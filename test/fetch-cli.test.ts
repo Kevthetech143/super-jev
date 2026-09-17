@@ -51,7 +51,12 @@ test('--json prints exactly one parseable JSON object and nothing else on stdout
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.mode, 'stub');
     assert.ok(Array.isArray(parsed.ranked));
-    assert.equal(parsed.ranked.length, 3);
+    // The stub answers by hash, so some records may lose to "none of these" and drop out.
+    assert.ok(parsed.ranked.length <= 3);
+    assert.equal(typeof parsed.noMatch, 'boolean');
+    assert.equal(typeof parsed.noMatchConfidence, 'number');
+    assert.equal(parsed.calls, 1);
+    assert.equal(parsed.prefilter.n, 40);
     for (const entry of parsed.ranked) {
       assert.equal(typeof entry.id, 'string');
       assert.equal(typeof entry.score, 'number');
@@ -86,7 +91,73 @@ test('--k caps the number of ids returned', async () => {
     const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--k', '1', '--json']);
     assert.equal(result.code, 0, result.stderr);
     const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.ranked.length, 1);
+    // The stub answers by hash; a record can lose to "none of these", so at most k.
+    assert.ok(parsed.ranked.length <= 1);
+  });
+});
+
+// ---------------------------------------------------------------- prefilter
+
+/** 120 filler records sharing no words with "gate my reply", plus the three real ones. */
+const BIG_CATALOG = JSON.stringify([
+  ...Array.from({ length: 120 }, (_, i) => ({ id: `filler${i}`, text: `zorp quux blorf item number ${i} with nothing relevant` })),
+  ...JSON.parse(CATALOG)
+]);
+
+test('--prefilter defaults to 40 and turns a many-call catalog into one call in the dry-run plan', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, BIG_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--dry-run', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.catalogSize, 123);
+    assert.equal(parsed.prefilter.n, 40);
+    assert.equal(parsed.prefilter.kept, 40);
+    assert.equal(parsed.prefilter.dropped, 83);
+    assert.equal(parsed.calls, 1);
+  });
+});
+
+test('--prefilter 0 disables the local filter and the plan goes back to one call per batch', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, BIG_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--dry-run', '--json', '--prefilter', '0']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.prefilter.n, 0);
+    assert.equal(parsed.prefilter.dropped, 0);
+    assert.ok(parsed.calls > 1);
+  });
+});
+
+test('--prefilter keeps the record whose words match the request, and the stub run reports calls', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, BIG_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'check my draft reply against the evidence', '--stub', '--json', '--prefilter', '5']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.prefilter.kept, 5);
+    assert.equal(parsed.calls, 1);
+    assert.equal(typeof parsed.noMatch, 'boolean');
+    // Every ranked id must be one the prefilter kept: a dropped record never reaches the judge.
+    const dropped = new Set(parsed.prefilter.droppedIds);
+    for (const entry of parsed.ranked) assert.ok(!dropped.has(entry.id));
+    assert.ok(!dropped.has('gate'), 'the record sharing the request\'s words must survive the prefilter');
+  });
+});
+
+test('--prefilter refuses a negative or fractional value, exit 1', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    for (const bad of ['-1', '1.5']) {
+      const result = runCli(['--catalog', catalogPath, '--request', 'anything', '--dry-run', '--prefilter', bad]);
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /--prefilter/);
+    }
   });
 });
 

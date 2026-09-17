@@ -15,8 +15,13 @@
 #   - derives evidence from the transcript itself when the payload names
 #     none — the tool_result content of the last N tool calls found in it
 #     (N = SUPERJEV_HOOK_EVIDENCE_N, default 8; size-capped by
-#     SUPERJEV_HOOK_EVIDENCE_MAX_BYTES) — and fails open (silent, logged)
-#     if nothing is derivable,
+#     SUPERJEV_HOOK_EVIDENCE_MAX_BYTES). If NO tool evidence is derivable
+#     (the turn ran no tools), it still runs the gate with the user's last
+#     prompt as the only evidence and, only if the gate reports a checkable
+#     claim, prints ONE advisory line ("reply makes claims with no tool
+#     evidence this turn — mark them unverified or gather evidence"); no
+#     checkable claim means silence. That path never blocks (exit 0) and
+#     the ledger line carries unchecked=true,
 #   - runs it through the claim gate, with a timeout (SUPERJEV_GATE_TIMEOUT,
 #     default 90s) that also fails open rather than hanging the session,
 #   - exits 0 (silent) on CLEAN, exits 2 with a reason on stderr to block

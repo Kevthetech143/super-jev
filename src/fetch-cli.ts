@@ -12,7 +12,7 @@ import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Jev } from './jev.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
-import { DEFAULT_K, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry } from './enhance/fetch.ts';
+import { DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry } from './enhance/fetch.ts';
 import type { Answer, Evaluator, Question, Request } from './types.ts';
 
 // Only deliberate, local diagnostics are printed. A raw parser or filesystem
@@ -21,18 +21,24 @@ class CliError extends Error {}
 
 const usage = `super-jev fetch --catalog CATALOG.json --request "<text>" [options]
 
-Scores every record in the catalog against the request in one sweep, and
-prints the top-k ids and their scores. Pull, not push: only the top few
-records are ever meant to be loaded by the caller.
+Scores the catalog against the request and prints the top-k ids and their
+scores. Pull, not push: only the top few records are ever meant to be
+loaded by the caller. A cheap local prefilter (token overlap) trims the
+catalog to the top N first, so a typical run is ONE provider call. Every
+record is judged against a "none of these" option; a record only ranks
+when it beats it, and when nothing does the result is ranked=[] with
+noMatch=true rather than a best guess.
 
   --catalog FILE   JSON: an array of {"id","text"} records, or
                    {"catalog":[...]}. This is the whole index — a skills
                    list, a tools catalog, a brain INDEX.
   --request TEXT   The plain-language request to score the catalog against.
   --k       N      How many top ids to return. Default ${DEFAULT_K}.
+  --prefilter N    Keep only the top N records by local token overlap
+                   before the provider call. Default ${DEFAULT_PREFILTER}; 0 disables.
   --out     DIR    Output directory. Files are created; a second run to the
                     same directory overwrites rather than failing.
-  --budget  N      maxInputTokens per call. Default 8000.
+  --budget  N      maxInputTokens per call. Default ${DEFAULT_FETCH_MAX_INPUT_TOKENS}.
   --batch   N      Max records per call.
   --dry-run        Print the plan and cost. Zero network.
   --stub           Run against the offline stub. Synthetic answers, zero
@@ -115,7 +121,7 @@ async function main(): Promise<number> {
   if (!args.length || args.includes('--help')) { console.log(usage); return 0; }
 
   let catalogPath = '', request = '', outDir = '';
-  let maxInputTokens: number | undefined, batch: number | undefined, k: number | undefined;
+  let maxInputTokens: number | undefined, batch: number | undefined, k: number | undefined, prefilter: number | undefined;
   let dryRun = false, stub = false, json = false;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
@@ -123,6 +129,7 @@ async function main(): Promise<number> {
     if (flag === '--catalog') { if (catalogPath) throw new CliError('Repeated --catalog'); catalogPath = resolve(next()); }
     else if (flag === '--request') { if (request) throw new CliError('Repeated --request'); request = next(); }
     else if (flag === '--k') { if (k !== undefined) throw new CliError('Repeated --k'); k = number(next(), '--k'); }
+    else if (flag === '--prefilter') { if (prefilter !== undefined) throw new CliError('Repeated --prefilter'); prefilter = number(next(), '--prefilter'); }
     else if (flag === '--out') { if (outDir) throw new CliError('Repeated --out'); outDir = resolve(next()); }
     else if (flag === '--budget') { if (maxInputTokens !== undefined) throw new CliError('Repeated --budget'); maxInputTokens = number(next(), '--budget'); }
     else if (flag === '--batch') { if (batch !== undefined) throw new CliError('Repeated --batch'); batch = number(next(), '--batch'); }
@@ -135,13 +142,14 @@ async function main(): Promise<number> {
   if (!request || !request.trim()) throw new CliError('--request needs a non-empty value');
   if (k !== undefined && (!Number.isInteger(k) || k < 1)) throw new CliError('--k must be a positive integer');
   if (batch !== undefined && (!Number.isInteger(batch) || batch < 1)) throw new CliError('--batch must be a positive integer');
+  if (prefilter !== undefined && (!Number.isInteger(prefilter) || prefilter < 0)) throw new CliError('--prefilter must be a non-negative integer (0 disables)');
   // The key check happens before any file is read, so a run that cannot
   // possibly reach the provider fails immediately and cheaply.
   if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live fetch, or use --dry-run or --stub');
 
   const catalog = parseCatalog(await readSmallFile(catalogPath, MAX_CATALOG_BYTES, 'catalog'));
   const options = {
-    k, ...(maxInputTokens !== undefined || batch !== undefined ? { budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) } } : {})
+    k, prefilter, ...(maxInputTokens !== undefined || batch !== undefined ? { budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) } } : {})
   };
 
   let plan;
@@ -158,6 +166,7 @@ async function main(): Promise<number> {
     catalogSize: plan.catalogSize,
     request,
     k: plan.k,
+    prefilter: plan.prefilter,
     calls: plan.plan.plan.calls.length,
     recordsPerCall: plan.plan.effectiveRecordsPerCall,
     recordsPerCallReason: plan.plan.recordsPerCallReason,
@@ -190,7 +199,10 @@ async function main(): Promise<number> {
     request,
     k: run.plan.k,
     catalogSize: run.plan.catalogSize,
+    prefilter: run.plan.prefilter,
     ranked: run.ranked,
+    noMatch: run.noMatch,
+    noMatchConfidence: run.noMatchConfidence,
     calls: run.calls,
     model: run.model,
     manifestComplete: run.manifest.complete,
@@ -213,7 +225,9 @@ async function main(): Promise<number> {
 
   if (json) { process.stdout.write(JSON.stringify(resultJson) + '\n'); return run.manifest.complete ? 0 : 1; }
 
-  console.error(`Top ${run.ranked.length} of ${run.plan.catalogSize}: ${run.ranked.map(r => `${r.id}=${r.score.toFixed(2)}`).join(', ') || '(none)'}`);
+  if (run.noMatch) console.error(`No match: "none of these" won for every record judged (confidence ${run.noMatchConfidence.toFixed(2)}); nothing in the catalog serves this request.`);
+  else console.error(`Top ${run.ranked.length} of ${run.plan.catalogSize}: ${run.ranked.map(r => `${r.id}=${r.score.toFixed(2)}`).join(', ') || '(none)'}`);
+  console.error(`calls: ${run.calls}${run.plan.prefilter.dropped ? ` (prefilter dropped ${run.plan.prefilter.dropped} of ${run.plan.catalogSize} locally)` : ''}`);
   if (outDir) console.error(`Wrote ranked.json, manifest.json and cost.json to ${outDir}`);
   if (run.errors.length) console.error(`${run.errors.length} validation or mapping problem(s) recorded`);
   if (!run.manifest.complete) { console.error('The coverage manifest is INCOMPLETE; do not treat this run as finished.'); return 1; }
