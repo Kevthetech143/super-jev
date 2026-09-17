@@ -1,10 +1,10 @@
-# Jev Loop
+# super-jev
 
 A small TypeScript harness that connects **evidence → Jev judgments → permitted actions → verified outcomes**.
 
 Domain-independent core. Pluggable data sources and tools. Local JSONL traces. Zero runtime dependencies. MIT licensed.
 
-**Status: experimental V0.1.0.** Offline demos and mocked API tests pass. Both included demos also passed live Jev API smoke tests (three evaluation requests total). This is an independent community project, not affiliated with TypeSafe AI. It contains no model weights.
+**Status: experimental V0.2.0.** Offline demos and mocked API tests pass. Both included demos also passed live Jev API smoke tests (three evaluation requests total). This is an independent community project, not affiliated with TypeSafe AI. It contains no model weights.
 
 ## Run in a minute
 
@@ -93,14 +93,16 @@ src/loop.ts        Bounded execution loop
 src/jev.ts         Jev HTTP adapter and answer validation
 src/journal.ts     JSONL persistence
 src/replay.ts      Read-only trace inspection CLI
-examples/         Two runnable domain packs and scripted evaluator
+src/organizer.ts   Configurable record classification and review routing
+src/cli.ts         JSON organizer CLI with explicit demo/live modes
+examples/         Two original domain demos and organizer input fixture
 test/             Core behavior and mocked API tests
 docs/             Architecture and launch draft
 ```
 
 ## Validation
 
-The initial suite has 13 tests covering feedback, the second domain, policy and argument rejection, unknown tools, malformed output, size/step/repetition limits, cancellation, timeouts, non-retried tool failures, API payloads, and HTTP failures. Both demos were executed offline and with live Jev responses. The live smoke test used three API evaluations and local demo tools. See docs/live-validation.json. This is control-flow validation, not a broad Jev capability benchmark.
+The suite has 22 tests covering the core loop, mocked API adapter, organizer grouping and review policy, input validation, CLI privacy, output protection, and failed-output cleanup. Both original demos and the organizer demo pass offline. Historical v0.1 live smoke tests used three API evaluations and local demo tools; see docs/live-validation.json. No live API calls were made for v0.2, and the organizer has not been validated against the live API. This is control-flow validation, not a broad Jev capability benchmark. Native TypeScript execution does not provide static type checking.
 
 ## API references
 
@@ -115,3 +117,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Useful first contributions: additional d
 ## License
 
 [MIT](LICENSE). The software license does not grant access to Jev; use of the hosted model is subject to TypeSafe's own terms.
+
+
+## New in v0.2: organize records
+
+```bash
+npm run organize -- examples/organizer.json --demo
+npm run organize -- your-records.json --live --out organized.json
+```
+
+Live mode requires `TYPESAFE_API_KEY`; it transmits your selected records to TypeSafe. The free scripted demo only accepts the bundled fixture. Output contains categories, confidence values, grouped IDs, and a review queue. Low-confidence and `other` items are excluded from automatic groups. Original files are never changed. Existing output files are never overwritten.
+
+For machine-readable stdout, invoke `node src/cli.ts organize examples/organizer.json --demo` directly (npm prints script banners). Output files are created with owner-only permissions. The CLI does not save run logs; keep your own input and output files outside the checkout to avoid committing private records.
+
+Define your own categories and records using [the sample input](examples/organizer.json). Agents with terminal access can follow [the agent usage contract](docs/agents.md). The organizer uses the existing harness loop, including model-response validation, permission checks, and completion verification. It is not an MCP server or an automatically installed skill.
+
+The original live smoke tests cover service recovery and document review. Organizer CLI tests use controlled fixtures; see the release notes for validation scope.
