@@ -21,6 +21,14 @@ spec = importlib.util.spec_from_file_location("superjev", SKILL / "superjev.py")
 sj = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sj)
 
+# A real, harmless file standing in for the fleet-local doors
+# (~/.claude/skills/jev-check/lib/jev.py and worker-verify/verify.py) that
+# are only real on the machine super-jev shipped from. Never actually run —
+# every test here mocks subprocess.run before a door would be invoked — it
+# just needs to exist so door_missing() sees a live door on any checkout,
+# including a fresh CI runner.
+FAKE_DOOR = Path(__file__).resolve().parent / "fake_door.py"
+
 
 class FakeDoor:
     """Records every call and returns a fixed exit code. Never runs anything."""
@@ -61,6 +69,23 @@ def repo(tmp_path, monkeypatch):
 def no_key(monkeypatch):
     """Every test starts with no API key, so nothing can go live by accident."""
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def reachable_doors(monkeypatch):
+    """Every test starts with both fleet-local doors reachable.
+
+    On a fresh checkout (a CI runner, or anyone else's machine) the real
+    fleet paths do not exist, so door_missing() would refuse before
+    subprocess.run is ever reached, whether or not it is mocked. Point
+    both at FAKE_DOOR, a real file, so gate/verify tests exercise the
+    normal path by default. Tests that specifically cover the "door not
+    installed" refusal (test_gate_refuses_when_the_door_is_not_installed,
+    test_verify_refuses_when_the_door_is_not_installed) override this
+    afterwards in their own body, which takes precedence.
+    """
+    monkeypatch.setattr(sj, "FLEET_JEV_LIB", FAKE_DOOR)
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", FAKE_DOOR)
 
 
 # ------------------------------------------------------------ ask routing
