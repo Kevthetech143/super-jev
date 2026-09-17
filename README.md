@@ -137,6 +137,94 @@ Define your own categories and records using [the sample input](examples/organiz
 
 The original live smoke tests cover service recovery and document review. Organizer tests include controlled offline fixtures and one live synthetic-record smoke test; see the release notes for validation scope.
 
+## Permit: safe to run automatically?
+
+`src/permit-cli.ts` (`npm run permit`) answers one question before an agent
+clicks, pays, sends or deletes: is this one action safe to run without a
+human? It asks a single choice question (`safe_to_auto` / `needs_approval` /
+`refuse`) through the transport and decides through the same gate as the rest
+of the harness (`decideOutcome` in `src/enhance/outcome.ts`), at a 0.80
+confidence threshold: anything below it never runs automatically.
+
+A hard rule, enforced in code rather than left to the prompt, means an action
+can never come back `safe_to_auto` whatever the model answered or how
+confident it was. It runs *before* the model is ever called, so an obviously
+irreversible action never spends a call finding out whether the model would
+have agreed. The rule scans the action, target, reversibility notes and
+policy lines together, on text that is normalized first (NFKC fold, zero-width
+and bidi characters stripped, Cyrillic/Greek homoglyphs mapped to their Latin
+lookalike, lowercased) so `Ｄelete`, `dеlete` (Cyrillic е) and `de​lete`
+(zero-width space) all match the same rule as `delete`. Matching is on stems
+and regexes, not whole phrases, so `deletes`, `deleting`, `rm -f`, `drop
+table`, `git push origin main -f` and `send an email` all match, not just
+their base form. The families covered: delete/remove/rm/wipe/purge, `drop
+table|database|column`, truncate, force-push/`push -f`/`git push ... -f`,
+`merge to/into main`, `reset --hard`, `checkout --`, `branch -D`,
+pay/payment/invoice/transfer/wire/settle/dollar-amounts/usd/crypto, sending an
+email/message/text/sms, replying to a customer/client, post/publish/tweet/
+release/deploy, restarting or stopping an app/bot/server/service/launchd,
+shutdown, format, overwrite, `chmod`/`chown -R`, and `curl | sh`.
+
+A second, softer list of cues — "clean up", "tidy", "old backups", "stale",
+"away", "over the remote", "history", "production", "prod", "live" — is not
+irreversible on its own, so it does not skip the model call, but it still
+downgrades an otherwise `safe_to_auto` answer to `needs_approval`: language a
+pilot run showed correlates with wanting a human look even when the model was
+confident.
+
+Confidence is cross-checked against the answer's own probability
+distribution (see below); when the provider returns no distribution at all,
+there is nothing to cross-check, and permit now treats that as
+`needs_approval` rather than accepting the self-report alone — the output
+names the gap (`noDistributionApplied`) instead of silently skipping the
+check.
+
+```bash
+# snapshot.json: {"action": "...", "target": "...", "reversible": true,
+#                 "reversibilityNotes": "...", "policyLines": ["..."]}
+npm run permit -- --snapshot snapshot.json --dry-run --json   # plan only, zero calls
+npm run permit -- --snapshot snapshot.json --stub --json      # offline plumbing check
+npm run permit -- --snapshot snapshot.json --action "delete the record" --json  # live, needs TYPESAFE_API_KEY
+```
+
+Exit codes: `0` safe_to_auto, `2` needs_approval, `3` refuse, `1` usage or
+failure. `src/enhance/permit.ts` is the domain-independent library; the CLI
+is argument parsing and printing around it.
+
+## Chain: evidence completeness before the final question
+
+`src/chain-cli.ts` (`npm run chain`) wraps the evidence-chain library that
+already existed — `gatherEvidence`/`traverse` (`src/enhance/evidence.ts`) and
+`runInvestigation` (`src/enhance/investigate.ts`) — behind a JSON role spec,
+so a case like "ticket, then order, then policy" can be checked from the
+command line instead of from a test file.
+
+Completeness is checked in code before any question is asked: a case missing
+a required role, or with a role two documents fill and neither supersedes the
+other, is blocked and never sent. `--dry-run` runs only that in-code check
+and reaches no network, because whether a case is blocked never depends on a
+model call.
+
+```bash
+# spec.json: {"question": "...", "options": {...}, "rootId": "T1",
+#             "roles": [{"name": "ticket", "match": {"type": "self"}},
+#                        {"name": "order",  "match": {"type": "idPrefix", "prefix": "O"}},
+#                        {"name": "policy", "match": {"type": "idPattern", "pattern": "^P"}}],
+#             "docs": [{"id": "T1", "text": "...", "links": ["O100", "P1"]}, ...]}
+npm run chain -- --spec spec.json --dry-run --json   # in-code completeness check only
+npm run chain -- --spec spec.json --stub --json      # offline plumbing check
+npm run chain -- --spec spec.json --json             # live, needs TYPESAFE_API_KEY
+```
+
+A spec can also carry a `"cases"` array to check several cases against the
+same document pool and roles in one call. See `npm run chain -- --help` for
+the full role-match vocabulary (`self`, `idPrefix`, `idPattern`,
+`textPattern`) and every spec field.
+
+Exit codes: `0` every case resolved, `2` at least one case is blocked on
+insufficient evidence (the missing roles are named in the output), `1` usage
+or failure.
+
 ## Agent front door (Claude Code skill)
 
 `skills/super-jev/` is a small [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: a single Python file, `superjev.py`, that gives an agent one command for every check in this repo instead of four things to remember. It is a thin wrapper — every judgement still belongs to the tool it wraps.
