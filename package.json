@@ -10,8 +10,9 @@
   },
   "scripts": {
     "demo": "node examples/demo.ts",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/enhance/*.test.ts",
     "replay": "node src/replay.ts",
-    "organize": "node src/cli.ts organize"
+    "organize": "node src/cli.ts organize",
+    "demo:enhance": "node examples/enhance-demo.ts"
   }
 }
