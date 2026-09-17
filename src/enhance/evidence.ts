@@ -38,7 +38,25 @@ export type EvidenceSpec = {
   proseReferences?: boolean;
   /** Words that mark a document as retired. Default: the word "superseded". */
   supersededPattern?: RegExp;
+  /**
+   * What a dangling reference means when the role it pointed at ended up filled
+   * another way. Default "incomplete", the safer reading.
+   *
+   * "incomplete" blocks: a reference the data itself makes to a document that
+   * is not in the pool means the evidence set is, on the data's own account,
+   * missing something. Whether the missing document would have changed the
+   * answer is exactly what cannot be known without reading it.
+   *
+   * "warning" keeps the reference as a data-quality note that travels with the
+   * result and does not block. Choose it for a corpus where broken links are
+   * known to be routine noise, and accept that a genuinely relevant missing
+   * document then reaches the model as a note instead of a block.
+   */
+  danglingReferenceIs?: 'warning' | 'incomplete';
 };
+
+/** The safer reading is the default: a reference to a document nobody holds blocks. */
+export const DEFAULT_DANGLING_REFERENCE_IS = 'incomplete' as const;
 
 export type TraversalReport = {
   rootId: string;
@@ -73,10 +91,10 @@ export type CompletenessReport = {
   /** Empty means the final question may be asked. */
   problems: string[];
   /**
-   * Data-quality notes that do NOT block. A dangling or corrupted reference is
-   * recorded here when the role it pointed at ended up filled by another live
-   * document; if it left a required role unfilled, the role check blocks and
-   * the reason appears in problems instead.
+   * Data-quality notes. Everything here is recorded whether or not it blocks:
+   * a dangling reference appears here always, and also in `problems` when
+   * `danglingReferenceIs` is "incomplete". Read `problems` to know what blocks;
+   * read this to know what was odd about the evidence.
    */
   warnings: string[];
   complete: boolean;
@@ -153,9 +171,12 @@ export function traverse(rootId: string, pool: Iterable<SourceDoc>, spec: Pick<E
  *   break the tie (the conflicting-policy shape);
  * - a truncated walk, because a partial evidence set cannot be called complete.
  *
- * A dangling reference is a warning, not a block, on its own: when it is the
- * reason a required role is empty the role check already blocks, and when the
- * role was filled another way the reference is a data-quality note.
+ * A dangling reference: when it is the reason a required role is empty, the
+ * role check already blocks either way. When the role was filled another way,
+ * `spec.danglingReferenceIs` decides. It defaults to "incomplete", so the
+ * broken reference blocks, because the data itself says a document is missing
+ * and nobody can tell from here whether that document mattered. Set it to
+ * "warning" to get the other reading, a note that travels and does not block.
  *
  * A document marked superseded is removed from its role and listed separately,
  * so "v2 supersedes v1" resolves to one live policy rather than a conflict.
@@ -193,7 +214,14 @@ export function checkCompleteness(spec: EvidenceSpec, traversal: TraversalReport
   if (traversal.truncated) problems.push(`traversal hit a bound (maxDepth=${spec.maxDepth ?? 3}, maxDocs=${spec.maxDocs ?? 16}) so the evidence set may be partial`);
 
   const warnings: string[] = [];
-  if (traversal.danglingIds.length) warnings.push(`referenced documents are missing from the pool: ${traversal.danglingIds.join(', ')}`);
+  const danglingIs = spec.danglingReferenceIs ?? DEFAULT_DANGLING_REFERENCE_IS;
+  if (traversal.danglingIds.length) {
+    const note = `referenced documents are missing from the pool: ${traversal.danglingIds.join(', ')}`;
+    // Recorded as a warning either way, so a reader scanning the data-quality
+    // notes still sees it without having to know how the flag was set.
+    warnings.push(note);
+    if (danglingIs === 'incomplete') problems.push(`${note}; danglingReferenceIs is "incomplete", so a reference the data makes to a document nobody holds blocks the final question`);
+  }
   if (traversal.cycleEdges.length) warnings.push(`cycles detected and not followed: ${traversal.cycleEdges.map(e => `${e.from}->${e.to}`).join(', ')}`);
   for (const assignment of assignments) {
     if (assignment.supersededDocs.length && assignment.docs.length) warnings.push(`role "${assignment.role}" ignored superseded document(s): ${assignment.supersededDocs.map(d => d.id).join(', ')}`);

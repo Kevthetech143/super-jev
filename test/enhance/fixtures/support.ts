@@ -35,6 +35,11 @@ export const returnPolicySpec: EvidenceSpec = {
   name: 'ticket -> order -> policy',
   maxDepth: 3,
   maxDocs: 16,
+  // The recorded pilot ran the warning reading of a dangling reference, so the
+  // fixture pins it rather than inheriting the safer default the prototype now
+  // ships. Pinning it here is what keeps the recorded twelve-case narrative
+  // comparable; evidence.test.ts covers both readings directly.
+  danglingReferenceIs: 'warning',
   roles: [
     { name: 'ticket', identify: (doc, rootId) => doc.id === rootId },
     { name: 'order', identify: doc => /purchase age:\s*\d+/i.test(doc.text) },

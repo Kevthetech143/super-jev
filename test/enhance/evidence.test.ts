@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkCompleteness, gatherEvidence, parseProseReferences, traverse } from '../../src/enhance/evidence.ts';
+import { checkCompleteness, gatherEvidence, parseProseReferences, traverse, DEFAULT_DANGLING_REFERENCE_IS } from '../../src/enhance/evidence.ts';
 import { investigations } from './fixtures/cases.ts';
 import { poolFrom, returnPolicySpec, returnPolicySpecWithProse } from './fixtures/support.ts';
 
@@ -84,10 +84,53 @@ test('the prose parser recovers a corrupted structured link without hiding it', 
   assert.match(withProse.warnings.join(' '), /missing from the pool: P8-typo/);
 });
 
-test('a dangling reference alone is a warning, not a block, once the role is filled', () => {
-  const report = gatherEvidence('T8', pool, returnPolicySpecWithProse);
+// --- what a dangling reference means is a choice, and it has a default -------
+//
+// T8's structured policy link is a typo, so P8-typo dangles. The prose parser
+// recovers the real policy, so the role ends up filled. That is the only case
+// where the reading of a dangling reference decides the answer: when the role
+// is unfilled the role check blocks either way.
+
+test('a dangling reference alone is a warning, not a block, when the spec says warning', () => {
+  const report = gatherEvidence('T8', pool, { ...returnPolicySpecWithProse, danglingReferenceIs: 'warning' });
   assert.deepEqual(report.problems, []);
-  assert.ok(report.warnings.length > 0);
+  assert.equal(report.complete, true);
+  assert.match(report.warnings.join(' '), /missing from the pool: P8-typo/);
+});
+
+test('the same dangling reference blocks when the spec says incomplete', () => {
+  const report = gatherEvidence('T8', pool, { ...returnPolicySpecWithProse, danglingReferenceIs: 'incomplete' });
+  assert.equal(report.complete, false);
+  assert.match(report.problems.join(' '), /missing from the pool: P8-typo/);
+  assert.match(report.problems.join(' '), /blocks the final question/);
+  assert.match(report.warnings.join(' '), /missing from the pool: P8-typo/, 'it is still recorded as a data-quality note');
+  const policy = report.assignments.find(a => a.role === 'policy')!;
+  assert.deepEqual(policy.docs.map(d => d.id), ['P8'], 'the role really was filled; the block is the flag, not an unfilled role');
+});
+
+test('the default is the safer reading: incomplete', () => {
+  assert.equal(DEFAULT_DANGLING_REFERENCE_IS, 'incomplete');
+  const bare = { ...returnPolicySpecWithProse };
+  delete bare.danglingReferenceIs;
+  const report = gatherEvidence('T8', pool, bare);
+  assert.equal(report.complete, false, 'with no flag set at all, the dangling reference blocks');
+  assert.deepEqual(report.problems, gatherEvidence('T8', pool, { ...bare, danglingReferenceIs: 'incomplete' }).problems);
+});
+
+test('the flag changes nothing when no reference dangles', () => {
+  for (const reading of ['warning', 'incomplete'] as const) {
+    const report = gatherEvidence('T1', pool, { ...returnPolicySpec, danglingReferenceIs: reading });
+    assert.deepEqual(report.traversal.danglingIds, []);
+    assert.equal(report.complete, true, `${reading}: a clean chain is complete either way`);
+  }
+});
+
+test('the flag cannot rescue a dangling reference that left a required role empty', () => {
+  // T9's policy is simply absent. "warning" is the permissive reading and it
+  // still blocks here, because the role check is a separate rule.
+  const report = gatherEvidence('T9', pool, { ...returnPolicySpec, danglingReferenceIs: 'warning' });
+  assert.equal(report.complete, false);
+  assert.match(report.problems.join(' '), /required role "policy" is not filled/);
 });
 
 test('the prose parser matches only the two documented phrases', () => {
