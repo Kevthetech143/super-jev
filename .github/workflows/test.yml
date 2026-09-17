@@ -13,3 +13,4 @@ jobs:
       - run: npm test
       - run: npm run demo
       - run: npm run demo -- --documents
+      - run: npm run organize -- examples/organizer.json --demo

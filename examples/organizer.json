@@ -1,0 +1,15 @@
+{
+  "records": [
+    { "id": "bill-1", "text": "Invoice INV-104. Please pay $450 within 30 days." },
+    { "id": "receipt-1", "text": "Payment of $89 received. Balance: $0." },
+    { "id": "help-1", "text": "Please send me a copy of my invoice." },
+    { "id": "misc-1", "text": "Team lunch is Friday. What sandwich would you like?" }
+  ],
+  "categories": {
+    "invoice": "A bill requesting payment",
+    "receipt": "Confirmation of completed payment",
+    "support": "A request for help or service, including requests for copies of documents",
+    "other": "None of the categories fit"
+  },
+  "minConfidence": 0.75
+}
