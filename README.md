@@ -147,23 +147,40 @@ of the harness (`decideOutcome` in `src/enhance/outcome.ts`), at a 0.80
 confidence threshold: anything below it never runs automatically.
 
 A hard rule, enforced in code rather than left to the prompt, means an action
-can never come back `safe_to_auto` whatever the model answered or how
-confident it was. It runs *before* the model is ever called, so an obviously
-irreversible action never spends a call finding out whether the model would
-have agreed. The rule scans the action, target, reversibility notes and
-policy lines together, on text that is normalized first (NFKC fold, zero-width
-and bidi characters stripped, Cyrillic/Greek homoglyphs mapped to their Latin
-lookalike, lowercased) so `Ｄelete`, `dеlete` (Cyrillic е) and `de​lete`
-(zero-width space) all match the same rule as `delete`. Matching is on stems
-and regexes, not whole phrases, so `deletes`, `deleting`, `rm -f`, `drop
-table`, `git push origin main -f` and `send an email` all match, not just
-their base form. The families covered: delete/remove/rm/wipe/purge, `drop
-table|database|column`, truncate, force-push/`push -f`/`git push ... -f`,
-`merge to/into main`, `reset --hard`, `checkout --`, `branch -D`,
-pay/payment/invoice/transfer/wire/settle/dollar-amounts/usd/crypto, sending an
-email/message/text/sms, replying to a customer/client, post/publish/tweet/
-release/deploy, restarting or stopping an app/bot/server/service/launchd,
-shutdown, format, overwrite, `chmod`/`chown -R`, and `curl | sh`.
+never gets to `safe_to_auto` on the model's say-so alone whatever it answered
+or how confident it was. It runs *before* the model is ever called, so an
+obviously irreversible action never spends a call finding out whether the
+model would have agreed. The rule scans the action, target, reversibility
+notes and policy lines together, on text that is normalized first (NFKC
+fold, zero-width and bidi characters stripped, Cyrillic/Greek homoglyphs
+mapped to their Latin lookalike, lowercased) so `Ｄelete`, `dеlete`
+(Cyrillic е) and `de​lete` (zero-width space) all match the same rule as
+`delete`. Matching is on stems and regexes, not whole phrases, so `deletes`,
+`deleting`, `rm -f`, `drop table`, `git push origin main -f` and `send an
+email` all match, not just their base form.
+
+The hard rule is not one class. Each matched label folds into one of two, and
+the result carries which one fired as `class`:
+
+- **`destructive`** — no practical undo, and no human-approval step makes it
+  retroactively fine to have already run, so the verdict is `refuse` (exit
+  `3`), no matter what the model would have said. Families: `rm -rf`,
+  wipe/purge, `drop table|database|column`, truncate, force-push (`push -f`,
+  `git push ... -f`, or the same thing phrased as "push over the remote
+  history"), `reset --hard`, `checkout --`, `branch -D`, format, overwrite,
+  `curl | sh`, a wire transfer, and crypto.
+- **`irreversible_routine`** — cannot be taken back once it happens, but it
+  is an ordinary, named action a human can look at and approve, so the
+  verdict is `needs_approval` (exit `2`), not `refuse`. Families:
+  delete/remove/rm (bare, no `-rf`), `merge to/into main`,
+  pay/payment/invoice/transfer/settle/dollar-amounts/usd, sending an
+  email/message/text/sms, replying to a customer/client, post/publish/tweet/
+  release/deploy, restarting or stopping an app/bot/server/service/launchd,
+  shutdown, and `chmod`/`chown -R`.
+
+Either way the model is never called: the class only changes which side of
+"may a human still say yes" the hard rule lands on, not whether it skips the
+call.
 
 A second, softer list of cues — "clean up", "tidy", "old backups", "stale",
 "away", "over the remote", "history", "production", "prod", "live" — is not

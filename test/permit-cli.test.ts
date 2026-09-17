@@ -102,17 +102,30 @@ test('--stub with an irreversible action (hard rule) is downgraded to needs_appr
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.verdict, 'needs_approval');
     assert.equal(parsed.hardRuleApplied, true);
+    assert.equal(parsed.class, 'irreversible_routine');
     assert.deepEqual(parsed.matchedKeywords, ['delete']);
   });
 });
 
-test('--stub with an irreversible action in the target field is also downgraded', async () => {
+test('--stub with a destructive-class action in the target field refuses outright, exit 3', async () => {
   await withSnapshot({ action: 'run cleanup', target: 'wire the funds' }, async (_dir, path) => {
+    const result = await runCli(['--snapshot', path, '--stub', '--json']);
+    assert.equal(result.code, 3);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.verdict, 'refuse');
+    assert.equal(parsed.class, 'destructive');
+    assert.deepEqual(parsed.matchedKeywords, ['wire']);
+  });
+});
+
+test('--stub with an irreversible-but-routine action in the target field is downgraded to needs_approval, exit 2', async () => {
+  await withSnapshot({ action: 'run cleanup', target: 'settle the balance' }, async (_dir, path) => {
     const result = await runCli(['--snapshot', path, '--stub', '--json']);
     assert.equal(result.code, 2);
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.verdict, 'needs_approval');
-    assert.deepEqual(parsed.matchedKeywords, ['transfer/wire/settle']);
+    assert.equal(parsed.class, 'irreversible_routine');
+    assert.deepEqual(parsed.matchedKeywords, ['transfer/settle']);
   });
 });
 

@@ -6,6 +6,7 @@ import {
   matchSoftCues,
   normalizeForHardRule,
   IRREVERSIBLE_KEYWORDS,
+  hardRuleClass,
   SOFT_CUES,
   PERMIT_CONFIDENCE_THRESHOLD
 } from '../../src/enhance/permit.ts';
@@ -198,9 +199,13 @@ test('hard rule: an irreversible action never returns safe_to_auto, and no model
 test('hard rule fires on a keyword found only in the target, not the action, still with no model call', async () => {
   const stub = fixed('safe_to_auto', 0.99);
   const result = await decidePermit('a2', { action: 'run the cleanup job', target: 'wire transfer #9' }, stub);
-  assert.equal(result.verdict, 'needs_approval');
+  // "wire" is a destructive-class label (a wired transfer settles same-day
+  // with no recall), so this now refuses outright rather than downgrading to
+  // needs_approval; "transfer" alone (routine class) still matches too.
+  assert.equal(result.verdict, 'refuse');
+  assert.equal(result.class, 'destructive');
   assert.equal(result.hardRuleApplied, true);
-  assert.deepEqual(result.matchedKeywords, ['transfer/wire/settle']);
+  assert.deepEqual(result.matchedKeywords, ['transfer/settle', 'wire']);
   assert.equal(stub.requests.length, 0);
 });
 
@@ -213,7 +218,11 @@ test('hard rule fires on a keyword found only in reversibilityNotes or policyLin
 
   const stub2 = fixed('safe_to_auto', 0.99);
   const r2 = await decidePermit('a4', { action: 'run the cleanup job', policyLines: ['never drop table users'] }, stub2);
-  assert.equal(r2.verdict, 'needs_approval');
+  // "drop table" is destructive-class, so a policy line naming it still
+  // refuses outright even though the action itself ("run the cleanup job")
+  // is unrelated.
+  assert.equal(r2.verdict, 'refuse');
+  assert.equal(r2.class, 'destructive');
   assert.equal(r2.hardRuleApplied, true);
   assert.equal(stub2.requests.length, 0);
 });
@@ -227,11 +236,61 @@ test('hard rule never fires for an action with no matched pattern, and the model
   assert.equal(stub.requests.length, 1);
 });
 
-test('every hard-rule label downgrades a confident answer and skips the model call', async () => {
+// ---------------------------------------------------------------------------
+// The hard rule is split into two classes: `destructive` (verdict `refuse`,
+// no undo, no human-approval path makes it retroactively fine) and
+// `irreversible_routine` (verdict `needs_approval`, a named ordinary action a
+// human can look at and approve). Every label from the old single-class rule
+// keeps or upgrades its ceiling: none of them used to reach past
+// needs_approval, so nothing here downgrades below needs_approval — a
+// destructive label upgrades to refuse, everything else stays needs_approval.
+// ---------------------------------------------------------------------------
+const EXPECTED_CLASS_BY_LABEL: Record<string, 'destructive' | 'irreversible_routine'> = {
+  delete: 'irreversible_routine',
+  remove: 'irreversible_routine',
+  rm: 'irreversible_routine',
+  'rm -rf': 'destructive',
+  wipe: 'destructive',
+  purge: 'destructive',
+  'drop table/database/column': 'destructive',
+  truncate: 'destructive',
+  'force push': 'destructive',
+  'push --force': 'destructive',
+  'git push -f': 'destructive',
+  'push over remote history': 'destructive',
+  'merge to main': 'irreversible_routine',
+  'reset --hard': 'destructive',
+  'checkout --': 'destructive',
+  'branch -D': 'destructive',
+  'pay/payment': 'irreversible_routine',
+  invoice: 'irreversible_routine',
+  'transfer/settle': 'irreversible_routine',
+  wire: 'destructive',
+  'dollar amount': 'irreversible_routine',
+  usd: 'irreversible_routine',
+  crypto: 'destructive',
+  'send email/message': 'irreversible_routine',
+  'reply to customer/client': 'irreversible_routine',
+  'post/publish/tweet/release/deploy': 'irreversible_routine',
+  'restart/stop/kill service': 'irreversible_routine',
+  shutdown: 'irreversible_routine',
+  format: 'destructive',
+  overwrite: 'destructive',
+  'chmod/chown -R': 'irreversible_routine',
+  'curl | sh': 'destructive'
+};
+
+test('every hard-rule label has an expected class, and every IRREVERSIBLE_KEYWORDS label is wired', () => {
+  for (const label of IRREVERSIBLE_KEYWORDS) assert.ok(EXPECTED_CLASS_BY_LABEL[label], `no expected class wired for label "${label}"`);
+  assert.equal(Object.keys(EXPECTED_CLASS_BY_LABEL).length, IRREVERSIBLE_KEYWORDS.length, 'EXPECTED_CLASS_BY_LABEL and IRREVERSIBLE_KEYWORDS must be kept in sync');
+});
+
+test('every hard-rule label short-circuits the model call, and lands on the verdict its class implies', async () => {
   const sampleActionFor: Record<string, string> = {
     delete: 'please delete the file',
     remove: 'please remove the file',
     rm: 'please rm the file',
+    'rm -rf': 'please rm -rf the build folder',
     wipe: 'please wipe the disk',
     purge: 'please purge the queue',
     'drop table/database/column': 'please drop table users',
@@ -239,13 +298,15 @@ test('every hard-rule label downgrades a confident answer and skips the model ca
     'force push': 'please force push the branch',
     'push --force': 'please push --force the branch',
     'git push -f': 'please git push origin main -f',
+    'push over remote history': 'please push over the remote history on release',
     'merge to main': 'please merge into main',
     'reset --hard': 'please reset --hard now',
     'checkout --': 'please checkout -- the file',
     'branch -D': 'please branch -D old-feature',
     'pay/payment': 'please pay the vendor',
     invoice: 'please send the invoice',
-    'transfer/wire/settle': 'please wire the funds',
+    'transfer/settle': 'please settle the balance',
+    wire: 'please wire the funds',
     'dollar amount': 'please charge $20 now',
     usd: 'please convert to usd',
     crypto: 'please move it to crypto',
@@ -262,9 +323,12 @@ test('every hard-rule label downgrades a confident answer and skips the model ca
   for (const label of IRREVERSIBLE_KEYWORDS) {
     const action = sampleActionFor[label];
     assert.ok(action, `no sample action wired for label "${label}"`);
+    const expectedClass = EXPECTED_CLASS_BY_LABEL[label];
+    const expectedVerdict = expectedClass === 'destructive' ? 'refuse' : 'needs_approval';
     const stub = fixed('safe_to_auto', 1.0);
     const result = await decidePermit('k', { action }, stub);
-    assert.equal(result.verdict, 'needs_approval', label);
+    assert.equal(result.verdict, expectedVerdict, label);
+    assert.equal(result.class, expectedClass, label);
     assert.equal(result.hardRuleApplied, true, label);
     assert.equal(stub.requests.length, 0, label);
   }
