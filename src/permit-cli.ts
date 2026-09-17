@@ -132,11 +132,15 @@ try {
       id: result.id, action: result.action, target: result.target,
       verdict: result.verdict, confidence: result.confidence, reason: result.reason,
       hardRuleApplied: result.hardRuleApplied, matchedKeywords: result.matchedKeywords,
+      softCueApplied: result.softCueApplied, matchedCues: result.matchedCues,
+      noDistributionApplied: result.noDistributionApplied,
       outcomeKind: result.outcome.kind
     }, null, 2));
   } else {
     console.log(`${result.verdict.toUpperCase()}: ${result.reason}`);
     if (result.hardRuleApplied) console.log(`Hard rule applied: matched ${result.matchedKeywords.join(', ')}`);
+    if (result.softCueApplied) console.log(`Soft cue applied: matched ${result.matchedCues.join(', ')}`);
+    if (result.noDistributionApplied) console.log('No distribution to cross-check confidence against; treated as needs_approval.');
   }
   process.exit(EXIT_BY_VERDICT[result.verdict]);
 } catch (error) {
