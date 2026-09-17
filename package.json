@@ -14,6 +14,8 @@
     "replay": "node src/replay.ts",
     "organize": "node src/cli.ts organize",
     "sweep": "node src/sweep-cli.ts",
+    "permit": "node src/permit-cli.ts",
+    "chain": "node src/chain-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
     "bench:live": "node bench/live-measure.ts",
     "test:skill": "python3 -m pytest skills/super-jev/tests -q"
