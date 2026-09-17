@@ -13,6 +13,7 @@
     "test": "node --test test/*.test.ts test/enhance/*.test.ts test/bench/*.test.ts",
     "replay": "node src/replay.ts",
     "organize": "node src/cli.ts organize",
+    "sweep": "node src/sweep-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
     "bench:live": "node bench/live-measure.ts"
   }
