@@ -39,6 +39,8 @@ export type PermitResult = {
   hardRuleApplied: boolean;
   /** Hard-rule labels matched in the action/target/notes/policy text. */
   matchedKeywords: string[];
+  /** The class the matched hard-rule labels fold into: 'destructive' (verdict is always `refuse`), 'irreversible_routine' (verdict is always `needs_approval`), or undefined when no hard-rule label matched. */
+  class?: HardRuleClass;
   /** True when a soft cue downgraded an otherwise-safe_to_auto answer. */
   softCueApplied: boolean;
   /** Soft-cue labels matched in the same text. */
@@ -128,42 +130,62 @@ export function normalizeForHardRule(text: string): string {
 // defeat the match. This is a hard rule enforced in code, not a hint folded
 // into the prompt: a prompt-only rule is a suggestion a model can (and in the
 // pilot, did) miss.
+//
+// The hard rule is not one class: some of these patterns describe an action
+// that destroys something with no practical undo (a recursive force-delete,
+// a rewritten shared history, a wired payment) -- for those, no confidence
+// number and no model call ever gets a vote, so the verdict is `refuse`.
+// Others are irreversible in the sense that they cannot be taken back once
+// they happen, but they are routine, named, human-in-the-loop-shaped actions
+// (send an email, publish a release, restart a bot) where a human approving
+// the specific action is the right ceiling, not an outright block -- for
+// those the verdict is `needs_approval`. Both classes skip the model call:
+// the only difference the class makes is which side of "may a human still
+// say yes" the hard rule lands on.
 // ---------------------------------------------------------------------------
 
-const IRREVERSIBLE_RULES: { label: string; pattern: RegExp }[] = [
-  { label: 'delete', pattern: /\bdelet(e|es|ed|ing)\b/ },
-  { label: 'remove', pattern: /\bremov(e|es|ed|ing)\b/ },
-  { label: 'rm', pattern: /\brm(\s+-[a-z]+)?\b/ },
-  { label: 'wipe', pattern: /\bwipe\b/ },
-  { label: 'purge', pattern: /\bpurge\b/ },
-  { label: 'drop table/database/column', pattern: /\bdrop\s+(table|database|column)\b/ },
-  { label: 'truncate', pattern: /\btruncate\b/ },
-  { label: 'force push', pattern: /\bforce[-_ ]push\b/ },
-  { label: 'push --force', pattern: /\bpush\s+(-f|--force)\b/ },
-  { label: 'git push -f', pattern: /\bgit\s+push\b[\s\S]*-f\b/ },
-  { label: 'merge to main', pattern: /\bmerge\s+(to|into)\s+main\b/ },
-  { label: 'reset --hard', pattern: /\breset\s+--hard\b/ },
-  { label: 'checkout --', pattern: /\bcheckout\s+--(?=\s|$)/ },
-  { label: 'branch -D', pattern: /\bbranch\s+-d\b/ },
-  { label: 'pay/payment', pattern: /\b(pay|pays|paid|paying|payment)\b/ },
-  { label: 'invoice', pattern: /\binvoice\b/ },
-  { label: 'transfer/wire/settle', pattern: /\b(transfer|wire|send\s+money|settle)\b/ },
-  { label: 'dollar amount', pattern: /\$\d/ },
-  { label: 'usd', pattern: /\busd\b/ },
-  { label: 'crypto', pattern: /\bcrypto\b/ },
-  { label: 'send email/message', pattern: /\bsend\s+(an?\s+|the\s+)?(email|mail|message|text|sms)\b/ },
-  { label: 'reply to customer/client', pattern: /\breply\s+to\s+(the\s+)?(customer|client)\b/ },
-  { label: 'post/publish/tweet/release/deploy', pattern: /\b(post|publish|tweet|release|deploy)\b/ },
-  { label: 'restart/stop/kill service', pattern: /\b(restart|stop|kill)\s+(the\s+)?(app|bot|server|service|launchd)\b/ },
-  { label: 'shutdown', pattern: /\bshutdown\b/ },
-  { label: 'format', pattern: /\bformat\b/ },
-  { label: 'overwrite', pattern: /\boverwrite\b/ },
-  { label: 'chmod/chown -R', pattern: /\b(chmod|chown)\b[\s\S]*-r\b/ },
-  { label: 'curl | sh', pattern: /\bcurl\b[\s\S]*\|\s*sh\b/ }
+export type HardRuleClass = 'destructive' | 'irreversible_routine';
+
+const IRREVERSIBLE_RULES: { label: string; pattern: RegExp; class: HardRuleClass }[] = [
+  { label: 'delete', pattern: /\bdelet(e|es|ed|ing)\b/, class: 'irreversible_routine' },
+  { label: 'remove', pattern: /\bremov(e|es|ed|ing)\b/, class: 'irreversible_routine' },
+  { label: 'rm', pattern: /\brm(\s+-[a-z]+)?\b/, class: 'irreversible_routine' },
+  { label: 'rm -rf', pattern: /\brm\s+-[a-z]*(rf|fr)[a-z]*\b/, class: 'destructive' },
+  { label: 'wipe', pattern: /\bwipe\b/, class: 'destructive' },
+  { label: 'purge', pattern: /\bpurge\b/, class: 'destructive' },
+  { label: 'drop table/database/column', pattern: /\bdrop\s+(table|database|column)\b/, class: 'destructive' },
+  { label: 'truncate', pattern: /\btruncate\b/, class: 'destructive' },
+  { label: 'force push', pattern: /\bforce[-_ ]push\b/, class: 'destructive' },
+  { label: 'push --force', pattern: /\bpush\s+(-f|--force)\b/, class: 'destructive' },
+  { label: 'git push -f', pattern: /\bgit\s+push\b[\s\S]*-f\b/, class: 'destructive' },
+  { label: 'push over remote history', pattern: /\bpush(es|ed|ing)?\s+over\s+(the\s+)?(remote\s+)?history\b/, class: 'destructive' },
+  { label: 'merge to main', pattern: /\bmerge\s+(to|into)\s+main\b/, class: 'irreversible_routine' },
+  { label: 'reset --hard', pattern: /\breset\s+--hard\b/, class: 'destructive' },
+  { label: 'checkout --', pattern: /\bcheckout\s+--(?=\s|$)/, class: 'destructive' },
+  { label: 'branch -D', pattern: /\bbranch\s+-d\b/, class: 'destructive' },
+  { label: 'pay/payment', pattern: /\b(pay|pays|paid|paying|payment)\b/, class: 'irreversible_routine' },
+  { label: 'invoice', pattern: /\binvoice\b/, class: 'irreversible_routine' },
+  { label: 'transfer/settle', pattern: /\b(transfer|send\s+money|settle)\b/, class: 'irreversible_routine' },
+  { label: 'wire', pattern: /\bwire\b/, class: 'destructive' },
+  { label: 'dollar amount', pattern: /\$\d/, class: 'irreversible_routine' },
+  { label: 'usd', pattern: /\busd\b/, class: 'irreversible_routine' },
+  { label: 'crypto', pattern: /\bcrypto\b/, class: 'destructive' },
+  { label: 'send email/message', pattern: /\bsend\s+(an?\s+|the\s+)?(email|mail|message|text|sms)\b/, class: 'irreversible_routine' },
+  { label: 'reply to customer/client', pattern: /\breply\s+to\s+(the\s+)?(customer|client)\b/, class: 'irreversible_routine' },
+  { label: 'post/publish/tweet/release/deploy', pattern: /\b(post|publish|tweet|release|deploy)\b/, class: 'irreversible_routine' },
+  { label: 'restart/stop/kill service', pattern: /\b(restart|stop|kill)\s+(the\s+)?(app|bot|server|service|launchd)\b/, class: 'irreversible_routine' },
+  { label: 'shutdown', pattern: /\bshutdown\b/, class: 'irreversible_routine' },
+  { label: 'format', pattern: /\bformat\b/, class: 'destructive' },
+  { label: 'overwrite', pattern: /\boverwrite\b/, class: 'destructive' },
+  { label: 'chmod/chown -R', pattern: /\b(chmod|chown)\b[\s\S]*-r\b/, class: 'irreversible_routine' },
+  { label: 'curl | sh', pattern: /\bcurl\b[\s\S]*\|\s*sh\b/, class: 'destructive' }
 ];
 
 /** Hard-rule labels, in declaration order, kept for callers that want the full list (e.g. tests, docs). */
 export const IRREVERSIBLE_KEYWORDS = IRREVERSIBLE_RULES.map(r => r.label);
+
+/** label -> class lookup, kept for callers (and decidePermit) that need to fold matched labels into one class. */
+const HARD_RULE_CLASS_BY_LABEL: Record<string, HardRuleClass> = Object.fromEntries(IRREVERSIBLE_RULES.map(r => [r.label, r.class]));
 
 /** Which hard-rule patterns match this text. Normalizes internally, so raw, unnormalized text is fine to pass in. */
 export function matchIrreversibleKeywords(text: string): string[] {
@@ -171,6 +193,18 @@ export function matchIrreversibleKeywords(text: string): string[] {
   const found: string[] = [];
   for (const { label, pattern } of IRREVERSIBLE_RULES) if (pattern.test(normalized)) found.push(label);
   return found;
+}
+
+/**
+ * Fold a set of matched hard-rule labels into one class: `destructive` if any
+ * matched label is destructive, otherwise `irreversible_routine`. A
+ * destructive match always wins the fold, the same way the hard rule itself
+ * only ever gets more cautious, never less: an action described partly in
+ * destructive terms and partly in routine terms is still destructive.
+ */
+export function hardRuleClass(matchedKeywords: string[]): HardRuleClass | undefined {
+  if (!matchedKeywords.length) return undefined;
+  return matchedKeywords.some(label => HARD_RULE_CLASS_BY_LABEL[label] === 'destructive') ? 'destructive' : 'irreversible_routine';
 }
 
 // ---------------------------------------------------------------------------
@@ -247,9 +281,16 @@ export type DecidePermitOptions = {
  *
  * 0. The hard rule runs FIRST, before any model call. If the action, target,
  *    reversibility notes or policy lines match an irreversible pattern, the
- *    verdict is `needs_approval` and the evaluator is never called: there is
- *    no reason to spend a call finding out whether a model thinks an
- *    obviously irreversible action is fine.
+ *    evaluator is never called: there is no reason to spend a call finding
+ *    out whether a model thinks an obviously irreversible action is fine.
+ *    Which verdict it gets depends on the class of the matched pattern(s):
+ *    a `destructive` match (rm -rf, force push, drop table, a wire transfer,
+ *    ...) goes straight to `refuse`, because there is no human approval flow
+ *    that makes those actions retroactively fine to have run; an
+ *    `irreversible_routine` match (send an email, publish a release, restart
+ *    a bot, pay an invoice, ...) goes to `needs_approval`, because those are
+ *    ordinary named actions a human can look at and approve. A destructive
+ *    match always wins if both classes matched (see `hardRuleClass`).
  * 1. Otherwise the model is asked, and `decideOutcome`'s kind maps to a
  *    verdict: accepted -> the model's own choice; everything else (review,
  *    abstain, unanswered, failed_validation, insufficient_evidence) ->
@@ -271,11 +312,15 @@ export async function decidePermit(id: string, snapshot: PermitSnapshot & { acti
   const matchedKeywords = matchIrreversibleKeywords(text);
 
   if (matchedKeywords.length) {
-    const reason = `hard rule: action matches irreversible pattern(s) ${matchedKeywords.join(', ')}, so it can never be safe_to_auto; no model call was made, so nothing was spent finding out whether the model agreed`;
+    const matchedClass = hardRuleClass(matchedKeywords)!;
+    const verdict: PermitVerdict = matchedClass === 'destructive' ? 'refuse' : 'needs_approval';
+    const reason = matchedClass === 'destructive'
+      ? `hard rule: action matches destructive pattern(s) ${matchedKeywords.join(', ')}; refused outright, no human-approval path makes this retroactively fine; no model call was made`
+      : `hard rule: action matches irreversible pattern(s) ${matchedKeywords.join(', ')}, so it can never be safe_to_auto; no model call was made, so nothing was spent finding out whether the model agreed`;
     const outcome: RecordOutcome = { id, kind: 'review', reason, passes: [] };
     return {
-      id, action: snapshot.action, target: snapshot.target, verdict: 'needs_approval', confidence: undefined, reason,
-      hardRuleApplied: true, matchedKeywords, softCueApplied: false, matchedCues: [], noDistributionApplied: false, outcome
+      id, action: snapshot.action, target: snapshot.target, verdict, confidence: undefined, reason,
+      hardRuleApplied: true, matchedKeywords, class: matchedClass, softCueApplied: false, matchedCues: [], noDistributionApplied: false, outcome
     };
   }
 
