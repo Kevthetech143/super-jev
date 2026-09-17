@@ -1,6 +1,6 @@
 ---
 name: super-jev
-description: "The ONE front door for every check we run — gate a draft against its evidence, verify a worker's report, sweep a pile bigger than one call, and run the live bench. Thin wrappers over a claim-gate tool, a report-verify tool, and the super-jev harness, never a second copy of them. Three doors are named but not built (permit, chain, fetch); each one names its own wishlist item and exits 6, so a missing tool tells you what is missing. `ask \"<one plain sentence>\"` routes a request to the right door with no model call. Triggers: /super-jev, check this before I send it, is this report true, run every question over this pile, super jev"
+description: "The ONE front door for every check we run — gate a draft against its evidence, verify a worker's report, sweep a pile bigger than one call, fetch the top few catalog entries for a request, and run the live bench. Thin wrappers over a claim-gate tool, a report-verify tool, and the super-jev harness, never a second copy of them. Two doors are named but not built (permit, chain); each one names its own wishlist item and exits 6, so a missing tool tells you what is missing. `ask \"<one plain sentence>\"` routes a request to the right door with no model call. Triggers: /super-jev, check this before I send it, is this report true, run every question over this pile, which skill handles this, super jev"
 type: procedure
 ---
 
@@ -12,7 +12,7 @@ type: procedure
 
 Before this, the checks were scattered across two skills and a repo on four branches. A fresh session had to remember four places. This is the one place.
 
-This copy lives in `skills/super-jev/` in the [super-jev](../../README.md) repo and is portable out of the box: `sweep` and `bench` look for their npm scripts in this checkout by default (override with `SUPERJEV_REPO`), and `gate`/`verify` wrap whatever claim-gate and report-verify tools you point them at (see **Install**, below). A clone with no env set at all still runs `status`, `ask`, `sweep` and `bench`; `gate` and `verify` need two tools this repo does not ship — see **Related doors** at the bottom.
+This copy lives in `skills/super-jev/` in the [super-jev](../../README.md) repo and is portable out of the box: `sweep`, `fetch` and `bench` look for their npm scripts in this checkout by default (override with `SUPERJEV_REPO`), and `gate`/`verify` wrap whatever claim-gate and report-verify tools you point them at (see **Install**, below). A clone with no env set at all still runs `status`, `ask`, `sweep`, `fetch` and `bench`; `gate` and `verify` need two tools this repo does not ship — see **Related doors** at the bottom.
 
     python3 skills/super-jev/superjev.py <door> ...
 
@@ -36,9 +36,9 @@ absent anywhere else — in that case the door names the missing path and the
 env var that replaces it, instead of failing inside a subprocess. `status`
 reports which of the two is live.
 
-`SUPERJEV_REPO` points `sweep` and `bench` at a super-jev checkout carrying
-those npm scripts; it defaults to this repo's own root, so those two doors
-need no env at all when the skill is used from inside a clone.
+`SUPERJEV_REPO` points `sweep`, `fetch` and `bench` at a super-jev checkout
+carrying those npm scripts; it defaults to this repo's own root, so those
+three doors need no env at all when the skill is used from inside a clone.
 
 ## The doors
 
@@ -47,10 +47,10 @@ need no env at all when the skill is used from inside a clone.
 | `gate <evidence...> --draft <file>` or `--claim "..."` | does my draft actually follow from the files I read | **LIVE**, needs a claim-gate tool | `SUPERJEV_GATE_CMD` |
 | `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | is this worker's "done" true | **LIVE**, needs a report-verify tool | `SUPERJEV_VERIFY_CMD` |
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | every question of every record, with proof nothing was skipped | **LIVE** | `npm run sweep` in the harness |
+| `fetch "<request>" --catalog <catalog.json>` | which few entries in the catalog actually serve this request | **LIVE** | `npm run fetch` in the harness |
 | `bench [--dry-run] [--stub]` | how good is the harness, measured | **LIVE** | `npm run bench:live` |
 | `permit <snapshot> --action "..."` | is it safe to click / pay / send / delete automatically | **NOT BUILT** — wishlist item 5 | — |
 | `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **NOT BUILT** — wishlist item 4 | — |
-| `fetch "<request>"` | which skill or tool should be loaded for this | **NOT BUILT** — wishlist item 6 | — |
 | `ask "<one plain sentence>"` | picks the door for you | **LIVE** | a keyword table, no model call |
 | `status` | which doors are live here, right now | **LIVE** | — |
 | `hook <gate\|verify>` | a Claude Code hook shim: reads the hook payload on stdin, maps the verdict to the hook's own exit convention | **LIVE** | wraps `gate`/`verify` above |
@@ -175,7 +175,7 @@ Every door here inherits it from the claim-gate tool it wraps, unchanged. This s
 
 **A door that is not installed here.** If the claim-gate or report-verify tool behind `gate`/`verify` is missing and no `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` is set, it says so by path and by env var name rather than failing inside a subprocess.
 
-**A checkout that does not carry the script.** `sweep` and `bench` need a real super-jev checkout, from `SUPERJEV_REPO` or this repo's own root. No directory, no `package.json`, or no such script and it refuses by name and tells you to point `SUPERJEV_REPO` at one. The sweep and bench scripts can live on their own branches, so a given checkout may well not have them — `status` tells you.
+**A checkout that does not carry the script.** `sweep`, `fetch` and `bench` need a real super-jev checkout, from `SUPERJEV_REPO` or this repo's own root. No directory, no `package.json`, or no such script and it refuses by name and tells you to point `SUPERJEV_REPO` at one. These scripts can live on their own branches, so a given checkout may well not have them — `status` tells you.
 
 **A live `bench` with no `TYPESAFE_API_KEY` in the environment.** It prints the dry-run plan instead — the call count and the token estimate, no network, no cost — and exits 5 so nothing downstream reads it as a completed bench.
 
@@ -193,4 +193,4 @@ Also runnable as `npm run test:skill` from the repo root. Fully offline: every d
 
 - The claim-gate tool behind `SUPERJEV_GATE_CMD` — the check itself, the question batteries, and the owner of the 0.80 line. Not shipped in this repo; see **Install** above.
 - The report-verify tool behind `SUPERJEV_VERIFY_CMD` — the evidence collectors and the CLEAN/READ/REJECT rule for a report. Not shipped in this repo; see **Install** above.
-- [`docs/wishlist.md`](../../docs/wishlist.md) — the seven items. Items 4, 5 and 6 are the three doors above that print instead of running.
+- [`docs/wishlist.md`](../../docs/wishlist.md) — the seven items. Items 4 and 5 are the two doors above (`chain`, `permit`) that print instead of running. Item 6 (`fetch`) is now built.

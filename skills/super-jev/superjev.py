@@ -10,8 +10,8 @@ failing silently.
 
     python3 skills/super-jev/superjev.py <sub> ...
 
-Subcommands: gate · verify · sweep · bench · hook · ledger · permit · chain ·
-fetch · ask · status
+Subcommands: gate · verify · sweep · fetch · bench · hook · ledger · permit ·
+chain · ask · status
 
 Exit codes: whatever the wrapped door returned. Plus 5 for a refusal by this
 wrapper (missing input, missing door, unroutable ask) and 6 for NOT BUILT.
@@ -196,12 +196,11 @@ LEDGER_PATH = _default_ledger_path()
 REFUSED = 5          # this wrapper refused: missing input or missing door
 NOT_BUILT = 6        # the door is named in the wishlist and does not exist yet
 
-# The three doors that are named but not built. item -> (title, why it is named)
-UNBUILT = {
-    "permit": (5, "ACTION PERMIT"),
-    "chain": (4, "EVIDENCE CHAIN"),
-    "fetch": (6, "FETCH LAYER"),
-}
+# Doors named in the wishlist but not yet built. item -> (title, why it is
+# named). Empty now that permit (item 5) and chain (item 4) are wired to the
+# npm CLIs #8 added — kept as a dict, not deleted, so a future wishlist item
+# has somewhere to register instead of needing a new mechanism.
+UNBUILT = {}
 CHAIN_NOTE = "src/enhance/evidence.ts exists, no CLI"
 
 
@@ -631,6 +630,119 @@ def cmd_sweep(a):
                   f"sweep exited {code}", details, cmd)
         return code
     return run_door(cmd, cwd=repo, door="sweep")
+
+
+# ---------------------------------------------------------------- fetch
+
+def cmd_fetch(a):
+    json_mode = getattr(a, "json", False)
+    npm_path = resolve_npm()
+    if npm_path is None:
+        return _npm_missing_refusal(json_mode, "fetch")
+    repo = repo_path()
+    bad = need_script(repo, "fetch", json_mode=json_mode, door="fetch")
+    if bad is not None:
+        return bad
+    cmd = ["npm", "run", "fetch", "--", "--catalog", a.catalog, "--request", a.request]
+    if a.k is not None:
+        cmd += ["--k", str(a.k)]
+    if a.out:
+        cmd += ["--out", a.out]
+    if a.budget is not None:
+        cmd += ["--budget", str(a.budget)]
+    if a.batch is not None:
+        cmd += ["--batch", str(a.batch)]
+    if a.dry_run:
+        cmd += ["--dry-run"]
+    if a.stub:
+        cmd += ["--stub"]
+    key_warning = None
+    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
+        key_warning = ("a live fetch needs TYPESAFE_API_KEY. Re-run with --dry-run "
+                       "or --stub to stay offline.")
+        if not json_mode:
+            print(f"super-jev: {key_warning}", file=sys.stderr)
+    if json_mode:
+        code, out, err = run_door(cmd, cwd=repo, capture=True, door="fetch", json_mode=True)
+        details = {"stdout": out, "stderr": err}
+        if key_warning:
+            details["note"] = key_warning
+        emit_json("fetch", "RAN" if code == 0 else "ERROR", code,
+                  f"fetch exited {code}", details, cmd)
+        return code
+    return run_door(cmd, cwd=repo, door="fetch")
+
+
+# ---------------------------------------------------------------- permit
+
+def cmd_permit(a):
+    json_mode = getattr(a, "json", False)
+    npm_path = resolve_npm()
+    if npm_path is None:
+        return _npm_missing_refusal(json_mode, "permit")
+    repo = repo_path()
+    bad = need_script(repo, "permit", json_mode=json_mode, door="permit")
+    if bad is not None:
+        return bad
+    cmd = ["npm", "run", "permit", "--", "--snapshot", a.snapshot]
+    if a.action:
+        cmd += ["--action", a.action]
+    if a.id:
+        cmd += ["--id", a.id]
+    if a.min_confidence is not None:
+        cmd += ["--min-confidence", str(a.min_confidence)]
+    if a.dry_run:
+        cmd += ["--dry-run"]
+    if a.stub:
+        cmd += ["--stub"]
+    key_warning = None
+    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
+        key_warning = ("a live permit needs TYPESAFE_API_KEY. Re-run with --dry-run "
+                       "or --stub to stay offline.")
+        if not json_mode:
+            print(f"super-jev: {key_warning}", file=sys.stderr)
+    if json_mode:
+        code, out, err = run_door(cmd, cwd=repo, capture=True, door="permit", json_mode=True)
+        details = {"stdout": out, "stderr": err}
+        if key_warning:
+            details["note"] = key_warning
+        emit_json("permit", "RAN" if code == 0 else "ERROR", code,
+                  f"permit exited {code}", details, cmd)
+        return code
+    return run_door(cmd, cwd=repo, door="permit")
+
+
+# ---------------------------------------------------------------- chain
+
+def cmd_chain(a):
+    json_mode = getattr(a, "json", False)
+    npm_path = resolve_npm()
+    if npm_path is None:
+        return _npm_missing_refusal(json_mode, "chain")
+    repo = repo_path()
+    bad = need_script(repo, "chain", json_mode=json_mode, door="chain")
+    if bad is not None:
+        return bad
+    cmd = ["npm", "run", "chain", "--", "--spec", a.spec]
+    if a.dry_run:
+        cmd += ["--dry-run"]
+    if a.stub:
+        cmd += ["--stub"]
+    key_warning = None
+    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
+        key_warning = ("a live chain needs TYPESAFE_API_KEY. Re-run with --dry-run "
+                       "or --stub to stay offline.")
+        if not json_mode:
+            print(f"super-jev: {key_warning}", file=sys.stderr)
+    if json_mode:
+        code, out, err = run_door(cmd, cwd=repo, capture=True, door="chain", json_mode=True)
+        details = {"stdout": out, "stderr": err}
+        if key_warning:
+            details["note"] = key_warning
+        emit_json("chain", "RAN" if code == 0 else "ERROR", code,
+                  f"chain exited {code}", details, cmd)
+        return code
+    return run_door(cmd, cwd=repo, door="chain")
 
 
 # ---------------------------------------------------------------- bench
@@ -1177,6 +1289,36 @@ def cmd_ask(a):
         print(f"would run: superjev.py verify {paths[0]}")
         return cmd_verify(argparse.Namespace(report=paths[0], worktree=None,
                                             test_cmd="", paths=[], dry_run=False))
+    if sub == "fetch":
+        catalog = next((p for p in paths if p.endswith(".json")), None)
+        print('would run: superjev.py fetch "<request>" --catalog <catalog.json>')
+        if not catalog:
+            print("missing: a .json catalog file. Name its path in the sentence, or "
+                  "call `fetch` directly.")
+            return REFUSED
+        print(f"missing: the plain request text. Call `fetch` directly with "
+              f"--catalog {catalog} and your request as the positional argument.")
+        return REFUSED
+    if sub == "permit":
+        snapshot = next((p for p in paths if p.endswith(".json")), None)
+        if not snapshot:
+            print('would run: superjev.py permit --snapshot <snapshot.json>')
+            print("missing: a .json snapshot file naming the action. Name its path in "
+                  "the sentence, or call `permit` directly.")
+            return REFUSED
+        print(f"would run: superjev.py permit --snapshot {snapshot}")
+        return cmd_permit(argparse.Namespace(snapshot=snapshot, action="", id="",
+                                             min_confidence=None, dry_run=False,
+                                             stub=False, json=False))
+    if sub == "chain":
+        spec = next((p for p in paths if p.endswith(".json")), None)
+        if not spec:
+            print("would run: superjev.py chain --spec <spec.json>")
+            print("missing: a .json spec file. Name its path in the sentence, or "
+                  "call `chain` directly.")
+            return REFUSED
+        print(f"would run: superjev.py chain --spec {spec}")
+        return cmd_chain(argparse.Namespace(spec=spec, dry_run=False, stub=False, json=False))
     # sweep
     records = next((p for p in paths if p.endswith(".jsonl")), None)
     questions = next((p for p in paths if p.endswith(".json")), None)
@@ -1219,10 +1361,10 @@ def cmd_status(a):
         ("gate", "LIVE" if live_gate else "MISSING DOOR", gate_what),
         ("verify", "LIVE" if live_verify else "MISSING DOOR", verify_what),
         ("sweep", script_state("sweep"), "npm run sweep"),
+        ("fetch", script_state("fetch"), "npm run fetch"),
         ("bench", script_state("bench:live"), "npm run bench:live"),
-        ("permit", "NOT BUILT", "wishlist item 5 (ACTION PERMIT)"),
-        ("chain", "NOT BUILT", "wishlist item 4 (EVIDENCE CHAIN)"),
-        ("fetch", "NOT BUILT", "wishlist item 6 (FETCH LAYER)"),
+        ("permit", script_state("permit"), "npm run permit"),
+        ("chain", script_state("chain"), "npm run chain"),
         ("ask", "LIVE", "keyword router, no model call"),
         ("status", "LIVE", "this"),
     ]
@@ -1322,22 +1464,37 @@ def build_parser():
                     help="how many recent lines to print (default 20)")
     lg.set_defaults(func=cmd_ledger)
 
-    pm = subs.add_parser("permit", help="NOT BUILT — wishlist item 5")
-    pm.add_argument("snapshot", nargs="?", help="the screen or context snapshot")
-    pm.add_argument("--action", default="", help="the action you intend to take")
+    pm = subs.add_parser("permit", help="is this one action safe to run automatically?")
+    pm.add_argument("--snapshot", required=True,
+                    help="JSON: action/target/reversible/reversibilityNotes/policyLines")
+    pm.add_argument("--action", default="", help="the action; overrides snapshot.action")
+    pm.add_argument("--id", default="", dest="id", help="label for this decision")
+    pm.add_argument("--min-confidence", type=float, dest="min_confidence",
+                    help="escalation threshold, 0..1")
+    pm.add_argument("--dry-run", action="store_true", help="print the request, no network")
+    pm.add_argument("--stub", action="store_true", help="offline stub, no key, no network")
     _add_json_flag(pm)
-    pm.set_defaults(func=lambda a: not_built("permit", getattr(a, "json", False)))
+    pm.set_defaults(func=cmd_permit)
 
-    ch = subs.add_parser("chain", help="NOT BUILT — wishlist item 4")
-    ch.add_argument("spec", nargs="?", help="required-source spec, JSON")
-    ch.add_argument("docs", nargs="*", help="the documents in the chain")
+    ch = subs.add_parser("chain", help="evidence completeness before the final question")
+    ch.add_argument("--spec", required=True, help="role spec, JSON")
+    ch.add_argument("--dry-run", action="store_true",
+                    help="in-code completeness check only, no network")
+    ch.add_argument("--stub", action="store_true", help="offline stub, no key, no network")
     _add_json_flag(ch)
-    ch.set_defaults(func=lambda a: not_built("chain", getattr(a, "json", False)))
+    ch.set_defaults(func=cmd_chain)
 
-    ft = subs.add_parser("fetch", help="NOT BUILT — wishlist item 6")
-    ft.add_argument("request", nargs="?", help="the request to score the catalog against")
+    ft = subs.add_parser("fetch", help="score a catalog against a request, top ids only")
+    ft.add_argument("request", help="the plain request to score the catalog against")
+    ft.add_argument("--catalog", required=True, help="catalog.json, an array of {id,text}")
+    ft.add_argument("--k", type=int, help="how many top ids to return")
+    ft.add_argument("--out", help="output directory; a rerun overwrites, never fails")
+    ft.add_argument("--budget", type=int, help="maxInputTokens per call")
+    ft.add_argument("--batch", type=int, help="max records per call")
+    ft.add_argument("--dry-run", action="store_true", help="print the plan, no network")
+    ft.add_argument("--stub", action="store_true", help="offline stub, no key, no network")
     _add_json_flag(ft)
-    ft.set_defaults(func=lambda a: not_built("fetch", getattr(a, "json", False)))
+    ft.set_defaults(func=cmd_fetch)
 
     ak = subs.add_parser("ask", help="one plain sentence; it picks the door")
     ak.add_argument("sentence", help="one plain sentence")

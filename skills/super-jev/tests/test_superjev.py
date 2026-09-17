@@ -59,12 +59,15 @@ def door(monkeypatch):
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    """A fake super-jev checkout carrying both npm scripts."""
+    """A fake super-jev checkout carrying all three npm scripts."""
     r = tmp_path / "super-jev"
     r.mkdir()
     (r / "package.json").write_text(json.dumps(
         {"scripts": {"sweep": "node src/sweep-cli.ts",
-                     "bench:live": "node bench/live-measure.ts"}}), encoding="utf-8")
+                     "fetch": "node src/fetch-cli.ts",
+                     "bench:live": "node bench/live-measure.ts",
+                     "permit": "node src/permit-cli.ts",
+                     "chain": "node src/chain-cli.ts"}}), encoding="utf-8")
     monkeypatch.setenv("SUPERJEV_REPO", str(r))
     return r
 
@@ -142,12 +145,20 @@ def test_ask_prefers_gate_when_both_families_match():
     assert sub == "gate"
 
 
-def test_ask_routed_to_an_unbuilt_door_exits_6(capsys):
+def test_ask_permit_names_the_missing_snapshot_when_none_is_named(capsys):
     code = sj.main(["ask", "is it safe to pay this invoice"])
     out = capsys.readouterr().out
-    assert code == sj.NOT_BUILT
+    assert code == sj.REFUSED
     assert "ask -> permit" in out
-    assert "wishlist item 5" in out
+    assert "missing: a .json snapshot file" in out
+
+
+def test_ask_chain_names_the_missing_spec_when_none_is_named(capsys):
+    code = sj.main(["ask", "does the ticket match the order"])
+    out = capsys.readouterr().out
+    assert code == sj.REFUSED
+    assert "ask -> chain" in out
+    assert "missing: a .json spec file" in out
 
 
 def test_ask_says_what_is_missing_when_the_files_are_not_named(capsys):
@@ -196,30 +207,35 @@ def test_ask_sweep_names_the_output_directory_as_missing(tmp_path, capsys):
 
 
 # ------------------------------------------------------------ NOT BUILT
+#
+# permit (wishlist item 5) and chain (wishlist item 4) are now wired to the
+# npm CLIs #8 added, so UNBUILT is empty and neither door hits this path
+# any more. The mechanism itself (not_built() / wishlist_line()) stays for
+# whatever wishlist item is next; these tests exercise it directly against
+# a fake UNBUILT entry instead of a door that no longer belongs there.
 
-@pytest.mark.parametrize("argv,item,title", [
-    (["permit", "snap.png", "--action", "click pay"], 5, "ACTION PERMIT"),
-    (["chain", "spec.json", "ticket.md"], 4, "EVIDENCE CHAIN"),
-    (["fetch", "which skill posts to x"], 6, "FETCH LAYER"),
-])
-def test_unbuilt_doors_exit_6_and_name_their_wishlist_item(argv, item, title, capsys):
-    code = sj.main(argv)
+def test_not_built_reports_the_wishlist_item(monkeypatch, tmp_path, capsys):
+    monkeypatch.setitem(sj.UNBUILT, "widget", (9, "WIDGET"))
+    wishlist = tmp_path / "wishlist.md"
+    wishlist.write_text("9. WIDGET — the next thing.\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "WISHLIST", wishlist)
+    code = sj.not_built("widget")
     out = capsys.readouterr().out
-    assert code == 6
-    assert f"not built yet — wishlist item {item} ({title})" in out
-    assert out.strip().splitlines()[1].startswith(f"{item}.")
+    assert code == sj.NOT_BUILT
+    assert "not built yet — wishlist item 9 (WIDGET)" in out
+    assert out.strip().splitlines()[1].startswith("9.")
 
 
-def test_chain_names_the_module_that_already_exists(capsys):
-    sj.main(["chain", "spec.json"])
-    assert "src/enhance/evidence.ts exists, no CLI" in capsys.readouterr().out
-
-
-def test_unbuilt_door_survives_a_missing_wishlist(monkeypatch, tmp_path, capsys):
+def test_not_built_survives_a_missing_wishlist(monkeypatch, tmp_path, capsys):
+    monkeypatch.setitem(sj.UNBUILT, "widget", (9, "WIDGET"))
     monkeypatch.setattr(sj, "WISHLIST", tmp_path / "gone.md")
-    code = sj.main(["fetch", "which tool"])
-    assert code == 6
+    code = sj.not_built("widget")
+    assert code == sj.NOT_BUILT
     assert "not readable" in capsys.readouterr().out
+
+
+def test_unbuilt_is_empty_now_that_permit_and_chain_are_wired():
+    assert sj.UNBUILT == {}
 
 
 # ------------------------------------------------------------ status
@@ -229,10 +245,14 @@ def test_status_shape(repo, capsys, monkeypatch):
     code = sj.main(["status"])
     out = capsys.readouterr().out
     assert code == 0
-    for door_name in ("gate", "verify", "sweep", "bench", "permit", "chain",
-                      "fetch", "ask", "status"):
+    for door_name in ("gate", "verify", "sweep", "fetch", "bench", "permit", "chain",
+                      "ask", "status"):
         assert door_name in out
-    assert out.count("NOT BUILT") == 3
+    assert "NOT BUILT" not in out
+    # all nine doors read LIVE: gate/verify via the fake fleet-local door,
+    # sweep/fetch/bench/permit/chain via the repo fixture's package.json,
+    # ask/status always
+    assert out.count("LIVE") == 9
     assert "harness commit: abc1234" in out
     assert "TYPESAFE_API_KEY in env: no" in out
 
@@ -254,7 +274,7 @@ def test_status_names_a_missing_script_instead_of_claiming_live(tmp_path, monkey
     monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
     sj.main(["status"])
     out = capsys.readouterr().out
-    assert out.count("MISSING SCRIPT") == 2
+    assert out.count("MISSING SCRIPT") == 5  # sweep, fetch, bench, permit, chain
 
 
 # ------------------------------------------------------------ gate
@@ -419,6 +439,206 @@ def test_sweep_refuses_a_missing_checkout(tmp_path, monkeypatch, door, capsys):
     assert code == sj.REFUSED
     assert "no super-jev checkout" in capsys.readouterr().err
     assert not door.calls
+
+
+# ------------------------------------------------------------ fetch
+
+def test_fetch_builds_the_npm_command_in_the_checkout(repo, door):
+    code = sj.main(["fetch", "gate my reply", "--catalog", "catalog.json",
+                    "--k", "3", "--out", "out", "--budget", "8000", "--batch", "40",
+                    "--dry-run"])
+    assert code == 0
+    call = door.calls[-1]
+    assert call["cmd"] == ["npm", "run", "fetch", "--",
+                           "--catalog", "catalog.json", "--request", "gate my reply",
+                           "--k", "3", "--out", "out", "--budget", "8000",
+                           "--batch", "40", "--dry-run"]
+    assert call["cwd"] == str(repo)
+
+
+def test_fetch_omits_flags_that_were_not_given(repo, door):
+    sj.main(["fetch", "anything", "--catalog", "c.json"])
+    argv = door.argv
+    for flag in ("--k", "--out", "--budget", "--batch", "--dry-run", "--stub"):
+        assert flag not in argv
+
+
+def test_fetch_refuses_a_checkout_without_the_script(tmp_path, monkeypatch, door, capsys):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "package.json").write_text('{"scripts":{}}', encoding="utf-8")
+    monkeypatch.setenv("SUPERJEV_REPO", str(bare))
+    code = sj.main(["fetch", "anything", "--catalog", "c.json"])
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "no `fetch` script" in err and str(bare) in err
+    assert not door.calls
+
+
+def test_fetch_refuses_a_missing_checkout(tmp_path, monkeypatch, door, capsys):
+    monkeypatch.setenv("SUPERJEV_REPO", str(tmp_path / "nowhere"))
+    code = sj.main(["fetch", "anything", "--catalog", "c.json"])
+    assert code == sj.REFUSED
+    assert "no super-jev checkout" in capsys.readouterr().err
+    assert not door.calls
+
+
+def test_ask_fetch_names_the_missing_request_when_only_a_catalog_is_named(tmp_path, capsys):
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text("[]", encoding="utf-8")
+    code = sj.main(["ask", f"which tool handles this {catalog}"])
+    out = capsys.readouterr().out
+    assert code == sj.REFUSED
+    assert "ask -> fetch" in out
+    assert "missing: the plain request text" in out
+
+
+def test_ask_fetch_names_the_missing_catalog_when_none_is_named(capsys):
+    code = sj.main(["ask", "which skill handles this request"])
+    out = capsys.readouterr().out
+    assert code == sj.REFUSED
+    assert "ask -> fetch" in out
+    assert "missing: a .json catalog file" in out
+
+
+def test_fetch_refuses_without_a_traceback_in_a_bare_environment(monkeypatch, capsys):
+    # The bug the reviewer found: cmd_fetch used to shell out to npm without
+    # ever calling resolve_npm() first, so a bare env with no npm on PATH
+    # crashed inside subprocess.run (FileNotFoundError) instead of refusing
+    # cleanly the way sweep/bench already did.
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    code = sj.main(["fetch", "anything", "--catalog", "c.json", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "npm not found" in err
+    assert "Traceback" not in err
+
+
+def test_fetch_json_shape_and_no_npm_banner_leaks_to_stdout(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout="npm banner noise\nfetch done"))
+    code = sj.main(["fetch", "anything", "--catalog", "c.json", "--dry-run", "--json"])
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert code == 0
+    assert obj["door"] == "fetch"
+    assert obj["verdict"] == "RAN"
+    assert "npm banner noise" in obj["details"]["stdout"]
+    assert "$ " not in out
+
+
+def test_fetch_calls_are_logged_to_the_ledger(repo, door):
+    sj.main(["fetch", "anything", "--catalog", "c.json", "--dry-run"])
+    lines = sj._ledger_lines()
+    assert lines
+    rec = json.loads(lines[-1])
+    assert rec["door"] == "fetch"
+
+
+# ------------------------------------------------------------ permit
+
+def test_permit_builds_the_npm_command_in_the_checkout(repo, door):
+    code = sj.main(["permit", "--snapshot", "snap.json", "--action", "delete the record",
+                    "--id", "d1", "--min-confidence", "0.9", "--dry-run"])
+    assert code == 0
+    call = door.calls[-1]
+    assert call["cmd"] == ["npm", "run", "permit", "--", "--snapshot", "snap.json",
+                           "--action", "delete the record", "--id", "d1",
+                           "--min-confidence", "0.9", "--dry-run"]
+    assert call["cwd"] == str(repo)
+
+
+def test_permit_omits_flags_that_were_not_given(repo, door):
+    sj.main(["permit", "--snapshot", "snap.json"])
+    argv = door.argv
+    for flag in ("--action", "--id", "--min-confidence", "--dry-run", "--stub"):
+        assert flag not in argv
+
+
+def test_permit_refuses_a_checkout_without_the_script(tmp_path, monkeypatch, door, capsys):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "package.json").write_text('{"scripts":{}}', encoding="utf-8")
+    monkeypatch.setenv("SUPERJEV_REPO", str(bare))
+    code = sj.main(["permit", "--snapshot", "snap.json"])
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "no `permit` script" in err and str(bare) in err
+    assert not door.calls
+
+
+def test_permit_refuses_without_a_traceback_in_a_bare_environment(monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    code = sj.main(["permit", "--snapshot", "snap.json", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "npm not found" in err
+    assert "Traceback" not in err
+
+
+def test_permit_json_shape(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout="permit verdict here"))
+    code = sj.main(["permit", "--snapshot", "snap.json", "--dry-run", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert obj["door"] == "permit"
+    assert obj["verdict"] == "RAN"
+
+
+def test_ask_runs_chain_when_a_spec_file_is_named(tmp_path, door):
+    spec = tmp_path / "spec.json"
+    spec.write_text("{}", encoding="utf-8")
+    code = sj.main(["ask", f"does the ticket match the order in {spec}"])
+    assert code == 0
+    assert door.argv == ["npm", "run", "chain", "--", "--spec", str(spec)]
+
+
+# ------------------------------------------------------------ chain
+
+def test_chain_builds_the_npm_command_in_the_checkout(repo, door):
+    code = sj.main(["chain", "--spec", "spec.json", "--dry-run"])
+    assert code == 0
+    call = door.calls[-1]
+    assert call["cmd"] == ["npm", "run", "chain", "--", "--spec", "spec.json", "--dry-run"]
+    assert call["cwd"] == str(repo)
+
+
+def test_chain_omits_flags_that_were_not_given(repo, door):
+    sj.main(["chain", "--spec", "spec.json"])
+    argv = door.argv
+    for flag in ("--dry-run", "--stub"):
+        assert flag not in argv
+
+
+def test_chain_refuses_a_checkout_without_the_script(tmp_path, monkeypatch, door, capsys):
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "package.json").write_text('{"scripts":{}}', encoding="utf-8")
+    monkeypatch.setenv("SUPERJEV_REPO", str(bare))
+    code = sj.main(["chain", "--spec", "spec.json"])
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "no `chain` script" in err and str(bare) in err
+    assert not door.calls
+
+
+def test_chain_refuses_without_a_traceback_in_a_bare_environment(monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    code = sj.main(["chain", "--spec", "spec.json", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "npm not found" in err
+    assert "Traceback" not in err
+
+
+def test_chain_json_shape(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout="chain result here"))
+    code = sj.main(["chain", "--spec", "spec.json", "--dry-run", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert obj["door"] == "chain"
+    assert obj["verdict"] == "RAN"
 
 
 # ------------------------------------------------------------ bench
@@ -942,7 +1162,7 @@ def test_status_says_npm_not_runnable_when_script_present_but_npm_missing(repo, 
     code = sj.main(["status"])
     out = capsys.readouterr().out
     assert code == 0
-    assert out.count("script present, npm not runnable") == 2
+    assert out.count("script present, npm not runnable") == 5  # sweep, fetch, bench, permit, chain
     assert "LIVE" not in [ln.split()[1] for ln in out.splitlines()
                           if ln.startswith("sweep") or ln.startswith("bench")]
 
