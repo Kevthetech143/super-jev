@@ -1,0 +1,677 @@
+{
+ "note": "Answers recorded from the live pilot calls in /Users/admin/super-jev-experiments/jev-robust/results.json. Reused here only to script an offline stub. They prove nothing about accuracy.",
+ "classification": {
+  "namedShuffled": {
+   "D20": {
+    "choice": "other",
+    "confidence": 0.98
+   },
+   "D03": {
+    "choice": "support",
+    "confidence": 0.99
+   },
+   "D23": {
+    "choice": "other",
+    "confidence": 0.85
+   },
+   "D06": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D26": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D09": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D29": {
+    "choice": "other",
+    "confidence": 0.97
+   },
+   "D12": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D32": {
+    "choice": "other",
+    "confidence": 0.97
+   },
+   "D15": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D18": {
+    "choice": "support",
+    "confidence": 0.86
+   },
+   "D01": {
+    "choice": "invoice",
+    "confidence": 1
+   },
+   "D21": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D04": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D24": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D07": {
+    "choice": "invoice",
+    "confidence": 1
+   },
+   "D27": {
+    "choice": "other",
+    "confidence": 0.89
+   },
+   "D10": {
+    "choice": "invoice",
+    "confidence": 1
+   },
+   "D30": {
+    "choice": "other",
+    "confidence": 0.86
+   },
+   "D13": {
+    "choice": "other",
+    "confidence": 0.99
+   },
+   "D16": {
+    "choice": "invoice",
+    "confidence": 0.92
+   },
+   "D19": {
+    "choice": "other",
+    "confidence": 0.62
+   },
+   "D02": {
+    "choice": "receipt",
+    "confidence": 0.99
+   },
+   "D22": {
+    "choice": "invoice",
+    "confidence": 0.99
+   },
+   "D05": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D25": {
+    "choice": "invoice",
+    "confidence": 0.82
+   },
+   "D08": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D28": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D11": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D31": {
+    "choice": "other",
+    "confidence": 0.29
+   },
+   "D14": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D17": {
+    "choice": "receipt",
+    "confidence": 0.8
+   }
+  },
+  "arrayShuffled": {
+   "D20": {
+    "choice": "other",
+    "confidence": 0.98
+   },
+   "D03": {
+    "choice": "support",
+    "confidence": 0.97
+   },
+   "D23": {
+    "choice": "other",
+    "confidence": 0.89
+   },
+   "D06": {
+    "choice": "contract",
+    "confidence": 0.98
+   },
+   "D26": {
+    "choice": "support",
+    "confidence": 0.93
+   },
+   "D09": {
+    "choice": "contract",
+    "confidence": 0.81
+   },
+   "D29": {
+    "choice": "other",
+    "confidence": 0.88
+   },
+   "D12": {
+    "choice": "support",
+    "confidence": 0.97
+   },
+   "D32": {
+    "choice": "other",
+    "confidence": 0.81
+   },
+   "D15": {
+    "choice": "contract",
+    "confidence": 0.77
+   },
+   "D18": {
+    "choice": "contract",
+    "confidence": 0.16
+   },
+   "D01": {
+    "choice": "invoice",
+    "confidence": 0.78
+   },
+   "D21": {
+    "choice": "other",
+    "confidence": 0.95
+   },
+   "D04": {
+    "choice": "support",
+    "confidence": 0.32
+   },
+   "D24": {
+    "choice": "invoice",
+    "confidence": 0.66
+   },
+   "D07": {
+    "choice": "invoice",
+    "confidence": 0.71
+   },
+   "D27": {
+    "choice": "invoice",
+    "confidence": 0.62
+   },
+   "D10": {
+    "choice": "invoice",
+    "confidence": 0.4
+   },
+   "D30": {
+    "choice": "invoice",
+    "confidence": 0.42
+   },
+   "D13": {
+    "choice": "invoice",
+    "confidence": 0.42
+   },
+   "D16": {
+    "choice": "invoice",
+    "confidence": 0.44
+   },
+   "D19": {
+    "choice": "invoice",
+    "confidence": 0.39
+   },
+   "D02": {
+    "choice": "invoice",
+    "confidence": 0.47
+   },
+   "D22": {
+    "choice": "receipt",
+    "confidence": 0.79
+   },
+   "D05": {
+    "choice": "invoice",
+    "confidence": 0.47
+   },
+   "D25": {
+    "choice": "invoice",
+    "confidence": 0.37
+   },
+   "D08": {
+    "choice": "contract",
+    "confidence": 0.25
+   },
+   "D28": {
+    "choice": "contract",
+    "confidence": 0.61
+   },
+   "D11": {
+    "choice": "contract",
+    "confidence": 0.59
+   },
+   "D31": {
+    "choice": "receipt",
+    "confidence": 0.33
+   },
+   "D14": {
+    "choice": "receipt",
+    "confidence": 0.2
+   },
+   "D17": {
+    "choice": "receipt",
+    "confidence": 0.38
+   }
+  },
+  "arrayOneBatch": {
+   "D01": {
+    "choice": "invoice",
+    "confidence": 1
+   },
+   "D02": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D03": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D04": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D05": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D06": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D07": {
+    "choice": "invoice",
+    "confidence": 0.99
+   },
+   "D08": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D09": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D10": {
+    "choice": "invoice",
+    "confidence": 0.97
+   },
+   "D11": {
+    "choice": "receipt",
+    "confidence": 0.99
+   },
+   "D12": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D13": {
+    "choice": "other",
+    "confidence": 0.86
+   },
+   "D14": {
+    "choice": "support",
+    "confidence": 0.99
+   },
+   "D15": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D16": {
+    "choice": "invoice",
+    "confidence": 0.89
+   },
+   "D17": {
+    "choice": "receipt",
+    "confidence": 0.49
+   },
+   "D18": {
+    "choice": "other",
+    "confidence": 0.41
+   },
+   "D19": {
+    "choice": "other",
+    "confidence": 0.53
+   },
+   "D20": {
+    "choice": "other",
+    "confidence": 0.99
+   },
+   "D21": {
+    "choice": "other",
+    "confidence": 0.98
+   },
+   "D22": {
+    "choice": "invoice",
+    "confidence": 0.8
+   },
+   "D23": {
+    "choice": "other",
+    "confidence": 0.88
+   },
+   "D24": {
+    "choice": "receipt",
+    "confidence": 0.97
+   },
+   "D25": {
+    "choice": "invoice",
+    "confidence": 0.8
+   },
+   "D26": {
+    "choice": "support",
+    "confidence": 0.9
+   },
+   "D27": {
+    "choice": "other",
+    "confidence": 0.88
+   },
+   "D28": {
+    "choice": "other",
+    "confidence": 0.83
+   },
+   "D29": {
+    "choice": "other",
+    "confidence": 0.85
+   },
+   "D30": {
+    "choice": "other",
+    "confidence": 0.88
+   },
+   "D31": {
+    "choice": "other",
+    "confidence": 0.35
+   },
+   "D32": {
+    "choice": "other",
+    "confidence": 0.63
+   }
+  },
+  "batchesOfFour": {
+   "D01": {
+    "choice": "invoice",
+    "confidence": 0.99
+   },
+   "D02": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D03": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D04": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D05": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D06": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D07": {
+    "choice": "invoice",
+    "confidence": 1
+   },
+   "D08": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D09": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D10": {
+    "choice": "invoice",
+    "confidence": 0.99
+   },
+   "D11": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D12": {
+    "choice": "support",
+    "confidence": 0.99
+   },
+   "D13": {
+    "choice": "other",
+    "confidence": 0.9
+   },
+   "D14": {
+    "choice": "support",
+    "confidence": 1
+   },
+   "D15": {
+    "choice": "contract",
+    "confidence": 1
+   },
+   "D16": {
+    "choice": "invoice",
+    "confidence": 0.93
+   },
+   "D17": {
+    "choice": "receipt",
+    "confidence": 0.94
+   },
+   "D18": {
+    "choice": "support",
+    "confidence": 0.9
+   },
+   "D19": {
+    "choice": "other",
+    "confidence": 0.56
+   },
+   "D20": {
+    "choice": "other",
+    "confidence": 0.98
+   },
+   "D21": {
+    "choice": "other",
+    "confidence": 1
+   },
+   "D22": {
+    "choice": "invoice",
+    "confidence": 0.92
+   },
+   "D23": {
+    "choice": "other",
+    "confidence": 0.9
+   },
+   "D24": {
+    "choice": "receipt",
+    "confidence": 1
+   },
+   "D25": {
+    "choice": "other",
+    "confidence": 0.54
+   },
+   "D26": {
+    "choice": "support",
+    "confidence": 0.98
+   },
+   "D27": {
+    "choice": "other",
+    "confidence": 0.95
+   },
+   "D28": {
+    "choice": "contract",
+    "confidence": 0.99
+   },
+   "D29": {
+    "choice": "other",
+    "confidence": 0.8
+   },
+   "D30": {
+    "choice": "other",
+    "confidence": 0.67
+   },
+   "D31": {
+    "choice": "receipt",
+    "confidence": 0.51
+   },
+   "D32": {
+    "choice": "other",
+    "confidence": 0.92
+   }
+  }
+ },
+ "investigation": {
+  "linked": {
+   "T1": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T2": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T3": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T4": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T5": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T6": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T7": {
+    "choice": "unknown",
+    "confidence": 1
+   },
+   "T8": {
+    "choice": "unknown",
+    "confidence": 0.91
+   },
+   "T9": {
+    "choice": "unknown",
+    "confidence": 0.53
+   },
+   "T10": {
+    "choice": "unknown",
+    "confidence": 1
+   },
+   "T11": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T12": {
+    "choice": "ineligible",
+    "confidence": 0.98
+   }
+  },
+  "structuredPlusProse": {
+   "T1": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T2": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T3": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T4": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T5": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T6": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T7": {
+    "choice": "eligible",
+    "confidence": 0.47
+   },
+   "T8": {
+    "choice": "eligible",
+    "confidence": 0.75
+   },
+   "T9": {
+    "choice": "unknown",
+    "confidence": 0.71
+   },
+   "T10": {
+    "choice": "unknown",
+    "confidence": 1
+   },
+   "T11": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T12": {
+    "choice": "ineligible",
+    "confidence": 0.99
+   }
+  },
+  "oracle": {
+   "T1": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T2": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T3": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T4": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T5": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T6": {
+    "choice": "ineligible",
+    "confidence": 1
+   },
+   "T7": {
+    "choice": "eligible",
+    "confidence": 0.7
+   },
+   "T8": {
+    "choice": "eligible",
+    "confidence": 0.54
+   },
+   "T9": {
+    "choice": "eligible",
+    "confidence": 0.59
+   },
+   "T10": {
+    "choice": "unknown",
+    "confidence": 0.99
+   },
+   "T11": {
+    "choice": "eligible",
+    "confidence": 1
+   },
+   "T12": {
+    "choice": "ineligible",
+    "confidence": 0.99
+   }
+  }
+ }
+}
