@@ -17,8 +17,14 @@ Sources read on 2026-09-17:
 
 Evidence for the OBSERVED rows is `results.json` in the `jev-robust` experiment
 package: 30 recorded live calls against model `jev-1.13.0`, containing 337
-answers that carry a probability distribution. None of it is live-validated by
-this pull request; no API call was made while writing it.
+answers that carry a probability distribution.
+
+There is now also **one live call**, made on 2026-09-17 against `jev-1.13.0`,
+which returned a `score`, a `choice` and a `noul` answer in one response. It is
+checked in verbatim as `test/fixtures/live-score-2026-09-17.json` and is
+asserted by the test suite. It confirmed the documented `score` rule and
+overturned one INFERRED rule outright; both are marked below. Everything else
+in this document is still recorded data or documentation only.
 
 ## 1. Response shape
 
@@ -30,8 +36,12 @@ this pull request; no API call was made while writing it.
 | A `noul` answer carries a single value "on a scale from 0 (no) to 1 (yes)". | DOCUMENTED | `/api` |
 | Every question is "evaluated in parallel and in isolation" against shared state. | DOCUMENTED | docs introduction |
 | Recorded responses also carry `model` and `usage.input_tokens` / `usage.output_tokens`. | OBSERVED | all 30 calls |
+| A `noul` answer carries only that value: no `confidence`, no `probabilities`. | OBSERVED | live call 2026-09-17 |
+| A `score` answer carries `legend`, the level labels echoed back. | OBSERVED | live call 2026-09-17 |
 
 This harness ignores `legend`; it derives level keys from the request it sent.
+The validator checks a `noul` answer's value and nothing else, which is what
+the live response shape requires.
 
 ## 2. What `choice` means
 
@@ -68,9 +78,13 @@ documented semantics and would reject legitimate answers such as score `1.30`
 over levels `{0: 0.0, 1: 0.70, 2: 0.30}`, where level 1.30 does not exist. The
 harness implements the documented expectation rule instead.
 
-OBSERVED: nothing. All 30 recorded calls used `choice` questions only, so there
-is no live `score` answer in the package to check this against. The rule is
-implemented from the documentation alone.
+OBSERVED, and **CONFIRMED LIVE 2026-09-17**: all 30 recorded calls used
+`choice` questions only, so the recorded package contains no `score` answer at
+all. The live call of 2026-09-17 supplied one, and it matches the documented
+rule exactly: `score` 1.85 over `{0: 0.01, 1: 0.23, 2: 0.66, 3: 0.10, 4: 0.00}`
+has expectation `0.23 + 1.32 + 0.30 = 1.85`, equal to the reported value with no
+tolerance used. That is one answer from one model version, so it is a
+confirmation rather than a guarantee, and the tolerance below stays in place.
 
 ### Tolerance on the score check
 
@@ -115,14 +129,31 @@ OBSERVED, across 337 recorded answers:
 | `confidence` is less than the maximum probability | 175 |
 | `confidence` exceeds the maximum probability | 0 |
 
-INFERRED: the harness rejects an answer whose `confidence` exceeds the maximum
-probability by more than one rounding step (0.01). Every documented reading of
-confidence makes a value above the peak internally inconsistent, and the
-recorded data never produced one. This is a real rejection risk rather than a
-guarantee: if TypeSafe's confidence statistic can legitimately exceed the peak
-probability for some distribution shape, this check would reject a valid
-answer, and it should be relaxed. It is the one rule here that a live probe
-could overturn.
+**OVERTURNED LIVE 2026-09-17.** This harness used to reject an answer whose
+`confidence` exceeded the maximum probability by more than one rounding step.
+That rule was INFERRED, it was flagged here as the one rule a live probe could
+overturn, and a live probe overturned it on the first try. The live `score`
+answer in `test/fixtures/live-score-2026-09-17.json` returned
+
+| Field | Value |
+|---|---|
+| `score` | 1.85 |
+| `confidence` | 0.71 |
+| `probabilities` | `{0: 0.01, 1: 0.23, 2: 0.66, 3: 0.10, 4: 0.00}` |
+| Peak probability | 0.66 |
+
+so a real `jev-1.13.0` response carries a confidence 0.05 above its own peak,
+on a five-level distribution whose total is exactly 1.00. The rule is removed
+from `src/jev.ts` entirely, not narrowed to `choice` answers: the docs give no
+formula for confidence at all, so with the score case disproved there is no
+basis left for asserting the relationship on any primitive. The live `choice`
+answer in the same response happened to be consistent with the old rule
+(confidence 1.0, peak 1.0), which proves nothing either way.
+
+What the validator now checks about `confidence` is the whole of what TypeSafe
+documents: that it is a finite number in `[0, 1]`. A value outside that range
+still fails. Nothing downstream is loosened by this; `confidence` was never a
+correctness signal.
 
 Downstream code in this repo keeps using `confidence` for review gating, and
 the organizer's gate stays at 0.75. The robustness report's finding stands
@@ -185,11 +216,26 @@ INFERRED, and narrow on purpose:
    untouched values are kept on the answer as `rawProbabilities`, so an audit
    can always see what was actually returned.
 3. Outside the band, the answer is rejected. Nothing is substituted, retried or
-   guessed. That covers a total of 0, a total above 1.05, negative values, a
-   `NaN`, a non-numeric value, a missing level and an extra level.
-4. Normalization is idempotent. The loop validates the same object a second
-   time, and the second pass leaves it and `rawProbabilities` alone.
-5. A validation failure never triggers a retry of anything, and in particular
+   guessed. The band is `|total - 1| <= 0.01`, so the rejection threshold is a
+   total below 0.99 or above 1.01. That covers a total of 0, a total above 1.01,
+   negative values, a `NaN`, a non-numeric value, a missing level and an extra
+   level.
+4. Validation does not write to the response it was given. `validateEvaluation`
+   returns the evaluation to use downstream, and the provider's parsed reply is
+   left exactly as it arrived, so a frozen response validates and a caller
+   holding the original can still see what was actually returned. The loop
+   journals and decides on the returned object.
+5. Validation is a fixed point: validating an already-validated evaluation
+   returns an equal object, including `rawProbabilities`.
+6. `rawProbabilities` is this harness's own audit field and never a provider
+   field. A value arriving under that name is never trusted. On the
+   renormalizing path it is overwritten with the probabilities the provider
+   actually sent. On the pass-through path it is kept only if it is a
+   distribution over the same levels that renormalizes to those probabilities,
+   which is what revalidating our own output looks like; anything else is
+   rejected with `Untrusted rawProbabilities`, because trusting it would let a
+   response forge its own audit trail.
+7. A validation failure never triggers a retry of anything, and in particular
    never re-runs a tool effect. The adapter surfaces the failure for an
    explicit new run, which is the pre-existing behaviour in `src/jev.ts`.
 
@@ -198,13 +244,19 @@ provider emitting three-decimal values or larger shortfalls.
 
 ## 6. What is still unverified
 
-- No live call was made for this pull request. Every OBSERVED number above
-  comes from previously recorded traces of model `jev-1.13.0`.
-- There is no recorded `score` answer anywhere in the package, so the
-  expectation rule in section 3 is documentation-only and has never met real
-  provider output.
-- The 0.01 band rests on 337 answers from one model version. Model aliases
-  change, and a future version could emit different precision.
-- The confidence rule in section 4 is the most likely of these to be wrong.
+- One live call has been made, on 2026-09-17, and it is checked in as a
+  fixture. Every other OBSERVED number above comes from 30 previously recorded
+  calls to `jev-1.13.0`.
+- The score expectation rule has now met real provider output exactly once. One
+  answer, one model version.
+- The 0.01 band rests on 337 recorded answers plus that one live response, all
+  from one model version. Model aliases change, and a future version could emit
+  different precision.
+- `confidence` has no documented formula, and the one relationship this harness
+  asserted about it was wrong. Nothing beyond "a number in `[0, 1]`" should be
+  assumed about it.
 - Whether repeating an identical request reliably reproduces the short totals is
   not established; the package has one such occurrence.
+- The live call used one state and three questions. Other shapes, longer
+  rubrics, and `noul` answers carrying extra fields are untested against the
+  live provider.
