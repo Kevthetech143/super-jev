@@ -10,9 +10,10 @@
   },
   "scripts": {
     "demo": "node examples/demo.ts",
-    "test": "node --test test/*.test.ts test/enhance/*.test.ts",
+    "test": "node --test test/*.test.ts test/enhance/*.test.ts test/bench/*.test.ts",
     "replay": "node src/replay.ts",
     "organize": "node src/cli.ts organize",
-    "demo:enhance": "node examples/enhance-demo.ts"
+    "demo:enhance": "node examples/enhance-demo.ts",
+    "bench:live": "node bench/live-measure.ts"
   }
 }

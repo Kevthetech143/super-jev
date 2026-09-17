@@ -95,6 +95,7 @@ src/journal.ts     JSONL persistence
 src/replay.ts      Read-only trace inspection CLI
 src/organizer.ts   Configurable record classification and review routing
 src/cli.ts         JSON organizer CLI with explicit demo/live modes
+bench/            Live measurement runner, fixtures and report generator
 examples/         Two original domain demos and organizer input fixture
 test/             Core behavior and mocked API tests
 docs/             Architecture and launch draft
@@ -103,6 +104,8 @@ docs/             Architecture and launch draft
 ## Validation
 
 The suite has 50 tests covering the core loop, response validation, mocked API adapter and CLI response contract, organizer grouping and review policy, bounded input reads, record-field minimization, CLI privacy, output protection, and failed-output cleanup. One live response from `jev-1.13.0`, recorded on 2026-09-17, is checked in as a fixture and asserted by the suite; it confirmed the documented `score` rule and disproved one rule this harness had inferred. Every rule the validator enforces is sourced and labelled in [the provider contract](docs/provider-contract.md). Both original demos and the organizer demo pass offline. Historical v0.1 live smoke tests used three API evaluations and local demo tools; see docs/live-validation.json. One v0.2 live organizer evaluation on `jev-1.13.0` classified four synthetic records as expected and verified grouping and the `other` review queue. See [organizer validation](docs/organizer-validation.md) for results and limits. This is control-flow validation and a small smoke test, not a broad Jev capability benchmark. Native TypeScript execution does not provide static type checking.
+
+The enhancer path has not been measured against live traffic yet. `npm run bench:live -- --dry-run` prints the plan for the measurement that would settle it: six conditions over the 48 labeled synthetic records, 76 calls, with the accepted-error rate as the headline number. See [the measurement runner](docs/bench-live-measure.md) for how to run it and what it cannot show.
 
 ## API references
 
