@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_K, RELEVANCE_LEVELS, formatFetchPlan, planFetch, relevanceQuestion, runFetch, type FetchCatalogEntry
+  DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, beatsNone, formatFetchPlan, planFetch, prefilterCatalog, relevanceQuestion, runFetch, tokenize, type FetchCatalogEntry
 } from '../../src/enhance/fetch.ts';
 import { choiceAnswer } from '../../src/enhance/stub.ts';
 import type { Answer, Evaluation, Evaluator, Question, Request } from '../../src/types.ts';
@@ -41,7 +41,7 @@ function catalog(entries: [string, string][]): FetchCatalogEntry[] {
 
 // ---------------------------------------------------------------- ranking
 
-test('runFetch ranks a high-relevance record above a low one and a none one', async () => {
+test('runFetch ranks a high-relevance record above a low one, and a "none" record does not rank at all', async () => {
   const cat = catalog([
     ['pay-coned', 'Pay a Con Edison electric bill via the guest checkout flow.'],
     ['gate', 'Check a draft against its evidence before it goes out; a gate step.'],
@@ -50,15 +50,164 @@ test('runFetch ranks a high-relevance record above a low one and a none one', as
   const { transport } = tableTransport({ gate: 'high', 'pay-coned': 'low', tweet: 'none' });
   const run = await runFetch(cat, 'gate my reply before I send it', { transport, k: 5 });
 
-  assert.equal(run.ranked.length, 3);
+  assert.equal(run.ranked.length, 2);
   assert.equal(run.ranked[0].id, 'gate');
   assert.equal(run.ranked[0].score, 1);
   assert.equal(run.ranked[1].id, 'pay-coned');
   assert.ok(run.ranked[1].score > 0 && run.ranked[1].score < 1);
-  assert.equal(run.ranked[2].id, 'tweet');
-  assert.equal(run.ranked[2].score, 0);
+  assert.ok(!run.ranked.some(r => r.id === 'tweet'), 'a record that lost to "none of these" must not appear in the ranked list');
+  assert.equal(run.noMatch, false);
   assert.equal(run.manifest.complete, true);
   assert.equal(run.calls, 1);
+});
+
+// ---------------------------------------------------------------- none of these
+
+test('every relevance question carries the "none of these" option', () => {
+  const q = relevanceQuestion('anything');
+  assert.ok('none' in q.criteria);
+  assert.ok(q.criteria.none.toLowerCase().includes('none of these'));
+});
+
+test('when "none" wins every batch the run reports noMatch with an empty ranked list and the confidence of none', async () => {
+  const cat = catalog(Array.from({ length: 7 }, (_, i) => [`r${i}`, `record ${i} about something unrelated`] as [string, string]));
+  const { transport } = tableTransport({}); // the table answers 'none' for every id it does not know
+  const run = await runFetch(cat, 'a request nothing here serves', { transport, k: 5, budget: { maxRecordsPerCall: 3 } });
+  assert.deepEqual(run.ranked, []);
+  assert.equal(run.noMatch, true);
+  assert.equal(run.noMatchConfidence, 0.9); // tableTransport answers at 0.9
+  assert.equal(run.calls, 3); // 7 records at 3 per call: none won in every batch, not just the first
+  assert.equal(run.manifest.complete, true);
+});
+
+test('a record ranks only if it beats "none": a real level with more mass on none than on itself does not rank', async () => {
+  const cat = catalog([['shaky', 'x'], ['solid', 'y']]);
+  const transport: Evaluator = {
+    evaluate: async (request: Request): Promise<Evaluation> => {
+      const state = (request.state as { records: Record<string, { id: string }> }).records;
+      const answers: Record<string, Answer> = {};
+      for (const wireKey of Object.keys(request.questions)) {
+        const recordKey = Object.keys(state).find(k => wireKey.endsWith(`_${k}`));
+        const id = state[recordKey!].id;
+        answers[wireKey] = id === 'shaky'
+          // choice says "low" but the distribution puts more on none than on low
+          ? { type: 'choice', choice: 'low', confidence: 0.4, probabilities: { high: 0.05, medium: 0.1, low: 0.4, none: 0.45 } }
+          : { type: 'choice', choice: 'medium', confidence: 0.7, probabilities: { high: 0.1, medium: 0.7, low: 0.1, none: 0.1 } };
+      }
+      return { model: 'table-offline', answers };
+    }
+  };
+  const run = await runFetch(cat, 'anything', { transport, k: 5 });
+  assert.deepEqual(run.ranked.map(r => r.id), ['solid']);
+  assert.equal(run.noMatch, false);
+});
+
+test('beatsNone: none, an unknown level, and no answer at all never beat none; a real level does', () => {
+  assert.equal(beatsNone(undefined, undefined), false);
+  assert.equal(beatsNone('none', undefined), false);
+  assert.equal(beatsNone('bogus', undefined), false);
+  assert.equal(beatsNone('high', undefined), true);
+  assert.equal(beatsNone('low', { high: 0, medium: 0, low: 0.6, none: 0.4 }), true);
+  assert.equal(beatsNone('low', { high: 0, medium: 0, low: 0.4, none: 0.6 }), false);
+});
+
+test('a run where nothing was answered at all is not a noMatch, and the manifest says so', async () => {
+  const cat = catalog([['a', 'x'], ['b', 'y']]);
+  const { transport } = tableTransport({}, { omit: ['a', 'b'] });
+  const run = await runFetch(cat, 'anything', { transport, k: 5, maxRetries: 0 });
+  assert.deepEqual(run.ranked, []);
+  assert.equal(run.noMatch, false);
+  assert.deepEqual(run.manifest.byKind.unanswered.sort(), ['a', 'b']);
+});
+
+// ---------------------------------------------------------------- prefilter
+
+/** A catalog of `n` filler records that share no words with the request, plus the ones given. */
+function bigCatalog(n: number, extra: [string, string][]): FetchCatalogEntry[] {
+  const filler = Array.from({ length: n }, (_, i) => [`filler${i}`, `zorp quux blorf item number ${i} with nothing relevant`] as [string, string]);
+  return catalog([...filler, ...extra]);
+}
+
+/** Every record id that reached the transport across all calls. */
+function idsSeen(requests: Request[]): string[] {
+  return requests.flatMap(r => Object.values((r.state as { records: Record<string, { id: string }> }).records).map(e => e.id));
+}
+
+test('prefilterCatalog keeps a record whose words match the request, and drops the ones that share nothing', () => {
+  const cat = bigCatalog(60, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
+  const out = prefilterCatalog(cat, 'pay my electric bill', 5);
+  assert.equal(out.kept.length, 5);
+  assert.ok(out.kept.some(e => e.id === 'pay-coned'));
+  assert.equal(out.droppedIds.length, 56);
+  assert.ok(out.scores['pay-coned'] > 0);
+});
+
+test('prefilterCatalog with n=0 keeps everything, and a catalog at or under n is untouched', () => {
+  const cat = bigCatalog(10, [['a', 'the a record']]);
+  assert.equal(prefilterCatalog(cat, 'anything', 0).kept.length, 11);
+  assert.equal(prefilterCatalog(cat, 'anything', 11).kept.length, 11);
+  assert.equal(prefilterCatalog(cat, 'anything', 50).droppedIds.length, 0);
+});
+
+test('prefilterCatalog is deterministic and keeps catalog order among the kept', () => {
+  const cat = bigCatalog(30, [['late', 'electric bill'], ['early', 'electric bill']]);
+  const a = prefilterCatalog(cat, 'electric bill', 3);
+  const b = prefilterCatalog(cat, 'electric bill', 3);
+  assert.deepEqual(a.kept.map(e => e.id), b.kept.map(e => e.id));
+  assert.ok(a.kept.map(e => e.id).indexOf('late') < a.kept.map(e => e.id).indexOf('early'));
+});
+
+test('tokenize lowercases, splits on non-alphanumerics, drops one-character tokens and folds plain plurals', () => {
+  assert.deepEqual(tokenize('Pay the Con-Edison bills, a $20 fee!'), ['pay', 'the', 'con', 'edison', 'bill', '20', 'fee']);
+});
+
+test('runFetch with the prefilter sends only the kept records to the judge, and the matching record is among them', async () => {
+  const cat = bigCatalog(100, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
+  const { transport, requests } = tableTransport({ 'pay-coned': 'high' });
+  const run = await runFetch(cat, 'pay my electric bill', { transport, k: 3, prefilter: 10 });
+  const seen = idsSeen(requests);
+  assert.equal(seen.length, 10);
+  assert.ok(seen.includes('pay-coned'));
+  assert.equal(run.ranked[0].id, 'pay-coned');
+  assert.equal(run.plan.prefilter.kept, 10);
+  assert.equal(run.plan.prefilter.dropped, 91);
+  assert.equal(run.plan.catalogSize, 101);
+});
+
+test('calls is 1 when prefilter <= records per call, and more than 1 when the prefilter is off', async () => {
+  const cat = bigCatalog(100, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
+  const on = tableTransport({ 'pay-coned': 'high' });
+  const withPrefilter = await runFetch(cat, 'pay my electric bill', { transport: on.transport });
+  assert.equal(DEFAULT_PREFILTER, 40);
+  assert.equal(withPrefilter.plan.prefilter.n, DEFAULT_PREFILTER);
+  assert.equal(withPrefilter.calls, 1);
+  assert.equal(on.requests.length, 1);
+
+  const off = tableTransport({ 'pay-coned': 'high' });
+  const noPrefilter = await runFetch(cat, 'pay my electric bill', { transport: off.transport, prefilter: 0 });
+  assert.equal(noPrefilter.plan.prefilter.n, 0);
+  assert.equal(noPrefilter.plan.prefilter.dropped, 0);
+  assert.ok(noPrefilter.calls > 1);
+  assert.equal(idsSeen(off.requests).length, 101);
+});
+
+test('the plan reports the prefilter before any call, and the dry-run call count reflects it', () => {
+  const cat = bigCatalog(100, [['pay-coned', 'Pay the electric bill']]);
+  const plan = planFetch(cat, 'pay my electric bill');
+  assert.equal(plan.prefilter.kept, 40);
+  assert.equal(plan.plan.plan.calls.length, 1);
+  assert.ok(formatFetchPlan(plan).includes('61 dropped locally'));
+  const off = planFetch(cat, 'pay my electric bill', { prefilter: 0 });
+  assert.ok(off.plan.plan.calls.length > 1);
+  assert.ok(formatFetchPlan(off).includes('prefilter: disabled'));
+});
+
+test('planFetch and runFetch refuse a negative or fractional prefilter', async () => {
+  const cat = catalog([['a', 'x']]);
+  assert.throws(() => planFetch(cat, 'anything', { prefilter: -1 }));
+  assert.throws(() => planFetch(cat, 'anything', { prefilter: 1.5 }));
+  const { transport } = tableTransport({});
+  await assert.rejects(() => runFetch(cat, 'anything', { transport, prefilter: -1 }));
 });
 
 test('a tie in score breaks on confidence, then on id, deterministically', async () => {
@@ -160,14 +309,12 @@ test('relevanceQuestion embeds the request as data, immune to a quote in it', ()
 
 // ---------------------------------------------------------------- unanswered records score 0
 
-test('an unanswered record scores 0 and confidence 0, and still appears in the manifest', async () => {
+test('an unanswered record never ranks (silence is not a match), and still appears in the manifest', async () => {
   const cat = catalog([['answered', 'x'], ['silent', 'y']]);
   const { transport } = tableTransport({ answered: 'high' }, { omit: ['silent'] });
   const run = await runFetch(cat, 'anything', { transport, k: 5, maxRetries: 0 });
-  const silent = run.ranked.find(r => r.id === 'silent');
-  assert.ok(silent);
-  assert.equal(silent!.score, 0);
-  assert.equal(silent!.confidence, 0);
+  assert.deepEqual(run.ranked.map(r => r.id), ['answered']);
+  assert.equal(run.noMatch, false);
   assert.ok(run.manifest.byKind.unanswered.includes('silent'));
 });
 

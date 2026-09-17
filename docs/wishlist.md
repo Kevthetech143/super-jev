@@ -45,18 +45,24 @@ provider's preview terms restrict publishing performance numbers here.
    in code before the final question.
    Closes: a case scored mostly correct even with the right evidence in hand,
    because a missing required document was never noticed.
-   Harness: a required-source spec and bounded traversal are merged. Missing:
-   a live run, and the "insufficient evidence" outcome wired to block action
-   in the loop.
-   Status: NOT BUILT. `chain` names this item and exits without a result.
+   Harness: a required-source spec and bounded traversal are merged, and the
+   `chain` door runs them (`npm run chain` in this repo). Missing: a live
+   run, and the "insufficient evidence" outcome wired to block action in
+   the loop.
+   Status: BUILT, wrapped by the `chain` door in this skill.
 
 5. **ACTION PERMIT** — before the harness clicks, pays, sends or deletes, Jev
    answers "safe to do automatically?" and the code decides.
    Closes: an automated agent taking an irreversible step it should not have.
    Harness: a `permit` step taking the intended action plus context; anything
    under the threshold or needing approval goes to a human. Fits the existing
-   "permitted actions" stage of the loop.
-   Status: NOT BUILT. `permit` names this item and exits without a result.
+   "permitted actions" stage of the loop. A hard rule in code, not in the
+   prompt, refuses destructive patterns outright and sends routine
+   irreversible ones to a human before any model call; `format` counts as
+   destructive only with a storage target (disk, drive, volume, partition,
+   SD card, USB, mkfs, diskutil erase), so formatting code is not refused.
+   Status: BUILT, wrapped by the `permit` door in this skill (`npm run
+   permit` in this repo).
 
 6. **FETCH LAYER** — pull, not push. Each turn Jev scores the whole catalog
    (skills, tools, knowledge, notes) against the request in one parallel
@@ -69,21 +75,27 @@ provider's preview terms restrict publishing performance numbers here.
    actually ran, with descriptions written closer to how a real user asks;
    the fetch layer must beat the injected map on both accuracy and tokens per
    turn.
-   Status: LIVE, wrapped by the `fetch` door in this skill (`npm run fetch`
-   in this repo). Built on the same `planSweep` / `runSweep` engine `sweep`
-   uses: one relevance question, the request folded into its instructions,
-   scored `high`/`medium`/`low`/`none` per catalog record, top-k by score
-   returned. The gate above — a bench of real past requests beating the
-   injected map on accuracy and tokens per turn — is NOT yet met: only an
-   offline plumbing bench has run so far (`npm run bench:fetch` against
-   `bench/fetch-cases.json`, a synthetic fixture scored by a scripted stub
-   that is told the answer ahead of time). That proves the ranking, the k
-   cap and the coverage manifest work; it is not evidence of real accuracy
-   or a real token saving. A live measurement against `bench/live-measure.ts`
-   still needs to run before this item's own gate is closed.
+   Status: BUILT, EXPERIMENTAL — wrapped by the `fetch` door in this skill
+   (`npm run fetch` in this repo); the admission gate is not yet met. Built
+   on the same `planSweep` / `runSweep` engine `sweep` uses: a cheap local
+   prefilter (token overlap, `--prefilter`, default 40, 0 disables) trims
+   the catalog first so a typical run is one call; then one relevance
+   question per kept record, the request folded into its instructions,
+   scored `high`/`medium`/`low`/`none` where `none` is "none of these". A
+   record ranks only if it beats `none`; when `none` wins everywhere the
+   result is an empty ranked list with `noMatch` set, never a best guess.
+   The gate above — a bench of real past requests beating the injected map
+   on accuracy and tokens per turn — is NOT yet met: only an offline
+   plumbing bench has run so far (`npm run bench:fetch` against
+   `bench/fetch-cases.json`, a synthetic fixture with match and no-match
+   cases scored by a scripted stub that is told the answer ahead of time).
+   That proves the ranking, the k cap, the no-match path and the coverage
+   manifest work; it is not evidence of real accuracy or a real token
+   saving. A live measurement against `bench/live-measure.ts` still needs
+   to run before this item's own gate is closed.
 
 7. **STEERING CABIN** — one front door for every check: gate, verify, sweep,
-   fetch, and bench live; permit and chain stubbed so a missing tool names
+   fetch, permit, chain, and bench live; a door that is ever missing names
    its own wishlist item instead of failing silently; `ask "<one sentence>"`
    routes a plain request to the right door with no model call.
    Closes: checks that used to be scattered across several places, so a

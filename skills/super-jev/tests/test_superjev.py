@@ -456,6 +456,13 @@ def test_fetch_builds_the_npm_command_in_the_checkout(repo, door):
     assert call["cwd"] == str(repo)
 
 
+def test_fetch_passes_prefilter_through_including_zero(repo, door):
+    sj.main(["fetch", "which skill", "--catalog", "c.json", "--prefilter", "0", "--stub"])
+    assert door.argv[-3:] == ["--prefilter", "0", "--stub"]
+    sj.main(["fetch", "which skill", "--catalog", "c.json", "--stub"])
+    assert "--prefilter" not in door.argv
+
+
 def test_fetch_omits_flags_that_were_not_given(repo, door):
     sj.main(["fetch", "anything", "--catalog", "c.json"])
     argv = door.argv
@@ -1025,19 +1032,23 @@ def test_hook_missing_text_field_is_fail_open_exit_0(monkeypatch, capsys):
     assert code == 0
 
 
-def test_hook_gate_with_no_evidence_fails_open_instead_of_misreporting_a_block(
+def test_hook_gate_with_no_evidence_never_blocks_and_always_hands_the_door_a_file(
         monkeypatch, capsys, door):
     # The wrapped gate tool requires evidence files as positional args; run
     # it with none and it exits on its own usage error, which happens to be
     # the same number this shim maps to "block". A payload naming no
-    # evidence must fail open rather than misreport that as a REJECT.
+    # evidence now still runs the gate (the unchecked-claims path), but it
+    # MUST hand the door a real evidence file, and MUST never block.
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim with nothing to check it against"}))
     code = sj.main(["hook", "gate"])
     out, err = capsys.readouterr()
     assert code == 0
-    assert out == ""
+    assert out == ""          # the fake door printed no claim row -> silent
     assert err == ""
-    assert not door.calls  # the wrapped tool was never even invoked
+    assert door.calls
+    argv = door.argv
+    ev = argv[argv.index("--kit") - 1]
+    assert ev.endswith(".md")  # an evidence file was always passed, never nothing
 
 
 def test_hook_reads_transcript_path_fallback(tmp_path, monkeypatch):
@@ -1262,20 +1273,147 @@ def test_stop_hook_derives_evidence_from_transcript_tool_results(tmp_path, monke
     assert "second tool result — the real evidence" in captured["evidence_text"]
 
 
-def test_stop_hook_fails_open_with_skipped_ledger_when_nothing_derivable(tmp_path, monkeypatch,
-                                                                          door):
+def test_stop_hook_with_nothing_derivable_runs_unchecked_and_ledgers_unchecked_true(
+        tmp_path, monkeypatch, door):
     # last_assistant_message present, but no evidence field and no
-    # transcript_path at all — nothing to derive evidence from.
+    # transcript_path at all — nothing to derive evidence from. The gate
+    # still runs (unchecked path), the ledger line says so, exit 0.
     payload = {"hook_event_name": "Stop", "last_assistant_message": "a claim with no evidence"}
     _hook_stdin(monkeypatch, json.dumps(payload))
     code = sj.main(["hook", "gate"])
     assert code == 0
-    assert not door.calls
+    assert door.calls
     lines = sj._ledger_lines()
     rec = json.loads(lines[-1])
-    assert rec["skipped"] is True
+    assert rec["unchecked"] is True
+    assert rec["skipped"] is False
     assert rec["exit_code"] == 0
-    assert "no evidence" in rec["note"] or "nothing to check" in rec["note"]
+    assert "unchecked" in rec["note"]
+
+
+# ------------------------------------------ unchecked-claims advisory (fake door)
+
+UNCHECKED_LINE = ("super-jev: reply makes claims with no tool evidence this turn — "
+                  "mark them unverified or gather evidence")
+
+
+def _no_evidence_transcript(tmp_path, prompt="please summarize the deploy status for me"):
+    """A Stop transcript with a user prompt and an assistant reply, but no
+    tool_use / tool_result anywhere — the turn gathered no evidence."""
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        json.dumps({"message": {"role": "user", "content": prompt}}) + "\n" +
+        json.dumps({"message": {"role": "assistant",
+                                "content": [{"type": "text",
+                                             "text": "The deploy finished and all tests passed."}]}})
+        + "\n", encoding="utf-8")
+    return t
+
+
+def test_unchecked_path_prints_one_advisory_when_the_door_reports_a_checkable_claim(
+        tmp_path, monkeypatch, capsys):
+    # fake door: a READ (3) with one weak claim row — a checkable claim, but
+    # not a strong flag. Must be ONE stdout line, exit 0, never a block.
+    fake = FakeDoor(3, stdout="\n  c1   SUPPORTED   0.55  The deploy finished and all tests passed\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _no_evidence_transcript(tmp_path)
+    _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                        "last_assistant_message": "The deploy finished and all tests passed."}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out.strip().splitlines() == [UNCHECKED_LINE]
+    assert err == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["unchecked"] is True and rec["exit_code"] == 0
+
+
+def test_unchecked_path_hands_the_door_the_users_last_prompt_as_evidence(tmp_path, monkeypatch):
+    captured = {}
+
+    def spy(cmd, cwd=None, env=None, **kw):
+        argv = [str(c) for c in cmd]
+        ev = argv[argv.index("--kit") - 1]
+        captured["evidence_text"] = open(ev, encoding="utf-8").read()
+        return subprocess.CompletedProcess(cmd, 3, stdout="  c1   NOT_SUPPORTED   0.55  x y z w\n", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", spy)
+    t = _no_evidence_transcript(tmp_path, prompt="what did the deploy do, in one line")
+    _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                        "last_assistant_message": "The deploy finished and all tests passed."}))
+    assert sj.main(["hook", "gate"]) == 0
+    assert captured["evidence_text"] == "what did the deploy do, in one line"
+
+
+def test_unchecked_path_stays_silent_when_the_door_reports_no_checkable_claim(
+        tmp_path, monkeypatch, capsys):
+    fake = FakeDoor(1, stdout="", stderr="jev: reply kit: no checkable claims — pass --claim ...")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _no_evidence_transcript(tmp_path)
+    _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                        "last_assistant_message": "Done."}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == "" and err == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["unchecked"] is True
+    assert "no checkable claim" in rec["note"]
+
+
+def test_unchecked_path_never_blocks_even_on_a_strong_flag_or_a_reject_code(
+        tmp_path, monkeypatch, capsys):
+    # The exact lie fixture (NOT_SUPPORTED 0.18, OVERCLAIMS 0.98) would block
+    # on the evidence path. With no tool evidence there is nothing to block
+    # against — only advise. Same for a door exit 2.
+    lie = (SKILL / "tests" / "fixtures" / "lie_stop_stdout.txt").read_text(encoding="utf-8")
+    for code_in in (3, 2):
+        monkeypatch.setattr(sj.subprocess, "run", FakeDoor(code_in, stdout=lie))
+        t = _no_evidence_transcript(tmp_path)
+        _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                            "last_assistant_message": "all 30 permit cases matched"}))
+        code = sj.main(["hook", "gate"])
+        out, err = capsys.readouterr()
+        assert code == 0
+        assert out.strip() == UNCHECKED_LINE
+        assert err == ""
+
+
+def test_unchecked_path_is_not_taken_when_tool_evidence_exists(tmp_path, monkeypatch, capsys):
+    # A transcript WITH a tool_result takes the normal evidence path: same
+    # weak-claim door output, but no unchecked advisory and no unchecked flag.
+    fake = FakeDoor(3, stdout="  c1   SUPPORTED   0.55  x y z w\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = tmp_path / "t.jsonl"
+    t.write_text(
+        json.dumps({"message": {"role": "user", "content": [
+            {"type": "tool_result", "content": "real tool output here"}]}}) + "\n" +
+        json.dumps({"message": {"role": "assistant", "content": [{"type": "text", "text": "reply"}]}})
+        + "\n", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                        "last_assistant_message": "a claim about the tool output"}))
+    assert sj.main(["hook", "gate"]) == 0
+    out, _ = capsys.readouterr()
+    assert UNCHECKED_LINE not in out
+    assert "advisory" in out
+    assert "unchecked" not in json.loads(sj._ledger_lines()[-1])
+
+
+def test_unchecked_path_real_subprocess_via_fake_door_prints_exactly_one_line(tmp_path):
+    # Real child process, real fake_door.py: proves the advisory is one clean
+    # stdout line and the door's own table never leaks.
+    lie = SKILL / "tests" / "fixtures" / "lie_stop_stdout.txt"
+    t = _no_evidence_transcript(tmp_path)
+    payload = {"hook_event_name": "Stop", "transcript_path": str(t),
+               "last_assistant_message": "all 30 permit cases matched, merged PRs 8, 9 and 10"}
+    proc = _run_real_hook(f"{sys.executable} {FAKE_DOOR}", payload,
+                          extra_env={"FAKE_DOOR_STDOUT_FILE": str(lie), "FAKE_DOOR_EXIT": "3"},
+                          ledger_path=tmp_path / "ledger.jsonl")
+    assert proc.returncode == 0
+    assert proc.stdout.strip().splitlines() == [UNCHECKED_LINE]
+    assert "NOT_SUPPORTED" not in proc.stdout
+    rec = json.loads((tmp_path / "ledger.jsonl").read_text().splitlines()[-1])
+    assert rec["unchecked"] is True
 
 
 def test_stop_hook_evidence_derivation_with_a_lying_last_message_still_blocks(tmp_path,

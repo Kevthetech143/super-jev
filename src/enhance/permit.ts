@@ -175,7 +175,11 @@ const IRREVERSIBLE_RULES: { label: string; pattern: RegExp; class: HardRuleClass
   { label: 'post/publish/tweet/release/deploy', pattern: /\b(post|publish|tweet|release|deploy)\b/, class: 'irreversible_routine' },
   { label: 'restart/stop/kill service', pattern: /\b(restart|stop|kill)\s+(the\s+)?(app|bot|server|service|launchd)\b/, class: 'irreversible_routine' },
   { label: 'shutdown', pattern: /\bshutdown\b/, class: 'irreversible_routine' },
-  { label: 'format', pattern: /\bformat\b/, class: 'destructive' },
+  // "format" alone over-matched: "format the code", "run the formatter",
+  // "preview the changes a formatter would make" were refused as if they
+  // were a disk wipe. Destructive only with a storage target, or as the
+  // mkfs / diskutil erase commands that actually do the wiping.
+  { label: 'format', pattern: /\bformat(s|ted|ting)?\s+(the\s+|a\s+|an\s+|this\s+|that\s+|my\s+|our\s+|every\s+|each\s+)?(disk|drive|volume|partition|sd\s*card|usb)\b|\bmkfs\b|\bdiskutil\s+erase/, class: 'destructive' },
   { label: 'overwrite', pattern: /\boverwrite\b/, class: 'destructive' },
   { label: 'chmod/chown -R', pattern: /\b(chmod|chown)\b[\s\S]*-r\b/, class: 'irreversible_routine' },
   { label: 'curl | sh', pattern: /\bcurl\b[\s\S]*\|\s*sh\b/, class: 'destructive' }

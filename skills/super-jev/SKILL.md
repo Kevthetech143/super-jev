@@ -1,6 +1,6 @@
 ---
 name: super-jev
-description: "The ONE front door for every check we run — gate a draft against its evidence, verify a worker's report, sweep a pile bigger than one call, fetch the top few catalog entries for a request, and run the live bench. Thin wrappers over a claim-gate tool, a report-verify tool, and the super-jev harness, never a second copy of them. Two doors are named but not built (permit, chain); each one names its own wishlist item and exits 6, so a missing tool tells you what is missing. `ask \"<one plain sentence>\"` routes a request to the right door with no model call. Triggers: /super-jev, check this before I send it, is this report true, run every question over this pile, which skill handles this, super jev"
+description: "The ONE front door for every check we run — gate a draft against its evidence, verify a worker's report, sweep a pile bigger than one call, fetch the top few catalog entries for a request, and run the live bench. Thin wrappers over a claim-gate tool, a report-verify tool, and the super-jev harness, never a second copy of them. A door whose tool is missing names its own wishlist item and exits 6, so a missing tool tells you what is missing. `ask \"<one plain sentence>\"` routes a request to the right door with no model call. Triggers: /super-jev, check this before I send it, is this report true, run every question over this pile, which skill handles this, super jev"
 type: procedure
 ---
 
@@ -47,7 +47,7 @@ three doors need no env at all when the skill is used from inside a clone.
 | `gate <evidence...> --draft <file>` or `--claim "..."` | does my draft actually follow from the files I read | **LIVE**, needs a claim-gate tool | `SUPERJEV_GATE_CMD` |
 | `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | is this worker's "done" true | **LIVE**, needs a report-verify tool | `SUPERJEV_VERIFY_CMD` |
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | every question of every record, with proof nothing was skipped | **LIVE** | `npm run sweep` in the harness |
-| `fetch "<request>" --catalog <catalog.json>` | which few entries in the catalog actually serve this request | **LIVE** | `npm run fetch` in the harness |
+| `fetch "<request>" --catalog <catalog.json> [--prefilter N]` | which few entries in the catalog actually serve this request; `noMatch: true` when none does | **LIVE** (experimental) | `npm run fetch` in the harness |
 | `bench [--dry-run] [--stub]` | how good is the harness, measured | **LIVE** | `npm run bench:live` |
 | `permit <snapshot> --action "..."` | is it safe to click / pay / send / delete automatically | **NOT BUILT** — wishlist item 5 | — |
 | `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **NOT BUILT** — wishlist item 4 | — |
@@ -193,4 +193,4 @@ Also runnable as `npm run test:skill` from the repo root. Fully offline: every d
 
 - The claim-gate tool behind `SUPERJEV_GATE_CMD` — the check itself, the question batteries, and the owner of the 0.80 line. Not shipped in this repo; see **Install** above.
 - The report-verify tool behind `SUPERJEV_VERIFY_CMD` — the evidence collectors and the CLEAN/READ/REJECT rule for a report. Not shipped in this repo; see **Install** above.
-- [`docs/wishlist.md`](../../docs/wishlist.md) — the seven items. Items 4 and 5 are the two doors above (`chain`, `permit`) that print instead of running. Item 6 (`fetch`) is now built.
+- [`docs/wishlist.md`](../../docs/wishlist.md) — the seven items. Items 4, 5 and 6 (`chain`, `permit`, `fetch`) are built; `fetch` is experimental until its own admission gate is met.
