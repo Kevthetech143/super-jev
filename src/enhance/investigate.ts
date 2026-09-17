@@ -138,7 +138,12 @@ export async function runInvestigation(config: InvestigateConfig, evaluator: Eva
       let evaluation: Evaluation | undefined;
       try {
         evaluation = await evaluator.evaluate(request, config.timeoutMs ? AbortSignal.timeout(config.timeoutMs) : new AbortController().signal);
-        if (validate) validateEvaluation(request, evaluation);
+        // Use the copy the validator vouched for when it returns one; see the
+        // same call in classify.ts for why the cast is here.
+        if (validate) {
+          const validated = validateEvaluation(request, evaluation) as unknown as Evaluation | undefined;
+          if (validated) evaluation = validated;
+        }
       } catch (error) {
         errors.push(`call ${call.index} attempt ${attempt}: ${(error as Error).message}`);
         meter.call(evaluation, performance.now() - started, estimate);
