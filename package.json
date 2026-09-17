@@ -16,8 +16,10 @@
     "sweep": "node src/sweep-cli.ts",
     "permit": "node src/permit-cli.ts",
     "chain": "node src/chain-cli.ts",
+    "fetch": "node src/fetch-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
     "bench:live": "node bench/live-measure.ts",
+    "bench:fetch": "node bench/fetch-bench.ts",
     "test:skill": "python3 -m pytest skills/super-jev/tests -q"
   }
 }
