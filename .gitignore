@@ -6,3 +6,6 @@ runs/
 *.zip
 
 bench/out/
+__pycache__/
+.pytest_cache/
+*.pyc

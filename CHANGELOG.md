@@ -2,7 +2,11 @@
 
 ## Unreleased
 
-Fixes only. No feature work, no version bump.
+No version bump.
+
+- Add an installable Claude Code agent skill at `skills/super-jev/` (`superjev.py`, `SKILL.md`, tests): one front door — `gate`, `verify`, `sweep`, `bench`, `ask`, `status`, plus `permit`/`chain`/`fetch` stubbed to name their own wishlist item instead of failing silently. `gate` and `verify` wrap external claim-gate and report-verify tools via `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` (no default tool ships in this repo); `sweep` and `bench` default `SUPERJEV_REPO` to this checkout's own root, so they need no env at all. Add `docs/wishlist.md` (the roadmap behind the stubbed doors, with every measured figure and internal path stripped) and a "Agent front door" section in the README and in `docs/agents.md`. Tests run with `python3 -m pytest skills/super-jev/tests -q` or `npm run test:skill`; CI runs them on `ubuntu-latest` via `actions/setup-python`.
+
+Fixes:
 
 - Bound journaling by the run deadline. A journal whose append never resolved held a run open past its `timeoutMs`; every append, including the opening and closing records, now goes through the same abort signal. A failed or timed-out intent record stops the step before the effect and reports "action not attempted"; if the effect ran and only its completion record failed, the run reports "action outcome unknown". The run result gains a `journaled` flag.
 - Reject special files in the organizer CLI without blocking. Input is opened with `O_RDONLY | O_NONBLOCK` and its type is taken from `fstat` on the descriptor already held, so a named pipe with no writer is refused immediately instead of parking the process inside `open()`. This also closes the check-then-reopen window. Byte limits, no-echo error messages and descriptor cleanup are unchanged.

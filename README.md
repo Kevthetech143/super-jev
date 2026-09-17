@@ -136,3 +136,27 @@ For machine-readable stdout, invoke `node src/cli.ts organize examples/organizer
 Define your own categories and records using [the sample input](examples/organizer.json). Agents with terminal access can follow [the agent usage contract](docs/agents.md). The organizer uses the existing harness loop, including model-response validation, permission checks, and completion verification. It is not an MCP server or an automatically installed skill.
 
 The original live smoke tests cover service recovery and document review. Organizer tests include controlled offline fixtures and one live synthetic-record smoke test; see the release notes for validation scope.
+
+## Agent front door (Claude Code skill)
+
+`skills/super-jev/` is a small [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: a single Python file, `superjev.py`, that gives an agent one command for every check in this repo instead of four things to remember. It is a thin wrapper — every judgement still belongs to the tool it wraps.
+
+Install it by symlink or copy:
+
+```bash
+ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
+```
+
+| subcommand | what it does |
+| --- | --- |
+| `gate <evidence...> --draft <file>` / `--claim "..."` | checks a draft or claim against the evidence files behind it, via `SUPERJEV_GATE_CMD` |
+| `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | checks a "done" report against machine-collected evidence, via `SUPERJEV_VERIFY_CMD` |
+| `sweep <records.jsonl> --questions <q.json> --out <dir>` | runs `npm run sweep` in this repo, with proof nothing was skipped |
+| `bench [--dry-run] [--stub]` | runs `npm run bench:live` in this repo, or prints the dry-run plan with no `TYPESAFE_API_KEY` |
+| `permit` / `chain` / `fetch` | not built yet; each names its own item in [`docs/wishlist.md`](docs/wishlist.md) and exits 6 instead of failing silently |
+| `ask "<one plain sentence>"` | routes a plain request to the right subcommand above with a keyword table, no model call |
+| `status` | reports which subcommands are live in this checkout right now |
+
+`gate` and `verify` wrap a claim-gate tool and a report-verify tool that are not part of this repo — point `SUPERJEV_GATE_CMD` and `SUPERJEV_VERIFY_CMD` at your own. `sweep` and `bench` need no env var at all: `SUPERJEV_REPO` defaults to this checkout's own root. Full docs, the exit-code table, and the routing keywords are in [`skills/super-jev/SKILL.md`](skills/super-jev/SKILL.md).
+
+Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill`. Fully offline — every wrapped door is a fake in the test, so no test reaches TypeSafe, npm or git.

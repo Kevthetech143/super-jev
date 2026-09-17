@@ -14,3 +14,8 @@ jobs:
       - run: npm run demo
       - run: npm run demo -- --documents
       - run: npm run organize -- examples/organizer.json --demo
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install pytest
+      - run: npm run test:skill
