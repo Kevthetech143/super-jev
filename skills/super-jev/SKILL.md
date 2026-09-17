@@ -53,10 +53,74 @@ need no env at all when the skill is used from inside a clone.
 | `fetch "<request>"` | which skill or tool should be loaded for this | **NOT BUILT** — wishlist item 6 | — |
 | `ask "<one plain sentence>"` | picks the door for you | **LIVE** | a keyword table, no model call |
 | `status` | which doors are live here, right now | **LIVE** | — |
+| `hook <gate\|verify>` | a Claude Code hook shim: reads the hook payload on stdin, maps the verdict to the hook's own exit convention | **LIVE** | wraps `gate`/`verify` above |
+| `ledger [-n N]` | the last N calls this wrapper made, and a per-door count | **LIVE** | reads `ledger/calls.jsonl` under this skill |
 
 **A door that is not built exits 6 and prints its own wishlist line.** That is the point: a missing tool names itself, in the wishlist's own words, instead of a vague failure. Never hand-write "not supported" — run it and read what it says.
 
-**`status` is the only honest answer to "does this work here?"** It reads the doors off disk, so a checkout without the sweep script shows `MISSING SCRIPT` rather than a promise.
+**`status` is the only honest answer to "does this work here?"** It reads the doors off disk, so a checkout without the sweep script shows `MISSING SCRIPT` rather than a promise. It also checks that `npm` itself is actually runnable — a checkout that carries the `sweep`/`bench:live` script but has no reachable `npm` shows `script present, npm not runnable`, never a false `LIVE`.
+
+## Machine-readable output: `--json`
+
+Every door above except `ask` and `hook` (which have contracts of their own) takes `--json`. It prints **exactly one JSON object on stdout and nothing else** — no echoed command, no npm banner, nothing from the wrapped tool leaks onto stdout unparsed. Anything the wrapped tool printed is captured and folded into `details`.
+
+```bash
+python3 $S gate evidence.md --draft draft.md --json
+python3 $S status --json
+```
+
+```json
+{
+  "door": "gate",
+  "verdict": "CLEAN",
+  "exit_code": 0,
+  "summary": "CLEAN — every claim is carried by the evidence at or above 0.80. Send it.",
+  "details": {"stdout": "...", "stderr": ""},
+  "would_run": ["python3", "/path/to/jev.py", "evidence.md", "--kit", "reply", "--draft", "draft.md"]
+}
+```
+
+`verdict` is a short keyword (`CLEAN` / `READ` / `REJECT` / `RAN` / `ERROR` / `REFUSED` / `NOT_BUILT` / `OK`, depending on the door); `summary` is the same human sentence the non-JSON mode prints; `would_run` is the argv this wrapper built, present on every response including refusals.
+
+## Hook shim: `hook <gate|verify>`
+
+`hook` is a *different* contract from the rest of this file — built for Claude Code's own hook exit convention, not this wrapper's usual exit codes:
+
+| this shim returns | what it means to Claude Code |
+|---|---|
+| exit 0, nothing on stdout | **allow** — CLEAN, or the wrapped tool's verdict maps to "not a problem" |
+| exit 0, one line on stdout | **advisory** — READ (or any other non-blocking verdict); never blocks |
+| exit 2, one line on stderr | **block** — REJECT: the evidence disproves a claim, or a quote is fabricated |
+
+It never exits 3, 4 or 5 — those are `gate`'s and `verify`'s own exit codes and mean nothing to a hook runner; they are folded into advisory (0) or block (2) above. It reads the Claude Code hook payload as JSON on stdin:
+
+- **gate** looks for `"draft"` / `"text"` / `"prompt"` (a string), else falls back to the transcript (below). `"evidence"` — a list of file paths — is **required** for gate to actually run; without it there is nothing to check the draft against, so it fails open (exit 0, silent) rather than running the wrapped tool with zero evidence, which would exit on its own usage error and get misread as a block.
+- **verify** looks for `"report"` / `"text"` / `"message"`, else the same transcript fallback, plus `"worktree"` if present.
+- `"transcript_path"` (real Claude Code Stop/PostToolUse payloads carry this, not a direct text field) is read as a Claude Code transcript JSONL and the most recent assistant message becomes the text.
+
+**Fail-open, always.** Empty stdin, non-JSON stdin, a payload with no usable text field, a gate payload with no evidence, or any unexpected exception during the run — every one of these exits 0 with nothing printed rather than blocking or crashing. Every one of them is still written to the call ledger, so a fail-open run is invisible to the session but not to an audit. `--map` accepts a mapping-profile name for forward compatibility; only `"default"` (the table above) exists today.
+
+`hooks/` in this skill ships two example scripts, not installed into `~/.claude/settings.json` by this skill:
+
+- **`hooks/stop-gate.sh`** — wires a Stop hook to `hook gate`, so nothing has to remember to gate a draft before the turn ends.
+- **`hooks/posttooluse-verify.sh`** — wires a PostToolUse hook (matcher `Agent`) to `hook verify`, so a sub-agent's final report gets checked as soon as it lands.
+
+Both are plain, executable bash; open either for the exact `settings.json` snippet that wires it in. Wiring them in is a deliberate, separate step — this skill ships the scripts, it does not touch your settings.
+
+## The call ledger
+
+Every invocation of `gate`, `verify`, `sweep` or `bench` — from the CLI, from `ask`, or from `hook` — appends one JSON line to `ledger/calls.jsonl` under this skill's own directory: `{ts, door, argv, exit_code, ms, json_mode, hook_mode}`. `hook`'s own fail-open decisions are logged too, with `door: "hook"` and a `note`.
+
+```bash
+python3 $S ledger          # last 20 calls, plus a per-door count
+python3 $S ledger -n 100   # last 100
+```
+
+`status` shows the ledger path and today's call count. The ledger is local, plaintext, never contains a secret (the key itself is never in argv or output), and is gitignored — `ledger/` fills up with real use and is not meant to be committed.
+
+## Bare-environment safety
+
+`sweep` and `bench` need `npm`. A hook's shell is usually non-interactive and does not carry the PATH edit an interactive shell profile adds — on a machine where Node is nvm-managed, that means `npm` is often simply absent. Before shelling out, both doors resolve `npm` themselves: `shutil.which("npm")` first, then the newest version under `~/.nvm/versions/node/*/bin`, prepending its `bin/` to `PATH` if found. If neither works, the door refuses with one line and exits 1 — no Python traceback. Every path in this file is resolved from the skill file's own location or an explicit flag, never from the process's current directory; if `HOME` is not set at all in the environment, the wrapper refuses with one line and exits 1 rather than guessing paths.
 
 ## The one simple ask
 

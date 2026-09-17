@@ -8,6 +8,7 @@ propagates. Nothing here reaches TypeSafe, npm or git.
     python3 -m pytest ~/.claude/skills/super-jev/tests/test_superjev.py -q
 """
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -33,13 +34,16 @@ FAKE_DOOR = Path(__file__).resolve().parent / "fake_door.py"
 class FakeDoor:
     """Records every call and returns a fixed exit code. Never runs anything."""
 
-    def __init__(self, code=0):
+    def __init__(self, code=0, stdout="", stderr=""):
         self.code = code
+        self.stdout = stdout
+        self.stderr = stderr
         self.calls = []
 
     def __call__(self, cmd, cwd=None, env=None, **kw):
         self.calls.append({"cmd": [str(c) for c in cmd], "cwd": cwd, "env": env or {}})
-        return subprocess.CompletedProcess(cmd, self.code, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, self.code, stdout=self.stdout,
+                                           stderr=self.stderr)
 
     @property
     def argv(self):
@@ -69,6 +73,14 @@ def repo(tmp_path, monkeypatch):
 def no_key(monkeypatch):
     """Every test starts with no API key, so nothing can go live by accident."""
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def ledger_tmp(tmp_path, monkeypatch):
+    """Every test writes its call ledger to a scratch path, never into this
+    checkout's real skills/super-jev/ledger/ — so a test run leaves no trace
+    and tests can inspect sj.LEDGER_PATH freely."""
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger" / "calls.jsonl")
 
 
 @pytest.fixture(autouse=True)
@@ -479,6 +491,330 @@ def test_no_secret_file_is_read_by_this_wrapper():
     source = (SKILL / "superjev.py").read_text(encoding="utf-8")
     for banned in ("logins.md", "-secret.md", '".env"', "'.env'", "profile/", "documents/"):
         assert banned not in source
+
+
+# ------------------------------------------------------------ --json shape
+
+JSON_KEYS = {"door", "verdict", "exit_code", "summary", "details", "would_run"}
+
+
+def test_gate_json_prints_exactly_one_object_with_the_required_shape(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout="fake gate ok"))
+    f = tmp_path / "a.md"
+    f.write_text("x", encoding="utf-8")
+    code = sj.main(["gate", str(f), "--draft", str(f), "--json"])
+    out = capsys.readouterr().out
+    assert code == 0
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 1, f"expected exactly one line of stdout, got: {out!r}"
+    obj = json.loads(lines[0])
+    assert set(obj) == JSON_KEYS
+    assert obj["door"] == "gate"
+    assert obj["verdict"] == "CLEAN"
+    assert obj["exit_code"] == 0
+    assert "fake gate ok" in obj["details"]["stdout"]
+    assert "$ " not in out  # no echoed command
+
+
+@pytest.mark.parametrize("code,word", [(0, "CLEAN"), (3, "READ"), (2, "REJECT")])
+def test_gate_json_verdict_word_per_exit_code(tmp_path, monkeypatch, capsys, code, word):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(code))
+    f = tmp_path / "a.md"
+    f.write_text("x", encoding="utf-8")
+    got = sj.main(["gate", str(f), "--draft", str(f), "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert got == code
+    assert obj["verdict"] == word
+
+
+def test_verify_json_shape(tmp_path, door, capsys):
+    report = tmp_path / "r.md"
+    report.write_text("done", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert set(obj) == JSON_KEYS
+    assert obj["door"] == "verify"
+    assert obj["verdict"] == "CLEAN"
+
+
+def test_gate_json_refusal_is_still_one_json_object(tmp_path, capsys):
+    f = tmp_path / "a.md"
+    f.write_text("x", encoding="utf-8")
+    code = sj.main(["gate", str(f), "--json"])  # no draft, no claim
+    out, err = capsys.readouterr()
+    assert code == sj.REFUSED
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert obj["verdict"] == "REFUSED"
+    assert obj["exit_code"] == sj.REFUSED
+
+
+def test_sweep_json_shape_and_no_npm_banner_leaks_to_stdout(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout="npm banner noise\nsweep done"))
+    code = sj.main(["sweep", "r.jsonl", "--questions", "q.json", "--out", "o",
+                    "--dry-run", "--json"])
+    out = capsys.readouterr().out
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 1
+    obj = json.loads(lines[0])
+    assert code == 0
+    assert obj["door"] == "sweep"
+    assert obj["verdict"] == "RAN"
+    assert "npm banner noise" in obj["details"]["stdout"]
+    assert "$ " not in out
+
+
+def test_bench_json_shape(repo, monkeypatch, capsys):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-test")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout="bench report here"))
+    code = sj.main(["bench", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert obj["door"] == "bench"
+    assert obj["verdict"] == "RAN"
+
+
+def test_status_json_shape(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
+    code = sj.main(["status", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert obj["door"] == "status"
+    assert "doors" in obj["details"]
+    assert obj["details"]["harness_commit"] == "abc1234"
+    assert "ledger_calls_today" in obj["details"]
+
+
+# ------------------------------------------------------------ hook shim
+
+def _hook_stdin(monkeypatch, payload_text):
+    monkeypatch.setattr(sj.sys, "stdin", io.StringIO(payload_text))
+
+
+def test_hook_gate_clean_is_silent_allow(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "the sky is blue", "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == ""
+    assert err == ""
+
+
+def test_hook_gate_read_is_a_nonblocking_advisory(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "some claim", "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "advisory" in out
+    assert err == ""
+
+
+def test_hook_gate_reject_blocks_with_reason_on_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(2))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a fabricated quote",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert out == ""
+    assert "blocked" in err
+
+
+@pytest.mark.parametrize("code,expect", [(0, 0), (3, 0), (4, 2), (2, 0), (5, 0)])
+def test_hook_verify_maps_every_exit_code_and_never_returns_3_4_5(tmp_path, monkeypatch,
+                                                                   capsys, code, expect):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(code))
+    _hook_stdin(monkeypatch, json.dumps({"report": "the worker is done"}))
+    got = sj.main(["hook", "verify"])
+    assert got == expect
+    assert got not in (3, 4, 5)
+
+
+def test_hook_empty_stdin_is_fail_open_exit_0(monkeypatch, capsys):
+    _hook_stdin(monkeypatch, "")
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == ""
+    assert err == ""
+
+
+def test_hook_non_json_stdin_is_fail_open_exit_0(monkeypatch, capsys):
+    _hook_stdin(monkeypatch, "not json at all {{{")
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == ""
+    assert err == ""
+
+
+def test_hook_missing_text_field_is_fail_open_exit_0(monkeypatch, capsys):
+    _hook_stdin(monkeypatch, json.dumps({"unrelated": "field"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+
+
+def test_hook_gate_with_no_evidence_fails_open_instead_of_misreporting_a_block(
+        monkeypatch, capsys, door):
+    # The wrapped gate tool requires evidence files as positional args; run
+    # it with none and it exits on its own usage error, which happens to be
+    # the same number this shim maps to "block". A payload naming no
+    # evidence must fail open rather than misreport that as a REJECT.
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim with nothing to check it against"}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == ""
+    assert err == ""
+    assert not door.calls  # the wrapped tool was never even invoked
+
+
+def test_hook_reads_transcript_path_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(
+        json.dumps({"message": {"role": "user", "content": "hi"}}) + "\n" +
+        json.dumps({"message": {"role": "assistant",
+                                "content": [{"type": "text", "text": "the final draft text"}]}})
+        + "\n", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"transcript_path": str(transcript)}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+
+
+def test_hook_never_raises_on_a_broken_payload(monkeypatch, capsys):
+    # A payload whose "draft" is not a string at all must not crash the shim.
+    _hook_stdin(monkeypatch, json.dumps({"draft": 12345}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+
+
+# ------------------------------------------------------------ npm resolution
+
+def test_npm_missing_refuses_with_exit_1_no_traceback(monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    code = sj.main(["sweep", "r.jsonl", "--questions", "q.json", "--out", "o", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "npm not found" in err
+    assert "Traceback" not in err
+
+
+def test_npm_missing_refuses_bench_too(monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    code = sj.main(["bench", "--dry-run"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "npm not found" in err
+
+
+def test_npm_missing_json_refusal_is_one_object(monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    code = sj.main(["sweep", "r.jsonl", "--questions", "q.json", "--out", "o",
+                    "--dry-run", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 1
+    assert obj["door"] == "sweep"
+    assert obj["exit_code"] == 1
+
+
+def test_resolve_npm_finds_a_newest_nvm_node_when_which_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    nvm = tmp_path / ".nvm" / "versions" / "node"
+    for v in ("v18.20.0", "v22.9.0", "v20.11.0"):
+        (nvm / v / "bin").mkdir(parents=True)
+        (nvm / v / "bin" / "npm").write_text("#!/bin/sh\n", encoding="utf-8")
+    found = sj.resolve_npm()
+    assert found == str(nvm / "v22.9.0" / "bin" / "npm")
+
+
+def test_resolve_npm_none_when_no_nvm_and_no_which(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert sj.resolve_npm() is None
+
+
+# ------------------------------------------------------------ HOME missing
+
+def test_home_missing_refuses_exit_1(monkeypatch, capsys):
+    monkeypatch.delenv("HOME", raising=False)
+    code = sj.main(["status"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "HOME" in err
+
+
+# ------------------------------------------------------------ ledger
+
+def test_run_door_appends_one_ledger_line_per_call(tmp_path, door):
+    sj.main(["gate", str(tmp_path / "missing.md"), "--draft", str(tmp_path / "missing.md")])
+    lines = sj._ledger_lines()
+    assert len(lines) == 1
+    rec = json.loads(lines[0])
+    assert rec["door"] == "gate"
+    assert rec["exit_code"] == 0
+    assert "argv" in rec and "ms" in rec and "ts" in rec
+    assert rec["json_mode"] is False
+    assert rec["hook_mode"] is False
+
+
+def test_ledger_command_prints_recent_lines_and_counts(door, capsys):
+    sj.main(["gate", "a.md", "--draft", "a.md"])
+    sj.main(["gate", "a.md", "--draft", "a.md"])
+    code = sj.main(["ledger"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.count('"door": "gate"') == 2
+    assert "gate" in out and "2" in out
+
+
+def test_ledger_command_with_nothing_recorded_yet(capsys):
+    code = sj.main(["ledger"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no calls recorded yet" in out
+
+
+def test_hook_logs_to_the_ledger_on_empty_stdin(monkeypatch):
+    _hook_stdin(monkeypatch, "")
+    sj.main(["hook", "gate"])
+    lines = sj._ledger_lines()
+    assert any(json.loads(ln).get("door") == "hook" for ln in lines)
+
+
+# ------------------------------------------------------------ status honesty
+
+def test_status_says_npm_not_runnable_when_script_present_but_npm_missing(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: None)
+    monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
+    code = sj.main(["status"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.count("script present, npm not runnable") == 2
+    assert "LIVE" not in [ln.split()[1] for ln in out.splitlines()
+                          if ln.startswith("sweep") or ln.startswith("bench")]
+
+
+def test_status_says_live_when_script_present_and_npm_runnable(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "resolve_npm", lambda: "/usr/bin/npm")
+    monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
+    code = sj.main(["status"])
+    out = capsys.readouterr().out
+    assert code == 0
+    for line in out.splitlines():
+        if line.startswith("sweep") or line.startswith("bench"):
+            assert "LIVE" in line
 
 
 if __name__ == "__main__":
