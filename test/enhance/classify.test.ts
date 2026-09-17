@@ -163,15 +163,40 @@ test('an answer nobody asked for is rejected and recorded, never attached to a r
   assertComplete(run.manifest);
 });
 
-test('a malformed distribution fails validation and is reported, not accepted', async () => {
-  const broken = { ...named, D01: { type: 'choice' as const, choice: 'invoice', confidence: 1, probabilities: { invoice: 0.5, receipt: 0.49, support: 0, contract: 0, other: 0 } } };
-  const stub = new StubEvaluator({ script: scriptFromTable(broken) });
-  const run = await runEnhancedClassification({ records: records.slice(0, 4), options, abstainOption: 'other', passes: [{ name: 'keyed', framing: 'keyed', order: 'input' }], maxRetries: 1 }, stub);
-  assert.match(run.passes[0].errors.join(' '), /Invalid distribution/);
-  assert.equal(run.manifest.byKind.unanswered.length, 4, 'the whole call was rejected, so no record in it got an answer');
-  assertComplete(run.manifest);
-  assert.equal(run.cost.calls, 2, 'the rejected call and its retry both cost money');
-  assert.equal(run.cost.retries, 1);
+/**
+ * Responses the validator must reject however the total is read.
+ *
+ * The earlier fixture here used a distribution totalling 0.99, which the
+ * validator once rejected on a 0.001 tolerance. It no longer does, and it
+ * should not: a two-decimal total of 0.99 is what the provider actually sends,
+ * so a rounding-sized shortfall is renormalized rather than refused. These
+ * fixtures are malformed in ways no rounding rule can excuse. One omits a level
+ * that was asked about. The other's mass is a tenth short, ten rounding steps
+ * outside the band.
+ */
+const malformedDistributions = {
+  'a level that was asked about is missing entirely': { type: 'choice' as const, choice: 'invoice', confidence: 1, probabilities: { invoice: 0.5, receipt: 0.5, support: 0, contract: 0 } },
+  'the total is 0.9, far outside any rounding step': { type: 'choice' as const, choice: 'invoice', confidence: 1, probabilities: { invoice: 0.5, receipt: 0.4, support: 0, contract: 0, other: 0 } }
+};
+
+for (const [why, answer] of Object.entries(malformedDistributions)) {
+  test(`a malformed distribution fails validation and is reported, not accepted: ${why}`, async () => {
+    const stub = new StubEvaluator({ script: scriptFromTable({ ...named, D01: answer }) });
+    const run = await runEnhancedClassification({ records: records.slice(0, 4), options, abstainOption: 'other', passes: [{ name: 'keyed', framing: 'keyed', order: 'input' }], maxRetries: 1 }, stub);
+    assert.match(run.passes[0].errors.join(' '), /Invalid distribution/);
+    assert.equal(run.manifest.byKind.unanswered.length, 4, 'the whole call was rejected, so no record in it got an answer');
+    assertComplete(run.manifest);
+    assert.equal(run.cost.calls, 2, 'the rejected call and its retry both cost money');
+    assert.equal(run.cost.retries, 1);
+  });
+}
+
+test('the fixtures above really are malformed against the options actually asked', () => {
+  // Pins the premise, so a change to the option list cannot quietly turn
+  // "missing a level" into "carries every level".
+  assert.equal(optionIds.length, 5);
+  assert.equal(Object.keys(malformedDistributions['a level that was asked about is missing entirely'].probabilities).length, 4);
+  assert.equal(Object.values(malformedDistributions['the total is 0.9, far outside any rounding step'].probabilities).reduce((x, y) => x + y, 0), 0.9);
 });
 
 test('cost accounting reports calls, tokens, retries and per-call latency', async () => {
@@ -197,7 +222,7 @@ test('an oversized record is never sent and is routed to review, not dropped', a
   assert.deepEqual(run.plans[0].plan.oversizedRecordIds, ['BIG']);
   const big = run.manifest.outcomes.find(o => o.id === 'BIG')!;
   assert.equal(big.kind, 'review');
-  assert.match(big.reason, /exceeds the per-call record allowance/);
+  assert.match(big.reason, /record and its question exceed the per-call allowance/);
   assertComplete(run.manifest);
   for (const request of run.passes[0].plan.calls) assert.equal(request.recordIds.includes('BIG'), false);
 });
