@@ -15,6 +15,7 @@
     "organize": "node src/cli.ts organize",
     "sweep": "node src/sweep-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
-    "bench:live": "node bench/live-measure.ts"
+    "bench:live": "node bench/live-measure.ts",
+    "test:skill": "python3 -m pytest skills/super-jev/tests -q"
   }
 }
