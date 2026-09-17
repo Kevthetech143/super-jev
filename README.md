@@ -102,7 +102,7 @@ docs/             Architecture and launch draft
 
 ## Validation
 
-The suite has 22 tests covering the core loop, mocked API adapter, organizer grouping and review policy, input validation, CLI privacy, output protection, and failed-output cleanup. Both original demos and the organizer demo pass offline. Historical v0.1 live smoke tests used three API evaluations and local demo tools; see docs/live-validation.json. No live API calls were made for v0.2, and the organizer has not been validated against the live API. This is control-flow validation, not a broad Jev capability benchmark. Native TypeScript execution does not provide static type checking.
+The suite has 26 tests covering the core loop, mocked API adapter and CLI response contract, organizer grouping and review policy, bounded input reads, record-field minimization, CLI privacy, output protection, and failed-output cleanup. Both original demos and the organizer demo pass offline. Historical v0.1 live smoke tests used three API evaluations and local demo tools; see docs/live-validation.json. No live API calls were made for v0.2, and the organizer has not been validated against the live API. See [organizer validation](docs/organizer-validation.md) for the current blocker. This is control-flow validation, not a broad Jev capability benchmark. Native TypeScript execution does not provide static type checking.
 
 ## API references
 

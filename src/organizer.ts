@@ -27,7 +27,12 @@ export function validateOrganizerInput(value: unknown): asserts value is Organiz
 
 export function organizer(input: OrganizerInput): Domain<OrganizerState> {
   validateOrganizerInput(input);
-  const config = structuredClone(input);
+  // Transmit only the documented record fields, never incidental metadata.
+  const config: OrganizerInput = {
+    records: input.records.map(({ id, text }) => ({ id, text })),
+    categories: { ...input.categories },
+    minConfidence: input.minConfidence
+  };
   const validRows = (value: unknown): value is OrganizedRow[] => Array.isArray(value) && value.length === config.records.length && Array.from(value).every((r, i) =>
     r?.id === config.records[i].id && Object.hasOwn(config.categories, r.category) && Number.isFinite(r.confidence) && r.confidence >= 0 && r.confidence <= 1 && r.needsReview === (r.confidence < (config.minConfidence ?? 0.75) || r.category === 'other'));
   return {

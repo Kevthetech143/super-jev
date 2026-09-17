@@ -8,6 +8,8 @@ Purpose: classify text records into caller-defined categories, then group record
 
 Input: a JSON object with `records` (1–100 objects containing unique nonempty `id` and `text` strings), `categories` (2–30 category ID/description pairs, including `other`), and optional `minConfidence` (0–1; default 0.75). Category IDs use lowercase letters, numbers, hyphens or underscores and begin with a letter. See `examples/organizer.json`.
 
+Only each record's `id` and `text` are included in provider evidence; extra record metadata is discarded. IDs and category descriptions are also transmitted, so use synthetic or authorized values for those fields too.
+
 1. Confirm the user authorizes sending these records to TypeSafe. Keep credentials in `TYPESAFE_API_KEY`, never in JSON, commands, or committed files.
 2. Prepare a small input JSON file containing only the records needed. Keep private inputs and outputs outside the checkout. The CLI limits the input to 80 KB and the engine independently limits the request to 100 KB. Category descriptions repeat for every record's question, so a valid input under 80 KB can still exceed the request budget. These are byte limits, not token guarantees.
 3. Run `node src/cli.ts organize /path/to/input.json --live --out /path/to/new-output.json` from the repository. The output path must not exist. Omit `--out` for JSON on stdout. An API request may incur charges.

@@ -35,8 +35,20 @@ try {
     else throw new CliError('Unknown or repeated argument');
   }
   if (!mode) throw new CliError('Choose --live or --demo explicitly');
-  const raw = await readFile(file, 'utf8');
-  if (Buffer.byteLength(raw) > 80_000) throw new CliError('Input exceeds 80 KB; split into smaller batches');
+  // Read at most the limit plus one byte, even if a file grows while reading.
+  const source = await open(file, 'r');
+  const buffer = Buffer.alloc(80_001);
+  let length = 0;
+  try {
+    if (!(await source.stat()).isFile()) throw new CliError('Input must be a regular JSON file');
+    while (length < buffer.length) {
+      const { bytesRead } = await source.read(buffer, length, buffer.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+  } finally { await source.close(); }
+  if (length > 80_000) throw new CliError('Input exceeds 80 KB; split into smaller batches');
+  const raw = buffer.subarray(0, length).toString('utf8');
   let input: unknown;
   try { input = JSON.parse(raw); }
   catch { throw new CliError('Input must be valid JSON'); }

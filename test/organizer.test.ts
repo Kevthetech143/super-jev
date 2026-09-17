@@ -6,8 +6,87 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { organizer, organizerReport, validateOrganizerInput } from '../src/organizer.ts';
 import { run } from '../src/loop.ts';
+import type { Evaluation } from '../src/types.ts';
 
 const fixture = JSON.parse(await readFile(new URL('../examples/organizer.json', import.meta.url), 'utf8'));
+
+test('organizer sends only id and text and snapshots caller data', async () => {
+  const input = structuredClone(fixture);
+  input.records[0].privateMetadata = 'SYNTHETIC_METADATA_NOT_FOR_PROVIDER';
+  const domain = organizer(input);
+  input.records[0].text = 'Changed after construction';
+  input.categories.invoice = 'Changed category';
+  const state = { rows: [], complete: false };
+  const evidence = await domain.observe(state, new AbortController().signal);
+  assert.deepEqual(evidence, { records: fixture.records });
+  const question = domain.questions(state, evidence).record_0;
+  assert.equal(question.type, 'choice');
+  if (question.type === 'choice') assert.equal(question.criteria.invoice, fixture.categories.invoice);
+});
+
+test('malformed organizer responses cannot produce groups', async () => {
+  const valid: Evaluation = {
+    model: 'mock', answers: Object.fromEntries(fixture.records.map((_: unknown, i: number) => [
+      `record_${i}`, { type: 'choice', choice: 'invoice', confidence: 1,
+        probabilities: { invoice: 1, receipt: 0, support: 0, other: 0 } }
+    ]))
+  };
+  for (const invalid of [undefined, { type: 'noul', noul: 1 },
+    { type: 'choice', choice: 'unknown', confidence: 1, probabilities: { invoice: 1, receipt: 0, support: 0, other: 0 } },
+    { type: 'choice', choice: 'invoice', confidence: 2, probabilities: { invoice: 1, receipt: 0, support: 0, other: 0 } },
+    { type: 'choice', choice: 'invoice', confidence: 1, probabilities: { invoice: 0.5, receipt: 0, support: 0, other: 0 } }
+  ]) {
+    const evaluation = structuredClone(valid);
+    evaluation.answers.record_0 = invalid as Evaluation['answers'][string];
+    const events: string[] = [];
+    const result = await run({ domain: organizer(fixture), initial: { rows: [], complete: false },
+      evaluator: { evaluate: async () => evaluation }, journal: { append: async event => { events.push(event.type); } } });
+    assert.equal(result.status, 'error');
+    assert.deepEqual(result.state.rows, []);
+    assert.ok(!events.includes('action_started'));
+  }
+});
+
+test('CLI live response contract preserves metadata, groups and review with mocked Jev', () => {
+  const response = { model: 'mock-jev', usage: { input_tokens: 100, output_tokens: 50 },
+    answers: Object.fromEntries(['invoice', 'receipt', 'support', 'other'].map((choice, i) => [
+      `record_${i}`, { type: 'choice', choice, confidence: i === 2 ? 0.5 : 0.95,
+        probabilities: Object.fromEntries(Object.keys(fixture.categories).map(k => [k, k === choice ? 1 : 0])) }
+    ])) };
+  const mock = 'data:text/javascript,' + encodeURIComponent(`
+    globalThis.fetch = async (url, init) => {
+      const request = JSON.parse(init.body);
+      if (url !== 'https://api.typesafe.ai/v1/systemone' || request.model !== 'jev-latest' || Object.keys(request.questions).length !== 4) throw new Error('Unexpected request');
+      return new Response(JSON.stringify(${JSON.stringify(response)}));
+    };
+  `);
+  const result = spawnSync(process.execPath, ['--import', mock, 'src/cli.ts', 'organize', 'examples/organizer.json', '--live'], {
+    encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: 'fixture' }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.mode, 'live');
+  assert.equal(output.model, response.model);
+  assert.deepEqual(output.usage, response.usage);
+  assert.equal(output.rows.length, 4);
+  assert.deepEqual(output.groups, { invoice: ['bill-1'], receipt: ['receipt-1'], support: [], other: [] });
+  assert.deepEqual(output.review, ['help-1', 'misc-1']);
+});
+
+test('CLI enforces the byte limit before parsing oversized multibyte input', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'super-jev-'));
+  const file = join(dir, 'large.json');
+  try {
+    for (const size of [80_000, 80_001]) {
+      const raw = '"' + 'é'.repeat(39_999) + '"' + (size === 80_001 ? ' ' : '');
+      assert.equal(Buffer.byteLength(raw), size);
+      await writeFile(file, raw);
+      const result = spawnSync(process.execPath, ['src/cli.ts', 'organize', file, '--demo'], { encoding: 'utf8' });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, size === 80_000 ? /Invalid organizer input/ : /Input exceeds 80 KB/);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 test('organizer validates unique IDs, fallback and confidence', () => {
   assert.throws(() => validateOrganizerInput({ ...fixture, records: [fixture.records[0], fixture.records[0]] }));
   assert.throws(() => validateOrganizerInput({ ...fixture, categories: { invoice: 'bill', receipt: 'paid' } }));
