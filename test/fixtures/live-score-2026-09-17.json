@@ -1,0 +1,79 @@
+{
+  "recordedAt": "2026-09-17",
+  "model": "jev-1.13.0",
+  "source": "One live call to https://api.typesafe.ai/v1/systemone made by the lead on 2026-09-17; response stored verbatim. This is the only live evidence in the repository.",
+  "note": "The score answer carries confidence 0.71 with a peak probability of 0.66. That is real provider output, and it overturns the harness's former INFERRED rule that a confidence above the distribution peak is invalid. The score 1.85 is the exact probability-weighted mean of the levels, which confirms the DOCUMENTED score rule against live output for the first time. The noul answer carries only its value.",
+  "questions": {
+    "urgency": {
+      "type": "score",
+      "instructions": "Rate how urgent this ticket is, 0 = no urgency, 4 = emergency.",
+      "criteria": [
+        "0 no urgency",
+        "1 low",
+        "2 moderate",
+        "3 high",
+        "4 emergency"
+      ]
+    },
+    "kind": {
+      "type": "choice",
+      "instructions": "Classify the ticket.",
+      "criteria": {
+        "return": "customer wants to return or replace",
+        "billing": "about a charge",
+        "other": "anything else"
+      }
+    },
+    "eligible": {
+      "type": "noul",
+      "instructions": "Is the return eligible under the stated policy?",
+      "criteria": {
+        "true": "eligible",
+        "false": "not eligible"
+      }
+    }
+  },
+  "state": "Ticket: Customer says the package arrived with a cracked screen and asks for a replacement. Order 4471 placed 2026-08-30, delivered 2026-09-02. Policy: returns accepted within 30 days for damaged goods.",
+  "response": {
+    "model": "jev-1.13.0",
+    "answers": {
+      "urgency": {
+        "type": "score",
+        "score": 1.85,
+        "confidence": 0.71,
+        "legend": {
+          "0": "0 no urgency",
+          "1": "1 low",
+          "2": "2 moderate",
+          "3": "3 high",
+          "4": "4 emergency"
+        },
+        "probabilities": {
+          "0": 0.01,
+          "1": 0.23,
+          "2": 0.66,
+          "3": 0.1,
+          "4": 0.0
+        }
+      },
+      "kind": {
+        "type": "choice",
+        "choice": "return",
+        "confidence": 1.0,
+        "probabilities": {
+          "other": 0.0,
+          "return": 1.0,
+          "billing": 0.0
+        }
+      },
+      "eligible": {
+        "type": "noul",
+        "noul": 0.95
+      }
+    },
+    "usage": {
+      "input_tokens": 490,
+      "output_tokens": 69
+    }
+  }
+}
