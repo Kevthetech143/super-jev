@@ -112,7 +112,7 @@ test('--stub with an irreversible action in the target field is also downgraded'
     assert.equal(result.code, 2);
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.verdict, 'needs_approval');
-    assert.deepEqual(parsed.matchedKeywords, ['wire']);
+    assert.deepEqual(parsed.matchedKeywords, ['transfer/wire/settle']);
   });
 });
 
