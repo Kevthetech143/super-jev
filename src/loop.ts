@@ -52,8 +52,10 @@ export async function run<S>(options: {
       if (!Object.keys(request.questions).length) throw new Error('Domain returned no questions');
       if (Buffer.byteLength(JSON.stringify(request), 'utf8') > maxBytes) throw new Error('Context exceeds byte budget; reduce evidence');
       await log('request', request);
-      const evaluation = await bounded(() => evaluator.evaluate(request, signal));
-      validateEvaluation(request, evaluation);
+      const received = await bounded(() => evaluator.evaluate(request, signal));
+      // Validation returns a new object rather than editing the provider's
+      // reply, so the journalled and decided-on evaluation is that returned one.
+      const evaluation = validateEvaluation(request, received);
       await log('evaluation', evaluation);
       const decision = domain.decide(state, evidence, evaluation);
       await log('decision', decision);
