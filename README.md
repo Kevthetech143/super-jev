@@ -167,7 +167,9 @@ the result carries which one fired as `class`:
   `3`), no matter what the model would have said. Families: `rm -rf`,
   wipe/purge, `drop table|database|column`, truncate, force-push (`push -f`,
   `git push ... -f`, or the same thing phrased as "push over the remote
-  history"), `reset --hard`, `checkout --`, `branch -D`, format, overwrite,
+  history"), `reset --hard`, `checkout --`, `branch -D`, format of a storage
+  target only (disk, drive, volume, partition, SD card, USB, `mkfs`,
+  `diskutil erase` — "format the code" is not a hard rule), overwrite,
   `curl | sh`, a wire transfer, and crypto.
 - **`irreversible_routine`** — cannot be taken back once it happens, but it
   is an ordinary, named action a human can look at and approve, so the
@@ -251,7 +253,7 @@ npm run fetch -- --catalog examples/organizer.json --request "check my draft aga
 npm run fetch -- --catalog my-catalog.json --request "pay the electric bill" --k 5 --out out --json
 ```
 
-`--catalog` is a JSON array of `{"id","text"}` records (or `{"catalog":[...]}`). Under the hood, `runFetch` (`src/enhance/fetch.ts`) is one relevance question — the request folded into its instructions, never interpolated raw — run through the same `planSweep` / `runSweep` engine `npm run sweep` uses, so the per-call question cap and the named `records.<key>.text` references that keep the sweep path order-insensitive apply here unchanged. Every catalog record gets a `high`/`medium`/`low`/`none` relevance level and a confidence; the top `k` by score (ties broken by confidence, then by id) come back as `{id, score, confidence}`. `--dry-run` prints the plan and reaches no network. `--stub` runs the offline stub. Live mode needs `TYPESAFE_API_KEY`. `npm run bench:fetch` runs the offline hit@1 / hit@k check in `bench/fetch-cases.json` against a scripted stub — plumbing only, not a ranking-accuracy claim; see the file header.
+`--catalog` is a JSON array of `{"id","text"}` records (or `{"catalog":[...]}`). Under the hood, `runFetch` (`src/enhance/fetch.ts`) is one relevance question — the request folded into its instructions, never interpolated raw — run through the same `planSweep` / `runSweep` engine `npm run sweep` uses, so the per-call question cap and the named `records.<key>.text` references that keep the sweep path order-insensitive apply here unchanged. A cheap local prefilter (`--prefilter N`, default 40, `0` disables) keeps only the top N records by token overlap with the request before anything is sent, so a typical run is one provider call; `calls` is reported. Every kept record gets a `high`/`medium`/`low`/`none` relevance level and a confidence, where `none` means "none of these": a record ranks only if it beats `none`, and when `none` wins for every record the result is `ranked: []` with `noMatch: true` and the confidence of `none`, never a best guess. The top `k` by score (ties broken by confidence, then by id) come back as `{id, score, confidence}`. `--dry-run` prints the plan and reaches no network. `--stub` runs the offline stub. Live mode needs `TYPESAFE_API_KEY`. `npm run bench:fetch` runs the offline hit@1 / hit@k check in `bench/fetch-cases.json` against a scripted stub — plumbing only, not a ranking-accuracy claim; see the file header.
 
 ## Agent front door (Claude Code skill)
 
