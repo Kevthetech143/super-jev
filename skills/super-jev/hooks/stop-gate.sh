@@ -19,8 +19,13 @@
 #     if nothing is derivable,
 #   - runs it through the claim gate, with a timeout (SUPERJEV_GATE_TIMEOUT,
 #     default 90s) that also fails open rather than hanging the session,
-#   - exits 0 (silent) on CLEAN, exits 0 with an advisory line on stdout for
-#     READ, exits 2 with a reason on stderr to block on REJECT.
+#   - exits 0 (silent) on CLEAN, exits 2 with a reason on stderr to block
+#     on REJECT (fabricated quote), and on READ, additionally BLOCKS (exit
+#     2) rather than advises if a claim or draft-level flag in the gate's
+#     own output crosses its own line — NOT_SUPPORTED at or below
+#     SUPERJEV_BLOCK_NOT_SUPPORTED (default 0.20), OVERCLAIMS at or above
+#     SUPERJEV_BLOCK_OVERCLAIM (default 0.80), or SELF_CONTRADICTORY at or
+#     below 0.30 — else exits 0 with an advisory line on stdout.
 #
 # This script is NOT installed into ~/.claude/settings.json by this skill —
 # copy the snippet below into your own settings.json to wire it in.

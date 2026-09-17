@@ -36,9 +36,12 @@
 #     necessarily the worker's tree,
 #   - runs it through report-verify, with a timeout (SUPERJEV_VERIFY_TIMEOUT,
 #     default 300s) that fails open rather than hanging the session,
-#   - exits 0 (silent) on CLEAN, exits 0 with an advisory line on stdout for
-#     READ / NO_CHECKABLE_CLAIMS / BAD_USAGE, exits 2 with a reason on
-#     stderr to block on REJECT (the evidence disproves a claim).
+#   - exits 0 (silent) on CLEAN, exits 2 with a reason on stderr to block
+#     on REJECT (the evidence disproves a claim), and on READ, additionally
+#     BLOCKS (exit 2) rather than advises if a claim/draft-level flag in
+#     worker-verify's own output crosses the same strong-flag line
+#     superjev.py hook gate uses (see stop-gate.sh) — else exits 0 with an
+#     advisory line on stdout for READ / NO_CHECKABLE_CLAIMS / BAD_USAGE.
 #
 # This script is NOT installed into ~/.claude/settings.json by this skill —
 # copy the snippet above into your own settings.json to wire it in.

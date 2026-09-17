@@ -82,6 +82,99 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # tree). This env var is the only non-payload source honoured.
 HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
 
+# Strong-flag block thresholds. A gate/verify run that comes back READ
+# (exit 3, "advisory") can still carry a claim-level or draft-level flag
+# strong enough that letting it pass as a silent advisory is the same bug
+# that let a lied-about Stop message through: NOT_SUPPORTED even at LOW
+# confidence ("the evidence does not address it", scored 0.18) is exactly
+# the sentence an agent must not say out loud as fact, so it blocks on a
+# score AT OR BELOW the line, not above it. OVERCLAIMS blocks on a score AT
+# OR ABOVE the line — a confident overclaim. SELF_CONTRADICTORY blocks at
+# or below its own fixed line (not env-configurable; only the two claim-
+# shaped flags get an env override). A fabricated quote is already exit 2
+# from jev.py itself and already maps to "block" via GATE_HOOK_ACTION —
+# nothing here changes that path.
+BLOCK_NOT_SUPPORTED_ENV = "SUPERJEV_BLOCK_NOT_SUPPORTED"
+BLOCK_OVERCLAIM_ENV = "SUPERJEV_BLOCK_OVERCLAIM"
+DEFAULT_BLOCK_NOT_SUPPORTED = 0.20
+DEFAULT_BLOCK_OVERCLAIM = 0.80
+BLOCK_SELF_CONTRADICTORY = 0.30
+
+# jev.py's --kit reply table (_print_reply) and worker-verify's own table
+# (same row shape, same function pattern) print one line per claim as
+#   "  c3   NOT_SUPPORTED   0.18  <subject text...>"
+# and one line per draft-level flag as
+#   "  overclaim         OVERCLAIMS           0.98   -> SOFTEN IT ..."
+# This regex reads either shape off the captured stdout: a key (c<N> or one
+# of the four draft-level question keys), then an ALL-CAPS verdict word,
+# then a confidence float. Both doors share this exact format because both
+# are built on jev.py's row shapes, so one parser covers gate and verify.
+_FLAG_LINE_RE = re.compile(
+    r'^\s*(?P<key>c\d+|leaked_internal|time_sensitive|self_contradictory|overclaim)\s+'
+    r'(?P<verdict>[A-Z][A-Z_]*)\s+(?P<score>\d+\.\d+)', re.MULTILINE)
+
+# The red verdicts worth carrying into the ledger and checking against a
+# block line. Mirrors jev.py's own RED_VERDICTS.
+NOTABLE_VERDICTS = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
+                    "SELF_CONTRADICTORY", "OVERCLAIMS"}
+
+
+def _block_not_supported_threshold():
+    try:
+        return float(os.environ.get(BLOCK_NOT_SUPPORTED_ENV, DEFAULT_BLOCK_NOT_SUPPORTED))
+    except (TypeError, ValueError):
+        return DEFAULT_BLOCK_NOT_SUPPORTED
+
+
+def _block_overclaim_threshold():
+    try:
+        return float(os.environ.get(BLOCK_OVERCLAIM_ENV, DEFAULT_BLOCK_OVERCLAIM))
+    except (TypeError, ValueError):
+        return DEFAULT_BLOCK_OVERCLAIM
+
+
+def _parse_strong_flags(text):
+    """Every notable (red) claim/draft-level line found in a captured
+    jev.py-shaped verdict table — gate (jev.py --kit reply) and verify
+    (worker-verify) print the identical row format, so one parser covers
+    both doors. Returns a list of {"key", "verdict", "score"} dicts, in the
+    order they appear on stdout. Never raises: None/empty/unparseable text
+    yields []."""
+    if not text:
+        return []
+    flags = []
+    for m in _FLAG_LINE_RE.finditer(text):
+        verdict = m.group("verdict")
+        if verdict not in NOTABLE_VERDICTS:
+            continue
+        try:
+            score = float(m.group("score"))
+        except ValueError:
+            continue
+        flags.append({"key": m.group("key"), "verdict": verdict, "score": score})
+    return flags
+
+
+def _hook_block_reasons(flags):
+    """Which of these already-notable flags cross THIS hook's own block
+    line (stricter, and in the opposite direction for NOT_SUPPORTED/
+    SELF_CONTRADICTORY, than jev's own 0.80 escalate-below line — see the
+    block above). Returns a list of "key VERDICT score" strings, in
+    argument order, for the stderr reason and the ledger line."""
+    not_supported_line = _block_not_supported_threshold()
+    overclaim_line = _block_overclaim_threshold()
+    reasons = []
+    for f in flags:
+        v, s, k = f["verdict"], f["score"], f["key"]
+        blocked = (
+            (v == "NOT_SUPPORTED" and s <= not_supported_line) or
+            (v == "OVERCLAIMS" and s >= overclaim_line) or
+            (v == "SELF_CONTRADICTORY" and s <= BLOCK_SELF_CONTRADICTORY)
+        )
+        if blocked:
+            reasons.append(f"{k} {v} {s:.2f}")
+    return reasons
+
 # The wishlist ships in this repo, not in a private fleet path.
 WISHLIST = REPO_ROOT / "docs" / "wishlist.md"
 DEFAULT_REPO = REPO_ROOT
@@ -431,12 +524,15 @@ def cmd_gate(a):
         return code
     if hook_mode:
         # Captured and NOT printed: cmd_hook builds its own one-line
-        # advisory/block message from the exit code alone. Printing the
-        # VERDICT line here would leak straight onto the hook's real
-        # stdout, breaking the "silent allow" contract.
+        # advisory/block message from the exit code, plus a strong-flag
+        # scan of the captured stdout (see _parse_strong_flags /
+        # _hook_block_reasons). Printing the VERDICT line here would leak
+        # straight onto the hook's real stdout, breaking the "silent
+        # allow" contract, so cmd_hook gets (code, out, err) back instead
+        # of a bare code — the only caller of this branch.
         code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
                                   hook_mode=True, timeout=timeout)
-        return code
+        return code, out, err
     code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout)
     print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
     return code
@@ -487,10 +583,11 @@ def cmd_verify(a):
         return code
     if hook_mode:
         # Same rationale as cmd_gate's hook_mode branch: captured, never
-        # printed — cmd_hook owns the single line the hook actually emits.
+        # printed, and returned as (code, out, err) so cmd_hook can run
+        # the same strong-flag scan over worker-verify's table.
         code, out, err = run_door(cmd, capture=True, door="verify", json_mode=False,
                                   hook_mode=True, timeout=timeout)
-        return code
+        return code, out, err
     code = run_door(cmd, door="verify", hook_mode=hook_mode, timeout=timeout)
     print(f"\nVERDICT: {VERIFY_VERDICT.get(code, f'ERROR — worker-verify exited {code}')}")
     return code
@@ -748,15 +845,19 @@ def _hook_evidence_paths(payload):
     return []
 
 
-def _hook_log(note, exit_code=0, skipped=False):
+def _hook_log(note, exit_code=0, skipped=False, flags=None):
     """One ledger line for a hook decision. `exit_code` is the real code
     this hook invocation is about to return (never hard-coded to 0) —
     2 for a block, 0 for everything else, including a fail-open skip.
     `skipped=True` marks a run where the wrapped door never executed at
     all (bad/empty input, no derivable evidence, a caught exception, a
     timeout, or a bad hook invocation); `skipped=False` means gate/verify
-    actually ran and this is its allow/advisory/block outcome."""
-    ledger_append({
+    actually ran and this is its allow/advisory/block outcome. `flags`, if
+    given, is the list of {"key","verdict","score"} dicts this run's
+    captured stdout carried (see _parse_strong_flags) — every block AND
+    every advisory line carries whatever was parsed, even an empty list,
+    so the ledger always shows what was actually checked."""
+    entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "door": "hook",
         "argv": [],
@@ -766,7 +867,10 @@ def _hook_log(note, exit_code=0, skipped=False):
         "hook_mode": True,
         "skipped": skipped,
         "note": note,
-    })
+    }
+    if flags is not None:
+        entry["flags"] = flags
+    ledger_append(entry)
 
 
 def cmd_hook(a):
@@ -893,7 +997,7 @@ def cmd_hook(a):
                 tmp.close()
                 ns = argparse.Namespace(evidence=evidence, draft=tmp_path, claim=None,
                                         json=False, hook_mode=True)
-                code = cmd_gate(ns)
+                code, door_out, door_err = cmd_gate(ns)
             finally:
                 try:
                     os.unlink(tmp_path)
@@ -924,26 +1028,44 @@ def cmd_hook(a):
                 ns = argparse.Namespace(report=tmp_path, worktree=worktree,
                                         test_cmd="", paths=[], dry_run=False,
                                         json=False, hook_mode=True)
-                code = cmd_verify(ns)
+                code, door_out, door_err = cmd_verify(ns)
             finally:
                 try:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
 
+        # Strong-flag override: a claim or draft-level flag red enough to
+        # cross THIS hook's own block line (see _hook_block_reasons) turns
+        # an "allow"/"advisory" base action into "block" — a READ (exit 3)
+        # whose captured table carries e.g. "c1 NOT_SUPPORTED 0.18" must
+        # not pass as a silent advisory just because jev's own 0.80
+        # escalate-below line did not also flag it. A fabricated quote
+        # (exit 2/4) is already "block" via the action map below and is
+        # unaffected — flags is still parsed and logged for it, but there
+        # is no weaker action to upgrade.
+        flags = _parse_strong_flags(door_out)
+        block_reasons = _hook_block_reasons(flags)
+
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")
+        if block_reasons:
+            action = "block"
         if action == "allow":
-            _hook_log(f"{door}: allow (exit {code})", exit_code=0)
+            _hook_log(f"{door}: allow (exit {code})", exit_code=0, flags=flags)
             return 0
         if action == "block":
             reason = f"super-jev {door} blocked this (exit {code})"
+            if block_reasons:
+                reason += ": " + "; ".join(block_reasons)
             print(reason, file=sys.stderr)
-            _hook_log(f"{door}: block (exit {code})", exit_code=2)
+            _hook_log(f"{door}: block (exit {code})" +
+                     (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
+                     exit_code=2, flags=flags)
             return 2
         advisory = f"super-jev {door} advisory (exit {code})"
         print(advisory)
-        _hook_log(f"{door}: advisory (exit {code})", exit_code=0)
+        _hook_log(f"{door}: advisory (exit {code})", exit_code=0, flags=flags)
         return 0
     except Exception as exc:  # fail-open: never wedge the session
         _hook_log(f"{door}: unexpected error ({exc.__class__.__name__}) — fail-open",
