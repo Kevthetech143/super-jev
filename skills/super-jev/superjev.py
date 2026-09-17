@@ -36,8 +36,6 @@ to a call ledger under this skill's own `ledger/` folder; see `ledger` and
 `status`.
 """
 import argparse
-import contextlib
-import io
 import json
 import os
 import re
@@ -63,13 +61,44 @@ FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 GATE_CMD_ENV = "SUPERJEV_GATE_CMD"
 VERIFY_CMD_ENV = "SUPERJEV_VERIFY_CMD"
 
+# Subprocess timeouts. A wrapped door must never hang a hook (or a CLI call)
+# forever; env overrides let a slow tool raise its own ceiling.
+GATE_TIMEOUT_ENV = "SUPERJEV_GATE_TIMEOUT"
+VERIFY_TIMEOUT_ENV = "SUPERJEV_VERIFY_TIMEOUT"
+DEFAULT_GATE_TIMEOUT_S = 90
+DEFAULT_VERIFY_TIMEOUT_S = 300
+TIMEOUT_EXIT_CODE = 124  # conventional shell "command timed out" code
+
+# How much of the transcript's tool_result history the Stop hook turns into
+# evidence when the payload names none itself. Env overrides let a caller
+# tune this without a code change.
+HOOK_EVIDENCE_N_ENV = "SUPERJEV_HOOK_EVIDENCE_N"
+HOOK_EVIDENCE_MAX_BYTES_ENV = "SUPERJEV_HOOK_EVIDENCE_MAX_BYTES"
+DEFAULT_HOOK_EVIDENCE_N = 8
+DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
+
+# PostToolUse verify must never guess a worktree from the payload's own cwd
+# (that field describes the lead session, not necessarily the worker's
+# tree). This env var is the only non-payload source honoured.
+HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
+
 # The wishlist ships in this repo, not in a private fleet path.
 WISHLIST = REPO_ROOT / "docs" / "wishlist.md"
 DEFAULT_REPO = REPO_ROOT
 
+
+def _default_ledger_path():
+    """SUPERJEV_LEDGER, if set, else this skill's own ledger/calls.jsonl."""
+    override = os.environ.get("SUPERJEV_LEDGER")
+    if override:
+        return Path(override).expanduser()
+    return SKILL_DIR / "ledger" / "calls.jsonl"
+
+
 # One JSONL line per door invocation. SUPERJEV_LEDGER overrides the path;
-# tests always override it so a test run never writes into a real checkout.
-LEDGER_PATH = SKILL_DIR / "ledger" / "calls.jsonl"
+# tests always override sj.LEDGER_PATH directly so a test run never writes
+# into a real checkout.
+LEDGER_PATH = _default_ledger_path()
 
 REFUSED = 5          # this wrapper refused: missing input or missing door
 NOT_BUILT = 6        # the door is named in the wishlist and does not exist yet
@@ -128,6 +157,17 @@ def child_env():
     return dict(os.environ)
 
 
+def _semver_key(name):
+    """(major, minor, patch) parsed off an nvm version dir name like
+    'v24.11.1', for a real numeric sort instead of a lexicographic one
+    ('v9.0.0' > 'v24.11.1' as strings). Anything unparseable sorts below
+    every real version rather than crashing the comparison."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", name)
+    if not m:
+        return (-1, -1, -1)
+    return tuple(int(g) for g in m.groups())
+
+
 def resolve_npm():
     """Absolute path to a runnable `npm`, or None. Never raises, never depends
     on cwd.
@@ -135,8 +175,9 @@ def resolve_npm():
     A bare/non-interactive shell (a hook's shell, `env -i ...`) usually does
     not carry the nvm PATH edit an interactive shell profile adds. If `npm`
     is not already on PATH, look under ~/.nvm/versions/node/*/bin, newest
-    version first, and prepend the winning bin dir to PATH so the door that
-    actually shells out to npm inherits it too.
+    version first by semantic version (not name string), and prepend the
+    winning bin dir to PATH so the door that actually shells out to npm
+    inherits it too.
     """
     found = shutil.which("npm")
     if found:
@@ -147,7 +188,7 @@ def resolve_npm():
     nvm_dir = Path(home) / ".nvm" / "versions" / "node"
     try:
         candidates = sorted((d for d in nvm_dir.iterdir() if d.is_dir()),
-                            key=lambda d: d.name, reverse=True)
+                            key=lambda d: _semver_key(d.name), reverse=True)
     except OSError:
         return None
     for d in candidates:
@@ -170,13 +211,16 @@ def _npm_missing_refusal(json_mode, door):
 
 def ledger_append(entry):
     """Append one JSONL line to the call ledger. Never raises — a ledger
-    problem must never break a door."""
+    problem must never break a door — but an unwritable ledger is not
+    swallowed in total silence: one line goes to stderr so a broken ledger
+    path is discoverable instead of invisibly dropping every record."""
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LEDGER_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"super-jev: could not write ledger at {LEDGER_PATH}: {exc}",
+              file=sys.stderr)
 
 
 def _ledger_lines():
@@ -200,37 +244,62 @@ def _ledger_count_today():
     return n
 
 
-def run_door(cmd, cwd=None, capture=False, door=None, json_mode=False, hook_mode=False):
+def run_door(cmd, cwd=None, capture=False, door=None, json_mode=False, hook_mode=False,
+            timeout=None):
     """Run a wrapped door and give back its exit code.
 
     Without `capture`, output is not captured: the door's own table is the
     result, and it goes straight to the operator's terminal (unchanged
-    behaviour). With `capture=True` (used by --json and by `hook`), nothing
-    is echoed and the door's stdout/stderr are returned instead of printed,
-    so a JSON caller gets exactly one object on stdout.
+    behaviour). With `capture=True` (used by --json and, always, by `hook`
+    — a hook must never let a child's raw stdout escape onto the hook's own
+    stdout via inherited fd 1), nothing is echoed and the door's
+    stdout/stderr are returned instead of printed, so a JSON or hook caller
+    gets exactly its own single line of output.
 
-    Every call — captured or not — is appended to the call ledger.
+    `timeout` (seconds) bounds the subprocess. A timeout never raises out of
+    this function: it is logged to the ledger and reported back as exit
+    code 124 (the conventional shell "timed out" code), so every caller —
+    including `hook`, which must fail open rather than hang a session —
+    sees an ordinary exit code instead of an uncaught exception.
+
+    Every call — captured, timed out, or not — is appended to the call
+    ledger.
     """
     if not capture:
         print("$ " + shlex.join(str(c) for c in cmd) + (f"   (in {cwd})" if cwd else ""))
         sys.stdout.flush()
     t0 = time.monotonic()
-    proc = subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
-                          env=child_env(), capture_output=capture,
-                          text=True if capture else False)
+    timed_out = False
+    try:
+        proc = subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
+                              env=child_env(), capture_output=capture,
+                              text=True if capture else False, timeout=timeout)
+        returncode = proc.returncode
+        out = proc.stdout if capture else ""
+        err = proc.stderr if capture else ""
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        returncode = TIMEOUT_EXIT_CODE
+        out = ""
+        err = f"super-jev: {door or (cmd[0] if cmd else '?')} timed out after {timeout}s"
+        if not capture:
+            print(err, file=sys.stderr)
     ms = int((time.monotonic() - t0) * 1000)
-    ledger_append({
+    entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "door": door or (str(cmd[0]) if cmd else "?"),
         "argv": [str(c) for c in cmd],
-        "exit_code": proc.returncode,
+        "exit_code": returncode,
         "ms": ms,
         "json_mode": json_mode,
         "hook_mode": hook_mode,
-    })
+    }
+    if timed_out:
+        entry["timeout"] = True
+    ledger_append(entry)
     if capture:
-        return proc.returncode, proc.stdout or "", proc.stderr or ""
-    return proc.returncode
+        return returncode, out or "", err or ""
+    return returncode
 
 
 def refuse(line):
@@ -327,6 +396,13 @@ GATE_VERDICT = {
 GATE_VERDICT_WORD = {0: "CLEAN", 3: "READ", 2: "REJECT"}
 
 
+def _gate_timeout():
+    try:
+        return float(os.environ.get(GATE_TIMEOUT_ENV, DEFAULT_GATE_TIMEOUT_S))
+    except ValueError:
+        return DEFAULT_GATE_TIMEOUT_S
+
+
 def cmd_gate(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
@@ -341,14 +417,27 @@ def cmd_gate(a):
         cmd += ["--draft", a.draft]
     for claim in a.claim or []:
         cmd += ["--claim", claim]
+    timeout = _gate_timeout()
+    # capture_output whenever this isn't a plain terminal call — --json needs
+    # exactly one object on stdout, and hook mode must never let the child's
+    # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
+    # inherit straight from this process regardless of contextlib redirects.
     if json_mode:
         code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
-                                  hook_mode=hook_mode)
+                                  hook_mode=hook_mode, timeout=timeout)
         emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                   GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
                   {"stdout": out, "stderr": err}, cmd)
         return code
-    code = run_door(cmd, door="gate", hook_mode=hook_mode)
+    if hook_mode:
+        # Captured and NOT printed: cmd_hook builds its own one-line
+        # advisory/block message from the exit code alone. Printing the
+        # VERDICT line here would leak straight onto the hook's real
+        # stdout, breaking the "silent allow" contract.
+        code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
+                                  hook_mode=True, timeout=timeout)
+        return code
+    code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout)
     print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
     return code
 
@@ -366,6 +455,13 @@ VERIFY_VERDICT_WORD = {0: "CLEAN", 3: "READ", 4: "REJECT", 2: "NO_CHECKABLE_CLAI
                        5: "BAD_USAGE"}
 
 
+def _verify_timeout():
+    try:
+        return float(os.environ.get(VERIFY_TIMEOUT_ENV, DEFAULT_VERIFY_TIMEOUT_S))
+    except ValueError:
+        return DEFAULT_VERIFY_TIMEOUT_S
+
+
 def cmd_verify(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
@@ -381,14 +477,21 @@ def cmd_verify(a):
         cmd += ["--paths", *a.paths]
     if a.dry_run:
         cmd += ["--dry-run"]
+    timeout = _verify_timeout()
     if json_mode:
         code, out, err = run_door(cmd, capture=True, door="verify", json_mode=True,
-                                  hook_mode=hook_mode)
+                                  hook_mode=hook_mode, timeout=timeout)
         emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code,
                   VERIFY_VERDICT.get(code, f"ERROR — worker-verify exited {code}"),
                   {"stdout": out, "stderr": err}, cmd)
         return code
-    code = run_door(cmd, door="verify", hook_mode=hook_mode)
+    if hook_mode:
+        # Same rationale as cmd_gate's hook_mode branch: captured, never
+        # printed — cmd_hook owns the single line the hook actually emits.
+        code, out, err = run_door(cmd, capture=True, door="verify", json_mode=False,
+                                  hook_mode=True, timeout=timeout)
+        return code
+    code = run_door(cmd, door="verify", hook_mode=hook_mode, timeout=timeout)
     print(f"\nVERDICT: {VERIFY_VERDICT.get(code, f'ERROR — worker-verify exited {code}')}")
     return code
 
@@ -491,6 +594,119 @@ def _hook_text(payload, keys):
     return None
 
 
+def _extract_text_blocks(value):
+    """Best-effort plain text out of an Anthropic-shaped content value: a
+    string, a list of {"type": "text", "text": ...} blocks, or a dict
+    carrying a "text"/"content"/"output"/"result" field. None if nothing
+    usable is found. Never raises on an odd shape — just returns None."""
+    if isinstance(value, str):
+        return value if value.strip() else None
+    if isinstance(value, list):
+        parts = [b.get("text", "") for b in value
+                if isinstance(b, dict) and b.get("type") == "text"]
+        joined = "\n".join(p for p in parts if p)
+        return joined if joined.strip() else None
+    if isinstance(value, dict):
+        for k in ("text", "content", "output", "result"):
+            got = _extract_text_blocks(value.get(k))
+            if got:
+                return got
+    return None
+
+
+def _hook_report_text(payload):
+    """The PostToolUse verify text: the direct 'report'/'text'/'message'
+    string fields (for a caller building its own smaller payload), else
+    payload['tool_response'] (the real field a PostToolUse payload carries
+    — the sub-agent's final report, for a Task/Agent tool call), else the
+    transcript fallback."""
+    for k in ("report", "text", "message"):
+        v = payload.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    got = _extract_text_blocks(payload.get("tool_response"))
+    if got:
+        return got
+    tp = payload.get("transcript_path")
+    if isinstance(tp, str) and tp:
+        return _last_assistant_text(tp)
+    return None
+
+
+def _read_transcript_records(transcript_path):
+    """Every parseable JSON object in a Claude Code transcript JSONL file,
+    in file order. [] on any read/parse problem — best-effort, never
+    raises."""
+    try:
+        path = Path(transcript_path).expanduser()
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            records.append(rec)
+    return records
+
+
+def _hook_evidence_n():
+    try:
+        n = int(os.environ.get(HOOK_EVIDENCE_N_ENV, DEFAULT_HOOK_EVIDENCE_N))
+        return n if n > 0 else DEFAULT_HOOK_EVIDENCE_N
+    except ValueError:
+        return DEFAULT_HOOK_EVIDENCE_N
+
+
+def _hook_evidence_max_bytes():
+    try:
+        n = int(os.environ.get(HOOK_EVIDENCE_MAX_BYTES_ENV, DEFAULT_HOOK_EVIDENCE_MAX_BYTES))
+        return n if n > 0 else DEFAULT_HOOK_EVIDENCE_MAX_BYTES
+    except ValueError:
+        return DEFAULT_HOOK_EVIDENCE_MAX_BYTES
+
+
+def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None):
+    """The evidence text a Stop-hook gate run uses when the payload names no
+    'evidence' itself: the tool_result content of the last `n` tool calls
+    found anywhere in the transcript (a real Stop payload's transcript_path
+    JSONL does not mark turn boundaries in a machine-obvious way, so this is
+    a best-effort "most recent tool calls" reading, not strictly scoped to
+    the current turn only), joined in chronological order and capped at
+    `max_bytes` total (the most recent bytes are kept, since the latest
+    tool calls are the most likely to back the latest draft).
+
+    Each transcript line that looks like {"message": {"content": [...]}}
+    is scanned for {"type": "tool_result", "content": ...} blocks; each
+    block's text is pulled out with _extract_text_blocks. Returns None if
+    no tool_result content is found anywhere, or the transcript cannot be
+    read at all.
+    """
+    n = n if n is not None else _hook_evidence_n()
+    max_bytes = max_bytes if max_bytes is not None else _hook_evidence_max_bytes()
+    results = []
+    for rec in _read_transcript_records(transcript_path):
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                text = _extract_text_blocks(block.get("content"))
+                if text:
+                    results.append(text)
+    if not results:
+        return None
+    tail = results[-n:]
+    joined = "\n\n---\n\n".join(tail)
+    if len(joined) > max_bytes:
+        joined = joined[-max_bytes:]
+    return joined if joined.strip() else None
+
+
 def _last_assistant_text(transcript_path):
     """The most recent assistant message text in a Claude Code transcript
     JSONL file, or None. Best-effort: any read/parse problem just yields
@@ -521,32 +737,34 @@ def _last_assistant_text(transcript_path):
 
 
 def _hook_evidence_paths(payload):
-    """payload['evidence'], a list of path strings, if present, else []. A
-    gate run with no evidence still runs — the wrapped tool's own business —
-    it is just less useful; document this in SKILL.md rather than refuse."""
+    """payload['evidence'], a list of path strings, if present, else [].
+    This is the back-compat path for a caller that builds its own smaller
+    payload with an explicit evidence list; a real Claude Code Stop payload
+    never carries this key — see _derive_evidence_text_from_transcript for
+    the path that actually fires against a real payload."""
     ev = payload.get("evidence")
     if isinstance(ev, list):
         return [str(p) for p in ev if isinstance(p, (str, os.PathLike))]
     return []
 
 
-def _hook_last_line(text):
-    for line in (text or "").splitlines():
-        if line.startswith("VERDICT:"):
-            return line[len("VERDICT:"):].strip()
-    stripped = (text or "").strip()
-    return stripped.splitlines()[-1] if stripped else "(no output)"
-
-
-def _hook_log(note):
+def _hook_log(note, exit_code=0, skipped=False):
+    """One ledger line for a hook decision. `exit_code` is the real code
+    this hook invocation is about to return (never hard-coded to 0) —
+    2 for a block, 0 for everything else, including a fail-open skip.
+    `skipped=True` marks a run where the wrapped door never executed at
+    all (bad/empty input, no derivable evidence, a caught exception, a
+    timeout, or a bad hook invocation); `skipped=False` means gate/verify
+    actually ran and this is its allow/advisory/block outcome."""
     ledger_append({
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "door": "hook",
         "argv": [],
-        "exit_code": 0,
+        "exit_code": exit_code,
         "ms": 0,
         "json_mode": False,
         "hook_mode": True,
+        "skipped": skipped,
         "note": note,
     })
 
@@ -556,47 +774,71 @@ def cmd_hook(a):
     exit semantics. This subcommand's own contract, not the plain wrapper's:
 
         exit 0  = allow (CLEAN) — silent on stdout
-        exit 0  = advisory (READ, or any other non-blocking verdict) — one
-                  line on stdout, never blocks
+        exit 0  = advisory (READ, or any other non-blocking verdict, or a
+                  fail-open skip) — at most one line on stdout, never blocks
         exit 2  = block (REJECT) — one line reason on stderr, per Claude
                   Code's own PreToolUse/Stop convention for "block"
 
     Never exits 3/4/5 — those are `gate`/`verify`'s own exit codes and do
-    not mean anything to a hook runner. Empty or non-JSON stdin, or a
-    payload with no usable text field, exits 0 with nothing printed
-    (fail-open — a broken or unexpected payload must never wedge the user's
-    session) but is logged to the call ledger either way. Any unexpected
-    exception during the run is caught here and also fails open, logged.
+    not mean anything to a hook runner. Empty or non-JSON stdin, a payload
+    with no usable text, no derivable evidence, a subprocess timeout, or
+    any unexpected exception during the run all fail open (exit 0) rather
+    than blocking or crashing — a hook must never wedge the user's session
+    over a bad or unexpected payload. Every one of these fail-open paths
+    writes a ledger line (via _hook_log, skipped=True) with the reason;
+    there is no silent skip.
 
-    Payload fields this reads (all optional, first match wins):
-      gate:   "draft" | "text" | "prompt" (string), else the last assistant
-              message in the transcript at "transcript_path" (a Claude Code
-              transcript JSONL — {"message": {"role": "assistant",
-              "content": ...}} per line); "evidence" (list of path strings)
-              — REQUIRED for gate to actually run. The wrapped claim-gate
-              tool takes evidence files as required positional arguments;
-              with none named in the payload there is nothing to check the
-              draft against, so this fails open (exit 0, silent) rather
-              than running the tool with no evidence — which would exit on
-              its own usage error, a number this shim would otherwise
-              misread as a REJECT block.
-      verify: "report" | "text" | "message" (string), else the same
-              transcript_path fallback; "worktree" (string) if present.
+    Payload fields this reads — verified against the real Claude Code
+    Stop and PostToolUse payload shapes, not assumed:
 
-    Real Claude Code Stop/PostToolUse payloads do not carry "draft" or
-    "report" directly — they carry transcript_path. The direct string keys
-    exist for hooks that build their own smaller payload instead of the
-    full Claude Code one; see hooks/ for both shapes.
+      gate (wired to Stop):
+        "last_assistant_message" — the real Stop-only field Claude Code
+          hands a hook so it does not have to re-parse a possibly-stale
+          transcript for the current turn's text; this is the DRAFT.
+        else "draft" | "text" | "prompt" (string) — back-compat for a
+          caller that builds its own smaller payload instead of
+          forwarding the real one.
+        else the last assistant message read out of the transcript at
+          "transcript_path" (a real Stop payload always carries this too).
+        "evidence" (list of path strings), if present — back-compat only;
+          a real Stop payload never carries this key.
+        else, when "transcript_path" is present and readable: EVIDENCE is
+          derived from the transcript itself — the tool_result content of
+          the last N tool calls found in it (N = SUPERJEV_HOOK_EVIDENCE_N,
+          default 8; total size capped by
+          SUPERJEV_HOOK_EVIDENCE_MAX_BYTES, default 50000), written to one
+          temp file and passed as the sole evidence path.
+        If neither an explicit "evidence" list nor a readable
+        "transcript_path" with derivable tool_result content is available,
+        there is nothing to check the draft against — fail open (exit 0,
+        logged, skipped=True) rather than running the wrapped tool with no
+        evidence, which would exit on its own usage error and get
+        misread as a block.
+
+      verify (wired to PostToolUse, matcher "Agent"):
+        "tool_name" — if present and not "Agent", this hook event is not a
+          sub-agent report; fail open (skipped=True) rather than verifying
+          something that is not a Task/Agent result. Absent entirely (a
+          caller's own smaller payload), verify proceeds as before.
+        "tool_response" — the REPORT: a real PostToolUse payload's tool
+          result for the Agent/Task tool call, text extracted best-effort
+          from a string, a list of {"type":"text"} blocks, or a dict.
+        else "report" | "text" | "message" (string) — back-compat.
+        else the transcript_path fallback, same as gate.
+        "worktree" (string), if present in the payload, else
+          SUPERJEV_HOOK_WORKTREE from the environment, else none — this is
+          deliberately never derived from the payload's own "cwd" (that
+          describes the lead session, not necessarily the worker's tree).
     """
     door = getattr(a, "door", "?")
     try:
         raw = sys.stdin.read()
     except Exception:
-        _hook_log("could not read stdin — fail-open")
+        _hook_log("could not read stdin — fail-open", skipped=True)
         return 0
 
     if not raw or not raw.strip():
-        _hook_log("empty stdin — fail-open")
+        _hook_log("empty stdin — fail-open", skipped=True)
         return 0
 
     try:
@@ -604,72 +846,115 @@ def cmd_hook(a):
         if not isinstance(payload, dict):
             raise ValueError("payload is not a JSON object")
     except (ValueError, TypeError):
-        _hook_log("non-JSON stdin — fail-open")
+        _hook_log("non-JSON stdin — fail-open", skipped=True)
         return 0
 
+    evidence_tmp_path = None
     try:
         if door == "gate":
-            text = _hook_text(payload, ["draft", "text", "prompt"])
-        else:
-            text = _hook_text(payload, ["report", "text", "message"])
-        if text is None:
-            _hook_log(f"{door}: no usable text field in payload — fail-open")
-            return 0
-
-        if door == "gate":
-            evidence = _hook_evidence_paths(payload)
-            if not evidence:
-                # The wrapped claim-gate tool takes evidence files as
-                # required positional args; with none it exits on its own
-                # argparse usage error (exit 2 on this tool), which is the
-                # SAME number this shim uses for "block". Running it anyway
-                # would misreport a missing-evidence payload as a REJECT
-                # block. There is nothing to gate the draft against, so
-                # fail open instead of faking a verdict.
-                _hook_log("gate: no evidence in payload — nothing to check, fail-open")
+            text = _hook_text(payload, ["last_assistant_message", "draft", "text", "prompt"])
+            if text is None:
+                _hook_log("gate: no usable text field in payload or transcript — "
+                          "fail-open", skipped=True)
                 return 0
 
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
-                                          encoding="utf-8")
-        tmp_path = tmp.name
-        try:
-            tmp.write(text)
-            tmp.close()
-            buf = io.StringIO()
-            with contextlib.redirect_stdout(buf):
-                if door == "gate":
-                    ns = argparse.Namespace(evidence=evidence, draft=tmp_path, claim=None,
-                                            json=False, hook_mode=True)
-                    code = cmd_gate(ns)
+            evidence = _hook_evidence_paths(payload)
+            evidence_source = "payload"
+            if not evidence:
+                tp = payload.get("transcript_path")
+                derived = None
+                if isinstance(tp, str) and tp:
+                    derived = _derive_evidence_text_from_transcript(tp)
+                if derived:
+                    tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md",
+                                                          delete=False, encoding="utf-8")
+                    evidence_tmp_path = tmp_ev.name
+                    tmp_ev.write(derived)
+                    tmp_ev.close()
+                    evidence = [evidence_tmp_path]
+                    evidence_source = "transcript tool_result derivation"
                 else:
-                    ns = argparse.Namespace(report=tmp_path, worktree=payload.get("worktree"),
-                                            test_cmd="", paths=[], dry_run=False,
-                                            json=False, hook_mode=True)
-                    code = cmd_verify(ns)
-            inner_output = buf.getvalue()
-        finally:
+                    # Neither an explicit evidence list nor a readable
+                    # transcript with any tool_result content — nothing to
+                    # check the draft against. Running the wrapped tool
+                    # anyway would exit on its own usage error (the SAME
+                    # number this shim uses for "block"), and get
+                    # misreported as a REJECT. Fail open instead.
+                    reason = ("gate: no evidence in payload and none derivable from "
+                             f"transcript_path ({tp!r}) — nothing to check, fail-open")
+                    _hook_log(reason, skipped=True)
+                    return 0
+
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                              encoding="utf-8")
+            tmp_path = tmp.name
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                tmp.write(text)
+                tmp.close()
+                ns = argparse.Namespace(evidence=evidence, draft=tmp_path, claim=None,
+                                        json=False, hook_mode=True)
+                code = cmd_gate(ns)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+        else:
+            tool_name = payload.get("tool_name")
+            if tool_name is not None and tool_name != "Agent":
+                _hook_log(f"verify: tool_name={tool_name!r} is not 'Agent' — this "
+                         "PostToolUse event is not a sub-agent report, fail-open",
+                         skipped=True)
+                return 0
+
+            text = _hook_report_text(payload)
+            if text is None:
+                _hook_log("verify: no usable report text (tool_response/report/text/"
+                         "message/transcript) — fail-open", skipped=True)
+                return 0
+
+            worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
+
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                              encoding="utf-8")
+            tmp_path = tmp.name
+            try:
+                tmp.write(text)
+                tmp.close()
+                ns = argparse.Namespace(report=tmp_path, worktree=worktree,
+                                        test_cmd="", paths=[], dry_run=False,
+                                        json=False, hook_mode=True)
+                code = cmd_verify(ns)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")
         if action == "allow":
-            _hook_log(f"{door}: allow (exit {code})")
+            _hook_log(f"{door}: allow (exit {code})", exit_code=0)
             return 0
         if action == "block":
-            reason = f"super-jev {door} blocked this (exit {code}): {_hook_last_line(inner_output)}"
+            reason = f"super-jev {door} blocked this (exit {code})"
             print(reason, file=sys.stderr)
-            _hook_log(f"{door}: block (exit {code})")
+            _hook_log(f"{door}: block (exit {code})", exit_code=2)
             return 2
-        advisory = f"super-jev {door} advisory (exit {code}): {_hook_last_line(inner_output)}"
+        advisory = f"super-jev {door} advisory (exit {code})"
         print(advisory)
-        _hook_log(f"{door}: advisory (exit {code})")
+        _hook_log(f"{door}: advisory (exit {code})", exit_code=0)
         return 0
     except Exception as exc:  # fail-open: never wedge the session
-        _hook_log(f"{door}: unexpected error ({exc.__class__.__name__}) — fail-open")
+        _hook_log(f"{door}: unexpected error ({exc.__class__.__name__}) — fail-open",
+                 skipped=True)
         return 0
+    finally:
+        if evidence_tmp_path:
+            try:
+                os.unlink(evidence_tmp_path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------- ledger
@@ -908,8 +1193,6 @@ def build_parser():
                               "the verdict onto the hook's own exit convention")
     hk.add_argument("door", choices=["gate", "verify"],
                     help="which check to run against the hook payload")
-    hk.add_argument("--map", default="default",
-                    help="verdict-to-exit mapping profile (only 'default' exists today)")
     hk.set_defaults(func=cmd_hook)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")
@@ -949,8 +1232,26 @@ def main(argv=None):
         print("super-jev: HOME is not set in the environment — refusing rather than "
               "guessing paths", file=sys.stderr)
         return 1
+    argv = sys.argv[1:] if argv is None else list(argv)
+    # `hook` has its own exit contract (0 allow/advisory, 2 block) — the
+    # SAME number argparse uses for its own usage errors (a bad --door
+    # choice, or none at all). A typo in a settings.json hook wiring must
+    # not become a permanent silent block on every hook event, so an
+    # argparse failure under `hook` is remapped to the hook contract's own
+    # fail-open (exit 0, advisory, ledger-logged) instead of propagating
+    # argparse's exit 2. Every other subcommand's usage errors are
+    # untouched — they are not bound by the hook contract.
+    is_hook_argv = bool(argv) and argv[0] == "hook"
     p = build_parser()
-    a = p.parse_args(argv)
+    try:
+        a = p.parse_args(argv)
+    except SystemExit as exc:
+        if is_hook_argv:
+            note = f"hook: bad invocation (argv={argv!r}) — advisory, never blocks"
+            print(f"super-jev hook: {note}")
+            _hook_log(note, exit_code=0, skipped=True)
+            return 0
+        raise
     if not getattr(a, "func", None):
         p.print_help()
         return REFUSED

@@ -2,10 +2,12 @@
 # Example PostToolUse hook wiring for `superjev.py hook verify`.
 #
 # Claude Code invokes a PostToolUse hook after a tool call completes, with a
-# JSON payload on stdin (fields include at least session_id,
-# transcript_path, hook_event_name, tool_name, tool_input, tool_response).
-# Point this at the Agent/Task tool so a sub-agent's final report gets
-# checked as soon as it lands, before the lead agent trusts it:
+# JSON payload on stdin. The real fields it carries (verified against the
+# Claude Code hooks docs, not assumed): session_id, transcript_path, cwd,
+# hook_event_name, tool_name, tool_input, tool_use_id, and tool_response —
+# the tool's own output. There is no "report" field. Point this at the
+# Agent/Task tool so a sub-agent's final report gets checked as soon as it
+# lands, before the lead agent trusts it:
 #
 #   {
 #     "hooks": {
@@ -21,12 +23,19 @@
 #   }
 #
 # `superjev.py hook verify` reads the payload and:
-#   - uses payload["report"] / ["text"] / ["message"] as the report text if
-#     present (a wrapper hook script can build this smaller shape itself
-#     instead of forwarding the full Claude Code payload — see SKILL.md),
-#   - otherwise falls back to the last assistant message in
-#     payload["transcript_path"],
-#   - runs it through report-verify,
+#   - if tool_name is present and is not "Agent", this event is not a
+#     sub-agent report — fails open (the matcher above should already
+#     prevent this, but the shim checks too rather than trusting it alone),
+#   - takes tool_response as the report text (falling back to
+#     payload["report"]/["text"]/["message"], then to the last assistant
+#     message in transcript_path, for a caller building its own smaller
+#     payload instead of forwarding the full one),
+#   - takes the worktree from payload["worktree"] if present, else
+#     SUPERJEV_HOOK_WORKTREE from the environment, else none — never from
+#     payload["cwd"], which is the lead session's directory, not
+#     necessarily the worker's tree,
+#   - runs it through report-verify, with a timeout (SUPERJEV_VERIFY_TIMEOUT,
+#     default 300s) that fails open rather than hanging the session,
 #   - exits 0 (silent) on CLEAN, exits 0 with an advisory line on stdout for
 #     READ / NO_CHECKABLE_CLAIMS / BAD_USAGE, exits 2 with a reason on
 #     stderr to block on REJECT (the evidence disproves a claim).

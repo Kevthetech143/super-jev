@@ -92,13 +92,19 @@ python3 $S status --json
 | exit 0, one line on stdout | **advisory** — READ (or any other non-blocking verdict); never blocks |
 | exit 2, one line on stderr | **block** — REJECT: the evidence disproves a claim, or a quote is fabricated |
 
-It never exits 3, 4 or 5 — those are `gate`'s and `verify`'s own exit codes and mean nothing to a hook runner; they are folded into advisory (0) or block (2) above. It reads the Claude Code hook payload as JSON on stdin:
+It never exits 3, 4 or 5 — those are `gate`'s and `verify`'s own exit codes and mean nothing to a hook runner; they are folded into advisory (0) or block (2) above.
 
-- **gate** looks for `"draft"` / `"text"` / `"prompt"` (a string), else falls back to the transcript (below). `"evidence"` — a list of file paths — is **required** for gate to actually run; without it there is nothing to check the draft against, so it fails open (exit 0, silent) rather than running the wrapped tool with zero evidence, which would exit on its own usage error and get misread as a block.
-- **verify** looks for `"report"` / `"text"` / `"message"`, else the same transcript fallback, plus `"worktree"` if present.
-- `"transcript_path"` (real Claude Code Stop/PostToolUse payloads carry this, not a direct text field) is read as a Claude Code transcript JSONL and the most recent assistant message becomes the text.
+**The real payload fields, verified against the Claude Code hooks docs — not assumed.** A real `Stop` payload never carries a `"draft"` or `"evidence"` key; a real `PostToolUse` payload never carries a `"report"` key. This shim reads the fields that actually exist:
 
-**Fail-open, always.** Empty stdin, non-JSON stdin, a payload with no usable text field, a gate payload with no evidence, or any unexpected exception during the run — every one of these exits 0 with nothing printed rather than blocking or crashing. Every one of them is still written to the call ledger, so a fail-open run is invisible to the session but not to an audit. `--map` accepts a mapping-profile name for forward compatibility; only `"default"` (the table above) exists today.
+- **gate** (wired to `Stop`): the DRAFT is `payload["last_assistant_message"]` — the field Claude Code hands a `Stop`/`SubagentStop` hook specifically so it does not have to re-parse a possibly-stale transcript for the current turn's text — else `"draft"` / `"text"` / `"prompt"` (a string, for a caller building its own smaller payload), else the last assistant message read out of `payload["transcript_path"]` (every real `Stop` payload carries this too: `session_id`, `transcript_path`, `cwd`, `hook_event_name`, `stop_hook_active`).
+  EVIDENCE is `payload["evidence"]` if a caller supplied one (back-compat only — a real `Stop` payload never has this key), else it is **derived from the transcript itself**: the `tool_result` content of the last `N` tool calls found in `transcript_path` (`N` = `SUPERJEV_HOOK_EVIDENCE_N`, default 8; total size capped by `SUPERJEV_HOOK_EVIDENCE_MAX_BYTES`, default 50000 bytes), written to one temp file. If neither an explicit evidence list nor any derivable `tool_result` content exists, there is nothing to check the draft against — fails open (exit 0, silent) rather than running the wrapped tool with zero evidence, which would exit on its own usage error and get misread as a block.
+- **verify** (wired to `PostToolUse`, matcher `Agent`): if `payload["tool_name"]` is present and is not `"Agent"`, this event is not a sub-agent report — fails open (this hook is only meaningful on an Agent/Task tool call). The REPORT is `payload["tool_response"]` (the real field a `PostToolUse` payload carries — the tool's own output; text is pulled out best-effort from a string, a list of `{"type":"text"}` blocks, or a dict), else `"report"` / `"text"` / `"message"` (back-compat), else the transcript fallback. The worktree is `payload["worktree"]` if a caller supplied one, else `SUPERJEV_HOOK_WORKTREE` from the environment, else none — **never** derived from `payload["cwd"]`, which describes the lead session's directory, not necessarily the worker's tree.
+
+**Fail-open, always, and never silently.** Empty stdin, non-JSON stdin, a payload with no usable text, no derivable evidence, a `tool_name` that is not `Agent`, a subprocess timeout, a bad hook invocation (e.g. a typo'd `--door`), or any unexpected exception during the run — every one of these exits 0 rather than blocking or crashing, and every one writes a ledger line (`skipped: true`, with the reason in `note`) — there is no silent skip. `--map` was removed: it was accepted and never read.
+
+**Subprocess timeouts.** `gate` and `verify` bound the wrapped tool's runtime — default 90s for gate (`SUPERJEV_GATE_TIMEOUT`), 300s for verify (`SUPERJEV_VERIFY_TIMEOUT`). A timeout never raises: it returns exit code 124, which is not in the hook's allow/block table, so it folds into the same fail-open advisory (exit 0) as everything else above.
+
+**No fd-level leak.** In `hook` mode the wrapped door's subprocess is always run with `capture_output=True` — never with the child's stdout/stderr inherited straight onto this process's own fd 1/2 — so a chatty wrapped tool's own table never escapes onto the hook's real stdout; only this shim's own single advisory/block line (or nothing, on a silent allow or a silent fail-open) is ever printed.
 
 `hooks/` in this skill ships two example scripts, not installed into `~/.claude/settings.json` by this skill:
 
@@ -109,7 +115,7 @@ Both are plain, executable bash; open either for the exact `settings.json` snipp
 
 ## The call ledger
 
-Every invocation of `gate`, `verify`, `sweep` or `bench` — from the CLI, from `ask`, or from `hook` — appends one JSON line to `ledger/calls.jsonl` under this skill's own directory: `{ts, door, argv, exit_code, ms, json_mode, hook_mode}`. `hook`'s own fail-open decisions are logged too, with `door: "hook"` and a `note`.
+Every invocation of `gate`, `verify`, `sweep` or `bench` — from the CLI, from `ask`, or from `hook` — appends one JSON line to `ledger/calls.jsonl` under this skill's own directory (override the path with `SUPERJEV_LEDGER`): `{ts, door, argv, exit_code, ms, json_mode, hook_mode}`. `hook`'s own decisions are logged too, with `door: "hook"`, a `note`, and `skipped` (`true` when the wrapped tool never ran at all — a fail-open path — `false` when it actually ran and this is its allow/advisory/block outcome); `exit_code` on a `hook` line is the real code that invocation returned (0 or 2), never hard-coded. If the ledger path itself is unwritable, one line goes to stderr rather than dropping the record in total silence.
 
 ```bash
 python3 $S ledger          # last 20 calls, plus a per-door count
@@ -120,7 +126,7 @@ python3 $S ledger -n 100   # last 100
 
 ## Bare-environment safety
 
-`sweep` and `bench` need `npm`. A hook's shell is usually non-interactive and does not carry the PATH edit an interactive shell profile adds — on a machine where Node is nvm-managed, that means `npm` is often simply absent. Before shelling out, both doors resolve `npm` themselves: `shutil.which("npm")` first, then the newest version under `~/.nvm/versions/node/*/bin`, prepending its `bin/` to `PATH` if found. If neither works, the door refuses with one line and exits 1 — no Python traceback. Every path in this file is resolved from the skill file's own location or an explicit flag, never from the process's current directory; if `HOME` is not set at all in the environment, the wrapper refuses with one line and exits 1 rather than guessing paths.
+`sweep` and `bench` need `npm`. A hook's shell is usually non-interactive and does not carry the PATH edit an interactive shell profile adds — on a machine where Node is nvm-managed, that means `npm` is often simply absent. Before shelling out, both doors resolve `npm` themselves: `shutil.which("npm")` first, then the newest version under `~/.nvm/versions/node/*/bin` — sorted by actual semantic version, not by directory name as a string, so a stale `v9.x` never shadows a real `v24.x` — prepending its `bin/` to `PATH` if found. If neither works, the door refuses with one line and exits 1 — no Python traceback. Every path in this file is resolved from the skill file's own location or an explicit flag, never from the process's current directory; if `HOME` is not set at all in the environment, the wrapper refuses with one line and exits 1 rather than guessing paths.
 
 ## The one simple ask
 
