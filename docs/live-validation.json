@@ -1,0 +1,60 @@
+{
+  "scope": "Three live Jev evaluations across service recovery simulation and document review; all tool actions local",
+  "results": [
+    {
+      "model": "jev-1.13.0",
+      "answers": {
+        "has_owner": {
+          "type": "noul",
+          "noul": 0.98
+        },
+        "has_deadline": {
+          "type": "noul",
+          "noul": 0.05
+        }
+      },
+      "usage": {
+        "input_tokens": 312,
+        "output_tokens": 40
+      }
+    },
+    {
+      "model": "jev-1.13.0",
+      "answers": {
+        "next": {
+          "type": "choice",
+          "choice": "restart",
+          "confidence": 0.99,
+          "probabilities": {
+            "restart": 0.99,
+            "check": 0.01,
+            "escalate": 0
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 368,
+        "output_tokens": 40
+      }
+    },
+    {
+      "model": "jev-1.13.0",
+      "answers": {
+        "next": {
+          "type": "choice",
+          "choice": "check",
+          "confidence": 0.94,
+          "probabilities": {
+            "restart": 0,
+            "check": 0.96,
+            "escalate": 0.04
+          }
+        }
+      },
+      "usage": {
+        "input_tokens": 368,
+        "output_tokens": 40
+      }
+    }
+  ]
+}

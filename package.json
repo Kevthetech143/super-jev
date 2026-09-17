@@ -1,0 +1,14 @@
+{
+  "name": "jev-loop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small, extensible decision-to-action harness for TypeSafe Jev",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "demo": "node examples/demo.ts",
+    "test": "node --test test/*.test.ts",
+    "replay": "node src/replay.ts"
+  }
+}
