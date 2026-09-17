@@ -171,7 +171,17 @@ export async function runEnhancedClassification(config: ClassifyConfig, evaluato
         let evaluation: Evaluation | undefined;
         try {
           evaluation = await evaluator.evaluate(request, config.timeoutMs ? AbortSignal.timeout(config.timeoutMs) : new AbortController().signal);
-          if (validate) validateEvaluation(request, evaluation);
+        // validateEvaluation returns the evaluation to use downstream: inside
+        // the documented rounding band it hands back a copy with the
+        // distribution renormalized and the provider's own values kept for the
+        // audit trail. Use that copy when there is one, so the answers mapped
+        // to records are the same ones the validator vouched for. The cast is
+        // there because a validator that only throws returns nothing, and this
+        // path must work either way.
+          if (validate) {
+            const validated = validateEvaluation(request, evaluation) as unknown as Evaluation | undefined;
+            if (validated) evaluation = validated;
+          }
         } catch (error) {
           errors.push(`${pass.name} call ${call.index} attempt ${attempt}: ${(error as Error).message}`);
           meter.call(evaluation, performance.now() - started, estimate);
