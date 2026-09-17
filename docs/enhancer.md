@@ -75,6 +75,65 @@ When an answer carries no usable distribution there is nothing to cross-check. A
 
 `cost.ts`. Every run returns `calls`, `inputTokens`, `outputTokens`, `retries`, `wallMs` and `perCallLatency`, so retries and extra passes are visible rather than hidden inside a wall-clock number. A failed attempt counts as a call, because it was billed. Provider-reported usage is used when present; otherwise the estimator fills in and the whole account is flagged `estimated`, because a mixed total is not a billing statement.
 
+## The sweep
+
+`sweep.ts` and `src/sweep-cli.ts`. The first thing in `src/enhance/` that is a whole job rather than a primitive: a pile of records bigger than one call, processed in full, with proof that nothing was skipped. Run it with `npm run sweep`.
+
+```
+npm run sweep -- --records records.jsonl --questions questions.json --out out/ --dry-run
+npm run sweep -- --records records.jsonl --questions questions.json --out out/
+```
+
+### The unit of work is a cell, not a record
+
+The classifier asks one question per record. A sweep asks several named questions of every record, so the unit is a cell: one record crossed with one question. A call carries `records x questions` questions. That is the only structural difference, and it is the reason the provider's per-call question cap binds here and never binds the classifier.
+
+Records arrive as JSONL, one `{"id", "text", "meta"}` object per line. Only `id` and `text` are ever sent. `meta` is caller data, it stays local, and it is echoed back on the matching output row, which is what lets a caller carry a record's provenance through the run without handing it to a provider.
+
+Questions arrive as JSON, an array of choice questions each with a `name`, `instructions` and `criteria`. The CLI expands them: every question in the file is asked of every record in the file.
+
+### Keys: the logical one and the one on the wire
+
+Every cell has two identifiers. The logical key is `q.<name>.<recordId>` and it is what every output file reports. The wire key is a safe object key derived from the question name and the record's own reference key.
+
+They are separate for the reason `reference.ts` already separates a record id from its question key: a record id and a question name are arbitrary caller strings, and a request key has to be a safe object key, so a dotted logical key cannot also be the key on the wire. The pairing is carried explicitly for every cell in every call, so an answer is never matched to a cell by position. A record id that sanitizes into a collision falls back to a positional wire key, which is safe because uniqueness only has to hold inside one request.
+
+### Two caps, and the tighter one wins
+
+A call is bounded by `maxRecordsPerCall`, which `--batch` sets, and independently by the question cap, which allows `floor(cap / questions per record)` records per call. The plan applies both and reports which one decided, in `recordsPerCallReason` and in the printed plan. A question set larger than the cap cannot carry even one record, and that is refused outright rather than silently truncated.
+
+The token budget is the third bound and it is enforced by `batch.ts` exactly as before. Question text is counted per record rather than reserved flat, because every question is sent once per record: a record carrying three questions pays for three question bodies and three per-record envelopes, and the estimate says so.
+
+`MAX_QUESTIONS_PER_CALL` is 255. That figure is DOCUMENTED by the brief that commissioned this feature and is not measured by this repository; `docs/provider-contract.md` records no question-count limit at all. It is a named constant and a `maxQuestionsPerCall` knob rather than a buried literal, so a corrected figure is a one-line change. Planning under the real cap wastes a little of the window; planning over it loses a whole call, so the bound is treated as hard.
+
+### The gate is per cell, the grouping is per record
+
+Each cell goes through `outcome.ts` unchanged, so a sweep inherits the whole gate policy including the confidence-versus-distribution cross-check. The record-level disposition is then the worst of its cells: `failed_validation` beats `unanswered` beats `review` beats `accepted`. A record is ACCEPTED only when every question about it cleared the gate. The sweep gate defaults to 0.80, stricter than the 0.75 organizer gate, and `--gate` moves it.
+
+A sweep is a single pass, so there is no cross-pass disagreement check here. That is a real reduction in strictness against the classifier's two-pass default, taken because a sweep's job is volume and a second pass doubles a large run's cost. The disagreement detector is still the stronger rule and a caller who needs it should use the classifier.
+
+### One bad answer costs one cell
+
+`validateEvaluation` is the adapter contract and it is all-or-nothing: one malformed distribution rejects the whole response. On a call carrying 255 cells that is 255 records' worth of work lost to one bad answer, which is the "a batch is a blast radius" failure named above at its worst.
+
+So the sweep validates one cell at a time, with the same validator, against a request containing only that cell's own question. A malformed answer then costs its own cell and nothing else, and the validated copy the contract hands back is what reaches the gate. A call is only retried when the whole response is unusable, because re-asking 255 cells to chase a handful costs more than it saves. Rejected unasked keys, missing cells and per-cell validation failures are all recorded and reported.
+
+### Outputs
+
+`--dry-run` prints the plan, writes `plan.json`, and reaches no network by construction. Live and `--stub` runs write five files, each created and never overwritten:
+
+| file | what it holds |
+|---|---|
+| `plan.json` | calls, records per call, which cap decided, estimated tokens, oversized records |
+| `results.jsonl` | one row per record: the record id, the echoed `meta`, and per question the choice, the confidence, the probability distribution and the cell's own outcome |
+| `manifest.json` | the coverage manifest: every input record in exactly one bucket, with `complete` and any problems |
+| `cost.json` | calls, tokens, retries, wall time, per-call latency, and whether the figures are estimates |
+| `report.md` | ACCEPTED and REVIEW tables with counts, the manifest buckets, the errors, and what the report is not |
+
+A live run needs `TYPESAFE_API_KEY` and the CLI refuses to start without it, before it reads any input file, unless `--dry-run` or `--stub` was asked for. An incomplete manifest exits non-zero, so a run that cannot account for its own input cannot report success.
+
+`--stub` runs the whole path against `StubEvaluator` with deterministic synthetic answers, derived from a hash of the question object so the same record gets the same answer at any batch size. It exercises the plumbing with no key and no network. It is not evidence about anything.
+
 ## Budget knobs and the defaults
 
 | Knob | Default | Why |
@@ -89,6 +148,8 @@ When an answer carries no usable distribution there is nothing to cross-check. A
 | `danglingReferenceIs` | `"incomplete"` | A reference the data makes to a document nobody holds means the evidence set is missing something on the data's own account. The safer reading blocks; `"warning"` keeps the old note-and-continue behaviour. |
 | passes | two, named references, opposite record orders | Answers moved with record order in the pilot, so a second pass in a different order is the cheapest disagreement detector available. |
 | `maxRetries` | 1 | One retry per call on a rejected response. Retries are counted and reported. |
+| sweep `gate` | 0.80 | A record is ACCEPTED only when every question about it clears this. Stricter than the organizer's 0.75 because a sweep has no second pass to catch disagreement. |
+| `maxQuestionsPerCall` | 255 | The provider's per-call question cap, which decides how many records a call can carry once questions are multiplied out. DOCUMENTED by the commissioning brief, not measured here. |
 
 Every one of these is an argument, not a constant. The two-pass default roughly doubles calls and tokens for a run; that is the price of the disagreement check, and the cost report is there so the price is visible.
 
@@ -97,6 +158,7 @@ Every one of these is an argument, not a constant. The two-pass default roughly 
 ```
 npm run demo:enhance
 npm test
+npm run sweep -- --help
 ```
 
 The demo runs both pipelines against the stub, prints the plan before any call, then the coverage manifest, the cost summary, and the per-case evidence decisions. No API key, no network, no charges.
@@ -116,7 +178,10 @@ That last result deserves care. It holds because the two passes draw on two diff
 - **No real-data validation.** Every fixture is synthetic, written as an adversarial example. There is no consented, de-identified real-use corpus behind any of it, and no independently reviewed labels.
 - **No coverage claim.** A high correctness count is not an automation rate. In the demo's deliberately strict two-framing configuration most records land in review, and the ratio of accepted to review on real work is unknown.
 - **No security audit.** The injection fixtures measure classification confusion only. Untrusted text is carried as evidence and never executed, but that is a design property here, not a tested security boundary.
-- **Not wired in.** `src/loop.ts`, `src/cli.ts` and `src/organizer.ts` are untouched. The only change outside `src/enhance/` is one export line in `src/index.ts`. Nothing in the shipped organizer path behaves differently.
+- **Not wired in.** `src/loop.ts`, `src/cli.ts` and `src/organizer.ts` are untouched. Outside `src/enhance/` the additions are one export line in `src/index.ts`, the sweep's own CLI in `src/sweep-cli.ts` and its `npm run sweep` script. Nothing in the shipped organizer path behaves differently.
+- **The sweep has no live numbers.** Every sweep test runs against a table-driven offline evaluator or the stub. They check the expansion, the two caps, the manifest, the per-cell validation salvage and the gate grouping. None of them measures accuracy, latency, cost or the accepted-error rate, and the wishlist's two sweep benchmarks, facts split across a chunk boundary and duplicated or superseded records, are not built here.
+- **The 255-question cap is unverified by this repository.** It comes from the brief, not from a provider document and not from a measurement. If the real cap is lower, a planned call will be rejected whole.
+- **A sweep is one pass.** It drops the cross-pass disagreement check that the classifier uses by default, so a sweep's ACCEPTED bar is genuinely lower than the classifier's.
 - **The disagreement rule is not free and not validated.** It doubles calls, it will send genuinely ambiguous records to review forever, and no one has measured how many correct answers it blocks alongside the wrong ones.
 - **The confidence cross-check is calibrated on one answer.** The 0.05 tolerance comes from a single live probe. Nobody has measured how often a real overclaiming answer is also a wrong answer, so the rule's value is assumed, not shown, and the tolerance could be far too loose or far too tight.
 - **No estimator accuracy claim.** The plan now matches the request it predicts, which is a statement about two pieces of this harness agreeing with each other. It is not a statement about the provider's tokenizer, and the plan is still not a billing figure.
