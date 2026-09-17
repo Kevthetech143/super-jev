@@ -652,6 +652,8 @@ def cmd_fetch(a):
         cmd += ["--budget", str(a.budget)]
     if a.batch is not None:
         cmd += ["--batch", str(a.batch)]
+    if getattr(a, "prefilter", None) is not None:
+        cmd += ["--prefilter", str(a.prefilter)]
     if a.dry_run:
         cmd += ["--dry-run"]
     if a.stub:
@@ -945,6 +947,47 @@ def _last_assistant_text(transcript_path):
     return None
 
 
+def _last_user_prompt(transcript_path):
+    """The most recent user message text in a Claude Code transcript JSONL
+    file, or None. Best-effort, same shape rules as _last_assistant_text.
+    Used by the unchecked-claims path: when a turn produced no tool_result
+    evidence, the user's own prompt is the only text the gate can weigh the
+    reply against."""
+    for rec in reversed(_read_transcript_records(transcript_path)):
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+            continue  # a tool_result carrier, not a human prompt
+        text = _extract_text_blocks(content)
+        if text:
+            return text
+    return None
+
+
+def _door_reports_checkable_claim(code, stdout, stderr):
+    """Did the wrapped gate door find at least one claim to check? jev.py's
+    reply kit exits on "no checkable claims" (a usage-style error, the
+    sentence on stderr, no claim table) when the draft holds nothing four
+    words or longer; otherwise it prints one "cN VERDICT score" row per
+    claim. A timeout or a missing door (REFUSED/124) is not a report of a
+    claim either."""
+    if code in (REFUSED, NOT_BUILT, TIMEOUT_EXIT_CODE):
+        return False
+    both = (stdout or "") + "\n" + (stderr or "")
+    if "no checkable claims" in both:
+        return False
+    if re.search(r"^\s*c\d+\s+[A-Z][A-Z_]*\s+\d+\.\d+", stdout or "", re.MULTILINE):
+        return True
+    return False
+
+
+UNCHECKED_ADVISORY = ("super-jev: reply makes claims with no tool evidence this turn — "
+                      "mark them unverified or gather evidence")
+
+
 def _hook_evidence_paths(payload):
     """payload['evidence'], a list of path strings, if present, else [].
     This is the back-compat path for a caller that builds its own smaller
@@ -957,7 +1000,7 @@ def _hook_evidence_paths(payload):
     return []
 
 
-def _hook_log(note, exit_code=0, skipped=False, flags=None):
+def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False):
     """One ledger line for a hook decision. `exit_code` is the real code
     this hook invocation is about to return (never hard-coded to 0) —
     2 for a block, 0 for everything else, including a fail-open skip.
@@ -982,6 +1025,8 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None):
     }
     if flags is not None:
         entry["flags"] = flags
+    if unchecked:
+        entry["unchecked"] = True
     ledger_append(entry)
 
 
@@ -1066,6 +1111,39 @@ def cmd_hook(a):
         return 0
 
     evidence_tmp_path = None
+
+    def _hook_unchecked(tp, evidence, tmp_ev_prompt_found):
+        """The no-tool-evidence path: run the gate against the user's last
+        prompt, advise once if the door reports a checkable claim, stay
+        silent if it reports none, log unchecked=True, exit 0 always."""
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                          encoding="utf-8")
+        tmp_path = tmp.name
+        try:
+            tmp.write(text)
+            tmp.close()
+            ns = argparse.Namespace(evidence=evidence, draft=tmp_path, claim=None,
+                                    json=False, hook_mode=True)
+            code, door_out, door_err = cmd_gate(ns)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        checkable = _door_reports_checkable_claim(code, door_out, door_err)
+        source = "last user prompt" if tmp_ev_prompt_found else "no prompt found"
+        if checkable:
+            print(UNCHECKED_ADVISORY)
+            _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
+                      f"({tp!r}); gate ran against {source}, checkable claim reported "
+                      f"(exit {code}), advisory printed", exit_code=0,
+                      flags=_parse_strong_flags(door_out), unchecked=True)
+        else:
+            _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
+                      f"({tp!r}); gate ran against {source}, no checkable claim "
+                      f"(exit {code}), silent", exit_code=0, unchecked=True)
+        return 0
+
     try:
         if door == "gate":
             text = _hook_text(payload, ["last_assistant_message", "draft", "text", "prompt"])
@@ -1091,15 +1169,28 @@ def cmd_hook(a):
                     evidence_source = "transcript tool_result derivation"
                 else:
                     # Neither an explicit evidence list nor a readable
-                    # transcript with any tool_result content — nothing to
-                    # check the draft against. Running the wrapped tool
-                    # anyway would exit on its own usage error (the SAME
-                    # number this shim uses for "block"), and get
-                    # misreported as a REJECT. Fail open instead.
-                    reason = ("gate: no evidence in payload and none derivable from "
-                             f"transcript_path ({tp!r}) — nothing to check, fail-open")
-                    _hook_log(reason, skipped=True)
-                    return 0
+                    # transcript with any tool_result content. The reply
+                    # is then, by construction, unverifiable this turn —
+                    # which used to mean silence, so a reply full of
+                    # confident claims was never checked at all. Now the
+                    # gate still runs, with the user's last prompt as the
+                    # only evidence (a real usage error from the wrapped
+                    # tool with NO evidence file would share the "block"
+                    # exit number, so a file is always written, even an
+                    # empty one). The door's job here is only to say
+                    # whether the reply carries a checkable claim: if it
+                    # does, ONE advisory line; if it does not, silence.
+                    # Never a block on this path — exit 0 always.
+                    prompt = _last_user_prompt(tp) if isinstance(tp, str) and tp else None
+                    tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md",
+                                                          delete=False, encoding="utf-8")
+                    evidence_tmp_path = tmp_ev.name
+                    tmp_ev.write(prompt or "(no tool evidence and no user prompt found "
+                                           "in the transcript this turn)")
+                    tmp_ev.close()
+                    evidence = [evidence_tmp_path]
+                    evidence_source = "unchecked: last user prompt"
+                    return _hook_unchecked(tp, evidence, tmp_ev_prompt_found=prompt is not None)
 
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
@@ -1491,6 +1582,9 @@ def build_parser():
     ft.add_argument("--out", help="output directory; a rerun overwrites, never fails")
     ft.add_argument("--budget", type=int, help="maxInputTokens per call")
     ft.add_argument("--batch", type=int, help="max records per call")
+    ft.add_argument("--prefilter", type=int,
+                    help="keep only the top N records by local token overlap before the "
+                         "one provider call (harness default 40; 0 disables)")
     ft.add_argument("--dry-run", action="store_true", help="print the plan, no network")
     ft.add_argument("--stub", action="store_true", help="offline stub, no key, no network")
     _add_json_flag(ft)

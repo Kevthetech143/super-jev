@@ -88,6 +88,13 @@ const MUST_TRIP: string[] = [
   'kill the server process',
   'shutdown the service',
   'format the drive',
+  'format the disk',
+  'format this volume',
+  'format the sd card',
+  'format usb',
+  'formatting the partition',
+  'mkfs.ext4 /dev/sdb1',
+  'diskutil erase disk2',
   'overwrite the existing config',
   'chmod -R 777 the repo',
   'chown -R deploy the folder',
@@ -136,8 +143,37 @@ const MUST_NOT_REFUSE: string[] = [
   'look up the customer record',
   'explain what this function does',
   'summarize the payment terms section of the contract',
-  'check whether the merge conflicts were resolved'
+  'check whether the merge conflicts were resolved',
+  // "format" without a storage target is code formatting, not a disk wipe
+  'format the code',
+  'run the formatter',
+  'preview the changes a formatter would make',
+  'format the date as ISO 8601',
+  'reformat the markdown table'
 ];
+
+test('format is destructive only with a storage target; code formatting never trips the hard rule', () => {
+  for (const phrase of ['format the code', 'run the formatter', 'preview the changes a formatter would make', 'format the date as ISO 8601']) {
+    assert.deepEqual(matchIrreversibleKeywords(phrase), [], `"${phrase}" must not match any hard rule`);
+  }
+  for (const phrase of ['format the drive', 'format the disk', 'format the sd card', 'format usb', 'mkfs.ext4 /dev/sdb1', 'diskutil erase disk2']) {
+    assert.deepEqual(matchIrreversibleKeywords(phrase), ['format'], `"${phrase}" must match the format rule`);
+  }
+});
+
+test('code formatting reaches the model and can be safe_to_auto; a disk format is refused without a model call', async () => {
+  const codeStub = fixed('safe_to_auto', 0.95);
+  const code = await decidePermit('fmt-code', { action: 'preview the changes a formatter would make' }, codeStub);
+  assert.equal(code.verdict, 'safe_to_auto');
+  assert.equal(code.hardRuleApplied, false);
+  assert.equal(codeStub.requests.length, 1);
+
+  const diskStub = fixed('safe_to_auto', 1.0);
+  const disk = await decidePermit('fmt-disk', { action: 'format the disk' }, diskStub);
+  assert.equal(disk.verdict, 'refuse');
+  assert.equal(disk.class, 'destructive');
+  assert.equal(diskStub.requests.length, 0);
+});
 
 test('every MUST_TRIP phrasing is caught by the hard-rule matcher (table-driven, reviewer-listed misses)', () => {
   for (const phrase of MUST_TRIP) {

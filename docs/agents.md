@@ -39,7 +39,7 @@ ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
 | `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | a report-verify tool | `SUPERJEV_VERIFY_CMD` (env), your own tool |
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | `npm run sweep` | nothing — `SUPERJEV_REPO` defaults to this checkout |
 | `bench [--dry-run] [--stub]` | `npm run bench:live` | nothing to plan; `TYPESAFE_API_KEY` for a live run |
-| `permit`, `chain`, `fetch` | nothing yet | not built; each exits 6 and names its item in [`docs/wishlist.md`](wishlist.md) |
+| `permit`, `chain`, `fetch` | `npm run permit` / `npm run chain` / `npm run fetch` in this repo | built (fetch experimental: its admission gate in [`docs/wishlist.md`](wishlist.md) is not yet met) |
 | `ask "<one plain sentence>"` | the table above | a keyword router, no model call, no env |
 | `status` | — | reports which subcommands are live in this checkout |
 
