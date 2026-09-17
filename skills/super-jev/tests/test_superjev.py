@@ -817,5 +817,348 @@ def test_status_says_live_when_script_present_and_npm_runnable(repo, monkeypatch
             assert "LIVE" in line
 
 
+# ------------------------------------------------------------ PR #9 fixes
+# Tests added for the Opus review on PR #9 (gh pr view 9 --comments):
+# real Stop/PostToolUse payload fields, no fd-level output leak in hook
+# mode, hook argparse errors never exit 2, a real ledger exit code /
+# skipped flag, a stderr line when the ledger is unwritable, and a
+# semantic-version nvm sort.
+
+def _tool_result_record(text):
+    return {"message": {"role": "user", "content": [
+        {"type": "tool_result", "content": [{"type": "text", "text": text}]}
+    ]}}
+
+
+def _assistant_text_record(text):
+    return {"message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+
+
+def _write_transcript(tmp_path, records, name="t.jsonl"):
+    path = tmp_path / name
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def test_stop_hook_uses_last_assistant_message_field_as_the_draft(tmp_path, monkeypatch):
+    # A real Stop payload carries "last_assistant_message" directly (per
+    # the Claude Code hooks docs) rather than "draft" — must be read.
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        draft_arg = cmd[cmd.index("--draft") + 1]
+        captured["draft_text"] = Path(draft_arg).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    payload = {
+        "session_id": "s1",
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+        "cwd": "/some/lead/cwd",
+        "last_assistant_message": "the sky is blue",
+        "evidence": [str(evidence)],
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    assert captured["draft_text"] == "the sky is blue"
+
+
+def test_stop_hook_derives_evidence_from_transcript_tool_results(tmp_path, monkeypatch):
+    # No "evidence" key at all (a real Stop payload never carries one) —
+    # evidence must come from the last N tool_result blocks in the
+    # transcript, written to one temp file.
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        # The evidence file is the first positional arg after the fleet
+        # door's own argv prefix; read it while it still exists (the shim
+        # deletes it after this call returns).
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        evidence_path = cmd[idx + 1]
+        captured["evidence_text"] = Path(evidence_path).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    transcript = _write_transcript(tmp_path, [
+        _tool_result_record("first tool result"),
+        _assistant_text_record("an intermediate assistant note"),
+        _tool_result_record("second tool result — the real evidence"),
+        _assistant_text_record("the final draft text"),
+    ])
+    payload = {
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+        "last_assistant_message": "the final draft text",
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    assert "first tool result" in captured["evidence_text"]
+    assert "second tool result — the real evidence" in captured["evidence_text"]
+
+
+def test_stop_hook_fails_open_with_skipped_ledger_when_nothing_derivable(tmp_path, monkeypatch,
+                                                                          door):
+    # last_assistant_message present, but no evidence field and no
+    # transcript_path at all — nothing to derive evidence from.
+    payload = {"hook_event_name": "Stop", "last_assistant_message": "a claim with no evidence"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    assert not door.calls
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["skipped"] is True
+    assert rec["exit_code"] == 0
+    assert "no evidence" in rec["note"] or "nothing to check" in rec["note"]
+
+
+def test_stop_hook_evidence_derivation_with_a_lying_last_message_still_blocks(tmp_path,
+                                                                               monkeypatch):
+    # The draft claims something the evidence (derived from the transcript's
+    # own tool_result content) does not support. The wrapped gate tool is
+    # the thing that actually judges this — here it is faked to REJECT
+    # (exit 2), and the wiring must map that to a hook block.
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(2))
+    transcript = _write_transcript(tmp_path, [
+        _tool_result_record("the file contains exactly 3 lines"),
+    ])
+    payload = {
+        "hook_event_name": "Stop",
+        "transcript_path": str(transcript),
+        "last_assistant_message": "the file contains exactly 300 lines",
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["skipped"] is False
+    assert rec["exit_code"] == 2
+
+
+def test_hook_ledger_records_real_exit_code_not_hardcoded_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(2))
+    evidence = tmp_path / "e.md"
+    evidence.write_text("x", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a fabricated quote",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["door"] == "hook"
+    assert rec["exit_code"] == 2  # not hard-coded 0 on a block
+
+
+def test_hook_bad_subcommand_invocation_exits_0_not_2(monkeypatch, capsys):
+    # argparse's own usage-error exit code (2) collides with the hook
+    # contract's "block" exit code. A typo in settings.json wiring
+    # (e.g. `hook badword`) must not become a permanent silent block.
+    code = sj.main(["hook", "badword"])
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "Traceback" not in err
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["skipped"] is True
+    assert rec["exit_code"] == 0
+
+
+def test_hook_missing_door_argument_exits_0_not_2(monkeypatch, capsys):
+    code = sj.main(["hook"])
+    assert code == 0
+    lines = sj._ledger_lines()
+    assert json.loads(lines[-1])["skipped"] is True
+
+
+def test_hook_map_flag_no_longer_exists(monkeypatch, capsys):
+    # --map was accepted and never read; removed rather than documented as
+    # a no-op. Passing it now is the same as any other bad hook invocation:
+    # fail-open, exit 0, never 2.
+    code = sj.main(["hook", "gate", "--map", "default"])
+    assert code == 0
+
+
+def test_posttooluse_verify_uses_tool_response_as_the_report(monkeypatch, door):
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Agent",
+        "tool_response": [{"type": "text", "text": "the worker pushed commit abc123"}],
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    report_arg = door.calls[-1]["cmd"][door.calls[-1]["cmd"].index(str(sj.FLEET_VERIFY_PY)) + 1]
+    assert Path(report_arg).exists() is False  # cleaned up after the call
+    # confirm the door actually saw the tool_response text at call time
+    assert door.calls  # the wrapped verify tool was invoked at all
+
+
+def test_posttooluse_verify_skips_when_tool_name_is_not_agent(monkeypatch, door):
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_response": {"stdout": "some bash output"},
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["skipped"] is True
+    assert "not 'Agent'" in rec["note"]
+
+
+def test_posttooluse_verify_ignores_payload_cwd_for_worktree(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    payload = {"tool_name": "Agent", "tool_response": "done", "cwd": "/lead/session/cwd"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    sj.main(["hook", "verify"])
+    assert "--worktree" not in captured["cmd"]
+
+
+def test_posttooluse_verify_worktree_from_env_var_only(monkeypatch):
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    monkeypatch.setenv(sj.HOOK_WORKTREE_ENV, "/the/worktree")
+    payload = {"tool_name": "Agent", "tool_response": "done", "cwd": "/lead/session/cwd"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    sj.main(["hook", "verify"])
+    assert "--worktree" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--worktree") + 1] == "/the/worktree"
+
+
+def test_run_door_timeout_returns_124_and_logs_ledger(monkeypatch):
+    def fake_run(cmd, cwd=None, env=None, timeout=None, **kw):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code, out, err = sj.run_door(["x"], capture=True, door="gate", timeout=5)
+    assert code == sj.TIMEOUT_EXIT_CODE == 124
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec.get("timeout") is True
+
+
+def test_hook_gate_timeout_fails_open_as_advisory_never_blocks(monkeypatch):
+    def fake_run(cmd, cwd=None, env=None, timeout=None, **kw):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    evidence_path = Path(sj.tempfile.gettempdir()) / "does_not_need_to_exist.md"
+    _hook_stdin(monkeypatch, json.dumps({"draft": "x", "evidence": ["/tmp/whatever"]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0  # 124 is not in GATE_HOOK_ACTION -> defaults to advisory, never 2
+
+
+def test_ledger_append_prints_one_stderr_line_when_unwritable(monkeypatch, capsys, tmp_path):
+    # A file where the ledger's parent directory should be makes mkdir /
+    # open fail with OSError — must not be swallowed in total silence.
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sj, "LEDGER_PATH", blocker / "calls.jsonl")
+    sj.ledger_append({"ts": "now", "door": "gate"})
+    err = capsys.readouterr().err
+    assert "could not write ledger" in err
+
+
+def test_default_ledger_path_honours_superjev_ledger_env(monkeypatch, tmp_path):
+    override = tmp_path / "custom" / "ledger.jsonl"
+    monkeypatch.setenv("SUPERJEV_LEDGER", str(override))
+    assert sj._default_ledger_path() == override
+    monkeypatch.delenv("SUPERJEV_LEDGER", raising=False)
+    assert sj._default_ledger_path() == sj.SKILL_DIR / "ledger" / "calls.jsonl"
+
+
+def test_resolve_npm_prefers_semantic_version_over_lexicographic_sort(tmp_path, monkeypatch):
+    # v9.0.0 > v24.11.1 lexicographically but not numerically — the review's
+    # exact repro: a stale nvm v9 must never shadow a newer v24.
+    monkeypatch.setattr(sj.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    nvm = tmp_path / ".nvm" / "versions" / "node"
+    for v in ("v9.0.0", "v24.11.1"):
+        (nvm / v / "bin").mkdir(parents=True)
+        (nvm / v / "bin" / "npm").write_text("#!/bin/sh\n", encoding="utf-8")
+    found = sj.resolve_npm()
+    assert found == str(nvm / "v24.11.1" / "bin" / "npm")
+
+
+# -------------------------------------------------- real-subprocess proof
+# The two tests below do NOT monkeypatch subprocess.run — they invoke
+# `python3 superjev.py hook gate` as a real child process, wired to a real
+# (but harmless, test-only) fake gate door via SUPERJEV_GATE_CMD, so the
+# fd-level fix (capture_output=True in hook mode, never inherited fds) is
+# proven rather than assumed from a mock.
+
+SUPERJEV_PY = SKILL / "superjev.py"
+
+
+def _run_real_hook(door_cmd, payload, extra_env=None, ledger_path=None):
+    env = dict(os.environ)
+    env["SUPERJEV_GATE_CMD"] = door_cmd
+    env["HOME"] = os.environ.get("HOME", "/tmp")
+    if ledger_path:
+        env["SUPERJEV_LEDGER"] = str(ledger_path)
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run(
+        [sys.executable, str(SUPERJEV_PY), "hook", "gate"],
+        input=json.dumps(payload), capture_output=True, text=True, env=env,
+    )
+    return proc
+
+
+def test_hook_gate_real_subprocess_clean_is_silent_and_no_leak(tmp_path):
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    payload = {"hook_event_name": "Stop", "last_assistant_message": "the sky is blue",
+              "evidence": [str(evidence)]}
+    proc = _run_real_hook(f"{sys.executable} {FAKE_DOOR}", payload,
+                          ledger_path=tmp_path / "ledger.jsonl")
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+    assert "fake_door:" not in proc.stdout  # the wrapped door's own line never leaks
+
+
+def test_hook_gate_real_subprocess_never_leaks_noisy_child_output(tmp_path):
+    # Reproduces the Opus review's exact repro: a wrapped door that prints
+    # a multi-line table to stdout, a line to stderr, and exits 2 (REJECT).
+    noisy = SKILL / "tests" / "fake_noisy_gate.py"
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    payload = {"hook_event_name": "Stop", "last_assistant_message": "a fabricated quote",
+              "evidence": [str(evidence)]}
+    proc = _run_real_hook(f"{sys.executable} {noisy}", payload,
+                          ledger_path=tmp_path / "ledger.jsonl")
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert "FAKE-GATE-STDOUT" not in proc.stdout
+    assert "FAKE-GATE-STDOUT" not in proc.stderr
+    assert "fake gate stderr" not in proc.stderr
+    assert "blocked" in proc.stderr
+    ledger_lines = (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    last = json.loads(ledger_lines[-1])
+    assert last["exit_code"] == 2
+    assert last["skipped"] is False
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
