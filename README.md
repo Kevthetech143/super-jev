@@ -4,7 +4,7 @@ A small TypeScript harness that connects **evidence → Jev judgments → permit
 
 Domain-independent core. Pluggable data sources and tools. Local JSONL traces. Zero runtime dependencies. MIT licensed.
 
-**Status: experimental V0.2.0.** Offline demos and mocked API tests pass. Both included demos also passed live Jev API smoke tests (three evaluation requests total). This is an independent community project, not affiliated with TypeSafe AI. It contains no model weights.
+**Status: experimental V0.2.0.** Offline demos and mocked API tests pass. The organizer passed a live Jev smoke test with four synthetic records; the two original demos passed historical live smoke tests. This is an independent community project, not affiliated with TypeSafe AI. It contains no model weights.
 
 ## Run in a minute
 
@@ -102,7 +102,7 @@ docs/             Architecture and launch draft
 
 ## Validation
 
-The suite has 26 tests covering the core loop, mocked API adapter and CLI response contract, organizer grouping and review policy, bounded input reads, record-field minimization, CLI privacy, output protection, and failed-output cleanup. Both original demos and the organizer demo pass offline. Historical v0.1 live smoke tests used three API evaluations and local demo tools; see docs/live-validation.json. No live API calls were made for v0.2, and the organizer has not been validated against the live API. See [organizer validation](docs/organizer-validation.md) for the current blocker. This is control-flow validation, not a broad Jev capability benchmark. Native TypeScript execution does not provide static type checking.
+The suite has 26 tests covering the core loop, mocked API adapter and CLI response contract, organizer grouping and review policy, bounded input reads, record-field minimization, CLI privacy, output protection, and failed-output cleanup. Both original demos and the organizer demo pass offline. Historical v0.1 live smoke tests used three API evaluations and local demo tools; see docs/live-validation.json. One v0.2 live organizer evaluation on `jev-1.13.0` classified four synthetic records as expected and verified grouping and the `other` review queue. See [organizer validation](docs/organizer-validation.md) for results and limits. This is control-flow validation and a small smoke test, not a broad Jev capability benchmark. Native TypeScript execution does not provide static type checking.
 
 ## API references
 
@@ -132,4 +132,4 @@ For machine-readable stdout, invoke `node src/cli.ts organize examples/organizer
 
 Define your own categories and records using [the sample input](examples/organizer.json). Agents with terminal access can follow [the agent usage contract](docs/agents.md). The organizer uses the existing harness loop, including model-response validation, permission checks, and completion verification. It is not an MCP server or an automatically installed skill.
 
-The original live smoke tests cover service recovery and document review. Organizer CLI tests use controlled fixtures; see the release notes for validation scope.
+The original live smoke tests cover service recovery and document review. Organizer tests include controlled offline fixtures and one live synthetic-record smoke test; see the release notes for validation scope.
