@@ -4,8 +4,11 @@ export type Question =
   | { type: 'score'; instructions: string; criteria: string[] };
 export type Answer =
   | { type: 'noul'; noul: number }
-  | { type: 'choice'; choice: string; probabilities: Record<string, number>; confidence: number }
-  | { type: 'score'; score: number; probabilities: Record<string, number>; confidence: number };
+  // rawProbabilities holds the provider's untouched values, and is present only
+  // when validation renormalized a rounding-sized shortfall in the total.
+  // See docs/provider-contract.md.
+  | { type: 'choice'; choice: string; probabilities: Record<string, number>; confidence: number; rawProbabilities?: Record<string, number> }
+  | { type: 'score'; score: number; probabilities: Record<string, number>; confidence: number; rawProbabilities?: Record<string, number> };
 export type Request = { state: unknown; questions: Record<string, Question> };
 export type Evaluation = { model: string; answers: Record<string, Answer>; usage?: { input_tokens: number; output_tokens: number } };
 export interface Evaluator { evaluate(request: Request, signal: AbortSignal): Promise<Evaluation> }
