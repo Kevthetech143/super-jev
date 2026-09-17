@@ -4,3 +4,5 @@ runs/
 .env.*
 !.env.example
 *.zip
+
+bench/out/
