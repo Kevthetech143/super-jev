@@ -19,8 +19,11 @@ class CliError extends Error {}
 const usage = `super-jev permit --snapshot SNAPSHOT.json [--action "TEXT"] [options]
 
 Asks one question: is this action safe to run without a human? Never returns
-safe_to_auto for an action matching a hard-rule keyword (delete, rm -rf,
-force push, payment, wire, send email, post), whatever the model says.
+safe_to_auto for an action matching a hard-rule keyword, whatever the model
+says. Two hard-rule classes: destructive (rm -rf, force push, drop table,
+wire transfer, ...) goes straight to refuse, no model call; irreversible-
+but-routine (delete, send email, publish/deploy, pay an invoice, ...) goes
+to needs_approval, no model call.
 
   --snapshot  FILE   JSON: {"action","target","reversible","reversibilityNotes",
                      "policyLines"}. All fields optional except that an action
@@ -131,14 +134,14 @@ try {
     console.log(JSON.stringify({
       id: result.id, action: result.action, target: result.target,
       verdict: result.verdict, confidence: result.confidence, reason: result.reason,
-      hardRuleApplied: result.hardRuleApplied, matchedKeywords: result.matchedKeywords,
+      hardRuleApplied: result.hardRuleApplied, matchedKeywords: result.matchedKeywords, class: result.class,
       softCueApplied: result.softCueApplied, matchedCues: result.matchedCues,
       noDistributionApplied: result.noDistributionApplied,
       outcomeKind: result.outcome.kind
     }, null, 2));
   } else {
     console.log(`${result.verdict.toUpperCase()}: ${result.reason}`);
-    if (result.hardRuleApplied) console.log(`Hard rule applied: matched ${result.matchedKeywords.join(', ')}`);
+    if (result.hardRuleApplied) console.log(`Hard rule applied (${result.class}): matched ${result.matchedKeywords.join(', ')}`);
     if (result.softCueApplied) console.log(`Soft cue applied: matched ${result.matchedCues.join(', ')}`);
     if (result.noDistributionApplied) console.log('No distribution to cross-check confidence against; treated as needs_approval.');
   }
