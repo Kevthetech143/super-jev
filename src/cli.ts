@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile, open, unlink } from 'node:fs/promises';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { run } from './loop.ts';
 import { Jev } from './jev.ts';
@@ -35,18 +36,25 @@ try {
     else throw new CliError('Unknown or repeated argument');
   }
   if (!mode) throw new CliError('Choose --live or --demo explicitly');
+  // Open without blocking, then decide from the descriptor itself. A blocking
+  // open of a named pipe waits for a writer that may never arrive, so the
+  // regular-file check would never be reached. O_NONBLOCK returns immediately
+  // for a FIFO, and checking the descriptor we already hold leaves no window
+  // for the path to be swapped between the check and the read.
+  let fd: number;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK); }
+  catch { throw new CliError('Cannot read input; provide a readable regular JSON file'); }
   // Read at most the limit plus one byte, even if a file grows while reading.
-  const source = await open(file, 'r');
   const buffer = Buffer.alloc(80_001);
   let length = 0;
   try {
-    if (!(await source.stat()).isFile()) throw new CliError('Input must be a regular JSON file');
+    if (!fstatSync(fd).isFile()) throw new CliError('Input must be a regular JSON file');
     while (length < buffer.length) {
-      const { bytesRead } = await source.read(buffer, length, buffer.length - length, null);
+      const bytesRead = readSync(fd, buffer, length, buffer.length - length, null);
       if (bytesRead === 0) break;
       length += bytesRead;
     }
-  } finally { await source.close(); }
+  } finally { closeSync(fd); }
   if (length > 80_000) throw new CliError('Input exceeds 80 KB; split into smaller batches');
   const raw = buffer.subarray(0, length).toString('utf8');
   let input: unknown;
