@@ -1,6 +1,6 @@
 # Using super-jev from an LLM agent
 
-This is a terminal interface, not an MCP server or installed agent skill. Any agent with authorized file/terminal access and Node 24+ can follow these instructions. Reading them does not grant permission to transmit private records.
+This is primarily a terminal interface, not an MCP server. Any agent with authorized file/terminal access and Node 24+ can follow these instructions. Reading them does not grant permission to transmit private records. One installable Claude Code skill does exist, covering the checks below (`gate`, `verify`, `sweep`, `bench`) — see [Agent front door (Claude Code skill)](#agent-front-door-claude-code-skill) at the end of this file. `organize`, below, has no skill wrapper yet; call it directly.
 
 ## Tool: organize
 
@@ -22,3 +22,29 @@ For a free offline demonstration run `npm run organize -- examples/organizer.jso
 Live output includes `mode`, the resolved `model`, and token `usage` when returned. No full trace is saved by this CLI. Use `organizer()` with `run()` and your own Journal to record/replay a workflow, taking care with sensitive data.
 
 This release does not implement priority scoring, file moves, database writes, recursive directory ingestion, arbitrary format extraction, automatic batching, or an MCP/API service. Use an adapter or another domain pack for those behaviors.
+
+## Agent front door (Claude Code skill)
+
+`skills/super-jev/` is an installable [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: one Python file, `superjev.py`, giving an agent a single command for the checks this repo already runs elsewhere, instead of four separate tools to remember. It never re-implements a check — every judgement belongs to the tool it wraps.
+
+Install by symlink or copy:
+
+```bash
+ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
+```
+
+| subcommand | wraps | what it needs |
+| --- | --- | --- |
+| `gate <evidence...> --draft <file>` / `--claim "..."` | a claim-gate tool | `SUPERJEV_GATE_CMD` (env), your own tool |
+| `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | a report-verify tool | `SUPERJEV_VERIFY_CMD` (env), your own tool |
+| `sweep <records.jsonl> --questions <q.json> --out <dir>` | `npm run sweep` | nothing — `SUPERJEV_REPO` defaults to this checkout |
+| `bench [--dry-run] [--stub]` | `npm run bench:live` | nothing to plan; `TYPESAFE_API_KEY` for a live run |
+| `permit`, `chain`, `fetch` | nothing yet | not built; each exits 6 and names its item in [`docs/wishlist.md`](wishlist.md) |
+| `ask "<one plain sentence>"` | the table above | a keyword router, no model call, no env |
+| `status` | — | reports which subcommands are live in this checkout |
+
+`gate` and `verify` are the two doors this repo does not ship a tool for. Point `SUPERJEV_GATE_CMD` and `SUPERJEV_VERIFY_CMD` at whatever claim-gate and report-verify tools you use; without either one, the matching subcommand names the missing path and the env var that replaces it, rather than failing inside a subprocess.
+
+Full reference, the exit-code table, and the `ask` routing keywords: [`skills/super-jev/SKILL.md`](../skills/super-jev/SKILL.md).
+
+Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill`. Fully offline; every wrapped door is a fake in the test suite.
