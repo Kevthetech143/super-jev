@@ -42,8 +42,14 @@ export type BatchPlan = {
   /** Record ids the budget cannot carry at all. Excluded from every call. */
   oversizedRecordIds: string[];
   budget: ContextBudget;
-  /** Tokens left for record payload after the reservations. */
+  /** Tokens one call may spend on records and, when counted, their questions. */
   perCallRecordAllowance: number;
+  /**
+   * True when the plan counted each record's actual question text instead of
+   * reserving a flat `reservedForQuestions`. Only a counted plan's estimate is
+   * comparable to what the request builder will actually send.
+   */
+  questionsCounted: boolean;
   totalEstimatedInputTokens: number;
 };
 
@@ -72,7 +78,13 @@ export type RecordOutcome = {
   /** Plain-words explanation of why this kind was chosen. */
   reason: string;
   /** One entry per pass, so disagreement is inspectable after the fact. */
-  passes: { pass: number; value?: string; confidence?: number }[];
+  passes: { pass: number; value?: string; confidence?: number; peak?: number }[];
+  /**
+   * True when no pass reported a usable probability distribution, so the gate
+   * had only the model's own confidence number to work with and could not
+   * cross-check it. Absent when at least one distribution was available.
+   */
+  confidenceOnly?: true;
 };
 
 export type CoverageManifest = {
