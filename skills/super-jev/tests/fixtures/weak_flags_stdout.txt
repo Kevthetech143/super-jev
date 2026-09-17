@@ -1,0 +1,15 @@
+
+jev claude-fable-5-1 · 1 chunk(s) · 900 in_tok · 400ms · 2026-09-17T17:41:00Z
+
+  c1   NOT_SUPPORTED   0.75  a minor aside the evidence happens not to cover
+       -> READ THE SOURCE — under the line, act on neither answer
+
+  leaked_internal    CLEAN                0.95
+  time_sensitive     NOT_TIME_SENSITIVE   0.90
+  self_contradictory CONSISTENT           0.92
+  overclaim          OVERCLAIMS           0.55   -> SOFTEN IT — the evidence shows less than the draft claims
+
+  2 of 5 need a human: c1, overclaim
+  the line is 0.80 — under it, re-read the source before you speak.
+
+  Jev advises. It never decides. Read the flags, then you decide.
