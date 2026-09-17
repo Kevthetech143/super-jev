@@ -242,6 +242,17 @@ Exit codes: `0` every case resolved, `2` at least one case is blocked on
 insufficient evidence (the missing roles are named in the output), `1` usage
 or failure.
 
+## Fetch: pull, not push (wishlist item 6)
+
+Score a whole catalog — a skills index, a tools catalog, a brain INDEX — against one plain request, and load only the top few entries instead of injecting the full catalog every turn.
+
+```bash
+npm run fetch -- --catalog examples/organizer.json --request "check my draft against the evidence" --dry-run
+npm run fetch -- --catalog my-catalog.json --request "pay the electric bill" --k 5 --out out --json
+```
+
+`--catalog` is a JSON array of `{"id","text"}` records (or `{"catalog":[...]}`). Under the hood, `runFetch` (`src/enhance/fetch.ts`) is one relevance question — the request folded into its instructions, never interpolated raw — run through the same `planSweep` / `runSweep` engine `npm run sweep` uses, so the per-call question cap and the named `records.<key>.text` references that keep the sweep path order-insensitive apply here unchanged. Every catalog record gets a `high`/`medium`/`low`/`none` relevance level and a confidence; the top `k` by score (ties broken by confidence, then by id) come back as `{id, score, confidence}`. `--dry-run` prints the plan and reaches no network. `--stub` runs the offline stub. Live mode needs `TYPESAFE_API_KEY`. `npm run bench:fetch` runs the offline hit@1 / hit@k check in `bench/fetch-cases.json` against a scripted stub — plumbing only, not a ranking-accuracy claim; see the file header.
+
 ## Agent front door (Claude Code skill)
 
 `skills/super-jev/` is a small [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: a single Python file, `superjev.py`, that gives an agent one command for every check in this repo instead of four things to remember. It is a thin wrapper — every judgement still belongs to the tool it wraps.
@@ -257,8 +268,9 @@ ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
 | `gate <evidence...> --draft <file>` / `--claim "..."` | checks a draft or claim against the evidence files behind it, via `SUPERJEV_GATE_CMD` |
 | `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | checks a "done" report against machine-collected evidence, via `SUPERJEV_VERIFY_CMD` |
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | runs `npm run sweep` in this repo, with proof nothing was skipped |
+| `fetch <request> --catalog <catalog.json>` | runs `npm run fetch` in this repo, scoring the catalog and returning the top ids |
 | `bench [--dry-run] [--stub]` | runs `npm run bench:live` in this repo, or prints the dry-run plan with no `TYPESAFE_API_KEY` |
-| `permit` / `chain` / `fetch` | not built yet; each names its own item in [`docs/wishlist.md`](docs/wishlist.md) and exits 6 instead of failing silently |
+| `permit` / `chain` | not built yet; each names its own item in [`docs/wishlist.md`](docs/wishlist.md) and exits 6 instead of failing silently |
 | `ask "<one plain sentence>"` | routes a plain request to the right subcommand above with a keyword table, no model call |
 | `status` | reports which subcommands are live in this checkout right now |
 
