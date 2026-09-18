@@ -796,12 +796,12 @@ other family.
 
 ## Pairing a label to a value — families 8, 9 and 10 (2026-09-18)
 
-`FLEET-FACTS-ROUND2.md` re-read the six fleet-set lies that survived
-families 6 and 7 and found five of them share one shape: the draft restates
+`FLEET-FACTS-ROUND2.md` re-read the fleet-set lies that survived
+families 6 and 7 and found that most of them share one shape: the draft restates
 a value that a tool in the window already stated **under a label**, and the
 mutation moves only the value. The naive form of that check — every number
-in the draft must appear verbatim in the window — was measured at 13 of 20
-truths on the fleet set and is unusable, because these bots legitimately
+in the draft must appear verbatim in the window — was measured on the fleet set
+and blocks far too many truths to be usable, because these bots legitimately
 quote session-level aggregates established upstream of the window. What
 makes the three families below safe is that a value is never compared on
 bare membership: it is compared only when an **identity anchor** ties it to
@@ -825,8 +825,8 @@ never compared against a plain count). Two values under one label means the
 check knows nothing and stays silent rather than pick one.
 
 **9. Score-list membership, scoped to one run.** A prior audit proposed and
-then withdrew this rule, having measured its window-wide form at 1 lie and 2
-truths — and it missed the very case it was built for, because the mutated
+then withdrew this rule, having measured its window-wide form — it blocked
+truths and missed the very case it was built for, because the mutated
 score occurred legitimately elsewhere in the window under a different tool's
 output. Scoping membership to **one run's own `conf=` receipt lines** rather
 than to the whole window is what fixes it. The family needs at least two
@@ -846,19 +846,19 @@ synonym table, so it ties two words that are the same word and nothing else.
 All three name a match as `SUPPORTED` and a mismatch as
 `CONTRADICTED_BY_FACT`, in the same sentence shape as every other family, so
 a fact reads the same whether the draft is honest or not. Measured offline
-over all 99 recorded cases across the three benches, with no judge call
+over every recorded case across the three benches, with no judge call
 (`skills/super-jev/tests/replay_fact_block_sweep.py`): together they fire on
-**5 fleet-set lies and 0 truths in any of the three sets**, taking the fleet
-set from 4 of 10 lies blocked to 9 of 10. The tenth is not a numbers case —
+**the fleet-set lies of this shape and on no truth in any of the three sets**.
+The one remaining fleet-set lie is not a numbers case —
 the draft's mutated token is present in the window under a genuinely related
 finding, and separating the two needs a semantic read, so it stays with the
 judge.
 
 One related safety change came out of the same measurement.
 `derive_window_facts` now orders `CONTRADICTED_BY_FACT` sentences ahead of
-everything else before applying `DERIVED_FACTS_CAP`. Set 2's t36 derives 23
-`SUPPORTED` facts from the result-table and merge families alone, one under
-the cap of 24, so on a slightly busier turn a plain first-come truncation
+everything else before applying `DERIVED_FACTS_CAP`. One recorded case already
+derives nearly as many `SUPPORTED` facts from the result-table and merge
+families alone as the cap allows, so on a slightly busier turn a plain first-come truncation
 could have dropped the one fact the deterministic block arm reads and
 silently turned a block into an allow. Ordering by verdict makes that
 impossible.
