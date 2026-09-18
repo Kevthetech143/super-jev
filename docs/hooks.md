@@ -1017,6 +1017,20 @@ prints recent calls and per-door counts. Read it before you trust any claim on
 this page, including ours. It is the only record that distinguishes "the gate
 approved this" from "the gate could not look".
 
+**Every record also carries `bot` and `origin`.** `bot` is
+`CLAW4MAC_BOT_ID` or `CLAUDE_BOT_ID` from the environment if either is
+set, else the claw4mac project-dir segment out of the hook payload's
+`transcript_path` (the part after `agent-cwd-` up to the next path
+separator — e.g. `claw4mac-primary`), else `"unknown"`. `origin` is
+`"bench"` when `SUPERJEV_BENCH=1` or the hook payload's `session_id`
+starts with `bench-`, else `"live"`. Neither field changes what a hook
+does — they are set once a real decision is already final, the same
+best-effort, never-raises contract the rest of the ledger writer has —
+they only say which of possibly many Claude Code seats produced the
+record, and whether it came from a real session or a bench/replay run.
+A record from before this field existed simply has no `bot`/`origin` key;
+readers should treat a missing key the same as `"unknown"`/`"live"`.
+
 **Watch the ledger, don't just keep it.** A recorded line is not the same
 thing as a noticed one. On 2026-09-16 a hook bug silently routed 9 of 40
 replies down the "unchecked" path — no tool evidence was derivable, so the
@@ -1121,6 +1135,12 @@ anything else about the write fails), one line goes to stderr and the
 gate/verify decision that already happened is completely unaffected — the
 catch ledger is a report on a decision, never part of making one.
 
+Every record also carries `bot` and `origin`, same derivation and same
+best-effort contract as the call ledger's own `bot`/`origin` (see "The
+ledger" above) — useful here because more than one Claude Code seat can
+share this same catch ledger, and a human tagging records benefits from
+knowing which seat produced the one they are looking at.
+
 **What still writes no record, on purpose.** Every fail-open path in this
 file — bad/empty/non-JSON stdin, no usable text field, a non-`gate`/
 `non-verify`/`non-prompt-verify` door, a non-Agent tool call, a spawn dict
@@ -1128,8 +1148,12 @@ or launch-ack shape that never reaches a verdict, the outer
 unexpected-exception catch — stays unrecorded. Nothing there ever reached a
 real decision, so there is nothing to tag.
 
-**Tagging.** `superjev.py catch list [--since 24h] [--untagged]` prints one
-line per record so you can find the id. `superjev.py catch tag <id>
+**Tagging.** `superjev.py catch list [--since 24h] [--untagged] [--bot
+<id>]` prints one line per record so you can find the id, now including a
+`bot=<id>` column (`bot=unknown` for a record with no `bot` field —
+either a pre-existing record from before this field existed, or one where
+neither the env vars nor the transcript_path derivation found anything).
+`--bot <id>` narrows the list to that one bot. `superjev.py catch tag <id>
 fair|false|miss "why"` records a human verdict on that one decision:
 
 - `fair` — the block was right. A real overclaim or contradiction, caught.
@@ -1175,7 +1199,8 @@ A record with a missing or unparseable timestamp is excluded from a real
 `--since` window (never silently treated as "recent enough to keep") and
 counted on its own `undated: N` line instead.
 
-**The numbers.** `superjev.py catch report [--since 7d]` prints:
+**The numbers.** `superjev.py catch report [--since 7d] [--bot <id>]`
+prints:
 
     fair catches: N
     false stops: N
@@ -1184,6 +1209,9 @@ counted on its own `undated: N` line instead.
     blocks suppressed: N
     judge advisories: N
     undated: N          (only printed when --since is given)
+    by bot:              (only printed when --bot is NOT given)
+      <bot>: N
+      ...
 
 Fair/false/miss/untagged is the same scoreboard as before: how often the
 gate is catching something real, how often it is wrongly getting in the
@@ -1192,7 +1220,10 @@ different thing entirely — a count of `advisory-forced` records, a real
 block that the stop_hook_active second pass demoted to advisory-only rather
 than blocking twice. By itself, being suppressed is not folded into false
 stops or misses, because nothing has been judged right or wrong yet — the
-retry just held a block back.
+retry just held a block back. `--bot <id>` narrows every number above to
+that one bot's records; without it, the report instead ends with a `by
+bot:` breakdown — record counts per bot, most-records-first — so more than
+one seat sharing this ledger stays visible as a whole and per-bot both.
 
 ## Judge-advisory mode
 

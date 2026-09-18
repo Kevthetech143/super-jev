@@ -48,6 +48,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1855,6 +1856,57 @@ def _npm_missing_refusal(json_mode, door):
     return 1
 
 
+# The hook payload (stdin JSON from a real Claude Code Stop/PostToolUse/
+# UserPromptSubmit event) for the invocation currently running, if any —
+# set once by cmd_hook/cmd_hook_prompt_verify right after stdin is parsed,
+# and read back by _current_bot_id/_current_origin below so every ledger
+# write in this same process (including the ones inside run_door, which
+# fire from deep inside cmd_gate/cmd_verify) can attribute itself without
+# payload having to be threaded through every call site. A manual CLI
+# invocation (no hook) leaves this None, which both helpers treat as "no
+# hook context" rather than an error.
+_ACTIVE_HOOK_PAYLOAD = None
+
+
+def _bot_id_from_transcript_path(transcript_path):
+    """The claw4mac project-dir segment out of a transcript_path — the
+    part after "agent-cwd-" up to the next path separator, e.g.
+    "claw4mac-primary" out of ".../-Users-admin--ai-wrapper-agent-cwd-
+    claw4mac-primary/<uuid>.jsonl". None if transcript_path is not a
+    string, or carries no such segment."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    m = re.search(r'agent-cwd-([^/]+)', transcript_path)
+    return m.group(1) if m else None
+
+
+def _current_bot_id():
+    """The bot id a ledger entry attributes itself to: CLAW4MAC_BOT_ID or
+    CLAUDE_BOT_ID from the environment if either is set, else derived from
+    the active hook payload's transcript_path (see
+    _bot_id_from_transcript_path), else "unknown"."""
+    env_bot = os.environ.get("CLAW4MAC_BOT_ID") or os.environ.get("CLAUDE_BOT_ID")
+    if env_bot:
+        return env_bot
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    derived = _bot_id_from_transcript_path(payload.get("transcript_path"))
+    return derived or "unknown"
+
+
+def _current_origin():
+    """"bench" when SUPERJEV_BENCH=1 in the environment, or the active hook
+    payload's session_id starts with "bench-"; "live" otherwise (including
+    every ordinary hook firing from a real Claude Code session, and every
+    manual CLI invocation with no bench markers)."""
+    if os.environ.get("SUPERJEV_BENCH") == "1":
+        return "bench"
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith("bench-"):
+        return "bench"
+    return "live"
+
+
 def ledger_append(entry):
     """Append one JSONL line to the call ledger. Never raises — a ledger
     problem must never break a door — but an unwritable ledger is not
@@ -1863,8 +1915,11 @@ def ledger_append(entry):
 
     Every entry gets a short unique `id` (if it does not already carry
     one) — `feedback --ledger-id` and the calibration export both address
-    a ledger line by this."""
+    a ledger line by this. Every entry also gets `bot` and `origin` (if
+    not already carrying them) — see _current_bot_id/_current_origin."""
     entry.setdefault("id", uuid.uuid4().hex[:12])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -1916,8 +1971,11 @@ def catch_ledger_append(entry):
     Exception, not just OSError (a bad entry that json.dumps chokes on, a
     permissions error, anything at all), because this call sits strictly
     after a real decision has already been returned and must never
-    propagate."""
+    propagate. Gets `bot` and `origin` the same way ledger_append does, if
+    not already carrying them."""
     entry.setdefault("id", uuid.uuid4().hex[:10])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -2316,6 +2374,9 @@ def _cmd_catch_list(a):
     records, undated = _catch_filter_since(records, since)
     if getattr(a, "untagged", False):
         records = [r for r in records if r.get("tag") is None]
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     if not records:
         print("catch list: no records")
     else:
@@ -2323,8 +2384,9 @@ def _cmd_catch_list(a):
             reasons = rec.get("reasons") or []
             first_reason = reasons[0] if reasons else ""
             tag = rec.get("tag") or "-"
+            bot = rec.get("bot") or "unknown"
             print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
-                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  bot={bot:14s}  {first_reason}")
     if since and undated:
         print(f"catch list: {undated} undated record(s) excluded from the --since window")
     return 0
@@ -2403,6 +2465,9 @@ def _cmd_catch_report(a):
                               "showing all time")
     records = _catch_records()
     records, undated = _catch_filter_since(records, since)
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     fair = sum(1 for r in records if r.get("tag") == "fair")
     false = sum(1 for r in records if r.get("tag") == "false")
     miss = sum(1 for r in records if r.get("tag") == "miss")
@@ -2442,6 +2507,12 @@ def _cmd_catch_report(a):
               "fair/false answer different questions, see docs/hooks.md)")
     if since:
         print(f"undated: {undated}")
+    if not bot_filter:
+        by_bot = Counter(r.get("bot") or "unknown" for r in records)
+        if by_bot:
+            print("by bot:")
+            for bot, n in sorted(by_bot.items(), key=lambda kv: (-kv[1], kv[0])):
+                print(f"  {bot}: {n}")
     return 0
 
 
@@ -6697,6 +6768,8 @@ def cmd_hook_prompt_verify(a):
         except (ValueError, TypeError):
             _hook_log("prompt-verify: non-JSON stdin — fail-open", skipped=True)
             return 0
+        global _ACTIVE_HOOK_PAYLOAD
+        _ACTIVE_HOOK_PAYLOAD = payload
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             _hook_log("prompt-verify: no usable 'prompt' field — fail-open", skipped=True)
@@ -7219,6 +7292,9 @@ def cmd_hook(a):
     except (ValueError, TypeError):
         _hook_log("non-JSON stdin — fail-open", skipped=True)
         return 0
+
+    global _ACTIVE_HOOK_PAYLOAD
+    _ACTIVE_HOOK_PAYLOAD = payload
 
     evidence_tmp_path = None
 
@@ -8685,6 +8761,8 @@ def build_parser():
     ck_list = ck_subs.add_parser("list", help="one line per catch-ledger record")
     ck_list.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
     ck_list.add_argument("--untagged", action="store_true", help="only untagged records")
+    ck_list.add_argument("--bot", default=None, help="only records from this bot id "
+                                                      "(see the `bot` field, e.g. primary)")
     ck_list.set_defaults(func=cmd_catch, catch_action="list")
     ck_tag = ck_subs.add_parser("tag", help="fair = block was right; false = block was "
                                             "wrong; miss = an allow let a lie through")
@@ -8695,6 +8773,8 @@ def build_parser():
     ck_report = ck_subs.add_parser("report", help="fair catches, false stops, misses, "
                                                    "plus untagged count")
     ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_report.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. primary)")
     ck_report.set_defaults(func=cmd_catch, catch_action="report")
     ck.set_defaults(func=cmd_catch, catch_action=None)
 
