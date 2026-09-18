@@ -851,15 +851,52 @@ fence line as a whole matches none of the arm's or the derived facts' per-line
 patterns whatever id the worker chose. The raw id is carried nowhere else in
 the window: it is worker text, the derived-fact families read every line
 without the walker, and the sanitised token keeps enough for a reader to know
-who spoke. Reading back, any line that merely *begins* `REPORT FROM` opens a
-body even when it does not parse (fail closed), and a body opened that way
-closes on any `END REPORT FROM` line. At every tail-keep truncation, the first
+who spoke. Reading back, the canonical strict fence opens a body wherever it
+appears, and a line that merely *begins* `REPORT FROM` — one the strict
+matcher rejects — opens a body too, fail closed, but **only inside a
+section the composer can emit a report in**: `[current turn reports]`, or
+a `[previous turn -N]` block after the `[relayed reports in this turn]`
+mark the composer now writes ahead of that turn's first report
+(`_prev_turn_items`, `_report_marker_who`'s `allow_loose`). The scope is
+the fix for a sixth review blocker: unconditional, the rule meant any
+tool result that merely *printed* such a line — a `cat` of a saved
+report, a transcript dump, a grep hit — turned every later line of that
+same result into report prose, which demoted a genuine
+`{"number": N, "state": "OPEN"}` sitting beside it to a prose signal and
+let a bare `gh pr merge N` invocation line from an earlier result win the
+arm. A body opened either way closes on any `END REPORT FROM` line. The
+mark is itself quoted out of every report body, and a forged copy inside
+a tool result can only switch the loose rule ON, which blocks more, never
+less. At every tail-keep truncation, the first
 line of the kept tail is quoted with `> ` **unconditionally** whenever the cut
 fell inside a line, because a fragment is never a genuine line and its shape
 is not something to guess at; and every tail-keep (both builders and the
 whole-window safety cut) now shrinks its slice until the *repaired* tail fits
 the budget (`_fence_safe_tail`), since the repair adds bytes and a block that
 overshot was being sliced a second time with its opener cut off.
+
+**A command invocation is not an outcome (2026-09-18, round 7).** A
+state-bearing line that an in-body rule demotes to prose keeps a separate
+"state-bearing" marker, because the demotion says how far the line may be
+trusted and not whether it speaks to the outcome at all; so when the
+strongest MERGED signal carries no state value of its own — a bare
+`gh pr merge N` invocation receipt — and any state-bearing not-merged
+signal exists at any strength, the pair is treated as unordered, which is
+a tie, and the arm fails closed on the not-merged signal with its own
+note. An invocation-only receipt can never be the sole basis for allowing
+a merge claim.
+
+**The receipt floor at a tail-keep (2026-09-18, round 7).** At tiny
+budgets the fence repair's own two lines can eat most of what there is,
+so `_fence_safe_tail`'s shrinking slice could fall past the only genuine
+`[from: ...]` receipt in the text, or overshoot far enough that the caller
+dropped the whole previous turn — leaving the window a worker's claim and
+none of the evidence. It now refuses to shrink below the newest genuine
+receipt header: if the normal slice loses it, the fallback starts at that
+header and carries no report body at all. The tradeoff, plainly: receipts
+are evidence and reports are claims, so when both cannot fit the receipt
+stays and the report goes, at the cost of a tiny-budget window carrying a
+receipt line with none of the narrative around it.
 
 **Accepted tradeoff.** Strength is compared before recency, so a receipt
 sitting in an *older* window section still outranks *current-turn* prose

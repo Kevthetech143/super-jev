@@ -902,7 +902,7 @@ def _count_pairing(draft_text, evidence_text):
 
 
 def _pr_state_signals(pr_num, evidence_text):
-    """[(rank, pos, kind, norm_state, raw_state, strength), ...] — every
+    """[(rank, pos, kind, norm_state, raw_state, strength, state_bearing), ...] — every
     PR-state signal about `pr_num` found in `evidence_text`, oldest scan
     order first. `kind` is 'receipt' (machine output: a `gh pr view
     --json` state field, a `"mergedAt"` field, or a `MERGED`-labelled
@@ -939,7 +939,15 @@ def _pr_state_signals(pr_num, evidence_text):
     `{"number": 52, "state": "OPEN"}` is still a claim about #52 that the
     arm must weigh, and dropping it on the floor was how a report could
     leave the arm with no signal at all and so allow the draft
-    (PR-STATE-REVIEW2 R3)."""
+    (PR-STATE-REVIEW2 R3). `state_bearing` is the seventh field and
+    records that fact separately from `strength`: True whenever the LINE
+    itself carries a machine state value (a JSON `"state"`/`"mergedAt"`
+    field, a literal `MERGED` line), whether or not an in-body rule then
+    demoted it to prose, and False for an English paraphrase and for a
+    bare `gh pr merge N` invocation. Strength says how far the line may
+    be trusted; `state_bearing` says whether it speaks to the OUTCOME at
+    all, and `_pr_mismatch_verdict` needs both (2026-09-18, sixth
+    review)."""
     signals = []
     pr_str = str(pr_num)
     for pos, raw, _stripped, _label, rank, in_report in \
@@ -950,9 +958,9 @@ def _pr_state_signals(pr_num, evidence_text):
             raw_state = jm.group(2).lower()
             norm = "MERGED" if raw_state == "merged" else "NOT_MERGED"
             if in_report:
-                signals.append((rank, pos, "prose", norm, raw_state, 0))
+                signals.append((rank, pos, "prose", norm, raw_state, 0, True))
             else:
-                signals.append((rank, pos, "receipt", norm, raw_state, 2))
+                signals.append((rank, pos, "receipt", norm, raw_state, 2, True))
 
         if _FACT_MERGE_RECEIPT_RE.search(raw):
             is_state_line = bool(re.match(r'^\s*MERGED\b', raw, re.IGNORECASE)) \
@@ -968,13 +976,14 @@ def _pr_state_signals(pr_num, evidence_text):
                     mm = rx.search(raw)
                     if mm and mm.group(1) == pr_str:
                         signals.append((rank, pos, kind, "MERGED",
-                                        "merged", strength))
+                                        "merged", strength, is_state_line))
                         break
 
         om = re.search(r'#' + re.escape(pr_str) + r'\b[^.\n]{0,40}?\b(open|not merged|draft)\b',
                        raw, re.IGNORECASE)
         if om:
-            signals.append((rank, pos, "prose", "NOT_MERGED", om.group(1).lower(), 0))
+            signals.append((rank, pos, "prose", "NOT_MERGED",
+                            om.group(1).lower(), 0, False))
     return signals
 
 
@@ -1010,7 +1019,15 @@ def _pr_mismatch_verdict(draft_text, evidence_text):
     explain-only `note` naming the ambiguity. That covers all three
     unorderable shapes — neither signal has a header, only one does, or
     both sit in one section — because in none of them does the arm know
-    which fact is newer, and not knowing is never license to allow."""
+    which fact is newer, and not knowing is never license to allow.
+
+    One more fail-closed rule sits beside recency (2026-09-18, sixth
+    review): when the strongest MERGED signal carries no state value of
+    its own — a bare `gh pr merge N` invocation receipt — and ANY
+    state-bearing not-merged signal exists at any strength, the pair is
+    treated as unorderable and the arm blocks on the not-merged side with
+    its own note. An invocation receipt can never be the sole basis for
+    allowing a merge claim."""
     if not draft_text or not evidence_text:
         return None, None
     m = _PR_MERGED_CLAIM_RE.search(draft_text)
@@ -1022,7 +1039,7 @@ def _pr_mismatch_verdict(draft_text, evidence_text):
         return None, None
 
     def sort_key(sig):
-        rank, pos, _kind, _norm, _raw, strength = sig
+        rank, pos, _kind, _norm, _raw, strength = sig[:6]
         # `-inf` here is a tie-break placeholder ONLY. It never decides a
         # conflict: any conflict this ordering would settle against an
         # unranked signal is caught as unorderable just below.
@@ -1041,6 +1058,26 @@ def _pr_mismatch_verdict(draft_text, evidence_text):
         not_merged = best if best[3] != "MERGED" else tied_conflicts[0]
         return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
                f"{not_merged[4]}"), note
+    # Rule B (2026-09-18, sixth review). A `gh pr merge N` line is a
+    # COMMAND INVOCATION: it proves the command was typed, never that it
+    # succeeded. It may therefore never be the sole basis for ALLOWING a
+    # merge claim against a line that actually carries a state value —
+    # not even when an in-body rule demoted that state line to prose,
+    # because the demotion is a statement about how far the line may be
+    # TRUSTED, not about whether it speaks to the outcome. Without this,
+    # anything that demoted a genuine `{"number": N, "state": "OPEN"}` to
+    # strength 0 let the invocation line win outright on strength, so the
+    # same-strength tie rule above never fired at all. Treated as
+    # unorderable — a tie — and so failed closed on the not-merged side.
+    if best[3] == "MERGED" and not best[6]:
+        state_not_merged = [s for s in signals if s[3] != "MERGED" and s[6]]
+        if state_not_merged:
+            note = (f"PR state ambiguous: PR #{pr_num}'s strongest MERGED signal "
+                   "carries no state value (a command invocation only) while a "
+                   "state-bearing not-merged signal is present — failing closed "
+                   "on the not-merged signal")
+            return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
+                   f"{state_not_merged[0][4]}"), note
     if best[3] == "MERGED":
         return None, None
     return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
@@ -3251,6 +3288,25 @@ def _previous_turn_windows(records, current_start, n_turns):
             _previous_turn_spans(records, current_start, n_turns)]
 
 
+def _prev_turn_items(texts, reports):
+    """The ordered render items for ONE previous turn: that turn's tool
+    results first, then the `[relayed reports in this turn]` mark and
+    that turn's relayed report blocks.
+
+    The mark is the whole point (2026-09-18, sixth review). A previous
+    turn's block carries receipts and reports under a single
+    `[previous turn -N]` header, and the walker needs to know which is
+    which from STRUCTURE the composer wrote, not from the text of the
+    lines themselves. It is attached to the first report rather than
+    added as its own item so the builders' `---` join does not put a
+    section rule between the mark and the report it marks."""
+    texts = list(texts or [])
+    reports = list(reports or [])
+    if not reports:
+        return texts
+    return texts + [REPORTS_REGION_LABEL + "\n" + reports[0]] + reports[1:]
+
+
 def _build_prev_turns_block_detailed(windows, budget):
     """Renders `windows` (most-recent-first list of list[str], see
     `_previous_turn_windows`) as one "[previous turn -N]" block per turn,
@@ -3643,6 +3699,22 @@ _WINDOW_SECTION_RE = re.compile(
     r'^\[(?:current turn|current turn reports|previous turn -\d+|session receipts)\]\s*$')
 _SECTION_SEPARATOR_RE = re.compile(r'^\s*(?:={3,}|-{3,})\s*$')
 
+# 2026-09-18 (PR-STATE-REVIEW6) — the composer's structural mark for
+# "the relayed-report part of this block starts here".
+#
+# Why it exists: the walker decides whether a `REPORT FROM`-looking line
+# may OPEN a report body from the SECTION it sits in, never from its own
+# text (see `_iter_window_report_lines`). `[current turn reports]` is
+# already a whole section of reports, but a `[previous turn -N]` block
+# mixes that turn's tool receipts and that turn's reports under one
+# header, so without a mark the only way to tell the two apart inside it
+# would be the text itself — which is exactly what a tool result that
+# prints a saved report can forge. `_prev_turn_items` emits this line
+# once, immediately before the first report of the turn, and
+# `_neutralise_report_body` quotes it out of every body.
+REPORTS_REGION_LABEL = "[relayed reports in this turn]"
+_REPORTS_REGION_RE = re.compile(r'^\[relayed reports in this turn\]\s*$')
+
 
 def _render_receipt_identity(cmd, cwd):
     """" [from: <cmd> @ <cwd>]", or "" when neither is known."""
@@ -3922,14 +3994,32 @@ _REPORT_END_LINE_RE = re.compile(
 REPORT_END_LABEL = "END REPORT FROM {who} (unverified worker claim)"
 
 
-def _report_marker_who(stripped):
+def _report_marker_who(stripped, allow_loose=True):
     """(is_opener, who) for one stripped window line. `who` is the parsed
     label token for a strict opener, or None for a loose `REPORT FROM`
     line that does not parse (an opener all the same — fail closed).
-    `(False, None)` for any other line."""
+    `(False, None)` for any other line.
+
+    `allow_loose` is the SCOPE of the fail-closed loose rule (2026-09-18,
+    sixth review). The canonical strict fence is composer output wherever
+    it appears, so it always opens. A loose `REPORT FROM` line is only
+    composer output in a place the composer can emit a report — inside
+    `[current turn reports]` or after the `[relayed reports in this turn]`
+    mark in a previous-turn block — so only readers that know they are in
+    such a section pass True. Everywhere else a `REPORT FROM`-looking
+    line is ordinary text, because the round-6 unconditional version let
+    any tool result that merely PRINTED such a line (a `cat` of a saved
+    report, a transcript dump, a grep hit) turn the rest of that same
+    tool result into report prose — which demoted a genuine
+    `{"number": N, "state": "OPEN"}` in it to strength 0 and let a bare
+    `gh pr merge N` invocation line win the arm. The truncation-repair
+    path still passes the default True: there a loose marker means "a
+    fence this cut damaged", and re-fencing it is the fail-closed move."""
     rm = _REPORT_MARKER_LINE_RE.match(stripped)
     if rm:
         return True, rm.group(1)
+    if not allow_loose:
+        return False, None
     lm = _REPORT_FENCE_LOOSE_RE.match(stripped)
     if lm and not lm.group(1):
         return True, None
@@ -3954,7 +4044,7 @@ def _report_end_closes(stripped, who):
 # quote marker a human reads as "the worker wrote this", and it stops every
 # one of those anchored patterns from matching.
 _REPORT_BODY_NEUTRALISE_RES = (
-    _WINDOW_SECTION_RE, _SECTION_SEPARATOR_RE,
+    _WINDOW_SECTION_RE, _SECTION_SEPARATOR_RE, _REPORTS_REGION_RE,
     _REPORT_MARKER_LINE_RE, _REPORT_END_LINE_RE, _REPORT_FENCE_LOOSE_RE,
 )
 
@@ -4003,8 +4093,7 @@ def _report_fence_state_at_cut(head_text, keep_bytes):
     line rather than only checking its own first line — a previous
     turn's joined texts carry any tool results ahead of that turn's
     reports (see `_previous_turn_windows` /
-    `_derive_evidence_text_from_transcript`'s `prev_windows = texts +
-    prev_reports[i]`), so a report a tail-keep cuts into can start
+    `_prev_turn_items`), so a report a tail-keep cuts into can start
     partway through the turn, not just at position zero. Also correct
     for the position-zero case a single whole report (as
     `_build_reports_block` tail-cuts) is in, so both truncation sites
@@ -4100,6 +4189,54 @@ def _repair_report_tail(head_text, keep_bytes, tail_text):
     return tail_text
 
 
+def _receipt_floor_slice(text):
+    """(slice_text, header_line) keeping `text`'s LAST genuine
+    `[from: ...]` receipt header line and every line after it that is not
+    inside a report body, or None when `text` carries no such header.
+
+    "Genuine" means the header sits OUTSIDE every report body, tracked
+    with the same fence pair the rest of this file uses — a `[from: ...]`
+    line a worker typed into their own report is not a receipt, and the
+    composer does not quote that shape out of bodies.
+
+    This is the floor `_fence_safe_tail` will not shrink below. See the
+    tradeoff note there."""
+    lines = (text or "").splitlines(keepends=True)
+    in_body, who = False, None
+    body_lines = set()
+    last = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if in_body:
+            if _SECTION_SEPARATOR_RE.match(stripped):
+                in_body, who = False, None
+                continue
+            body_lines.add(i)
+            if _report_end_closes(stripped, who):
+                in_body, who = False, None
+            continue
+        is_open, w = _report_marker_who(stripped)
+        if is_open:
+            in_body, who = True, w
+            body_lines.add(i)
+            continue
+        if stripped.startswith("[from:") and _RECEIPT_IDENTITY_RE.search(stripped):
+            last = i
+    if last is None:
+        return None
+    kept = [l for i, l in enumerate(lines)
+            if i >= last and i not in body_lines]
+    # Dropping the report bodies can leave the separators and blank lines
+    # that used to sit between them dangling at the end. They carry
+    # nothing and they cost budget, so trim them.
+    while kept and (not kept[-1].strip()
+                    or _SECTION_SEPARATOR_RE.match(kept[-1].strip())):
+        kept.pop()
+    if not kept:
+        return None
+    return "".join(kept), lines[last].strip()
+
+
 def _fence_safe_tail(text, keep_bytes):
     """(tail, bytes_cut) — the freshest bytes of `text` that fit in
     `keep_bytes` AFTER `_repair_report_tail` has re-fenced and quoted
@@ -4116,17 +4253,48 @@ def _fence_safe_tail(text, keep_bytes):
     site goes through here, and the whole-window cut never fires on a
     fenced body. Converges because the repair's overhead is bounded (two
     fence lines of at most REPORT_WHO_MAX_CHARS plus a fixed suffix, and
-    two quote bytes) and each round shrinks the slice by the overshoot."""
+    two quote bytes) and each round shrinks the slice by the overshoot.
+
+    THE RECEIPT FLOOR (2026-09-18, sixth review, low severity). At tiny
+    budgets — measured between roughly 60 and 400 bytes — the repair's
+    own two fence lines can eat most of the budget, so the shrinking
+    slice fell past the only genuine `[from: ...]` receipt in `text`, or
+    overshot so far that the caller dropped the whole previous turn. The
+    window then kept, at best, a worker's claim and none of the evidence,
+    which flipped some verdicts from block to allow. So: if the normal
+    slice loses the newest genuine receipt header, fall back to a slice
+    that starts AT that header and carries no report body at all.
+
+    The tradeoff, stated plainly: receipts are evidence and reports are
+    claims, so when both cannot fit, the receipt stays and the report
+    goes. The cost is real — a tiny-budget window can now carry a receipt
+    line with none of the narrative around it, and the report that was
+    dropped may have said something the reader wanted. The benefit is
+    that the window keeps the one kind of line the arm is allowed to
+    trust, which is the thing a block decision has to rest on. `bytes_cut`
+    on this path is the size difference rather than a prefix length,
+    since the fallback drops lines from the middle too; it is used only
+    for `--explain` accounting."""
     raw = (text or "").encode("utf-8")
     keep = min(keep_bytes, len(raw))
+    got = None
     while keep > 0:
         tail = raw[-keep:].decode("utf-8", errors="ignore")
         repaired = _repair_report_tail(text, keep, tail)
         size = len(repaired.encode("utf-8"))
         if size <= keep_bytes:
-            return repaired, len(raw) - len(tail.encode("utf-8"))
+            got = (repaired, len(raw) - len(tail.encode("utf-8")))
+            break
         keep -= (size - keep_bytes)
-    return None
+    floor = _receipt_floor_slice(text)
+    if floor is None:
+        return got
+    floor_text, header = floor
+    if got is not None and header and header in got[0]:
+        return got  # the newest receipt survived the normal slice
+    if floor_text.strip() and len(floor_text.encode("utf-8")) <= keep_bytes:
+        return floor_text, len(raw) - len(floor_text.encode("utf-8"))
+    return got
 
 
 def _section_emit_slot(label):
@@ -4207,9 +4375,14 @@ def _iter_window_report_lines(text):
     * A section header is only accepted as a boundary when it is OUTSIDE a
       report body and its `_section_emit_slot` steps strictly upward from
       the last accepted header. Anything else is prose.
-    * Any line that begins `REPORT FROM` opens a body — the strict fence
-      the composer emits, or a loose one that fails to parse (fail
-      closed; see `_report_marker_who`). It never reads as prose.
+    * The composer's canonical strict fence always opens a body. A LOOSE
+      `REPORT FROM` line — one the strict matcher rejects — opens a body
+      only inside a section the composer can emit a report in:
+      `[current turn reports]`, or a previous-turn block after its
+      `[relayed reports in this turn]` mark (`_report_marker_who`'s
+      `allow_loose`). Elsewhere it is ordinary text: the round-6
+      unconditional version let a tool result that merely printed such a
+      line turn its own later lines into report prose.
     * A report body ends at its own closing fence (`_report_block_close`),
       at a section separator, or at end of text — and at nothing else. In
       particular a blank line no longer ends a body (a worker writing a
@@ -4223,6 +4396,7 @@ def _iter_window_report_lines(text):
     label = None
     slot = None
     in_report = False
+    in_reports_region = False
     who = None
     close_at = None
     for pos, raw in enumerate(lines, start=1):
@@ -4242,13 +4416,28 @@ def _iter_window_report_lines(text):
                 new_slot = _section_emit_slot(stripped)
                 if new_slot is not None and (slot is None or new_slot > slot):
                     label, slot = stripped, new_slot
+                    # A new accepted section closes any reports region:
+                    # `[current turn reports]` IS one, everything else
+                    # starts as tool-result/receipt territory until the
+                    # composer's own mark says otherwise.
+                    in_reports_region = (stripped == "[current turn reports]")
                     continue
                 # A header the composer could not have emitted here.
                 # Fall through: it is prose, and it moves no boundary.
-            is_open, who = _report_marker_who(stripped)
+            if _REPORTS_REGION_RE.match(stripped):
+                # Composer structure (see REPORTS_REGION_LABEL): consumed,
+                # never yielded. A forged copy inside a tool result can
+                # only ENABLE the loose-opener rule, which blocks more,
+                # never less — and a forged copy inside a report body is
+                # quoted out on the way in.
+                in_reports_region = True
+                continue
+            is_open, who = _report_marker_who(
+                stripped, allow_loose=in_reports_region)
             if is_open:
-                # A strict fence, or a loose `REPORT FROM` line that does
-                # not parse (who None): either opens a body — fail closed.
+                # The strict fence anywhere, or a loose `REPORT FROM`
+                # line inside a reports region (who None): either opens a
+                # body — fail closed.
                 in_report = True
                 close_at = _report_block_close(lines, i, who)
                 continue
@@ -5791,7 +5980,8 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     prev_spans = _previous_turn_spans(records, start, prev_turns) if start is not None else []
     prev_reports = (_previous_turn_reports(records, start, prev_turns)
                     if start is not None else [])
-    prev_windows = [texts + (prev_reports[i] if i < len(prev_reports) else [])
+    prev_windows = [_prev_turn_items(texts,
+                                     prev_reports[i] if i < len(prev_reports) else [])
                     for i, (_a, _b, texts) in enumerate(prev_spans)]
 
     meta = {"prev_turns_found": len(prev_windows), "prev_bytes": 0, "prev_dropped": 0,
@@ -5807,8 +5997,9 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
            "prev_turn_detail": [
                {"turn": i, "records": f"{a}-{b - 1}", "tool_results": len(texts),
                 "reports": len(prev_reports[i - 1]) if i - 1 < len(prev_reports) else 0,
-                "bytes": len(("\n\n---\n\n".join(
-                    texts + (prev_reports[i - 1] if i - 1 < len(prev_reports) else []))
+                "bytes": len(("\n\n---\n\n".join(_prev_turn_items(
+                    texts,
+                    prev_reports[i - 1] if i - 1 < len(prev_reports) else []))
                 ).encode("utf-8")),
                 "kept": None}
                for i, (a, b, texts) in enumerate(prev_spans, start=1)]}
