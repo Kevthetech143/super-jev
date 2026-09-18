@@ -5273,3 +5273,145 @@ def test_stop_hook_gate_folds_a_cited_files_tail_into_the_window(tmp_path, monke
     assert sj.main(["hook", "gate"]) == 0
     assert "CITED FILE" in captured["evidence_text"]
     assert "lies 17/20" in captured["evidence_text"]
+
+
+# ---- V4-RESIDUE.md change 1: cited-file resolver tie-break ----------------
+
+_T38_DIR = (Path.home() / "super-jev-experiments" / "gate-bench-20260918"
+           / "payloads-v3-2" / "t38")
+_T38_SUMMARY = (Path.home() / "super-jev-experiments" / "stress-20260917"
+               / "results" / "SUMMARY.md")
+
+requires_t38_fixture = pytest.mark.skipif(
+    not (_T38_DIR / "payload.json").exists() or not _T38_SUMMARY.exists(),
+    reason="t38 live-bench fixture / SUMMARY.md not present on this machine")
+
+
+@requires_t38_fixture
+def test_cited_file_resolver_resolves_t38_to_the_real_summary_md():
+    """The keyword form ('per the summary log') used to return "" on
+    every one of the 70 bench cases (V4-RESIDUE.md section 2, t38) because
+    ~/super-jev-experiments holds several files whose stem contains
+    'summary'. The window/receipts tie-break should now pick the one file
+    t38's OWN session actually wrote to: stress-20260917/results/SUMMARY.md,
+    named literally in the transcript's own bash heredoc commands."""
+    payload = json.loads((_T38_DIR / "payload.json").read_text(encoding="utf-8"))
+    draft = payload["last_assistant_message"]
+    window, _meta = sj._derive_evidence_text_from_transcript(
+        str(_T38_DIR / "transcript.jsonl"), session_id=payload.get("session_id"),
+        return_meta=True)
+    block = sj.build_cited_file_block(draft, window_text=window)
+    assert block != "", "cited-file block is still empty on t38"
+    assert f"CITED FILE {_T38_SUMMARY}" in block or "SUMMARY.md" in block
+    resolved = sj._resolve_cited_basename("summary", sj._cited_file_roots(),
+                                          window_hint_text=window)
+    assert resolved == _T38_SUMMARY.resolve()
+
+
+def test_cited_file_resolver_still_returns_empty_with_no_citation():
+    assert sj.build_cited_file_block("no citation in this draft at all") == ""
+    assert sj.build_cited_file_block(
+        "no citation in this draft at all", window_text="some window text") == ""
+
+
+def test_cited_file_resolver_prefers_the_path_literal_in_the_window(
+        tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a = tmp_path / "a" / "SUMMARY.md"
+    b = tmp_path / "b" / "SUMMARY.md"
+    a.write_text("A's own numbers: 17/20\n", encoding="utf-8")
+    b.write_text("B's own numbers: 9/10\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    window = f"[current turn]\n$ cat {a}\n(wrote to {a})\n"
+    block = sj.build_cited_file_block("per SUMMARY.md, some claim", window_text=window)
+    assert "A's own numbers" in block
+    assert "B's own numbers" not in block
+
+
+def test_cited_file_resolver_still_ambiguous_when_neither_path_is_in_the_window(
+        tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "SUMMARY.md").write_text("one\n", encoding="utf-8")
+    (tmp_path / "b" / "SUMMARY.md").write_text("two\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    assert sj.build_cited_file_block(
+        "per SUMMARY.md, some claim", window_text="[current turn]\nnothing here\n") == ""
+
+
+def test_cited_file_resolver_prefers_exact_stem_over_substring_match(
+        tmp_path, monkeypatch):
+    f_exact = tmp_path / "summary.md"
+    f_sub = tmp_path / "results-3k" / "summary-extra.md"
+    f_sub.parent.mkdir()
+    f_exact.write_text("exact stem numbers: 17/20\n", encoding="utf-8")
+    f_sub.write_text("substring stem numbers: 9/10\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    block = sj.build_cited_file_block("per the summary log, some claim")
+    assert "exact stem numbers" in block
+    assert "substring stem numbers" not in block
+
+
+def test_cited_file_resolver_in_the_summary_phrase_resolves_like_per_log(
+        tmp_path, monkeypatch):
+    f = tmp_path / "summary.md"
+    f.write_text("in-the-summary numbers: 17/20\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    block = sj.build_cited_file_block("in the summary, we landed 17/20")
+    assert "in-the-summary numbers" in block
+
+
+# ---- V4-RESIDUE.md change 2: stale-report-vs-merge-receipt derived fact ---
+
+def test_derive_window_facts_flags_a_stale_not_merged_report_when_a_newer_receipt_exists():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM GateV3 (unverified worker claim)\n"
+        "PR #27 is not merged, still waiting on CI to go green.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "$ gh pr merge 27\n"
+        "Merged pull request #27\n"
+    )
+    facts = sj.derive_window_facts(window, "PR #27 merged and live on my own hooks.")
+    assert any(
+        f.startswith("PR #27:") and "postdates the worker report" in f
+        and "receipt wins" in f
+        for f in facts
+    ), facts
+
+
+def test_derive_window_facts_never_fires_when_the_receipt_precedes_the_report():
+    window = (
+        "[previous turn -2]\n"
+        "$ gh pr merge 27\n"
+        "Merged pull request #27\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn reports]\n"
+        "REPORT FROM GateV3 (unverified worker claim)\n"
+        "PR #27 is not merged as of this check.\n"
+    )
+    facts = sj.derive_window_facts(window, "still waiting on PR #27")
+    assert not any(f.startswith("PR #27:") and "postdates" in f for f in facts), facts
+
+
+def test_derive_window_facts_stale_report_fact_respects_the_identity_guard():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM GateV3 (unverified worker claim)\n"
+        "PR #28 is not merged, still open.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "$ gh pr merge 27\n"
+        "Merged pull request #27\n"
+    )
+    facts = sj.derive_window_facts(window, "PR #27 merged.")
+    assert not any(f.startswith("PR #28:") for f in facts), facts
+    assert not any(f.startswith("PR #27:") and "postdates" in f for f in facts), facts
