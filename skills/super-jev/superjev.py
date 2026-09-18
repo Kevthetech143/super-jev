@@ -351,8 +351,17 @@ _EVIDENCE_COUNT_RES = {
         re.compile(r'\b(\d+)\s+passed\b(?=[^\n]*\bin\s+[\d.]+\s*s\b)', re.IGNORECASE),
         # jest / vitest: "Tests:  86 passed, 86 total"
         re.compile(r'\bTests?\s*:[^\n]*?\b(\d+)\s+passed\b', re.IGNORECASE),
-        # node:test / tap: "# pass 164", "ok 164 - ..." summary "pass 164"
-        re.compile(r'(?:^|\n)\s*#?\s*pass\s+(\d+)\b', re.IGNORECASE),
+        # node:test / tap: "# pass 164", "ok 164 - ..." summary "pass 164",
+        # and node:test's own glyph-prefixed report, "ℹ pass 158" /
+        # "ℹ tests 158". The old pattern was `\s*#?\s*pass` and the
+        # glyph is NOT whitespace, so `\s*` could not consume it and the
+        # real line never matched: on bench case t04 the true "ℹ pass 158"
+        # sat unmatched in the window while a stale pytest receipt paired
+        # against the draft's 158 instead. One leading marker glyph is
+        # allowed, and the total line ("tests N") counts too, since the
+        # arm clears as soon as ANY same-label evidence count matches.
+        re.compile(r'(?:^|\n)[ \t]*(?:[#ℹ✔✖✗•]+[ \t]*)?'
+                   r'(?:pass|tests)[ \t]+(\d+)\b', re.IGNORECASE),
         # mocha: "164 passing (2s)"
         re.compile(r'\b(\d+)\s+passing\b', re.IGNORECASE),
     ),
@@ -398,23 +407,170 @@ def _extract_labelled_draft_counts(text):
     return out
 
 
-def _extract_labelled_evidence_counts(evidence_text):
-    """{label: set(ints)} for the counts the EVIDENCE window really
-    carries — only from lines matching that label's registered receipt /
-    tool-result shapes (see `_EVIDENCE_COUNT_RES`). Never from a bare
-    number, and never from an "N of M" phrase, which in this harness is far
-    more often a claim tally than a test count."""
+def _extract_labelled_evidence_counts_scoped(evidence_text):
+    """{label: [(count, identity), ...]} for the counts the EVIDENCE
+    window really carries — only from lines matching that label's
+    registered receipt / tool-result shapes (see `_EVIDENCE_COUNT_RES`).
+    Never from a bare number, and never from an "N of M" phrase, which in
+    this harness is far more often a claim tally than a test count.
+
+    `identity` is `(command, cwd)` when the line carries a `[from: ... @
+    ...]` marker (see `_render_receipt_identity`), else None. Read line by
+    line precisely so a count stays attached to its own marker: a receipt
+    from one repo must not lend its identity to the receipt below it."""
     out = {}
     if not evidence_text:
         return out
-    for label, regexes in _EVIDENCE_COUNT_RES.items():
-        found = set()
-        for rx in regexes:
-            for m in rx.finditer(evidence_text):
-                found.add(int(m.group(1)))
-        if found:
-            out[label] = found
+    sticky = None
+    for line in evidence_text.splitlines():
+        if _WINDOW_SECTION_RE.match(line) or _SECTION_SEPARATOR_RE.match(line):
+            sticky = None          # a new section speaks for a new run
+            continue
+        im = _RECEIPT_IDENTITY_RE.search(line)
+        if im and not _RECEIPT_IDENTITY_RE.sub("", line).strip():
+            # A lone `[from: ...]` header line: it identifies the result
+            # printed beneath it, until the next section or header.
+            sticky = (im.group(1) or "", im.group(2) or "")
+            continue
+        identity = (im.group(1) or "", im.group(2) or "") if im else sticky
+        for label, regexes in _EVIDENCE_COUNT_RES.items():
+            for rx in regexes:
+                for m in rx.finditer(line):
+                    out.setdefault(label, []).append((int(m.group(1)), identity))
     return out
+
+
+def _extract_labelled_evidence_counts(evidence_text):
+    """`_extract_labelled_evidence_counts_scoped` with the identities
+    dropped — {label: set(ints)}, the shape callers used before a receipt
+    carried the command it came from."""
+    return {label: {n for n, _ident in pairs}
+            for label, pairs in
+            _extract_labelled_evidence_counts_scoped(evidence_text).items()}
+
+
+# ------------------------------------------- count identity (which suite?)
+#
+# Bench case t04: the draft truthfully said "158 tests pass on a fresh
+# clone" (node:test, super-jev, /tmp/sjmain) and the arm blocked it against
+# "29 passed in 9.18s" — a pytest run of the unrelated /card prompt-card
+# suite, 88 transcript records earlier, that reached the window through the
+# session-receipt pool. Both numbers carry the coarse label "tests", so the
+# same-label rule could not separate them; nothing else could either,
+# because a receipt carried no command.
+#
+# Now it does, and a count only pairs when its run's identity is something
+# the DRAFT or the CURRENT TURN actually names: the same runner family, or
+# the same repo/directory/package path. An evidence count whose identity is
+# unknown still pairs (that is the pre-existing behaviour, and a
+# tool_result read straight out of this turn has no marker), but a receipt
+# from a run nobody in this turn mentioned is no longer evidence about this
+# turn's claim.
+_RUNNER_FAMILY_RES = {
+    "pytest": (re.compile(r'\bpytest\b', re.IGNORECASE),),
+    "node-test": (re.compile(r'\bnpm\s+(?:run\s+)?test\b', re.IGNORECASE),
+                  re.compile(r'\bnode\s+--test\b', re.IGNORECASE),
+                  re.compile(r'\bnode:test\b', re.IGNORECASE)),
+    "jest": (re.compile(r'\bjest\b', re.IGNORECASE),),
+    "vitest": (re.compile(r'\bvitest\b', re.IGNORECASE),),
+    "mocha": (re.compile(r'\bmocha\b', re.IGNORECASE),),
+    "go-test": (re.compile(r'\bgo\s+test\b', re.IGNORECASE),),
+    "cargo-test": (re.compile(r'\bcargo\s+test\b', re.IGNORECASE),),
+}
+
+# Path segments too generic to identify anything. A receipt from
+# `~/.claude/skills/card/tests` must not match a draft just because both
+# mention "tests".
+_GENERIC_PATH_SEGMENTS = frozenset({
+    "", ".", "..", "~", "users", "user", "home", "admin", "tmp", "var",
+    "private", "opt", "usr", "src", "lib", "bin", "test", "tests",
+    "node_modules", "dist", "build", "skills", "skill", "docs", "doc",
+    "scripts", "script", "python3", "python", "npm", "node", "repo",
+    "repos", "projects", "project", "work", "claude", "agents", "global",
+})
+
+_PATHISH_RE = re.compile(r'[~/]?[\w.\-]+(?:/[\w.\-]+)+')
+
+
+def _runner_families(text):
+    """Every test-runner family named in `text` (see _RUNNER_FAMILY_RES)."""
+    if not text:
+        return set()
+    return {fam for fam, rxs in _RUNNER_FAMILY_RES.items()
+            if any(rx.search(text) for rx in rxs)}
+
+
+def _identity_path_segments(text):
+    """The non-generic path segments named anywhere in `text` — the
+    repo/package/directory names that can actually identify one suite
+    against another (see _GENERIC_PATH_SEGMENTS)."""
+    segs = set()
+    if not text:
+        return segs
+    for m in _PATHISH_RE.finditer(text):
+        for part in m.group(0).split("/"):
+            part = part.strip("~.").lower()
+            if len(part) >= 4 and part not in _GENERIC_PATH_SEGMENTS:
+                segs.add(part)
+    return segs
+
+
+def _identity_in_scope(identity, context_text):
+    """Does an evidence count's `identity` — (command, cwd) — belong to
+    something `context_text` (the draft plus the current turn) names?
+
+    True when the identity is unknown (None/empty: nothing to check, pair
+    as before), when the identity's runner family is a family the context
+    also names, or when a non-generic path segment of the identity appears
+    among the context's own path segments. False otherwise — and a False
+    means "not evidence about this claim", never "the claim is a lie"."""
+    if not identity:
+        return True
+    cmd, cwd = identity[0] or "", identity[1] if len(identity) > 1 else ""
+    if not (cmd or "").strip() and not (cwd or "").strip():
+        return True
+    ctx = context_text or ""
+    ctx_fams = _runner_families(ctx)
+    ctx_segs = _identity_path_segments(ctx)
+    # The COMMAND is the identity; the cwd is only the shell's working
+    # directory, shared by every run in the session, so matching on it
+    # alone would let any receipt pair with anything (bench case t04: the
+    # stale /card pytest receipt and the fresh node:test run shared the
+    # lead's cwd, and nothing else). cwd is used only when the command
+    # itself names neither a runner nor a path.
+    fams = _runner_families(cmd)
+    if fams:
+        return bool(fams & ctx_fams)
+    segs = _identity_path_segments(cmd)
+    if segs:
+        return bool(segs & ctx_segs)
+    cwd_segs = _identity_path_segments(cwd)
+    if cwd_segs:
+        return bool(cwd_segs & ctx_segs)
+    return True
+
+
+# The window's own current-turn section labels — the only part of an
+# assembled evidence window that speaks for THIS turn. Identity scoping
+# reads its context from the draft plus these sections, never from the
+# receipts section (a receipt naming its own command must not vouch for
+# itself).
+_CURRENT_SECTION_RE = re.compile(
+    r'^\[current turn(?: reports)?\]\n(.*?)(?=^\[(?:previous turn|session receipts|'
+    r'current turn)|\Z)', re.DOTALL | re.MULTILINE)
+
+
+def _count_pairing_context(draft_text, evidence_text):
+    """The text an evidence count's identity is checked against: the draft
+    itself plus every `[current turn]` / `[current turn reports]` section
+    of the assembled window. When the evidence carries no such section (a
+    plain evidence file handed in by a caller, or a test fixture) the
+    draft alone is the context — and in that case no identity markers
+    exist either, so nothing is scoped out."""
+    parts = [draft_text or ""]
+    for m in _CURRENT_SECTION_RE.finditer(evidence_text or ""):
+        parts.append(m.group(1))
+    return "\n".join(parts)
 
 
 def _count_mismatch_reason(draft_text, evidence_text):
@@ -429,23 +585,47 @@ def _count_mismatch_reason(draft_text, evidence_text):
     it would turn "we could not look" into "you lied", the exact bug this
     file already guards against for OVERCLAIMS. Never pairs numbers across
     labels, and never pairs a bare number with anything."""
+    reason, _detail = _count_pairing(draft_text, evidence_text)
+    return reason
+
+
+def _count_pairing(draft_text, evidence_text):
+    """(reason_or_None, detail) — `_count_mismatch_reason`'s verdict plus
+    the pairing it made, so `--explain` can print which evidence counts
+    were paired with the draft's, which were scoped out by command
+    identity, and why. `detail` is a list of per-label dicts:
+    {label, draft, paired, out_of_scope, matched}."""
+    detail = []
     draft_counts = _extract_labelled_draft_counts(draft_text)
     if not draft_counts:
-        return None
-    evidence_counts = _extract_labelled_evidence_counts(evidence_text)
-    if not evidence_counts:
-        return None
+        return None, detail
+    scoped = _extract_labelled_evidence_counts_scoped(evidence_text)
+    if not scoped:
+        return None, detail
+    context = _count_pairing_context(draft_text, evidence_text)
+    reason = None
     for label in _COUNT_LABEL_KEYWORDS:
         d_set = draft_counts.get(label)
-        e_set = evidence_counts.get(label)
-        if not d_set or not e_set:
+        pairs = scoped.get(label)
+        if not d_set or not pairs:
             continue
-        if d_set & e_set:
+        in_scope, out_of_scope = [], []
+        for n, identity in pairs:
+            (in_scope if _identity_in_scope(identity, context) else
+             out_of_scope).append((n, identity))
+        e_set = {n for n, _i in in_scope}
+        row = {"label": label, "draft": sorted(d_set), "paired": sorted(e_set),
+               "out_of_scope": sorted({n for n, _i in out_of_scope}),
+               "out_of_scope_identities": sorted(
+                   {f"{(i or ('', ''))[0]}" for _n, i in out_of_scope if i}),
+               "matched": sorted(d_set & e_set)}
+        detail.append(row)
+        if reason is not None or not e_set or (d_set & e_set):
             continue
         d = "/".join(str(n) for n in sorted(d_set))
         e = "/".join(str(n) for n in sorted(e_set))
-        return f"count mismatch ({label}): draft {d} vs evidence {e}"
-    return None
+        reason = f"count mismatch ({label}): draft {d} vs evidence {e}"
+    return reason, detail
 
 
 def _pr_mismatch_reason(draft_text, evidence_text):
@@ -2037,7 +2217,8 @@ def _previous_turn_spans(records, current_start, n_turns):
         prev_start = _previous_turn_start_index(records, boundary)
         if prev_start is None:
             break
-        spans.append((prev_start, boundary, _collect_tool_results(records[prev_start:boundary])))
+        spans.append((prev_start, boundary,
+                      _labelled_tool_results(records[prev_start:boundary])))
         boundary = prev_start
     return spans
 
@@ -2093,9 +2274,61 @@ def _build_prev_turns_block(windows, budget):
     return block, dropped
 
 
-def _collect_tool_results(records):
-    """Every tool_result block's extracted text, in file order, out of a
-    list of transcript records."""
+# Which tool_use input fields name the thing that was RUN. `command` is
+# Bash; the rest let a file-reading tool still say what it touched, which
+# is enough identity to keep a count from travelling between repos.
+_TOOL_IDENTITY_KEYS = ("command", "cmd", "file_path", "path", "pattern", "notebook_path")
+
+# How much of a command line is carried as identity. Long enough to keep
+# the repo path and the runner, short enough not to dominate a receipt.
+IDENTITY_CMD_MAX_CHARS = 220
+
+
+def _tool_use_identity_map(records):
+    """{tool_use_id: (command, cwd)} built from every assistant tool_use
+    block in `records`. The command is the tool's own input (see
+    _TOOL_IDENTITY_KEYS, prefixed with the tool name when the input names
+    no command of its own) and the cwd is the transcript record's own
+    `cwd` field — together, the identity of the run that produced each
+    tool_result. Without this a recorded count is just a number, and a
+    stale "29 passed" from one repo pairs happily with a "158 tests"
+    claim about another (bench case t04)."""
+    out = {}
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        msg = rec.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        cwd = rec.get("cwd") or ""
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                continue
+            tid = block.get("id")
+            if not tid:
+                continue
+            inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+            cmd = ""
+            for key in _TOOL_IDENTITY_KEYS:
+                val = inp.get(key)
+                if isinstance(val, str) and val.strip():
+                    cmd = val.strip() if key in ("command", "cmd") else \
+                        f"{block.get('name') or 'tool'} {val.strip()}"
+                    break
+            if not cmd:
+                cmd = str(block.get("name") or "")
+            out[tid] = (cmd[:IDENTITY_CMD_MAX_CHARS].replace("\n", " "),
+                        str(cwd)[:IDENTITY_CMD_MAX_CHARS])
+    return out
+
+
+def _collect_tool_results_with_identity(records):
+    """[(text, command, cwd)] for every tool_result block in `records`, in
+    file order — `_collect_tool_results` plus the identity of the run that
+    produced each result, paired through the tool_use_id. `command`/`cwd`
+    are "" when the matching tool_use is not in this record slice."""
+    ids = _tool_use_identity_map(records)
     results = []
     for rec in records:
         msg = rec.get("message") if isinstance(rec, dict) else None
@@ -2106,8 +2339,177 @@ def _collect_tool_results(records):
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 text = _extract_text_blocks(block.get("content"))
                 if text:
-                    results.append(text)
+                    cmd, cwd = ids.get(block.get("tool_use_id"), ("", ""))
+                    results.append((text, cmd, cwd))
     return results
+
+
+def _collect_tool_results(records):
+    """Every tool_result block's extracted text, in file order, out of a
+    list of transcript records."""
+    return [text for text, _cmd, _cwd in _collect_tool_results_with_identity(records)]
+
+
+def _identity_header(cmd, cwd):
+    """"[from: <cmd> @ <cwd>]" for a tool result carried into the window,
+    or "" when there is no identity worth printing. A bare tool NAME with
+    no command line, no path and no cwd identifies nothing, so it gets no
+    header rather than a misleading one."""
+    cmd = (cmd or "").strip()
+    cwd = (cwd or "").strip()
+    informative = bool(cwd) or (" " in cmd) or ("/" in cmd)
+    if not informative:
+        return ""
+    return _render_receipt_identity(cmd, cwd).strip()
+
+
+def _labelled_tool_results(records):
+    """`_collect_tool_results` with each result preceded by its own
+    `[from: <command> @ <cwd>]` header line, so a count read out of the
+    assembled window can be traced back to the run that produced it (see
+    `_extract_labelled_evidence_counts_scoped`, which treats a lone header
+    line as the identity of every count beneath it until the next section
+    or header). Without this, a previous turn's test count is just a
+    number in a wall of text, and the count arm cannot tell whether it
+    belongs to the suite the draft is talking about."""
+    out = []
+    for text, cmd, cwd in _collect_tool_results_with_identity(records):
+        header = _identity_header(cmd, cwd)
+        out.append(f"{header}\n{text}" if header else text)
+    return out
+
+
+# --------------------------------------------- worker / teammate reports
+#
+# A worker's finished report does NOT arrive as a tool_result. Claude Code
+# delivers it as a role="user" TEXT record — either a `<teammate-message
+# teammate_id="...">` block from the teammate mailbox, or a harness
+# `<task-notification>` block whose `<result>`/`<summary>` carries what the
+# agent ended with. `_collect_tool_results` therefore cannot see any of it,
+# and before 2026-09-17 neither could the gate: on the bench, cases t01,
+# t02 and t13 were blocked purely because the only proof of "26 to 47
+# tests", "86 of 86 pass" and "status shows every door live" was a worker
+# report sitting in the lead's context as a user turn.
+#
+# These blocks are evidence of a DIFFERENT kind from a tool result: they
+# prove the lead was told something, not that the something is true. They
+# are therefore carried into the window under an explicit label —
+# "REPORT FROM <who> (unverified worker claim)" — so the judge can see the
+# draft is RELAYING a report rather than inventing a number, and can still
+# weigh it as a second-hand claim rather than a receipt.
+_TEAMMATE_MSG_RE = re.compile(
+    r'<teammate-message\b([^>]*)>(.*?)(?:</teammate-message>|\Z)', re.DOTALL)
+_TASK_NOTIFY_RE = re.compile(
+    r'<task-notification>(.*?)(?:</task-notification>|\Z)', re.DOTALL)
+_TEAMMATE_ID_RE = re.compile(r'teammate_id\s*=\s*"([^"]*)"')
+_TASK_ID_RE = re.compile(r'<task-id>(.*?)</task-id>', re.DOTALL)
+_TASK_AGENT_RE = re.compile(r'Agent\s+"([^"]+)"')
+_TASK_PART_RES = (
+    re.compile(r'<summary>(.*?)</summary>', re.DOTALL),
+    re.compile(r'<result>(.*?)</result>', re.DOTALL),
+)
+
+# The label every carried report gets. Deliberately says "unverified" in
+# the window itself: the gate's whole job is telling a receipt apart from
+# a claim, and a relayed report is a claim with a named source.
+REPORT_LABEL = "REPORT FROM {who} (unverified worker claim)"
+
+# How much of any ONE report block is carried, before the window's own cap
+# even applies. A worker report is often a page long; the load-bearing
+# lines (counts, PR links, COMPLETE/INCOMPLETE) are near its start.
+REPORT_BLOCK_MAX_CHARS = 4000
+
+
+def _extract_report_blocks_from_text(text):
+    """[(who, body)] for every teammate-message / task-notification block
+    inside one user-role record's text, in the order they appear. `who` is
+    the teammate_id, the agent name the notification names, or the task id
+    — never invented, always something the transcript itself said."""
+    if not text:
+        return []
+    out = []
+    for m in _TEAMMATE_MSG_RE.finditer(text):
+        attrs, body = m.group(1) or "", (m.group(2) or "").strip()
+        if not body:
+            continue
+        who = _TEAMMATE_ID_RE.search(attrs)
+        out.append((who.group(1) if who else "teammate",
+                    body[:REPORT_BLOCK_MAX_CHARS]))
+    for m in _TASK_NOTIFY_RE.finditer(text):
+        inner = m.group(1) or ""
+        parts = []
+        for rx in _TASK_PART_RES:
+            for pm in rx.finditer(inner):
+                got = (pm.group(1) or "").strip()
+                if got:
+                    parts.append(got)
+        if not parts:
+            continue
+        agent = _TASK_AGENT_RE.search(inner)
+        if agent:
+            who = agent.group(1)
+        else:
+            tid = _TASK_ID_RE.search(inner)
+            who = f"task {tid.group(1).strip()}" if tid else "background task"
+        out.append((who, "\n".join(parts)[:REPORT_BLOCK_MAX_CHARS]))
+    return out
+
+
+def _collect_report_blocks(records):
+    """Every labelled worker/teammate report text, in file order, out of a
+    list of transcript records. Only user-role records that are NOT
+    tool_result carriers are read (see _is_real_user_prompt_record) — a
+    report never arrives as a tool_result, and reading tool_results here
+    would double-count them."""
+    out = []
+    for rec in records:
+        if not _is_real_user_prompt_record(rec):
+            continue
+        msg = rec.get("message") if isinstance(rec, dict) else None
+        text = _extract_text_blocks((msg or {}).get("content"))
+        for who, body in _extract_report_blocks_from_text(text):
+            out.append(f"{REPORT_LABEL.format(who=who)}\n{body}")
+    return out
+
+
+def _previous_turn_reports(records, current_start, n_turns):
+    """The labelled report texts per previous turn, most-recent-first —
+    the `_previous_turn_spans` shape for reports rather than tool
+    results. Same spans, same boundary rule, so a report rides in and out
+    of the window with the turn it belongs to."""
+    return [_collect_report_blocks(records[a:b])
+            for a, b, _texts in _previous_turn_spans(records, current_start, n_turns)]
+
+
+def _build_reports_block(reports, budget, label):
+    """(block_text, kept_count, bytes_cut) for a labelled reports section
+    held inside `budget` bytes. Keeps the FRESHEST reports: whole reports
+    are dropped from the OLDEST end first, and if even the newest single
+    report is still over budget its own tail is kept. Returns ("", 0, 0)
+    when there is nothing to carry or no budget at all."""
+    if not reports or budget <= 0:
+        return "", 0, 0
+    kept = list(reports)
+    header = f"[{label}]\n"
+
+    def render(items):
+        return header + "\n\n".join(items)
+
+    block = render(kept)
+    cut = 0
+    while len(block.encode("utf-8")) > budget and len(kept) > 1:
+        dropped = kept.pop(0)  # oldest report first
+        cut += len(dropped.encode("utf-8"))
+        block = render(kept)
+    if len(block.encode("utf-8")) > budget:
+        room = max(budget - len(header.encode("utf-8")) - 40, 0)
+        if room <= 0:
+            return "", 0, sum(len(r.encode("utf-8")) for r in reports)
+        raw = kept[0].encode("utf-8")
+        tail = raw[-room:].decode("utf-8", errors="ignore")
+        cut += len(raw) - len(tail.encode("utf-8"))
+        block = header + "[...head of this report dropped...]\n" + tail
+    return block, len(kept), cut
 
 
 # ------------------------------------------------------------- receipts
@@ -2121,6 +2523,10 @@ def _collect_tool_results(records):
 # out of the N-tool-call window is exactly the evidence-gap shape the
 # bench's 3 blocked truths (t06, t12, t20) shared.
 RECEIPTS_WINDOW = 40
+
+# The share of the cap left after the current turn and the receipts that
+# this turn's worker/teammate reports may take (see _build_reports_block).
+REPORTS_BUDGET_SHARE = 0.6
 
 # What counts as a receipt-worthy line in a tool result. Widened 2026-09-17:
 # the old pattern was `gh pr merge|gh pr checks|N passed`, which misses the
@@ -2141,6 +2547,59 @@ _RECEIPT_WORTHY_RE = re.compile(
 
 # How many receipt lines a transcript backfill may harvest in one pass.
 RECEIPT_BACKFILL_CAP = 60
+
+
+# How a receipt carries the identity of the run it came from. Rendered
+# onto the end of the receipt line so the count arm can read it back out
+# of the assembled window text with no extra plumbing, and so a human
+# reading `--explain` can see which command a number belongs to.
+_RECEIPT_IDENTITY_RE = re.compile(r'\s*\[from:\s*(.*?)(?:\s+@\s+([^\]]*))?\]\s*$')
+
+# The assembled window's own section headers and separators — where a
+# sticky `[from: ...]` identity stops applying.
+_WINDOW_SECTION_RE = re.compile(
+    r'^\[(?:current turn|current turn reports|previous turn -\d+|session receipts)\]\s*$')
+_SECTION_SEPARATOR_RE = re.compile(r'^\s*(?:={3,}|-{3,})\s*$')
+
+
+def _render_receipt_identity(cmd, cwd):
+    """" [from: <cmd> @ <cwd>]", or "" when neither is known."""
+    cmd = (cmd or "").strip()
+    cwd = (cwd or "").strip()
+    if not cmd and not cwd:
+        return ""
+    if cmd and cwd:
+        return f" [from: {cmd} @ {cwd}]"
+    return f" [from: {cmd or cwd}]"
+
+
+def _receipt_bare_fact(line):
+    """A rendered receipt line stripped back to its bare fact text — no
+    timestamp prefix, no `[from: ...]` identity suffix. Dedup keys are
+    computed on this so the same fact recorded with and without identity
+    is still one fact."""
+    text = (line or "").strip()
+    text = _RECEIPT_IDENTITY_RE.sub("", text)
+    # A stored line is "<iso-ts> <fact>"; a backfilled one has no prefix.
+    head = text.split(" ", 1)
+    if len(head) == 2 and re.fullmatch(r'\d{4}-\d{2}-\d{2}T[\d:+\-.Z]+', head[0]):
+        return head[1].strip()
+    return text
+
+
+def _identity_items(texts):
+    """`texts` normalised to [(text, cmd, cwd)] — accepts either a plain
+    list of strings (legacy callers) or the identity triples
+    `_collect_tool_results_with_identity` returns."""
+    out = []
+    for item in texts or []:
+        if isinstance(item, str):
+            out.append((item, "", ""))
+        elif isinstance(item, (tuple, list)) and item:
+            out.append((item[0],
+                        item[1] if len(item) > 1 else "",
+                        item[2] if len(item) > 2 else ""))
+    return out
 
 
 def _receipts_path(session_id):
@@ -2170,7 +2629,8 @@ def _load_receipts(session_id, n=RECEIPTS_WINDOW):
         except ValueError:
             continue
         if isinstance(rec, dict) and rec.get("fact"):
-            out.append(f"{rec.get('ts', '')} {rec['fact']}")
+            out.append(f"{rec.get('ts', '')} {rec['fact']}"
+                       + _render_receipt_identity(rec.get("cmd"), rec.get("cwd")))
     return out
 
 
@@ -2183,23 +2643,25 @@ def _record_receipts(session_id, texts):
         return
     path = _receipts_path(session_id)
     existing_raw = _load_receipts(session_id, 200)
-    existing = {r.split(" ", 1)[1] if " " in r else r for r in existing_raw}
+    existing = {_receipt_bare_fact(r) for r in existing_raw}
     new_facts = []
-    for text in texts:
+    for text, cmd, cwd in _identity_items(texts):
         for fact in _extract_receipt_facts(text):
             if fact in existing:
                 continue
             existing.add(fact)
-            new_facts.append(fact)
+            new_facts.append((fact, cmd, cwd))
     if not new_facts:
         return
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
-            for fact in new_facts:
+            for fact, cmd, cwd in new_facts:
                 f.write(json.dumps({
                     "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     "fact": fact[:300],
+                    "cmd": cmd,
+                    "cwd": cwd,
                 }, ensure_ascii=False) + "\n")
     except OSError:
         pass
@@ -2231,12 +2693,12 @@ def _backfill_receipts_from_transcript(records, before_index=None, cap=None):
     scope = records[:before_index] if before_index is not None else records
     seen = set()
     out = []
-    for text in _collect_tool_results(scope):
+    for text, cmd, cwd in _collect_tool_results_with_identity(scope):
         for fact in _extract_receipt_facts(text):
             if fact in seen:
                 continue
             seen.add(fact)
-            out.append(fact[:300])
+            out.append(fact[:300] + _render_receipt_identity(cmd, cwd))
             if len(out) >= cap:
                 return out
     return out
@@ -2269,7 +2731,19 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          zero receipts on all 40 cases of the 2026-09-17 bench while the
          transcripts carried 1 to 15 lines each — see docs/hooks.md,
          "gate v3 — receipts backfill and the labelled count arm".
-      3. The CURRENT turn's tool_result content (the last `n` tool calls
+      3. The CURRENT turn's worker/teammate REPORTS — every
+         `<teammate-message>` / `<task-notification>` block in this turn's
+         user-role records, each labelled "REPORT FROM <who> (unverified
+         worker claim)" (see _collect_report_blocks). These never arrive
+         as tool_results, so layers 1 and 3 could not see them at all, and
+         three of the 2026-09-17 bench's blocked TRUE reports (t01, t02,
+         t13) were blocked purely because the only proof of what they
+         relayed was a report. They ride at current-turn priority but may
+         take at most REPORTS_BUDGET_SHARE of the room left after the
+         current turn and the receipts, so a page-long report cannot
+         starve the previous-turn block. A previous turn's reports ride
+         inside that turn's own block and are dropped with it.
+      4. The CURRENT turn's tool_result content (the last `n` tool calls
          found at or after the most recent real user prompt — see
          _current_turn_start_index), highest priority, NEVER dropped to
          make room for anything else.
@@ -2296,7 +2770,13 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     turn: its record range, tool_result count, byte size and whether it
     was kept), prev_truncated ((turn, bytes_cut) when the freshest
     previous turn had its head cut to fit, else None), and
-    receipts_source/receipts_from_store/receipts_backfilled.
+    receipts_source/receipts_from_store/receipts_backfilled, and
+    reports_found/reports_current/reports_kept/reports_bytes/
+    reports_cut_bytes for the worker-report layer.
+
+    `current_turn_empty` deliberately tracks this turn's own TOOL results
+    only: a turn whose sole new material is a relayed worker report has
+    still run nothing itself, so the secondary arm stays suppressed there.
 
     `meta["current_turn_empty"]` is True whenever the CURRENT turn
     contributed no tool_result content, regardless of whether previous-turn
@@ -2324,13 +2804,20 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     records = _read_transcript_records(transcript_path)
     start = _current_turn_start_index(records)
     scoped = records[start:] if start is not None else records
-    cur_results = _collect_tool_results(scoped)
+    cur_items = _collect_tool_results_with_identity(scoped)
+    cur_results = _labelled_tool_results(scoped)
+    # Worker/teammate reports in THIS turn's user-role records — see
+    # _collect_report_blocks. Never a tool_result, so never in cur_results.
+    cur_reports = _collect_report_blocks(scoped)
 
     if session_id:
-        _record_receipts(session_id, cur_results)
+        _record_receipts(session_id, cur_items)
 
     prev_spans = _previous_turn_spans(records, start, prev_turns) if start is not None else []
-    prev_windows = [texts for _, _, texts in prev_spans]
+    prev_reports = (_previous_turn_reports(records, start, prev_turns)
+                    if start is not None else [])
+    prev_windows = [texts + (prev_reports[i] if i < len(prev_reports) else [])
+                    for i, (_a, _b, texts) in enumerate(prev_spans)]
 
     meta = {"prev_turns_found": len(prev_windows), "prev_bytes": 0, "prev_dropped": 0,
            "receipts_count": 0, "receipts_bytes": 0, "current_bytes": 0,
@@ -2339,9 +2826,15 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
            "current_turn_start": start, "receipts_source": "none",
            "receipts_from_store": 0, "receipts_backfilled": 0,
            "prev_truncated": None,
+           "reports_found": len(cur_reports) + sum(len(r) for r in prev_reports),
+           "reports_current": len(cur_reports), "reports_kept": 0,
+           "reports_bytes": 0, "reports_cut_bytes": 0,
            "prev_turn_detail": [
                {"turn": i, "records": f"{a}-{b - 1}", "tool_results": len(texts),
-                "bytes": len(("\n\n---\n\n".join(texts)).encode("utf-8")),
+                "reports": len(prev_reports[i - 1]) if i - 1 < len(prev_reports) else 0,
+                "bytes": len(("\n\n---\n\n".join(
+                    texts + (prev_reports[i - 1] if i - 1 < len(prev_reports) else []))
+                ).encode("utf-8")),
                 "kept": None}
                for i, (a, b, texts) in enumerate(prev_spans, start=1)]}
 
@@ -2367,9 +2860,9 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     # _backfill_receipts_from_transcript). Deduped against the store on the
     # bare fact text, since a stored line carries a timestamp prefix and a
     # backfilled one does not.
-    stored_facts = {r.split(" ", 1)[1] if " " in r else r for r in stored}
+    stored_facts = {_receipt_bare_fact(r) for r in stored}
     backfilled = [f for f in _backfill_receipts_from_transcript(records, start)
-                  if f not in stored_facts]
+                  if _receipt_bare_fact(f) not in stored_facts]
     receipts = backfilled + stored  # oldest-derived first, store's own last
     if len(receipts) > RECEIPTS_WINDOW:
         receipts = receipts[-RECEIPTS_WINDOW:]
@@ -2384,7 +2877,27 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
             else "transcript backfill" if backfilled else "store")
 
     overhead = 32  # section-join separators ("\n\n===\n\n"), one per gap
-    remaining_for_prev = effective_cap - meta["current_bytes"] - meta["receipts_bytes"] - overhead
+    remaining = effective_cap - meta["current_bytes"] - meta["receipts_bytes"] - overhead
+
+    # This turn's worker/teammate reports sit at current-turn priority (a
+    # report the draft is relaying is what the judge most needs to see) but
+    # are not allowed to starve the previous-turn block: they may take at
+    # most REPORTS_BUDGET_SHARE of what is left after the current turn and
+    # the receipts, dropping the OLDEST report first and keeping the tail
+    # of the newest if even that one is over budget (_build_reports_block).
+    reports_section = ""
+    if cur_reports and remaining > 0:
+        reports_budget = max(int(remaining * REPORTS_BUDGET_SHARE), 0)
+        reports_section, kept_reports, cut = _build_reports_block(
+            cur_reports, reports_budget, "current turn reports")
+        meta["reports_kept"] = kept_reports
+        meta["reports_cut_bytes"] = cut
+        meta["reports_bytes"] = len(reports_section.encode("utf-8"))
+        remaining -= meta["reports_bytes"] + 8
+    elif cur_reports:
+        meta["reports_cut_bytes"] = sum(len(r.encode("utf-8")) for r in cur_reports)
+
+    remaining_for_prev = remaining
     prev_section = ""
     if prev_windows and remaining_for_prev > 0:
         prev_block, dropped, kept, truncated = _build_prev_turns_block_detailed(
@@ -2401,7 +2914,8 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         for d in meta["prev_turn_detail"]:
             d["kept"] = False
 
-    sections = [s for s in (prev_section, receipts_section, cur_section) if s]
+    sections = [s for s in (prev_section, receipts_section, reports_section,
+                            cur_section) if s]
     joined = "\n\n===\n\n".join(sections)
     if len(joined.encode("utf-8")) > effective_cap:
         # The current turn alone (plus receipts) is bigger than the cap —
@@ -2640,7 +3154,8 @@ def _evidence_probe(report_path, worktree=None, test_cmd=""):
 
 
 def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
-                               det_block_reasons, block_reasons, block_notes):
+                               det_block_reasons, block_reasons, block_notes,
+                               count_pairing=None):
     """`hook gate --explain`'s own report: the wide evidence window's
     composition (bytes per segment, how many previous turns were found/
     dropped, receipts count) and which rule fired — printed on top of, not
@@ -2673,6 +3188,7 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                     else "not budgeted")
             print(f"    turn -{d.get('turn')}        : records "
                   f"{d.get('records')}, {d.get('tool_results')} tool result(s), "
+                  f"{d.get('reports', 0)} report(s), "
                   f"{d.get('bytes')} bytes — {state}")
         trunc = m.get("prev_truncated")
         if trunc:
@@ -2680,6 +3196,12 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                   "cut to fit the cap (tail kept)")
         if not (m.get("prev_turn_detail") or []):
             print("    (no previous turn carried tool results)")
+        print(f"  worker reports    : {m.get('reports_found', 0)} found "
+              f"({m.get('reports_current', 0)} in this turn), "
+              f"{m.get('reports_kept', 0)} kept at current-turn priority, "
+              f"{m.get('reports_bytes', 0)} bytes"
+              + (f", {m.get('reports_cut_bytes', 0)} bytes cut to fit the cap"
+                 if m.get('reports_cut_bytes') else ""))
         print(f"  session receipts  : {m.get('receipts_count', 0)} line(s), "
               f"{m.get('receipts_bytes', 0)} bytes, source "
               f"{m.get('receipts_source', 'none')} "
@@ -2698,6 +3220,15 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
     else:
         print(f"  block line        : {_block_confidence_line():.2f} (SUPERJEV_BLOCK_CONF); "
               "OVERCLAIMS needs a companion claim >= 0.50")
+    for row in count_pairing or []:
+        print(f"  count pairing     : {row.get('label')} — draft "
+              f"{row.get('draft')}, paired with evidence {row.get('paired')}, "
+              f"matched {row.get('matched')}")
+        if row.get("out_of_scope"):
+            print(f"                      scoped OUT by command identity: "
+                  f"{row.get('out_of_scope')} from "
+                  f"{row.get('out_of_scope_identities') or ['(unnamed run)']} "
+                  "— a run neither the draft nor this turn names")
     if det_block_reasons:
         print(f"  deterministic     : {'; '.join(det_block_reasons)}")
     if block_reasons:
@@ -2899,9 +3430,9 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
 # door that actually sees that: wired to UserPromptSubmit, it reads every
 # teammate-message block out of the next user turn and verifies each one
 # that looks like a real report.
-_TEAMMATE_MSG_RE = re.compile(r'<teammate-message\b([^>]*)>(.*?)</teammate-message>',
-                              re.DOTALL)
-_TEAMMATE_ID_RE = re.compile(r'teammate_id="([^"]*)"')
+# (`_TEAMMATE_MSG_RE` / `_TEAMMATE_ID_RE` are defined once, up with the
+# report-block collectors the gate window uses — two module-level copies of
+# the same pattern used to sit here, and the second silently won.)
 # What makes a teammate-message block worth checking: a COMPLETE/INCOMPLETE
 # word, a "PR #N"/"pull/N" mention, or a test count ("6 tests", "4 passed").
 _REPORT_TRIGGER_RE = re.compile(
@@ -3563,10 +4094,15 @@ def cmd_hook(a):
             # See deterministic_block_reasons's own docstring: fires only
             # on a real contradiction (a drafted count/PR state the
             # evidence itself disagrees with), never on an evidence gap.
-            det_block_reasons = deterministic_block_reasons(
+            det_reason, count_pairing = _count_pairing(
                 text, _read_evidence_text(evidence))
+            det_block_reasons = [r for r in
+                                 (det_reason,
+                                  _pr_mismatch_reason(text, _read_evidence_text(evidence)))
+                                 if r]
         else:
             det_block_reasons = []
+            count_pairing = []
             tool_name = payload.get("tool_name")
             if tool_name is not None and tool_name != "Agent":
                 _hook_log(f"verify: tool_name={tool_name!r} is not 'Agent' — this "
@@ -3663,7 +4199,8 @@ def cmd_hook(a):
 
         if door == "gate" and getattr(a, "explain", False):
             _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
-                                       det_block_reasons, block_reasons, block_notes)
+                                       det_block_reasons, block_reasons, block_notes,
+                                       count_pairing=count_pairing)
 
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")

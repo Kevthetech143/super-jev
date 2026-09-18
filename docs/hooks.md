@@ -385,6 +385,87 @@ kept, cut by the cap, or head-truncated. Receipts print their source split
 between the session store and the transcript backfill. A window a gate
 blocked on is only auditable if you can see the turns it read.
 
+## Gate v3 — worker reports and count identity (2026-09-17)
+
+Two more window defects, both found by reading the blocked cases back
+against their transcripts rather than by reasoning about the code.
+
+### A worker's report is not a tool result
+
+A worker or teammate never hands its report back as a `tool_result`.
+Claude Code delivers it as a `role: "user"` **text** record: either a
+`<teammate-message teammate_id="...">` block from the teammate mailbox, or
+a harness `<task-notification>` block whose `<summary>`/`<result>` carries
+what the agent ended with. The window was built from `tool_result` blocks
+only, so none of it was ever visible to the judge. Three blocked cases
+whose drafts were true were blocked for that reason alone: the only proof
+of a test count going up, of a suite passing, and of a status command
+showing every door live was a report sitting in the lead's own context.
+
+The window now carries those blocks, from the current turn and from the
+previous turns it already reaches back over, each under the label
+
+    REPORT FROM <who> (unverified worker claim)
+
+`<who>` is the `teammate_id`, the agent name the notification gives, or
+the task id — never invented. The label matters as much as the text: a
+report proves the lead **was told** something, not that the something is
+true, and the judge has to be able to tell a relayed claim from a receipt.
+What it stops is the failure where a lead faithfully passing on a worker's
+numbers is scored as if it had invented them.
+
+Reports ride at current-turn priority, because a report the draft is
+relaying is what the judge most needs to see, but they may take at most
+`REPORTS_BUDGET_SHARE` of the room left after the current turn and the
+receipts, so a page-long report cannot starve the previous-turn block.
+Inside that budget the oldest report is dropped first, and if even the
+newest one is over budget its tail is kept. A previous turn's reports ride
+inside that turn's own block and are dropped with it. Any single report is
+carried up to `REPORT_BLOCK_MAX_CHARS`. `current_turn_empty` deliberately
+still tracks this turn's own tool results only: a turn whose only new
+material is a relayed report has run nothing itself.
+
+### A count now carries the command it came from
+
+The count arm used to pair any draft count with any evidence count that
+shared its coarse unit label. Two independent defects let it pair numbers
+from different suites in different repositories:
+
+- **The node:test recogniser missed the real line.** It was
+  `\s*#?\s*pass\s+(\d+)`, and node:test prints `ℹ pass 158`. The glyph
+  is not whitespace, so `\s*` could not consume it and the true count sat
+  unmatched in the window while a stale number from elsewhere paired
+  against the draft instead. Both `ℹ pass N` and the total line
+  `ℹ tests N` are now recognised.
+- **A receipt carried no identity.** Every receipt, and every tool result
+  carried into the window, is now labelled with the command line and the
+  cwd it came from, read off the `tool_use` input the transcript already
+  holds and paired through the `tool_use_id`:
+
+      [from: python3 -m pytest skills/card/tests/test_card.py -q @ /Users/admin/repo]
+
+  A lone header line identifies every count printed beneath it until the
+  next section or header; a receipt carries its marker on its own line.
+
+A draft count now pairs only with evidence counts whose identity is
+something the **draft or the current turn** actually names: the same test
+runner family (`pytest`, `npm test` / `node --test`, `jest`, `vitest`,
+`mocha`, `go test`, `cargo test`), or the same non-generic repository,
+directory or package path. The command is the identity; the shell's cwd is
+not, because every run in a session shares it, and matching on it alone is
+precisely how a stale count from one repository reached a claim about
+another. An evidence count with no identity at all still pairs, exactly as
+before.
+
+When nothing pairs, the arm stays **silent**. An unpairable claim is an
+evidence gap, never a lie — the same direction this file already takes for
+`OVERCLAIMS`.
+
+`--explain` prints the pairing: how many reports were carried and how many
+bytes they took, and per unit label the draft's counts, the evidence
+counts they were paired with, what matched, and which counts were scoped
+out by command identity together with the run they came from.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
