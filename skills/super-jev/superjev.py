@@ -2499,7 +2499,9 @@ def cmd_catch(a):
         return _cmd_catch_tag(a)
     if action == "report":
         return _cmd_catch_report(a)
-    return refuse("catch: no action — use list, tag or report")
+    if action == "signal":
+        return _cmd_catch_signal(a)
+    return refuse("catch: no action — use list, tag, report or signal")
 
 
 def _catch_refuse3(line):
@@ -2535,6 +2537,29 @@ def _cmd_catch_list(a):
     bot_filter = getattr(a, "bot", None)
     if bot_filter:
         records = [r for r in records if r.get("bot") == bot_filter]
+    only_id = getattr(a, "id", None)
+    if only_id:
+        records = [r for r in records if r.get("id") == only_id]
+        if not records:
+            print(f"catch list: no record with id {only_id!r}")
+            return 0
+        # --id is the "redacted detail" lookup `catch signal`'s own issue
+        # body points a human at (see _catch_signal_body) — the one-line
+        # table below only ever shows the FIRST reason, so a single-record
+        # --id lookup prints every reason plus the redacted draft excerpt
+        # too (already _catch_redact-ed when the record was first written
+        # — see catch_log), not just that one summary line.
+        rec = records[0]
+        tag = rec.get("tag") or "-"
+        print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
+              f"{rec.get('decision','?'):10s}  tag={tag}")
+        for reason in (rec.get("reasons") or []):
+            print(f"  reason: {reason}")
+        if rec.get("note"):
+            print(f"  note: {rec['note']}")
+        if rec.get("draft_excerpt"):
+            print(f"  draft: {rec['draft_excerpt']!r}")
+        return 0
     if not records:
         print("catch list: no records")
     else:
@@ -2677,6 +2702,564 @@ def _cmd_catch_report(a):
             print("by bot:")
             for bot, n in sorted(by_bot.items(), key=lambda kv: (-kv[1], kv[0])):
                 print(f"  {bot}: {n}")
+    return 0
+
+
+# --------------------------------------------------------- catch signal
+#
+# `catch signal` is the first step of the compounding loop: harness
+# catches -> tags -> issue -> fix PR -> bench robot. It never invents a
+# pattern — it only groups catch-ledger records a human already tagged
+# "false" (a block that was wrong: the draft was actually true) or "miss"
+# (an allow that let a lie through) by REASON FAMILY: the reason string
+# with its numbers/values stripped, so "count mismatch (tests): draft
+# 0/61 vs evidence 53" and "count mismatch (tests): draft 2/9 vs evidence
+# 4" collapse into the same family, "count mismatch (tests)" — same
+# detection arm, different numbers. Once a family reaches --min, `catch
+# signal` offers to draft (or, with --open, actually file) a GitHub issue
+# describing the pattern with a handful of redacted examples pulled
+# straight from the ledger's own excerpts — never the raw payload.
+
+_CATCH_FAMILY_COUNT_MISMATCH_RE = re.compile(r'^(count mismatch \([^)]*\))')
+
+# A judge-score-shaped reason — f"{k} {v} {s:.2f}" (see _catch_reason_family's
+# own docstring) with an optional leading c<digits> claim key and an optional
+# trailing parenthetical, e.g. "c2 CONTRADICTED 0.82" or "overclaim OVERCLAIMS
+# 0.94 (overclaim==1.00 arm)". This is the one colonless shape the generic
+# fallback below is actually meant to strip down to a bare verdict name —
+# anything ELSE colonless (an advisory note, free text) does not match this
+# and is bucketed instead (see _catch_reason_advisory_bucket).
+_CATCH_FAMILY_SCORE_RE = re.compile(
+    r'^(?:c\d+|[a-z_]+)\s+[A-Z_]+\s+\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)*(?:\s*\([^)]*\))?$'
+)
+
+_CATCH_ADVISORY_BUCKET_WORD_RE = re.compile(r'^[A-Za-z]+$')
+
+_CATCH_FAMILY_MAX_LEN = 60
+
+
+def _catch_reason_advisory_bucket(reason):
+    """Fixed bucket for a reason string with no recognised `HEADER:`/
+    judge-score keyword prefix — a colonless advisory note (e.g. one
+    embedding a `--test-cmd '...'` argument). Before this, such a reason
+    became the family VERBATIM: the whole, unbounded, unescaped note
+    reached a public issue title/body (the one string that ever skipped
+    both _catch_redact and _catch_signal_escape_markdown), and one
+    advisory note per differing detail/score never collapsed into a
+    single family the way every other arm's blocks did. Uses the
+    reason's first two words when both are plain letters (so notes
+    sharing the same score-free lead-in still collapse into one family,
+    not one per note), else the fixed literal "advisory-note"."""
+    words = reason.split()
+    first_two = words[:2]
+    if first_two and all(_CATCH_ADVISORY_BUCKET_WORD_RE.match(w) for w in first_two):
+        return " ".join(first_two)[:40]
+    return "advisory-note"
+
+
+def _catch_reason_family(reason):
+    """The reason string with its numbers/values stripped off, so repeat
+    false/miss blocks from the SAME detection arm collapse into one
+    family regardless of which numbers or claim key fired that time.
+    Three shapes are named outright: "count mismatch (<label>)" keeps its
+    label (the label is the identity that matters, the draft/evidence
+    counts are not), "PR mismatch: ..." and "LABELLED VALUE: ..." collapse
+    to their own bare header. Anything else falls back to a generic strip:
+    drop a trailing parenthetical (e.g. "(overclaim==1.00 arm)"), then a
+    trailing run of numbers (a score like "0.94", or a key/verdict/score
+    triple's own score). The judge's own reason shape is
+    f"{k} {v} {s:.2f}" where k is either a PER-CALL claim key (c1, c2, c3,
+    ...) or a NAMED arm key (overclaim, leaked_internal, time_sensitive,
+    self_contradictory). A per-call key is not part of the family's
+    identity, only which claim index in that turn's draft happened to trip
+    the arm, so leaving it in used to split one arm's blocks across as
+    many families as there were claim indices and a real repeat pattern
+    (six separate OVERCLAIMS blocks, say) could never reach --min. A
+    leading c<digits> token is now stripped for that reason, so
+    "c2 CONTRADICTED 0.82" -> "CONTRADICTED" and "c1 OVERCLAIMS 0.91
+    (overclaim==1.00 arm)" -> "OVERCLAIMS" — every c<digits> variant of the
+    same arm collapses to one family. A NAMED arm key IS part of the arm's
+    identity (not a per-call index) and is kept, so "overclaim OVERCLAIMS
+    0.94" -> "overclaim OVERCLAIMS" and "leaked_internal HAS_LEAKS 0.95"
+    -> "leaked_internal HAS_LEAKS" unchanged. A reason with neither a
+    recognised `HEADER:` prefix (no colon at all) nor the judge's own
+    score shape — a colonless advisory note, e.g. one embedding a
+    `--test-cmd '...'` argument — used to fall all the way through this
+    same generic strip and come out as the ENTIRE reason, verbatim:
+    unbounded, and never run through _catch_redact or
+    _catch_signal_escape_markdown before reaching a public issue
+    title/body. That shape is now bucketed instead (see
+    _catch_reason_advisory_bucket) so one advisory note collapses into
+    one family per score-free lead-in, not one per note. Every return
+    path is capped at _CATCH_FAMILY_MAX_LEN (60) chars and passed through
+    _catch_signal_escape_markdown — belt-and-braces alongside the same
+    escape _catch_signal_title/_catch_signal_body apply again at
+    render time, since a *recognised*-header family can still carry a
+    backtick/@handle/#NN if the draft text before the colon did. Never
+    raises; an empty/falsy reason returns ""."""
+    if not reason:
+        return ""
+    reason = str(reason).strip()
+    m = _CATCH_FAMILY_COUNT_MISMATCH_RE.match(reason)
+    if m:
+        family = m.group(1)
+    elif reason.startswith("PR mismatch"):
+        family = "PR mismatch"
+    elif reason.startswith("LABELLED VALUE"):
+        family = "LABELLED VALUE"
+    elif ":" not in reason and not _CATCH_FAMILY_SCORE_RE.match(reason):
+        family = _catch_reason_advisory_bucket(reason)
+    else:
+        prefix = reason.split(":", 1)[0].strip()
+        prefix = re.sub(r'\s*\([^)]*\)\s*$', '', prefix)
+        prefix = re.sub(r'\s+\d+(\.\d+)?(/\d+(\.\d+)?)*\s*$', '', prefix)
+        prefix = re.sub(r'^c\d+\s+', '', prefix)
+        prefix = prefix.strip()
+        family = prefix if prefix else _catch_reason_advisory_bucket(reason)
+    family = _catch_signal_escape_markdown(family)
+    return family[:_CATCH_FAMILY_MAX_LEN]
+
+
+def _catch_signal_groups(records, tags=("false", "miss")):
+    """{(tag, family): [records...]}, sorted by ts ascending within each
+    group, for every record whose tag is in `tags` and whose first
+    reason string is non-empty — a tagged record with no reasons has
+    nothing to group by and is silently skipped, never a crash."""
+    groups = {}
+    for rec in records:
+        tag = rec.get("tag")
+        if tag not in tags:
+            continue
+        reasons = rec.get("reasons") or []
+        if not reasons:
+            continue
+        family = _catch_reason_family(reasons[0])
+        if not family:
+            continue
+        groups.setdefault((tag, family), []).append(rec)
+    for key in groups:
+        groups[key].sort(key=lambda r: r.get("ts") or "")
+    return groups
+
+
+# --------------------------------------------- markdown-injection guard
+#
+# _catch_signal_escape_markdown is only ever reached by draft-derived text
+# — a redacted reason line or draft excerpt shown under the local-only
+# --with-reasons/--with-drafts flags (see _cmd_catch_signal: that
+# combination is a hard refusal alongside --open, so this text never
+# reaches a real `gh issue create` body). Even a REDACTED excerpt is still
+# attacker-controlled text pulled from a draft the model itself wrote —
+# nothing stops it from carrying literal markdown/GitHub-autolink syntax
+# (a fenced code block, an @mention, a "fixes #NN" auto-close/auto-link
+# form) that would render live if this text were ever pasted into an
+# issue/PR body or comment. Three specific constructs are neutralised:
+#   - a backtick is replaced with the fullwidth lookalike ` (U+FF40), so
+#     draft text can never open/close a code span or escape a fenced
+#     block early;
+#   - "@handle" has its "@" replaced with "at:", so GitHub never turns it
+#     into a real user mention/notification;
+#   - "#123"-shaped text has its "#" replaced with "no.", so GitHub never
+#     auto-links/auto-closes an issue or PR off draft text.
+# Never raises: an empty/None input returns "".
+_MD_HANDLE_RX = re.compile(r'@(?=\w)')
+_MD_ISSUE_REF_RX = re.compile(r'#(?=\d)')
+
+
+def _catch_signal_escape_markdown(text):
+    if not text:
+        return text or ""
+    out = text.replace("`", "｀")
+    out = _MD_HANDLE_RX.sub("at:", out)
+    out = _MD_ISSUE_REF_RX.sub("no.", out)
+    return out
+
+
+def _catch_signal_examples(records, limit=3, with_reasons=False, with_drafts=False):
+    """Up to `limit` examples off the front of `records` (already sorted
+    oldest-first by the caller). By default an example is metadata ONLY —
+    just the record id — because a public `catch signal --open` issue
+    must never carry draft-derived text at all (see BLOCKING 1: names,
+    addresses, order numbers, health details, dollar figures, non-US
+    phone numbers and token URLs all used to reach the issue body despite
+    _catch_redact, because that redaction net only ever covered a few
+    narrow shapes — secrets, emails, US phone numbers, SSNs, card
+    numbers). A reason line is added only when `with_reasons` is set, a
+    draft excerpt only when `with_drafts` is set — both are local-only
+    flags `_cmd_catch_signal` refuses to combine with `--open` (hard
+    error, exit 2), so this function is never called with either True on
+    a run that could reach `gh issue create`. When either is set, the
+    field still goes through _catch_redact again here even though
+    draft_excerpt was already redacted when the record was first written
+    (belt and suspenders), and then through _catch_signal_escape_markdown
+    — draft-derived text is never rendered anywhere without both passes."""
+    out = []
+    for rec in records[:limit]:
+        ex = {"id": rec.get("id", "")}
+        if with_reasons:
+            reasons = rec.get("reasons") or []
+            reason_line = _catch_redact(reasons[0]) if reasons else ""
+            ex["reason"] = _catch_signal_escape_markdown(reason_line)
+        if with_drafts:
+            draft = _catch_redact(rec.get("draft_excerpt") or "")[:300]
+            ex["draft"] = _catch_signal_escape_markdown(draft)
+        out.append(ex)
+    return out
+
+
+_CATCH_SIGNAL_TITLE_TEMPLATES = {
+    "false": "false block: {family} (x{count})",
+    "miss": "missed lie: {family} (x{count})",
+}
+
+
+def _catch_signal_title(tag, family, count):
+    """A signal's title — belt-and-braces escapes `family` again here
+    even though _catch_reason_family already bounds and escapes it, since
+    a *recognised*-header family (e.g. the text before a colon in a
+    draft-derived reason) can still carry a backtick/@handle/#NN if the
+    draft text before that colon did."""
+    tmpl = _CATCH_SIGNAL_TITLE_TEMPLATES.get(tag, "{tag} pattern: {family} (x{count})")
+    return tmpl.format(tag=tag, family=_catch_signal_escape_markdown(family), count=count)
+
+
+def _catch_signal_bot_counts(records):
+    """{bot_id: count} for one family's records, counts only — no reason/
+    draft text, so this is safe in the default (--open-reachable) body
+    the same way the rest of a signal's metadata is. A missing `bot`
+    field (an older record written before the ledger tagged bot/origin)
+    counts under "unknown", same fallback `catch list`'s own bot column
+    uses. Sorted by count desc then bot id, for a stable order."""
+    counts = {}
+    for rec in records:
+        bot = rec.get("bot") or "unknown"
+        counts[bot] = counts.get(bot, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _build_catch_signals(records, since_spec, min_count, with_reasons=False,
+                         with_drafts=False):
+    """(signals, undated) — one signal dict per (tag, family) that has
+    reached `min_count` records, sorted by count desc then tag/family for
+    a stable order across runs. `since_spec` is applied via the same
+    _catch_filter_since every other `catch` subcommand uses, so an
+    undated record is excluded from the window (never silently "recent")
+    and its count is returned separately, same contract as `catch
+    list`/`catch report`. `with_reasons`/`with_drafts` are passed straight
+    through to _catch_signal_examples — see there for what each adds and
+    why both default off."""
+    filtered, undated = _catch_filter_since(records, since_spec)
+    groups = _catch_signal_groups(filtered)
+    signals = []
+    for (tag, family), recs in groups.items():
+        if len(recs) < min_count:
+            continue
+        signals.append({
+            "tag": tag,
+            "family": family,
+            "count": len(recs),
+            "first_ts": recs[0].get("ts"),
+            "last_ts": recs[-1].get("ts"),
+            "ids": [r.get("id") for r in recs],
+            "examples": _catch_signal_examples(recs, with_reasons=with_reasons,
+                                               with_drafts=with_drafts),
+            "title": _catch_signal_title(tag, family, len(recs)),
+            "bot_counts": _catch_signal_bot_counts(recs),
+        })
+    signals.sort(key=lambda s: (-s["count"], s["tag"], s["family"]))
+    return signals, undated
+
+
+def _catch_signal_bot_line(bot_counts):
+    """The counts-only per-bot breakdown line — e.g. 'primary=3,
+    worker2=1' — or "" for an empty/missing dict (older signal, or a
+    caller that never computed it)."""
+    if not bot_counts:
+        return ""
+    return ", ".join(f"{bot}={count}" for bot, count in bot_counts.items())
+
+
+def _print_catch_signal(signal):
+    print(f"signal: {signal['title']}")
+    print(f"  family: {signal['family']}  tag: {signal['tag']}  count: {signal['count']}")
+    print(f"  first: {signal['first_ts']}  last: {signal['last_ts']}")
+    bot_line = _catch_signal_bot_line(signal.get("bot_counts"))
+    if bot_line:
+        print(f"  by bot: {bot_line}")
+    for i, ex in enumerate(signal["examples"], 1):
+        line = f"  example {i} ({ex['id']})"
+        if "draft" in ex:
+            line += f": draft: {ex['draft']!r}"
+        print(line)
+        if ex.get("reason"):
+            print(f"              reason: {ex['reason']!r}")
+
+
+def _catch_signal_body(signal):
+    """The full GitHub issue body (markdown) for one signal. By default
+    (no `with_reasons`/`with_drafts` on the signal's examples — see
+    _catch_signal_examples) this holds ONLY family, count, first/last
+    timestamps and record ids, plus a pointer to run `catch list` locally
+    for the redacted detail — a public issue never carries draft-derived
+    text at all (BLOCKING 1). Any draft/reason text that IS present (the
+    local-only --with-reasons/--with-drafts modes, never reachable from
+    --open — see _cmd_catch_signal) already passed through both
+    _catch_redact and _catch_signal_escape_markdown via
+    _catch_signal_examples, so this function only assembles strings, it
+    never touches raw text itself. `family` is passed through
+    _catch_signal_escape_markdown again here too — same belt-and-braces
+    reasoning as _catch_signal_title."""
+    safe_family = _catch_signal_escape_markdown(signal['family'])
+    lines = [
+        f"## {signal['title']}",
+        "",
+        f"Reason family: `{safe_family}`",
+        f"Tag: {signal['tag']}",
+        f"Count: {signal['count']}",
+        f"First seen: {signal['first_ts']}",
+        f"Last seen: {signal['last_ts']}",
+    ]
+    bot_line = _catch_signal_bot_line(signal.get("bot_counts"))
+    if bot_line:
+        lines.append(f"By bot: {bot_line}")
+    lines += [
+        "",
+        "### Records",
+        "",
+    ]
+    examples_by_id = {ex["id"]: ex for ex in signal["examples"]}
+    for rec_id in signal["ids"]:
+        ex = examples_by_id.get(rec_id, {"id": rec_id})
+        line = f"- `{rec_id}`"
+        if "reason" in ex:
+            line += f" — reason: `{ex['reason']}`"
+        if "draft" in ex:
+            line += f" — draft: `{ex['draft']}`"
+        lines.append(line)
+    lines += [
+        "",
+        "Run `superjev catch list --id <id>` locally for the redacted detail "
+        "behind any record id above — this issue body never carries "
+        "draft-derived text (see docs/hooks.md, \"Turning a repeat pattern "
+        "into a fix PR\").",
+        "",
+        "---",
+        "Filed automatically by `superjev catch signal` from the catch ledger — "
+        "the first step of the compounding loop: harness catches -> tags -> "
+        "issue -> fix PR -> bench robot.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _catch_signal_has_pii(text):
+    """True if `text` still matches an email/phone/SSN pattern — a
+    belt-and-braces assert `catch signal --open` runs on the FULL
+    assembled issue body right before it would call `gh issue create`.
+    Since BLOCKING 1, the default (--open-reachable) body never carries
+    draft-derived text at all — only family/count/timestamps/ids/a
+    `catch list` pointer — so this should structurally never fire on that
+    path; it stays wired in as a final, cheap check that needs no draft
+    text and no monkeypatching to exercise (call it directly with a body
+    string containing a literal email). Never raises; empty/falsy text is
+    never a match."""
+    if not text:
+        return False
+    if _COMPILED_EMAIL[1].search(text):
+        return True
+    for _kind, rx in _COMPILED_CATCH_REDACT:
+        if rx.search(text):
+            return True
+    return False
+
+
+def _catch_signals_sidecar_path():
+    """<catch ledger dir>/signals.jsonl — one line per (tag, family) this
+    process has ever filed an issue for via `catch signal --open`, so the
+    same family is never filed twice. Deliberately a sidecar file, not a
+    note written back onto the matched catch-ledger records themselves:
+    a record's `note` field already carries the human's own tag reason
+    (see `catch tag`), and overwriting it with an issue URL would destroy
+    that annotation."""
+    return CATCH_LEDGER_PATH.parent / "signals.jsonl"
+
+
+def _catch_signal_already_filed(tag, family):
+    """The issue URL already on file for this (tag, family) pair, from an
+    earlier `catch signal --open` run (this process or any other), or
+    None. Reads the sidecar fresh every call — never cached — so a filed
+    signal is never re-filed even across separate cron invocations."""
+    path = _catch_signals_sidecar_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("tag") == tag and rec.get("family") == family:
+            return rec.get("issue_url")
+    return None
+
+
+def _catch_signal_record_filed(tag, family, count, ids, issue_url):
+    """Appends one line to the signals.jsonl sidecar recording that this
+    (tag, family) has now been filed — see _catch_signal_already_filed.
+    Never raises: a write failure prints to stderr and is otherwise
+    silent, same contract as catch_ledger_append/_rewrite_catch_records —
+    the issue is already filed by the time this runs, so a sidecar write
+    failure must never look like the filing itself failed."""
+    path = _catch_signals_sidecar_path()
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tag": tag,
+        "family": family,
+        "count": count,
+        "ids": ids,
+        "issue_url": issue_url,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"super-jev: could not write catch signals sidecar at {path}: {exc}",
+              file=sys.stderr)
+
+
+_GH_ISSUE_TIMEOUT = 15
+
+
+def _run_gh_issue_create(repo, title, body):
+    """One `gh issue create` call for `catch signal --open`: never
+    interactive (GH_PROMPT_DISABLED=1, stdin closed), a 15s timeout, and
+    never raises. Returns (True, issue_url) on success or (False,
+    stderr-or-message) otherwise. The body is written to a temp file
+    (--body-file) rather than passed as an argv string, so a large body
+    or one containing shell-special characters is never mangled or
+    truncated by argv limits."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(body)
+            tmp_path = f.name
+        cmd = ["gh", "issue", "create", "--repo", repo, "--title", title,
+               "--body-file", tmp_path, "--label", "harness-signal"]
+        env = dict(os.environ)
+        env["GH_PROMPT_DISABLED"] = "1"
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=_GH_ISSUE_TIMEOUT, env=env,
+                           stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            return False, (p.stderr or p.stdout or "gh issue create failed").strip()
+        out_lines = (p.stdout or "").strip().splitlines()
+        url = out_lines[-1].strip() if out_lines else ""
+        return True, url
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _cmd_catch_signal(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse3(f"catch signal: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
+    # N: --min 0 used to silently become --min 3 (`getattr(a, "min", 3) or 3`
+    # treats a real, explicit 0 the same as "not given" because 0 is falsy).
+    # Checked against `is None` instead, so an explicit --min 0 reaches the
+    # "--min must be at least 1" refusal below rather than being silently
+    # rewritten to 3.
+    min_count = a.min if getattr(a, "min", None) is not None else 3
+    if min_count < 1:
+        return refuse("catch signal: --min must be at least 1")
+    open_issues = getattr(a, "open", False)
+    dry_run = getattr(a, "dry_run", False)
+    repo = getattr(a, "repo", None)
+    with_reasons = getattr(a, "with_reasons", False)
+    with_drafts = getattr(a, "with_drafts", False)
+    if open_issues and not repo:
+        return refuse("catch signal --open needs --repo owner/name")
+    # BLOCKING 2: --with-reasons/--with-drafts render draft-derived text
+    # locally (escaped, but still draft-derived) — --open files a PUBLIC
+    # issue, which must never carry any draft-derived text at all (see
+    # _catch_signal_body). Refusing the combination outright, rather than
+    # silently ignoring the flags under --open, is a hard usage error
+    # (exit 2, argparse's own convention) so a caller never gets surprised
+    # by which mode actually ran.
+    if open_issues and (with_reasons or with_drafts):
+        print("super-jev: catch signal --open refuses --with-reasons/--with-drafts — "
+              "a public issue body must never carry draft-derived text; drop --open "
+              "to preview locally with either flag", file=sys.stderr)
+        return 2
+
+    bot_filter = getattr(a, "bot", None)
+    records = _catch_records()
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
+    signals, undated = _build_catch_signals(records, since, min_count,
+                                            with_reasons=with_reasons,
+                                            with_drafts=with_drafts)
+    if not signals:
+        print(f"catch signal: no reason family has reached --min {min_count} "
+              "false/miss block(s)")
+        if since and undated:
+            print(f"catch signal: {undated} undated record(s) excluded from the "
+                  "--since window")
+        return 1
+
+    # NIT: `--open` used to always return 0 even when every filing in the
+    # loop below failed (gh error, or the PII refusal) — a cron caller had
+    # no way to branch on "signal(s) found but nothing actually got filed"
+    # without parsing stdout/stderr. Tracked here and turned into exit 3
+    # (the shared "refused for a domain reason" exit — see _catch_refuse3)
+    # once every signal has been attempted.
+    any_filing_failed = False
+    for signal in signals:
+        _print_catch_signal(signal)
+        body = _catch_signal_body(signal)
+        if dry_run:
+            print("  --- issue body (--dry-run, gh never called) ---")
+            for line in body.splitlines():
+                print(f"  {line}")
+            print("  --- end issue body ---")
+            continue
+        if not open_issues:
+            continue
+        already = _catch_signal_already_filed(signal["tag"], signal["family"])
+        if already:
+            print(f"  already filed: {already}")
+            continue
+        if _catch_signal_has_pii(body):
+            print("  refusing to open an issue for this signal: the assembled "
+                  "body still matches an email/phone/SSN pattern after "
+                  "redaction — not filed", file=sys.stderr)
+            any_filing_failed = True
+            continue
+        ok, result = _run_gh_issue_create(repo, signal["title"], body)
+        if not ok:
+            print(f"  gh issue create failed: {result}", file=sys.stderr)
+            any_filing_failed = True
+            continue
+        print(f"  filed: {result}")
+        _catch_signal_record_filed(signal["tag"], signal["family"], signal["count"],
+                                   signal["ids"], result)
+
+    if since and undated:
+        print(f"catch signal: {undated} undated record(s) excluded from the --since "
+              "window")
+    if open_issues and any_filing_failed:
+        return 3
     return 0
 
 
@@ -9195,6 +9778,10 @@ def build_parser():
     ck_list = ck_subs.add_parser("list", help="one line per catch-ledger record")
     ck_list.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
     ck_list.add_argument("--untagged", action="store_true", help="only untagged records")
+    ck_list.add_argument("--id", default=None,
+                         help="only the one record with this id — what `catch signal`'s "
+                              "own issue-body pointer tells a human to run locally for "
+                              "the redacted detail behind a record id")
     ck_list.add_argument("--bot", default=None, help="only records from this bot id "
                                                       "(see the `bot` field, e.g. primary)")
     ck_list.set_defaults(func=cmd_catch, catch_action="list")
@@ -9210,6 +9797,33 @@ def build_parser():
     ck_report.add_argument("--bot", default=None, help="only records from this bot id "
                                                         "(see the `bot` field, e.g. primary)")
     ck_report.set_defaults(func=cmd_catch, catch_action="report")
+    ck_signal = ck_subs.add_parser("signal", help="group false/miss blocks by reason "
+                                                   "family; draft (or --open, file) a "
+                                                   "GitHub issue once one crosses --min")
+    ck_signal.add_argument("--min", type=int, default=3,
+                           help="how many same-family false/miss blocks before a "
+                                "signal fires (default 3)")
+    ck_signal.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_signal.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. "
+                                                        "primary) — restricts grouping, "
+                                                        "not just the printed breakdown")
+    ck_signal.add_argument("--open", action="store_true", dest="open",
+                           help="actually file the issue via `gh issue create` "
+                                "(needs --repo); default just prints the signal")
+    ck_signal.add_argument("--repo", default=None,
+                           help="owner/name — required with --open")
+    ck_signal.add_argument("--dry-run", action="store_true", dest="dry_run",
+                           help="print the issue body for each signal; never calls gh")
+    ck_signal.add_argument("--with-reasons", action="store_true", dest="with_reasons",
+                           help="local preview only: add each example's redacted "
+                                "reason line — refused together with --open, a public "
+                                "issue never carries draft-derived text")
+    ck_signal.add_argument("--with-drafts", action="store_true", dest="with_drafts",
+                           help="local preview only: add each example's redacted draft "
+                                "excerpt — refused together with --open, a public issue "
+                                "never carries draft-derived text")
+    ck_signal.set_defaults(func=cmd_catch, catch_action="signal")
     ck.set_defaults(func=cmd_catch, catch_action=None)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")
