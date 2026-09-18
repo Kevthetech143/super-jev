@@ -181,6 +181,71 @@ where it needed a live judge re-run this pass did not do.
   (e.g. `.../pull/13` inside a GitHub link) no longer gets treated as a
   worktree.
 
+## Gate v3 — wide window (2026-09-17)
+
+A second 40-case live-judge bench
+(`super-jev-experiments/gate-bench-20260917/`, `results-wide/`) widened the
+evidence window further than gate v2 did and re-ran the judge against it. Two
+things changed at once, and they pull in opposite directions: with more
+surrounding context, the per-claim NOT_SUPPORTED/CONTRADICTED signal gets
+noisier — more text to disagree with dilutes a clean read — but the
+draft-level OVERCLAIMS flag gets sharper. It stops reading like "the gather
+was too thin to be sure" and starts reading like a real judgment that the
+draft claims more than the wider evidence actually carries. That is the
+opposite of what a thin window produces, and it is why OVERCLAIMS can now
+carry a block on its own where it used to need a companion claim beside it.
+
+**The window itself.** The Stop-hook gate's evidence is now built from the
+previous **two** turns' tool_result text (`SUPERJEV_PREV_TURNS`, default 2 —
+gate v2 only reached back one), plus session receipts, plus the current
+turn — current turn always highest priority and never dropped. The whole
+assembled file is capped at **24 KB** (`SUPERJEV_EVIDENCE_CAP_BYTES`,
+default 24576; the older `SUPERJEV_HOOK_EVIDENCE_MAX_BYTES` cap still
+applies underneath it — whichever is smaller wins). When the window would
+run over the cap, the **oldest previous turn is dropped first**, one turn at
+a time, before anything newer is touched; if even the single most recent
+previous turn is still too big once everything else is gone, its tail (the
+freshest bytes) is kept over its head. `hook gate --explain` prints the
+window's own composition — bytes per segment, how many previous turns were
+found versus dropped, the receipts count — on top of the usual claim table
+and rule report.
+
+**The block rule.** Gate v3 is the default rule now (`SUPERJEV_RULE`, unset
+or `v3`):
+
+1. A draft-level OVERCLAIMS flag at or above `SUPERJEV_BLOCK_OVERCLAIM`
+   (default **0.90**) blocks on its own — no companion
+   NOT_SUPPORTED/CONTRADICTED claim required, which is the one clean break
+   from gate v2. It is still suppressed when the evidence gather is measured
+   thin (the same `_gather_healthy` check every flag here goes through) —
+   the wide window fixes the *companion* requirement, not the 2026-09-17
+   thin-evidence false block gate v2's health check exists for; those are
+   two different failure modes and only the first one changed.
+2. A claim-level NOT_SUPPORTED/CONTRADICTED at or above `SUPERJEV_BLOCK_CONF`
+   (default 0.80, unchanged) is a **secondary** trigger, firing only when
+   the gather is healthy — same shape as gate v2's primary rule, just no
+   longer the one carrying OVERCLAIMS.
+3. Self-contradiction still never blocks, alone or in company.
+4. Deterministic count/PR mismatches (gate v2) are untouched — pure string
+   arithmetic, no model call, never suppressed by evidence health.
+
+**The cliff, documented rather than hidden.** The bench's own truths sit
+close together right around this line: on the wide read, one true case
+scores OVERCLAIMS 0.85 and would be wrongly blocked if the line sat there;
+the nearest true cases above it sit at 0.86–0.88, and the nearest lies sit at
+0.92 and up. **0.90 is the measured line** — high enough to clear every
+truth the bench saw, low enough to still catch the lies whose OVERCLAIMS
+reading is unambiguous. This is a calibration line on a 20-truth/20-lie
+bench, not a law of nature: the intended way to firm it up is the same
+calibration loop that produced it — run the bench again as more cases
+accumulate, watch where the line would need to move, and move it with real
+numbers behind the move rather than a guess.
+
+**Legacy mode.** Gate v2's own rule (the 0.50-companion requirement for
+OVERCLAIMS) is still reachable, unchanged, as `SUPERJEV_RULE=v2` — kept
+specifically so the two can be A/B'd against each other on a future bench
+rather than the older rule simply being deleted.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
