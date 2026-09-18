@@ -4410,19 +4410,41 @@ def _iter_window_report_lines(text):
     in_reports_region = False
     who = None
     close_at = None
+    # True only on a line that directly follows a section separator or an
+    # accepted section header (blank lines in between do not clear it) —
+    # the only two places `_prev_turn_items` ever puts the composer's
+    # `[relayed reports in this turn]` mark (see REPORTS_REGION_LABEL and
+    # `_build_prev_turns_block_detailed`'s "\n\n---\n\n".join). Anywhere
+    # else the mark did not come from the composer, so it must not be
+    # honoured there (eighth review): a tool result that prints the mark
+    # plus a loose `REPORT FROM` line mid-body, with no separator or
+    # header in front of it, is ordinary text, not structure.
+    at_boundary = False
     for pos, raw in enumerate(lines, start=1):
         i = pos - 1
         stripped = raw.strip()
         if in_report:
             if i == close_at:
                 in_report, who, close_at = False, None, None
+                at_boundary = False
                 continue
             if _SECTION_SEPARATOR_RE.match(stripped):
                 in_report, who, close_at = False, None, None
+                in_reports_region = False
+                at_boundary = True
                 continue
             if not stripped:
                 continue
         else:
+            if not stripped:
+                continue
+            if _SECTION_SEPARATOR_RE.match(stripped):
+                # Every section separator ends whatever reports region
+                # was open before it — a mark seen before this line marks
+                # nothing after it.
+                in_reports_region = False
+                at_boundary = True
+                continue
             if _WINDOW_SECTION_RE.match(stripped):
                 new_slot = _section_emit_slot(stripped)
                 if new_slot is not None and (slot is None or new_slot > slot):
@@ -4432,17 +4454,23 @@ def _iter_window_report_lines(text):
                     # starts as tool-result/receipt territory until the
                     # composer's own mark says otherwise.
                     in_reports_region = (stripped == "[current turn reports]")
+                    at_boundary = True
                     continue
                 # A header the composer could not have emitted here.
                 # Fall through: it is prose, and it moves no boundary.
             if _REPORTS_REGION_RE.match(stripped):
-                # Composer structure (see REPORTS_REGION_LABEL): consumed,
-                # never yielded. A forged copy inside a tool result can
-                # only ENABLE the loose-opener rule, which blocks more,
-                # never less — and a forged copy inside a report body is
-                # quoted out on the way in.
-                in_reports_region = True
-                continue
+                # Composer structure (see REPORTS_REGION_LABEL) — but only
+                # when it sits where the composer actually puts it: right
+                # after a section separator or an accepted section header
+                # (`at_boundary`). A copy anywhere else — mid tool-result
+                # text, inside a receipt, after a `##` sub-header a worker
+                # typed — is not ours and is left as ordinary text below,
+                # so it cannot enable the loose `REPORT FROM` opener and
+                # cannot mask a real receipt behind it.
+                if at_boundary:
+                    in_reports_region = True
+                    at_boundary = False
+                    continue
             is_open, who = _report_marker_who(
                 stripped, allow_loose=in_reports_region)
             if is_open:
@@ -4451,9 +4479,9 @@ def _iter_window_report_lines(text):
                 # body — fail closed.
                 in_report = True
                 close_at = _report_block_close(lines, i, who)
+                at_boundary = False
                 continue
-            if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
-                continue
+            at_boundary = False
         rank = _section_recency_rank(label) if label is not None else None
         yield pos, raw, stripped, label, rank, in_report
 
