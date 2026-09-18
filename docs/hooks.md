@@ -1653,13 +1653,13 @@ bug, not the catch.
 
 Whether `l01` is still caught today rests entirely on the judge, and the
 judge's own score for the identical draft/evidence pair has moved across
-three real calls: `0.98` OVERCLAIMS (2026-09-17, pre-dates the wide
-evidence window), `0.93` OVERCLAIMS (2026-09-18, pre-#64, comfortably over
-the `0.90` block line — the deterministic count-mismatch fired *alongside*
-this score, not instead of it), and, on the live post-#64 run, no
-threshold crossed at all (`--explain` shows `fired on: nothing`, meaning
-both the `0.90` overclaim line and the `0.80` secondary line were missed
-that time). Same draft, same evidence, three live judge calls, three
+three real calls: OVERCLAIMS landed above the `0.90` block line twice in a
+row (2026-09-17, pre-dates the wide evidence window; then 2026-09-18,
+pre-#64, with the deterministic count-mismatch firing *alongside* this
+score, not instead of it), then, on the live post-#64 run, below every
+threshold (`--explain` shows `fired on: nothing`, meaning both the `0.90`
+overclaim line and the `0.80` secondary line were missed that time). Same
+draft, same evidence, three live judge calls, three
 different outcomes on a case sitting right at the line — this is judge
 score variance on a borderline reply, not a code regression #64
 introduced, and `replay_gate_bench.py` now lists `l01` among the lies the

@@ -9302,3 +9302,136 @@ def test_catch_report_shows_by_bot_breakdown_when_no_filter(tmp_path, monkeypatc
     assert "by bot:" in out
     assert "primary: 2" in out
     assert "b1: 1" in out
+
+
+# --------------------------------------------- PR #67 round 2: sweep baseline
+
+def _load_sweep_module():
+    import importlib.util as _ilu
+    sweep_path = SKILL / "tests" / "replay_fact_block_sweep.py"
+    spec = _ilu.spec_from_file_location("replay_fact_block_sweep", sweep_path)
+    sweep = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(sweep)
+    return sweep
+
+
+def _head_window_and_facts(mod, transcript_path, draft):
+    derived, wmeta = mod._derive_evidence_text_from_transcript(
+        str(transcript_path), return_meta=True)
+    receipt_extra_facts = None
+    if wmeta is not None and wmeta.get("current_turn_empty"):
+        receipt_idx = mod._receipt_turn_index(wmeta)
+        if receipt_idx is not None:
+            fact = mod._receipt_turn_extra_fact(receipt_idx)
+            receipt_extra_facts = [fact] if fact else None
+    cited_block = mod.build_cited_file_block(draft, window_text=derived)
+    if cited_block:
+        derived = (derived + "\n\n===\n\n" + cited_block) if derived else cited_block
+    derived, facts, fmeta = mod.compose_window_with_facts(
+        derived or "", draft, cap_bytes=0, extra_facts=receipt_extra_facts)
+    return derived, facts, fmeta
+
+
+def test_sweep_baseline_module_assembles_the_same_window_as_head(tmp_path, monkeypatch):
+    # FIX 1 (PR #67 round 2): `_load_baseline_module` execs the baseline
+    # superjev.py from a NamedTemporaryFile, so its own SKILL_DIR/REPO_ROOT
+    # (derived from __file__) point at the temp directory rather than this
+    # repo — `_cited_file_roots()` then searches the wrong place and the
+    # baseline silently drops the `[cited files]` tail the head side sees.
+    # After the fix, the baseline module's SKILL_DIR/REPO_ROOT are copied
+    # from the live `sj` module right after exec, so both sides walk the
+    # same roots and produce byte-identical windows and fact counts for a
+    # case whose draft cites a real file.
+    sweep = _load_sweep_module()
+
+    fake_repo_root = tmp_path / "fake_repo"
+    fake_repo_root.mkdir()
+    cited = fake_repo_root / "SWEEPTESTFIX1.md"
+    cited.write_text("the cited tail content xyz\n", encoding="utf-8")
+    monkeypatch.setattr(sweep.sj, "REPO_ROOT", fake_repo_root)
+
+    # Skip real git ref resolution entirely (no network, no real repo
+    # state needed) — the override short-circuits _resolve_baseline_ref.
+    monkeypatch.setenv("SUPERJEV_SWEEP_BASELINE_REF", "fake-ref")
+    live_source = (SKILL / "superjev.py").read_text(encoding="utf-8")
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        if cmd[:2] == ["git", "-C"] and "show" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout=live_source, stderr="")
+        if cmd[:2] == ["git", "-C"] and "rev-parse" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="deadbeef\n", stderr="")
+        raise AssertionError(f"unexpected git call in test: {cmd}")
+    monkeypatch.setattr(sweep.subprocess, "run", fake_run)
+
+    baseline, ref, sha = sweep._load_baseline_module()
+    assert baseline is not None
+    assert ref == "fake-ref"
+    assert sha == "deadbeef"
+    # The fix under test: both sides resolve to the SAME repo root, not
+    # the baseline's own throwaway temp-file directory.
+    assert baseline.REPO_ROOT == fake_repo_root
+    assert baseline.SKILL_DIR == sweep.sj.SKILL_DIR
+
+    transcript = _write_transcript(tmp_path, [
+        _tool_result_record("some earlier tool output"),
+        _assistant_text_record("the final draft text"),
+    ])
+    draft = "per SWEEPTESTFIX1.md, the cited tail content xyz is confirmed"
+
+    head_window, head_facts, _ = _head_window_and_facts(sweep.sj, transcript, draft)
+    base_window, base_facts, _ = _head_window_and_facts(baseline, transcript, draft)
+
+    # Both sides must have actually found and folded in the cited file —
+    # otherwise this test would pass vacuously (both sides empty) without
+    # ever exercising the bug the fix addresses.
+    assert "CITED FILE" in head_window
+    assert "the cited tail content xyz" in head_window
+
+    assert head_window == base_window
+    assert len(head_facts) == len(base_facts)
+
+
+def test_sweep_default_baseline_ref_is_merge_base_with_origin_main(monkeypatch):
+    # FIX 2 (PR #67 round 2): the default baseline must be the merge-base
+    # of HEAD and origin/main, not HEAD~1 — HEAD~1 silently compares a
+    # multi-commit branch against its OWN earlier commit instead of main.
+    sweep = _load_sweep_module()
+    monkeypatch.delenv("SUPERJEV_SWEEP_BASELINE_REF", raising=False)
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        calls.append(cmd)
+        if "rev-parse" in cmd and "--verify" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        if "merge-base" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="abc123deadbeef\n", stderr="")
+        raise AssertionError(f"unexpected git call in test: {cmd}")
+    monkeypatch.setattr(sweep.subprocess, "run", fake_run)
+
+    ref = sweep._resolve_baseline_ref()
+    assert ref == "abc123deadbeef"
+    assert any("merge-base" in c and "origin/main" in c for c in calls)
+
+
+def test_sweep_baseline_ref_falls_back_to_head_tilde_1_when_origin_main_missing(monkeypatch):
+    sweep = _load_sweep_module()
+    monkeypatch.delenv("SUPERJEV_SWEEP_BASELINE_REF", raising=False)
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        if "rev-parse" in cmd and "--verify" in cmd:
+            raise subprocess.CalledProcessError(1, cmd)
+        raise AssertionError(f"unexpected git call in test: {cmd}")
+    monkeypatch.setattr(sweep.subprocess, "run", fake_run)
+
+    assert sweep._resolve_baseline_ref() == "HEAD~1"
+
+
+def test_sweep_baseline_ref_env_override_wins(monkeypatch):
+    sweep = _load_sweep_module()
+    monkeypatch.setenv("SUPERJEV_SWEEP_BASELINE_REF", "some-explicit-ref")
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        raise AssertionError("must not call git when the env override is set")
+    monkeypatch.setattr(sweep.subprocess, "run", fake_run)
+
+    assert sweep._resolve_baseline_ref() == "some-explicit-ref"
