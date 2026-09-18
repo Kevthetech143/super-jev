@@ -1244,6 +1244,76 @@ than blocking twice. By itself, being suppressed is not folded into false
 stops or misses, because nothing has been judged right or wrong yet — the
 retry just held a block back.
 
+## Two more false-block sources closed (2026-09-18)
+
+Two live false blocks, found on separate reported drafts, both fixed at the
+same layer they were caused: literal string/regex work, no judge involved.
+
+**The count arm's draft-side tokenizer no longer splits a mixed alnum run.**
+`_extract_labelled_draft_counts` tokenized a clause with `[A-Za-z#/]+|\d+` as
+two *separate* alternatives, so a run with no separator between letters and
+digits — a git short SHA like `0dca183` — matched as three tokens instead of
+one: `0`, `dca`, `183`. A true draft that said "HEAD 0dca183, 61 tests per
+Muse" put both bogus digit tokens inside the four-token window of `tests`,
+alongside the real `61`, and the arm reported `count mismatch (tests):
+draft 0/61/183 vs evidence 53` on a true report. The tokenizer now matches
+one combined character class, `[A-Za-z0-9#/]+`, so a mixed run stays one
+token; the existing `tok.isdigit()` check downstream already excludes
+anything that isn't a pure digit run, so the hash contributes nothing at all
+rather than two counts.
+
+Fixing the tokenizer alone was not enough on that same case: the real
+receipt for the honest `61` was a grep excerpt of a worker's own report,
+`` `test_v2_details` -> **61 passed**. ``, which carries no `in Ns` duration
+and matched none of the registered runner shapes — it sat unmatched while
+an unrelated, in-scope `53 passed in 77.52s` (a different, earlier task's
+baseline run, in scope only because it shared the same relay-tool path)
+paired instead. `_EVIDENCE_COUNT_RES["tests"]` now also recognises a
+worker's bold-markdown summary of a run, `**N passed**`, the same way it
+already trusts the glyph-prefixed node:test line.
+
+**Family 8 (labelled-value pairing) gained a common-noun / number-list
+guard.** A draft saying "items 2 and 3" — the English noun "items" followed
+by a plain enumerated list — paired against an evidence row labelled `feat
+items` (an unrelated table column sharing one common word) and blocked. The
+adjacency pairing in `_fact_draft_label_values` now also tags a pair as
+`guard_word`-bearing when the matched word is a common count noun (`step`,
+`item`, `point`, `option`, `part` — see `_FACT_COUNT_NOUN_STEMS`) sitting
+next to an enumerated number list (`_fact_in_number_list_context`, matching
+"2 and 3" / "1, 2 and 3" shapes). `_facts_labelled_value_claims` only trusts
+a guarded pair when the evidence's own label is **no longer** than the word
+the draft used, or is the exact (multi-word) phrase the draft itself wrote —
+so `feat items` (two words, longer than `items`) is rejected unless the
+draft literally wrote "feat items" itself. The draft can still mark a word
+as an explicit label with real punctuation — `items: 2`, `items = 2`,
+`` `items` 2 `` — via `_fact_explicit_label_word`, which bypasses the guard
+entirely (and, being explicit, is allowed to cross the clause-boundary rule
+the rest of family 8 respects). Separately, the same value-token scan no
+longer reads the leading digits of a mixed alnum run as a standalone value —
+"HEAD 0dca183" does not read as the labelled value `0` for `head` — the
+same fix as the count arm's tokenizer, applied where family 8 extracts
+values instead of counts.
+
+Both changes are re-measured against every recorded bench (gate-bench-
+20260917, -20260918, -20260918-fleet, and the -20260918-blind set) with
+`skills/super-jev/tests/replay_gate_bench.py` and
+`skills/super-jev/tests/replay_fact_block_sweep.py`: zero truths newly
+blocked, and the two count lies (l04, l05) the deterministic arm already
+caught still catch clean.
+
+**Families 4 and 5's receipt scan no longer reads inside a REPORT FROM
+fence.** Both read every window line through `_fact_window_lines`,
+including a worker's own unverified claim text inside a `REPORT FROM ...`
+block — so a report merely *saying* "gh pr merge 39 ran clean, PR 39
+merged" (not an actual `gh` receipt) could be read as a real merge receipt
+by family 4's merge/CI check, or by family 5's stale-report-vs-receipt
+check. `_fact_window_lines_excluding_reports` (and its positive-image
+sibling, `_iter_window_report_lines`, factored out of the in_report
+tracking `_report_not_merged_claims` already used) now feeds the RECEIPT
+half of both families; `_report_not_merged_claims` itself, family 5's own
+"a report claims not-merged" half, still reads a report's body on purpose —
+that check is about what the report says, not about a receipt.
+
 ## Judge-advisory mode
 
 `SUPERJEV_GATE_JUDGE_ADVISORY=1` is a third, opt-in failsafe next to the
