@@ -443,8 +443,45 @@ export async function runFetch(catalog: FetchCatalogEntry[], request: string, op
 // asks a clarifying question instead of guessing.
 // ---------------------------------------------------------------------------
 
-/** Default confidence floor below which the gate asks instead of acting. DOCUMENTED by the routing research's escalation rule, not measured live by this repo. */
-export const DEFAULT_FETCH_FLOOR = 0.80;
+/**
+ * Default confidence floor below which the gate asks instead of acting.
+ *
+ * Was 0.80 (documented by the routing research's escalation rule, never
+ * measured live). An offline replay of saved live rankings
+ * (`bigcall-20260917/results/fetch-floor/REPORT.md`) swept floor and margin
+ * together against 60 real requests and found floor>=0.60 combined with
+ * `DEFAULT_FETCH_MARGIN` served more correct top picks with fewer wrong
+ * serves than the old floor-only rule at 0.80. The old behaviour is still
+ * reachable with `--floor 0.80 --margin 0`.
+ */
+export const DEFAULT_FETCH_FLOOR = 0.60;
+
+/**
+ * Default minimum gap between the top pick's confidence and the runner-up's,
+ * below which the gate asks instead of acting even when the top pick alone
+ * clears the floor. A confident top-1 sitting in a crowded field — a
+ * second candidate almost as confident — is still a guess, just a
+ * confident-sounding one; the margin catches what a bare floor can't.
+ * Measured alongside `DEFAULT_FETCH_FLOOR` in the same offline replay: 0.10
+ * was the best-performing margin at floor 0.60 across the swept grid. Set
+ * to 0 to disable the margin check and gate on the floor alone (the old
+ * behaviour, paired with `--floor 0.80`).
+ */
+export const DEFAULT_FETCH_MARGIN = 0.10;
+
+/**
+ * The gap between the top pick's confidence and the runner-up's, both drawn
+ * from `ranked` (only candidates that already beat "none of these"). When
+ * there is no runner-up the gap is the top pick's own confidence — a lone
+ * candidate has nothing to be confused with, so its full confidence counts
+ * as its margin, matching the offline replay's definition.
+ */
+export function topMargin(ranked: FetchRankedEntry[]): number {
+  const top = ranked[0];
+  if (!top) return 0;
+  const runnerUp = ranked[1];
+  return runnerUp ? top.confidence - runnerUp.confidence : top.confidence;
+}
 
 export type FetchGateAsk = {
   noMatch: true;
@@ -469,19 +506,24 @@ export function buildClarifyingQuestion(candidateIds: string[]): string {
 }
 
 /**
- * Apply the confidence floor to a completed run. Below the floor, or when
- * `run.noMatch` already won, returns `{noMatch: true, candidates, ask}` so
- * the caller can ask a clarifying question instead of guessing; the top 3
- * candidates come from `allScored` (every judged record, whether or not it
- * beat none), so there is still something to ask about even when nothing in
- * the catalog beat "none of these" at all. Otherwise returns the ranked list
- * unchanged as `{noMatch: false, ranked}`.
+ * Apply the confidence floor and the margin to a completed run. Below the
+ * floor, or when the gap between the top pick and the runner-up is below
+ * `margin`, or when `run.noMatch` already won, returns
+ * `{noMatch: true, candidates, ask}` so the caller can ask a clarifying
+ * question instead of guessing; the top 3 candidates come from `allScored`
+ * (every judged record, whether or not it beat none), so there is still
+ * something to ask about even when nothing in the catalog beat "none of
+ * these" at all. Otherwise returns the ranked list unchanged as
+ * `{noMatch: false, ranked}`. `margin` defaults to `DEFAULT_FETCH_MARGIN`;
+ * pass 0 to gate on the floor alone (the old behaviour).
  */
-export function applyNoneGate(run: FetchRun, floor: number = DEFAULT_FETCH_FLOOR): FetchGateResult {
+export function applyNoneGate(run: FetchRun, floor: number = DEFAULT_FETCH_FLOOR, margin: number = DEFAULT_FETCH_MARGIN): FetchGateResult {
   if (!Number.isFinite(floor) || floor < 0 || floor > 1) throw new Error('floor must be a number in [0, 1]');
+  if (!Number.isFinite(margin) || margin < 0 || margin > 1) throw new Error('margin must be a number in [0, 1]');
   const top = run.ranked[0];
   const belowFloor = run.noMatch || !top || top.confidence < floor;
-  if (!belowFloor) return { noMatch: false, ranked: run.ranked };
+  const belowMargin = !belowFloor && topMargin(run.ranked) < margin;
+  if (!belowFloor && !belowMargin) return { noMatch: false, ranked: run.ranked };
   const candidates = run.allScored.slice(0, 3);
   return { noMatch: true, candidates, ask: buildClarifyingQuestion(candidates.map(c => c.id)) };
 }

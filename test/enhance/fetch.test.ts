@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_FETCH_FLOOR, DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, applyNoneGate, beatsNone, buildClarifyingQuestion,
-  formatFetchPlan, planFetch, prefilterCatalog, relevanceQuestion, runFetch, tokenize, type FetchCatalogEntry, type FetchRun
+  DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN, DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, applyNoneGate, beatsNone, buildClarifyingQuestion,
+  formatFetchPlan, planFetch, prefilterCatalog, relevanceQuestion, runFetch, tokenize, topMargin, type FetchCatalogEntry, type FetchRun
 } from '../../src/enhance/fetch.ts';
 import { choiceAnswer } from '../../src/enhance/stub.ts';
 import type { Answer, Evaluation, Evaluator, Question, Request } from '../../src/types.ts';
@@ -424,12 +424,64 @@ test('applyNoneGate asks a clarifying question when the top pick is below the fl
   }
 });
 
-test('applyNoneGate uses DEFAULT_FETCH_FLOOR (0.80) when no floor is given', () => {
-  assert.equal(DEFAULT_FETCH_FLOOR, 0.80);
-  const belowDefault = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.79 }], allScored: [{ id: 'a', score: 1, confidence: 0.79 }] });
+test('applyNoneGate uses DEFAULT_FETCH_FLOOR (0.60) when no floor is given', () => {
+  assert.equal(DEFAULT_FETCH_FLOOR, 0.60);
+  const belowDefault = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.59 }], allScored: [{ id: 'a', score: 1, confidence: 0.59 }] });
   assert.equal(applyNoneGate(belowDefault).noMatch, true);
-  const atDefault = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.80 }], allScored: [{ id: 'a', score: 1, confidence: 0.80 }] });
+  // Single candidate: topMargin falls back to the top pick's own confidence
+  // (0.60), which clears DEFAULT_FETCH_MARGIN (0.10), so only the floor is
+  // in play here.
+  const atDefault = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.60 }], allScored: [{ id: 'a', score: 1, confidence: 0.60 }] });
   assert.equal(applyNoneGate(atDefault).noMatch, false);
+});
+
+test('topMargin is the gap between top1 and top2 confidence, or the lone top pick\'s own confidence with no runner-up', () => {
+  assert.equal(topMargin([]), 0);
+  assert.equal(topMargin([{ id: 'a', score: 1, confidence: 0.7 }]), 0.7);
+  assert.ok(Math.abs(topMargin([{ id: 'a', score: 1, confidence: 0.7 }, { id: 'b', score: 1, confidence: 0.65 }]) - 0.05) < 1e-9);
+});
+
+test('applyNoneGate uses DEFAULT_FETCH_MARGIN (0.10) when no margin is given: a confident top pick in a crowded field is still gated', () => {
+  assert.equal(DEFAULT_FETCH_MARGIN, 0.10);
+  // Both candidates clear the floor (0.60), but the gap between them is
+  // only 0.05 — below the default margin — so this is a guess, not a
+  // confident pick.
+  const crowded = fakeRun({
+    ranked: [{ id: 'a', score: 1, confidence: 0.90 }, { id: 'b', score: 1, confidence: 0.85 }],
+    allScored: [{ id: 'a', score: 1, confidence: 0.90 }, { id: 'b', score: 1, confidence: 0.85 }]
+  });
+  const gate = applyNoneGate(crowded, 0.60);
+  assert.equal(gate.noMatch, true);
+
+  // Same floor, a wide gap: served.
+  const clear = fakeRun({
+    ranked: [{ id: 'a', score: 1, confidence: 0.90 }, { id: 'b', score: 1, confidence: 0.60 }],
+    allScored: [{ id: 'a', score: 1, confidence: 0.90 }, { id: 'b', score: 1, confidence: 0.60 }]
+  });
+  assert.equal(applyNoneGate(clear, 0.60).noMatch, false);
+});
+
+test('applyNoneGate: margin=0 gates on the floor alone, reproducing the old floor-only behaviour at --floor 0.80', () => {
+  const crowded = fakeRun({
+    ranked: [{ id: 'a', score: 1, confidence: 0.90 }, { id: 'b', score: 1, confidence: 0.85 }],
+    allScored: [{ id: 'a', score: 1, confidence: 0.90 }, { id: 'b', score: 1, confidence: 0.85 }]
+  });
+  assert.equal(applyNoneGate(crowded, 0.80, 0).noMatch, false);
+});
+
+test('applyNoneGate: floor refusal takes precedence — a low top-1 confidence still gates even with a wide margin', () => {
+  const run = fakeRun({
+    ranked: [{ id: 'a', score: 1, confidence: 0.55 }, { id: 'b', score: 1, confidence: 0.10 }],
+    allScored: [{ id: 'a', score: 1, confidence: 0.55 }, { id: 'b', score: 1, confidence: 0.10 }]
+  });
+  const gate = applyNoneGate(run, 0.60, 0.10);
+  assert.equal(gate.noMatch, true);
+});
+
+test('applyNoneGate: noMatch precedence — noMatch=true gates regardless of floor and margin values', () => {
+  const run = fakeRun({ noMatch: true, ranked: [], allScored: [{ id: 'a', score: 1, confidence: 0.99 }] });
+  const gate = applyNoneGate(run, 0, 0);
+  assert.equal(gate.noMatch, true);
 });
 
 test('applyNoneGate on an actual noMatch run offers the top-3 closest candidates from allScored, even though none of them beat "none of these"', () => {
@@ -465,6 +517,12 @@ test('applyNoneGate refuses a floor outside [0,1]', () => {
   const run = fakeRun({});
   assert.throws(() => applyNoneGate(run, -0.1));
   assert.throws(() => applyNoneGate(run, 1.1));
+});
+
+test('applyNoneGate refuses a margin outside [0,1]', () => {
+  const run = fakeRun({});
+  assert.throws(() => applyNoneGate(run, 0.6, -0.1));
+  assert.throws(() => applyNoneGate(run, 0.6, 1.1));
 });
 
 test('buildClarifyingQuestion phrases one candidate as "did you mean X" and several as a list', () => {

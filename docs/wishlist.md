@@ -91,10 +91,16 @@ provider's preview terms restrict publishing performance numbers here.
    before. One relevance question per kept record, the request folded into
    its instructions, scored `high`/`medium`/`low`/`none` where `none` is
    "none of these". A record ranks only if it beats `none`. A **none gate**
-   (`applyNoneGate`, `--floor`, default 0.80) then asks a clarifying
-   question — `{noMatch: true, candidates, ask}` — instead of acting,
-   whenever nothing beat `none` or the top pick's confidence is below the
-   floor. A **feedback loop** (`--record`/`--ledger` on `fetch`, `catalog --
+   (`applyNoneGate`, `--floor`, default 0.60, and `--margin`, default 0.10)
+   then asks a clarifying question — `{noMatch: true, candidates, ask}` —
+   instead of acting, whenever nothing beat `none`, the top pick's
+   confidence is below the floor, or the gap between the top pick and the
+   runner-up is below the margin — a confident-looking top-1 with an
+   almost-as-confident runner-up is still a guess. An offline replay of
+   saved live fetch rankings (described in words, not benchmarked numbers)
+   found the floor+margin pair served more correct top picks with fewer
+   wrong serves than the old floor-only 0.80 rule, which is still reachable
+   with `--floor 0.80 --margin 0`. A **feedback loop** (`--record`/`--ledger` on `fetch`, `catalog --
    learn`) mines corrected picks into proposed new utterances, written to a
    separate file, never silently merged into the catalog.
    The gate above — a bench of real past requests beating the injected map

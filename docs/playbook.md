@@ -34,7 +34,7 @@ their npm scripts without any env var).
 | Is this action safe to run alone | `permit` | `python3 $S permit --snapshot action.json --json` | one of `safe_to_auto` / `needs_approval` / `refuse` | safe_to_auto: proceed without a human. needs_approval: stop, a human signs off first. refuse: do not run this, by policy or by the action's own nature (a hard code rule blocks destructive patterns before any model call runs) | **trusted for the hard-coded refuse class (irreversible/destructive); the model's own safe/needs_approval split is newer and less proven** |
 | Is the evidence chain complete before I answer | `chain` | `python3 $S chain --spec spec.json --json` | per-case accepted answer, or a block naming exactly which required role is missing | a case with every required document present gets asked the one real question and answered. A case missing a required role (e.g. no policy doc linked) is blocked in code, before any model call, and the door names the missing role | **trusted** — the completeness check is pure code, not a model judgment, and runs the same in `--dry-run` |
 | Pull facts out of a pile bigger than one call | `sweep` | `python3 $S sweep records.jsonl --questions questions.json --out dir --json` | a coverage manifest (every record accounted for), `results.jsonl`, `report.md` | manifest `complete: true` means nothing was silently skipped; each record is `accepted` (every question cleared the gate) or `for review` (something under the gate) | **trusted for coverage** (nothing dropped); **treat individual answers as advisory** near a chunk boundary — the same fact can score differently depending which batch it landed in |
-| Pick the skill/tool for a request | `fetch` | `python3 $S fetch "<plain request>" --catalog catalog.json --json` | top-k catalog ids with confidence, or `{"noMatch": true, ...}` when nothing clears the floor | a clear top pick above the 0.80 floor is usable as a suggestion. `noMatch: true` means ask a clarifying question rather than guessing | **experimental — do not route silently on this alone.** It beats guessing but has not yet cleared its own admission bar; treat its top pick as a suggestion a human or the routing keyword table can override |
+| Pick the skill/tool for a request | `fetch` | `python3 $S fetch "<plain request>" --catalog catalog.json --json` | top-k catalog ids with confidence, or `{"noMatch": true, ...}` when nothing clears the floor and margin | a clear top pick that clears both the 0.60 confidence floor and the 0.10 margin over the runner-up is usable as a suggestion; a confident-looking pick with an almost-as-confident runner-up still gets gated, since a crowded top-1 is a guess too. `noMatch: true` means ask a clarifying question rather than guessing | **experimental — do not route silently on this alone.** It beats guessing but has not yet cleared its own admission bar; treat its top pick as a suggestion a human or the routing keyword table can override |
 | Build/validate a catalog | `fetch` + hand-editing | build `catalog.json` as `{id, text, utterances?, negatives?, tags?}` per entry, then `python3 $S fetch "<a request you know the right answer to>" --catalog catalog.json --dry-run --json` to see the call plan and cost before spending anything | the dry-run plan: record count, call count, estimated tokens | use this to sanity-check a catalog's size and cost before a live run; there is no separate "validate" door — dry-run is the check | **advisory only** — a plan, not a correctness check |
 | Run the benches | `bench` | `python3 $S bench --dry-run --json` (plan and cost, no network) or `--stub` (offline synthetic run) or live (needs `TYPESAFE_API_KEY`) | the run plan (call count, token estimate) or, live, the harness's own accuracy/coverage/cost report | `--dry-run` never touches the network and always exits 5 without a key so nothing downstream reads it as a completed bench. A live bench is the only source of a real number for any door above | **the plan is trusted (pure arithmetic); a live number is only as good as the fixtures it was measured against** |
 | Read the ledger | `ledger` | `python3 $S ledger -n 20` | the last N calls (door, argv, exit code, timing) and a per-door count | this is the only record that tells you a door actually ran versus failed open silently — read it before trusting any claim a door made, including this page's own claims | **trusted as a factual log of what ran; it is not a judgment about correctness** |
@@ -227,10 +227,16 @@ python3 $S fetch "pay the electric bill" --catalog catalog.json --stub --json
   }
 }
 ```
-Note this real run: the top score (0.67) is below the 0.80 none-gate floor,
-so the door itself flags this as a `noMatch`-shaped result and offers a
-"did you mean" list instead of picking one — exactly the behavior you want
-when nothing is confident. Next step on a real `noMatch`: ask the clarifying
+Note this real run, captured under the old floor-only gate (`--floor 0.80`,
+before this doc's margin rule existed): the top score (0.67) was below the
+0.80 none-gate floor, so the door flagged this as a `noMatch`-shaped result
+and offered a "did you mean" list instead of picking one — exactly the
+behavior you want when nothing is confident. Under today's default
+(`--floor 0.60`, `--margin 0.10`), the same three scores (0.67, 0.33, 0.33)
+would clear both: 0.67 is above the 0.60 floor, and the gap to the runner-up
+(0.34) is above the 0.10 margin, so this exact run would now be served
+instead of gated — that's the lower floor doing its job on a case that
+wasn't actually ambiguous. Next step on a real `noMatch`: ask the clarifying
 question the door hands back, don't guess. On a confident top pick, treat it
 as a suggestion, not a routing decision — see §4.
 
