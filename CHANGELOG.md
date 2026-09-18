@@ -71,6 +71,64 @@ No version bump.
   arm still fails open, but it is no longer invisible. Both are `null` on
   a row that consulted no arms, which is not `[]`.
 
+- **Family 8's explicit-label colon syntax ("items: 2") could pair a
+  sentence-subject colon with the numerator of an "N of M" ratio.** The
+  #64 escape hatch that lets a draft mark a word as a label with real
+  punctuation ("items: 2") did not account for the value right after the
+  colon being the first half of a ratio ("Status gate: 6 of 7 checks") —
+  the word before the colon is naming the sentence's subject there, not
+  handing that one number a label. `_fact_draft_label_values` now skips
+  both numbers of an "N of M" / "N/M" shape entirely (see
+  `_FACT_RATIO_RE`), by explicit-label syntax or by plain adjacency, so
+  neither end of a ratio can be mistaken for a labelled value. Found via
+  a live post-merge false block (a "door" claim contradicting an
+  unrelated checklist row); see docs/hooks.md.
+- **`replay_fact_block_sweep.py` could not see a `[cited files]` fact at
+  all, and used a live results directory's `.exit` files as its
+  pre-change baseline.** `cmd_hook`'s own window assembly folds the
+  receipt-turn extra fact and `build_cited_file_block`'s cited-file tail
+  into the window before deriving facts; the sweep skipped both, so any
+  case whose draft names its own source ("per the summary log") replayed
+  a window with real content missing from it — not "predicts no block",
+  genuinely blind to what the live gate saw. The sweep now assembles the
+  window the same way `cmd_hook` does, and its "old" side is a real
+  import-and-run of `superjev.py` as of the commit before the one under
+  test (default HEAD's own parent, override via
+  `SUPERJEV_SWEEP_BASELINE_REF`) rather than a recorded exit code, whose
+  timing relative to the change under test is not guaranteed. See
+  docs/hooks.md.
+- **A worker inside a GENUINE worktree could move the ref that vouched for
+  `package.json`, and could plant a program in the config the worktree
+  SHARES with the protected repo.** `git worktree add` gives a worktree the
+  same `.git/config` and the same refs directory as the protected checkout,
+  so neither is worker-proof and no identity check can catch either — the
+  worktree is real and does belong to the right repository. Two
+  consequences, both closed. (1) The npm provenance check read the
+  vouched-for blob through `origin/main:package.json`, and a worker could
+  run `git update-ref refs/remotes/origin/main $(git rev-parse HEAD)` from
+  its own worktree to make that ref name its OWN hostile commit. Nothing
+  asks git for the vouched-for content any more: the PROTECTED checkout's
+  on-disk `package.json` is hashed in Python and compared to the worktree's
+  on-disk bytes, and the protected checkout must itself match a door-owned
+  pin committed at `skills/super-jev/trusted-package-json.sha256`, else the
+  refusal is `protected-package-json-unpinned`. The additive
+  `git diff --quiet` leg is gone; the Python hash is the whole answer. (2)
+  `filter.<driver>.clean` and its siblings name programs git EXECUTES on a
+  `status -sb`, `diff --stat`, `diff --quiet` or `ls-files -m`, and the key
+  names are open-ended so there is nothing finite to pin off with `-c`
+  flags. `_worktree_trust` now ends with a `git config --list --show-origin
+  -z` scan (a non-executing verb) and refuses the worktree on any key that
+  names a program, `worktree-config-execution:<key>`; a `.gitattributes`
+  naming any filter or diff driver is its own refusal,
+  `worktree-attributes-driver:<attr>`. The scan refuses only on keys whose
+  origin file resolves INSIDE the protected repo's common dir, because
+  system and global config are not worker-writable and legitimately carry
+  `credential.helper` and `alias.*`; `include.path` / `includeIf.*` are on
+  the list, which closes the route of laundering a key's origin out of the
+  common dir. New `superjev doctor` runs the same scan against the
+  PROTECTED repo, which the door can refuse a worktree over but cannot
+  un-write, and exits non-zero on a worker-writable hit. See docs/hooks.md,
+  "The shared `.git/config` is a list of programs".
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
   and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
@@ -238,11 +296,163 @@ No version bump.
   blocking. The Stop-scan's REJECT label had the identical hole — most
   REJECT labels in the same adjudication ran at `health=thin` — a bare
   exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
-  same catch-ledger shape. In practice this makes the live verify door
-  advisory-only for every report until a worktree is supplied: a real
+  same catch-ledger shape. In practice this made the live verify door
+  advisory-only for every report until a worktree was supplied: a real
   PostToolUse payload carries no `worktree` key and nothing exports
-  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
-  today. See docs/hooks.md, "verify: spawn acks and gather health".
+  `SUPERJEV_HOOK_WORKTREE`, so the gather was thin on every live call.
+  See docs/hooks.md, "verify: spawn acks and gather health".
+
+- **Verify hook: a worktree is now derived from the worker's own report
+  text when the payload and the environment give it none — behind a trust
+  boundary.** Closes the gap the entry above left open: a real
+  PostToolUse(Agent) payload never carries a `worktree` key, so
+  `_evidence_inventory` in the live verify path always saw a thin gather
+  and the door stayed advisory-only. `_worktree_from_report(text)` scans
+  the report for any absolute, no-spaces path it mentions. Source
+  precedence: the payload's own `worktree` key, then
+  `SUPERJEV_HOOK_WORKTREE`, then this report-derived path. Every
+  `hook verify` run logs which source won as `worktree_source` in the call
+  ledger, so a reviewer can see when the door used a path the worker
+  itself named rather than one supplied upstream.
+
+- **Security: one validator stands between report text and every
+  subprocess.** A directory named in a worker's report is untrusted input,
+  and it is not inert input to git: a repository's own `.git/config` can
+  set `core.fsmonitor` or `core.hooksPath`, and `git status` inside it runs
+  what those name. Deriving a worktree from report text on the strength of
+  "it exists and has a `.git`" was therefore an arbitrary-code-execution
+  path, and the same shape already existed on the Stop-scan and
+  `hook prompt-verify` paths, which derived a worktree AND a test command
+  from report text with no check at all. New `_trusted_worktree(path,
+  protected_repo)` is the single gate both paths now go through. It
+  resolves the realpath first, refuses anything the evidence-guard
+  blocklist covers (so a harmless-looking symlink cannot launder a
+  credential-adjacent target), refuses the protected repo's own main
+  checkout, requires the realpath to sit under an allowlist root
+  (`SUPERJEV_WORKTREE_ROOTS`, `os.pathsep`-separated, defaulting to the
+  fleet's own worktree root), and then requires
+  `git rev-parse --git-common-dir` there to resolve to the protected
+  repo's own common dir — so a foreign or planted repository is refused
+  even when it is a perfectly real repo in the right place. A `.git` FILE
+  worktree whose gitdir points outside that common dir is refused too. The
+  protected repo is `SUPERJEV_PROTECTED_REPO`, else the checkout
+  `superjev.py` itself lives in; when neither answers, nothing is trusted.
+  Every check that could execute repository config runs only AFTER the
+  cheap filesystem gates, and the validator itself uses only `rev-parse`,
+  which does not trigger `core.fsmonitor`. Refusals are recorded in the
+  ledger as `worktree_refused: ["worktree-untrusted:<why>"]`, and
+  `worktree_source` carries `"report-refused:<why>"` so a thin gather is
+  never mistaken for a report that named nothing.
+
+- **Security: the trust boundary now reaches the CONSUMER, via the
+  environment.** Argv flags only cover git commands this module builds
+  itself, and that left two holes. First, the validated worktree is handed
+  on to programs that run git themselves off their own argv: the external
+  `worker-verify` door runs `git -C <worktree> status -sb`, `gh` shells
+  out to git, and a derived `npm`/`node` test command can too — so the
+  boundary ended at the door while the untrusted path went through it.
+  Second, and worse, a worker inside a GENUINE worktree of the protected
+  repo can run `git config core.fsmonitor <script>`, which lands in the
+  SHARED `.git/config` every worktree of that repo reads; the worktree is
+  real and in the right place, so `_trusted_worktree` has nothing to
+  refuse. Git reads config from the environment at the same precedence as
+  `-c`, and children inherit it, so a new `safe_git_env()` builds an
+  environment pinning `core.fsmonitor=false`, `core.hooksPath=/dev/null`
+  and `core.pager=cat`, and EVERY subprocess this module spawns now runs
+  under it — the `verify` and `gate` doors, `gh`, `_git_rc`, the derived
+  test command and the `node` derived-facts CLI. Inherited
+  `GIT_CONFIG_*` pairs are preserved and ours appended after them, since
+  git applies the pairs in order and the last wins. `cmd_verify` refuses
+  to launch `worker-verify` at all when the pins are absent from the
+  environment it is about to inherit, and a source-level test requires
+  every `subprocess` call in `superjev.py` to pass an explicit `env`, so a
+  call added later cannot ship inheriting a bare `os.environ`. The `-c`
+  flags stay on our own argv as well.
+
+- **Security: `diff.external` and textconv can no longer run, or bend what
+  a diff reports.** Two more config keys name a program git executes, and
+  neither is covered by pinning `core.fsmonitor`/`core.hooksPath`:
+  `diff.external` replaces git's diff engine for every file, and a
+  `diff.<driver>.textconv` selected by a checked-in `.gitattributes` runs
+  over each blob before diffing. Both are writable by a worker in a
+  genuine worktree, and both also CHANGE what a diff reports — which is
+  what the `npm` provenance check reads, so a planted differ that exited
+  quietly would have made a modified `package.json` read as clean. Every
+  `git diff` the door runs now carries `--no-ext-diff --no-textconv`,
+  injected centrally by `git_argv` so no call site can omit them. Pinning
+  the key is not an option: `-c diff.external=` makes git fatal out with
+  "external diff died".
+
+- **Security: a clean filter can no longer hide a hostile
+  `package.json`.** Found while fixing the two entries above, and
+  exploitable. `filter.<driver>.clean` is a program git runs over the
+  WORKING COPY before comparing it, selected per-path by a checked-in
+  `.gitattributes`; a filter that echoes the committed content makes `git
+  diff --quiet HEAD -- package.json` report a hostile working copy as
+  unmodified, defeating the very check meant to catch an uncommitted edit.
+  `--no-ext-diff`/`--no-textconv` do not cover it and no key can be
+  pinned, because the driver name is chosen by whoever writes the
+  `.gitattributes`. So the working-copy half of the provenance check no
+  longer asks git: it reads the bytes and computes the git object id in
+  Python (sha1 and sha256, since the object format is a repository
+  property), and compares that to the vouched-for blob id. `git diff
+  --quiet` is still consulted, but only ever to refuse. The cost is a
+  false refusal on a repo that legitimately filters or CRLF-normalises the
+  file being checked, which is the safe direction.
+
+- **Security: `SUPERJEV_WORKTREE_ROOTS=none` refuses every derived
+  worktree.** A reserved value, not a path: no root is allowlisted, so
+  nothing derived from report text reaches the filesystem and no test
+  command runs. One `none` anywhere in the list wins over a real root
+  beside it. Unset and blank keep their existing meaning (fall back to the
+  fleet's default root), which is why the lockdown needs a word of its own
+  rather than an empty value. Refusals carry the new
+  `no-allowlist-root` token, distinct from `outside-allowlist-root`, which
+  also now covers the case where every root named failed to resolve.
+
+- **Security: every `git` call the door makes disables fsmonitor and
+  hooks.** All of them now build their argv through one helper,
+  `git_argv`, which prepends `-c core.fsmonitor=false -c
+  core.hooksPath=/dev/null` ahead of `-C`. This is defence in depth behind
+  `_trusted_worktree`, not a substitute for it — and, on its own, not
+  enough; see the environment-pin entry above for what it does not cover.
+
+- **Security: a report-derived `npm test` no longer vouches for itself.**
+  `npm test` names no program — `package.json`'s `scripts` does, and a
+  worker can write that file. A worker could therefore report a pass count,
+  have this door run its own script, and have that script's output accepted
+  as independent evidence for the report.
+
+  The first cut of this check asked the wrong question. It required
+  `package.json` to be tracked and unmodified against `HEAD`, both
+  evaluated inside the worker's OWN worktree — which a worker defeated by
+  simply committing its hostile `package.json` on its task branch, so that
+  the file was tracked and its working copy agreed with its own `HEAD`.
+  The question is not "did this worker leave `package.json` alone", it is
+  "is this the script the PROTECTED repo vouches for". So the worktree's
+  committed blob (`HEAD:package.json`) is now compared against the
+  protected repo's default-branch blob (`origin/main:package.json`,
+  falling back to `main:package.json` — the remote-tracking ref first,
+  because a local `main` in a shared checkout can be moved), and the
+  working copy must equal that same blob as well. Either lookup failing to
+  answer is a refusal, not a pass. Otherwise the run records
+  `untrusted-test-cmd` plus a specific `untrusted-test-cmd:<why>`
+  (`package-json-differs`, `package.json-modified`,
+  `package.json-not-tracked`, `protected-package-json-unreadable`, and so
+  on) and gathers no test evidence. Enforced both where the command is
+  derived and at `check_test_cmd_for_fallback`, the point where it would
+  execute.
+
+- **Fix: a path containing the word "pytest" is no longer read as a test
+  command.** `_TEST_PHRASE_RE` matched `pytest` inside a longer path (a
+  `/tmp/pytest-of-<user>/...` scratch directory, say) and its greedy tail
+  swallowed the rest of that path into the capture — so a report that
+  merely mentioned such a directory produced a "test command" whose
+  `argv[0]` came straight out of report text and was then executed. A
+  derived command must now be a runner the report actually named, and a
+  match can no longer grow across a `/`, a quote or a shell
+  metacharacter. See docs/hooks.md, "The trust boundary for worker-named
+  paths".
 
 - **Two more deterministic-arm false-block sources closed.** The count
   arm's draft-side tokenizer no longer splits a mixed alnum run (a git
