@@ -4,6 +4,37 @@
 
 No version bump.
 
+- **OVERCLAIMS calibration behind `SUPERJEV_OVERCLAIMS_V2`, off by
+  default.** The reply kit asks one draft-level yes/no question about
+  overclaiming over the whole draft at once, and gate v3 blocks on that
+  single answer alone. A status report to the principal mixes finished
+  actions, open items and plans, so one sentence the window cannot carry
+  flips the answer for the entire reply and the block names no sentence.
+  With the new env var set to `1`, `overclaims_v2_decision` demotes that
+  flag to an advisory note when the draft carries an explicit open-items
+  segment (a sentence or bullet naming what is *not* done) and is a
+  structured report of more than one line: a reply that volunteers its
+  own unfinished work is not the shape of a reply claiming more than it
+  did. The arm reaches exactly that one flag — a deterministic reason
+  (count mismatch, PR mismatch, `CONTRADICTED_BY_FACT`, written-file and
+  labelled-value identity) is never touched, a per-claim `CONTRADICTED`
+  row vetoes the demotion, a negative derived fact vetoes it, and every
+  demotion leaves a note carrying the env var name in stderr, `--explain`
+  and the ledger, so it is never silence. Two other calibrations were
+  measured against the recorded material first and rejected as worse than
+  doing nothing: raising the confidence line (blocked true replies and
+  caught lies share the same narrow band at the top of the scale), and
+  requiring every completion sentence to carry a token that literally
+  appears in the window (true status prose often reports an action in words
+  alone, while a fabrication will quote a real figure). The anchor listing survives as
+  `--explain` diagnostic detail and decides nothing. The trigger is a
+  property of the draft's own prose and the draft is written by the party
+  being judged, so an agent that knows the rule can buy immunity from
+  this arm by always naming a pending item — hence off by default, never
+  over the deterministic arms, and always countable. See
+  `docs/hooks.md`, "OVERCLAIMS v2 — the open-items demotion, behind a
+  flag".
+
 - **`catch signal` round 3: bounded reason families, per-bot grouping and
   breakdown.** A colonless reason with no recognised `HEADER:`/judge-score
   prefix (an advisory note, e.g. one embedding a `--test-cmd '...'`
