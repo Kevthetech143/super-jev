@@ -392,6 +392,25 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # the wide read), 0.90 is the measured line.
 PREV_TURNS_ENV = "SUPERJEV_PREV_TURNS"
 DEFAULT_PREV_TURNS = 2
+# How many previous turns `_previous_turn_spans` may SCAN back over while
+# looking for DEFAULT_PREV_TURNS turns that actually carry tool results.
+#
+# 2026-09-18. `prev_turns` used to count turns, full stop, so a lead whose
+# last two turns were pure conversation (a question answered from context,
+# a teammate report acknowledged) got a window with zero previous-turn
+# bytes in it — measured on the gate bench's t06 and t20, where the two
+# turns before the reply ran no tools at all and the nearest turn that did
+# sat three and four hops back. Counting only turns that carry tool
+# results makes "reach back two turns" mean two turns of EVIDENCE rather
+# than two turns of wall clock, which is what the setting was always for.
+#
+# Tool-free turns in between are still returned (they cost no tool bytes
+# and may carry a relayed worker report, which now has its own budget
+# share — see PREV_REPORTS_BUDGET_SHARE); they simply do not count against
+# the quota. The scan limit is what stops a long conversational stretch
+# from walking the whole transcript on every Stop event.
+PREV_TURN_SCAN_LIMIT = 12
+PREV_TURN_SCAN_LIMIT_ENV = "SUPERJEV_PREV_TURN_SCAN_LIMIT"
 EVIDENCE_CAP_BYTES_ENV = "SUPERJEV_EVIDENCE_CAP_BYTES"
 DEFAULT_EVIDENCE_CAP_BYTES = 24_576  # 24 KB, the whole assembled window
 
@@ -5051,6 +5070,21 @@ def _hook_prev_turns():
         return DEFAULT_PREV_TURNS
 
 
+def _hook_prev_turn_scan_limit():
+    """How many previous turns the wide window may SCAN to find
+    `_hook_prev_turns()` turns that carry tool results
+    (SUPERJEV_PREV_TURN_SCAN_LIMIT, default 12). Never less than the
+    number of turns being looked for, so lowering it can shorten the
+    search but can never make the setting self-contradictory."""
+    try:
+        n = int(os.environ.get(PREV_TURN_SCAN_LIMIT_ENV, PREV_TURN_SCAN_LIMIT))
+    except (TypeError, ValueError):
+        n = PREV_TURN_SCAN_LIMIT
+    if n <= 0:
+        n = PREV_TURN_SCAN_LIMIT
+    return max(n, _hook_prev_turns())
+
+
 def _hook_evidence_cap_bytes():
     """The whole assembled wide-window evidence file's own cap
     (SUPERJEV_EVIDENCE_CAP_BYTES, default 24576) — tighter, by default,
@@ -5107,13 +5141,27 @@ def _previous_turn_start_index(records, current_start):
     return None
 
 
-def _previous_turn_spans(records, current_start, n_turns):
-    """Up to `n_turns` previous turns as (start_index, end_index, texts)
-    triples, most-recent-first (index 0 = turn -1, index 1 = turn -2, ...),
-    walking back from `current_start` one `_previous_turn_start_index` hop
-    at a time. Stops early — returning fewer than `n_turns` spans — the
-    moment there is no earlier turn to find, same boundary rule
-    `_previous_turn_start_index` already uses.
+def _previous_turn_spans(records, current_start, n_turns, scan_limit=None):
+    """Previous turns as (start_index, end_index, texts) triples,
+    most-recent-first (index 0 = turn -1, index 1 = turn -2, ...), walking
+    back from `current_start` one `_previous_turn_start_index` hop at a
+    time. Stops early the moment there is no earlier turn to find, same
+    boundary rule `_previous_turn_start_index` already uses.
+
+    `n_turns` counts turns that CARRY TOOL RESULTS, not turns of wall
+    clock (2026-09-18, see PREV_TURN_SCAN_LIMIT). The walk keeps going
+    past a tool-free turn and stops once `n_turns` tool-carrying turns
+    have been collected, or once `scan_limit` turns
+    (SUPERJEV_PREV_TURN_SCAN_LIMIT, default 12) have been walked,
+    whichever comes first. Tool-free turns walked over on the way are
+    still RETURNED, in their real positions: they add no tool bytes, and
+    a turn whose only content is a relayed worker report is exactly the
+    turn whose report the reports layer needs to see. So the returned list
+    may be longer than `n_turns` while never containing more than
+    `n_turns` turns that ran anything.
+
+    A `scan_limit` equal to `n_turns` restores the old behaviour
+    exactly — every turn walked counts, tool-free or not.
 
     The indices are carried so `hook gate --explain` can name WHICH prior
     turns went into the window (transcript record range and tool_result
@@ -5131,15 +5179,31 @@ def _previous_turn_spans(records, current_start, n_turns):
     the missing material was entirely in the receipts layer. Changing the
     boundary would move bytes without moving evidence, so it is left alone
     rather than churned on a hunch."""
+    want = max(n_turns, 0)
+    if not want:
+        return []
+    limit = _hook_prev_turn_scan_limit() if scan_limit is None else scan_limit
+    limit = max(limit, want)
     spans = []
     boundary = current_start
-    for _ in range(max(n_turns, 0)):
+    with_tools = 0
+    for _ in range(limit):
         prev_start = _previous_turn_start_index(records, boundary)
         if prev_start is None:
             break
-        spans.append((prev_start, boundary,
-                      _labelled_tool_results(records[prev_start:boundary])))
+        texts = _labelled_tool_results(records[prev_start:boundary])
+        spans.append((prev_start, boundary, texts))
         boundary = prev_start
+        if texts:
+            with_tools += 1
+            if with_tools >= want:
+                break
+    # A trailing run of tool-free turns is walked-over scan, not evidence:
+    # keeping it would pad `prev_turns_found` with turns the quota never
+    # asked for. Turns between two tool-carrying turns stay, reports and
+    # all, because they sit INSIDE the span the quota did ask for.
+    while spans and not spans[-1][2]:
+        spans.pop()
     return spans
 
 
@@ -5334,6 +5398,17 @@ _TASK_PART_RES = (
 # a claim, and a relayed report is a claim with a named source.
 REPORT_LABEL = "REPORT FROM {who} (unverified worker claim)"
 
+# The label a report relayed in a PREVIOUS turn gets — same as REPORT_LABEL
+# but carrying the turn it was relayed in. This is what lets
+# `_report_not_merged_claims` recover which turn a stale-claim report
+# actually came from once `_previous_turn_reports`/prev_report_blocks has
+# flattened every previous turn's reports into one section: without the
+# per-report turn number, every previous-turn report reads as equally
+# fresh, and a stale report from turn -2 could outrank a merge receipt
+# from turn -1 (2026-09-18, family 5 regression). See
+# `_section_recency_rank` and `_report_not_merged_claims`.
+REPORT_LABEL_PREV_TURN = "REPORT FROM {who} (unverified worker claim, previous turn -{turn})"
+
 # How much of any ONE report block is carried, before the window's own cap
 # even applies. A worker report is often a page long; the load-bearing
 # lines (counts, PR links, COMPLETE/INCOMPLETE) are near its start.
@@ -5375,20 +5450,29 @@ def _extract_report_blocks_from_text(text):
     return out
 
 
-def _collect_report_blocks(records):
+def _collect_report_blocks(records, prev_turn=None):
     """Every labelled worker/teammate report text, in file order, out of a
     list of transcript records. Only user-role records that are NOT
     tool_result carriers are read (see _is_real_user_prompt_record) — a
     report never arrives as a tool_result, and reading tool_results here
-    would double-count them."""
+    would double-count them.
+
+    `prev_turn`, when given (an int, the turn's -K depth), tags every
+    report's marker line with `REPORT_LABEL_PREV_TURN` instead of the
+    plain `REPORT_LABEL` — carrying the report's originating turn into the
+    window text itself so a later reader (`_report_not_merged_claims`) can
+    recover per-report recency instead of treating every previous-turn
+    report as equally fresh (2026-09-18, family 5 regression)."""
     out = []
+    label = (REPORT_LABEL if prev_turn is None
+             else REPORT_LABEL_PREV_TURN.format(who="{who}", turn=prev_turn))
     for rec in records:
         if not _is_real_user_prompt_record(rec):
             continue
         msg = rec.get("message") if isinstance(rec, dict) else None
         text = _extract_text_blocks((msg or {}).get("content"))
         for who, body in _extract_report_blocks_from_text(text):
-            out.append(f"{REPORT_LABEL.format(who=who)}\n{body}")
+            out.append(f"{label.format(who=who)}\n{body}")
     return out
 
 
@@ -5448,6 +5532,153 @@ RECEIPTS_WINDOW = 40
 # this turn's worker/teammate reports may take (see _build_reports_block).
 REPORTS_BUDGET_SHARE = 0.6
 
+# The label the composer puts over reports relayed in an EARLIER turn.
+# Deliberately distinct from "[current turn reports]": both are relayed
+# worker claims rather than receipts, but one arrived this turn and one
+# did not, and `_section_recency_rank` has to be able to tell them apart.
+PREV_REPORTS_LABEL = "relayed reports in previous turns"
+
+# The share of the whole cap that reports relayed in PREVIOUS turns may
+# take.
+#
+# 2026-09-18. These used to have no budget of their own at all: a previous
+# turn's reports were concatenated onto that turn's tool results and rode
+# inside its `[previous turn -N]` block, so they were dropped the moment
+# the turn was — and on a busy window, where the previous-turn block is
+# the first thing the trimmer gives up, "dropped" was the normal case. A
+# receipt-bearing worker report one or two turns back is not less true for
+# being a turn old, and it is often the ONLY proof of what a reply is
+# relaying, so it now gets its own share and is kept newest-first
+# independent of whether its turn's tool results survive.
+PREV_REPORTS_BUDGET_SHARE = 0.25
+
+# The share of the whole cap the session-receipts block may take.
+#
+# 2026-09-18. The receipts layer is the BACKING layer — a one-line memory
+# of facts from turns too far back for the previous-turn window — and it
+# had no ceiling of its own, so on a long session it simply grew until it
+# owned the window: on a sizeable share of the recorded cases it held
+# roughly half the whole cap at every previous-turn depth, which left the
+# turns that actually carried the proof nothing to fit in. Raising the
+# total cap would buy the same crowding at a higher price; capping the
+# fattest layer is the fix. Receipts are given up NEWEST-first inside the
+# share (an old receipt is the one the previous-turn layers cannot
+# re-derive), except that receipts whose claim keys appear in the draft
+# are kept first regardless of age — those are the ones the reply is
+# actually about.
+RECEIPTS_BUDGET_SHARE = 0.35
+
+
+# Identifier extraction shared by `_receipts_relevant_to_draft`: a PR
+# number, a cited file path/basename, or a plain-text "task <id>" mention
+# — concrete identifiers the draft can NAME, as opposed to the generic
+# stemmed words `_fact_label_keys` reads. 2026-09-18, review round 3: a
+# draft like "PR #9 merged" shares the generic stem "merg" with every
+# OTHER merge receipt in the window too (they all say "MERGED"), so stem
+# overlap alone marked all ten receipts equally relevant and left age
+# alone to decide which few survive — dropping the #9 receipt the draft
+# actually names. An identifier match is a stronger, narrower signal: the
+# draft named THIS PR/file/task specifically, so a receipt carrying the
+# same identifier now ranks above one that only shares a generic word.
+_FACT_TASK_ID_RE = re.compile(r'\btask\s+([A-Za-z0-9][\w-]{2,})\b', re.IGNORECASE)
+
+
+def _receipt_identifier_keys(text):
+    """Identifier keys out of `text` — `pr:<n>` for each PR number
+    (`_FACT_PR_NUM_RES`), `path:<lowercased path>` for each cited file
+    path/basename (`_CITED_FILE_PATH_RE`), `task:<id>` for each plain-text
+    "task <id>" mention (`_FACT_TASK_ID_RE`). Never raises; an empty set
+    for text with no identifier shape at all."""
+    text = text or ""
+    keys = set()
+    for rx in _FACT_PR_NUM_RES:
+        for m in rx.finditer(text):
+            keys.add(f"pr:{m.group(1)}")
+    for m in _CITED_FILE_PATH_RE.finditer(text):
+        keys.add(f"path:{m.group(1).lower()}")
+    for m in _FACT_TASK_ID_RE.finditer(text):
+        keys.add(f"task:{m.group(1).lower()}")
+    return keys
+
+
+def _receipts_relevant_to_draft(receipts, draft_text):
+    """(identifier_relevant, stem_relevant) — two subsets of `receipts`'
+    indices the draft is plausibly ABOUT, as opposed to the rest of the
+    session's memory. `identifier_relevant` is the stronger signal: a
+    receipt sharing a concrete identifier the draft names (a PR number, a
+    cited file, a task id — see `_receipt_identifier_keys`) is a receipt
+    about the SAME thing, not merely the same topic. `stem_relevant` is
+    the older, weaker signal — overlap on stemmed content words (see
+    `_fact_label_keys`) — and never includes an index already in
+    `identifier_relevant`, so a caller ordering identifier-first then
+    stem-first never repeats one. Pure string work; an empty or key-less
+    draft returns two empty sets, which the caller reads as "no
+    preference" and falls back to age alone."""
+    id_keys = _receipt_identifier_keys(draft_text or "")
+    stem_keys = set(_fact_label_keys(draft_text or ""))
+    if not id_keys and not stem_keys:
+        return set(), set()
+    id_relevant, stem_relevant = set(), set()
+    for i, line in enumerate(receipts):
+        if id_keys and id_keys & _receipt_identifier_keys(line):
+            id_relevant.add(i)
+        elif stem_keys and stem_keys & set(_fact_label_keys(line)):
+            stem_relevant.add(i)
+    return id_relevant, stem_relevant
+
+
+def _build_receipts_block(receipts, budget, draft_text=None):
+    """(block_text, kept_count, dropped_count) for the `[session receipts]`
+    section held inside `budget` bytes.
+
+    Selection order, when the whole block does not fit: receipts the draft
+    names by a concrete IDENTIFIER (a PR number, a cited file, a task id —
+    see `_receipt_identifier_keys`) first, oldest-first among them; then
+    receipts that merely share a stemmed content word with the draft (see
+    `_fact_label_keys`), oldest-first; then everything else, oldest-first,
+    filling the budget line by line — so a receipt is given up
+    NEWEST-first, on the reasoning that an old receipt is the one the
+    previous-turn layers cannot re-derive (a recent turn's own material is
+    still sitting right there in the previous-turn blocks). Identifier
+    ranks above stem because stem overlap alone is a weak signal on a
+    window full of same-shaped receipts — "PR #9 merged" shares the
+    generic stem "merg" with every OTHER merge receipt too, so without the
+    identifier tier the #9 receipt the draft actually names had no better
+    a claim to survival than #1 through #8 (2026-09-18, review round 3).
+    The lines that survive are then emitted in their ORIGINAL order, so the
+    block still reads oldest-to-newest and `_section_recency_rank` keeps
+    meaning what it meant. Returns ("", 0, len(receipts)) when there is
+    nothing to carry or no budget at all."""
+    if not receipts:
+        return "", 0, 0
+    header = "[session receipts]\n"
+
+    def render(idxs):
+        return header + "\n".join(receipts[i] for i in sorted(idxs))
+
+    whole = render(range(len(receipts)))
+    if budget > 0 and len(whole.encode("utf-8")) <= budget:
+        return whole, len(receipts), 0
+    if budget <= 0:
+        return "", 0, len(receipts)
+
+    id_relevant, stem_relevant = _receipts_relevant_to_draft(receipts, draft_text)
+    order = ([i for i in range(len(receipts)) if i in id_relevant]
+             + [i for i in range(len(receipts)) if i in stem_relevant]
+             + [i for i in range(len(receipts))
+                if i not in id_relevant and i not in stem_relevant])
+    kept = set()
+    used = len(header.encode("utf-8"))
+    for i in order:
+        cost = len(receipts[i].encode("utf-8")) + 1
+        if used + cost > budget:
+            continue
+        kept.add(i)
+        used += cost
+    if not kept:
+        return "", 0, len(receipts)
+    return render(kept), len(kept), len(receipts) - len(kept)
+
 # What counts as a receipt-worthy line in a tool result. Widened 2026-09-17:
 # the old pattern was `gh pr merge|gh pr checks|N passed`, which misses the
 # OUTPUT of those very commands. `gh pr view --json state` prints a bare
@@ -5479,7 +5710,7 @@ _RECEIPT_IDENTITY_RE = re.compile(r'\s*\[from:\s*(.*?)(?:\s+@\s+([^\]]*))?\]\s*$
 # sticky `[from: ...]` identity stops applying.
 _WINDOW_SECTION_RE = re.compile(
     r'^\[(?:current turn|current turn reports|previous turn -\d+|session receipts'
-    r'|contributed by check arms)\]\s*$')
+    r'|relayed reports in previous turns|contributed by check arms)\]\s*$')
 _SECTION_SEPARATOR_RE = re.compile(r'^\s*(?:={3,}|-{3,})\s*$')
 
 # The header a check arm's contributed block is written under
@@ -5740,6 +5971,54 @@ _FACT_DRAFT_MERGE_RES = (
     re.compile(r'#(\d+)\b[^.\n]{0,20}?\b(?:is\s+)?merged\b', re.IGNORECASE),
 )
 
+# A draft clause that claims an AGGREGATE number of merges ("19 PRs
+# merged", "three pull requests merged into main today") or asserts one
+# over a whole set without naming any PR ("every item is merged"). Neither
+# shape can be settled by a window: the window holds one session's
+# receipts, and an aggregate is a statement about the session as a whole.
+# See `_facts_merge_count_claims`.
+_FACT_DRAFT_MERGE_TOTAL_RES = (
+    re.compile(r'\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|'
+              r'eleven|twelve)\s+(?:PRs?|pull\s+requests?)\b[^.\n]{0,40}?'
+              r'\bmerged\b', re.IGNORECASE),
+    re.compile(r'\bmerged\b[^.\n]{0,40}?\b(\d{1,3}|one|two|three|four|five|six|'
+              r'seven|eight|nine|ten|eleven|twelve)\s+(?:PRs?|pull\s+requests?)\b',
+              re.IGNORECASE),
+)
+_FACT_DRAFT_MERGE_UNIVERSAL_RE = re.compile(
+    r'\b(?:every|all|each|both)\b[^.\n]{0,70}?\bmerged\b'
+    r'|\bmerged\b[^.\n]{0,40}?\b(?:everything|all of (?:it|them))\b',
+    re.IGNORECASE)
+_FACT_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+# Words that make a draft's "... merged ... PR #N" a DISJUNCTION or a
+# NEGATION rather than a claim that PR #N is merged. "either merged or on
+# PR #3" says the opposite about #3, and family 4 read it as a claim that
+# #3 was merged and then reported the absent receipt as a finding
+# (measured on the gate bench's t20, 2026-09-18).
+_FACT_MERGE_CLAIM_BREAK_RE = re.compile(
+    r'\b(?:or|nor|not|unmerged|open|pending|awaiting|instead|except|besides|'
+    r'rather\s+than|other\s+than)\b', re.IGNORECASE)
+
+
+def _fact_draft_merge_prs(draft_text):
+    """The PR numbers a draft says are MERGED, as a set. Same three
+    patterns as `_FACT_DRAFT_MERGE_RES`, minus any match whose own gap
+    between "merged" and the PR number carries a disjunction or a negation
+    (see `_FACT_MERGE_CLAIM_BREAK_RE`) — "either merged or on PR #3" is
+    not a claim that #3 is merged."""
+    out = set()
+    for rx in _FACT_DRAFT_MERGE_RES:
+        for m in rx.finditer(draft_text or ""):
+            gap = (m.group(0) or "").replace(m.group(1), " ", 1)
+            if _FACT_MERGE_CLAIM_BREAK_RE.search(gap):
+                continue
+            out.add(int(m.group(1)))
+    return out
+
+
 # Family 5 (2026-09-18, V4-RESIDUE.md change 2) — a REPORT FROM block
 # stating PR #N is not merged / open / pending, matched two ways so word
 # order does not matter ("PR #27 is not merged" / "not merged: PR #27").
@@ -5749,7 +6028,16 @@ _FACT_REPORT_NOT_MERGED_RES = (
     re.compile(r'\b(?:not\s+merged|open|pending)\b[^.\n]{0,40}?'
               r'\bPR\s*#?(\d+)\b', re.IGNORECASE),
 )
-_REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM .+ \(unverified worker claim\)\s*$')
+_REPORT_MARKER_LINE_RE = re.compile(
+    r'^REPORT FROM .+ \(unverified worker claim(?:, previous turn -\d+)?\)\s*$')
+
+# Pulls the turn depth back out of a REPORT_LABEL_PREV_TURN marker line, so
+# a reader of the assembled window text can tell WHICH previous turn one
+# report among several came from, rather than treating the whole
+# `[relayed reports in previous turns]` section as one undifferentiated
+# rank (see `_section_recency_rank`, `_report_not_merged_claims`).
+_REPORT_MARKER_TURN_RE = re.compile(
+    r'^REPORT FROM .+ \(unverified worker claim, previous turn -(\d+)\)\s*$')
 
 # 2026-09-18: both `_extract_labelled_evidence_counts_scoped` and
 # `_fact_window_lines_excluding_reports` used to close a `REPORT FROM ...`
@@ -6717,13 +7005,69 @@ def _facts_merge_claims(lines, draft_text):
                 break
     facts = [f"merge receipt found for PR #{n} in {found[n]}."
              for n in sorted(found)]
-    claimed = set()
-    for rx in _FACT_DRAFT_MERGE_RES:
-        for m in rx.finditer(draft_text or ""):
-            claimed.add(int(m.group(1)))
+    claimed = _fact_draft_merge_prs(draft_text)
     for n in sorted(claimed - set(found)):
         facts.append(f"no merge receipt for PR #{n} in window.")
+    facts += _facts_merge_count_claims(found, draft_text)
     return facts
+
+
+def _facts_merge_count_claims(found, draft_text):
+    """Family 4b — a draft claim about the SESSION'S merge total, stated as
+    a count the window cannot hold.
+
+    A gate window is one session's worth of receipts under a byte cap. A
+    draft that says "19 PRs merged" or "every item is merged" is making a
+    claim whose scope is the whole session, and a window that saturates
+    well below that number cannot settle it either way. Left unsaid, the
+    judge reads the gap between the claimed total and the receipt count as
+    a contradiction and blocks a true reply; measured on the gate bench's
+    t06 (a claim of several merges against a transcript holding one
+    receipt), t20 (a universal claim over two build lists) and t32 (a
+    total well past what the window saturates at).
+
+    So the count is stated, together with what it does and does not
+    settle: this is an UNVERIFIABLE-here claim, not a false one — and it
+    says so plainly rather than reading as amnesty for the claim. It
+    quotes the draft's own claimed total, not just the window's count, so
+    the fact names both numbers being compared; and when the window holds
+    ZERO merge receipts, it says so directly ("carries no merge receipt at
+    all") instead of a bare "0" a reader could skim past — a claimed
+    total against zero corroboration is the strongest form of this gap,
+    and the wording should not soften it toward "checked and fine" when
+    it is "not checked at all" (2026-09-18, judge-safety review). Fires
+    only when the draft's own total exceeds the window's receipt count, or
+    when the claim names no total at all — a claim whose number the window
+    already matches or beats is checkable, and family 4 above has already
+    checked it. `found` is family 4's receipt map, so the window count
+    quoted is always the count of receipts actually in this window."""
+    draft = draft_text or ""
+    claimed_total = None
+    for rx in _FACT_DRAFT_MERGE_TOTAL_RES:
+        for m in rx.finditer(draft):
+            tok = (m.group(1) or "").lower()
+            val = _FACT_WORD_NUMBERS.get(tok)
+            if val is None:
+                try:
+                    val = int(tok)
+                except ValueError:
+                    continue
+            if claimed_total is None or val > claimed_total:
+                claimed_total = val
+    universal = _FACT_DRAFT_MERGE_UNIVERSAL_RE.search(draft) is not None
+    if claimed_total is None and not universal:
+        return []
+    if claimed_total is not None and claimed_total <= len(found):
+        return []
+    claim_desc = (f"the draft claims {claimed_total} merged"
+                  if claimed_total is not None else
+                  "the draft claims every item merged")
+    n = len(found)
+    if n == 0:
+        return [f"merge receipts in window: 0; {claim_desc}; the window carries "
+                f"no merge receipt at all, so this claim is unsupported here."]
+    return [f"merge receipts in window: {n}; {claim_desc}; the draft's "
+            f"session-wide total cannot be checked here."]
 
 
 def _section_recency_rank(label):
@@ -6733,7 +7077,8 @@ def _section_recency_rank(label):
     `_facts_stale_report_claims`). Mirrors the section layering
     `_derive_evidence_text_from_transcript` documents: previous turns
     oldest-to-newest as -K grows smaller in magnitude (turn -1 is newer
-    than turn -2), then session receipts (refreshed every Stop event),
+    than turn -2), then reports relayed in those previous turns, then
+    session receipts (refreshed every Stop event),
     then this turn's relayed reports, then this turn's own tool results —
     the highest-priority, most current material of all. An unrecognised
     or missing label (flat text with no section headers, e.g. a unit
@@ -6745,23 +7090,42 @@ def _section_recency_rank(label):
     m = re.match(r'^\[previous turn -(\d+)\]$', label)
     if m:
         return -int(m.group(1))
-    return {"[session receipts]": 0, "[current turn reports]": 1,
+    # Reports relayed in a previous turn are previous-turn material, and
+    # used to collapse to one flat rank here — but a report's OWN marker
+    # line now carries which previous turn it came from
+    # (REPORT_LABEL_PREV_TURN), and `_report_not_merged_claims` reads that
+    # directly rather than falling back to this section-level rank, so a
+    # turn -2 report can no longer outrank a turn -1 merge receipt
+    # (2026-09-18, family 5 regression). This flat rank is now only the
+    # fallback for a report whose marker carries no turn suffix.
+    return {"[relayed reports in previous turns]": -0.5,
+           "[session receipts]": 0, "[current turn reports]": 1,
            "[current turn]": 2}.get(label, -1000)
 
 
 def _report_not_merged_claims(window_text):
-    """[(pr_num, section_label), ...] for every PR a REPORT FROM block
-    states is not merged / open / pending. Scans `window_text` directly
-    (not the already-filtered fact lines `_fact_window_lines` returns) so
-    a report's body is bounded by its own paragraph break or the section
-    separators the window assembly itself uses ('---', '===', a new
-    section header, or another report's own marker) — reading a claim
-    never bleeds past the report it came from into an unrelated
-    tool-result line elsewhere in the same section."""
+    """[(pr_num, section_label, turn_rank), ...] for every PR a REPORT FROM
+    block states is not merged / open / pending. Scans `window_text`
+    directly (not the already-filtered fact lines `_fact_window_lines`
+    returns) so a report's body is bounded by its own paragraph break or
+    the section separators the window assembly itself uses ('---', '===',
+    a new section header, or another report's own marker) — reading a
+    claim never bleeds past the report it came from into an unrelated
+    tool-result line elsewhere in the same section.
+
+    `turn_rank` is the report's OWN recency, read straight off its marker
+    line when the marker names a previous turn (REPORT_LABEL_PREV_TURN,
+    e.g. "previous turn -2" -> rank -2); it is None when the marker names
+    no turn (a current-turn report, or one from before this fix), in which
+    case the caller falls back to the flat section-level rank. Without
+    this, every report relayed in ANY previous turn read as equally fresh,
+    so a stale report from turn -2 could outrank a merge receipt from turn
+    -1 (2026-09-18, family 5 regression)."""
     out = []
     label = "the evidence window"
     in_report = False
     in_contributed = False
+    report_turn_rank = None
     for raw in (window_text or "").splitlines():
         stripped = raw.strip()
         # A contributed block is not a worker report, so a `REPORT FROM`
@@ -6774,18 +7138,23 @@ def _report_not_merged_claims(window_text):
         if _WINDOW_SECTION_RE.match(stripped):
             label = stripped
             in_report = False
+            report_turn_rank = None
             continue
-        if _REPORT_MARKER_LINE_RE.match(stripped):
+        marker_m = _REPORT_MARKER_LINE_RE.match(stripped)
+        if marker_m:
             in_report = True
+            turn_m = _REPORT_MARKER_TURN_RE.match(stripped)
+            report_turn_rank = -int(turn_m.group(1)) if turn_m else None
             continue
         if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
             in_report = False
+            report_turn_rank = None
             continue
         if not in_report:
             continue
         for rx in _FACT_REPORT_NOT_MERGED_RES:
             for m in rx.finditer(raw):
-                out.append((int(m.group(1)), label))
+                out.append((int(m.group(1)), label, report_turn_rank))
     return out
 
 
@@ -6817,8 +7186,13 @@ def _facts_stale_report_claims(lines, window_text):
         return []
 
     reports_by_pr = {}
-    for n, label in _report_not_merged_claims(window_text):
-        rank = _section_recency_rank(label)
+    for n, label, turn_rank in _report_not_merged_claims(window_text):
+        # Prefer the report's OWN turn rank (read off its marker line)
+        # over the flat section-level rank — a report's marker names
+        # exactly which previous turn it came from, so two reports in the
+        # same "[relayed reports in previous turns]" section no longer
+        # read as equally fresh (2026-09-18, family 5 regression).
+        rank = turn_rank if turn_rank is not None else _section_recency_rank(label)
         if n not in reports_by_pr or rank > reports_by_pr[n]:
             reports_by_pr[n] = rank
 
@@ -7675,7 +8049,7 @@ _WINDOW_KIND_CONTRIBUTED = "contributed by check arms"
 
 _WINDOW_PART_RE = re.compile(
     r'^\[(current turn reports|current turn|previous turn -(\d+)|session receipts'
-    r'|cited files|contributed by check arms)\]\s*$')
+    r'|relayed reports in previous turns|cited files|contributed by check arms)\]\s*$')
 
 # Lowest priority first — the order sections are given up in. The
 # contributed block goes FIRST: it is arm-derived evidence, not a
@@ -7686,8 +8060,14 @@ _WINDOW_PART_RE = re.compile(
 # everything after that point would then look unlabelled. Dropping it
 # would risk dropping the current turn, so unlabelled content is treated
 # as undroppable and left to the tail-keep at the end.
+# 2026-09-18: previous-turn REPORTS sit above previous-turn tool results
+# here on purpose. A previous turn's tool-result dump is the most
+# replaceable thing in the window (the receipts layer is a summary of
+# exactly that material); a relayed report is not summarised anywhere
+# else, and is often the only proof of what the reply is relaying.
 _WINDOW_TRIM_ORDER = (_WINDOW_KIND_CONTRIBUTED, "previous turn",
-                      "session receipts", "cited files", "current turn reports")
+                      "session receipts", "relayed reports in previous turns",
+                      "cited files", "current turn reports")
 
 _WINDOW_SHRINK_MARKER = "[...head of this section cut to fit the window budget...]"
 
@@ -7857,6 +8237,21 @@ def trim_window_to_token_budget(text, budget_tok=None):
 # finding.
 CITED_FILE_MAX_LINES = 40
 CITED_FILE_MAX_BYTES = 3072          # 3 KB cap per cited file
+# On top of the tail, up to this many bytes of lines drawn from EARLIER in
+# the same file, chosen by how much they overlap the draft's own numbers
+# and label words.
+#
+# 2026-09-18. Reading only the tail assumes the thing the draft cites is
+# the last thing written, and an append-only log breaks that assumption
+# the moment anything else is appended after it. Measured on the gate
+# bench's t38: the draft cites a running summary log by a generic noun,
+# the file resolves correctly, and the lines carrying the draft's own
+# figures sit in the middle of the file — nowhere near the tail the
+# block was reading. Selection is deterministic (literal integer and
+# stemmed-word overlap, see `_cited_file_relevant_lines`) and additive: the
+# tail is still carried, unchanged.
+CITED_FILE_RELEVANT_MAX_BYTES = 2048
+CITED_FILE_RELEVANT_MAX_LINES = 6
 CITED_FILE_MAX_FILES = 2             # at most this many citations resolved per draft
 CITED_FILE_EXTS = (".md", ".txt", ".log", ".json")
 
@@ -8066,9 +8461,84 @@ def _resolve_cited_basename(basename, roots, max_scan=20000, window_hint_text=No
     return _pick_cited_candidate(candidates, basename, roots, window_hint_text)
 
 
-def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_MAX_BYTES):
+_CITED_INT_RE = re.compile(r'\b\d{1,4}\b')
+_CITED_RATIO_RE = re.compile(r'\b(\d{1,4})\s*(?:/|of)\s*(\d{1,4})\b')
+
+
+def _cited_file_relevant_lines(lines, draft_text, exclude_from=None,
+                               max_lines=CITED_FILE_RELEVANT_MAX_LINES,
+                               max_bytes=CITED_FILE_RELEVANT_MAX_BYTES):
+    """The lines of `lines` (a cited file, split) that overlap `draft_text`
+    most, as a list of (line_number, text) in FILE order.
+
+    Deterministic scoring, no model, no I/O:
+
+      * a RATIO the draft itself states ("14 of 20", "9/10") appearing on
+        the line is worth 10 — that shape is what a figure claim looks
+        like, and a line carrying the same pair of numbers is almost
+        always the line the claim came from;
+      * each of the draft's own integers on the line is worth 2;
+      * each shared stemmed label word (`_fact_label_keys`) is worth 1.
+
+    A line has to carry either a stated ratio or two of the draft's own
+    integers to be eligible at all, so prose that merely shares vocabulary
+    is never pulled in. Ties break toward the LATER line, since a running
+    log's later entries supersede its earlier ones. Lines at or after
+    `exclude_from` are skipped (the tail is already being carried).
+    Returns [] for an empty draft, and never raises."""
+    draft = draft_text or ""
+    draft_ints = {int(x) for x in _CITED_INT_RE.findall(draft)}
+    if not draft_ints:
+        return []
+    draft_ratios = {(int(a), int(b)) for a, b in _CITED_RATIO_RE.findall(draft)}
+    draft_keys = set(_fact_label_keys(draft))
+    limit = len(lines) if exclude_from is None else max(exclude_from, 0)
+    scored = []
+    for i in range(min(limit, len(lines))):
+        line = lines[i]
+        if not line.strip():
+            continue
+        line_ratios = {(int(a), int(b)) for a, b in _CITED_RATIO_RE.findall(line)}
+        ratio_hits = len(draft_ratios & line_ratios)
+        int_hits = len(draft_ints & {int(x) for x in _CITED_INT_RE.findall(line)})
+        if not ratio_hits and int_hits < 2:
+            continue
+        key_hits = len(draft_keys & set(_fact_label_keys(line)))
+        scored.append((ratio_hits * 10 + int_hits * 2 + key_hits, i, line))
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    picked, used = [], 0
+    for _score, i, line in scored:
+        if len(picked) >= max_lines:
+            break
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost > max_bytes:
+            continue
+        picked.append((i + 1, line))
+        used += cost
+    picked.sort()
+    return picked
+
+
+def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_MAX_BYTES,
+                    draft_text=None):
     """The last `max_lines` lines of `path`, capped at `max_bytes` (the
-    tail is kept if still over budget). None on any read problem."""
+    tail is kept if still over budget). None on any read problem.
+
+    When `draft_text` is given, up to CITED_FILE_RELEVANT_MAX_LINES lines
+    from EARLIER in the same file that overlap the draft's own numbers and
+    label words are carried too, BELOW the tail, each prefixed with its own
+    line number (see `_cited_file_relevant_lines`) so a reader can tell
+    the contiguous tail apart from the picked-out lines that follow it. An
+    append-only log's cited figures are routinely nowhere near its end.
+
+    The selection is a NUMBER match, not a confirmation of anything: a
+    line scores purely on whether the draft's own digits or a stated ratio
+    appear on it, the same way for a line that agrees with the draft and
+    one that flatly contradicts it. It is corroboration-shaped (the
+    draft's own query controls which lines get pulled in, and a line that
+    merely shares numbers can still disagree with the draft's claim about
+    them), so the block's own heading says exactly that — never that the
+    picked lines say what the draft says (2026-09-18, review round 2)."""
     try:
         text = Path(path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -8079,7 +8549,20 @@ def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_M
     if len(raw) > max_bytes:
         raw = raw[-max_bytes:]
         tail = raw.decode("utf-8", errors="ignore")
-    return tail
+    if not draft_text:
+        return tail
+    picked = _cited_file_relevant_lines(lines, draft_text,
+                                       exclude_from=len(lines) - max_lines)
+    if not picked:
+        return tail
+    tail_out = ("(the file's tail)\n" + tail if tail else tail)
+    picked_out = (
+        "(lines elsewhere in this file whose NUMBERS match the draft's own "
+        "figures — a number match only, not a confirmation that any picked "
+        "line says what the draft says)\n"
+        + "\n".join(f"L{num}: {line}" for num, line in picked)
+        + "\n(end of matched lines)")
+    return tail_out + "\n" + picked_out
 
 
 def build_cited_file_block(draft_text, window_text=None):
@@ -8130,7 +8613,7 @@ def build_cited_file_block(draft_text, window_text=None):
             real = path
         if real in seen_paths:
             continue
-        tail = _read_file_tail(path)
+        tail = _read_file_tail(path, draft_text=draft_text)
         if not tail or not tail.strip():
             continue
         seen_paths.add(real)
@@ -8143,7 +8626,8 @@ def build_cited_file_block(draft_text, window_text=None):
 
 def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None,
                                           session_id=None, prev_turns=None,
-                                          cap_bytes=None, return_meta=False):
+                                          cap_bytes=None, return_meta=False,
+                                          draft_text=None):
     """The evidence text a Stop-hook gate run uses when the payload names no
     'evidence' itself — gate v3's wide window. Three layers, current turn
     highest priority:
@@ -8155,7 +8639,18 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          now, and dropping it the moment the turn ends was an evidence
          gap. When the assembled window would exceed the cap, the OLDEST
          previous turn is dropped first (see _build_prev_turns_block) —
-         never the current turn.
+         never the current turn. `prev_turns` counts turns that CARRY
+         TOOL RESULTS: a tool-free turn is walked over rather than
+         counted, up to SUPERJEV_PREV_TURN_SCAN_LIMIT turns of scan (see
+         PREV_TURN_SCAN_LIMIT), so two conversational turns before the
+         reply can no longer leave this layer empty.
+      1b. Every worker/teammate REPORT relayed in one of those previous
+         turns, under "[relayed reports in previous turns]", with its own
+         share of the cap (PREV_REPORTS_BUDGET_SHARE), kept NEWEST-first
+         through the same fence renderer as layer 3. These used to ride
+         inside their turn's own block and be dropped with it, which made
+         a receipt-bearing report one turn old the easiest thing in the
+         window to lose.
       2. Up to the last RECEIPTS_WINDOW session receipts — a one-line
          memory of every receipt-worthy fact this session has seen in a
          tool result (a `gh pr merge`/`gh pr checks` command, a bare
@@ -8167,7 +8662,10 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          Stop hook never ran on. The store alone left the live shim with
          zero receipts on all 40 cases of the 2026-09-17 bench while the
          transcripts carried 1 to 15 lines each — see docs/hooks.md,
-         "gate v3 — receipts backfill and the labelled count arm".
+         "gate v3 — receipts backfill and the labelled count arm". This
+         layer takes at most RECEIPTS_BUDGET_SHARE of the cap (see
+         `_build_receipts_block`); uncapped, it grew on a long session
+         until the turns holding the actual proof had no room left.
       3. The CURRENT turn's worker/teammate REPORTS — every
          `<teammate-message>` / `<task-notification>` block in this turn's
          user-role records, each labelled "REPORT FROM <who> (unverified
@@ -8178,8 +8676,8 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          relayed was a report. They ride at current-turn priority but may
          take at most REPORTS_BUDGET_SHARE of the room left after the
          current turn and the receipts, so a page-long report cannot
-         starve the previous-turn block. A previous turn's reports ride
-         inside that turn's own block and are dropped with it.
+         starve the previous-turn block. A previous turn's reports are
+         layer 1b, budgeted separately.
       4. The CURRENT turn's tool_result content (the last `n` tool calls
          found at or after the most recent real user prompt — see
          _current_turn_start_index), highest priority, NEVER dropped to
@@ -8207,9 +8705,14 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     turn: its record range, tool_result count, byte size and whether it
     was kept), prev_truncated ((turn, bytes_cut) when the freshest
     previous turn had its head cut to fit, else None), and
-    receipts_source/receipts_from_store/receipts_backfilled, and
+    receipts_source/receipts_from_store/receipts_backfilled,
+    receipts_dropped and receipts_share_bytes for the capped receipts
+    layer, prev_scanned (how many previous turns were walked to find the
+    tool-carrying ones), and
     reports_found/reports_current/reports_kept/reports_bytes/
-    reports_cut_bytes for the worker-report layer.
+    reports_cut_bytes for the worker-report layers, of which
+    reports_prev_found/reports_prev_kept/reports_prev_bytes/
+    reports_prev_cut_bytes are the previous-turn half.
 
     `current_turn_empty` deliberately tracks this turn's own TOOL results
     only: a turn whose sole new material is a relayed worker report has
@@ -8251,10 +8754,24 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         _record_receipts(session_id, cur_items)
 
     prev_spans = _previous_turn_spans(records, start, prev_turns) if start is not None else []
-    prev_reports = (_previous_turn_reports(records, start, prev_turns)
-                    if start is not None else [])
-    prev_windows = [texts + (prev_reports[i] if i < len(prev_reports) else [])
-                    for i, (_a, _b, texts) in enumerate(prev_spans)]
+    # spans[0] is turn -1, spans[1] is turn -2, ... — tag each turn's
+    # reports with that depth so the window text itself carries which
+    # previous turn each report came from (see REPORT_LABEL_PREV_TURN).
+    prev_reports = [_collect_report_blocks(records[a:b], prev_turn=i + 1)
+                     for i, (a, b, _t) in enumerate(prev_spans)]
+    # Previous-turn tool results only. A previous turn's REPORTS used to be
+    # concatenated on here and dropped with the turn; they now ride in
+    # their own budgeted section (see PREV_REPORTS_BUDGET_SHARE).
+    prev_windows = [texts for _a, _b, texts in prev_spans]
+    # Newest-first, flattened: `_build_reports_block` keeps the freshest
+    # reports, and "freshest" across turns means turn -1's reports before
+    # turn -2's. Within one turn, file order is already oldest-first, so
+    # each turn's list is reversed before being laid end to end and the
+    # whole thing reversed back — leaving one oldest-first list whose
+    # oldest end is the furthest-back turn.
+    prev_report_blocks = []
+    for reps in reversed(prev_reports):
+        prev_report_blocks.extend(reps)
 
     # RECEIPT SHAPES (see _facts_receipt_shapes): derived HERE, off the
     # records this function has already read, because the family's whole
@@ -8273,15 +8790,20 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
            "receipt_shapes_count": len(receipt_shape_facts),
            "receipts_from_store": 0, "receipts_backfilled": 0,
            "prev_truncated": None,
-           "reports_found": len(cur_reports) + sum(len(r) for r in prev_reports),
+           "prev_scanned": len(prev_spans),
+           "receipts_dropped": 0, "receipts_share_bytes": 0,
+           "reports_found": len(cur_reports) + len(prev_report_blocks),
            "reports_current": len(cur_reports), "reports_kept": 0,
            "reports_bytes": 0, "reports_cut_bytes": 0,
+           "reports_prev_found": len(prev_report_blocks),
+           "reports_prev_kept": 0, "reports_prev_bytes": 0,
+           "reports_prev_cut_bytes": 0,
            "prev_turn_detail": [
                {"turn": i, "records": f"{a}-{b - 1}", "tool_results": len(texts),
                 "reports": len(prev_reports[i - 1]) if i - 1 < len(prev_reports) else 0,
-                "bytes": len(("\n\n---\n\n".join(
-                    texts + (prev_reports[i - 1] if i - 1 < len(prev_reports) else []))
-                ).encode("utf-8")),
+                # Tool-result bytes only: this turn's reports are budgeted
+                # in their own section now, not inside this block.
+                "bytes": len(("\n\n---\n\n".join(texts)).encode("utf-8")),
                 "kept": None}
                for i, (a, b, texts) in enumerate(prev_spans, start=1)]}
 
@@ -8316,15 +8838,33 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     meta["receipts_from_store"] = len(stored)
     meta["receipts_backfilled"] = len(backfilled)
     if receipts:
-        receipts_section = "[session receipts]\n" + "\n".join(receipts)
-        meta["receipts_count"] = len(receipts)
-        meta["receipts_bytes"] = len(receipts_section.encode("utf-8"))
         meta["receipts_source"] = (
             "store + transcript backfill" if stored and backfilled
             else "transcript backfill" if backfilled else "store")
 
     overhead = 32  # section-join separators ("\n\n===\n\n"), one per gap
-    remaining = effective_cap - meta["current_bytes"] - meta["receipts_bytes"] - overhead
+    # RECEIPTS_BUDGET_SHARE is a RESERVATION, not a ceiling. The receipts
+    # layer is reserved its share so the previous-turn dump cannot crowd it
+    # out, and the previous-turn layers are budgeted against what is left
+    # AFTER that reservation so the receipts cannot crowd THEM out — but
+    # whatever the earlier layers do not spend comes back to the receipts
+    # at the end. A hard ceiling would throw receipt lines away in windows
+    # with room to spare: replayed over the recorded sets, a ceiling
+    # dropped receipt lines out of recorded LIES' windows, and a dropped
+    # receipt is a refutation the judge never sees.
+    # PREV_REPORTS_BUDGET_SHARE is a reservation on the same terms.
+    receipts_full_bytes = (len(("[session receipts]\n" + "\n".join(receipts))
+                              .encode("utf-8")) if receipts else 0)
+    receipts_reserve = min(max(int(effective_cap * RECEIPTS_BUDGET_SHARE), 0),
+                           receipts_full_bytes)
+    meta["receipts_share_bytes"] = receipts_reserve
+    prev_reports_full_bytes = (
+        len((f"[{PREV_REPORTS_LABEL}]\n" + "\n\n".join(prev_report_blocks))
+            .encode("utf-8")) if prev_report_blocks else 0)
+    prev_reports_reserve = min(
+        max(int(effective_cap * PREV_REPORTS_BUDGET_SHARE), 0),
+        prev_reports_full_bytes)
+    remaining = effective_cap - meta["current_bytes"] - overhead
 
     # This turn's worker/teammate reports sit at current-turn priority (a
     # report the draft is relaying is what the judge most needs to see) but
@@ -8334,7 +8874,8 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     # of the newest if even that one is over budget (_build_reports_block).
     reports_section = ""
     if cur_reports and remaining > 0:
-        reports_budget = max(int(remaining * REPORTS_BUDGET_SHARE), 0)
+        reports_budget = max(int(max(remaining - receipts_reserve, 0)
+                                 * REPORTS_BUDGET_SHARE), 0)
         reports_section, kept_reports, cut = _build_reports_block(
             cur_reports, reports_budget, "current turn reports")
         meta["reports_kept"] = kept_reports
@@ -8344,7 +8885,13 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     elif cur_reports:
         meta["reports_cut_bytes"] = sum(len(r.encode("utf-8")) for r in cur_reports)
 
-    remaining_for_prev = remaining
+    # Previous-turn tool results get what is left once the two
+    # reservations below them are set aside. They are the most replaceable
+    # material in the window (the receipts layer is a one-line summary of
+    # exactly this kind of output, and a relayed report is summarised
+    # nowhere), so they are the layer that pays for both.
+    remaining_for_prev = max(
+        remaining - receipts_reserve - prev_reports_reserve, 0)
     prev_section = ""
     if prev_windows and remaining_for_prev > 0:
         prev_block, dropped, kept, truncated = _build_prev_turns_block_detailed(
@@ -8360,9 +8907,46 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         meta["prev_dropped"] = len(prev_windows)  # no budget left for any of them
         for d in meta["prev_turn_detail"]:
             d["kept"] = False
+    if prev_section:
+        remaining -= meta["prev_bytes"] + 8
 
-    sections = [s for s in (prev_section, receipts_section, reports_section,
-                            cur_section) if s]
+    # Reports relayed in a PREVIOUS turn, under their own marker rather
+    # than riding inside a previous-turn block and being dropped with it.
+    # Same fence renderer, so each one still carries its "REPORT FROM
+    # <who> (unverified worker claim)" marker and is read as a relayed
+    # claim, not a receipt. Reserved share, then whatever the
+    # previous-turn block left unspent — a ceiling here dropped whole
+    # whole reports out of windows with most of the cap still free
+    # (measured on set 1's l07).
+    prev_reports_section = ""
+    if prev_report_blocks and remaining > 0:
+        prev_reports_budget = max(remaining - receipts_reserve,
+                                  prev_reports_reserve)
+        prev_reports_section, kept_prev, cut_prev = _build_reports_block(
+            prev_report_blocks, prev_reports_budget, PREV_REPORTS_LABEL)
+        meta["reports_prev_kept"] = kept_prev
+        meta["reports_prev_cut_bytes"] = cut_prev
+        meta["reports_prev_bytes"] = len(prev_reports_section.encode("utf-8"))
+        if prev_reports_section:
+            remaining -= meta["reports_prev_bytes"] + 8
+    elif prev_report_blocks:
+        meta["reports_prev_cut_bytes"] = sum(
+            len(r.encode("utf-8")) for r in prev_report_blocks)
+    meta["reports_kept"] += meta["reports_prev_kept"]
+    meta["reports_cut_bytes"] += meta["reports_prev_cut_bytes"]
+
+    # Receipts last, with everything the layers above left unspent — never
+    # less than their reservation, never more than the whole layer.
+    if receipts:
+        receipts_budget = max(remaining, receipts_reserve)
+        receipts_section, kept_receipts, dropped_receipts = _build_receipts_block(
+            receipts, receipts_budget, draft_text)
+        meta["receipts_count"] = kept_receipts
+        meta["receipts_dropped"] = dropped_receipts
+        meta["receipts_bytes"] = len(receipts_section.encode("utf-8"))
+
+    sections = [s for s in (prev_section, prev_reports_section, receipts_section,
+                            reports_section, cur_section) if s]
     joined = "\n\n===\n\n".join(sections)
     if len(joined.encode("utf-8")) > effective_cap:
         # The current turn alone (plus receipts) is bigger than the cap —
@@ -8375,7 +8959,8 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
 
 
 def derive_evidence_window(transcript_path, n=None, max_bytes=None, session_id=None,
-                           prev_turns=None, cap_bytes=None, return_meta=False):
+                           prev_turns=None, cap_bytes=None, return_meta=False,
+                           draft_text=None):
     """Public wrapper around `_derive_evidence_text_from_transcript` — the
     exact wide-evidence-window assembler `hook gate` judges a draft
     against, exposed under a stable, non-underscore name for a bench or
@@ -8389,7 +8974,8 @@ def derive_evidence_window(transcript_path, n=None, max_bytes=None, session_id=N
     field meaning of `meta`, including `current_turn_empty`."""
     return _derive_evidence_text_from_transcript(
         transcript_path, n=n, max_bytes=max_bytes, session_id=session_id,
-        prev_turns=prev_turns, cap_bytes=cap_bytes, return_meta=return_meta)
+        prev_turns=prev_turns, cap_bytes=cap_bytes, return_meta=return_meta,
+        draft_text=draft_text)
 
 
 def _last_assistant_text(transcript_path):
@@ -9154,11 +9740,16 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
               "  current turn from : whole transcript (no user prompt found)")
         print(f"  previous turns    : {m.get('prev_turns_found', 0)} found, "
               f"{m.get('prev_dropped', 0)} dropped (oldest first), "
-              f"{m.get('prev_bytes', 0)} bytes kept")
+              f"{m.get('prev_bytes', 0)} bytes kept"
+              + (f" — {m.get('prev_scanned', 0)} turn(s) scanned to find them "
+                 f"({PREV_TURN_SCAN_LIMIT_ENV}, tool-free turns skipped)"
+                 if m.get("prev_scanned") else ""))
         # Which prior turns were chosen, and what the cap cut. A window this
         # gate blocked on is only auditable if you can see the turns it read.
         for d in m.get("prev_turn_detail") or []:
-            state = ("kept" if d.get("kept") else
+            state = ("tool-free (walked over; any report it carried was taken)"
+                    if not d.get("tool_results") else
+                    "kept" if d.get("kept") else
                     "CUT (over cap, oldest dropped first)" if d.get("kept") is False
                     else "not budgeted")
             print(f"    turn -{d.get('turn')}        : records "
@@ -9173,12 +9764,25 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
             print("    (no previous turn carried tool results)")
         print(f"  worker reports    : {m.get('reports_found', 0)} found "
               f"({m.get('reports_current', 0)} in this turn), "
-              f"{m.get('reports_kept', 0)} kept at current-turn priority, "
-              f"{m.get('reports_bytes', 0)} bytes"
+              f"{m.get('reports_kept', 0)} kept, "
+              f"{m.get('reports_bytes', 0) + m.get('reports_prev_bytes', 0)} bytes"
               + (f", {m.get('reports_cut_bytes', 0)} bytes cut to fit the cap"
                  if m.get('reports_cut_bytes') else ""))
-        print(f"  session receipts  : {m.get('receipts_count', 0)} line(s), "
-              f"{m.get('receipts_bytes', 0)} bytes, source "
+        print(f"    this turn       : {m.get('reports_kept', 0) - m.get('reports_prev_kept', 0)} "
+              f"of {m.get('reports_current', 0)} kept, {m.get('reports_bytes', 0)} bytes "
+              f"(share {REPORTS_BUDGET_SHARE:.0%} of the room left)")
+        print(f"    earlier turns   : {m.get('reports_prev_kept', 0)} of "
+              f"{m.get('reports_prev_found', 0)} kept, "
+              f"{m.get('reports_prev_bytes', 0)} bytes "
+              f"(own share, {PREV_REPORTS_BUDGET_SHARE:.0%} of the cap — newest first)")
+        print(f"  session receipts  : {m.get('receipts_count', 0)} line(s) kept"
+              + (f", {m.get('receipts_dropped', 0)} dropped over the "
+                 f"{RECEIPTS_BUDGET_SHARE:.0%} share "
+                 f"({m.get('receipts_share_bytes', 0)} bytes)"
+                 if m.get('receipts_dropped') else
+                 f" (share {RECEIPTS_BUDGET_SHARE:.0%} of the cap, "
+                 f"{m.get('receipts_share_bytes', 0)} bytes)")
+              + f", {m.get('receipts_bytes', 0)} bytes, source "
               f"{m.get('receipts_source', 'none')} "
               f"({m.get('receipts_from_store', 0)} from the session store, "
               f"{m.get('receipts_backfilled', 0)} backfilled from the transcript)")
@@ -10450,7 +11054,8 @@ def cmd_hook(a):
                 derived = None
                 if isinstance(tp, str) and tp:
                     derived, window_meta = _derive_evidence_text_from_transcript(
-                        tp, session_id=payload.get("session_id"), return_meta=True)
+                        tp, session_id=payload.get("session_id"), return_meta=True,
+                        draft_text=text)
                 if derived:
                     # gate-adjudication-20260918.md: the receipt-turn fix,
                     # scoped to a current turn that ran no tools of its own

@@ -6066,10 +6066,8 @@ def test_stop_hook_gate_stays_quiet_when_running_unchecked_share_is_low(
     assert out == ""
 
 
-# ==========================================================================
-# gate: worker/teammate reports are part of the evidence window
-# ==========================================================================
-#
+# ===================================================================# gate: worker/teammate reports are part of the evidence window
+# ===================================================================#
 # Both defects fixed here come from the 2026-09-17 TRUTH-AUDIT of the
 # blocked-truth bench cases:
 #
@@ -10229,8 +10227,7 @@ def test_sweep_baseline_ref_env_override_wins(monkeypatch):
     monkeypatch.setattr(sweep.subprocess, "run", fake_run)
 
     assert sweep._resolve_baseline_ref() == "some-explicit-ref"
-# ============================================================================
-# THE TRUST BOUNDARY REACHES THE CONSUMER — safe_git_env
+# =====================================================================# THE TRUST BOUNDARY REACHES THE CONSUMER — safe_git_env
 #
 # The argv flags in GIT_SAFE_FLAGS only protect git commands THIS module
 # builds. Two things they cannot protect:
@@ -10454,8 +10451,7 @@ def test_every_subprocess_call_in_the_module_passes_an_env():
                       "pass env=safe_git_env() or env=child_env()")
 
 
-# ============================================================================
-# NPM PROVENANCE — the vouched-for package.json, not the worker's own
+# =====================================================================# NPM PROVENANCE — the vouched-for package.json, not the worker's own
 #
 # `npm test` names no program; package.json's "scripts" does. The old check
 # asked "is package.json unmodified against HEAD" INSIDE THE WORKER'S OWN
@@ -10564,8 +10560,7 @@ def test_check_test_cmd_for_fallback_refuses_a_committed_hostile_package_json(tr
         "python3 -m pytest tests/test_x.py", str(wt)) is None
 
 
-# ============================================================================
-# FINDING 6 — the shared .git/config is arbitrary code execution
+# =====================================================================# FINDING 6 — the shared .git/config is arbitrary code execution
 #
 # `git worktree add` gives every worktree the SAME `.git/config` as the
 # protected checkout. So a worker inside a GENUINE worktree — one that clears
@@ -11019,8 +11014,7 @@ def test_protected_checkout_is_the_main_checkout_never_the_running_worktree(trus
         str(trusted.repo))
 
 
-# ============================================================================
-# diff.external / textconv — the other two config keys that name a program
+# =====================================================================# diff.external / textconv — the other two config keys that name a program
 #
 # `diff.external` replaces git's diff engine with the named program for
 # every file; a `diff.<driver>.textconv` selected by a checked-in
@@ -11085,8 +11079,7 @@ def test_npm_gate_reads_a_modified_package_json_through_a_planted_diff_external(
         "worktree-config-execution:diff.external")
 
 
-# ============================================================================
-# SUPERJEV_WORKTREE_ROOTS=none — refuse every derived worktree
+# =====================================================================# SUPERJEV_WORKTREE_ROOTS=none — refuse every derived worktree
 
 def test_worktree_roots_none_refuses_every_derived_worktree(trusted, monkeypatch):
     wt = trusted.worktree()
@@ -11125,8 +11118,7 @@ def test_worktree_roots_unset_or_blank_still_falls_back_to_the_default(monkeypat
     assert sj._worktree_roots() != []
 
 
-# ============================================================================
-# filter.<driver>.clean — the third config key that decides what a diff says
+# =====================================================================# filter.<driver>.clean — the third config key that decides what a diff says
 #
 # Found while hardening the two above, and exploitable: a clean filter is a
 # program git runs over the WORKING COPY before comparing it, selected
@@ -11664,3 +11656,391 @@ def test_receipt_shapes_ride_on_the_window_meta_the_gate_path_reads(tmp_path):
         str(transcript), return_meta=True)
     assert meta["receipt_shapes_count"] == 1
     assert "an append to /work/ledger.md" in meta["receipt_shape_facts"][0]
+# ------------------------------------------ window budget (2026-09-18)
+#
+# Five mechanisms, one test group each. Every transcript here is
+# synthetic: a handful of records built in-process, no recorded payload,
+# no door, no model call. The recorded benches are replayed separately by
+# tests/replay_gate_bench.py and tests/replay_fact_block_sweep.py.
+
+def _turn(prompt, tool_texts=(), reports=()):
+    """One synthetic turn: a real user prompt, then a tool_use/tool_result
+    pair per entry in `tool_texts`, then one user-role text record per
+    entry in `reports` (a teammate-message block, which is how a worker
+    report really arrives)."""
+    recs = [{"message": {"role": "user", "content": prompt}}]
+    for i, text in enumerate(tool_texts):
+        tid = f"{abs(hash(prompt)) % 9999}-{i}"
+        recs.append({"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": tid, "name": "Bash",
+             "input": {"command": "echo probe"}}]}})
+        recs.append({"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tid, "content": text}]}})
+    for who, body in reports:
+        recs.append({"message": {"role": "user", "content":
+                    f'<teammate-message teammate_id="{who}">{body}</teammate-message>'}})
+    return recs
+
+
+def _flat(*turns):
+    out = []
+    for t in turns:
+        out.extend(t)
+    return out
+
+
+# --- mechanism 1: a previous turn's reports get their own budget share
+
+def test_a_previous_turns_report_survives_under_its_own_marker(tmp_path):
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("build it", ["old tool output here"],
+              [("Worker", "COMPLETE — the suite shows 41 of 41 green.")]),
+        _turn("anything else?"),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True)
+    assert f"[{sj.PREV_REPORTS_LABEL}]" in derived
+    assert "41 of 41 green" in derived
+    assert meta["reports_prev_found"] == 1
+    assert meta["reports_prev_kept"] == 1
+    assert meta["reports_kept"] == 1
+
+
+def test_a_previous_turns_report_keeps_its_unverified_claim_fence(tmp_path):
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("build it", ["old tool output here"],
+              [("Worker", "COMPLETE — 41 of 41 green.")]),
+        _turn("anything else?"),
+    ))
+    derived = sj._derive_evidence_text_from_transcript(transcript)
+    # A previous-turn report's marker now also carries which turn it came
+    # from (REPORT_LABEL_PREV_TURN, 2026-09-18, review round 2) — still
+    # says "unverified worker claim", still opens the same fence.
+    assert "REPORT FROM Worker (unverified worker claim, previous turn -1)" in derived
+
+
+def test_a_previous_turns_report_is_not_dropped_when_its_turn_is(tmp_path):
+    # The previous-turn tool dump is far too big for the cap; the report
+    # rides in its own section and has to survive anyway.
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("build it", ["X" * 40000],
+              [("Worker", "COMPLETE — the suite shows 41 of 41 green.")]),
+        _turn("anything else?"),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True, cap_bytes=6000)
+    assert "41 of 41 green" in derived
+    assert meta["reports_prev_kept"] == 1
+
+
+def test_previous_turn_reports_are_kept_newest_first(tmp_path):
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("first", ["t1"], [("Old", "OLD REPORT " + "o" * 3000)]),
+        _turn("second", ["t2"], [("New", "NEW REPORT " + "n" * 3000)]),
+        _turn("anything else?"),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True, cap_bytes=4200)
+    assert "NEW REPORT" in derived
+    assert "OLD REPORT" not in derived
+    assert meta["reports_prev_kept"] == 1
+    assert meta["reports_prev_cut_bytes"] > 0
+
+
+def test_previous_turn_reports_rank_below_the_receipts_layer(tmp_path):
+    # _section_recency_rank has to place the new marker, or family 5's
+    # stale-report check cannot compare a report against a receipt.
+    assert (sj._section_recency_rank(f"[{sj.PREV_REPORTS_LABEL}]")
+            < sj._section_recency_rank("[session receipts]"))
+    assert (sj._section_recency_rank(f"[{sj.PREV_REPORTS_LABEL}]")
+            > sj._section_recency_rank("[previous turn -1]"))
+
+
+def test_previous_turn_reports_marker_is_a_trimmable_window_section():
+    # The one hard token cap trims by labelled section; an unrecognised
+    # marker makes its whole section unrankable.
+    parts = sj._split_window_parts(
+        f"[{sj.PREV_REPORTS_LABEL}]\nREPORT FROM W (unverified worker claim)\nbody\n")
+    assert [p["kind"] for p in parts] == [sj.PREV_REPORTS_LABEL]
+    assert sj.PREV_REPORTS_LABEL in sj._WINDOW_TRIM_ORDER
+
+
+# --- mechanism 2: the receipts layer's share of the cap
+
+def test_receipts_share_stops_the_receipts_layer_crowding_out_a_turn(tmp_path):
+    receipt_lines = [f"gh pr merge {n} --squash: merged" for n in range(1, 40)]
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("do the merges", receipt_lines),
+        _turn("and the tests", ["PROOF LINE: 41 passed in the new suite"]),
+        _turn("anything else?"),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True, cap_bytes=3000)
+    assert meta["receipts_share_bytes"] <= int(3000 * sj.RECEIPTS_BUDGET_SHARE)
+    assert meta["receipts_bytes"] <= max(meta["receipts_share_bytes"],
+                                         3000 - meta["prev_bytes"])
+    assert "PROOF LINE" in derived
+
+
+def test_receipts_share_is_a_reservation_not_a_ceiling(tmp_path):
+    # Nothing else wants the room, so no receipt line is given up: a
+    # ceiling here threw away refutations the judge needed to see.
+    receipt_lines = [f"gh pr merge {n} --squash: merged" for n in range(1, 40)]
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("do the merges", receipt_lines),
+        _turn("anything else?"),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True)
+    assert meta["receipts_dropped"] == 0
+    assert "gh pr merge 1 " in derived
+
+
+def test_receipts_over_the_share_keep_the_lines_the_draft_is_about(tmp_path):
+    receipts = [f"gh pr merge {n} --squash: merged" for n in range(1, 30)]
+    receipts.append("zebrafish audit: 41 passed")   # oldest-but-relevant
+    block, kept, dropped = sj._build_receipts_block(
+        receipts, 400, "The zebrafish audit came back clean, Sir.")
+    assert dropped > 0
+    assert "zebrafish audit" in block
+    assert kept >= 1
+
+
+def test_receipts_block_with_no_budget_keeps_nothing(tmp_path):
+    block, kept, dropped = sj._build_receipts_block(["a receipt"], 0, "draft")
+    assert (block, kept, dropped) == ("", 0, 1)
+
+
+def test_receipts_relevance_identifier_match_beats_generic_stem_match(tmp_path):
+    # Ten PR merge receipts, room for three. Every one shares the generic
+    # stem "merg" with the draft ("PR #9 merged"), so stem overlap alone
+    # marks all ten equally relevant and leaves age to decide — dropping
+    # the #9 receipt the draft actually names. The identifier tier (a
+    # concrete PR number, here) must rank above the stem tier so #9
+    # survives regardless of its position among the other nine.
+    receipts = [f"gh pr merge {n} --squash: merged [from: gh pr merge {n}]"
+               for n in range(1, 11)]
+    block, kept, dropped = sj._build_receipts_block(
+        receipts, 220, "PR #9 merged, Sir.")
+    assert dropped > 0
+    assert "gh pr merge 9 " in block
+
+
+def test_receipts_relevance_returns_identifier_and_stem_tiers_separately():
+    receipts = ["gh pr merge 9 --squash: merged [from: gh pr merge 9]",
+               "zebrafish audit: 41 passed"]
+    id_relevant, stem_relevant = sj._receipts_relevant_to_draft(
+        receipts, "PR #9 merged, and the zebrafish run came back clean, Sir.")
+    assert id_relevant == {0}
+    assert stem_relevant == {1}
+
+
+# --- mechanism 3: previous-turn depth counts turns that carry tool results
+
+def test_prev_turn_depth_skips_tool_free_turns(tmp_path):
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("run the suite", ["PROOF LINE: 41 passed"]),
+        _turn("thanks"),                      # tool-free
+        _turn("and how are we doing?"),       # tool-free
+        _turn("so are we green?"),            # the current turn, tool-free
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True, prev_turns=2)
+    assert "PROOF LINE" in derived
+    assert meta["prev_scanned"] >= 3
+    assert meta["current_turn_empty"] is True
+
+
+def test_prev_turn_depth_counts_only_tool_carrying_turns(tmp_path):
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("first", ["FIRST TOOL"]),
+        _turn("chat"),
+        _turn("second", ["SECOND TOOL"]),
+        _turn("more chat"),
+        _turn("third", ["THIRD TOOL"]),
+        _turn("now?"),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True, prev_turns=2)
+    # Two tool-carrying turns, and not the third.
+    assert "THIRD TOOL" in derived
+    assert "SECOND TOOL" in derived
+    assert "FIRST TOOL" not in derived
+
+
+def test_prev_turn_scan_limit_stops_a_long_tool_free_stretch(tmp_path, monkeypatch):
+    records = _turn("ran it", ["PROOF LINE: 41 passed"])
+    for i in range(10):
+        records += _turn(f"just chatting {i}")
+    records += _turn("so are we green?")
+    transcript = _write_transcript(tmp_path, records)
+    monkeypatch.setenv("SUPERJEV_PREV_TURN_SCAN_LIMIT", "3")
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True, prev_turns=2)
+    assert meta["prev_scanned"] <= 3
+    # Asserted on the previous-turn SECTION, not the marker text: the
+    # receipts layer backfills receipt-worthy lines ("41 passed") out of
+    # the whole transcript regardless of turn depth, and that is a
+    # different mechanism doing its job.
+    assert meta["prev_turns_found"] == 0
+    assert "[previous turn -" not in (derived or "")
+
+
+def test_prev_turn_scan_limit_is_never_below_the_turns_asked_for(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_PREV_TURNS", "5")
+    monkeypatch.setenv("SUPERJEV_PREV_TURN_SCAN_LIMIT", "1")
+    assert sj._hook_prev_turn_scan_limit() == 5
+
+
+def test_prev_turn_spans_with_scan_limit_equal_to_n_is_the_old_behaviour(tmp_path):
+    records = _flat(_turn("a", ["A"]), _turn("b"), _turn("c"))
+    transcript = _write_transcript(tmp_path, records)
+    recs = sj._read_transcript_records(transcript)
+    start = sj._current_turn_start_index(recs)
+    spans = sj._previous_turn_spans(recs, start, 1, scan_limit=1)
+    assert len(spans) == 0          # turn -1 is tool-free and never counted past
+
+
+# --- mechanism 4: the cited-file read-back reaches past the tail
+
+def test_cited_file_relevant_lines_reach_past_the_tail(tmp_path):
+    body = (["filler line with no numbers"] * 5
+            + ["RUN A: lies 14/20, truths blocked 3/20"]
+            + ["filler line with no numbers"] * 60)
+    path = tmp_path / "SUMMARY.md"
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    tail = sj._read_file_tail(path, draft_text="We hit 14 of 20 lies, Sir.")
+    assert "RUN A: lies 14/20" in tail
+    assert "L6:" in tail                      # carries its own line number
+
+
+def test_cited_file_relevant_lines_need_a_figure_not_just_vocabulary(tmp_path):
+    body = (["the gate and the lies and the truths, all words, no digits"]
+            + ["filler"] * 60)
+    path = tmp_path / "SUMMARY.md"
+    path.write_text("\n".join(body) + "\n", encoding="utf-8")
+    tail = sj._read_file_tail(path, draft_text="The gate blocked 14 of 20 lies, Sir.")
+    assert "all words, no digits" not in tail
+
+
+def test_cited_file_tail_is_unchanged_when_no_draft_is_given(tmp_path):
+    path = tmp_path / "SUMMARY.md"
+    path.write_text("\n".join(f"line {i}" for i in range(80)) + "\n", encoding="utf-8")
+    assert sj._read_file_tail(path) == sj._read_file_tail(path, draft_text="")
+
+
+def test_cited_file_relevant_lines_are_returned_in_file_order(tmp_path):
+    lines = ["EARLY: lies 14/20 here", "mid filler"] + ["pad"] * 3 + \
+            ["LATE: lies 14/20 again"] + ["pad"] * 60
+    picked = sj._cited_file_relevant_lines(
+        lines, "14 of 20 lies, Sir.", exclude_from=len(lines) - 40)
+    assert [n for n, _ in picked] == sorted(n for n, _ in picked)
+    assert any("EARLY" in t for _n, t in picked)
+
+
+def test_cited_file_relevant_lines_are_capped(tmp_path):
+    lines = [f"ROW {i}: lies 14/20 truths 3/20" for i in range(50)] + ["pad"] * 60
+    picked = sj._cited_file_relevant_lines(
+        lines, "14 of 20 lies and 3 of 20 truths, Sir.",
+        exclude_from=len(lines) - 40)
+    assert len(picked) <= sj.CITED_FILE_RELEVANT_MAX_LINES
+    assert sum(len(t.encode("utf-8")) for _n, t in picked) <= \
+        sj.CITED_FILE_RELEVANT_MAX_BYTES
+
+
+# --- mechanism 5: a session-wide merge total reads as uncheckable
+
+def test_a_session_wide_merge_total_is_stated_as_uncheckable():
+    window = "[session receipts]\nMERGED (#4)\n"
+    facts = sj.derive_window_facts(
+        window, "Three pull requests merged into main today, Sir.")
+    assert ("merge receipts in window: 1; the draft claims 3 merged; the "
+            "draft's session-wide total cannot be checked here.") in facts
+
+
+def test_a_zero_receipt_window_says_plainly_it_carries_no_receipt():
+    # A claimed total against ZERO corroboration must not read as amnesty
+    # ("checked, fine") — it has to say the window carries no receipt at
+    # all and the claim is unsupported here (2026-09-18, judge-safety
+    # review).
+    window = "[current turn]\nno merges here\n"
+    facts = sj.derive_window_facts(
+        window, "Three pull requests merged into main today, Sir.")
+    assert ("merge receipts in window: 0; the draft claims 3 merged; the "
+            "window carries no merge receipt at all, so this claim is "
+            "unsupported here.") in facts
+
+
+def test_a_nonzero_receipt_window_quotes_both_the_count_and_the_claim():
+    window = "[session receipts]\nMERGED (#4)\nMERGED (#5)\n"
+    facts = sj.derive_window_facts(
+        window, "Five pull requests merged into main today, Sir.")
+    assert ("merge receipts in window: 2; the draft claims 5 merged; the "
+            "draft's session-wide total cannot be checked here.") in facts
+
+
+def test_a_merge_total_the_window_already_matches_is_left_alone():
+    window = "[session receipts]\nMERGED (#4)\nMERGED (#5)\n"
+    facts = sj.derive_window_facts(window, "Two PRs merged today, Sir.")
+    assert not any("cannot be checked here" in f for f in facts)
+
+
+def test_a_universal_merge_claim_with_no_number_states_the_window_count():
+    window = "[session receipts]\nMERGED (#4)\n"
+    facts = sj.derive_window_facts(
+        window, "Every item on the build list is merged, Sir.")
+    assert any("merge receipts in window: 1" in f
+               and "the draft claims every item merged" in f for f in facts)
+
+
+def test_a_draft_with_no_merge_total_gets_no_count_line():
+    window = "[session receipts]\nMERGED (#4)\n"
+    facts = sj.derive_window_facts(window, "PR #4 merged, Sir.")
+    assert not any("cannot be checked here" in f for f in facts)
+
+
+def test_merged_or_on_pr_n_is_not_read_as_a_claim_that_n_merged():
+    window = "[session receipts]\nMERGED (#4)\n"
+    facts = sj.derive_window_facts(
+        window, "Every item is either merged or on PR #3, Sir.")
+    assert not any("no merge receipt for PR #3" in f for f in facts)
+
+
+def test_a_real_merge_claim_with_no_receipt_is_still_named():
+    window = "[session receipts]\nMERGED (#4)\n"
+    facts = sj.derive_window_facts(window, "PR #9 is merged, Sir.")
+    assert "no merge receipt for PR #9 in window." in facts
+
+
+# --- the whole chain stays inside its cap
+
+def test_the_assembled_window_stays_inside_the_cap_with_every_layer_present(tmp_path):
+    transcript = _write_transcript(tmp_path, _flat(
+        _turn("do it", [f"gh pr merge {n}: merged" for n in range(1, 30)],
+              [("W1", "REPORT ONE " + "a" * 4000)]),
+        _turn("more", ["Y" * 9000], [("W2", "REPORT TWO " + "b" * 4000)]),
+        _turn("and now?", ["Z" * 5000], [("W3", "REPORT THREE " + "c" * 4000)]),
+    ))
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, return_meta=True)
+    assert len(derived.encode("utf-8")) <= meta["cap_bytes"]
+    assert meta["total_bytes"] <= meta["cap_bytes"]
+
+
+# ------------------------- sweep: receipt-worthy-line-count warning check
+
+def test_sweep_receipt_worthy_line_count_matches_the_live_pattern():
+    sweep = _load_sweep_module()
+    window = ("[session receipts]\n"
+              "gh pr merge 4: merged\n"
+              "42 passed\n"
+              "some unrelated line\n")
+    assert sweep._receipt_worthy_line_count(sweep.sj, window) == 2
+
+
+def test_sweep_receipt_worthy_line_count_is_zero_for_no_module_pattern():
+    sweep = _load_sweep_module()
+
+    class _Bare:
+        pass
+    assert sweep._receipt_worthy_line_count(_Bare(), "42 passed\n") == 0

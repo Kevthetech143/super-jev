@@ -212,6 +212,119 @@ No version bump.
   nothing to say anything had gone wrong. The live side now mirrors the
   baseline treatment: every exception is counted and printed under its
   own "LIVE ERROR" line, and the sweep exits non-zero if any occurred.
+- **The window budget: a receipt that supports a true reply was being
+  dropped before the judge ever saw it.** Five separate gathering faults,
+  all in the Stop-hook gate's wide evidence window, each one capable of
+  hiding the very line that made a reply true. See docs/hooks.md, "The
+  window budget — reservations, not ceilings".
+
+  1. *A worker's report went out of the window with its turn.* A report
+     relayed in an earlier turn was concatenated onto that turn's tool
+     results and rode inside its `[previous turn -N]` block, so it was
+     dropped whenever the turn was — and the previous-turn block is the
+     first thing the trimmer gives up. Relayed reports from earlier turns
+     now have their own budget and their own marker,
+     `[relayed reports in previous turns]`, kept newest-first through the
+     same report fence renderer, so each one still reads as an unverified
+     relayed claim rather than a receipt. A receipt-bearing report a turn
+     or two back now survives whether or not its turn's tool output does.
+
+  2. *The session-receipts layer grew until it owned the window.* It is
+     the backing layer — a one-line memory of facts from turns too far
+     back to carry whole — and it had no share of its own, so on a long
+     session it crowded out the turns that held the actual proof. It now
+     has a reserved share of the cap. Over the share, receipts are given
+     up newest-first, except that receipts whose claim keys appear in the
+     draft are kept first regardless of age.
+
+  3. *Previous-turn depth counted turns, not evidence.* `SUPERJEV_PREV_TURNS`
+     counted turns of wall clock, so a lead whose last two turns were pure
+     conversation got a window with no previous-turn material at all, even
+     with a tool-carrying turn one hop further back. The setting now counts
+     turns that CARRY TOOL RESULTS, walking over tool-free turns up to
+     `SUPERJEV_PREV_TURN_SCAN_LIMIT`. Tool-free turns on the way are still
+     read for the reports they carry.
+
+  4. *The cited-file read-back only ever read the tail.* When a draft names
+     its own source and that source is an append-only log, the entry the
+     draft is quoting is routinely nowhere near the end of the file. The
+     block now carries, above the tail, the lines from earlier in the same
+     file that overlap the draft's own figures — a ratio the draft states,
+     its own integers, its own label words, scored literally in code, each
+     line prefixed with its real line number. The tail itself is unchanged.
+
+  5. *A session-wide merge total read as a contradiction.* A draft that
+     says a number of PRs merged, or that a whole set is merged, is making
+     a claim whose scope is the session; a window that saturates below that
+     number cannot settle it either way, and silence left the judge reading
+     the gap as a refutation. A new derived fact now states the window's own
+     merge-receipt count and says plainly that the session-wide total cannot
+     be checked there. It fires only when the claimed total is past the
+     window's count, or when the claim names no total at all.
+
+  `window_model.py` follows the new layout: a `SECTION_PREV_REPORTS` with
+  its own header, emit slot and recency rank, detected by feature so
+  `render()` stays byte-for-byte correct against a composer on either side
+  of the change. See docs/window-model.md, "The previous-turn reports
+  section". One measured cost, in the safe direction: `from_text` refuses a
+  section boundary once an unbounded report body has opened, and more
+  windows now carry a report section, so fewer recorded windows round-trip
+  to the same pieces. Nothing gained trust and no piece changed kind on
+  re-parse.
+
+  Two supporting fixes came out of the same measurement. `"either merged or
+  on PR #N"` was being read as a claim that PR #N was merged, and the absent
+  receipt reported as a finding; a disjunction or negation between "merged"
+  and the PR number now disqualifies the match, in the Python gate and in
+  the TypeScript `windowFacts` mirror alike. And both new shares are
+  RESERVATIONS rather than ceilings: a layer is guaranteed its share against
+  the layers below it, and gets back whatever the layers above it leave
+  unspent, because a hard ceiling threw evidence away in windows with room
+  to spare.
+
+- **Window-budget round 2: six review findings closed.** (1) The receipts
+  layer's over-share selection dropped the OLDEST receipts first, the
+  opposite of the section's own rationale (an old receipt is what the
+  previous-turn layers cannot re-derive) — `_build_receipts_block` now
+  drops newest-first, keeping the oldest, same as the comment always said.
+  (2) A previous-turn-reports regression: `_section_recency_rank` gave
+  every relayed report the same flat rank regardless of which previous
+  turn it came from, so a stale report from turn -2 could outrank a merge
+  receipt from turn -1 and family 5's stale-report fact went silent where
+  it used to fire. Each report's marker line now carries its own
+  originating turn (`REPORT_LABEL_PREV_TURN`), and `_report_not_merged_claims`
+  reads that turn back out instead of collapsing every previous-turn
+  report to one rank. (3) `tests/replay_fact_block_sweep.py` now also
+  WARNS (never fails) when a recorded case's window loses a
+  receipt-worthy line the baseline carried, closing the gap between what
+  docs/hooks.md claimed the sweep checked and what it actually ran — see
+  "Window-budget round 3" below for how this check widened again shortly
+  after landing. (4) docs/hooks.md's wording matched to the source
+  comment it was paraphrasing loosely — see round 3 below for a further
+  correction to that same wording. (5) The merge-count derived fact now
+  quotes the draft's own claimed total alongside the window's receipt
+  count, and states plainly when the window carries no merge receipt at
+  all, rather than reading as amnesty for an unsupported claim. (6) The
+  cited-file relevant-line block is relabelled to say it is a number
+  match, not confirmation that a picked line says what the draft says,
+  and the picked lines now sit below the tail rather than above it.
+
+- **Window-budget round 3.** The receipt-line warning above now covers
+  truths as well as lies, printed separately — restricting it to lies
+  alone could not see the real signal, since the recorded case that
+  actually loses a line is a truth, not a lie. `_receipts_relevant_to_draft`
+  now ranks a receipt the draft names by a concrete identifier (a PR
+  number, a cited file, a task id) above one that merely shares a generic
+  stemmed word: a draft naming one PR out of many shares the same
+  "merged" stem with every OTHER merge receipt in the window, so stem
+  overlap alone could not tell them apart and left age to drop the very
+  receipt the draft was about — mirrored in `window_model.py` so the two
+  stay byte-identical. `test/fixtures/gate-window-facts.json` now also
+  pins the zero-receipt merge-count sentence, holding the Python and
+  TypeScript mirrors identical on that branch too, through the same
+  shared-fixture mechanism as the rest of the file. Docs and the
+  `RECEIPTS_BUDGET_SHARE` comment reworded to "a sizeable share of the
+  recorded cases" — what was actually measured, not a fixed count.
 
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
