@@ -1301,6 +1301,136 @@ def test_hook_gate_stop_hook_active_false_still_blocks(tmp_path, monkeypatch, ca
     assert "blocked" in err
 
 
+# --------------------------------------------- SUPERJEV_GATE_JUDGE_ADVISORY
+#
+# A block whose ONLY reasons come from the judge (OVERCLAIMS, or under
+# SUPERJEV_RULE=v2 the secondary NOT_SUPPORTED/CONTRADICTED arm) is demoted
+# to advisory (exit 0) when SUPERJEV_GATE_JUDGE_ADVISORY=1. A block carrying
+# even one deterministic reason (count mismatch, PR mismatch,
+# CONTRADICTED_BY_FACT) is untouched — see docs/hooks.md, "Judge-advisory
+# mode".
+
+def test_hook_gate_judge_advisory_demotes_a_judge_only_block_to_exit_0(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out == ""
+    assert "super-jev gate (judge advisory, not blocked):" in err
+    assert "overclaim OVERCLAIMS 1.00" in err
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert "judge advisory, not blocked" in rec["note"]
+    assert rec["exit_code"] == 0
+
+
+def test_hook_gate_judge_advisory_still_blocks_a_deterministic_reason(
+        tmp_path, monkeypatch, capsys):
+    # A pure count-mismatch block (no OVERCLAIMS/secondary flag involved at
+    # all) is untouched by the env var — it never had a judge reason to
+    # begin with.
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    stdout = "  c1   SUPPORTED       0.60  the fix\n  overclaim   OVERCLAIMS   0.40\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("12 passed in 2.1s", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "Done: 19 tests passed.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "blocked" in err
+
+
+def test_hook_gate_judge_advisory_still_blocks_mixed_deterministic_and_judge_reasons(
+        tmp_path, monkeypatch, capsys):
+    # A block carrying BOTH a deterministic reason and a judge reason
+    # (OVERCLAIMS 1.00 here) still blocks — the env var only demotes a
+    # block whose reasons are judge-only, never one that also carries a
+    # real deterministic mismatch.
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending; "
+                        "12 passed in 2.1s", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse. "
+                                        "Done: 19 tests passed.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+    assert "overclaim OVERCLAIMS 1.00" in err
+
+
+def test_hook_gate_judge_advisory_env_unset_leaves_behaviour_unchanged(
+        tmp_path, monkeypatch, capsys):
+    # Same judge-only-block fixture as the first test above, env NOT set —
+    # this must still block exactly as it does today.
+    monkeypatch.delenv("SUPERJEV_GATE_JUDGE_ADVISORY", raising=False)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+    assert "overclaim OVERCLAIMS 1.00" in err
+
+
+def test_catch_ledger_judge_advisory_records_advisory_judge_decision(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "advisory-judge"
+
+
+def test_catch_report_counts_judge_advisories_on_its_own_line(
+        tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "j1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "advisory-judge", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "j2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "advisory-forced", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "j3", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "report"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "judge advisories: 1" in out
+    assert "blocks suppressed: 1" in out
+    assert "false stops: 0" in out
+    assert "misses: 0" in out
+
+
 # ------------------------------------------------ machine-tag stripping
 #
 # The bug this closes: a reply carrying fleet bookkeeping — a trailing

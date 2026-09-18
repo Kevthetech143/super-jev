@@ -1182,6 +1182,7 @@ counted on its own `undated: N` line instead.
     misses: N
     untagged: N
     blocks suppressed: N
+    judge advisories: N
     undated: N          (only printed when --since is given)
 
 Fair/false/miss/untagged is the same scoreboard as before: how often the
@@ -1192,6 +1193,39 @@ block that the stop_hook_active second pass demoted to advisory-only rather
 than blocking twice. By itself, being suppressed is not folded into false
 stops or misses, because nothing has been judged right or wrong yet — the
 retry just held a block back.
+
+## Judge-advisory mode
+
+`SUPERJEV_GATE_JUDGE_ADVISORY=1` is a third, opt-in failsafe next to the
+stop_hook_active one above, for the same underlying worry from a different
+angle: the judge's own confidence score (OVERCLAIMS, or under
+`SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm) is a model
+guessing how well a reply is carried by its evidence, and a guess can be
+wrong in a way that stops a true turn for no reason. Turning this on tells
+the gate: when a block's only reasons are the judge's, print the reason and
+let the turn end anyway, rather than stopping it.
+
+It never weakens the deterministic side of the gate. A block that carries
+even one deterministic reason — a drafted test/claim count the evidence
+contradicts, a PR-state mismatch, or a `CONTRADICTED_BY_FACT` fact sentence
+(literal string/int work over text that was already in the window, no model
+call involved) — blocks exactly as it does with the env unset, exit 2, no
+exceptions. Only a block whose reasons are judge-only is demoted.
+
+When that happens, `hook gate` prints the same reason line a real block
+would, prefixed `super-jev gate (judge advisory, not blocked):` instead of
+`super-jev gate blocked this`, and exits 0 instead of 2 — the turn is
+allowed to end. The catch ledger records the decision as `advisory-judge`
+rather than `block`, so `catch report` can count how many turns this mode
+let through that the gate would otherwise have stopped, on their own line:
+
+    judge advisories: N
+
+separate from `blocks suppressed` (the stop_hook_active count above) — one
+counts a loop-guard re-run, the other counts every turn this mode fires on,
+and a session can trip both failsafes on different turns without either
+line double-counting the other. An `advisory-judge` record can be tagged
+`fair`/`false` the same way an `advisory-forced` one can.
 
 An `advisory-forced` record can still, separately, be tagged `fair` or
 `false` later (a human decides the retry's demotion was itself the right
