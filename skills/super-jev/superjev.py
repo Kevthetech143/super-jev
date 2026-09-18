@@ -808,12 +808,26 @@ def _extract_labelled_draft_counts(text):
     evidence 53" on a true report. One combined character class keeps a
     mixed alnum run as ONE token; `tok.isdigit()` below already excludes
     anything that is not a pure digit run, so a hash like "0dca183" is now
-    excluded outright instead of being read as two counts."""
+    excluded outright instead of being read as two counts.
+
+    2026-09-18, second fix: folding `#` and `/` into that SAME character
+    class went too far the other way — `[A-Za-z0-9#/]+` swallows a slash
+    fraction or a hash-prefixed number into one glued, non-digit token, so
+    "41/41 passed", "3/41 tests pass" and "Tests #52 passed" tokenized as
+    "41/41", "3/41" and "Tests", "#52" — none of which is a pure digit run,
+    so `tok.isdigit()` drops them all and the draft claims no count at all.
+    A draft with no claimed count can never mismatch, so a false "41/41
+    passed" next to a true "3/41 tests pass" receipt passed clean. `#` and
+    `/` now tokenize as their OWN single-character tokens instead of
+    gluing to neighbouring digits, so "41/41" becomes "41", "/", "41" (two
+    digit tokens) and "#52" becomes "#", "52" (one digit token) while a
+    mixed alnum run with no `#`/`/` in it — "0dca183" — is untouched and
+    still glues into one non-digit token."""
     out = {}
     if not text:
         return out
     for clause in re.split(r'[.\n;]', text):
-        tokens = re.findall(r"[A-Za-z0-9#/]+", clause)
+        tokens = re.findall(r"[A-Za-z0-9]+|[#/]", clause)
         labels = [(i, _label_for_word(t)) for i, t in enumerate(tokens)]
         labels = [(i, lab) for i, lab in labels if lab]
         if not labels:
@@ -838,14 +852,37 @@ def _extract_labelled_evidence_counts_scoped(evidence_text):
     `identity` is `(command, cwd)` when the line carries a `[from: ... @
     ...]` marker (see `_render_receipt_identity`), else None. Read line by
     line precisely so a count stays attached to its own marker: a receipt
-    from one repo must not lend its identity to the receipt below it."""
+    from one repo must not lend its identity to the receipt below it.
+
+    2026-09-18: this function had no `REPORT FROM ...` fence exclusion, so
+    a worker's own bold-markdown run summary inside its own unverified
+    report body ("**61 passed**") was read as a real evidence count —
+    the same trust-boundary hole families 4 and 5 were fixed for
+    (`_fact_window_lines_excluding_reports`), just for counts instead of
+    merge/CI claims. A worker could put a false total in its own report
+    text and have it clear the count arm as if a real receipt had printed
+    it. Lines inside a `REPORT FROM ... (unverified worker claim)` fence
+    (see `_REPORT_MARKER_LINE_RE`) are now skipped entirely — a report's
+    own claimed numbers never enter this table, only a real receipt line
+    sitting outside one does."""
     out = {}
     if not evidence_text:
         return out
     sticky = None
+    in_report = False
     for line in evidence_text.splitlines():
+        stripped = line.strip()
         if _WINDOW_SECTION_RE.match(line) or _SECTION_SEPARATOR_RE.match(line):
             sticky = None          # a new section speaks for a new run
+            in_report = False
+            continue
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            in_report = True
+            continue
+        if not stripped:
+            in_report = False
+            continue
+        if in_report:
             continue
         im = _RECEIPT_IDENTITY_RE.search(line)
         if im and not _RECEIPT_IDENTITY_RE.sub("", line).strip():
@@ -4800,6 +4837,20 @@ def _facts_read_back_claims(window_text, draft_text):
 # quantity (family 10). No identity anchor means silence, not a guess.
 
 _FACT_VALUE_TOKEN_RE = re.compile(r'\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?')
+# 2026-09-18: a digit run immediately followed by a letter was skipped
+# outright as "the leading digits of a mixed alnum token" — meant to catch
+# a git short SHA like "0dca183" glued onto a number ("HEAD 0dca183" must
+# not read as the value 0) — but that also threw away every unit-suffixed
+# value: "latency 250ms", "cache 4k", "heap 8GB" all end in a letter right
+# after the digits and were silently dropped, so a draft's "latency 250ms"
+# next to an evidence row of "latency: 400" no longer contradicted.
+# Narrowed to the actual mixed-identifier shape: take the word chars right
+# after the matched digits (the "tail") and only treat it as a fused
+# identifier — not a value — when that tail ITSELF looks like the rest of
+# a hash: starts with a letter and has another digit further in
+# ("dca183"). A pure unit suffix ("ms", "k", "GB") never has a trailing
+# digit and is left alone.
+_FACT_MIXED_ID_TAIL_RE = re.compile(r'[A-Za-z]\w*\d')
 _FACT_SCORE_TOKEN_RE = re.compile(r'\b(0\.\d\d?|1\.00)\b')
 # Words that may sit BETWEEN a label and its value without breaking the
 # pairing ("cut under $3.55", "equity is $10,249"). A linker is never
@@ -5014,12 +5065,16 @@ def _fact_draft_label_values(draft_text):
             if m.start() in range_starts:
                 continue
             if m.end() < len(sentence) and sentence[m.end()].isalpha():
-                # A digit run immediately followed by a letter is not a
-                # standalone value — it's the leading digits of a mixed
-                # alnum token, e.g. a git short SHA. "HEAD 0dca183" must
-                # not read as the value 0; matches BUG B's identical guard
-                # in `_extract_labelled_draft_counts` for the count arm.
-                continue
+                # See `_FACT_MIXED_ID_TAIL_RE`: only skip when the tail
+                # right after the digits is itself shaped like the rest of
+                # a fused identifier (a letter followed eventually by
+                # another digit, e.g. "dca183" off "HEAD 0dca183"). A pure
+                # unit suffix ("ms", "k", "GB") has no trailing digit and
+                # is kept as a value.
+                tail_m = re.match(r'\w*', sentence[m.end():])
+                tail = tail_m.group(0) if tail_m else ""
+                if _FACT_MIXED_ID_TAIL_RE.fullmatch(tail):
+                    continue
             value = m.group(0)
             explicit_word = _fact_explicit_label_word(sentence, m.start())
             if explicit_word:
@@ -5238,35 +5293,6 @@ def _fact_window_lines(window_text):
     return out
 
 
-def _iter_window_report_lines(window_text):
-    """`_fact_window_lines` scoped to only the lines that sit INSIDE a
-    `REPORT FROM ... (unverified worker claim)` fence (see
-    `_REPORT_MARKER_LINE_RE`) — the same in_report tracking
-    `_report_not_merged_claims` already uses to bound one report's body to
-    its own paragraph break or section boundary, factored out so any
-    family can either scan a report's own words (this function) or, via
-    `_fact_window_lines_excluding_reports`, read everything EXCEPT them."""
-    label = "the evidence window"
-    in_report = False
-    out = []
-    for raw in (window_text or "").splitlines():
-        line = raw.rstrip()
-        stripped = line.strip()
-        if _WINDOW_SECTION_RE.match(stripped):
-            label = stripped
-            in_report = False
-            continue
-        if _REPORT_MARKER_LINE_RE.match(stripped):
-            in_report = True
-            continue
-        if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
-            in_report = False
-            continue
-        if in_report:
-            out.append((label, line))
-    return out
-
-
 def _fact_window_lines_excluding_reports(window_text):
     """`_fact_window_lines`, minus every line inside a `REPORT FROM ...`
     fence. An unverified worker's own prose must not be read as an actual
@@ -5275,8 +5301,15 @@ def _fact_window_lines_excluding_reports(window_text):
     were reading report bodies straight through `_fact_window_lines`, so a
     worker's own claim inside its report ("PR #12 merged") could be misread
     as a real `gh`-shaped merge receipt rather than the unverified claim it
-    is. Same fence tracking as `_iter_window_report_lines`, inverted, in
-    one pass so the two can never disagree about what a report's body is."""
+    is. Same `REPORT FROM ...` fence tracking `_extract_labelled_evidence_
+    counts_scoped` uses for counts, one pass, so the exclusion can never
+    disagree about what a report's body is.
+
+    2026-09-18: this used to be paired with a mirror-image
+    `_iter_window_report_lines` (the same fence tracking, inverted, to read
+    ONLY a report's own words) — removed with no functional change, since
+    it had no production caller and nothing besides its own partition test
+    exercised it."""
     label = "the evidence window"
     in_report = False
     out = []

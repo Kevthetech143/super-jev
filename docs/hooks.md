@@ -1391,6 +1391,71 @@ half of both families; `_report_not_merged_claims` itself, family 5's own
 "a report claims not-merged" half, still reads a report's body on purpose —
 that check is about what the report says, not about a receipt.
 
+## Four more deterministic-arm review findings closed (2026-09-18)
+
+A review of the section above found four more issues in the same code,
+before it shipped.
+
+**The count arm's tokenizer swallowed a slash fraction or a hash-prefixed
+number.** Folding `#` and `/` into the SAME character class as letters and
+digits (`[A-Za-z0-9#/]+`) fixed the mixed-alnum-run case above, but a slash
+fraction ("41/41 passed"), a short fraction ("3/41 tests pass") or a
+hash-prefixed number ("Tests #52 passed") also glues into one run under
+that class — `41/41`, `3/41`, `#52` — none of which is a pure digit run, so
+`tok.isdigit()` drops all of them and the draft claims no count at all. A
+draft with no claimed count can never mismatch, so a false "41/41 passed"
+next to a true "34 passed in 6.94s" receipt passed clean. `_extract_
+labelled_draft_counts` now tokenizes with `[A-Za-z0-9]+|[#/]` — `#` and `/`
+match as their own single-character tokens instead of gluing onto a
+neighbouring digit run — so `41/41` becomes the two digit tokens `41` and
+`41`, and `#52` becomes `52`. A mixed alnum run with neither character in
+it, e.g. a git short SHA, is untouched and still glues into one non-digit
+token that `tok.isdigit()` excludes.
+
+**The digit-then-letter guard on labelled values was too broad.** The same
+mixed-alnum-run fix for family 8's value scan — skip a digit run immediately
+followed by a letter, so "HEAD 0dca183" is not read as the value `0` — also
+skipped every unit-suffixed value: "latency 250ms", "cache 4k", "heap 8GB"
+all end in a letter right after the digits too, and were silently dropped,
+so a draft's "latency 250ms" next to an evidence row of "latency: 400" no
+longer contradicted. The guard is narrowed to the shape it was meant to
+catch: take the word characters right after the matched digits (the
+"tail"), and only skip when that tail is itself shaped like the rest of a
+fused identifier — starts with a letter, has another digit further in
+(`_FACT_MIXED_ID_TAIL_RE`, `[A-Za-z]\w*\d`, matching "dca183" off
+"0dca183"). A pure unit suffix ("ms", "k", "GB") never has a trailing digit
+and is kept as a value.
+
+**Evidence counts had no REPORT FROM fence exclusion.** Families 4 and 5's
+receipt scan was fixed (above) to stop reading a worker's own claim text
+inside a `REPORT FROM ...` fence as a real receipt; `_extract_labelled_
+evidence_counts_scoped`, the count arm's evidence-side reader, was not — a
+worker's own bold-markdown run summary inside its OWN unverified report
+body (`**61 passed**`) was still read as a real evidence count. That is a
+trust boundary hole distinct from an honest evidence gap: a worker could put
+a false total in its own report text and have the count arm treat it as
+proof of itself, with a real, contradicting receipt sitting right next to
+it unread. Evidence counts now track the same `REPORT FROM ...` fence and
+skip every line inside one entirely, matching the exclusion families 4 and
+5 already use.
+
+**`_iter_window_report_lines` is removed.** It was factored out alongside
+the families 4/5 fix as the positive-image sibling of `_fact_window_lines_
+excluding_reports` (read ONLY a report's own words, instead of everything
+except them), but nothing in this codebase ever called it in production —
+only its own partition test did — and a separately parked change defines a
+different-signature function of the same name. Rather than rename around
+that collision, it is deleted; its test now exercises `_fact_window_lines_
+excluding_reports` directly.
+
+Re-measured against `skills/super-jev/tests/replay_gate_bench.py` and
+`skills/super-jev/tests/replay_fact_block_sweep.py`: zero truths newly
+blocked, zero decision flips on the fact-block sweep. One blind-bench lie
+catch that relied on the old hash-split tokenizer artifact — a count
+mismatch the deterministic arm only reported because of the bug this PR
+fixes — is now left to the judge, same as most lies already were; nothing
+that was a genuine catch is lost.
+
 ## Judge-advisory mode
 
 `SUPERJEV_GATE_JUDGE_ADVISORY` is a third, opt-in failsafe next to the

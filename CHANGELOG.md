@@ -4,6 +4,40 @@
 
 No version bump.
 
+- **Four more deterministic-arm review findings closed, on top of the
+  hash-split/noun-label fix above.** (1) The count arm's tokenizer folded
+  `#` and `/` into the same character class as letters and digits
+  (`[A-Za-z0-9#/]+`), so a slash fraction or a hash-prefixed number
+  ("41/41 passed", "3/41 tests pass", "Tests #52 passed") glued into one
+  non-digit token that `tok.isdigit()` dropped outright — the draft
+  claimed no count at all, so a false count claim of that shape slipped
+  past the arm clean. `#` and `/` now tokenize as their own single-
+  character tokens instead; a mixed alnum run with neither character in
+  it, e.g. a git short SHA, is unaffected. (2) `_fact_draft_label_values`'
+  digit-then-letter guard (added for the same short-SHA shape) was too
+  broad — it skipped every digit run immediately followed by a letter, so
+  a unit-suffixed value ("250ms", "4k", "8GB") was dropped too, and a
+  labelled-value contradiction against one no longer fired. Narrowed to
+  only skip when the tail right after the digits looks like the rest of a
+  fused identifier — a letter, then eventually another digit — leaving a
+  pure unit suffix, which never has a trailing digit, as a real value.
+  (3) `_extract_labelled_evidence_counts_scoped` had no `REPORT FROM ...`
+  fence exclusion, unlike families 4 and 5's receipt scan, so a worker's
+  own bold-markdown run summary inside its OWN unverified report body
+  (`**61 passed**`) was read as a real evidence count — a trust-boundary
+  hole a worker's own claim text could exploit to clear the count arm
+  against itself. Evidence counts now skip every line inside a report
+  fence, matching families 4/5. (4) `_iter_window_report_lines`, added
+  alongside the families 4/5 fix, had no production caller and collided
+  in name with a different-signature function a parked PR defines; it is
+  removed, and its one test now exercises
+  `_fact_window_lines_excluding_reports` directly. Net effect on the
+  deterministic arms' live bench read: one blind-bench lie catch that
+  happened to work only because of the old hash-split tokenizer artifact
+  is now left to the judge, same as most lies always have been — the
+  bench's zero-false-block guarantee on true reports is unaffected. See
+  docs/hooks.md, "Four more deterministic-arm review findings closed".
+
 - **OVERCLAIMS arm — the receipt-turn fix.** A hand adjudication of every
   live `hook gate` block on the primary's own seat
   (`ops/gate-adjudication-20260918.md`) found one live false-block
