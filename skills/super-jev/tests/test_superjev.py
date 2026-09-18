@@ -3933,3 +3933,191 @@ def test_explain_names_the_previous_turn_the_cap_cut(tmp_path, monkeypatch, caps
     sj.main(["hook", "gate", "--explain"])
     out = capsys.readouterr().out
     assert "CUT (over cap, oldest dropped first)" in out
+# ------------------------------------------------------------ ledger health
+
+def _hook_line(door="gate", verdict="allow", reason=None, note_extra=""):
+    """One synthetic hook-run ledger entry, shaped like a real _hook_log
+    call (door='hook' at the json level, the real sub-door riding in the
+    note's own "<door>: ..." prefix — see _ledger_line_subdoor)."""
+    if verdict == "block":
+        return {"door": "hook", "note": f"{door}: block (exit 2){note_extra}",
+                "exit_code": 2, "skipped": False, "unchecked": False}
+    if verdict == "advisory":
+        return {"door": "hook", "note": f"{door}: advisory (exit 0){note_extra}",
+                "exit_code": 0, "skipped": False, "unchecked": False}
+    if verdict == "unchecked":
+        entry = {"door": "hook",
+                 "note": f"{door}: unchecked — no tool evidence derivable{note_extra}",
+                 "exit_code": 0, "skipped": False, "unchecked": True}
+        if reason:
+            entry["reason"] = reason
+        return entry
+    return {"door": "hook", "note": f"{door}: allow (exit 0){note_extra}",
+           "exit_code": 0, "skipped": False, "unchecked": False}
+
+
+def test_ledger_health_below_threshold_has_no_warning(capsys):
+    for _ in range(9):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    sj.ledger_append(_hook_line(verdict="unchecked"))  # 1/10 = 10%
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "WARN" not in out
+    assert "10.0%" in out
+
+
+def test_ledger_health_above_threshold_warns_with_top_skip_reason(capsys):
+    for _ in range(6):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 4  # 4/10 = 40% > default 25%
+    assert "WARN" in out
+    assert "no-tool-evidence" in out
+    assert "40.0%" in out
+
+
+def test_ledger_health_threshold_is_env_configurable(monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_UNCHECKED_WARN", "50")
+    for _ in range(6):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0  # 40% no longer exceeds a 50% threshold
+    assert "WARN" not in out
+
+
+def test_ledger_health_empty_ledger_does_not_crash(capsys):
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no hook runs recorded" in out
+
+
+def test_ledger_health_missing_file_does_not_crash(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "does" / "not" / "exist.jsonl")
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no hook runs recorded" in out
+
+
+def test_ledger_health_json_shape_and_exit_code(capsys):
+    for _ in range(6):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    code = sj.main(["ledger", "health", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 4
+    assert obj["warn"] is True
+    assert obj["overall"]["runs"] == 10
+    assert obj["overall"]["unchecked"] == 4
+    assert obj["doors"]["gate"]["top_skip_reason"] == "no-tool-evidence"
+
+
+def test_ledger_health_per_door_breakdown(capsys):
+    for _ in range(3):
+        sj.ledger_append(_hook_line(door="gate", verdict="allow"))
+    for _ in range(2):
+        sj.ledger_append(_hook_line(door="gate", verdict="unchecked"))
+    for _ in range(5):
+        sj.ledger_append(_hook_line(door="verify", verdict="allow"))
+    code = sj.main(["ledger", "health", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 4  # gate alone: 2/5 = 40% exceeds the default 25% threshold
+    assert obj["doors"]["gate"]["runs"] == 5
+    assert obj["doors"]["gate"]["unchecked"] == 2
+    assert obj["doors"]["verify"]["runs"] == 5
+    assert obj["doors"]["verify"]["unchecked"] == 0
+
+
+def test_ledger_health_window_limits_to_recent_runs(capsys):
+    for _ in range(30):
+        sj.ledger_append(_hook_line(verdict="unchecked"))  # old, high unchecked
+    for _ in range(10):
+        sj.ledger_append(_hook_line(verdict="allow"))  # recent, all healthy
+    code = sj.main(["ledger", "health", "--window", "10"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "0.0%" in out
+    assert "WARN" not in out
+
+
+def test_ledger_health_a_bucket_with_too_few_runs_never_warns(capsys):
+    # a single unchecked run is a 100% share but not a sample worth
+    # trusting — MIN_RUNS_FOR_WARN guards exactly this.
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "WARN" not in out
+
+
+def test_status_includes_ledger_health_block(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
+    for _ in range(6):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    code = sj.main(["status"])
+    out = capsys.readouterr().out
+    assert code == 0  # status itself never fails just because the ledger warns
+    assert "ledger health" in out
+    assert "WARN" in out
+    assert "no-tool-evidence" in out
+
+
+def test_status_json_includes_ledger_health(repo, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
+    for _ in range(6):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked"))
+    code = sj.main(["status", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert obj["details"]["ledger_health_warn"] is True
+    assert obj["details"]["ledger_health"]["overall"]["runs"] == 10
+
+
+def test_stop_hook_gate_appends_notice_when_running_unchecked_share_is_high(
+        tmp_path, monkeypatch, capsys):
+    # 19 of the last 20 hook-door runs already unchecked, well above the
+    # default 25% threshold — the 2026-09-16 shape. The 20th run below
+    # (a normal allow) must still carry a visible notice in its own
+    # stdout, so the agent sees it THIS turn.
+    for _ in range(19):
+        sj.ledger_append(_hook_line(door="gate", verdict="unchecked",
+                                    reason="no-tool-evidence"))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "the sky is blue",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "ledger health" in out
+    assert "unchecked share" in out
+    assert "no-tool-evidence" in out
+
+
+def test_stop_hook_gate_stays_quiet_when_running_unchecked_share_is_low(
+        tmp_path, monkeypatch, capsys):
+    for _ in range(19):
+        sj.ledger_append(_hook_line(door="gate", verdict="allow"))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "the sky is blue",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out == ""
