@@ -82,6 +82,35 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # tree). This env var is the only non-payload source honoured.
 HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
 
+# A background Agent/Task spawn's tool_response is sometimes only a launch
+# acknowledgement ("Spawned successfully... now running", "Async agent
+# launched... You will be notified automatically when it completes") rather
+# than the sub-agent's actual final report. Running `verify` against that
+# text is a category error — there is nothing to check yet — and jev's own
+# OVERCLAIMS scoring has been seen to score it as a confident, unsupported
+# claim and block it (see docs/ledger for the 2026-09-17 false alarm this
+# fixes). Before calling the verify door, classify the text: a launch/ack
+# phrase match, or text too short to plausibly be a real report AND
+# carrying none of a report's own markers (COMPLETE/INCOMPLETE/verdict/a
+# test count), skips the door entirely rather than running it.
+HOOK_ACK_PATTERNS_ENV = "SUPERJEV_HOOK_ACK_PATTERNS"
+DEFAULT_ACK_PATTERNS = [
+    "spawned successfully",
+    "async agent launched",
+    "agent is now running",
+    "will be notified",
+    "resumed agent",
+    "idle_notification",
+]
+VERIFY_MIN_CHARS_ENV = "SUPERJEV_VERIFY_MIN_CHARS"
+DEFAULT_VERIFY_MIN_CHARS = 200
+# Content that marks a text as a real report even when it is short: an
+# explicit COMPLETE/INCOMPLETE/verdict word, or a test count ("12 tests",
+# "tests: 3 passed", "test-count").
+_REPORT_MARKER_RE = re.compile(
+    r'\b(complete|incomplete|verdict)\b|\d+\s*(tests?|passed|failed)|test-count',
+    re.IGNORECASE)
+
 # Strong-flag block thresholds. A gate/verify run that comes back READ
 # (exit 3, "advisory") can still carry a claim-level or draft-level flag
 # strong enough that letting it pass as a silent advisory is the same bug
@@ -988,6 +1017,43 @@ UNCHECKED_ADVISORY = ("super-jev: reply makes claims with no tool evidence this 
                       "mark them unverified or gather evidence")
 
 
+def _ack_patterns():
+    """The launch/ack phrase list verify's pre-check matches against,
+    lowercased. SUPERJEV_HOOK_ACK_PATTERNS (comma-separated), if set,
+    REPLACES the built-in list entirely; otherwise DEFAULT_ACK_PATTERNS."""
+    override = os.environ.get(HOOK_ACK_PATTERNS_ENV)
+    if override:
+        return [p.strip().lower() for p in override.split(",") if p.strip()]
+    return DEFAULT_ACK_PATTERNS
+
+
+def _verify_min_chars():
+    try:
+        n = int(os.environ.get(VERIFY_MIN_CHARS_ENV, DEFAULT_VERIFY_MIN_CHARS))
+        return n if n > 0 else DEFAULT_VERIFY_MIN_CHARS
+    except ValueError:
+        return DEFAULT_VERIFY_MIN_CHARS
+
+
+def _is_launch_ack(text):
+    """(is_ack, reason) for one tool_response text. True when this looks
+    like an Agent/Task launch acknowledgement rather than a worker's final
+    report: it contains one of the ack/launch phrases (see
+    _ack_patterns()), OR it is shorter than SUPERJEV_VERIFY_MIN_CHARS
+    (default 200) and carries none of a real report's own markers
+    (COMPLETE/INCOMPLETE/verdict/a test count — see _REPORT_MARKER_RE).
+    `text` is assumed non-empty (callers only reach this after
+    _hook_report_text already returned something)."""
+    low = text.lower()
+    for pat in _ack_patterns():
+        if pat in low:
+            return True, f"matches ack pattern {pat!r}"
+    min_chars = _verify_min_chars()
+    if len(text) < min_chars and not _REPORT_MARKER_RE.search(text):
+        return True, f"shorter than {min_chars} chars with no report markers"
+    return False, ""
+
+
 def _hook_evidence_paths(payload):
     """payload['evidence'], a list of path strings, if present, else [].
     This is the back-compat path for a caller that builds its own smaller
@@ -1000,18 +1066,24 @@ def _hook_evidence_paths(payload):
     return []
 
 
-def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False):
+def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, reason=None,
+              hook_mode=True, source=None):
     """One ledger line for a hook decision. `exit_code` is the real code
     this hook invocation is about to return (never hard-coded to 0) —
     2 for a block, 0 for everything else, including a fail-open skip.
     `skipped=True` marks a run where the wrapped door never executed at
     all (bad/empty input, no derivable evidence, a caught exception, a
-    timeout, or a bad hook invocation); `skipped=False` means gate/verify
-    actually ran and this is its allow/advisory/block outcome. `flags`, if
-    given, is the list of {"key","verdict","score"} dicts this run's
-    captured stdout carried (see _parse_strong_flags) — every block AND
-    every advisory line carries whatever was parsed, even an empty list,
-    so the ledger always shows what was actually checked."""
+    timeout, a bad hook invocation, or a launch-ack the pre-check caught);
+    `skipped=False` means gate/verify actually ran and this is its
+    allow/advisory/block outcome. `flags`, if given, is the list of
+    {"key","verdict","score"} dicts this run's captured stdout carried
+    (see _parse_strong_flags) — every block AND every advisory line
+    carries whatever was parsed, even an empty list, so the ledger always
+    shows what was actually checked. `reason`, if given, is a short
+    machine-matchable tag (e.g. "launch-ack") distinct from the free-text
+    `note`. `hook_mode` is False and `source` is "manual" for a `hook
+    verify --from-file` run — same ledger shape, but this call did not
+    come from a real Claude Code hook firing."""
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "door": "hook",
@@ -1019,7 +1091,7 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False):
         "exit_code": exit_code,
         "ms": 0,
         "json_mode": False,
-        "hook_mode": True,
+        "hook_mode": hook_mode,
         "skipped": skipped,
         "note": note,
     }
@@ -1027,7 +1099,80 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False):
         entry["flags"] = flags
     if unchecked:
         entry["unchecked"] = True
+    if reason is not None:
+        entry["reason"] = reason
+    if source is not None:
+        entry["source"] = source
     ledger_append(entry)
+
+
+def _hook_verify_from_file(door, path):
+    """`hook verify --from-file <report.txt>`: run the exact same verify
+    check `hook verify` runs off a real PostToolUse payload, but against a
+    report file that arrived out of band — a worker's final report message
+    the lead is holding, not a hook firing. Prints the same one-line
+    allow/advisory/block verdict `hook` prints, and writes the same shape
+    of ledger line, except hook_mode=False and source="manual" so it is
+    distinguishable from a real hook invocation. Never runs the launch-ack
+    pre-check — a caller passing --from-file has already decided this file
+    is a report worth checking."""
+    if door != "verify":
+        msg = "super-jev hook: --from-file is only supported for `hook verify`"
+        print(msg, file=sys.stderr)
+        _hook_log(f"{door}: --from-file refused — only verify supports it", exit_code=0,
+                 skipped=True, reason="from-file-wrong-door", hook_mode=False, source="manual")
+        return 0
+    try:
+        text = Path(path).expanduser().read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"super-jev hook: could not read --from-file {path!r}: {exc}", file=sys.stderr)
+        _hook_log(f"verify: --from-file {path!r} unreadable ({exc}) — fail-open",
+                 exit_code=0, skipped=True, reason="from-file-unreadable",
+                 hook_mode=False, source="manual")
+        return 0
+    if not text.strip():
+        _hook_log(f"verify: --from-file {path!r} is empty — fail-open", exit_code=0,
+                 skipped=True, reason="from-file-empty", hook_mode=False, source="manual")
+        return 0
+
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8")
+    tmp_path = tmp.name
+    try:
+        tmp.write(text)
+        tmp.close()
+        ns = argparse.Namespace(report=tmp_path, worktree=os.environ.get(HOOK_WORKTREE_ENV),
+                                test_cmd="", paths=[], dry_run=False, json=False,
+                                hook_mode=True)
+        code, door_out, door_err = cmd_verify(ns)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    flags = _parse_strong_flags(door_out)
+    block_reasons = _hook_block_reasons(flags)
+    action = VERIFY_HOOK_ACTION.get(code, "advisory")
+    if block_reasons:
+        action = "block"
+    if action == "allow":
+        _hook_log(f"verify: allow (exit {code}) [from-file {path!r}]", exit_code=0,
+                 flags=flags, hook_mode=False, source="manual")
+        return 0
+    if action == "block":
+        reason = f"super-jev verify blocked this (exit {code})"
+        if block_reasons:
+            reason += ": " + "; ".join(block_reasons)
+        print(reason, file=sys.stderr)
+        _hook_log(f"verify: block (exit {code}) [from-file {path!r}]" +
+                 (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
+                 exit_code=2, flags=flags, hook_mode=False, source="manual")
+        return 2
+    advisory = f"super-jev verify advisory (exit {code})"
+    print(advisory)
+    _hook_log(f"verify: advisory (exit {code}) [from-file {path!r}]", exit_code=0,
+             flags=flags, hook_mode=False, source="manual")
+    return 0
 
 
 def cmd_hook(a):
@@ -1092,6 +1237,9 @@ def cmd_hook(a):
           describes the lead session, not necessarily the worker's tree).
     """
     door = getattr(a, "door", "?")
+    from_file = getattr(a, "from_file", None)
+    if from_file:
+        return _hook_verify_from_file(door, from_file)
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -1218,6 +1366,12 @@ def cmd_hook(a):
             if text is None:
                 _hook_log("verify: no usable report text (tool_response/report/text/"
                          "message/transcript) — fail-open", skipped=True)
+                return 0
+
+            is_ack, ack_reason = _is_launch_ack(text)
+            if is_ack:
+                _hook_log(f"verify: skipped — {ack_reason}", exit_code=0, skipped=True,
+                         reason="launch-ack")
                 return 0
 
             worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
@@ -1548,6 +1702,9 @@ def build_parser():
                               "the verdict onto the hook's own exit convention")
     hk.add_argument("door", choices=["gate", "verify"],
                     help="which check to run against the hook payload")
+    hk.add_argument("--from-file", dest="from_file", default=None,
+                    help="verify only: run the same check against a report file that "
+                         "arrived out of band, instead of a hook payload on stdin")
     hk.set_defaults(func=cmd_hook)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")
