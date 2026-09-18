@@ -799,6 +799,36 @@ together — the only deterministic pair where that happens. Only this one
 arm changed; the count-mismatch arm and every derived-fact family are
 untouched.
 
+**The trust boundary is structure, not text (2026-09-18).** Everything
+above rests on being able to say which lines of a window are tool receipts
+and which are a worker's prose, and a report body is text the worker wrote,
+so nothing inside one can be trusted to mark its own edges. The boundary
+therefore comes from structure the **composer** controls and quotes out of
+every body it carries: each report block is fenced between a `REPORT FROM
+<who> (unverified worker claim)` line and a matching `END REPORT FROM <who>
+(unverified worker claim)` line, and any line in the body that could pass
+for a fence, a window section header or a `---`/`===` section rule is
+re-emitted with a leading `> ` (`_neutralise_report_body`). Reading it back
+(`_iter_window_report_lines`, the one walker the PR-state arm and the
+report-claim scanner share), a body ends only at its own closing fence — the
+LAST matching fence before the next section rule, never the first, so a
+fence a worker typed cannot close their block early — at a section rule, or
+at end of text; a blank line and a section header end nothing. A section
+header is honoured as a recency boundary only when it sits outside a body
+AND steps strictly upward in the composer's own emit order
+(`_section_emit_slot`: previous turns newest-first, then session receipts,
+then this turn's reports, then this turn's tool results), so a forged header
+can neither invent a newer section for a worker's own line nor demote a
+genuine receipt into an older one. A state-bearing line inside a body
+degrades to a **prose** signal for that PR rather than vanishing, because a
+quoted `{"number": N, "state": "OPEN"}` is still a claim the arm must weigh
+and dropping it left the arm with nothing to weigh at all. And ordering is
+only ever used when ordering exists: two signals can be compared on recency
+only if both sit under a section header and those headers differ, so a
+signal with no header, and two signals inside one section, are **unordered
+— which is a tie, and a tie fails closed** on the not-merged signal with the
+ambiguity note.
+
 **Accepted tradeoff.** Strength is compared before recency, so a receipt
 sitting in an *older* window section still outranks *current-turn* prose
 saying the PR was reverted or reopened — a worker who reverts or reopens a
