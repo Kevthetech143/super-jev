@@ -6499,10 +6499,10 @@ def test_catch_tag_and_report_arithmetic(tmp_path, monkeypatch, capsys):
     assert "untagged: 0" in out
 
 
-def test_catch_tag_false_writes_bench_case_fair_does_not(tmp_path, monkeypatch):
+def test_catch_tag_false_writes_catch_case_fair_does_not(tmp_path, monkeypatch):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
-    bench_dir = tmp_path / "bench-out"
-    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(bench_dir))
+    cases_file = tmp_path / "catch-cases-out.json"
+    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
     _write_catch_records(catch_path, [
         {"id": "c1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
          "decision": "block", "reasons": [], "draft_excerpt": "true draft",
@@ -6513,23 +6513,436 @@ def test_catch_tag_false_writes_bench_case_fair_does_not(tmp_path, monkeypatch):
     ])
     sj.main(["catch", "tag", "c1", "false", "wrong"])
     sj.main(["catch", "tag", "c2", "fair", "right"])
-    assert (bench_dir / "c1.json").exists()
-    assert not (bench_dir / "c2.json").exists()
-    case = json.loads((bench_dir / "c1.json").read_text(encoding="utf-8"))
-    assert case["kind"] == "truth"
-    assert case["draft"] == "true draft"
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    # fair never writes a catch case — only false/miss do.
+    assert len(cases) == 1
+    assert cases[0]["id"] == "c1"
+    assert cases[0]["kind"] == "truth"
+    assert cases[0]["draft"] == "true draft"
+    # New shape: no transcript anchor at all — never pretends to be a
+    # gate-bench case (source_offset/source_idx/transcript_path/bot).
+    for key in ("source_offset", "source_idx", "transcript_path", "bot"):
+        assert key not in cases[0]
 
 
-def test_catch_tag_miss_writes_lie_kind_bench_case(tmp_path, monkeypatch):
+def test_catch_tag_miss_writes_lie_kind_catch_case(tmp_path, monkeypatch):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
-    bench_dir = tmp_path / "bench-out"
-    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(bench_dir))
+    cases_file = tmp_path / "catch-cases-out.json"
+    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
     _write_catch_records(catch_path, [
         {"id": "d1", "ts": "2026-09-18T00:00:00+00:00", "door": "verify",
          "decision": "allow", "reasons": [], "draft_excerpt": "a lie that got through",
          "window_bytes": None, "ms": None, "tag": None, "note": None},
     ])
     sj.main(["catch", "tag", "d1", "miss", "should have blocked"])
-    case = json.loads((bench_dir / "d1.json").read_text(encoding="utf-8"))
-    assert case["kind"] == "lie"
-    assert case["payload_path"] is None  # no SUPERJEV_CATCH_KEEP_PAYLOAD copy exists
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert len(cases) == 1
+    assert cases[0]["kind"] == "lie"
+    assert cases[0]["payload_path"] is None  # no SUPERJEV_CATCH_KEEP_PAYLOAD copy exists
+    assert cases[0]["draft"] == "a lie that got through"  # falls back to the excerpt
+
+
+def test_catch_tag_appends_to_one_array_file_not_one_file_per_case(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    cases_file = tmp_path / "catch-cases-out.json"
+    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
+    _write_catch_records(catch_path, [
+        {"id": "e1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "one",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "e2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "two",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    sj.main(["catch", "tag", "e1", "false", "wrong"])
+    sj.main(["catch", "tag", "e2", "false", "also wrong"])
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert [c["id"] for c in cases] == ["e1", "e2"]
+
+
+def test_catch_tag_uses_full_payload_draft_when_keep_payload_was_on(tmp_path, monkeypatch):
+    ledger, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    cases_file = tmp_path / "catch-cases-out.json"
+    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
+    payloads_dir = catch_path.parent / "payloads"
+    payloads_dir.mkdir(parents=True)
+    (payloads_dir / "f1.json").write_text(
+        json.dumps({"last_assistant_message": "the FULL original draft text, "
+                                               "longer than any excerpt"}),
+        encoding="utf-8")
+    _write_catch_records(catch_path, [
+        {"id": "f1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "short excerpt only",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    sj.main(["catch", "tag", "f1", "false", "wrong"])
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert "FULL original draft text" in cases[0]["draft"]
+    assert cases[0]["payload_path"] == str(payloads_dir / "f1.json")
+
+
+# ---------------------------------------------- catch ledger: review fixes
+
+def test_catch_excerpt_redacts_phone_ssn_and_card_numbers(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("customer info on file", encoding="utf-8")
+    draft = ("call the customer at (415) 555-0132, SSN 078-05-1120, "
+             "card 4111 1111 1111 1111 — the reply matches")
+    _hook_stdin(monkeypatch, json.dumps({"draft": draft, "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    rec = _read_catch_records(catch_path)[0]
+    excerpt = rec["draft_excerpt"]
+    assert "415" not in excerpt or "REDACTED:phone" in excerpt
+    assert "078-05-1120" not in excerpt
+    assert "4111 1111 1111 1111" not in excerpt
+    assert "REDACTED:phone" in excerpt
+    assert "REDACTED:ssn" in excerpt
+    assert "REDACTED:card-number" in excerpt
+
+
+def test_catch_excerpt_redacts_emails_unlike_the_evidence_window(tmp_path, monkeypatch):
+    # redact() called on the evidence window itself does NOT redact emails
+    # by default — the catch-ledger path must, unconditionally.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("contact kelvin@example.com about this", encoding="utf-8")
+    draft = "reply sent to kelvin@example.com, matches the evidence"
+    _hook_stdin(monkeypatch, json.dumps({"draft": draft, "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    rec = _read_catch_records(catch_path)[0]
+    assert "kelvin@example.com" not in rec["draft_excerpt"]
+    assert "REDACTED:email" in rec["draft_excerpt"]
+
+
+def test_catch_excerpt_slices_to_4096_before_redacting_then_240_after():
+    long_text = "x" * 5000 + " sk-" + "a" * 40
+    excerpt = sj._catch_excerpt(long_text)
+    assert len(excerpt) <= 240
+    # The secret sat past char 4096, so the pre-slice must have dropped it
+    # (not the redaction failing to find it).
+    assert "REDACTED" not in excerpt
+
+
+def test_catch_save_payload_uses_catch_only_redaction(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "catches.jsonl")
+    monkeypatch.setenv("SUPERJEV_CATCH_KEEP_PAYLOAD", "1")
+    out_path = sj._catch_save_payload(
+        "p1", {"draft": "call 212-555-0100 or email kelvin@example.com"})
+    saved = Path(out_path).read_text(encoding="utf-8")
+    assert "212-555-0100" not in saved
+    assert "kelvin@example.com" not in saved
+    assert "REDACTED" in saved
+
+
+# --------------------------------- catch ledger: decision paths now recorded
+
+def test_catch_ledger_records_unchecked_on_gate_budget_exceeded_with_evidence(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv(sj.GATE_BUDGET_S_ENV, "0.000001")
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps(
+        {"draft": "the sky is blue", "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 3
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "unchecked"
+    assert "budget-exceeded" in recs[0]["reasons"]
+
+
+def test_catch_ledger_records_unchecked_on_no_evidence_budget_exceeded(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv(sj.GATE_MAX_CALLS_ENV, "0")
+    t = _no_evidence_transcript(tmp_path)
+    _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                        "last_assistant_message": "Done."}))
+    code = sj.main(["hook", "gate"])
+    assert code == 3
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "unchecked"
+    assert "budget-exceeded" in recs[0]["reasons"]
+
+
+def test_catch_ledger_records_verify_from_file_allow_block_advisory(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    report_file = tmp_path / "report.txt"
+
+    report_file.write_text("COMPLETE: worker finished, 6 tests passed", encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    assert sj.main(["hook", "verify", "--from-file", str(report_file),
+                    "--worktree", str(tmp_path)]) == 0
+
+    report_file.write_text("COMPLETE: worker finished, evidence disproves a claim",
+                           encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4))
+    assert sj.main(["hook", "verify", "--from-file", str(report_file),
+                    "--worktree", str(tmp_path)]) == 2
+
+    report_file.write_text("COMPLETE: worker finished, mixed signal", encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3))
+    assert sj.main(["hook", "verify", "--from-file", str(report_file),
+                    "--worktree", str(tmp_path)]) == 0
+
+    recs = _read_catch_records(catch_path)
+    assert [r["decision"] for r in recs] == ["allow", "block", "advisory"]
+    assert all(r["door"] == "verify" for r in recs)
+
+
+def test_catch_ledger_records_per_teammate_prompt_verify_verdict(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    prompt = ('<teammate-message teammate_id="w1">COMPLETE: 4 tests passed, '
+             'PR #12 merged</teammate-message>')
+    _hook_stdin(monkeypatch, json.dumps({"prompt": prompt}))
+    code = sj.main(["hook", "prompt-verify"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["door"] == "prompt-verify"
+    assert recs[0]["decision"] == "allow"  # CLEAN -> allow
+
+
+def test_catch_ledger_records_block_for_rejected_prompt_verify_teammate(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4))
+    prompt = ('<teammate-message teammate_id="w1">COMPLETE: 4 tests passed, '
+             'PR #12 merged</teammate-message>')
+    _hook_stdin(monkeypatch, json.dumps({"prompt": prompt}))
+    code = sj.main(["hook", "prompt-verify"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert recs[0]["decision"] == "block"  # REJECT -> block
+
+
+# ------------------------------------------------- N1: advisory-forced
+
+def test_catch_ledger_stop_hook_active_records_advisory_forced_not_advisory(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    lie = (SKILL / "tests" / "fixtures" / "lie_stop_high_confidence_stdout.txt").read_text(
+        encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=lie))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "all 30 permit cases matched... merged PRs 8, 9 and 10",
+        "evidence": [str(evidence)], "stop_hook_active": True}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0  # forced advisory, never a real block
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "advisory-forced"
+
+
+def test_catch_report_counts_advisory_forced_as_blocks_suppressed(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "g1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "advisory-forced", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "g2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "report"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "blocks suppressed: 1" in out
+    assert "false stops: 0" in out
+    assert "misses: 0" in out
+
+
+# ------------------------------------------------------- N2: tag contradiction
+
+@pytest.mark.parametrize("decision,value", [
+    ("allow", "false"),
+    ("allow", "fair"),
+    ("block", "miss"),
+    ("advisory-forced", "miss"),
+])
+def test_catch_tag_refuses_a_tag_that_contradicts_the_decision(
+        tmp_path, monkeypatch, capsys, decision, value):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "h1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": decision, "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "tag", "h1", value, "why"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "does not fit" in err
+    rec = _read_catch_records(catch_path)[0]
+    assert rec["tag"] is None  # never persisted
+
+
+def test_catch_tag_allows_matching_decisions(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "i1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "unchecked", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    assert sj.main(["catch", "tag", "i1", "miss", "should have blocked"]) == 0
+    assert _read_catch_records(catch_path)[0]["tag"] == "miss"
+
+
+# --------------------------------------------------- N3: --since validation
+
+def test_catch_list_rejects_unparseable_since(tmp_path, monkeypatch, capsys):
+    _set_catch_paths(monkeypatch, tmp_path)
+    code = sj.main(["catch", "list", "--since", "yesterday"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "not a valid duration" in err
+
+
+def test_catch_report_rejects_unparseable_since(tmp_path, monkeypatch, capsys):
+    _set_catch_paths(monkeypatch, tmp_path)
+    code = sj.main(["catch", "report", "--since", "not-a-duration"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "not a valid duration" in err
+
+
+def test_catch_report_since_reports_undated_separately(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "j1", "ts": "not-a-timestamp", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "j2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": "fair", "note": "ok"},
+    ])
+    code = sj.main(["catch", "report", "--since", "7d"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "undated: 1" in out
+
+
+def test_catch_list_since_reports_undated_line(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "k1", "ts": "", "door": "gate", "decision": "block", "reasons": [],
+         "draft_excerpt": "", "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "list", "--since", "24h"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "1 undated record(s) excluded" in out
+
+
+# ------------------------------------------------- N4: catch_ledger_append
+
+def test_catch_ledger_append_never_raises_on_non_os_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "catches.jsonl")
+    # An entry json.dumps cannot serialize — a TypeError, not an OSError —
+    # must still be swallowed with one stderr line, never raised.
+    bad_entry = {"door": "gate", "bad": object()}
+    catch_id = sj.catch_ledger_append(bad_entry)
+    assert catch_id  # still returns an id
+    err = capsys.readouterr().err
+    assert "could not write catch ledger" in err
+
+
+# --------------------------------------------------------- N5: real env vars
+
+def test_default_catch_ledger_path_honours_superjev_catch_ledger_env(monkeypatch, tmp_path):
+    override = tmp_path / "custom" / "catches.jsonl"
+    monkeypatch.setenv("SUPERJEV_CATCH_LEDGER", str(override))
+    assert sj._default_catch_ledger_path() == override
+    monkeypatch.delenv("SUPERJEV_CATCH_LEDGER", raising=False)
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger" / "calls.jsonl")
+    assert sj._default_catch_ledger_path() == sj.LEDGER_PATH.parent / "catches.jsonl"
+
+
+def test_catch_keep_payload_real_env_var_gates_the_save(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "catches.jsonl")
+    monkeypatch.delenv("SUPERJEV_CATCH_KEEP_PAYLOAD", raising=False)
+    assert sj._catch_save_payload("m1", {"draft": "x"}) is None
+    monkeypatch.setenv("SUPERJEV_CATCH_KEEP_PAYLOAD", "1")
+    out = sj._catch_save_payload("m2", {"draft": "x"})
+    assert out is not None
+    assert Path(out).exists()
+
+
+# ---------------------------------------------------------------- N6: order
+
+def test_unchecked_advisory_prints_even_if_reasons_computation_later_raises(
+        tmp_path, monkeypatch, capsys):
+    fake = FakeDoor(3, stdout="\n  c1   SUPPORTED   0.55  The deploy finished\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _no_evidence_transcript(tmp_path)
+    _hook_stdin(monkeypatch, json.dumps({"hook_event_name": "Stop", "transcript_path": str(t),
+                                        "last_assistant_message": "The deploy finished."}))
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(sj, "_parse_strong_flags", _boom)
+    code = sj.main(["hook", "gate"])
+    out = capsys.readouterr().out
+    assert code == 0  # fail-open, caught by the outer try/except
+    assert UNCHECKED_LINE in out  # printed BEFORE the raising computation ran
+
+
+# ---------------------------------------------------------- B1: replay script
+
+def test_replay_catch_cases_skips_cases_with_no_payload(tmp_path, monkeypatch, capsys):
+    import importlib.util as _ilu
+    replay_path = SKILL / "tests" / "replay_catch_cases.py"
+    spec = _ilu.spec_from_file_location("replay_catch_cases", replay_path)
+    replay = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(replay)
+
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n1", "kind": "truth", "door": "gate", "payload_path": None},
+    ]), encoding="utf-8")
+    code = replay.main([str(cases_file)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no payload — cannot replay" in out
+    assert "no payload (excerpt-only, not counted below): 1" in out
+
+
+def test_replay_catch_cases_replays_a_case_with_a_saved_payload(tmp_path, monkeypatch, capsys):
+    import importlib.util as _ilu
+    replay_path = SKILL / "tests" / "replay_catch_cases.py"
+    spec = _ilu.spec_from_file_location("replay_catch_cases", replay_path)
+    replay = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(replay)
+
+    monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", tmp_path / "real-catches.jsonl")
+    monkeypatch.setattr(replay.sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setattr(replay.sj, "FLEET_JEV_LIB", FAKE_DOOR)
+
+    payload_path = tmp_path / "n2-payload.json"
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    payload_path.write_text(json.dumps({"draft": "the sky is blue",
+                                        "evidence": [str(evidence)]}), encoding="utf-8")
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n2", "kind": "lie", "door": "gate", "payload_path": str(payload_path)},
+    ]), encoding="utf-8")
+
+    code = replay.main([str(cases_file)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "n2" in out
+    assert "new_decision=allow" in out
+    # The replay's own catch_log call must never land in the real ledger
+    # this script's cases file was read from.
+    assert not (tmp_path / "real-catches.jsonl").exists()
