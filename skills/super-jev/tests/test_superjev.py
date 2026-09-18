@@ -917,8 +917,125 @@ def test_hook_gate_read_with_only_weak_flags_stays_advisory(tmp_path, monkeypatc
     assert err == ""
 
 
-@pytest.mark.parametrize("verdict,score", [("NOT_SUPPORTED", 0.20), ("OVERCLAIMS", 0.80),
-                                           ("SELF_CONTRADICTORY", 0.30)])
+# --------------------------------------------- stop_hook_active loop guard
+#
+# The bug this closes: Claude Code re-runs the Stop hook with
+# stop_hook_active=true when a PRIOR Stop hook already blocked this turn.
+# The gate ignored that field entirely, so a block on the re-run could
+# loop forever — the live 2026-09-17 finding was the SAME short reply
+# blocked three times running (self_contradictory 0.10/0.15/0.05, overclaim
+# 0.87/0.25/0.30, leaked_internal 0.26/0.21/0.10 — real ledger values) while
+# the reply was rewritten more carefully each pass. On stop_hook_active,
+# this hook now never blocks — advisory at most, flags still printed.
+
+def test_hook_gate_stop_hook_active_forces_advisory_not_block(tmp_path, monkeypatch, capsys):
+    # These flags (overclaim 0.87) would block on a first pass — see
+    # test_hook_gate_self_contradictory_blocks_alongside_overclaim above.
+    stdout = ("  c2                 NOT_SUPPORTED        0.45\n"
+              "  leaked_internal    HAS_LEAKS            0.26\n"
+              "  self_contradictory SELF_CONTRADICTORY   0.10\n"
+              "  overclaim          OVERCLAIMS           0.87\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a reply that would otherwise block",
+                                        "evidence": [str(evidence)],
+                                        "stop_hook_active": True}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "second pass" in out
+    assert err == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert "second pass, advisory only" in rec["note"]
+    assert rec["exit_code"] == 0
+
+
+def test_hook_gate_stop_hook_active_false_still_blocks(tmp_path, monkeypatch, capsys):
+    # stop_hook_active explicitly False (or the key absent) is a first
+    # pass — the loop guard must not weaken normal blocking behavior.
+    stdout = "  overclaim          OVERCLAIMS           0.99\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "an overclaiming reply",
+                                        "evidence": [str(evidence)],
+                                        "stop_hook_active": False}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "blocked" in err
+
+
+# ------------------------------------------------ machine-tag stripping
+#
+# The bug this closes: a reply carrying fleet bookkeeping — a trailing
+# [BOARD: ...] line, a Rung line, [Add] [Skip] buttons, a raw <...> system
+# tag — got checked against the claim gate AS PART OF the reply's own
+# content, and jev's leaked_internal/self_contradictory scoring read that
+# bookkeeping as internal leakage or a contradiction. These tags must be
+# stripped out of the draft before it goes to the gate.
+
+def test_strip_machine_tags_removes_board_rung_buttons_and_system_tags():
+    text = ("All set, PR is open.\n"
+            "[BOARD: card-42 -> done, 3 counts]\n"
+            "Rung: Sonnet 5 — everyday build work.\n"
+            "Rung line: same idea, alternate label.\n"
+            "[Add] [Skip]\n"
+            "<system-reminder>internal noise</system-reminder>\n"
+            "Last real line of the reply.")
+    stripped = sj._strip_machine_tags(text)
+    assert "[BOARD:" not in stripped
+    assert "Rung:" not in stripped
+    assert "Rung line:" not in stripped
+    assert "[Add]" not in stripped and "[Skip]" not in stripped
+    assert "<system-reminder>" not in stripped and "</system-reminder>" not in stripped
+    assert "All set, PR is open." in stripped
+    assert "Last real line of the reply." in stripped
+    # the inline system-tag content survives; only the tags themselves go
+    assert "internal noise" in stripped
+
+
+def test_strip_machine_tags_env_override(monkeypatch):
+    monkeypatch.setenv(sj.STRIP_PATTERNS_ENV, json.dumps([r'^SECRET:.*$']))
+    text = "keep this\nSECRET: drop this\nkeep this too"
+    stripped = sj._strip_machine_tags(text)
+    assert "SECRET:" not in stripped
+    assert "keep this" in stripped
+    assert "keep this too" in stripped
+    # the default BOARD pattern is NOT applied once the env overrides the list
+    text2 = "keep\n[BOARD: still here]"
+    assert "[BOARD:" in sj._strip_machine_tags(text2)
+
+
+def test_hook_gate_strips_board_tag_before_checking_draft(tmp_path, monkeypatch, capsys):
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        if "--draft" in cmd:
+            draft_path = cmd[cmd.index("--draft") + 1]
+            captured["draft_text"] = Path(draft_path).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    reply = ("Done, filed the PR.\n"
+             "[BOARD: card-42 -> done]\n"
+             "Rung: Sonnet 5, everyday build work.\n"
+             "[Add] [Skip]\n")
+    _hook_stdin(monkeypatch, json.dumps({"draft": reply, "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    assert "draft_text" in captured
+    assert "[BOARD:" not in captured["draft_text"]
+    assert "Rung:" not in captured["draft_text"]
+    assert "[Add]" not in captured["draft_text"]
+    assert "Done, filed the PR." in captured["draft_text"]
+
+
+@pytest.mark.parametrize("verdict,score", [("NOT_SUPPORTED", 0.20), ("OVERCLAIMS", 0.80)])
 def test_hook_gate_blocks_exactly_at_each_threshold(tmp_path, monkeypatch, capsys,
                                                      verdict, score):
     stdout = f"  c1   {verdict:14s} {score:.2f}  a claim right on the line\n"
@@ -929,6 +1046,47 @@ def test_hook_gate_blocks_exactly_at_each_threshold(tmp_path, monkeypatch, capsy
                                         "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
     assert code == 2
+
+
+def test_hook_gate_self_contradictory_alone_does_not_block(tmp_path, monkeypatch, capsys):
+    # SELF_CONTRADICTORY at or below its own 0.30 line, with no NOT_SUPPORTED
+    # or OVERCLAIMS flag blocking alongside it, must not block on its own —
+    # this is the exact shape of the 2026-09-17 loop: a calmer rewrite still
+    # read as mildly self-contradictory to jev's own scoring while the real
+    # overclaim/unsupported problems were already fixed, and blocking on
+    # self-contradiction alone looped the Stop gate forever.
+    stdout = ("  leaked_internal    HAS_LEAKS            0.10\n"
+              "  self_contradictory SELF_CONTRADICTORY   0.05\n"
+              "  overclaim          OVERCLAIMS           0.30\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a calmer rewrite",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "advisory" in out
+    assert err == ""
+
+
+def test_hook_gate_self_contradictory_blocks_alongside_overclaim(tmp_path, monkeypatch, capsys):
+    # SELF_CONTRADICTORY still counts as a block reason when the SAME run
+    # also carries a blocking OVERCLAIMS flag (>= 0.80) — this is the
+    # first pass of the 2026-09-17 loop, and it must still block.
+    stdout = ("  c2                 NOT_SUPPORTED        0.45\n"
+              "  leaked_internal    HAS_LEAKS            0.26\n"
+              "  self_contradictory SELF_CONTRADICTORY   0.10\n"
+              "  overclaim          OVERCLAIMS           0.87\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "an overclaiming, contradictory reply",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "overclaim OVERCLAIMS" in err
 
 
 def test_hook_gate_block_thresholds_are_env_configurable(tmp_path, monkeypatch, capsys):
