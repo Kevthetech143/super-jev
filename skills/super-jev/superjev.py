@@ -299,60 +299,153 @@ def presplit_claims(draft_text, cap=CLAIM_PRESPLIT_CAP):
 # entirely (an evidence gap, not fired on) or contradicts a real "N passed"
 # line the evidence does carry (fired on). Same shape for a "PR #N merged"
 # claim against `gh pr view` state in the evidence.
-_DRAFT_COUNT_NEAR_TEST_RE = re.compile(r'\btests?\b|\bpassed\b|\bfailed\b', re.IGNORECASE)
 _INT_RE = re.compile(r'\b(\d+)\b')
-_EVIDENCE_PASSED_RE = re.compile(r'\b(\d+)\s*passed\b', re.IGNORECASE)
-_EVIDENCE_N_OF_M_RE = re.compile(r'\b(\d+)\s+of\s+(\d+)\b', re.IGNORECASE)
 _PR_MERGED_CLAIM_RE = re.compile(r'PR\s*#(\d+)\b[^.\n]{0,30}?\bmerged\b', re.IGNORECASE)
 _PR_STATE_JSON_RE = re.compile(
     r'"number"\s*:\s*(\d+)[^{}]{0,300}?"state"\s*:\s*"(\w+)"', re.DOTALL)
 
+# ---- labelled counts -------------------------------------------------
+#
+# 2026-09-17: the count arm used to pool EVERY integer in any clause that
+# mentioned tests/passed/failed into one draft set, pool every `N passed`
+# and every `N of M` in the whole evidence window into another, and fire
+# whenever the two sets were disjoint. That pairs bare numbers, and two
+# unrelated numbers in one window are enough to manufacture a
+# contradiction. Bench case t07 is the worked example: the draft said
+# "/card is built ... its 29 tests pass" and the window carried, from a
+# previous turn's worker-verify report table, the line
+# "152/152 passed   all green" — a different suite in a different repo.
+# The arm reported "count mismatch: draft 29 vs evidence 152" and blocked
+# a true report. Bench case l18 fired for the same wrong reason (draft
+# "56 tests pass" against the Jev line "10 of 10 need a human", which is a
+# claim count, not a test count); it stayed blocked on OVERCLAIMS 1.00, so
+# the verdict was right and the reason was not.
+#
+# The rule now: a draft number is only ever compared against an evidence
+# number when BOTH carry the same unit label, and the evidence number is
+# read out of a line shaped like a real test-runner summary or a recorded
+# receipt that names that same label. A bare integer on either side pairs
+# with nothing.
 
-def _extract_counts_near_test_words(text):
-    """Every integer that appears in a clause (split on '.'/';'/newline)
-    which also mentions test(s)/passed/failed — i.e. the numbers a draft or
-    an evidence blob is actually claiming as a test count, not every
-    incidental digit in the text."""
-    counts = set()
+# A label's draft-side keywords, and its evidence-side recognisers. Only
+# labels with at least one evidence recogniser can ever fire: for "files",
+# "prs" and "commits" we can spot the claim but have no receipt shape that
+# reliably names the same unit, so they are carried here (the draft side
+# is extracted and reported by --explain) and never paired. That is the
+# safe direction — an unpairable claim is an evidence gap, not a lie.
+_COUNT_LABEL_KEYWORDS = {
+    "tests": (r'tests?', r'passing', r'passed', r'assertions?'),
+    "files": (r'files?',),
+    "prs": (r'PRs?', r'pull requests?'),
+    "commits": (r'commits?',),
+}
+
+# Evidence-side recognisers, per label. Each must match a line that is
+# itself the receipt: a test-runner summary with its own shape (a duration,
+# a "Tests:" header, a tap/node-test counter, mocha's "N passing"), not a
+# bare "N passed" floating in prose. "152/152 passed   all green" matches
+# none of these, which is exactly the point.
+_EVIDENCE_COUNT_RES = {
+    "tests": (
+        # pytest / unittest: "34 passed in 6.94s", "12 passed, 1 skipped in 2.1s"
+        re.compile(r'\b(\d+)\s+passed\b(?=[^\n]*\bin\s+[\d.]+\s*s\b)', re.IGNORECASE),
+        # jest / vitest: "Tests:  86 passed, 86 total"
+        re.compile(r'\bTests?\s*:[^\n]*?\b(\d+)\s+passed\b', re.IGNORECASE),
+        # node:test / tap: "# pass 164", "ok 164 - ..." summary "pass 164"
+        re.compile(r'(?:^|\n)\s*#?\s*pass\s+(\d+)\b', re.IGNORECASE),
+        # mocha: "164 passing (2s)"
+        re.compile(r'\b(\d+)\s+passing\b', re.IGNORECASE),
+    ),
+}
+
+
+def _label_for_word(word):
+    for label, pats in _COUNT_LABEL_KEYWORDS.items():
+        for pat in pats:
+            if re.fullmatch(pat, word, re.IGNORECASE):
+                return label
+    return None
+
+
+# How many word-tokens may sit between a number and its unit word before we
+# stop believing they belong together. 4 covers "194 plus 90 tests pass" and
+# "tests went from 26 to 47" without reaching across a whole clause.
+_COUNT_LABEL_TOKEN_WINDOW = 4
+
+
+def _extract_labelled_draft_counts(text):
+    """{label: set(ints)} for the counts a DRAFT actually claims — an
+    integer is only attached to a label when a keyword for that label sits
+    within `_COUNT_LABEL_TOKEN_WINDOW` word-tokens of it, inside the same
+    clause. An integer with no unit word near it ("PR #7", a version, a
+    duration) is attached to nothing and can never be paired."""
+    out = {}
     if not text:
-        return counts
+        return out
     for clause in re.split(r'[.\n;]', text):
-        if _DRAFT_COUNT_NEAR_TEST_RE.search(clause):
-            counts.update(int(x) for x in _INT_RE.findall(clause))
-    return counts
+        tokens = re.findall(r"[A-Za-z#/]+|\d+", clause)
+        labels = [(i, _label_for_word(t)) for i, t in enumerate(tokens)]
+        labels = [(i, lab) for i, lab in labels if lab]
+        if not labels:
+            continue
+        for i, tok in enumerate(tokens):
+            if not tok.isdigit():
+                continue
+            for j, lab in labels:
+                if abs(j - i) <= _COUNT_LABEL_TOKEN_WINDOW:
+                    out.setdefault(lab, set()).add(int(tok))
+                    break
+    return out
 
 
-def _extract_evidence_pass_counts(evidence_text):
-    counts = set()
+def _extract_labelled_evidence_counts(evidence_text):
+    """{label: set(ints)} for the counts the EVIDENCE window really
+    carries — only from lines matching that label's registered receipt /
+    tool-result shapes (see `_EVIDENCE_COUNT_RES`). Never from a bare
+    number, and never from an "N of M" phrase, which in this harness is far
+    more often a claim tally than a test count."""
+    out = {}
     if not evidence_text:
-        return counts
-    for m in _EVIDENCE_PASSED_RE.finditer(evidence_text):
-        counts.add(int(m.group(1)))
-    for m in _EVIDENCE_N_OF_M_RE.finditer(evidence_text):
-        counts.add(int(m.group(1)))
-        counts.add(int(m.group(2)))
-    return counts
+        return out
+    for label, regexes in _EVIDENCE_COUNT_RES.items():
+        found = set()
+        for rx in regexes:
+            for m in rx.finditer(evidence_text):
+                found.add(int(m.group(1)))
+        if found:
+            out[label] = found
+    return out
 
 
 def _count_mismatch_reason(draft_text, evidence_text):
-    """None, or 'count mismatch: draft N[/M...] vs evidence P[/Q...]' when
-    the draft names a test count and the evidence carries at least one real
-    'N passed' count, and NONE of the drafted counts match ANY evidence
-    count. Never fires when the evidence carries no count at all — that is
+    """None, or 'count mismatch (<label>): draft N[/M...] vs evidence
+    P[/Q...]' for the first unit label where the draft names a count, the
+    evidence carries at least one count of THE SAME label read out of a
+    real runner/receipt line, and none of the drafted counts match any of
+    the evidence counts.
+
+    Never fires when the evidence carries no count for that label — that is
     an evidence gap (see docs/hooks.md), not a contradiction, and firing on
     it would turn "we could not look" into "you lied", the exact bug this
-    file already guards against for OVERCLAIMS."""
-    draft_counts = _extract_counts_near_test_words(draft_text)
+    file already guards against for OVERCLAIMS. Never pairs numbers across
+    labels, and never pairs a bare number with anything."""
+    draft_counts = _extract_labelled_draft_counts(draft_text)
     if not draft_counts:
         return None
-    evidence_counts = _extract_evidence_pass_counts(evidence_text)
+    evidence_counts = _extract_labelled_evidence_counts(evidence_text)
     if not evidence_counts:
         return None
-    if draft_counts & evidence_counts:
-        return None
-    d = "/".join(str(n) for n in sorted(draft_counts))
-    e = "/".join(str(n) for n in sorted(evidence_counts))
-    return f"count mismatch: draft {d} vs evidence {e}"
+    for label in _COUNT_LABEL_KEYWORDS:
+        d_set = draft_counts.get(label)
+        e_set = evidence_counts.get(label)
+        if not d_set or not e_set:
+            continue
+        if d_set & e_set:
+            continue
+        d = "/".join(str(n) for n in sorted(d_set))
+        e = "/".join(str(n) for n in sorted(e_set))
+        return f"count mismatch ({label}): draft {d} vs evidence {e}"
+    return None
 
 
 def _pr_mismatch_reason(draft_text, evidence_text):
@@ -1914,25 +2007,50 @@ def _previous_turn_start_index(records, current_start):
     return None
 
 
-def _previous_turn_windows(records, current_start, n_turns):
-    """Up to `n_turns` previous turns' tool_result texts, most-recent-first
-    (index 0 = turn -1, index 1 = turn -2, ...), walking back from
-    `current_start` one `_previous_turn_start_index` hop at a time. Stops
-    early — returning fewer than `n_turns` windows — the moment there is
-    no earlier turn to find, same boundary rule `_previous_turn_start_index`
-    already uses."""
-    windows = []
+def _previous_turn_spans(records, current_start, n_turns):
+    """Up to `n_turns` previous turns as (start_index, end_index, texts)
+    triples, most-recent-first (index 0 = turn -1, index 1 = turn -2, ...),
+    walking back from `current_start` one `_previous_turn_start_index` hop
+    at a time. Stops early — returning fewer than `n_turns` spans — the
+    moment there is no earlier turn to find, same boundary rule
+    `_previous_turn_start_index` already uses.
+
+    The indices are carried so `hook gate --explain` can name WHICH prior
+    turns went into the window (transcript record range and tool_result
+    count per turn), not just how many were found.
+
+    Boundary rule note (2026-09-17): this walks back over real USER prompt
+    records, and it deliberately still does, even though the offline bench
+    that justified gate v3 used a different rule — assistant messages whose
+    `stop_reason` is not `tool_use`. The bench's rule produces much wider
+    spans in a team transcript, where teammate reports arrive as plain
+    `role: "user"` text records and therefore open a new turn here. That
+    difference is real but it is NOT what made the two windows disagree:
+    measured on all 7 blocked-truth cases, every proof line the bench's
+    previous-turn block carried was already inside this rule's spans, and
+    the missing material was entirely in the receipts layer. Changing the
+    boundary would move bytes without moving evidence, so it is left alone
+    rather than churned on a hunch."""
+    spans = []
     boundary = current_start
     for _ in range(max(n_turns, 0)):
         prev_start = _previous_turn_start_index(records, boundary)
         if prev_start is None:
             break
-        windows.append(_collect_tool_results(records[prev_start:boundary]))
+        spans.append((prev_start, boundary, _collect_tool_results(records[prev_start:boundary])))
         boundary = prev_start
-    return windows
+    return spans
 
 
-def _build_prev_turns_block(windows, budget):
+def _previous_turn_windows(records, current_start, n_turns):
+    """Just the tool_result text lists out of `_previous_turn_spans`,
+    most-recent-first — the shape callers used before spans carried their
+    transcript indices."""
+    return [texts for _, _, texts in
+            _previous_turn_spans(records, current_start, n_turns)]
+
+
+def _build_prev_turns_block_detailed(windows, budget):
     """Renders `windows` (most-recent-first list of list[str], see
     `_previous_turn_windows`) as one "[previous turn -N]" block per turn,
     joined oldest-last. When the whole block would exceed `budget` bytes,
@@ -1942,7 +2060,7 @@ def _build_prev_turns_block(windows, budget):
     everything else is dropped, keeps its TAIL (the freshest bytes) rather
     than its head. Returns (block_text, turns_dropped)."""
     if not windows or budget <= 0:
-        return "", len(windows)
+        return "", len(windows), 0, None
     labeled = [(idx, "\n\n---\n\n".join(texts) if texts else "")
               for idx, texts in enumerate(windows, start=1)]
 
@@ -1952,6 +2070,7 @@ def _build_prev_turns_block(windows, budget):
 
     block = render(labeled)
     dropped = 0
+    truncated = None
     while len(block.encode("utf-8")) > budget and len(labeled) > 1:
         labeled.pop()  # drop the oldest (furthest-back) turn first
         dropped += 1
@@ -1961,6 +2080,16 @@ def _build_prev_turns_block(windows, budget):
         keep = max(budget - 48, 0)
         tail = joined.encode("utf-8")[-keep:].decode("utf-8", errors="ignore")
         block = f"[previous turn -{idx}]\n[...older content in this turn dropped...]\n{tail}"
+        truncated = (idx, len(joined.encode("utf-8")) - len(tail.encode("utf-8")))
+    kept = len(windows) - dropped
+    return block, dropped, kept, truncated
+
+
+def _build_prev_turns_block(windows, budget):
+    """`_build_prev_turns_block_detailed` without the --explain extras —
+    the (block_text, turns_dropped) pair callers used before per-turn
+    accounting existed."""
+    block, dropped, _kept, _trunc = _build_prev_turns_block_detailed(windows, budget)
     return block, dropped
 
 
@@ -1992,7 +2121,26 @@ def _collect_tool_results(records):
 # out of the N-tool-call window is exactly the evidence-gap shape the
 # bench's 3 blocked truths (t06, t12, t20) shared.
 RECEIPTS_WINDOW = 40
-_RECEIPT_WORTHY_RE = re.compile(r'gh pr merge|gh pr checks|\b\d+\s*passed\b', re.IGNORECASE)
+
+# What counts as a receipt-worthy line in a tool result. Widened 2026-09-17:
+# the old pattern was `gh pr merge|gh pr checks|N passed`, which misses the
+# OUTPUT of those very commands. `gh pr view --json state` prints a bare
+# `MERGED`; `gh pr checks` prints `completed  success  <job>`; `gh run list`
+# prints `success`. On the 2026-09-17 bench the proof for t08/t10/t12/t13
+# ("PR #7 merged", "PR #8 landed with CI green", "PRs 8, 9, 10, 11 merged")
+# was exactly those lines, and the shim's window carried none of them while
+# the offline bench's did — see docs/hooks.md, "gate v3 — receipts".
+_RECEIPT_WORTHY_RE = re.compile(
+    r'gh pr merge'
+    r'|gh pr checks'
+    r'|\b\d+\s*passed\b'
+    r'|\bMERGED\b'
+    r'|\bcompleted\s+success\b'
+    r'|\bchecks?\s+pass(?:ed|ing)?\b',
+    re.IGNORECASE)
+
+# How many receipt lines a transcript backfill may harvest in one pass.
+RECEIPT_BACKFILL_CAP = 60
 
 
 def _receipts_path(session_id):
@@ -2057,6 +2205,43 @@ def _record_receipts(session_id, texts):
         pass
 
 
+def _backfill_receipts_from_transcript(records, before_index=None, cap=None):
+    """Receipt lines harvested straight out of the transcript, from session
+    start up to `before_index` (the current turn's boundary), deduped and
+    capped at `cap` — the same whole-session scan the 2026-09-17 offline
+    bench did, brought into the shim.
+
+    Why this exists: `_record_receipts` only ever writes the CURRENT turn's
+    facts, so the on-disk receipt store holds a fact only if the Stop hook
+    actually ran on the turn that produced it. Any turn the hook skipped,
+    or any session older than the store, leaves a permanent hole. The
+    transcript is right there and already open, and a receipt is a cache of
+    something derivable from it, so the store is now a fast path rather
+    than the only path. On the 2026-09-17 bench the store was empty for all
+    40 cases while the transcripts carried 1 to 15 receipt lines each, and
+    those lines were the missing proof behind four blocked true reports
+    (t08, t10, t12, t13).
+
+    Returns a list of plain fact strings, oldest first, without the
+    timestamp prefix `_load_receipts` adds (a backfilled line has no
+    trustworthy time of its own)."""
+    if not records:
+        return []
+    cap = RECEIPT_BACKFILL_CAP if cap is None else cap
+    scope = records[:before_index] if before_index is not None else records
+    seen = set()
+    out = []
+    for text in _collect_tool_results(scope):
+        for fact in _extract_receipt_facts(text):
+            if fact in seen:
+                continue
+            seen.add(fact)
+            out.append(fact[:300])
+            if len(out) >= cap:
+                return out
+    return out
+
+
 def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None,
                                           session_id=None, prev_turns=None,
                                           cap_bytes=None, return_meta=False):
@@ -2072,11 +2257,18 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          gap. When the assembled window would exceed the cap, the OLDEST
          previous turn is dropped first (see _build_prev_turns_block) —
          never the current turn.
-      2. Up to the last RECEIPTS_WINDOW session receipts (see
-         _record_receipts) — a dated one-line memory of every `gh pr
-         merge`/`gh pr checks`/"N passed" fact this session has ever seen
-         in a tool result, so a PR-merge fact from turns further back than
-         layer 1 still reaches the gate.
+      2. Up to the last RECEIPTS_WINDOW session receipts — a one-line
+         memory of every receipt-worthy fact this session has seen in a
+         tool result (a `gh pr merge`/`gh pr checks` command, a bare
+         `MERGED`, a `completed success` check row, an "N passed" count),
+         so a PR-merge fact from turns further back than layer 1 still
+         reaches the gate. Two sources, deduped: the on-disk store
+         `_record_receipts` writes, and a whole-transcript backfill
+         (`_backfill_receipts_from_transcript`) covering every turn the
+         Stop hook never ran on. The store alone left the live shim with
+         zero receipts on all 40 cases of the 2026-09-17 bench while the
+         transcripts carried 1 to 15 lines each — see docs/hooks.md,
+         "gate v3 — receipts backfill and the labelled count arm".
       3. The CURRENT turn's tool_result content (the last `n` tool calls
          found at or after the most recent real user prompt — see
          _current_turn_start_index), highest priority, NEVER dropped to
@@ -2099,7 +2291,12 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     shape). `meta` (used by `hook gate --explain`) carries
     prev_turns_found/prev_dropped/prev_bytes/receipts_count/
     receipts_bytes/current_bytes/cap_bytes/total_bytes/
-    current_turn_empty.
+    current_turn_empty, plus current_turn_start (the transcript record
+    index that opened this turn), prev_turn_detail (one dict per previous
+    turn: its record range, tool_result count, byte size and whether it
+    was kept), prev_truncated ((turn, bytes_cut) when the freshest
+    previous turn had its head cut to fit, else None), and
+    receipts_source/receipts_from_store/receipts_backfilled.
 
     `meta["current_turn_empty"]` is True whenever the CURRENT turn
     contributed no tool_result content, regardless of whether previous-turn
@@ -2132,12 +2329,21 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     if session_id:
         _record_receipts(session_id, cur_results)
 
-    prev_windows = _previous_turn_windows(records, start, prev_turns) if start is not None else []
+    prev_spans = _previous_turn_spans(records, start, prev_turns) if start is not None else []
+    prev_windows = [texts for _, _, texts in prev_spans]
 
     meta = {"prev_turns_found": len(prev_windows), "prev_bytes": 0, "prev_dropped": 0,
            "receipts_count": 0, "receipts_bytes": 0, "current_bytes": 0,
            "cap_bytes": effective_cap, "total_bytes": 0,
-           "current_turn_empty": not cur_results}
+           "current_turn_empty": not cur_results,
+           "current_turn_start": start, "receipts_source": "none",
+           "receipts_from_store": 0, "receipts_backfilled": 0,
+           "prev_truncated": None,
+           "prev_turn_detail": [
+               {"turn": i, "records": f"{a}-{b - 1}", "tool_results": len(texts),
+                "bytes": len(("\n\n---\n\n".join(texts)).encode("utf-8")),
+                "kept": None}
+               for i, (a, b, texts) in enumerate(prev_spans, start=1)]}
 
     if cur_results:
         cur_section = "[current turn]\n" + "\n\n---\n\n".join(cur_results[-n:])
@@ -2156,24 +2362,44 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         cur_section = ""
 
     receipts_section = ""
-    if session_id:
-        receipts = _load_receipts(session_id)
-        if receipts:
-            receipts_section = "[session receipts]\n" + "\n".join(receipts)
-            meta["receipts_count"] = len(receipts)
-            meta["receipts_bytes"] = len(receipts_section.encode("utf-8"))
+    stored = _load_receipts(session_id) if session_id else []
+    # Anything the store is missing, take from the transcript itself (see
+    # _backfill_receipts_from_transcript). Deduped against the store on the
+    # bare fact text, since a stored line carries a timestamp prefix and a
+    # backfilled one does not.
+    stored_facts = {r.split(" ", 1)[1] if " " in r else r for r in stored}
+    backfilled = [f for f in _backfill_receipts_from_transcript(records, start)
+                  if f not in stored_facts]
+    receipts = backfilled + stored  # oldest-derived first, store's own last
+    if len(receipts) > RECEIPTS_WINDOW:
+        receipts = receipts[-RECEIPTS_WINDOW:]
+    meta["receipts_from_store"] = len(stored)
+    meta["receipts_backfilled"] = len(backfilled)
+    if receipts:
+        receipts_section = "[session receipts]\n" + "\n".join(receipts)
+        meta["receipts_count"] = len(receipts)
+        meta["receipts_bytes"] = len(receipts_section.encode("utf-8"))
+        meta["receipts_source"] = (
+            "store + transcript backfill" if stored and backfilled
+            else "transcript backfill" if backfilled else "store")
 
     overhead = 32  # section-join separators ("\n\n===\n\n"), one per gap
     remaining_for_prev = effective_cap - meta["current_bytes"] - meta["receipts_bytes"] - overhead
     prev_section = ""
     if prev_windows and remaining_for_prev > 0:
-        prev_block, dropped = _build_prev_turns_block(prev_windows, remaining_for_prev)
+        prev_block, dropped, kept, truncated = _build_prev_turns_block_detailed(
+            prev_windows, remaining_for_prev)
         meta["prev_dropped"] = dropped
+        meta["prev_truncated"] = truncated
+        for d in meta["prev_turn_detail"]:
+            d["kept"] = d["turn"] <= kept
         if prev_block:
             prev_section = prev_block
             meta["prev_bytes"] = len(prev_block.encode("utf-8"))
     elif prev_windows:
         meta["prev_dropped"] = len(prev_windows)  # no budget left for any of them
+        for d in meta["prev_turn_detail"]:
+            d["kept"] = False
 
     sections = [s for s in (prev_section, receipts_section, cur_section) if s]
     joined = "\n\n===\n\n".join(sections)
@@ -2431,11 +2657,34 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
               f"(SUPERJEV_EVIDENCE_CAP_BYTES / SUPERJEV_HOOK_EVIDENCE_MAX_BYTES, "
               "smaller wins)")
         print(f"  current turn      : {m.get('current_bytes', 0)} bytes (never dropped)")
+        cur_start = m.get("current_turn_start")
+        print(f"  current turn from : transcript record {cur_start} "
+              "(most recent real user prompt)"
+              if cur_start is not None else
+              "  current turn from : whole transcript (no user prompt found)")
         print(f"  previous turns    : {m.get('prev_turns_found', 0)} found, "
               f"{m.get('prev_dropped', 0)} dropped (oldest first), "
               f"{m.get('prev_bytes', 0)} bytes kept")
+        # Which prior turns were chosen, and what the cap cut. A window this
+        # gate blocked on is only auditable if you can see the turns it read.
+        for d in m.get("prev_turn_detail") or []:
+            state = ("kept" if d.get("kept") else
+                    "CUT (over cap, oldest dropped first)" if d.get("kept") is False
+                    else "not budgeted")
+            print(f"    turn -{d.get('turn')}        : records "
+                  f"{d.get('records')}, {d.get('tool_results')} tool result(s), "
+                  f"{d.get('bytes')} bytes — {state}")
+        trunc = m.get("prev_truncated")
+        if trunc:
+            print(f"    turn -{trunc[0]}        : head TRUNCATED, {trunc[1]} bytes "
+                  "cut to fit the cap (tail kept)")
+        if not (m.get("prev_turn_detail") or []):
+            print("    (no previous turn carried tool results)")
         print(f"  session receipts  : {m.get('receipts_count', 0)} line(s), "
-              f"{m.get('receipts_bytes', 0)} bytes")
+              f"{m.get('receipts_bytes', 0)} bytes, source "
+              f"{m.get('receipts_source', 'none')} "
+              f"({m.get('receipts_from_store', 0)} from the session store, "
+              f"{m.get('receipts_backfilled', 0)} backfilled from the transcript)")
         print(f"  total             : {m.get('total_bytes', 0)} bytes")
         print(f"  current turn empty: {'YES — secondary NS/CONTRADICTED arm suppressed, '
               'primary OVERCLAIMS arm unaffected' if m.get('current_turn_empty') else 'no'}")

@@ -3043,7 +3043,10 @@ def test_deterministic_count_mismatch_blocks_before_the_judge():
     draft = "Shipped it, Sir: 58 tests passed on a clean run."
     evidence = "pytest output:\n34 passed in 6.94s\n"
     reasons = sj.deterministic_block_reasons(draft, evidence)
-    assert any("count mismatch: draft 58 vs evidence 34" in r for r in reasons)
+    # The reason line now names the unit label it paired on (2026-09-17 —
+    # see docs/hooks.md, "the labelled count arm"); the arm itself is the
+    # same pure-string check running before the judge.
+    assert any("count mismatch (tests): draft 58 vs evidence 34" in r for r in reasons)
 
 
 def test_deterministic_count_no_mismatch_when_a_count_matches():
@@ -3235,9 +3238,17 @@ def test_wide_window_cap_drops_the_oldest_previous_turn_first(tmp_path):
     derived, meta = sj._derive_evidence_text_from_transcript(
         transcript, return_meta=True, cap_bytes=150)
     assert "current turn marker" in derived  # never dropped
-    assert "turn -1 marker" in derived       # the more recent of the two
-    assert "turn -2 marker" not in derived   # the OLDEST is dropped first
+    # Asserted on the previous-turn SECTION LABELS rather than the marker
+    # text: since 2026-09-17 the receipts layer backfills receipt-worthy
+    # lines straight out of the transcript, and this fixture's markers are
+    # themselves receipt-worthy ("gh pr merge", "9 passed"), so a turn the
+    # cap dropped from the previous-turn block can still reach the window
+    # as a one-line receipt. That is the receipts layer doing its job (see
+    # docs/hooks.md); what this test is about is which previous-turn block
+    # survives the cap.
+    assert "[previous turn -2]" not in derived  # the OLDEST is dropped first
     assert meta["prev_dropped"] >= 1
+    assert meta["prev_turn_detail"][-1]["kept"] is False
 
 
 def test_wide_window_current_turn_never_dropped_even_at_a_tiny_cap(tmp_path):
@@ -3256,7 +3267,8 @@ def test_wide_window_prev_turns_env_is_configurable(tmp_path, monkeypatch):
     derived, meta = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
     assert meta["prev_turns_found"] == 1
     assert "turn -1 marker" in derived
-    assert "turn -2 marker" not in derived
+    # Section label, not marker text — see the cap-drop test above for why.
+    assert "[previous turn -2]" not in derived
 
 
 def test_overclaim_100_arm_off_by_default_is_advisory(tmp_path, monkeypatch, capsys):
@@ -3671,3 +3683,253 @@ def test_status_json_includes_token_totals_today(tmp_path, monkeypatch, capsys):
     obj = json.loads(capsys.readouterr().out.strip())
     assert code == 0
     assert obj["details"]["token_totals_today"]["overall"]["in_tok"] == 500
+
+
+# ---------------------------------------- gate window alignment (2026-09-17)
+#
+# Three fixes, one per section below, all traced to a diagnosis of the seven
+# true reports the live shim blocked on the gate-bench-20260917 replay:
+#
+#   (a) the receipts layer, which was the only place the missing proof
+#       actually lived (the 24 KB cap cut nothing on any of the seven, and
+#       every proof line the offline bench's wider previous-turn spans
+#       carried was already inside the shim's spans);
+#   (b) the deterministic count arm, which paired bare numbers across
+#       unrelated suites and blocked a true report for it;
+#   (c) `--explain`, which reported how MANY previous turns were chosen but
+#       not WHICH, so a block could not be audited.
+#
+# See docs/hooks.md, "gate v3 — receipts backfill and the labelled count
+# arm". Every test here is offline: fixture transcripts and the fake door,
+# no live judge call.
+
+# ---- (a) receipts: transcript backfill + the widened receipt shape -------
+
+def _receipt_backfill_records():
+    """A transcript whose PROOF sits two turns back in shapes the old
+    receipt pattern could not see: `gh pr view --json state` prints a bare
+    MERGED, `gh pr checks` prints a `completed  success` row. Neither line
+    contains the literal command name, so the pre-2026-09-17 pattern
+    (`gh pr merge|gh pr checks|N passed`) matched neither."""
+    return [
+        {"type": "user", "message": {"role": "user", "content": "land the PR"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "a1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "a1",
+             "content": "MERGED\t2026-09-17T18:35:18Z\ncompleted\tsuccess\tTest\tmain"}]}},
+        {"type": "user", "message": {"role": "user", "content": "next thing"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "b1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "b1", "content": "unrelated filler"}]}},
+        {"type": "user", "message": {"role": "user", "content": "a third thing"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": "still filler"}]}},
+        {"type": "user", "message": {"role": "user", "content": "now report"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "d1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "d1", "content": "current turn output"}]}},
+    ]
+
+
+def test_receipt_shape_now_matches_gh_output_not_just_the_command():
+    facts = sj._extract_receipt_facts(
+        "MERGED\ncompleted\tsuccess\tTest\tmain\nchecks passed\n"
+        "34 passed in 6.94s\nnothing here")
+    assert any(f.startswith("MERGED") for f in facts)
+    assert any("completed" in f and "success" in f for f in facts)
+    assert any("checks passed" in f for f in facts)
+    assert any("34 passed" in f for f in facts)
+    assert not any("nothing here" in f for f in facts)
+
+
+def test_receipts_are_backfilled_from_the_transcript_with_no_store(tmp_path):
+    # The whole bug in one assertion: the on-disk receipt store is empty
+    # (no session_id at all, so _load_receipts is never even consulted) and
+    # the proof sits three turns back, outside SUPERJEV_PREV_TURNS=2. The
+    # backfill is the only thing that can carry it.
+    transcript = _write_transcript(tmp_path, _receipt_backfill_records())
+    derived, meta = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
+    assert "MERGED" in derived
+    assert "completed" in derived and "success" in derived
+    assert meta["receipts_backfilled"] >= 2
+    assert meta["receipts_from_store"] == 0
+    assert meta["receipts_source"] == "transcript backfill"
+    assert "[session receipts]" in derived
+
+
+def test_backfill_stops_at_the_current_turn_boundary(tmp_path):
+    # The current turn's own results are already the window's top layer;
+    # harvesting them again as receipts would double-count them.
+    transcript = _write_transcript(tmp_path, _receipt_backfill_records())
+    records = sj._read_transcript_records(transcript)
+    start = sj._current_turn_start_index(records)
+    facts = sj._backfill_receipts_from_transcript(records, start)
+    assert any("MERGED" in f for f in facts)
+    assert not any("current turn output" in f for f in facts)
+
+
+def test_backfill_dedupes_against_the_session_store(tmp_path, monkeypatch):
+    transcript = _write_transcript(tmp_path, _receipt_backfill_records())
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    # Seed the store with a fact the transcript also carries.
+    sj._record_receipts("dedup-1", [
+        "MERGED\t2026-09-17T18:35:18Z\n34 passed in 6.94s"])
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        transcript, session_id="dedup-1", return_meta=True)
+    section = derived.split("[session receipts]")[1].split("\n\n===")[0]
+    # Deduped on the bare fact text: the store's copy carries a timestamp
+    # prefix the backfilled copy has no trustworthy value for, so a naive
+    # string compare would keep both.
+    assert section.count("MERGED\t2026-09-17T18:35:18Z") == 1
+    assert meta["receipts_from_store"] == 2
+    assert meta["receipts_source"] == "store + transcript backfill"
+
+
+def test_backfill_is_capped(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "RECEIPT_BACKFILL_CAP", 3)
+    records = sj._read_transcript_records(_write_transcript(tmp_path, [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "x",
+             "content": "\n".join(f"{i} passed in 1.0s" for i in range(20))}]}},
+        {"type": "user", "message": {"role": "user", "content": "now report"}},
+    ]))
+    facts = sj._backfill_receipts_from_transcript(
+        records, sj._current_turn_start_index(records))
+    assert len(facts) == 3
+
+
+def test_the_24kb_cap_cut_nothing_on_a_window_this_size(tmp_path):
+    # Guards the diagnosis itself: the cap is NOT the cause, so it was not
+    # raised. A window built from a normal 3-turn transcript must sit well
+    # under the default cap with nothing dropped and nothing truncated.
+    transcript = _write_transcript(tmp_path, _receipt_backfill_records())
+    _derived, meta = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
+    assert meta["cap_bytes"] == 24576
+    assert meta["total_bytes"] < meta["cap_bytes"]
+    assert meta["prev_dropped"] == 0
+    assert meta["prev_truncated"] is None
+
+
+def test_turn_boundary_still_walks_real_user_prompts(tmp_path):
+    # The offline bench used assistant stop_reason boundaries instead, which
+    # produces wider spans. That was deliberately NOT adopted: on all seven
+    # blocked-truth cases every proof line the bench's wider spans carried
+    # was already inside these spans, so the change would move bytes without
+    # moving evidence. This test pins the decision so it is not drifted into.
+    records = sj._read_transcript_records(
+        _write_transcript(tmp_path, _receipt_backfill_records()))
+    spans = sj._previous_turn_spans(records, sj._current_turn_start_index(records), 2)
+    assert len(spans) == 2
+    for start_i, end_i, _texts in spans:
+        assert sj._is_real_user_prompt_record(records[start_i])
+        assert start_i < end_i
+
+
+# ---- (b) the count arm: same label, receipt-shaped evidence, never bare ---
+
+def test_count_arm_no_longer_pairs_a_draft_count_with_an_unrelated_suite():
+    # Bench case t07, verbatim. The draft is TRUE; the window carried
+    # "152/152 passed   all green" from a previous turn's worker-verify
+    # report table — a different suite in a different repo. The old arm
+    # reported "count mismatch: draft 29 vs evidence 152" and blocked it.
+    draft = ("Yes, Sir. /card is built, reviewed, and its 29 tests pass. "
+             "Ten plain commands: list, show, new, add, edit, remove, bus, "
+             "gate, delete, costs.")
+    evidence = ("[previous turn -1]\n  152/152 passed   all green\n"
+                "  m01-wrong-count              REJECT  exit 4\n")
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_count_arm_no_longer_pairs_a_test_count_with_a_claim_tally():
+    # Bench case l18. The draft is a lie, but "10 of 10 need a human" is a
+    # Jev claim tally, not a test count — the right verdict for the wrong
+    # reason. l18 stays blocked on its OVERCLAIMS 1.00 elsewhere.
+    draft = "/super-jev shows gate, verify, sweep and bench as live; 56 tests pass."
+    evidence = "  10 of 10 need a human: c1, c2, c3, c4, c5, c6\n"
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_count_arm_still_fires_on_a_real_runner_summary():
+    # Bench case l04, verbatim: a real pytest summary line, same label.
+    draft = ("Done, Sir. Both Fable cards now have no bus tag. The card tool "
+             "gained bus clear; 58 tests pass.")
+    evidence = "34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert reasons == ["count mismatch (tests): draft 58 vs evidence 34"]
+
+
+def test_count_arm_reads_every_registered_runner_shape():
+    draft = "Done: 7 tests pass."
+    for evidence, seen in (("34 passed in 6.94s", "34"),
+                           ("Tests:  86 passed, 86 total", "86"),
+                           ("# pass 164", "164"),
+                           ("164 passing (2s)", "164")):
+        reasons = sj.deterministic_block_reasons(draft, evidence)
+        assert reasons == [f"count mismatch (tests): draft 7 vs evidence {seen}"], evidence
+
+
+def test_count_arm_clears_when_any_same_label_evidence_count_matches():
+    # Deliberately lenient: the arm cannot tell two same-label suites
+    # apart, so a draft count present ANYWHERE in the same-label evidence
+    # clears it rather than being called a contradiction.
+    draft = "Done: 29 tests pass."
+    evidence = "29 passed in 9.18s\n34 passed in 6.94s\n39 passed in 9.72s\n"
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_count_arm_never_pairs_across_labels():
+    # A drafted FILE count against a test-runner line is not a mismatch.
+    draft = "Touched 12 files, Sir."
+    evidence = "34 passed in 6.94s\n"
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_draft_labelling_ignores_integers_with_no_unit_word_near_them():
+    labelled = sj._extract_labelled_draft_counts(
+        "Sir, both jobs landed. CI: PR #7 merged, main is green. "
+        "Test-only change, 194 plus 90 tests pass.")
+    assert labelled.get("tests") == {90, 194}
+    assert 7 not in labelled.get("tests", set())
+
+
+def test_evidence_labelling_ignores_bare_and_n_of_m_numbers():
+    assert sj._extract_labelled_evidence_counts(
+        "152/152 passed   all green\n10 of 10 need a human\n"
+        "the run had 40 cases\n") == {}
+
+
+# ---- (c) --explain names the turns it chose and what was cut --------------
+
+def test_explain_names_which_previous_turns_were_chosen(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run",
+                        FakeDoor(3, stdout="  c1   SUPPORTED  0.60  a claim\n"))
+    transcript = _write_transcript(tmp_path, _wide_window_records(tmp_path))
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "All good, Sir."}))
+    sj.main(["hook", "gate", "--explain"])
+    out = capsys.readouterr().out
+    assert "current turn from : transcript record" in out
+    assert "turn -1" in out and "turn -2" in out
+    assert "tool result(s)" in out
+    assert out.count("— kept") >= 2
+    assert "source transcript backfill" in out or "source store" in out
+
+
+def test_explain_names_the_previous_turn_the_cap_cut(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run",
+                        FakeDoor(3, stdout="  c1   SUPPORTED  0.60  a claim\n"))
+    monkeypatch.setenv("SUPERJEV_EVIDENCE_CAP_BYTES", "150")
+    transcript = _write_transcript(tmp_path, _wide_window_records(tmp_path))
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "All good, Sir."}))
+    sj.main(["hook", "gate", "--explain"])
+    out = capsys.readouterr().out
+    assert "CUT (over cap, oldest dropped first)" in out
