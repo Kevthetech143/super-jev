@@ -4,6 +4,32 @@
 
 No version bump.
 
+- **Family 8's explicit-label colon syntax ("items: 2") could pair a
+  sentence-subject colon with the numerator of an "N of M" ratio.** The
+  #64 escape hatch that lets a draft mark a word as a label with real
+  punctuation ("items: 2") did not account for the value right after the
+  colon being the first half of a ratio ("Status gate: 6 of 7 checks") —
+  the word before the colon is naming the sentence's subject there, not
+  handing that one number a label. `_fact_draft_label_values` now skips
+  both numbers of an "N of M" / "N/M" shape entirely (see
+  `_FACT_RATIO_RE`), by explicit-label syntax or by plain adjacency, so
+  neither end of a ratio can be mistaken for a labelled value. Found via
+  a live post-merge false block (a "door" claim contradicting an
+  unrelated checklist row); see docs/hooks.md.
+- **`replay_fact_block_sweep.py` could not see a `[cited files]` fact at
+  all, and used a live results directory's `.exit` files as its
+  pre-change baseline.** `cmd_hook`'s own window assembly folds the
+  receipt-turn extra fact and `build_cited_file_block`'s cited-file tail
+  into the window before deriving facts; the sweep skipped both, so any
+  case whose draft names its own source ("per the summary log") replayed
+  a window with real content missing from it — not "predicts no block",
+  genuinely blind to what the live gate saw. The sweep now assembles the
+  window the same way `cmd_hook` does, and its "old" side is a real
+  import-and-run of `superjev.py` as of the commit before the one under
+  test (default HEAD's own parent, override via
+  `SUPERJEV_SWEEP_BASELINE_REF`) rather than a recorded exit code, whose
+  timing relative to the change under test is not guaranteed. See
+  docs/hooks.md.
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
   and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
