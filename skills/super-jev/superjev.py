@@ -3892,7 +3892,23 @@ def _neutralise_report_body(body):
 
 def _render_report_block(who, body):
     """One fenced, neutralised report block — the only shape the window
-    ever carries a worker/teammate report in."""
+    ever carries a worker/teammate report in.
+
+    `who` is collapsed to single-spaced, stripped text before either
+    fence label is built. `who` comes straight from a `teammate_id="..."`
+    attribute or an agent/task name lifted out of transcript text
+    (`_extract_report_blocks_from_text`, `_TEAMMATE_ID_RE`), neither of
+    which forbids embedded newlines. Left alone, a `who` containing a
+    newline splits the `REPORT FROM {who} (unverified worker claim)`
+    label itself across two physical lines: the first no longer ends in
+    that suffix and the second no longer starts with `REPORT FROM`, so
+    neither half matches `_REPORT_MARKER_LINE_RE` and the opener is
+    never recognised as one — the whole body, including whatever the
+    forged second "line" of `who` says, reads as ordinary window text
+    instead of confined, unverified report prose. Collapsing here keeps
+    both labels — and therefore every downstream fence match, which
+    reads `who` back out of this same rendered text — on one line."""
+    who = " ".join((who or "").split())
     return (f"{REPORT_LABEL.format(who=who)}\n"
             f"{_neutralise_report_body(body)}\n"
             f"{REPORT_END_LABEL.format(who=who)}")
@@ -3963,9 +3979,14 @@ def _repair_report_tail(head_text, keep_bytes, tail_text):
 
     2. The cut lands mid-line, so `tail_text`'s own first line is a
        FRAGMENT of whatever real line was split — most often the
-       CLOSING `END REPORT FROM ...` line — and a fragment can
-       coincidentally still match the OPENER pattern once stripped
-       (`"D REPORT FROM ..."`, missing its leading `EN`, still matches).
+       CLOSING `END REPORT FROM ...` line, but the composer also
+       neutralises fences, section headers and `---`/`===` separators
+       inside a body (`_REPORT_BODY_NEUTRALISE_RES`), and a tail-keep
+       that lands two bytes into any ONE of those four patterns hands
+       the window that same bare fragment un-neutralised — a bare `---`
+       two bytes into a `> ---` body line closes the report early just
+       as surely as a mangled `END REPORT FROM` does. Checked against
+       all four patterns, not just the two fence lines, for that reason.
        Left alone that fragment is itself forged structure. Quoted out
        with `> ` — the same convention `_neutralise_report_body` already
        uses for worker-controlled text — it reads as plain text instead.
@@ -3979,7 +4000,7 @@ def _repair_report_tail(head_text, keep_bytes, tail_text):
     lines = tail_text.splitlines(keepends=True)
     if mid_line_cut and lines:
         stripped = lines[0].strip()
-        if _REPORT_MARKER_LINE_RE.match(stripped) or _REPORT_END_LINE_RE.match(stripped):
+        if any(rx.match(stripped) for rx in _REPORT_BODY_NEUTRALISE_RES):
             lines[0] = "> " + lines[0]
             tail_text = "".join(lines)
     if not marker:
