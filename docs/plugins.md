@@ -134,8 +134,8 @@ def contribute(window, draft, ctx):
 `run_arms` runs in two phases, in this order:
 
 1. **The evidence phase.** Every arm's `contribute` is called. The lines
-   are collected in arm-name order and appended to the evidence under one
-   `[contributed by check arms]` block. `ctx` carries **no `judge` key**
+   are collected in arm-name order and appended to the evidence as one
+   `[contributed by check arms]` section. `ctx` carries **no `judge` key**
    in this phase, on purpose: an arm cannot both feed the judge and read
    its answer.
 2. **The check phase.** Every arm's `check` is called, and `ctx["judge"]`
@@ -149,6 +149,52 @@ property `from_text(render(w)) == w`) is untouched.
 
 An arm that only contributes still needs a `check` — return `None` from
 it. An arm that only checks needs no `contribute` at all.
+
+### A contributed line is never evidence
+
+**A contributed line carries no trust and no receipt strength, ever.** It
+is a check arm's own assertion about this run, not something received from
+anywhere, so nothing it says can be read as a tool result.
+
+That is enforced structurally rather than by anyone remembering to. The
+block is a first-class window section, `window_model.SECTION_CONTRIBUTED`:
+
+- **one header, one definition.** `window_model.HEADER_CONTRIBUTED` is
+  the string, and `arms.CONTRIBUTED_HEADER` is an alias of it. The
+  renderer that writes the line and the reader that recognises it cannot
+  disagree about its bytes.
+- **its own emit slot, above every other section.** `emit_slot` ranks it
+  last, matching where `JudgeEvidence.render` writes it, so the `===`
+  before it is a boundary `from_text` accepts.
+- **its own piece origin, `check_arm`.** Not in
+  `window_model.TRUSTED_ORIGINS`, so the single trust rule answers no for
+  the ordinary reason rather than by a special case. `pr_state_signals_
+  from_window` reads `ln.trusted`, so a contributed PR-state line degrades
+  to prose at strength 0 with no extra plumbing.
+- **prose to every deterministic reader.** The count reader, the
+  labelled-value table, the receipt half of the merge/CI and stale-report
+  families, and the not-merged claim scan all skip the block. An arm's own
+  `**61 passed**` never enters the count table.
+- **neutralised line by line.** `window_model.neutralise_contributed_line`
+  strips any `[from: cmd @ cwd]` identity tail and prefixes the line with
+  `> `, so no single line passes for a receipt row on its own shape
+  either.
+- **no ordering.** `recency_rank` returns `None` for the section. A
+  contributed block is not a turn, so it has no recency to weigh against a
+  real receipt.
+
+Why all of that for one block: before it was a section, the header was one
+the reader did not recognise, so the `===` before it was not a boundary
+and `_section_chunks` folded the whole block into the chunk above it. When
+that chunk was `[session receipts]`, every contributed line — and any
+`[from: ...]` tail forged onto one — re-parsed as a **trusted session
+receipt**. Arm text laundered into a receipt by nothing but its position.
+
+The invariant is a test: after `render()` and `from_text`, no contributed
+line has trust. And in the one case the boundary cannot be proved — a
+window carrying an unbounded report body makes every later `===`
+un-provable — the block is absorbed into that report's *claim*. Untrusted
+either way. There is no arrangement of these bytes that gains trust.
 
 ## One judge call per run
 
@@ -231,8 +277,8 @@ One rule, stated in registry terms:
 > **Demote the block if every blocking verdict came from an arm whose
 > `KIND` is `judge`.**
 
-That rule lives in `arms.judge_only_blocks(verdicts, kinds)` and nowhere
-else. The gate's own reasons have not all moved to the registry yet, so
+That rule lives in `arms.judge_only_blocks(verdicts, kinds, weak_verdicts=None)`
+and nowhere else. The gate's own reasons have not all moved to the registry yet, so
 `superjev._gate_blocking_verdicts` adapts this call's reason lists into
 verdicts and kinds and hands them to that one function — the gate never
 names which judge arm fired, which is why the rule covers the v2 and v3
@@ -250,15 +296,26 @@ Two edges, both deliberate:
 
 ```sh
 SUPERJEV_GATE_JUDGE_ADVISORY=1        # the whole failsafe: demote it
-SUPERJEV_GATE_JUDGE_ADVISORY=weak     # the seam — see below
+SUPERJEV_GATE_JUDGE_ADVISORY=weak     # only the weak judge verdicts
 ```
 
-`weak` is recognised here and **not implemented on this branch**: it
-demotes nothing, and says so once per process rather than silently doing
-nothing. PR #59 (landing on main) is what gives it meaning — demote only
-the weak judge findings and leave the confident ones blocking. It is
-named here so the env var has one documented keyspace across both
-branches rather than two.
+`weak` is the same rule with a **filter**, not a second rule. The gate
+passes `weak_verdicts` — the verdicts a weak demotion covers
+(NOT_SUPPORTED, CONTRADICTED, SELF_CONTRADICTORY, never OVERCLAIMS) — and
+`judge_only_blocks` then demotes only when every blocking verdict is both
+judge-kind *and* named in that set. A blocking judge verdict outside it
+keeps its block, so an OVERCLAIMS finding still stops the turn while the
+per-claim arm no longer does.
+
+The filter reads each verdict's own `verdict` attribute, which
+`_gate_blocking_verdicts` fills in from the reason line's
+`key VERDICT score` shape. A verdict that has none — a reason line in a
+shape the gate cannot parse, or the exit-code block above — is **not**
+demotable under a filter. Fail closed: a finding that cannot say which
+verdict it is must not be demoted by a rule that selects on verdicts.
+
+See `docs/hooks.md`, "Judge-advisory mode", for the operator's view of
+both levels.
 
 ### The gate switch
 
