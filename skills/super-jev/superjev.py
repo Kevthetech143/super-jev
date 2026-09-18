@@ -1022,12 +1022,17 @@ def _pr_mismatch_verdict(draft_text, evidence_text):
     which fact is newer, and not knowing is never license to allow.
 
     One more fail-closed rule sits beside recency (2026-09-18, sixth
-    review): when the strongest MERGED signal carries no state value of
-    its own — a bare `gh pr merge N` invocation receipt — and ANY
-    state-bearing not-merged signal exists at any strength, the pair is
-    treated as unorderable and the arm blocks on the not-merged side with
-    its own note. An invocation receipt can never be the sole basis for
-    allowing a merge claim."""
+    review; widened round 8): when the strongest MERGED signal carries no
+    state value of its own — a bare `gh pr merge N` invocation receipt —
+    and ANY not-merged signal exists at any strength, state-bearing or
+    plain prose, the pair is treated as unorderable and the arm blocks on
+    the not-merged side with its own note. An invocation-only receipt can
+    never be the sole basis for allowing a merge claim against ANY
+    not-merged signal — a command-invocation receipt proves only that a
+    command was typed, so it carries no more weight than the prose it is
+    being weighed against; only a receipt that actually carries a state
+    value (strength 2) still outranks prose (the accepted tradeoff,
+    unchanged)."""
     if not draft_text or not evidence_text:
         return None, None
     m = _PR_MERGED_CLAIM_RE.search(draft_text)
@@ -1058,26 +1063,32 @@ def _pr_mismatch_verdict(draft_text, evidence_text):
         not_merged = best if best[3] != "MERGED" else tied_conflicts[0]
         return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
                f"{not_merged[4]}"), note
-    # Rule B (2026-09-18, sixth review). A `gh pr merge N` line is a
-    # COMMAND INVOCATION: it proves the command was typed, never that it
-    # succeeded. It may therefore never be the sole basis for ALLOWING a
-    # merge claim against a line that actually carries a state value —
-    # not even when an in-body rule demoted that state line to prose,
-    # because the demotion is a statement about how far the line may be
-    # TRUSTED, not about whether it speaks to the outcome. Without this,
-    # anything that demoted a genuine `{"number": N, "state": "OPEN"}` to
-    # strength 0 let the invocation line win outright on strength, so the
-    # same-strength tie rule above never fired at all. Treated as
-    # unorderable — a tie — and so failed closed on the not-merged side.
+    # Rule B (2026-09-18, sixth review; widened round 8). A `gh pr merge
+    # N` line is a COMMAND INVOCATION: it proves the command was typed,
+    # never that it succeeded. It may therefore never be the sole basis
+    # for ALLOWING a merge claim against ANY not-merged signal — a
+    # state-bearing line (a JSON state field, a literal `MERGED`/`OPEN`
+    # state line, whether or not an in-body rule demoted it to prose) OR
+    # plain prose ("PR #52 is open still.") with no state value at all.
+    # An invocation-only receipt outranks nothing: it is strength 1 by
+    # construction, and a bare command name is not evidence of outcome,
+    # so weighing it against a not-merged signal of ANY strength is never
+    # a real ordering. Without this, a not-merged signal that was plain
+    # prose (never state-bearing to begin with) lost outright to the
+    # invocation line on strength, and the same-strength tie rule above
+    # never got a chance to fire. Treated as unorderable — a tie — and so
+    # failed closed on the not-merged side. A state-bearing MERGED
+    # receipt (strength 2) is unaffected: it still outranks prose, which
+    # remains the documented, accepted tradeoff.
     if best[3] == "MERGED" and not best[6]:
-        state_not_merged = [s for s in signals if s[3] != "MERGED" and s[6]]
-        if state_not_merged:
+        not_merged = [s for s in signals if s[3] != "MERGED"]
+        if not_merged:
             note = (f"PR state ambiguous: PR #{pr_num}'s strongest MERGED signal "
-                   "carries no state value (a command invocation only) while a "
-                   "state-bearing not-merged signal is present — failing closed "
-                   "on the not-merged signal")
+                   "carries no state value (a command invocation only); an "
+                   "invocation-only merge receipt cannot outrank a not-merged "
+                   "signal — failing closed on the not-merged signal")
             return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
-                   f"{state_not_merged[0][4]}"), note
+                   f"{not_merged[0][4]}"), note
     if best[3] == "MERGED":
         return None, None
     return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
