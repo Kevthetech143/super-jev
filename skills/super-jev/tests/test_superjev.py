@@ -8834,3 +8834,162 @@ def test_catch_report_shows_by_bot_breakdown_when_no_filter(tmp_path, monkeypatc
     assert "by bot:" in out
     assert "primary: 2" in out
     assert "b1: 1" in out
+
+
+# ---------------------------------------------------------------- OVERCLAIMS v2
+#
+# The open-items demotion of the draft-level OVERCLAIMS arm, behind
+# SUPERJEV_OVERCLAIMS_V2. Every test here asserts one of two things: that
+# the arm is inert with the env var unset, or that when it is set it only
+# ever demotes the one flag it is allowed to demote.
+
+OC2_REPORT = ("**Shipped:** the ledger split is merged and the poller is armed.\n"
+              "**Still open:** the report door, and one worker finishing the "
+              "token count.")
+OC2_PROSE = "The fix is merged and verified, and the poller is armed on both clocks."
+OC2_OVERCLAIM_STDOUT = ("  c1   SUPPORTED       0.95  the ledger split is merged\n"
+                        "  overclaim         OVERCLAIMS           0.97   -> SOFTEN IT\n")
+
+
+def test_overclaims_v2_demotes_a_structured_report_that_names_its_open_items():
+    d = sj.overclaims_v2_decision("the ledger split is merged; poller armed",
+                                  OC2_REPORT)
+    assert d["demote"] is True
+    assert "open items" in d["reason"]
+
+
+def test_overclaims_v2_does_not_demote_one_paragraph_of_completion_prose():
+    # A single-line draft is a straight completion claim; an incidental
+    # pending clause in it carries none of the open-items signal.
+    d = sj.overclaims_v2_decision("nothing relevant", OC2_PROSE + " Waiting on the PRs.")
+    assert d["demote"] is False
+    assert "not a structured report" in d["reason"]
+
+
+def test_overclaims_v2_does_not_demote_a_report_with_no_open_items():
+    d = sj.overclaims_v2_decision("nothing relevant",
+                                  "**Shipped:** the split is merged.\n"
+                                  "**Also:** the poller is armed.")
+    assert d["demote"] is False
+    assert "nothing as still open" in d["reason"]
+
+
+def test_overclaims_v2_never_demotes_against_a_negative_derived_fact():
+    # The code already looked in the window and came back empty; no
+    # property of the draft's prose can talk it out of that.
+    d = sj.overclaims_v2_decision("some window", OC2_REPORT,
+                                  facts=["no merge receipt for PR #3 in window."])
+    assert d["demote"] is False
+    assert "no merge receipt" in d["reason"]
+
+
+def test_overclaims_v2_never_demotes_against_a_contradicted_by_fact():
+    d = sj.overclaims_v2_decision("some window", OC2_REPORT,
+                                  facts=["WRITTEN FILE: ... CONTRADICTED_BY_FACT"])
+    assert d["demote"] is False
+
+
+def test_overclaims_v2_decision_never_raises_on_junk():
+    for args in ((None, None), ("", ""), (object(), object())):
+        assert sj.overclaims_v2_decision(*args)["demote"] is False
+
+
+def test_overclaims_v2_anchor_listing_is_diagnostic_only():
+    # The anchor listing was measured as a demotion rule and rejected (it
+    # freed no false block and cost caught lies). It must still be
+    # computed for --explain, and must not move the decision either way.
+    window = "job 7fe0d21b finished at 09:14"
+    draft = ("**Done:** job 7fe0d21b finished and the ledger updated.\n"
+             "**Still open:** the second batch.")
+    d = sj.overclaims_v2_decision(window, draft)
+    assert d["demote"] is True
+    assert any(tok == "7fe0d21b" for _s, tok in d["anchored"])
+    # Same draft shape, no anchor in the window at all — still demoted,
+    # because anchoring decides nothing.
+    d2 = sj.overclaims_v2_decision("an unrelated window", draft)
+    assert d2["demote"] is True
+    assert d2["unanchored"]
+
+
+def test_overclaims_v2_demotion_is_a_note_not_a_block_in_the_decision():
+    flags = [{"key": "overclaim", "verdict": "OVERCLAIMS", "score": 0.97}]
+    decision = {"demote": True, "reason": "the draft names its own open items",
+                "anchored": [], "unanchored": []}
+    reasons, notes = sj._hook_block_decision_v3(flags, [], None,
+                                                overclaims_v2=decision)
+    assert reasons == []
+    assert any("SUPERJEV_OVERCLAIMS_V2" in n and "open items" in n for n in notes)
+
+
+def test_overclaims_v2_demotion_is_vetoed_by_a_contradicted_claim_row():
+    flags = [{"key": "overclaim", "verdict": "OVERCLAIMS", "score": 0.97}]
+    rows = [{"key": "c1", "verdict": "CONTRADICTED", "score": 0.60}]
+    decision = {"demote": True, "reason": "r", "anchored": [], "unanchored": []}
+    reasons, _notes = sj._hook_block_decision_v3(flags, rows, None,
+                                                 overclaims_v2=decision)
+    assert reasons == ["overclaim OVERCLAIMS 0.97"]
+
+
+def test_overclaims_v2_does_not_touch_the_secondary_arm():
+    # The secondary NOT_SUPPORTED/CONTRADICTED arm is already advisory
+    # under gate v4 and this arm must not change its wording or standing.
+    flags = [{"key": "c2", "verdict": "NOT_SUPPORTED", "score": 0.95}]
+    decision = {"demote": True, "reason": "r", "anchored": [], "unanchored": []}
+    reasons, notes = sj._hook_block_decision_v3(flags, [], None,
+                                                overclaims_v2=decision)
+    assert reasons == []
+    assert any("gate v4" in n for n in notes)
+    assert not any("SUPERJEV_OVERCLAIMS_V2" in n for n in notes)
+
+
+def test_overclaims_v2_is_inert_when_the_decision_is_not_passed():
+    flags = [{"key": "overclaim", "verdict": "OVERCLAIMS", "score": 0.97}]
+    reasons, _notes = sj._hook_block_decision_v3(flags, [], None)
+    assert reasons == ["overclaim OVERCLAIMS 0.97"]
+
+
+def test_hook_gate_overclaims_v2_off_by_default_still_blocks(tmp_path, monkeypatch,
+                                                             capsys):
+    monkeypatch.delenv("SUPERJEV_OVERCLAIMS_V2", raising=False)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=OC2_OVERCLAIM_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the ledger split is merged", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": OC2_REPORT,
+                                         "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    _out, err = capsys.readouterr()
+    assert code == 2
+    assert "overclaim OVERCLAIMS 0.97" in err
+
+
+def test_hook_gate_overclaims_v2_on_demotes_the_same_reply(tmp_path, monkeypatch,
+                                                           capsys):
+    monkeypatch.setenv("SUPERJEV_OVERCLAIMS_V2", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=OC2_OVERCLAIM_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the ledger split is merged", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": OC2_REPORT,
+                                         "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code != 2
+    # Never silence: the demotion says so, on stdout or stderr.
+    assert "SUPERJEV_OVERCLAIMS_V2" in (out + err)
+
+
+def test_hook_gate_overclaims_v2_never_demotes_a_deterministic_reason(
+        tmp_path, monkeypatch, capsys):
+    # A count mismatch is literal arithmetic over text that WAS in the
+    # window. This arm must not reach it.
+    monkeypatch.setenv("SUPERJEV_OVERCLAIMS_V2", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=OC2_OVERCLAIM_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("12 passed in 2.1s", encoding="utf-8")
+    draft = ("**Shipped:** 19 tests passed and the split is merged.\n"
+             "**Still open:** the report door.")
+    _hook_stdin(monkeypatch, json.dumps({"draft": draft,
+                                         "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    _out, err = capsys.readouterr()
+    assert code == 2
+    assert "count mismatch" in err
