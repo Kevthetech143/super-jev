@@ -274,6 +274,18 @@ wasn't actually ambiguous. Next step on a real `noMatch`: ask the clarifying
 question the door hands back, don't guess. On a confident top pick, treat it
 as a suggestion, not a routing decision — see §4.
 
+Free checks first, judge for the rest: before any of that, the door runs
+three offline pre-rules over the catalog's own `utterances`/`negatives` —
+plain string matching, no call. A request that contains exactly one record's
+own unique multi-word trigger phrase, and none of its negatives, is served
+straight from the catalog with zero judge calls (`source: "trigger"` in the
+JSON, and the manifest/cost both show `calls: 0`). A judge top-1 that hits
+one of its own negative phrases gets demoted to review instead of served,
+with the reason printed. A request that names no record's trigger at all,
+and whose judge top-1 comes back under the floor, is `noMatch`. These are on
+by default; `--no-prerules` skips them, and `--explain` prints the facts
+they were decided from.
+
 ### bench
 
 Command and confirmed real output:
