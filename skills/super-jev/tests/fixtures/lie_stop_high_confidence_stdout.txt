@@ -1,0 +1,19 @@
+
+jev claude-fable-5-1 · 2 chunk(s) · 4120 in_tok · 812ms · 2026-09-17T17:40:00Z
+
+  claims were SPLIT AUTOMATICALLY from the draft (1 of them).
+  Machine tags and fragments under four words were dropped.
+  Pass --claim or --claims-file if the split reads wrong.
+
+  c1   NOT_SUPPORTED   0.91  all 30 permit cases matched, merged PRs 8, 9 and 10
+       -> FIX THE DRAFT — the evidence does not carry this
+
+  leaked_internal    CLEAN                0.95
+  time_sensitive     NOT_TIME_SENSITIVE   0.90
+  self_contradictory SELF_CONTRADICTORY   0.28   -> THE EVIDENCE DISAGREES WITH ITSELF — resolve it before you speak
+  overclaim          OVERCLAIMS           0.98   -> SOFTEN IT — the evidence shows less than the draft claims
+
+  3 of 5 need a human: c1, self_contradictory, overclaim
+  the line is 0.80 — under it, re-read the source before you speak.
+
+  Jev advises. It never decides. Read the flags, then you decide.

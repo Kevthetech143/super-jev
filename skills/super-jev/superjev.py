@@ -111,25 +111,9 @@ _REPORT_MARKER_RE = re.compile(
     r'\b(complete|incomplete|verdict)\b|\d+\s*(tests?|passed|failed)|test-count',
     re.IGNORECASE)
 
-# Strong-flag block thresholds. A gate/verify run that comes back READ
-# (exit 3, "advisory") can still carry a claim-level or draft-level flag
-# strong enough that letting it pass as a silent advisory is the same bug
-# that let a lied-about Stop message through: NOT_SUPPORTED even at LOW
-# confidence ("the evidence does not address it", scored 0.18) is exactly
-# the sentence an agent must not say out loud as fact, so it blocks on a
-# score AT OR BELOW the line, not above it. OVERCLAIMS blocks on a score AT
-# OR ABOVE the line — a confident overclaim. SELF_CONTRADICTORY blocks at
-# or below its own fixed line (not env-configurable; only the two claim-
-# shaped flags get an env override). A fabricated quote is already exit 2
-# from jev.py itself and already maps to "block" via GATE_HOOK_ACTION —
-# nothing here changes that path.
-BLOCK_NOT_SUPPORTED_ENV = "SUPERJEV_BLOCK_NOT_SUPPORTED"
-BLOCK_OVERCLAIM_ENV = "SUPERJEV_BLOCK_OVERCLAIM"
-DEFAULT_BLOCK_NOT_SUPPORTED = 0.20
-DEFAULT_BLOCK_OVERCLAIM = 0.80
-BLOCK_SELF_CONTRADICTORY = 0.30
-
-# READ THIS BEFORE CHANGING EITHER THRESHOLD ABOVE.
+# Strong-flag block thresholds.
+#
+# READ THIS BEFORE CHANGING THE LINE BELOW.
 #
 # The float on a jev/worker-verify row is the judge's CONFIDENCE IN ITS OWN
 # VERDICT, not a measure of how well the evidence supports the claim. See
@@ -138,19 +122,50 @@ BLOCK_SELF_CONTRADICTORY = 0.30
 # source". So "c3 NOT_SUPPORTED 0.97" reads as "I am 97% sure the evidence
 # does not address this claim" — the STRONGEST unsupported-claim signal
 # there is — while "c1 NOT_SUPPORTED 0.18" reads as "I barely think so, do
-# not act on me".
+# not act on me". The rule below follows that reading: a verdict is only a
+# block reason when the judge said it with HIGH confidence, at or above the
+# line, never at or below it. (Decided 2026-09-17, PR #18's open decision —
+# the earlier "blocks at or below the line" direction is gone; see
+# docs/hooks.md.)
 #
-# DEFAULT_BLOCK_NOT_SUPPORTED therefore blocks in the direction that is
-# hardest to defend: it fires on the judge's LEAST confident
-# unsupported-claim findings and fails OPEN on its most confident ones. It
-# is left as-is here on purpose — this change is a precision fix, and
-# making the gate stricter without a bench run would trade tonight's false
-# blocks for a new, unmeasured set of them. docs/hooks.md records it as the
-# top open decision. Do not "fix" the direction without re-running bench/.
-NOT_SUPPORTED_DIRECTION_NOTE = (
-    "the float is the judge's CONFIDENCE in its verdict, not a support score; "
-    "NOT_SUPPORTED blocks at or BELOW the line, so a high-confidence "
-    "unsupported claim fails open (docs/hooks.md, open decision 1)")
+# A gate/verify run that comes back READ (exit 3, "advisory") can still
+# carry a claim-level or draft-level flag strong enough that letting it
+# pass as a silent advisory is the same bug that let a lied-about Stop
+# message through, so a confident NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS
+# upgrades a READ to a block. But a confident verdict is only as good as
+# the evidence behind it: when the gather itself was too thin to judge
+# against (PR #18's `_evidence_inventory` "thin" flag — no evidence
+# source, a refused directory-level test command, a PR block with no
+# check-run data, or a probe under the char floor), NONE of these flags
+# may block, of any verdict, because "the evidence disagrees" and "there
+# was no evidence" produce the same red table. No evidence inventory at
+# all (the standard hook path never gathers one) counts as healthy — there
+# is nothing measured to be thin.
+#
+# OVERCLAIMS carries one more condition on top of health: it only blocks
+# when the SAME run also carries a claim-level NOT_SUPPORTED/CONTRADICTED
+# at or above OVERCLAIM_COMPANION_MIN — otherwise "the draft claims more
+# than the evidence carries" is the expected, correct answer when every
+# claim came back SUPPORTED, and is not itself a finding about the
+# worker's honesty.
+#
+# SELF_CONTRADICTORY is never a block reason, alone or in company — a
+# calmer rewrite of a reply still reads as mildly self-contradictory to
+# jev's own scoring (hedging language does), and blocking on it was what
+# looped the Stop gate on 2026-09-17 (see docs/hooks.md, The loop guard).
+# It still prints in the table as an advisory.
+#
+# A fabricated quote is already exit 2 from jev.py itself and already maps
+# to "block" via GATE_HOOK_ACTION — nothing here changes that path.
+BLOCK_CONF_ENV = "SUPERJEV_BLOCK_CONF"
+DEFAULT_BLOCK_CONF = 0.80
+# The companion floor for OVERCLAIMS. Deliberately lower than the block
+# line itself and NOT env-configurable — it exists only to tell "this
+# OVERCLAIMS sits beside a real unsupported/contradicted claim" from "this
+# OVERCLAIMS is the whole story", not to be a second tunable block line.
+OVERCLAIM_COMPANION_MIN = 0.50
+_BLOCKABLE_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "OVERCLAIMS")
+_RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -346,18 +361,20 @@ NOTABLE_VERDICTS = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIV
                     "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
 
-def _block_not_supported_threshold():
+def _block_confidence_line():
     try:
-        return float(os.environ.get(BLOCK_NOT_SUPPORTED_ENV, DEFAULT_BLOCK_NOT_SUPPORTED))
+        return float(os.environ.get(BLOCK_CONF_ENV, DEFAULT_BLOCK_CONF))
     except (TypeError, ValueError):
-        return DEFAULT_BLOCK_NOT_SUPPORTED
+        return DEFAULT_BLOCK_CONF
 
 
-def _block_overclaim_threshold():
-    try:
-        return float(os.environ.get(BLOCK_OVERCLAIM_ENV, DEFAULT_BLOCK_OVERCLAIM))
-    except (TypeError, ValueError):
-        return DEFAULT_BLOCK_OVERCLAIM
+def _gather_healthy(evidence):
+    """True unless the evidence inventory explicitly says the gather was
+    too thin to carry a verdict. `evidence=None` (the standard hook path,
+    which never gathers a --test-cmd/--pr) defaults to healthy — there is
+    nothing measured to be thin, and PR #18's own rule only ever suppresses
+    on a POSITIVE, measured gap, never on the absence of a measurement."""
+    return not (bool(evidence) and evidence.get("thin") is True)
 
 
 def _parse_strong_flags(text):
@@ -390,79 +407,72 @@ def _hook_block_decision(flags, claim_rows=None, evidence=None):
     plain-words lines explaining any flag that WOULD have blocked and was
     suppressed, for stderr, --explain and the ledger.
 
-    Directions, because they are not symmetric (see the long comment on
-    the thresholds): NOT_SUPPORTED and SELF_CONTRADICTORY block at or
-    BELOW their line, OVERCLAIMS blocks at or ABOVE its line.
+    The rule (decided 2026-09-17; see the long comment above the
+    thresholds for why the direction is ">= the line", never "<="):
 
-    Two suppressions, both of them fixes for real 2026-09-17 incidents:
+      1. A claim-level NOT_SUPPORTED or CONTRADICTED at or ABOVE the
+         confidence line blocks — but only when the evidence gather was
+         healthy (see `_gather_healthy`). A confident red verdict against
+         evidence too thin to judge is a statement about OUR gather, not
+         the worker's honesty, so it is suppressed the same way an
+         OVERCLAIMS-alone finding always was.
+      2. OVERCLAIMS at or above the line blocks only when the gather was
+         ALSO healthy AND the same run carries a claim-level
+         NOT_SUPPORTED/CONTRADICTED at or above OVERCLAIM_COMPANION_MIN —
+         "the draft claims more than the evidence carries" is the
+         expected, correct answer when every claim came back SUPPORTED
+         (or nothing is known about the claims at all is treated as
+         "unknown", not "zero", so a genuinely unparseable table still
+         blocks rather than silently passing).
+      3. SELF_CONTRADICTORY is never a block reason, alone or in company.
+         It still prints as an advisory.
+      4. A fabricated quote is already exit 2/4 and "block" via the action
+         map, untouched by anything here.
 
-    SELF_CONTRADICTORY never blocks on its own. It counts only when the
-    SAME run also carries a blocking NOT_SUPPORTED or OVERCLAIMS. A calmer
-    rewrite of a reply still reads as mildly self-contradictory to jev's
-    scoring (hedging language does), so blocking on it alone is what
-    looped the Stop gate: the same short reply blocked three times running
-    on self_contradictory 0.10/0.15/0.05 while overclaim fell 0.87 ->
-    0.25 -> 0.30.
+    Every flag suppressed for either reason lands in `notes`, never in
+    silence — a suppressed block is an advisory, not a silent allow."""
+    line = _block_confidence_line()
+    healthy = _gather_healthy(evidence)
+    rows = [r for r in (claim_rows or []) if r["key"].startswith("c")]
+    red_rows = [r for r in rows if r["verdict"] in _RED_CLAIM_VERDICTS]
+    companion_ok = (not rows) or any(r["score"] >= OVERCLAIM_COMPANION_MIN
+                                     for r in red_rows)
 
-    OVERCLAIMS never blocks ON ITS OWN when the run gives us no standing
-    to act on it — that is, when EVERY claim-level row came back
-    SUPPORTED, or when the evidence inventory says the evidence is absent
-    or too thin to judge against. "The draft claims more than the
-    evidence carries" is the expected, correct answer when the evidence
-    carries nothing, so on its own it is a statement about OUR gather, not
-    about the worker's honesty. It still prints as an advisory and still
-    lands in the ledger. A blocking NOT_SUPPORTED in the same run is
-    untouched: OVERCLAIMS alongside a real unsupported-claim finding
-    blocks exactly as before, and nothing here weakens a fabricated quote
-    (already exit 2/4 and "block" via the action map)."""
-    not_supported_line = _block_not_supported_threshold()
-    overclaim_line = _block_overclaim_threshold()
+    reasons, suppressed_health, suppressed_companion = [], [], 0
+    for f in flags:
+        v, s, k = f["verdict"], f["score"], f["key"]
+        if v not in _BLOCKABLE_VERDICTS or s < line:
+            continue
+        if not healthy:
+            suppressed_health.append(f"{k} {v} {s:.2f}")
+            continue
+        if v == "OVERCLAIMS" and not companion_ok:
+            suppressed_companion += 1
+            continue
+        reasons.append(f"{k} {v} {s:.2f}")
+
     notes = []
-    has_not_supported_block = any(
-        f["verdict"] == "NOT_SUPPORTED" and f["score"] <= not_supported_line
-        for f in flags)
-    has_overclaim_block = any(
-        f["verdict"] == "OVERCLAIMS" and f["score"] >= overclaim_line
-        for f in flags)
-
-    # The OVERCLAIMS-alone gate.
-    overclaim_suppressed = False
-    if has_overclaim_block and not has_not_supported_block:
-        rows = [r for r in (claim_rows or []) if r["key"].startswith("c")]
-        all_supported = bool(rows) and all(r["verdict"] == "SUPPORTED" for r in rows)
-        thin = bool(evidence) and evidence.get("thin") is True
-        if all_supported:
-            overclaim_suppressed = True
+    if suppressed_health:
+        # Kept to one line on purpose: this string goes into stderr, the
+        # ledger and the session's own context. The full list of gaps is
+        # what --explain is for.
+        first = (evidence.get("reasons") or ["no evidence was gathered"])[0]
+        headline = first.split(",")[0].split(" so ")[0].strip()
+        notes.append(
+            f"{len(suppressed_health)} flag(s) crossed the {line:.2f} line "
+            f"({'; '.join(suppressed_health)}) but the evidence cannot carry "
+            f"a verdict ({headline}) — advisory, not a block; run with "
+            "--explain for the full gather")
+    if suppressed_companion:
+        if rows and all(r["verdict"] == "SUPPORTED" for r in rows):
             notes.append(
                 f"OVERCLAIMS was the only blocking flag and all {len(rows)} "
                 "claim(s) came back SUPPORTED — advisory, not a block")
-        elif thin:
-            overclaim_suppressed = True
-            # Kept to one line on purpose: this string goes into stderr, the
-            # ledger and the session's own context. The full list of gaps is
-            # what --explain is for.
-            first = (evidence.get("reasons") or ["no evidence was gathered"])[0]
-            headline = first.split(",")[0].split(" so ")[0].strip()
-            notes.append(
-                "OVERCLAIMS was the only blocking flag and the evidence "
-                f"cannot carry a verdict ({headline}) — advisory, not a "
-                "block; run with --explain for the full gather")
-        if overclaim_suppressed:
-            has_overclaim_block = False
-
-    reasons = []
-    for f in flags:
-        v, s, k = f["verdict"], f["score"], f["key"]
-        if v == "NOT_SUPPORTED" and s <= not_supported_line:
-            blocked = True
-        elif v == "OVERCLAIMS" and s >= overclaim_line:
-            blocked = not overclaim_suppressed
-        elif v == "SELF_CONTRADICTORY" and s <= BLOCK_SELF_CONTRADICTORY:
-            blocked = has_not_supported_block or has_overclaim_block
         else:
-            blocked = False
-        if blocked:
-            reasons.append(f"{k} {v} {s:.2f}")
+            notes.append(
+                "OVERCLAIMS was the only blocking flag and no claim reached "
+                f"the {OVERCLAIM_COMPANION_MIN:.2f} companion line — "
+                "advisory, not a block")
     return reasons, notes
 
 
@@ -1536,10 +1546,12 @@ def _print_explain(door, code, action, flags, claim_rows, evidence, notes,
         print("\n  draft-level flags")
         for f in other:
             print(f"      {f['key']:<17s} {f['verdict']:<16s} {f['score']:.2f}")
-    print(f"\n  thresholds        : NOT_SUPPORTED blocks at or below "
-          f"{_block_not_supported_threshold():.2f}, OVERCLAIMS at or above "
-          f"{_block_overclaim_threshold():.2f}")
-    print(f"  note              : {NOT_SUPPORTED_DIRECTION_NOTE}")
+    print(f"\n  thresholds        : NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS block at "
+          f"or above {_block_confidence_line():.2f}, gather permitting")
+    print("  note              : the float is the judge's CONFIDENCE in its "
+          "verdict, not a support score — a claim marked NOT_SUPPORTED at high "
+          "confidence blocks, but only when the evidence gather was healthy "
+          "enough to trust that confidence")
     print(f"\n  door exit         : {code}")
     print(f"  decision          : {action.upper()}")
     if block_reasons:
@@ -1630,18 +1642,17 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
                                        pr=pr)
         block_reasons, notes = _hook_block_decision(flags, claim_rows, evidence)
 
-        # Would this block rest on OVERCLAIMS alone? If so, the answer turns
-        # on whether we actually gathered anything to judge against — so
-        # spend the free `--dry-run` gather and decide on real numbers
-        # rather than on what we hoped the flags meant. Also run it for
-        # --explain, where the whole point is showing the human the size.
-        overclaim_only = (
-            any(f["verdict"] == "OVERCLAIMS"
-                and f["score"] >= _block_overclaim_threshold() for f in flags)
-            and not any(f["verdict"] == "NOT_SUPPORTED"
-                        and f["score"] <= _block_not_supported_threshold()
-                        for f in flags))
-        if explain or overclaim_only:
+        # Any candidate block (a claim-level NOT_SUPPORTED/CONTRADICTED or a
+        # draft-level OVERCLAIMS at or above the confidence line) turns on
+        # whether the gather was actually healthy enough to trust that
+        # confidence — so whenever one exists, spend the free `--dry-run`
+        # gather and decide on real numbers rather than on what we hoped
+        # the flags meant. Also run it for --explain, where the whole point
+        # is showing the human the size.
+        line = _block_confidence_line()
+        has_candidate = any(f["verdict"] in _BLOCKABLE_VERDICTS and f["score"] >= line
+                            for f in flags)
+        if explain or has_candidate:
             probe = _evidence_probe(tmp_path, resolved_worktree, test_cmd)
             if probe:
                 evidence = _evidence_inventory(test_cmd=test_cmd,
