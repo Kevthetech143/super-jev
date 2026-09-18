@@ -2388,9 +2388,7 @@ The family emits at most four lines, one per verb class:
   recorded / appended / updated that file*.
 - **sent** — a relay send script matched in command position on the command
   line (never a bare mention like `cat send.sh`), with any task ids that
-  send's own argument named; a write to the late-Telegram outbox file
-  (named as what it actually is: delivery to the configured owner's
-  Telegram via the claw4mac poller, on its own delayed cadence); or a
+  send's own argument named; a write to the late-Telegram outbox file; or a
   message-shaped tool call (Telegram/email/chat) whose own NAME carries a
   send verb (send/reply/forward/post/notify/message) and no read/mutate
   verb (get/list/search/create/update/label/unlabel/trash/untrash/mark/
@@ -2405,6 +2403,26 @@ The family emits at most four lines, one per verb class:
   excluded, since that file names no recipient at all and is the draft's
   own delivery act, not evidence of one. Supports *sent / replied /
   notified / told / escalated / reported that message*.
+
+  The late-Telegram outbox line names what it ACTUALLY delivers, not just
+  the file it happens to be a write to: `_relay_late_telegram_once` in
+  `/Users/admin/claw4mac/core/app.py` (the claw4mac poller) reads that
+  file on its own polling cadence and, on non-empty content, calls the
+  control adapter's `send_message`, which the poller's own comment states
+  "targets the configured owner chat_id" — so the fact line says delivery
+  to the configured owner's Telegram via the claw4mac poller, the same
+  destination the code actually reaches, not a bare file path with a
+  session id that names no recipient a reader could recognize.
+
+  A message-shaped tool's recipient comes from the tool's OWN input field
+  only — it is never resolved against a contacts list or cross-checked
+  against anything else in the window. For an internal fleet tool that
+  recipient can be an opaque session/agent hash rather than a human name
+  (see `SendMessage`'s `to` field); the fact still names it verbatim,
+  because that is the value the tool call actually carried, but a judge
+  has no way to tell whether that hash names the RIGHT recipient — a
+  mismatch there is not something this family, or any fact family, can
+  catch.
 - **scheduled** — a scheduler tool call, or a crontab/launchd *install*,
   with whatever id its own result handed back. Supports *scheduled / armed /
   set to fire under that id*.
