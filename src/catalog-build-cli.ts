@@ -18,7 +18,7 @@ import { join, resolve } from 'node:path';
 
 class CliError extends Error {}
 
-const usage = `super-jev catalog:build <skills-dir> <out.json>
+export const usage = `super-jev catalog:build <skills-dir> <out.json>
 
 Walks <skills-dir> for <name>/SKILL.md files, reads each skill's
 frontmatter "description" and any body lines starting with
