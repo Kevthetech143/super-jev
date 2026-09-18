@@ -18,6 +18,7 @@
     "chain": "node src/chain-cli.ts",
     "fetch": "node src/fetch-cli.ts",
     "catalog": "node src/catalog-cli.ts",
+    "catalog:build": "node src/catalog-build-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
     "bench:live": "node bench/live-measure.ts",
     "bench:fetch": "node bench/fetch-bench.ts",
