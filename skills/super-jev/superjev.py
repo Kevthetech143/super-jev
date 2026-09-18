@@ -315,7 +315,18 @@ DEFAULT_EVIDENCE_CAP_BYTES = 24_576  # 24 KB, the whole assembled window
 #                              (default 20 s), rather than starting one it
 #                              would have to kill. Its reports defer to
 #                              the next Stop event, as they already do on
-#                              a timeout.
+#                              a timeout, and the ledger reason for that
+#                              is "stop-scan-deferred" — a DEFERRED record,
+#                              never "budget-exceeded" and never LOST. The
+#                              reply itself is judged by the gate on the
+#                              same event, so calling this a lost check
+#                              was simply wrong (2026-09-18). Note this
+#                              default (20 s) is deliberately above the
+#                              default event budget (15 s): at the default
+#                              allowance of one call the gate holds it
+#                              anyway, so the scan always defers and only
+#                              ever spends a call when an operator raises
+#                              SUPERJEV_GATE_MAX_CALLS.
 #   SUPERJEV_STOP_SCAN_MAX_BYTES  the scan reads only the last N bytes of
 #                              the transcript (default 2 MB) instead of
 #                              all of it; the live transcripts in the
@@ -340,6 +351,17 @@ BUDGET_EXCEEDED_ADVISORY = (
     f"{GATE_BUDGET_S_ENV} wall-clock budget ran out before this reply could be "
     "checked. Nothing about it was verified; treat its claims as unchecked.")
 BUDGET_EXCEEDED_REASON = "budget-exceeded"
+
+# The advisory teammate-report scan's own deferral tag. It is NOT
+# BUDGET_EXCEEDED_REASON and must never become it again: that reason means
+# "this turn's reply shipped and nothing judged it" and sits in the health
+# monitor's LOST bucket. The scan running short of budget means something
+# entirely different — the gate still judged the reply, and the scan's
+# advisory worker-report checks are retried on the next Stop event, because
+# the state file only advances past reports it actually attempted. Sharing
+# one reason string made every Stop event with a new worker report report a
+# lost check that never happened (2026-09-18).
+SCAN_DEFERRED_REASON = "stop-scan-deferred"
 RULE_ENV = "SUPERJEV_RULE"
 DEFAULT_RULE = "v3"
 BLOCK_OVERCLAIM_ENV = "SUPERJEV_BLOCK_OVERCLAIM"
@@ -5789,17 +5811,28 @@ def _hook_stop_scan_teammate_reports(payload, budget=None):
             # budget, which is the entire reason this guard exists.
             if budget is not None:
                 remaining = budget.remaining()
+                # Ask for the call BEFORE looking at the clock. At the
+                # defaults the allowance is the real and structural reason
+                # this scan defers (SUPERJEV_GATE_MAX_CALLS=1, and the gate
+                # reserved it), so naming the clock first told the reader
+                # the budget ran out when no time had been spent at all.
+                # claim_call() takes nothing when it returns False.
+                got_call = budget.claim_call(reserve=1)
                 short = remaining is not None and remaining < min_start
-                if short or not budget.claim_call(reserve=1):
+                if not got_call or short:
                     timed_out = True
-                    why = (f"only {remaining:.1f}s left, under "
-                           f"{STOP_SCAN_MIN_BUDGET_S_ENV}={min_start:g}s"
-                           if short else
-                           f"no live call left under {GATE_MAX_CALLS_ENV} once the "
-                           "gate's own verdict is reserved")
-                    _hook_log(f"stop-scan: budget exceeded, not judged ({why}) — "
-                             "remaining report(s) deferred to the next Stop event",
-                             skipped=True, reason="budget-exceeded",
+                    why = (f"no live call left under {GATE_MAX_CALLS_ENV} once the "
+                           "gate's own verdict is reserved"
+                           if not got_call else
+                           f"only {remaining:.1f}s left, under "
+                           f"{STOP_SCAN_MIN_BUDGET_S_ENV}={min_start:g}s")
+                    # "deferred", never "not judged": the reply itself is
+                    # judged by the gate on this same event. Only these
+                    # advisory worker-report checks move to the next one.
+                    _hook_log(f"stop-scan: deferred, not dropped ({why}) — "
+                             "remaining report(s) retried on the next Stop event; "
+                             "this turn's own reply is judged by the gate as usual",
+                             skipped=True, reason=SCAN_DEFERRED_REASON,
                              source="stop-transcript")
                     break
             _stop_scan_verify_one(r, budget=budget)
@@ -6402,7 +6435,14 @@ SKIP_REASON_BUCKETS = {
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
-    "stop-scan-timeout": SKIP_BUCKET_LOST,
+    # The advisory teammate-report scan running out of its own time or its
+    # own call allowance is a DEFERRAL, not a lost check. The turn's reply
+    # is still judged by the gate on this same event, and the scan's state
+    # file only advances past reports it actually attempted, so the rest
+    # are retried on the next Stop event. Counting these as LOST pinned a
+    # permanent false WARN on every session that spawned workers.
+    "stop-scan-timeout": SKIP_BUCKET_DEFERRED,
+    "stop-scan-deferred": SKIP_BUCKET_DEFERRED,
     # A reply that went unjudged because the event ran out of wall clock
     # is a LOST check, not a deferral — the turn ended, the reply shipped,
     # and nothing checked it. It belongs in the bucket the health monitor

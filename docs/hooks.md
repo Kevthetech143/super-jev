@@ -776,6 +776,19 @@ The scan will also not *start* a live check it can see it would have to kill:
 `SUPERJEV_STOP_SCAN_MIN_S` (default 20 seconds) is the floor of remaining
 budget below which it defers instead, so a doomed check never costs a call.
 
+**A deferral is not a lost check.** `budget-exceeded` means one thing only:
+this turn's reply shipped and nothing judged it. When the *advisory scan*
+defers — no live call left for it, or too little wall clock to finish one
+honestly — it writes `stop-scan-deferred` instead, which sits in the
+**DEFERRED** bucket and raises no warning. The distinction is the whole point:
+the gate still judged the reply on that same event, and the deferred worker
+reports come back on the next one, because the scan's state file only advances
+past reports it actually attempted. `stop-scan-timeout`, the scan's other
+deferral, is DEFERRED for the same reason. These shared one reason string when
+the budget first shipped, and since the default allowance of one call is always
+reserved by the gate, every Stop event that saw a new worker report then
+reported a lost check that had not happened.
+
 **One window cap, enforced once, immediately before the call.** The window
 used to be capped in three places that did not compose: the builder capped
 what it assembled, the caller then appended a cited-file block *after* that
