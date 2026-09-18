@@ -1077,6 +1077,62 @@ and appends a one-line notice to its own output whenever a lost check shows
 up in that window — so the notice shows up in-session, not just in a file
 nobody opened.
 
+## The catch ledger
+
+The ledger above is a machine's record of what ran. The catch ledger is a
+second, much smaller file next to it, built for a human to read: one line
+per gate/verify decision, with room to say whether that decision was right.
+
+**What a record is.** Every time the Stop-hook gate or the PostToolUse
+verify hook reaches a real decision — allow, block, advisory, or the
+no-tool-evidence "unchecked" path — it appends one line to
+`SUPERJEV_CATCH_LEDGER` (default: next to the call ledger, as
+`catches.jsonl`): a short id, the timestamp, which door, the decision, the
+same reason strings `--explain` would print, a 240-character excerpt of the
+draft or report (redacted through the same guard that protects the evidence
+window — see "The evidence guard" above), how big the evidence window was,
+how long the check took, and two empty fields, `tag` and `note`, waiting for
+a human. **The full draft, report, or evidence window is never written
+here** — only the short redacted excerpt. Writing this record is
+best-effort: if the path is not writable, one line goes to stderr and the
+gate/verify decision that already happened is completely unaffected — the
+catch ledger is a report on a decision, never part of making one.
+
+**Tagging.** `superjev.py catch list [--since 24h] [--untagged]` prints one
+line per record so you can find the id. `superjev.py catch tag <id>
+fair|false|miss "why"` records a human verdict on that one decision:
+
+- `fair` — the block was right. A real overclaim or contradiction, caught.
+- `false` — the block was wrong. The draft was actually true.
+- `miss` — an allow let something false through. It should have blocked.
+
+**The three numbers.** `superjev.py catch report [--since 7d]` prints
+exactly three counts plus how many records are still untagged:
+
+    fair catches: N
+    false stops: N
+    misses: N
+    untagged: N
+
+That is the whole scoreboard: how often the gate is catching something real,
+how often it is wrongly getting in the way, and how often something false
+gets past it. Untagged is not a fourth verdict, just a reminder of how much
+of the ledger nobody has judged yet.
+
+**Auto-bench.** Tagging a record `false` or `miss` writes a bench case file
+to `SUPERJEV_BENCH_OUT` (default: `bench-cases/` next to the catch ledger),
+in the same shape the existing replay scripts consume — a `truth` case for a
+wrongly-blocked draft, a `lie` case for a wrongly-allowed one. Say plainly
+what that file does and does not carry: its `draft` field is only the catch
+ledger's own 240-character redacted excerpt, because that is all the catch
+ledger ever kept. The full text is gone unless `SUPERJEV_CATCH_KEEP_PAYLOAD=1`
+was set at decision time, which opts in to also saving a redacted copy of
+the whole hook payload under `payloads/<id>.json` — off by default, because
+the catch ledger's whole point is to not carry the full window. A bench case
+made without that env var set is good for a title, a decision, and a tag;
+turn the env var on before the block you want to replay later if you also
+want the fuller text.
+
 ## What it costs
 
 Evidence collection is local and free: git, a directory listing, a grep, and

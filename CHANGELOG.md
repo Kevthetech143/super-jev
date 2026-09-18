@@ -4,6 +4,23 @@
 
 No version bump.
 
+- **The catch ledger.** A new, separate JSONL file (`SUPERJEV_CATCH_LEDGER`,
+  default `catches.jsonl` next to the call ledger) records one small line
+  per gate/verify hook decision — id, door, decision, the same reason
+  strings `--explain` prints, a 240-char redacted excerpt of the draft or
+  report, window size, and two blank fields (`tag`, `note`) for a human.
+  Writing it is best-effort and never affects the decision or exit code it
+  is reporting on. New `superjev.py catch` subcommand: `list [--since 24h]
+  [--untagged]`, `tag <id> fair|false|miss "note"`, and `report [--since
+  7d]`, which prints exactly three numbers (fair catches, false stops,
+  misses) plus an untagged count. Tagging a record `false` or `miss` writes
+  a bench case file (`SUPERJEV_BENCH_OUT`, default `bench-cases/` next to
+  the catch ledger) in the shape the existing replay scripts consume;
+  opt-in `SUPERJEV_CATCH_KEEP_PAYLOAD=1` also saves a redacted copy of the
+  gate's hook payload under `payloads/<id>.json` at decision time, since the
+  catch ledger itself never keeps more than the 240-char excerpt. See
+  `docs/hooks.md`, "The catch ledger".
+
 - **Fetch none gate: floor + margin.** The none gate's confidence floor drops from 0.80 to a new default of **0.60**, and a new **margin** check joins it (`--margin N`, default **0.10**): the gate now also asks a clarifying question when the gap between the top pick's confidence and the runner-up's is below the margin, even when the top pick alone clears the floor. Rationale, in words: a confident-looking top-1 sitting in a crowded field — a runner-up almost as confident — is still a guess, just a confident-sounding one; the floor alone can't tell "clearly the best answer" apart from "the least-bad of two nearly-tied answers," and the margin is what catches the second case. An offline replay of saved live fetch rankings found the floor+margin pair served more correct top picks with fewer wrong serves than the old floor-only rule, described here in words rather than as benchmarked numbers. Both are overridable via `--floor`/`--margin` and the `SUPERJEV_FETCH_FLOOR`/`SUPERJEV_FETCH_MARGIN` env vars (a CLI flag always wins over its env var); the old floor-only behaviour is still reachable with `--floor 0.80 --margin 0`. `applyNoneGate` takes a third `margin` parameter; new `topMargin` export computes the gap (a lone top pick with no runner-up counts its own confidence as its margin). The `noMatch` decision (nothing beat "none of these") is unchanged and still takes precedence over both checks.
 
 - **Fetch v2**: a catalog schema (`src/enhance/catalog.ts`) — a v1 record stays `{id,text}`; a v2 record adds optional `utterances` (realistic user phrasings), `negatives` (near-miss phrasings that should NOT route here) and `tags`, drawn from the tool/skill-retrieval literature (ToolRet, SkillRet, aurelio-labs/semantic-router's `Route(utterances=[...])`). `loadCatalog`/`parseCatalogText` accept v1, v2, or a mix in one array. New `npm run catalog -- validate <file>` reports records with fewer than three utterances, the same phrasing claimed by two records, and a negative that is word-for-word another record's utterance.

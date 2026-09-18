@@ -6357,3 +6357,179 @@ def test_derived_facts_put_contradictions_ahead_of_the_cap():
     assert "CONTRADICTED_BY_FACT" in facts[0]
     assert "$3.55" in facts[0]
     assert sj._fact_block_reasons(facts)
+
+
+# ------------------------------------------------------------ catch ledger
+
+def _set_catch_paths(monkeypatch, tmp_path):
+    ledger = tmp_path / "calls.jsonl"
+    catch = tmp_path / "catches.jsonl"
+    monkeypatch.setattr(sj, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", catch)
+    return ledger, catch
+
+
+def _read_catch_records(path):
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def _write_catch_records(path, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+
+_LIE_STDOUT = (Path(__file__).resolve().parent / "fixtures" /
+              "lie_stop_high_confidence_stdout.txt").read_text(encoding="utf-8")
+
+
+def test_catch_ledger_writes_record_on_block(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "all 30 permit cases matched... merged PRs 8, 9 and 10",
+        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["door"] == "gate"
+    assert rec["decision"] == "block"
+    assert rec["reasons"]
+    assert rec["tag"] is None
+    assert rec["note"] is None
+    assert rec.get("id")
+
+
+def test_catch_ledger_writes_record_on_allow(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "the sky is blue",
+                                         "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "allow"
+
+
+def test_catch_ledger_unwritable_path_never_changes_decision(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "calls.jsonl")
+    blocker = tmp_path / "not_a_dir"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", blocker / "catches.jsonl")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "all 30 permit cases matched... merged PRs 8, 9 and 10",
+        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    # Same block decision as test_catch_ledger_writes_record_on_block above —
+    # an unwritable catch ledger path must never change it.
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "blocked" in err
+    assert "could not write catch ledger" in err
+
+
+def test_catch_ledger_excerpt_is_redacted(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    secret = "sk-" + "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8"
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("evidence text " + secret, encoding="utf-8")
+    draft = f"the key is {secret} and the evidence text matches"
+    _hook_stdin(monkeypatch, json.dumps({"draft": draft, "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    rec = _read_catch_records(catch_path)[0]
+    assert secret not in rec["draft_excerpt"]
+    assert "REDACTED" in rec["draft_excerpt"]
+
+
+def test_catch_list_untagged_only(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": "fair", "note": "ok"},
+    ])
+    code = sj.main(["catch", "list", "--untagged"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "a1" in out
+    assert "a2" not in out
+
+
+def test_catch_tag_and_report_arithmetic(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "b1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "", "window_bytes": None,
+         "ms": None, "tag": None, "note": None},
+        {"id": "b2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "", "window_bytes": None,
+         "ms": None, "tag": None, "note": None},
+        {"id": "b3", "ts": "2026-09-18T00:00:00+00:00", "door": "verify",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": None,
+         "ms": None, "tag": None, "note": None},
+    ])
+    assert sj.main(["catch", "tag", "b1", "fair", "correct block"]) == 0
+    assert sj.main(["catch", "tag", "b2", "false", "wrong block"]) == 0
+    assert sj.main(["catch", "tag", "b3", "miss", "let a lie through"]) == 0
+    capsys.readouterr()
+    code = sj.main(["catch", "report"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "fair catches: 1" in out
+    assert "false stops: 1" in out
+    assert "misses: 1" in out
+    assert "untagged: 0" in out
+
+
+def test_catch_tag_false_writes_bench_case_fair_does_not(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    bench_dir = tmp_path / "bench-out"
+    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(bench_dir))
+    _write_catch_records(catch_path, [
+        {"id": "c1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "true draft",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "c2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "real block",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    sj.main(["catch", "tag", "c1", "false", "wrong"])
+    sj.main(["catch", "tag", "c2", "fair", "right"])
+    assert (bench_dir / "c1.json").exists()
+    assert not (bench_dir / "c2.json").exists()
+    case = json.loads((bench_dir / "c1.json").read_text(encoding="utf-8"))
+    assert case["kind"] == "truth"
+    assert case["draft"] == "true draft"
+
+
+def test_catch_tag_miss_writes_lie_kind_bench_case(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    bench_dir = tmp_path / "bench-out"
+    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(bench_dir))
+    _write_catch_records(catch_path, [
+        {"id": "d1", "ts": "2026-09-18T00:00:00+00:00", "door": "verify",
+         "decision": "allow", "reasons": [], "draft_excerpt": "a lie that got through",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    sj.main(["catch", "tag", "d1", "miss", "should have blocked"])
+    case = json.loads((bench_dir / "d1.json").read_text(encoding="utf-8"))
+    assert case["kind"] == "lie"
+    assert case["payload_path"] is None  # no SUPERJEV_CATCH_KEEP_PAYLOAD copy exists
