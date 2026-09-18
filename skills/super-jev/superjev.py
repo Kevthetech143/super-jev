@@ -36,6 +36,8 @@ to a call ledger under this skill's own `ledger/` folder; see `ledger` and
 `status`.
 """
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -46,7 +48,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOME = Path(os.path.expanduser("~"))
@@ -201,6 +203,126 @@ def redact_counted(text, redact_emails=False):
 def redact(text, redact_emails=False):
     """Convenience form that drops the count (atoms.py's `redact` signature)."""
     return redact_counted(text, redact_emails)[0]
+
+
+# --------------------------------------------------- catch-ledger-only redaction
+#
+# The patterns below fire ONLY on the catch-ledger path (the 240-char draft
+# excerpt and the opt-in saved payload copy) — never on the gate/verify
+# evidence window itself, which stays governed by redact()/redact_counted()
+# above unchanged. The catch ledger is customer-facing text a human tags by
+# hand and reads later, so it gets the wider net: emails (redact() called
+# with redact_emails=True) plus US phone numbers, SSN-shaped 3-2-4 digit
+# strings, and 13+ digit card numbers (space, dash or dot separators).
+#
+# Card numbers are handled separately from the table below (see
+# _CARD_NUMBER_*_RX/_catch_redact_card_repl), not as a plain find-and-replace
+# pattern, for three reasons (see N1, N3):
+#   - the old `\b(?:\d[ \-]?){13,19}\b` form silently missed any run of 20+
+#     digits: \b requires a transition into/out of a word character, and
+#     inside a longer all-digit run there is no such transition anywhere
+#     except at the run's own true start/end — capped at 19 reps, the
+#     regex could never land a cut point on a real \b, so it just never
+#     matched at all. An ungrouped (no separator) run just needs its upper
+#     bound removed — see _CARD_NUMBER_PLAIN_RX.
+#   - a bare 13-digit ungrouped run is often a plausible unix-millisecond
+#     timestamp (this repo's own ledger timestamps and payload fields are
+#     full of them), not a card number, and redacting those made ordinary
+#     catch records unreadable for no privacy benefit. Only a 13-digit run
+#     shaped like one (starts "1", second digit 5-9 — roughly the
+#     2015-2029 range any real timestamp here falls in) is left alone;
+#     13 digits in any other shape, and every run of 14+ digits, still
+#     redacts.
+#   - N3: a SEPARATED (space/dash/dot) digit run is a different animal.
+#     The old "13+ digits, any mix of separators" form matched things that
+#     were never a card number at all — most sharply, a dotted
+#     date+time stamp like "2026.09.18.10.46.33.123" (a card-hint id
+#     format this repo uses elsewhere), which has 17 digits and plenty of
+#     dot separators but no card shape whatsoever. A separated match is
+#     now required to be an EXACT card grouping — 4-4-4-4 (Visa/MC/Discover,
+#     16 digits) or 4-6-5 (Amex, 15 digits) — using the SAME separator
+#     throughout (a backreference), so "4111.1111.1111.1111" still
+#     redacts but a 7-group dotted timestamp never matches the shape at
+#     all. As a second guard, even a genuine 4-4-4-4/4-6-5 shape is left
+#     alone when its first group looks like a plausible year (starts "19"
+#     or "20") — a date that happens to fall into a 4-digit-group pattern
+#     is a false positive, not a card number.
+# \b at both ends is kept for exactly the reason it always had one: a
+# digit run glued to a letter (e.g. inside a git id or other alphanumeric
+# token) is never a card number and is never matched, because \b treats
+# letters and digits as the same "word" character class.
+_CARD_NUMBER_PLAIN_RX = re.compile(r"\b\d{13,}\b")
+_CARD_NUMBER_GROUPED_RX = re.compile(
+    r"\b\d{4}([ \-.])\d{4}\1\d{4}\1\d{4}\b"      # 4-4-4-4 (Visa/MC/Discover)
+    r"|"
+    r"\b\d{4}([ \-.])\d{6}\2\d{5}\b"             # 4-6-5 (Amex)
+)
+
+
+def _looks_like_unix_ms_timestamp(digits):
+    """True for a 13-digit run shaped like a plausible unix-millisecond
+    timestamp (starts "1", second digit 5-9) — see the module note above
+    _CARD_NUMBER_PLAIN_RX. Only ever checked against exactly 13 digits;
+    anything longer is never a timestamp candidate and always redacts."""
+    return len(digits) == 13 and digits[0] == "1" and digits[1] in "56789"
+
+
+def _looks_like_a_year_group(first_group):
+    """True when a 4-digit group (the first group of a grouped card-shape
+    match) looks like a plausible year — starts "19" or "20" — the N3
+    guard against a date string that happens to land on a 4-4-4-4/4-6-5
+    shape."""
+    return first_group[:2] in ("19", "20")
+
+
+def _catch_redact_card_plain_repl(m):
+    digits = m.group(0)
+    if _looks_like_unix_ms_timestamp(digits):
+        return digits
+    return "[REDACTED:card-number]"
+
+
+def _catch_redact_card_grouped_repl(m):
+    text = m.group(0)
+    first_group = text[:4]
+    if _looks_like_a_year_group(first_group):
+        return text
+    return "[REDACTED:card-number]"
+
+
+# US-shaped phone numbers only (see N2): area code's first digit is 2-9
+# (0 and 1 are never a real US area code's first digit — simplest way to
+# stop matching a non-phone 3-3-4 digit shape like a numeric range,
+# "100-200-3000", without a lookup table). `(?<!\d)`/`(?!\d)` refuse a
+# match glued to another digit on either side (an ordinary phone number is
+# never itself part of a longer digit run), and `(?!\.\d)` refuses a match
+# immediately followed by a decimal continuation (part of a longer
+# dotted/decimal sequence — a coordinate, not a phone number).
+_CATCH_REDACT_PATTERNS = (
+    ("phone", r"(?<!\d)(?:\+?1[ \-.]?)?\(?[2-9]\d{2}\)?[ \-.]\d{3}[ \-.]\d{4}(?!\d)(?!\.\d)"),
+    ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
+)
+_COMPILED_CATCH_REDACT = tuple((k, re.compile(p)) for k, p in _CATCH_REDACT_PATTERNS)
+
+
+def _catch_redact(text):
+    """The redaction used ONLY by the catch ledger (draft excerpt + saved
+    payload) — never applied to the gate/verify evidence window. Runs the
+    general redact() with redact_emails=True (secrets, credentials, plus
+    emails), then, catch-ledger-only, redacts card numbers — an ungrouped
+    13+ digit run (unix-ms timestamps excepted) or a separated run in an
+    exact 4-4-4-4/4-6-5 card grouping (a plausible year first group
+    excepted — see N3, _CARD_NUMBER_PLAIN_RX/_CARD_NUMBER_GROUPED_RX) —
+    US-shaped phone numbers, and SSN-shaped 3-2-4 digit strings. Never
+    raises: an empty/None input returns ""."""
+    if not text:
+        return text or ""
+    out = redact(str(text), redact_emails=True)
+    out = _CARD_NUMBER_GROUPED_RX.sub(_catch_redact_card_grouped_repl, out)
+    out = _CARD_NUMBER_PLAIN_RX.sub(_catch_redact_card_plain_repl, out)
+    for kind, rx in _COMPILED_CATCH_REDACT:
+        out = rx.sub(f"[REDACTED:{kind}]", out)
+    return out
 
 
 class GuardTally:
@@ -1743,6 +1865,558 @@ def _ledger_lines():
     except OSError:
         return []
     return [ln for ln in text.splitlines() if ln.strip()]
+
+
+# --------------------------------------------------------------- catch ledger
+#
+# The catch ledger is a second, separate JSONL file from the call ledger
+# above. The call ledger is "what ran, how long, what exit code" — every
+# door invocation. The catch ledger is narrower and purpose-built: one
+# record per gate/verify hook DECISION (allow/block/advisory/unchecked),
+# small enough that Kelvin can tag each one fair/false/miss by hand and
+# read the three-number scoreboard `catch report` prints. See docs/hooks.md,
+# "The catch ledger".
+
+def _default_catch_ledger_path():
+    """SUPERJEV_CATCH_LEDGER, if set, else alongside the call ledger, as
+    catches.jsonl — same directory SUPERJEV_LEDGER resolves to (or this
+    skill's own ledger/ dir when neither is set)."""
+    override = os.environ.get("SUPERJEV_CATCH_LEDGER")
+    if override:
+        return Path(override).expanduser()
+    return LEDGER_PATH.parent / "catches.jsonl"
+
+
+CATCH_LEDGER_PATH = _default_catch_ledger_path()
+
+
+def catch_ledger_append(entry):
+    """Append one JSONL line to the catch ledger. Never raises — same
+    contract as ledger_append. Critically, this is only ever called AFTER
+    the real gate/verify decision (exit code, block/allow/advisory) is
+    already final and returned by the caller: a broken or unwritable catch
+    ledger path must never change what a hook does, only whether this
+    optional record of it gets written. A write failure prints one line to
+    stderr rather than raising or failing silently — this catches any
+    Exception, not just OSError (a bad entry that json.dumps chokes on, a
+    permissions error, anything at all), because this call sits strictly
+    after a real decision has already been returned and must never
+    propagate."""
+    entry.setdefault("id", uuid.uuid4().hex[:10])
+    try:
+        CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        print(f"super-jev: could not write catch ledger at {CATCH_LEDGER_PATH}: {exc}",
+              file=sys.stderr)
+    return entry["id"]
+
+
+def _catch_excerpt(text):
+    """The catch ledger's excerpt: the input is first sliced to 4096 chars
+    (bounding how much text _catch_redact ever has to scan), THEN redacted
+    through _catch_redact — secrets/credentials, emails, US phone numbers,
+    SSN-shaped digit strings, and card numbers (an ungrouped 13+ digit run,
+    or a grouped 4-4-4-4/4-6-5 run using one consistent separator, each
+    with its own narrow exception — see _catch_redact and docs/hooks.md) —
+    and finally sliced to the 240 chars actually kept. No secret,
+    credential, email, phone number, SSN-shaped string or card number ever
+    lands in the catch ledger, because this excerpt is the only piece of
+    the original text the ledger keeps at all."""
+    if not text:
+        return ""
+    return _catch_redact(str(text)[:4096])[:240]
+
+
+def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
+              start_time=None, payload=None):
+    """One record for the catch ledger — called once per gate/verify hook
+    decision. `decision` is one of "block", "allow", "advisory", "unchecked"
+    (see docs/hooks.md). `reasons` is the same strings --explain shows for
+    this run (block_reasons/block_notes), never the raw evidence. `ms` is
+    left as None (not guessed) when `start_time` was not captured.
+
+    Wrapped in try/except on purpose: a bug in this function must never
+    surface as a change to the hook's own return value, because every call
+    site here runs strictly after that value is already decided.
+    `payload`, if given and SUPERJEV_CATCH_KEEP_PAYLOAD=1, is saved
+    (redacted) alongside this record's id for later bench-case export —
+    see _catch_save_payload."""
+    try:
+        ms = None
+        if start_time is not None:
+            ms = int((time.monotonic() - start_time) * 1000)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "door": door,
+            "decision": decision,
+            "reasons": list(reasons or []),
+            "draft_excerpt": _catch_excerpt(draft_text),
+            "window_bytes": window_bytes,
+            "ms": ms,
+            "tag": None,
+            "note": None,
+        }
+        catch_id = catch_ledger_append(entry)
+        if payload is not None:
+            _catch_save_payload(catch_id, payload)
+        return catch_id
+    except Exception:
+        return None
+
+
+def _catch_save_payload(catch_id, payload):
+    """Opt-in only (SUPERJEV_CATCH_KEEP_PAYLOAD=1): the redacted hook
+    payload for THIS decision, saved under <catch ledger dir>/payloads/
+    <id>.json. Off by default because the catch ledger's whole point is
+    that it never writes the full window; this is the explicit exception a
+    human turned on, meant to make later bench-case export possible for a
+    tagged false stop or miss. Never raises, never required for the ledger
+    line above to succeed — a payload save failure is silent by design
+    (the ledger line is the record that matters; the payload is a bonus)."""
+    if os.environ.get("SUPERJEV_CATCH_KEEP_PAYLOAD") != "1":
+        return None
+    try:
+        out_dir = CATCH_LEDGER_PATH.parent / "payloads"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        redacted = _catch_redact(raw)
+        out_path = out_dir / f"{catch_id}.json"
+        out_path.write_text(redacted, encoding="utf-8")
+        return str(out_path)
+    except Exception:
+        return None
+
+
+def _catch_cases_path():
+    """SUPERJEV_CATCH_CASES, if set, else <catch ledger dir>/catch-cases.json
+    — ONE JSON array file that `catch tag` keeps in sync with the catch
+    ledger's own tags (see _upsert_catch_case). NOT the old per-id
+    bench-case-file shape (that never fit this data — see
+    _build_catch_case's docstring for why), and NOT the old default
+    directory name (bench-cases/); the default is a single file,
+    catch-cases.json, next to the catch ledger."""
+    override = os.environ.get("SUPERJEV_CATCH_CASES")
+    if override:
+        return Path(override).expanduser()
+    return CATCH_LEDGER_PATH.parent / "catch-cases.json"
+
+
+def _catch_lock_path():
+    return CATCH_LEDGER_PATH.parent / (CATCH_LEDGER_PATH.name + ".lock")
+
+
+class _CatchLockRefused(Exception):
+    """Internal signal only: _catch_lock could not even open its lock file
+    (see below). Caught by _cmd_catch_tag and turned into a normal
+    `return REFUSED`, same as every other catch-tag refusal — never lets
+    an OSError (or this exception) reach the caller as a traceback."""
+
+
+@contextlib.contextmanager
+def _catch_lock():
+    """Exclusive lock held across ONE `catch tag` command's whole
+    read-modify-write — both the catch-ledger rewrite (_rewrite_catch_records)
+    and the catch-cases array upsert (_upsert_catch_case) — so two `catch
+    tag` commands racing on different ids never silently drop each other's
+    write (see B3). A sibling `.lock` file, never the ledger file itself,
+    so holding this open never interferes with the ledger's own
+    os.replace-based atomic rewrite. fcntl.flock blocks (waits) rather than
+    failing, so a second `catch tag` simply waits its turn instead of
+    losing its write; the lock is released (and the fd closed) even if the
+    body raises.
+
+    mkdir/open here can raise OSError — a read-only or missing catch-ledger
+    directory, most commonly — and that must be a clean one-line refusal,
+    not a traceback. Caught and printed here, then re-raised as
+    _CatchLockRefused so _cmd_catch_tag can turn it into an ordinary
+    `return REFUSED` (exit 5), the same shape every other catch-tag
+    refusal already uses."""
+    lock_path = _catch_lock_path()
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(lock_path, "a+")
+    except OSError as exc:
+        print(f"super-jev: catch tag: could not open lock file {lock_path}: {exc}",
+              file=sys.stderr)
+        raise _CatchLockRefused() from exc
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fd.close()
+
+
+def _catch_payload_path(rec_id):
+    return CATCH_LEDGER_PATH.parent / "payloads" / f"{rec_id}.json"
+
+
+def _load_full_payload_draft(rec_id):
+    """If SUPERJEV_CATCH_KEEP_PAYLOAD was on when this record was made, the
+    saved (redacted) hook payload may carry the full draft/report text
+    under one of a few keys a real gate/verify hook payload uses. Returns
+    None (never raises) when there is no payload copy, it cannot be read
+    or parsed, or none of the known keys carried a non-empty string — the
+    caller then falls back to the catch ledger's own 240-char excerpt,
+    which is all that was ever kept in that case."""
+    payload_path = _catch_payload_path(rec_id)
+    if not payload_path.exists():
+        return None
+    try:
+        data = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("last_assistant_message", "draft", "report", "text", "prompt"):
+        val = data.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
+def _build_catch_case(record):
+    """Build ONE "catch case" dict (not written anywhere yet — see
+    _upsert_catch_case) for a catch-ledger record tagged "false" (a block
+    that was wrong — the draft was actually true) or "miss" (an allow that
+    let a lie through).
+
+    This is deliberately NOT a "bench case" in the gate-bench sense, and
+    is never claimed to be one. A catch record has no transcript anchor —
+    no source_offset/source_idx/transcript_path/bot — so it can never
+    satisfy replay_gate_bench.py or replay_fact_block_sweep.py, which both
+    read one JSON array of cases shaped that way. Use
+    skills/super-jev/tests/replay_catch_cases.py instead, which reads
+    THIS file's own shape and, for any case that carries a payload_path,
+    can re-run the original gate/verify decision offline through
+    SUPERJEV_GATE_CMD/SUPERJEV_VERIFY_CMD.
+
+    `draft` here is the FULL draft/report text when a payload copy exists
+    (SUPERJEV_CATCH_KEEP_PAYLOAD was on at decision time — see
+    _load_full_payload_draft) — otherwise it falls back to the catch
+    ledger's own 240-char redacted excerpt, which is all that was ever
+    kept. Either way this is the same catch-ledger redaction (see
+    _catch_redact), never the raw original text."""
+    tag = record.get("tag")
+    # false = a block was wrong, i.e. the blocked draft was actually TRUE.
+    # miss = an allow let a lie through, i.e. the allowed draft was a LIE.
+    kind = "truth" if tag == "false" else "lie"
+    rec_id = record.get("id", "")
+    payload_path = _catch_payload_path(rec_id)
+    full_draft = _load_full_payload_draft(rec_id)
+    draft = _catch_redact(full_draft) if full_draft is not None else record.get(
+        "draft_excerpt", "")
+    return {
+        "id": rec_id,
+        "ts": record.get("ts"),
+        "door": record.get("door"),
+        "kind": kind,
+        "draft": draft,
+        "payload_path": str(payload_path) if payload_path.exists() else None,
+        "reasons": record.get("reasons") or [],
+        "note": record.get("note"),
+    }
+
+
+def _catch_cases_write(cases):
+    """Atomic overwrite of the whole catch-cases array file. Must be
+    called with the catch lock already held (see _catch_lock) whenever the
+    caller also touched the catch ledger in the same command, so the two
+    files never observe a partial update from a concurrent `catch tag`.
+
+    Sorted by `ts` (ISO 8601, so this is also chronological string order;
+    a missing/unparseable ts sorts first via "") before writing — N1: a
+    re-tag removes and re-appends a case (see _upsert_catch_case), which
+    without this would silently move it to the end of the file, reordering
+    every case that already existed just because one of them got
+    re-tagged."""
+    cases = sorted(cases, key=lambda c: c.get("ts") or "")
+    cases_path = _catch_cases_path()
+    try:
+        cases_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cases_path.with_suffix(cases_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(cases, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+        os.replace(tmp_path, cases_path)
+        return str(cases_path)
+    except OSError as exc:
+        print(f"super-jev: could not write catch cases at {cases_path}: {exc}",
+              file=sys.stderr)
+        return None
+
+
+def _upsert_catch_case(rec_id, new_case):
+    """At most one catch case per record id (see B2): replaces any
+    existing case for `rec_id` with `new_case`, or — when `new_case` is
+    None — removes that id's case without adding one (a re-tag to "fair"
+    withdraws a false/miss case that had been written for the same id).
+    Reads the cases file fresh, so this must be called with the catch lock
+    already held: an unlocked read-modify-write here is exactly B3's
+    race."""
+    cases_path = _catch_cases_path()
+    try:
+        existing = json.loads(cases_path.read_text(encoding="utf-8"))
+        if not isinstance(existing, list):
+            existing = []
+    except (OSError, ValueError):
+        existing = []
+    existing = [c for c in existing if c.get("id") != rec_id]
+    if new_case is not None:
+        existing.append(new_case)
+    return _catch_cases_write(existing)
+
+
+def _catch_lines():
+    try:
+        text = CATCH_LEDGER_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [ln for ln in text.splitlines() if ln.strip()]
+
+
+def _catch_records():
+    out = []
+    for line in _catch_lines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+def _parse_since(spec):
+    """"24h" / "7d" / "30m" -> a timedelta, or None if unparseable (caller
+    then applies no time filter rather than guessing)."""
+    if not spec:
+        return None
+    m = re.match(r"^(\d+)\s*([mhd])$", str(spec).strip().lower())
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "m":
+        return timedelta(minutes=n)
+    if unit == "h":
+        return timedelta(hours=n)
+    return timedelta(days=n)
+
+
+def _catch_ts(rec):
+    try:
+        return datetime.fromisoformat(str(rec.get("ts", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _catch_filter_since(records, since_spec):
+    """Returns (kept, undated_count). `since_spec` of None/"" means no
+    filter at all — every record is kept and undated_count is 0. When a
+    real window is applied, a record with a missing or unparseable `ts` is
+    excluded from that window (never silently included, as if it were
+    always "recent") and counted separately in undated_count instead — the
+    caller reports that count on its own line rather than folding it into
+    either side of the window.
+
+    Callers must validate `since_spec` themselves before calling this (see
+    `_parse_since`) — an unparseable-but-non-empty spec is a caller error,
+    reported as exit 2, not silently treated as "no filter" here."""
+    delta = _parse_since(since_spec)
+    if delta is None:
+        return records, 0
+    cutoff = datetime.now(timezone.utc) - delta
+    out = []
+    undated = 0
+    for rec in records:
+        ts = _catch_ts(rec)
+        if ts is None:
+            undated += 1
+            continue
+        if ts >= cutoff:
+            out.append(rec)
+    return out, undated
+
+
+def _rewrite_catch_records(records):
+    """Rewrite the whole catch ledger file from a list of records — used
+    only by `catch tag`, which mutates one existing line in place. Never
+    raises; on failure prints to stderr and leaves the file as it was."""
+    try:
+        CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = CATCH_LEDGER_PATH.with_suffix(CATCH_LEDGER_PATH.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, CATCH_LEDGER_PATH)
+        return True
+    except OSError as exc:
+        print(f"super-jev: could not update catch ledger at {CATCH_LEDGER_PATH}: {exc}",
+              file=sys.stderr)
+        return False
+
+
+def cmd_catch(a):
+    action = getattr(a, "catch_action", None)
+    if action == "list":
+        return _cmd_catch_list(a)
+    if action == "tag":
+        return _cmd_catch_tag(a)
+    if action == "report":
+        return _cmd_catch_report(a)
+    return refuse("catch: no action — use list, tag or report")
+
+
+def _catch_refuse3(line):
+    """Same shape as refuse(), but exit 3 — the shared exit code for every
+    `catch` refusal that is NOT a plain usage error and NOT the generic
+    REFUSED (5): `catch tag`'s tag-vs-decision contradiction refusal
+    (N6 — a tag that contradicts the record it names, e.g. "false" on a
+    record whose decision was "allow"), and `catch list`'s/`catch
+    report`'s shared --since validation refusal (N4 — an unparseable
+    --since value). Both used to exit differently (2 for --since, 3 for
+    the tag contradiction) even though neither is an argparse usage error
+    (argparse already accepted the arguments fine in both cases) and
+    neither is the generic "missing input/door" refusal(5) — exit 2 is
+    argparse's own usage-error convention, so overloading it here made a
+    caller unable to tell "bad flag" apart from "refused for a domain
+    reason" by exit code alone. N4 moved --since onto this same code so
+    both refusal families now share one, unambiguous, non-usage-error
+    exit."""
+    print(f"super-jev: {line}", file=sys.stderr)
+    return 3
+
+
+def _cmd_catch_list(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse3(f"catch list: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
+    records = _catch_records()
+    records, undated = _catch_filter_since(records, since)
+    if getattr(a, "untagged", False):
+        records = [r for r in records if r.get("tag") is None]
+    if not records:
+        print("catch list: no records")
+    else:
+        for rec in records:
+            reasons = rec.get("reasons") or []
+            first_reason = reasons[0] if reasons else ""
+            tag = rec.get("tag") or "-"
+            print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+    if since and undated:
+        print(f"catch list: {undated} undated record(s) excluded from the --since window")
+    return 0
+
+
+# Which recorded `decision` a given tag value is allowed to land on — a
+# tag that contradicts the record it names is refused rather than silently
+# accepted (see _cmd_catch_tag): "false"/"fair" only make sense against a
+# real or forced block (the thing being judged right or wrong IS a block),
+# "miss" only against a decision that let the reply through unblocked.
+_TAG_ALLOWED_DECISIONS = {
+    "fair": ("block", "advisory-forced"),
+    "false": ("block", "advisory-forced"),
+    "miss": ("allow", "advisory", "unchecked"),
+}
+
+
+def _cmd_catch_tag(a):
+    catch_id = a.id
+    value = a.value
+    note = getattr(a, "note", "") or ""
+    if value not in ("fair", "false", "miss"):
+        return refuse(f"catch tag: {value!r} — use fair, false or miss")
+    # The whole read-modify-write — ledger AND catch-cases array — runs
+    # under one lock (see B3): records are re-read fresh here, inside the
+    # lock, not reused from some earlier read, so two `catch tag` commands
+    # racing on different ids never clobber each other's write.
+    try:
+        return _cmd_catch_tag_locked(catch_id, value, note)
+    except _CatchLockRefused:
+        return REFUSED
+
+
+def _cmd_catch_tag_locked(catch_id, value, note):
+    with _catch_lock():
+        records = _catch_records()
+        matched = None
+        for rec in records:
+            if rec.get("id") == catch_id:
+                matched = rec
+                break
+        if matched is None:
+            return refuse(f"catch tag: no catch-ledger record with id {catch_id!r}")
+        decision = matched.get("decision")
+        allowed = _TAG_ALLOWED_DECISIONS[value]
+        if decision not in allowed:
+            return _catch_refuse3(
+                f"catch tag: {value!r} does not fit a {decision!r} record ({catch_id}) — "
+                f"{value!r} only fits: {'/'.join(allowed)}")
+        matched["tag"] = value
+        matched["note"] = note
+        if not _rewrite_catch_records(records):
+            return refuse(f"catch tag: could not persist the tag for {catch_id!r}")
+        case_path = None
+        if value in ("false", "miss"):
+            # At most one catch case per record id (B2): a re-tag from
+            # false to miss (or vice versa) replaces the earlier case for
+            # this id rather than appending a duplicate.
+            case_path = _upsert_catch_case(catch_id, _build_catch_case(matched))
+        else:
+            # Tagging fair withdraws any case an earlier false/miss tag on
+            # this same id had written (B2) — a case whose tag no longer
+            # says "wrong" or "missed" has no business staying in the
+            # catch-cases file.
+            _upsert_catch_case(catch_id, None)
+    print(f"catch tag: {catch_id} -> {value}" +
+          (f" (catch case: {case_path})" if case_path else ""))
+    return 0
+
+
+def _cmd_catch_report(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse3(f"catch report: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
+    records = _catch_records()
+    records, undated = _catch_filter_since(records, since)
+    fair = sum(1 for r in records if r.get("tag") == "fair")
+    false = sum(1 for r in records if r.get("tag") == "false")
+    miss = sum(1 for r in records if r.get("tag") == "miss")
+    untagged = sum(1 for r in records if r.get("tag") is None)
+    # "advisory-forced" is a would-have-blocked stop_hook_active second pass
+    # (see docs/hooks.md) — reported here as its own line, "blocks
+    # suppressed", never folded into "false stops" or "misses" by ITSELF,
+    # because being demoted to advisory is neither: nothing was judged
+    # right or wrong yet, a real block was just held back by the retry.
+    # Once a human tags that same record fair or false, though, it also
+    # lands on that tag's own line above (see N5) — the two lines are
+    # answering different questions ("was a block held back?" vs "was the
+    # underlying call right?") and a record can honestly answer both, so
+    # this is not double-counting a single question, but the raw sum of
+    # the lines above can still look larger than the record count without
+    # this footnote explaining why.
+    suppressed = sum(1 for r in records if r.get("decision") == "advisory-forced")
+    suppressed_and_tagged = sum(1 for r in records if r.get("decision") == "advisory-forced"
+                                and r.get("tag") in ("fair", "false"))
+    print(f"fair catches: {fair}")
+    print(f"false stops: {false}")
+    print(f"misses: {miss}")
+    print(f"untagged: {untagged}")
+    print(f"blocks suppressed: {suppressed}")
+    if suppressed_and_tagged:
+        print(f"  ({suppressed_and_tagged} of the above blocks-suppressed record(s) is "
+              "also tagged fair/false and counted on that line too — suppressed and "
+              "fair/false answer different questions, see docs/hooks.md)")
+    if since:
+        print(f"undated: {undated}")
+    return 0
 
 
 def _ledger_count_today():
@@ -5770,7 +6444,13 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
     pr resolve to anything, there is no evidence source at all — this
     prints an advisory and returns 0 WITHOUT ever calling the verify door,
     rather than running it blind and letting an unrelated old default
-    verdict stand in for "nothing was checked"."""
+    verdict stand in for "nothing was checked". Every REAL verdict this
+    reaches (allow/block/advisory, after the door actually ran) also gets
+    a catch-ledger record, door="verify", the same as a live PostToolUse
+    verify hook — the early fail-open returns above (wrong door, unreadable
+    file, empty file, no evidence source) do not, same as every other
+    fail-open path in this file."""
+    _catch_t0 = time.monotonic()
     if door != "verify":
         msg = "super-jev hook: --from-file is only supported for `hook verify`"
         print(msg, file=sys.stderr)
@@ -5855,9 +6535,12 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
         _print_explain("verify", code, action, flags, claim_rows, evidence, notes,
                        block_reasons)
     note_tail = (" — " + "; ".join(notes)) if notes else ""
+    _catch_payload = {"door": "verify", "source": "from-file", "path": path, "report": text}
     if action == "allow":
         _hook_log(f"verify: allow (exit {code}) [from-file {path!r}]", exit_code=0,
                  flags=flags, hook_mode=False, source="manual")
+        catch_log("verify", "allow", reasons=notes, draft_text=text,
+                 start_time=_catch_t0, payload=_catch_payload)
         return 0
     if action == "block":
         reason = f"super-jev verify blocked this (exit {code})"
@@ -5870,11 +6553,15 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
                  (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
                  (f" — advisory: {'; '.join(notes)}" if notes else ""),
                  exit_code=2, flags=flags, hook_mode=False, source="manual")
+        catch_log("verify", "block", reasons=block_reasons + notes, draft_text=text,
+                 start_time=_catch_t0, payload=_catch_payload)
         return 2
     advisory = f"super-jev verify advisory (exit {code}){note_tail}"
     print(advisory)
     _hook_log(f"verify: advisory (exit {code}) [from-file {path!r}]{note_tail}",
              exit_code=0, flags=flags, hook_mode=False, source="manual")
+    catch_log("verify", "advisory", reasons=notes, draft_text=text,
+             start_time=_catch_t0, payload=_catch_payload)
     return 0
 
 
@@ -6014,6 +6701,7 @@ def cmd_hook_prompt_verify(a):
             elif derived["pr"]:
                 report_text += f"\n\nRelated pull request: PR #{derived['pr']}"
 
+            _catch_t0 = time.monotonic()
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
             tmp_path = tmp.name
@@ -6045,6 +6733,15 @@ def cmd_hook_prompt_verify(a):
             _hook_log(f"prompt-verify: {teammate_id} — {label} (exit {code}) [{used}]",
                      exit_code=0, skipped=False, flags=flags, hook_mode=True,
                      source="teammate-message")
+            # One catch-ledger record per teammate verdict — CLEAN/READ/REJECT
+            # map onto the same allow/advisory/block vocabulary every other
+            # door's catch record uses.
+            _catch_decision = {"CLEAN": "allow", "READ": "advisory",
+                               "REJECT": "block"}.get(label, "advisory")
+            catch_log("prompt-verify", _catch_decision, reasons=block_reasons,
+                     draft_text=report_text, start_time=_catch_t0,
+                     payload={"door": "prompt-verify", "teammate_id": teammate_id,
+                              "report": report_text})
             any_checked = True
         if not any_checked:
             _hook_log("prompt-verify: no teammate-message block carried a report marker",
@@ -6470,6 +7167,7 @@ def cmd_hook(a):
           describes the lead session, not necessarily the worker's tree).
     """
     door = getattr(a, "door", "?")
+    _catch_t0 = time.monotonic()
     if door == "prompt-verify":
         return cmd_hook_prompt_verify(a)
     from_file = getattr(a, "from_file", None)
@@ -6513,6 +7211,9 @@ def cmd_hook(a):
                       f"budget was spent after {budget.elapsed():.1f}s) — advisory, "
                       "the reply was NOT checked", exit_code=3, skipped=True,
                       reason=BUDGET_EXCEEDED_REASON)
+            catch_log("gate", "unchecked", reasons=[BUDGET_EXCEEDED_REASON],
+                     draft_text=text, window_bytes=None, start_time=_catch_t0,
+                     payload=payload)
             return 3
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                           encoding="utf-8")
@@ -6551,6 +7252,16 @@ def cmd_hook(a):
         notice = _running_unchecked_notice()
         if notice:
             print(notice)
+        # Computed only here, AFTER both the advisory print above and this
+        # notice — a raise from _parse_strong_flags on a malformed door_out
+        # must never be able to swallow either print (see N6/brutal review):
+        # this whole block runs strictly after them now, not before.
+        _catch_unchecked_flags = _parse_strong_flags(door_out) or []
+        _catch_unchecked_reasons = [f"{f.get('key')} {f.get('verdict')} {f.get('score')}"
+                                    for f in _catch_unchecked_flags]
+        catch_log("gate", "unchecked", reasons=_catch_unchecked_reasons,
+                 draft_text=text, window_bytes=None, start_time=_catch_t0,
+                 payload=payload)
         return 0
 
     budget = StopBudget()
@@ -6669,6 +7380,9 @@ def cmd_hook(a):
                 _budget_notice = _running_unchecked_notice()
                 if _budget_notice:
                     print(_budget_notice)
+                catch_log("gate", "unchecked", reasons=[BUDGET_EXCEEDED_REASON],
+                         draft_text=text, window_bytes=None, start_time=_catch_t0,
+                         payload=payload)
                 return 3
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
@@ -6842,6 +7556,18 @@ def cmd_hook(a):
             suppressed_reason = "flagged-suppressed-empty-turn"
             suppressed_note_tail = f" [suppressed: {sk} {sv} {sscore:.2f}]"
 
+        # The catch ledger's own window_bytes — best-effort, gate only (the
+        # transcript-derived window is the thing worth sizing; verify has
+        # no equivalent window, so this stays None there).
+        _catch_window_bytes = None
+        if door == "gate":
+            _catch_window_bytes = (window_meta or {}).get("total_bytes")
+            if _catch_window_bytes is None:
+                try:
+                    _catch_window_bytes = sum(os.path.getsize(p) for p in evidence)
+                except OSError:
+                    _catch_window_bytes = None
+
         def _print_ledger_notice_if_gate():
             # So an in-session bug shaped like the 2026-09-16 one (a hook
             # silently routing replies down the unchecked path) shows up
@@ -6857,6 +7583,9 @@ def cmd_hook(a):
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
+            catch_log(door, "allow", reasons=block_notes, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block-forced-advisory":
@@ -6866,6 +7595,9 @@ def cmd_hook(a):
             _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
                      f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
+            catch_log(door, "advisory-forced", reasons=block_reasons, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -6883,6 +7615,9 @@ def cmd_hook(a):
                      (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
                      (f" — advisory: {'; '.join(block_notes)}" if block_notes else ""),
                      exit_code=2, flags=flags)
+            catch_log(door, "block", reasons=block_reasons + block_notes, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
             _print_ledger_notice_if_gate()
             return 2
         note_tail = (" — " + "; ".join(block_notes)) if block_notes else ""
@@ -6890,6 +7625,9 @@ def cmd_hook(a):
         print(advisory)
         _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags,
                  reason=suppressed_reason)
+        catch_log(door, "advisory", reasons=block_notes, draft_text=text,
+                 window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                 payload=payload)
         _print_ledger_notice_if_gate()
         return 0
     except Exception as exc:  # fail-open: never wedge the session
@@ -7888,6 +8626,25 @@ def build_parser():
                          "GitHub pull URL (via --worktree's origin remote) and "
                          "appended to the report so worker-verify runs `gh pr view` on it")
     hk.set_defaults(func=cmd_hook)
+
+    ck = subs.add_parser("catch", help="the catch ledger: one record per gate/verify "
+                                       "decision, tagged fair/false/miss")
+    ck_subs = ck.add_subparsers(dest="catch_action")
+    ck_list = ck_subs.add_parser("list", help="one line per catch-ledger record")
+    ck_list.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_list.add_argument("--untagged", action="store_true", help="only untagged records")
+    ck_list.set_defaults(func=cmd_catch, catch_action="list")
+    ck_tag = ck_subs.add_parser("tag", help="fair = block was right; false = block was "
+                                            "wrong; miss = an allow let a lie through")
+    ck_tag.add_argument("id", help="the catch-ledger record id (see `catch list`)")
+    ck_tag.add_argument("value", choices=["fair", "false", "miss"])
+    ck_tag.add_argument("note", nargs="?", default="", help="why, in your own words")
+    ck_tag.set_defaults(func=cmd_catch, catch_action="tag")
+    ck_report = ck_subs.add_parser("report", help="fair catches, false stops, misses, "
+                                                   "plus untagged count")
+    ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_report.set_defaults(func=cmd_catch, catch_action="report")
+    ck.set_defaults(func=cmd_catch, catch_action=None)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")
     lg.add_argument("-n", type=int, default=20, dest="n",

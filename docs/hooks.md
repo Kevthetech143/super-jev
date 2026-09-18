@@ -1077,6 +1077,172 @@ and appends a one-line notice to its own output whenever a lost check shows
 up in that window — so the notice shows up in-session, not just in a file
 nobody opened.
 
+## The catch ledger
+
+The ledger above is a machine's record of what ran. The catch ledger is a
+second, much smaller file next to it, built for a human to read: one line
+per gate/verify decision, with room to say whether that decision was right.
+
+**What a record is.** Every time the Stop-hook gate, the PostToolUse verify
+hook (both a live hook firing and `hook verify --from-file`), or `hook
+prompt-verify` (one record per teammate-message verdict) reaches a real
+decision — allow, block, advisory, the stop_hook_active second pass
+("advisory-forced" — see below), or the no-tool-evidence/budget-exceeded
+"unchecked" path — it appends one line to `SUPERJEV_CATCH_LEDGER` (default:
+next to the call ledger, as `catches.jsonl`): a short id, the timestamp,
+which door, the decision, the same reason strings `--explain` would print, a
+240-character excerpt of the draft or report, how big the evidence window
+was, how long the check took, and two empty fields, `tag` and `note`,
+waiting for a human. **The full draft, report, or evidence window is never
+written here** — only the short redacted excerpt.
+
+The excerpt's redaction is NOT the same guard that protects the evidence
+window. The catch ledger is text a human reads and tags by hand, so it gets
+a wider net: the input is first sliced to 4096 characters, redacted for
+secrets/credentials AND emails (the evidence-window guard leaves emails
+alone by default), then, catch-ledger-only, also redacted for US phone
+numbers, SSN-shaped 3-2-4 digit strings, and card numbers — either an
+ungrouped run of 13 or more digits, or a grouped run in an exact 4-4-4-4
+(Visa/MC/Discover) or 4-6-5 (Amex) shape using ONE consistent separator
+(space, dash, or dot) throughout — then sliced to the final 240 characters.
+An operator reading a catch record should know three exceptions to that
+card rule: a mix of separators within one grouped run is NOT redacted (it
+no longer matches the exact grouping shape); a 13-digit ungrouped run that
+looks like a unix-millisecond timestamp (starts "1", second digit 5-9) is
+left alone rather than redacted; and a grouped run whose first group looks
+like a plausible year (starts "19" or "20") is left alone as a likely date,
+not a card number. Phone, SSN, and card patterns are catch-ledger only —
+none of those three extra patterns ever touch the evidence window itself,
+only this excerpt and the opt-in saved payload below; the evidence window
+is never redacted this way.
+
+Writing this record is best-effort: if the path is not writable (or
+anything else about the write fails), one line goes to stderr and the
+gate/verify decision that already happened is completely unaffected — the
+catch ledger is a report on a decision, never part of making one.
+
+**What still writes no record, on purpose.** Every fail-open path in this
+file — bad/empty/non-JSON stdin, no usable text field, a non-`gate`/
+`non-verify`/`non-prompt-verify` door, a non-Agent tool call, a spawn dict
+or launch-ack shape that never reaches a verdict, the outer
+unexpected-exception catch — stays unrecorded. Nothing there ever reached a
+real decision, so there is nothing to tag.
+
+**Tagging.** `superjev.py catch list [--since 24h] [--untagged]` prints one
+line per record so you can find the id. `superjev.py catch tag <id>
+fair|false|miss "why"` records a human verdict on that one decision:
+
+- `fair` — the block was right. A real overclaim or contradiction, caught.
+  Only fits a record whose decision is `block` or `advisory-forced`.
+- `false` — the block was wrong. The draft was actually true. Only fits
+  `block` or `advisory-forced`.
+- `miss` — an allow let something false through. It should have blocked.
+  Only fits `allow`, `advisory`, or `unchecked`.
+
+A tag that contradicts its record's own decision (e.g. `false` against an
+`allow`) is refused, exit 3, with a plain message — never silently
+accepted. Exit 3, not 2: exit 2 is argparse's own usage-error convention,
+while a tag/decision mismatch (like an unparseable `--since`, below) is a
+semantic refusal on arguments argparse already accepted fine, so both
+share exit 3 rather than being indistinguishable from a typo in the
+flags.
+
+Re-tagging the same id is an upsert, not an append: `catch tag <id>
+false` then later `catch tag <id> miss` replaces the earlier tag and, if a
+catch case had been written for it, replaces that case too rather than
+leaving two. `catch tag <id> fair` after an earlier `false`/`miss`
+withdraws that id's catch case entirely — a case whose tag no longer says
+"wrong" or "missed" has no business staying in the catch-cases file. At
+most one catch case per record id, always.
+
+Two `catch tag` commands racing on different ids (e.g. a batch of parallel
+`catch tag` subprocesses) cannot lose each other's write: the whole
+read-modify-write — the ledger rewrite and the catch-cases upsert together
+— runs under one `flock`-held lock, a sibling `.lock` file next to the
+catch ledger, not the ledger file itself. A second `catch tag` simply
+waits its turn rather than reading stale data and clobbering the first
+one's write. That lock only guards `catch tag` against itself, though: a
+live hook's own ledger append (`catch_ledger_append`, a plain append, never
+taken under this lock) can race a `catch tag` rewrite's read-modify-write
+of the whole file in a sub-millisecond window and lose that one new
+scoreboard row — this never touches or reverses a gate/verify decision
+itself, only the ledger's optional record of it.
+
+**`--since`.** An unparseable `--since` value (anything that isn't
+`<N>m`/`<N>h`/`<N>d`) is refused, exit 3, same family as the tag/decision
+contradiction refusal above — it never silently falls back to "all time".
+A record with a missing or unparseable timestamp is excluded from a real
+`--since` window (never silently treated as "recent enough to keep") and
+counted on its own `undated: N` line instead.
+
+**The numbers.** `superjev.py catch report [--since 7d]` prints:
+
+    fair catches: N
+    false stops: N
+    misses: N
+    untagged: N
+    blocks suppressed: N
+    undated: N          (only printed when --since is given)
+
+Fair/false/miss/untagged is the same scoreboard as before: how often the
+gate is catching something real, how often it is wrongly getting in the
+way, and how often something false gets past it. **Blocks suppressed** is a
+different thing entirely — a count of `advisory-forced` records, a real
+block that the stop_hook_active second pass demoted to advisory-only rather
+than blocking twice. By itself, being suppressed is not folded into false
+stops or misses, because nothing has been judged right or wrong yet — the
+retry just held a block back.
+
+An `advisory-forced` record can still, separately, be tagged `fair` or
+`false` later (a human decides the retry's demotion was itself the right
+or wrong call) — when that happens the record counts on **both** the
+`blocks suppressed` line and its own `fair catches`/`false stops` line,
+because the two lines answer different questions ("was a block held
+back?" vs "was the underlying call right?") and a record can honestly
+answer both. `catch report` prints a one-line footnote naming how many
+`blocks suppressed` records are also tagged, whenever that count is
+nonzero, so the two lines never look like a silent double-count.
+
+**Catch cases (not bench cases).** Tagging a record `false` or `miss`
+appends one **catch case** to a single JSON array file,
+`SUPERJEV_CATCH_CASES` (default: `catch-cases.json` next to the catch
+ledger) — `{id, ts, door, kind (truth|lie), draft, payload_path, reasons,
+note}`. This is deliberately **not** shaped like the existing
+`gate-bench-*` case files those scripts (`replay_gate_bench.py`,
+`replay_fact_block_sweep.py`) read: a catch case has no transcript anchor
+at all — no `source_offset`, `source_idx`, `transcript_path`, or `bot` —
+because a live gate/verify hook decision was never made against one named
+spot in a recorded transcript the way a bench case is. Pretending it fit
+that shape would silently break both of those scripts' replay logic.
+
+Use `skills/super-jev/tests/replay_catch_cases.py` instead, which reads a
+catch-cases.json file directly and, for every case that carries a
+`payload_path` (`SUPERJEV_CATCH_KEEP_PAYLOAD=1` was set at decision time —
+see below), re-runs the same `hook gate`/`hook verify` decision offline
+through `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` — a fake/canned door for
+a dry run, or a door that replays a previously-recorded verdict. **This
+script refuses to run at all, exit 2, before touching any case, unless
+every door a case in the file needs has its env var set** — it never
+falls back to the real fleet gate/verify door the way `door_cmd()` does
+for every other caller in this repo. Pass `--live` to allow that fallback
+explicitly; the script itself never sets or reads `TYPESAFE_API_KEY`
+either way. It then prints a per-case decision plus a lies-blocked/
+truths-blocked summary. A case is excluded from that summary, and printed
+with its own one-line reason instead, when it cannot be replayed at all:
+no `payload_path` ("no payload — cannot replay, excerpt-only"), a payload
+that will not parse ("payload unreadable"), a payload that carries none
+of the fields this door can read text from ("payload shape unsupported
+for this door"), or a payload that ran through the door but produced no
+new catch-ledger decision ("door failed"). Without the saved payload, a
+catch case is only ever good for a title, a decision, and a tag, never a
+full replay, because the catch ledger itself never keeps more than the
+240-character excerpt.
+
+`SUPERJEV_CATCH_KEEP_PAYLOAD=1` opts in, at decision time, to also saving a
+redacted copy of the whole hook payload under `payloads/<id>.json` — off by
+default, because the catch ledger's whole point is to not carry the full
+window. Turn it on before the block you want to be able to replay later.
+
 ## What it costs
 
 Evidence collection is local and free: git, a directory listing, a grep, and
