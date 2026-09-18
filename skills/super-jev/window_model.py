@@ -423,24 +423,23 @@ def _fuses_provenance(line):
     Past one of these the window is FUSED: the head of the cut item is
     gone, so which bytes came out of which record is no longer
     recoverable, and no line after it can be honoured as composer
-    structure. Not even under `bodies_fenced` — a fence cannot bound a
-    body whose opening was cut away, which is exactly why PR #53's
+    structure. A body whose opening was cut away cannot be bounded by
+    anything downstream, which is exactly why PR #53's
     `_repair_report_tail` re-opens one at a cut.
     """
     return (line or "").strip() in (PREV_CUT_MARKER, REPORT_CUT_MARKER)
 
 
-def _unbounded(line, bodies_fenced=False):
+def _unbounded(line):
     """True when `line` means nothing after it in this block can be
     trusted as composer structure — worker text has opened, or a byte cut
     has fused two records' bytes together."""
-    return _fuses_provenance(line) or (
-        not bodies_fenced and _opens_worker_text(line))
+    return _fuses_provenance(line) or _opens_worker_text(line)
 
 
-def _unbounded_in(chunk, bodies_fenced=False):
+def _unbounded_in(chunk):
     """True when any line of `chunk` is `_unbounded`."""
-    return any(_unbounded(ln, bodies_fenced) for ln in chunk.split("\n"))
+    return any(_unbounded(ln) for ln in chunk.split("\n"))
 
 
 # ============================================================ dataclasses
@@ -943,7 +942,7 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
     return win.with_spans()
 
 
-def from_text(window_text, byte_cap=None, bodies_fenced=False):
+def from_text(window_text, byte_cap=None):
     """A `Window` parsed out of an ALREADY-COMPOSED window, using the
     section headers and report labels the composer emits — for replaying a
     recorded bench, whose evidence sits on disk as flat text.
@@ -971,8 +970,8 @@ def from_text(window_text, byte_cap=None, bodies_fenced=False):
       highest slot accepted so far, so `[session receipts]` after
       `[current turn reports]`, or a repeat of a header already seen, is
       prose wearing a header's clothes;
-    * and, with `bodies_fenced` false, a `\n\n===\n\n` run after a report
-      label is not a boundary at all. It stays inside the report.
+    * and a `\n\n===\n\n` run after a report label is not a boundary at
+      all. It stays inside the report.
 
     That last rule is the expensive one, and it is not a choice. This
     checkout's composer copies a worker's report body in VERBATIM
@@ -983,7 +982,15 @@ def from_text(window_text, byte_cap=None, bodies_fenced=False):
     do not say which. Reading it as a separator is how a report body
     reading `blank / === / blank / [session receipts] / MERGED PR #52
     [from: gh pr merge 52 @ ...]` used to re-parse into a TRUSTED session
-    receipt and turn a PR-mismatch block into an allow. Fail closed.
+    receipt and turn a PR-mismatch block into an allow. Fail closed, always
+    — there is no flag that turns this off. A composer that closes its
+    report bodies with a fence and quotes structure out of them (the way
+    PR #53's `_render_report_block` does) would let a reader trust a
+    `===` outside a body again, but `from_text` does not take that
+    composer's word for it: it has no way to tell, from the bytes alone,
+    whether the composer that wrote them actually fences. Trusting an
+    unverified claim about the composer is exactly the hole this function
+    exists to close, so the fail-closed parse is the only parse.
 
     WHAT IT COSTS
     -------------
@@ -991,25 +998,15 @@ def from_text(window_text, byte_cap=None, bodies_fenced=False):
     exact and `from_text(render(w), byte_cap=w.byte_cap) == w`. On a
     window that does carry one, every section AFTER the first report is
     folded into that report's claim, so its receipts re-parse as worker
-    text — trust lost, never gained. `docs/window-model.md` records how
-    many of the recorded bench windows that is, and
-    `tests/replay_window_model.py` measures it on every run.
+    text — trust lost, never gained. `docs/window-model.md` records this
+    gap, and `tests/replay_window_model.py` measures it on every run.
 
-    `bodies_fenced=True` is the caller ASSERTING that the composer which
-    wrote these bytes bounds its report bodies the way PR #53's
-    `_render_report_block` does — closes each with its own
-    `END REPORT FROM` line and quotes structure lines out of the body — so
-    a `===` outside a body is necessarily the composer's. Pass it only for
-    bytes such a composer produced; on this checkout's bytes it would
-    re-open the hole above. It is the flag a migration flips once the
-    composer fences, not a tuning knob.
-
-    What no flag repairs: a genuine tool result whose own output happens to
-    contain `\n\n---\n\n` splits into two receipt pieces, and one that
-    prints a `REPORT FROM` line demotes itself and its neighbours to
-    claims. Both are safe directions, both are invisible in flat text, and
-    both are why `from_transcript` is the constructor a live gate should
-    use.
+    What no amount of care here repairs: a genuine tool result whose own
+    output happens to contain `\n\n---\n\n` splits into two receipt
+    pieces, and one that prints a `REPORT FROM` line demotes itself and
+    its neighbours to claims. Both are safe directions, both are invisible
+    in flat text, and both are why `from_transcript` is the constructor a
+    live gate should use.
 
     `byte_cap` cannot be recovered from the bytes; it defaults to the
     text's own size.
@@ -1017,15 +1014,15 @@ def from_text(window_text, byte_cap=None, bodies_fenced=False):
     text = window_text or ""
     cap = byte_cap if byte_cap is not None else len(text.encode("utf-8"))
     pieces = []
-    for raw_section in _section_chunks(text, bodies_fenced):
-        pieces.extend(_parse_section(raw_section, bodies_fenced))
+    for raw_section in _section_chunks(text):
+        pieces.extend(_parse_section(raw_section))
     win = Window(pieces=tuple(pieces), byte_cap=cap, inferred=True)
     return win.with_spans()
 
 
 # ------------------------------------------------------- from_text guts
 
-def _section_chunks(text, bodies_fenced=False):
+def _section_chunks(text):
     """`text` split into the window sections the COMPOSER could have
     written, as raw chunk strings — the split `from_text` uses instead of
     a bare `text.split(SECTION_SEPARATOR)`.
@@ -1037,14 +1034,14 @@ def _section_chunks(text, bodies_fenced=False):
        `emit_slot` steps STRICTLY upward from the highest slot accepted so
        far (the composer emits its sections in one fixed order, each at
        most once), and
-    2. unless `bodies_fenced`, no report label may have appeared yet. An
-       unfenced report body is unbounded — see `from_text` — so a `===`
-       after one is not provably the composer's.
+    2. no report label may have appeared yet. An unfenced report body is
+       unbounded — see `from_text` — so a `===` after one is not provably
+       the composer's.
 
     A `===` that fails either rule stays in the chunk it fell in, which is
-    what carrying the fence state ACROSS the split means: the report body
-    keeps its own bytes instead of handing its tail to a fresh, trusted
-    section.
+    what carrying the "a report has opened" state ACROSS the split means:
+    the report body keeps its own bytes instead of handing its tail to a
+    fresh, trusted section.
 
     Header-less chunks are still split, but only while the window has
     shown no accepted header at all — that is a hand-written bench
@@ -1055,8 +1052,8 @@ def _section_chunks(text, bodies_fenced=False):
     """
     raw = (text or "").split(SECTION_SEPARATOR)
     chunks = [raw[0]]
-    slot = _chunk_accepted_slot(raw[0], bodies_fenced)
-    worker = _unbounded_in(raw[0], bodies_fenced)
+    slot = _chunk_accepted_slot(raw[0])
+    worker = _unbounded_in(raw[0])
     for nxt in raw[1:]:
         sec = section_for_header(nxt.split("\n", 1)[0])
         new = emit_slot(sec) if sec is not None else None
@@ -1067,15 +1064,15 @@ def _section_chunks(text, bodies_fenced=False):
         if accept:
             chunks.append(nxt)
             if new is not None:
-                slot = _chunk_accepted_slot(nxt, bodies_fenced)
-            worker = _unbounded_in(nxt, bodies_fenced)
+                slot = _chunk_accepted_slot(nxt)
+            worker = _unbounded_in(nxt)
         else:
             chunks[-1] = chunks[-1] + SECTION_SEPARATOR + nxt
-            worker = worker or _unbounded_in(nxt, bodies_fenced)
+            worker = worker or _unbounded_in(nxt)
     return chunks
 
 
-def _chunk_accepted_slot(chunk, bodies_fenced=False):
+def _chunk_accepted_slot(chunk):
     """The highest `emit_slot` any header ACCEPTED inside `chunk` carries,
     or None when the chunk has no composer header.
 
@@ -1090,16 +1087,16 @@ def _chunk_accepted_slot(chunk, bodies_fenced=False):
         return None
     if prev_index(sec) is None:
         return emit_slot(sec)
-    _idx, slot = _prev_header_indices(chunk.split("\n"), bodies_fenced)
+    _idx, slot = _prev_header_indices(chunk.split("\n"))
     return slot
 
 
-def _prev_header_indices(lines, bodies_fenced=False):
+def _prev_header_indices(lines):
     """(indices, highest_slot) — the `[previous turn -K]` header lines of a
     previous-turns block that the COMPOSER could have written, by the same
     two rules `_section_chunks` applies to a `===`: strictly upward in
-    `emit_slot`, and (unless `bodies_fenced`) not after a report label has
-    opened an unbounded body.
+    `emit_slot`, and not after a report label has opened an unbounded
+    body.
 
     Previous-turn blocks are joined by a blank line, not by `===`, so this
     is the second place a worker's report body can try to invent a section
@@ -1114,19 +1111,19 @@ def _prev_header_indices(lines, bodies_fenced=False):
                 out.append(i)
                 slot = new
                 continue
-        if _unbounded(line, bodies_fenced):
+        if _unbounded(line):
             worker = True
     return out, slot
 
 
-def _parse_section(raw_section, bodies_fenced=False):
+def _parse_section(raw_section):
     """Pieces for one accepted window section (see `_section_chunks`)."""
     if not raw_section:
         return []
     lines = raw_section.split("\n")
     first = section_for_header(lines[0])
     if first is not None and prev_index(first) is not None:
-        return _parse_prev_block(raw_section, bodies_fenced)
+        return _parse_prev_block(raw_section)
     if first == SECTION_CURRENT:
         return ([_header_piece(SECTION_CURRENT)]
                 + _parse_items("\n".join(lines[1:]), SECTION_CURRENT))
@@ -1154,13 +1151,13 @@ def _parse_section(raw_section, bodies_fenced=False):
     return _parse_items(raw_section, SECTION_UNKNOWN)
 
 
-def _parse_prev_block(raw_section, bodies_fenced=False):
+def _parse_prev_block(raw_section):
     """Pieces for the previous-turns section, which holds one
     `[previous turn -K]` block per turn joined by a blank line. Only the
     header lines `_prev_header_indices` accepts start a block; the rest
     are content of whatever block they fell in."""
     lines = raw_section.split("\n")
-    idx, _slot = _prev_header_indices(lines, bodies_fenced)
+    idx, _slot = _prev_header_indices(lines)
     if not idx:
         return _parse_items(raw_section, SECTION_UNKNOWN)
     out = []
