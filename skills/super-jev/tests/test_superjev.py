@@ -180,7 +180,11 @@ def test_ask_runs_gate_when_two_real_paths_are_in_the_sentence(tmp_path, door, c
     assert door.argv[1] == str(sj.FLEET_JEV_LIB)
     assert door.argv[2] == str(evidence)
     assert "--kit" in door.argv and "reply" in door.argv
-    assert door.argv[door.argv.index("--draft") + 1] == str(draft)
+    # gate v2: a non-empty --draft is pre-split into a --claims-file rather
+    # than handed to jev.py as --draft (see presplit_claims / cmd_gate) —
+    # the temp file itself is unlinked right after the call, so this only
+    # checks the flag made it onto argv.
+    assert "--claims-file" in door.argv
     assert "VERDICT: CLEAN" in out
 
 
@@ -1041,7 +1045,12 @@ def test_hook_gate_strips_board_tag_before_checking_draft(tmp_path, monkeypatch,
 
     def fake_run(cmd, cwd=None, env=None, **kw):
         cmd = [str(c) for c in cmd]
-        if "--draft" in cmd:
+        # gate v2: a non-empty draft is pre-split into --claims-file rather
+        # than passed straight through as --draft (see presplit_claims).
+        if "--claims-file" in cmd:
+            claims_path = cmd[cmd.index("--claims-file") + 1]
+            captured["draft_text"] = Path(claims_path).read_text(encoding="utf-8")
+        elif "--draft" in cmd:
             draft_path = cmd[cmd.index("--draft") + 1]
             captured["draft_text"] = Path(draft_path).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -1423,7 +1432,11 @@ def test_stop_hook_uses_last_assistant_message_field_as_the_draft(tmp_path, monk
     captured = {}
 
     def fake_run(cmd, cwd=None, env=None, **kw):
-        draft_arg = cmd[cmd.index("--draft") + 1]
+        cmd = [str(c) for c in cmd]
+        # gate v2: a non-empty draft is pre-split into --claims-file rather
+        # than passed straight through as --draft (see presplit_claims).
+        key = "--claims-file" if "--claims-file" in cmd else "--draft"
+        draft_arg = cmd[cmd.index(key) + 1]
         captured["draft_text"] = Path(draft_arg).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -1441,7 +1454,7 @@ def test_stop_hook_uses_last_assistant_message_field_as_the_draft(tmp_path, monk
     _hook_stdin(monkeypatch, json.dumps(payload))
     code = sj.main(["hook", "gate"])
     assert code == 0
-    assert captured["draft_text"] == "the sky is blue"
+    assert captured["draft_text"].strip() == "the sky is blue"
 
 
 def test_stop_hook_derives_evidence_from_transcript_tool_results(tmp_path, monkeypatch):
@@ -2717,6 +2730,28 @@ def _stop_gate_payload(transcript, session_id="sess-1"):
             "last_assistant_message": "ok, done for this turn"}
 
 
+def _run_stop_scan(tmp_path, monkeypatch, records, session_id="sess-1", name="t.jsonl"):
+    """Runs the Stop hook TWICE against the SAME (growing) transcript path,
+    the way a real session does: once against just a seed record — so the
+    per-session stop-state file initializes to the transcript's CURRENT
+    end rather than its top (the 2026-09-17 fix: a session's first-ever
+    Stop scan must process zero old reports, never everything in the
+    transcript so far) — then again after `records` are appended, so
+    `records` are genuinely NEW relative to the state file the first call
+    wrote. Returns the exit code of the SECOND (real) call; the ledger and
+    any door fixture will also carry the first call's (report-free) gate
+    check, which every test below already accounts for by filtering on
+    "--kit" (gate) vs. no "--kit" (verify)."""
+    seed = [_teammate_user_record("just warming up the transcript, nothing to report",
+                                  "seed", teammate_id="Nobody")]
+    path = _write_transcript(tmp_path, seed, name=name)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path, session_id=session_id)))
+    sj.main(["hook", "gate"])
+    path = _write_transcript(tmp_path, seed + records, name=name)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path, session_id=session_id)))
+    return sj.main(["hook", "gate"])
+
+
 def test_stop_scan_finds_reports_skips_idle_dup_and_chatter(tmp_path, monkeypatch, door):
     wt = tmp_path / "wt1"
     wt.mkdir()
@@ -2734,11 +2769,9 @@ def test_stop_scan_finds_reports_skips_idle_dup_and_chatter(tmp_path, monkeypatc
         _teammate_user_record("just some chatter, nothing to report", "u5",
                               teammate_id="Carol"),
     ]
-    transcript = _write_transcript(tmp_path, records)
-    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
-    code = sj.main(["hook", "gate"])
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
     assert code == 0
-    verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    verify_calls = [c for c in door.calls if "--kit" not in c["cmd"]]
     assert len(verify_calls) == 2
 
     ledger_lines = [json.loads(l) for l in sj._ledger_lines()]
@@ -2752,6 +2785,28 @@ def test_stop_scan_finds_reports_skips_idle_dup_and_chatter(tmp_path, monkeypatc
     assert state["last_uuid"] == "u5"
 
 
+def test_stop_scan_first_run_ever_processes_zero_reports(tmp_path, monkeypatch, door):
+    # The 2026-09-17 fix: a session's very first Stop-scan call must
+    # initialize its state to the transcript's CURRENT end, never scan
+    # from the top — otherwise a fresh session attached to an already-long
+    # transcript re-verifies every teammate report ever seen in it.
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [_teammate_user_record(
+        f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
+        teammate_id="Alice")]
+    transcript = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    verify_calls = [c for c in door.calls if "--kit" not in c["cmd"]]
+    assert len(verify_calls) == 0  # nothing scanned on this session's first-ever call
+    state_path = sj.LEDGER_PATH.parent / "state" / "stop-state-sess-1.json"
+    assert state_path.exists()
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_uuid"] == "u1"  # parked at the transcript's current end
+
+
 def test_stop_scan_rerun_processes_zero_new_reports(tmp_path, monkeypatch, door):
     wt = tmp_path / "wt1"
     wt.mkdir()
@@ -2761,17 +2816,17 @@ def test_stop_scan_rerun_processes_zero_new_reports(tmp_path, monkeypatch, door)
         _teammate_user_record("INCOMPLETE: could not reproduce the failure.", "u4",
                               teammate_id="Bob"),
     ]
-    transcript = _write_transcript(tmp_path, records)
-    payload_text = json.dumps(_stop_gate_payload(transcript))
-
-    _hook_stdin(monkeypatch, payload_text)
-    sj.main(["hook", "gate"])
-    first_verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
+    assert code == 0
+    first_verify_calls = [c for c in door.calls if "--kit" not in c["cmd"]]
     assert len(first_verify_calls) == 2
 
-    _hook_stdin(monkeypatch, payload_text)
+    # Rerun against the exact same (already-scanned) transcript: no new
+    # reports, so no new verify calls.
+    transcript = tmp_path / "t.jsonl"
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
     sj.main(["hook", "gate"])
-    second_verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    second_verify_calls = [c for c in door.calls if "--kit" not in c["cmd"]]
     assert len(second_verify_calls) == 2  # no new verifies ran on the rerun
 
 
@@ -2785,7 +2840,7 @@ def test_stop_scan_never_changes_the_gate_exit_code(tmp_path, monkeypatch, door)
 
         def __call__(self, cmd, cwd=None, env=None, **kw):
             self.calls.append({"cmd": [str(c) for c in cmd], "cwd": cwd, "env": env or {}})
-            if "--draft" not in cmd:
+            if "--kit" not in cmd:
                 lie = (FIXTURES / "lie_stop_high_confidence_stdout.txt").read_text(
                     encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 3, stdout=lie, stderr="")
@@ -2798,9 +2853,7 @@ def test_stop_scan_never_changes_the_gate_exit_code(tmp_path, monkeypatch, door)
     records = [_teammate_user_record(
         f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
         teammate_id="Alice")]
-    transcript = _write_transcript(tmp_path, records)
-    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
-    code = sj.main(["hook", "gate"])
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
     assert code == 0  # gate itself was clean; the scanned report's REJECT never leaks out
 
 
@@ -2811,7 +2864,7 @@ def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsy
 
         def __call__(self, cmd, cwd=None, env=None, **kw):
             self.calls.append([str(c) for c in cmd])
-            if "--draft" not in cmd:
+            if "--kit" not in cmd:
                 lie = (FIXTURES / "lie_stop_high_confidence_stdout.txt").read_text(
                     encoding="utf-8")
                 return subprocess.CompletedProcess(cmd, 3, stdout=lie, stderr="")
@@ -2823,9 +2876,7 @@ def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsy
     records = [_teammate_user_record(
         f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
         teammate_id="Alice")]
-    transcript = _write_transcript(tmp_path, records)
-    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
-    code = sj.main(["hook", "gate"])
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
     out = capsys.readouterr().out
     assert code == 0
     assert "super-jev verify Alice: REJECT" in out
@@ -2840,7 +2891,7 @@ def test_stop_scan_no_session_id_is_a_silent_noop(tmp_path, monkeypatch, door):
     _hook_stdin(monkeypatch, json.dumps(payload))
     code = sj.main(["hook", "gate"])
     assert code == 0
-    verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    verify_calls = [c for c in door.calls if "--kit" not in c["cmd"]]
     assert len(verify_calls) == 0
 
 
@@ -2851,12 +2902,235 @@ def test_stop_scan_timeout_defers_remaining_reports_and_ledgers(tmp_path, monkey
     records = [_teammate_user_record(
         f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
         teammate_id="Alice")]
-    transcript = _write_transcript(tmp_path, records)
-    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
-    code = sj.main(["hook", "gate"])
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
     assert code == 0
-    verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    verify_calls = [c for c in door.calls if "--kit" not in c["cmd"]]
     assert len(verify_calls) == 0  # deadline already passed before the first report
     ledger_lines = [json.loads(l) for l in sj._ledger_lines()]
     timeouts = [l for l in ledger_lines if l.get("reason") == "stop-scan-timeout"]
     assert len(timeouts) == 1
+
+
+# =========================================================== gate v2 tests
+#
+# Fake-door coverage for each of the six gate-v2 items: claim pre-split,
+# deterministic count/PR cross-check, the widened evidence window
+# (previous turn + session receipts), the overclaim==1.00 arm, and the two
+# stop-scan fixes (covered above by test_stop_scan_first_run_ever_processes_
+# zero_reports and _run_stop_scan; the worktree-must-be-a-directory fix is
+# covered below).
+
+def test_presplit_claims_splits_dedupes_and_caps():
+    draft = ("PR #2 is merged and CI passed. 58 tests passed; deployment "
+             "is green: the migration is done. PR #2 is merged and CI passed.")
+    claims = sj.presplit_claims(draft)
+    assert len(claims) == len(set(c.lower() for c in claims))  # deduped
+    assert any("58 tests passed" in c for c in claims)
+    assert any("PR #2 is merged" in c for c in claims)
+    long_draft = ". ".join(f"fact number {i} happened" for i in range(60))
+    assert len(sj.presplit_claims(long_draft)) <= sj.CLAIM_PRESPLIT_CAP
+    assert sj.presplit_claims("") == []
+
+
+def test_presplit_disabled_by_env_falls_back_to_draft(tmp_path, monkeypatch, door):
+    monkeypatch.setenv("SUPERJEV_PRESPLIT", "0")
+    f = tmp_path / "notes.md"
+    f.write_text("evidence text", encoding="utf-8")
+    d = tmp_path / "draft.md"
+    d.write_text("A draft with multiple; clauses and facts.", encoding="utf-8")
+    sj.main(["gate", str(f), "--draft", str(d)])
+    assert "--claims-file" not in door.argv
+    assert door.argv[door.argv.index("--draft") + 1] == str(d)
+
+
+def test_deterministic_count_mismatch_blocks_before_the_judge():
+    draft = "Shipped it, Sir: 58 tests passed on a clean run."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch: draft 58 vs evidence 34" in r for r in reasons)
+
+
+def test_deterministic_count_no_mismatch_when_a_count_matches():
+    draft = "58 tests passed, Sir."
+    evidence = "58 passed in 4.10s\n"
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_deterministic_count_silent_on_a_pure_evidence_gap():
+    # No "N passed" anywhere in the evidence at all — an evidence gap, not
+    # a contradiction; must never fire (see REPORT.md section 3, "the
+    # useful inversion... is left out of the recommendation").
+    draft = "212 tests passed, Sir."
+    evidence = "gh pr view: {\"state\": \"OPEN\"}\n"
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_deterministic_pr_mismatch_blocks_on_a_named_pr():
+    draft = "PR #11 is merged into main, Sir."
+    evidence = '{"number": 11, "state": "OPEN"}\n'
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #11" in r and "open" in r for r in reasons)
+
+
+def test_deterministic_pr_no_mismatch_when_evidence_agrees():
+    draft = "PR #11 is merged into main, Sir."
+    evidence = '{"number": 11, "state": "MERGED"}\n'
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_hook_gate_blocks_on_deterministic_count_mismatch_via_fake_door(tmp_path, monkeypatch):
+    # Full hook path: the judge itself comes back CLEAN (fake door prints a
+    # SUPPORTED table), but the deterministic count cross-check still
+    # blocks — proving item 2 runs independently of, and before, the judge.
+    stdout = "  c1   SUPPORTED       0.90  58 tests passed\n"
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    records = [{
+        "type": "user",
+        "message": {"role": "user", "content": "please check this"},
+    }, {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash"}]},
+    }, {
+        "type": "user",
+        "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1",
+             "content": "34 passed in 6.94s"}]},
+    }]
+    transcript = _write_transcript(tmp_path, records)
+    payload = {"hook_event_name": "Stop", "session_id": "det-1",
+              "transcript_path": str(transcript),
+              "last_assistant_message": "Shipped it: 58 tests passed."}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "gate"])
+    assert code == 2  # blocked
+
+
+def test_overclaim_100_arm_off_by_default_is_advisory(tmp_path, monkeypatch, capsys):
+    # A claim row present and SUPPORTED (companion condition NOT met — see
+    # OVERCLAIM_COMPANION_MIN) is exactly the "every claim came back
+    # SUPPORTED" shape the normal OVERCLAIMS-alone suppression exists for.
+    stdout = ("  c1   SUPPORTED       0.95  a claim the evidence backs\n"
+              "  overclaim         OVERCLAIMS           1.00   -> SOFTEN IT\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a confident claim",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0  # advisory only — companion condition not met, arm is off
+
+
+def test_overclaim_100_arm_blocks_when_enabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_OVERCLAIM_100_BLOCK", "1")
+    stdout = ("  c1   SUPPORTED       0.95  a claim the evidence backs\n"
+              "  overclaim         OVERCLAIMS           1.00   -> SOFTEN IT\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a confident claim",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2  # the fragile arm, turned on, blocks on a bare 1.00
+                      # even though the companion condition alone would not
+
+
+def test_overclaim_100_arm_does_not_fire_below_the_floor(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_OVERCLAIM_100_BLOCK", "1")
+    stdout = ("  c1   SUPPORTED       0.95  a claim the evidence backs\n"
+              "  overclaim         OVERCLAIMS           0.99   -> SOFTEN IT\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a confident claim",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0  # 0.99 stays under the fragile 0.995 floor
+
+
+def test_evidence_window_includes_previous_turn_at_lower_priority(tmp_path):
+    prev_result = {"type": "tool_result", "tool_use_id": "p1",
+                   "content": "gh pr merge #9: merged"}
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn one"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "p1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [prev_result]}},
+        {"type": "user", "message": {"role": "user", "content": "turn two"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": "17 passed"}]}},
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    derived = sj._derive_evidence_text_from_transcript(transcript)
+    assert "17 passed" in derived          # current turn
+    assert "gh pr merge #9" in derived     # previous turn, still present
+
+
+def test_evidence_window_omits_previous_turn_when_current_turn_ran_no_tools(tmp_path):
+    prev_result = {"type": "tool_result", "tool_use_id": "p1", "content": "9 passed"}
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn one"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "p1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [prev_result]}},
+        {"type": "user", "message": {"role": "user", "content": "turn two, no tools"}},
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    # PR #22 health semantics preserved: a tool-free current turn derives
+    # NOTHING, even though the previous turn has real tool_result content.
+    assert sj._derive_evidence_text_from_transcript(transcript) is None
+
+
+def test_session_receipts_recorded_and_replayed_into_the_evidence_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger" / "calls.jsonl")
+    records1 = [
+        {"type": "user", "message": {"role": "user", "content": "turn one"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1",
+             "content": "gh pr checks 7: all green"}]}},
+    ]
+    t1 = _write_transcript(tmp_path, records1, name="t1.jsonl")
+    sj._derive_evidence_text_from_transcript(t1, session_id="recsess")
+
+    receipts_path = sj.LEDGER_PATH.parent / "state" / "receipts-recsess.jsonl"
+    assert receipts_path.exists()
+    assert "gh pr checks 7" in receipts_path.read_text(encoding="utf-8")
+
+    # A LATER turn with its own, unrelated tool result still carries that
+    # earlier receipt forward into its evidence window.
+    records2 = [
+        {"type": "user", "message": {"role": "user", "content": "turn two"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c2", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c2", "content": "5 passed"}]}},
+    ]
+    t2 = _write_transcript(tmp_path, records2, name="t2.jsonl")
+    derived2 = sj._derive_evidence_text_from_transcript(t2, session_id="recsess")
+    assert "5 passed" in derived2
+    assert "gh pr checks 7" in derived2
+
+
+def test_derived_worktree_must_be_a_real_directory_never_a_url(tmp_path):
+    real_dir = tmp_path / "worker-wt"
+    real_dir.mkdir()
+    text = (f"Done, Sir. See https://github.com/org/repo/pull/13 for the PR; "
+            f"the work is in {real_dir}.")
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] == str(real_dir)
+    assert derived["pr"] == 13
+
+
+def test_derived_worktree_none_when_only_a_url_path_is_present(tmp_path):
+    text = "Done, Sir. See https://github.com/org/repo/pull/13 for the PR."
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] is None
+    assert derived["pr"] == 13
