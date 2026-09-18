@@ -4,6 +4,29 @@
 
 No version bump.
 
+- **Plug-in check arms and a swappable judge.** Two new packages give the
+  gate a clean plug-in seam. `skills/super-jev/arms/` is a registry: an
+  arm is one module exposing `NAME`, `KIND`, `DEFAULT_MODE` and
+  `check(window, draft, ctx) -> Verdict | None`, and the registry
+  discovers arms by listing the package directory, so dropping a file in
+  registers it and there is no hard-coded list anywhere. Per-arm mode
+  (`block`/`advisory`/`off`) comes from `SUPERJEV_ARM_<NAME>`, else a JSON
+  file named by `SUPERJEV_ARMS_CONFIG`, else the arm's own default; an
+  unrecognised value falls back to the default and prints one stderr
+  line. `skills/super-jev/judges/` puts the model call behind one
+  interface — `get_judge().classify(draft, window) -> JudgeResult` — with
+  a `typesafe` backend that wraps today's `cmd_gate` call unchanged and a
+  `fake` backend that runs `SUPERJEV_GATE_CMD` directly for offline
+  tests, selected with `SUPERJEV_JUDGE`. The PR-state arm is migrated
+  end-to-end as the template (`arms/pr_state.py`, asking the window
+  model's `pr_state_verdict_from_window` instead of scanning raw evidence
+  text); `superjev.py`'s legacy `_pr_mismatch_reason` stays callable and
+  stays the default, and `SUPERJEV_ARMS=1` is the switch that runs the
+  arm through the registry instead. Both offline replays print the same
+  decisions with the switch off and on, which is why one arm was migrated
+  first rather than all of them: the switch is the proof harness. See
+  docs/plugins.md.
+
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
   reason behind it came from the judge (the OVERCLAIMS arm, or under
