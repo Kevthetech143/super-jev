@@ -393,6 +393,28 @@ prints recent calls and per-door counts. Read it before you trust any claim on
 this page, including ours. It is the only record that distinguishes "the gate
 approved this" from "the gate could not look".
 
+**Watch the ledger, don't just keep it.** A recorded line is not the same
+thing as a noticed one. On 2026-09-16 a hook bug silently routed 9 of 40
+replies down the "unchecked" path — no tool evidence was derivable, so the
+gate ran against the last prompt instead of the real transcript, printed a
+one-line advisory at most, and logged an ordinary-looking exit-0 line every
+time. The ledger had the whole story from the first occurrence. Nobody was
+reading it, so nobody noticed until the next morning. `superjev.py status`
+now prints a ledger-health block every time it runs — for the last 50 hook
+runs (`--window` to change it), a per-door count of blocked, advisory, and
+unchecked/skipped runs, plus the unchecked share, with a `WARN` line and the
+most common skip reason once any door's unchecked share crosses 25%
+(`SUPERJEV_UNCHECKED_WARN` to change the threshold; a door needs at least
+five runs in the window before its share counts, so one unlucky run never
+trips a false alarm). The same read is available on its own as `superjev.py
+ledger health`, which exits 0 when things look healthy and 4 when they
+don't, for wiring into a script or a cron check. And because a bug like this
+one is worth catching the same turn it happens rather than the next time
+someone runs `status`, the Stop-hook gate itself now checks its own last 20
+runs and appends a one-line notice to its own output whenever that running
+share is over threshold — so the notice shows up in-session, not just in a
+file nobody opened.
+
 ## What it costs
 
 Evidence collection is local and free: git, a directory listing, a grep, and
