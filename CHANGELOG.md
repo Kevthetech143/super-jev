@@ -205,6 +205,59 @@ No version bump.
   the new count on its own line, `judge advisories: N`, alongside `blocks
   suppressed: N` — the two failsafes are counted separately. See
   docs/hooks.md, "Judge-advisory mode".
+- **The structural window model.** New `skills/super-jev/window_model.py`:
+  the gate's evidence window as labelled `Piece`s (`receipt`, `claim`,
+  `fact`, `header`, `draft`) carrying their own section, recency rank,
+  source and provenance, instead of one flat blob of text that six
+  readers each re-parse. Two constructors — `from_transcript(...)` from
+  the composer's own transcript inputs, and `from_text(...)` for
+  replaying a recorded bench — plus `render()`, which emits the exact
+  bytes `_derive_evidence_text_from_transcript` emits today, and query
+  helpers (`lines`, `receipts_for`, `values_labelled`, `newest`,
+  `claims`, `receipts`, `sections`, `fit`).
+
+  The trust rule now lives in ONE function: a piece is trusted iff its
+  text came out of a tool result record, or out of a session receipt,
+  which is a cache of an earlier turn's tool result. Never from a
+  teammate message, never from assistant text, regardless of wording. So
+  a report quoting `{"state": "MERGED"}` stays a claim, and a tool result
+  that merely PRINTS a report stays a receipt. Truncation keeps piece
+  boundaries (`Window.fit`): whole claims go before whole receipts do,
+  and nothing is ever cut inside a piece. The default `policy="legacy"`
+  reproduces the composer's byte truncation instead, quirks included, so
+  `render()` is byte-identical during the migration; a legacy cut that
+  fuses two pieces into one blob is marked untrusted, because provenance
+  is no longer separable.
+
+  Wired to nothing on purpose — PR #53 is open over the readers a
+  migration would touch. The one reader here is read-only:
+  `pr_state_signals_from_window` / `pr_state_verdict_from_window`
+  reproduce PR #53's PR-state arm, verdict strings and both fail-closed
+  rules included, with `in_report` replaced by `not line.trusted`. New
+  `docs/window-model.md` carries the trust rule, the truncation
+  policies, what `from_text` cannot know, and a per-reader migration
+  plan.
+
+  `from_text` states one guarantee and keeps it: no byte the composer
+  copied out of a worker's report can end up inside a TRUSTED piece. A
+  section header only bounds a section where the composer could have
+  emitted it (its slot steps strictly upward in the composer's own emit
+  order), a `===` run after a report label does not bound one at all
+  because this branch's composer copies report bodies in verbatim, and
+  past a byte-cut marker nothing is structure in either direction. The
+  cost is that a window carrying a relayed report no longer re-parses to
+  the same pieces, and there is no flag that buys the exact parse back —
+  `from_text` never takes a caller's word for how its bytes were built,
+  so it fails closed on every input, always. The replay prints the
+  round-trip count so the gap is visible.
+
+  New `skills/super-jev/tests/test_window_model.py` (offline) and
+  `skills/super-jev/tests/replay_window_model.py`, which replays every
+  recorded gate-bench transcript with no network and no key, against this
+  checkout's composer and then against PR #53's — whose previous-turn
+  reports sit behind a `[relayed reports in this turn]` mark that `main`
+  does not emit, and which `render()` now reproduces by feature-detecting
+  the composer rather than by assuming a branch.
 
 - **The catch ledger.** A new, separate JSONL file (`SUPERJEV_CATCH_LEDGER`,
   default `catches.jsonl` next to the call ledger) records one small line
