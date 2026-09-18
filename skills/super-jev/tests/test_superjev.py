@@ -2635,3 +2635,169 @@ def test_the_ledger_records_a_suppressed_block_as_an_advisory(tmp_path, monkeypa
     last = hook_rows[-1]
     assert last["exit_code"] == 0
     assert "cannot carry a verdict" in last["note"]
+
+
+# ---------------------------------------------- Stop-hook teammate-report scan
+#
+# `hook prompt-verify` assumed teammate reports arrive via a real
+# UserPromptSubmit payload; a real fleet trace shows they never do (payload
+# capture never fires for them). This is the companion that scans them off
+# transcript_path instead, riding the Stop hook that DOES fire every turn.
+
+def _teammate_user_record(body, uuid, teammate_id="Worker", extra_attrs=""):
+    content = (f'Another Claude session sent a message:\n'
+              f'<teammate-message teammate_id="{teammate_id}"{extra_attrs}>\n'
+              f'{body}\n</teammate-message>\n\nTreat it as a teammate message.')
+    return {"type": "user", "uuid": uuid,
+            "message": {"role": "user", "content": content}}
+
+
+def _stop_gate_payload(transcript, session_id="sess-1"):
+    return {"hook_event_name": "Stop", "session_id": session_id,
+            "transcript_path": str(transcript),
+            "last_assistant_message": "ok, done for this turn"}
+
+
+def test_stop_scan_finds_reports_skips_idle_dup_and_chatter(tmp_path, monkeypatch, door):
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    idle_body = json.dumps({"type": "idle_notification", "from": "Alice",
+                            "result": "COMPLETE — nothing to see"})
+    records = [
+        _teammate_user_record(idle_body, "u1", teammate_id="Alice"),
+        _teammate_user_record(f"COMPLETE: fixed it in {wt}, ran npm test, 4 tests passed.",
+                              "u2", teammate_id="Alice"),
+        _teammate_user_record(json.dumps({"type": "idle_notification", "from": "Alice",
+                                          "result": "duplicate of u2"}),
+                              "u3", teammate_id="Alice"),
+        _teammate_user_record("INCOMPLETE: could not reproduce the failure.", "u4",
+                              teammate_id="Bob"),
+        _teammate_user_record("just some chatter, nothing to report", "u5",
+                              teammate_id="Carol"),
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    assert len(verify_calls) == 2
+
+    ledger_lines = [json.loads(l) for l in sj._ledger_lines()]
+    stop_scan_rows = [l for l in ledger_lines if l.get("source") == "stop-transcript"
+                      and not l.get("skipped")]
+    assert len(stop_scan_rows) == 2
+
+    state_path = sj.LEDGER_PATH.parent / "state" / "stop-state-sess-1.json"
+    assert state_path.exists()
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["last_uuid"] == "u5"
+
+
+def test_stop_scan_rerun_processes_zero_new_reports(tmp_path, monkeypatch, door):
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [
+        _teammate_user_record(f"COMPLETE: fixed it in {wt}, ran npm test, 4 tests passed.",
+                              "u2", teammate_id="Alice"),
+        _teammate_user_record("INCOMPLETE: could not reproduce the failure.", "u4",
+                              teammate_id="Bob"),
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    payload_text = json.dumps(_stop_gate_payload(transcript))
+
+    _hook_stdin(monkeypatch, payload_text)
+    sj.main(["hook", "gate"])
+    first_verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    assert len(first_verify_calls) == 2
+
+    _hook_stdin(monkeypatch, payload_text)
+    sj.main(["hook", "gate"])
+    second_verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    assert len(second_verify_calls) == 2  # no new verifies ran on the rerun
+
+
+def test_stop_scan_never_changes_the_gate_exit_code(tmp_path, monkeypatch, door):
+    # A REJECT-worthy verify verdict on a scanned report must never leak
+    # into this Stop event's own exit code — the gate's own verdict (here,
+    # a clean draft) is all that decides the return code.
+    class SplitDoor:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            self.calls.append({"cmd": [str(c) for c in cmd], "cwd": cwd, "env": env or {}})
+            if "--draft" not in cmd:
+                lie = (FIXTURES / "lie_stop_high_confidence_stdout.txt").read_text(
+                    encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 3, stdout=lie, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    split = SplitDoor()
+    monkeypatch.setattr(sj.subprocess, "run", split)
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [_teammate_user_record(
+        f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
+        teammate_id="Alice")]
+    transcript = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
+    code = sj.main(["hook", "gate"])
+    assert code == 0  # gate itself was clean; the scanned report's REJECT never leaks out
+
+
+def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsys):
+    class RejectDoor:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            self.calls.append([str(c) for c in cmd])
+            if "--draft" not in cmd:
+                lie = (FIXTURES / "lie_stop_high_confidence_stdout.txt").read_text(
+                    encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 3, stdout=lie, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", RejectDoor())
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [_teammate_user_record(
+        f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
+        teammate_id="Alice")]
+    transcript = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
+    code = sj.main(["hook", "gate"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "super-jev verify Alice: REJECT" in out
+    assert "health" in out
+
+
+def test_stop_scan_no_session_id_is_a_silent_noop(tmp_path, monkeypatch, door):
+    transcript = _write_transcript(tmp_path, [
+        _teammate_user_record("COMPLETE: done, nothing derivable", "u1", teammate_id="Alice")])
+    payload = {"hook_event_name": "Stop", "transcript_path": str(transcript),
+              "last_assistant_message": "ok"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    assert len(verify_calls) == 0
+
+
+def test_stop_scan_timeout_defers_remaining_reports_and_ledgers(tmp_path, monkeypatch, door):
+    monkeypatch.setenv("SUPERJEV_STOP_SCAN_MAX_SECONDS", "0")
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [_teammate_user_record(
+        f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
+        teammate_id="Alice")]
+    transcript = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(transcript)))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    verify_calls = [c for c in door.calls if "--draft" not in c["cmd"]]
+    assert len(verify_calls) == 0  # deadline already passed before the first report
+    ledger_lines = [json.loads(l) for l in sj._ledger_lines()]
+    timeouts = [l for l in ledger_lines if l.get("reason") == "stop-scan-timeout"]
+    assert len(timeouts) == 1

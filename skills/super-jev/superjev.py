@@ -1855,6 +1855,272 @@ def cmd_hook_prompt_verify(a):
         return 0
 
 
+# -------------------------------------------- stop-transcript report scan
+#
+# `hook prompt-verify` was built on the assumption that a teammate's report
+# arrives as a real Claude Code UserPromptSubmit event. It does not: a real
+# fleet trace shows the report text landing as ordinary "type":"user"
+# content in the transcript JSONL, but the UserPromptSubmit hook's payload
+# capture never fires for it — so `hook prompt-verify` never sees a real
+# report, it only ever ran in tests. The Stop hook DOES fire on every
+# reply, and it already opens transcript_path to derive gate evidence (see
+# _derive_evidence_text_from_transcript above), so this reuses that same
+# open to also scan for teammate-message report blocks and verify them —
+# a second, independent check riding the one hook event that is reliably
+# real.
+#
+# This is advisory-only, by design, same reasoning as `hook prompt-verify`:
+# a Stop hook's real job (the `gate` check on this turn's own draft) must
+# never be perturbed by a side-channel scan of someone else's report, so
+# every exit path here is silent-or-advisory and NEVER raises out to the
+# caller.
+STOP_SCAN_MAX_REPORTS_ENV = "SUPERJEV_STOP_SCAN_MAX_REPORTS"
+DEFAULT_STOP_SCAN_MAX_REPORTS = 3
+STOP_SCAN_MAX_SECONDS_ENV = "SUPERJEV_STOP_SCAN_MAX_SECONDS"
+DEFAULT_STOP_SCAN_MAX_SECONDS = 120.0
+
+
+def _stop_scan_max_reports():
+    try:
+        n = int(os.environ.get(STOP_SCAN_MAX_REPORTS_ENV, DEFAULT_STOP_SCAN_MAX_REPORTS))
+        return n if n > 0 else DEFAULT_STOP_SCAN_MAX_REPORTS
+    except (TypeError, ValueError):
+        return DEFAULT_STOP_SCAN_MAX_REPORTS
+
+
+def _stop_scan_max_seconds():
+    try:
+        return float(os.environ.get(STOP_SCAN_MAX_SECONDS_ENV, DEFAULT_STOP_SCAN_MAX_SECONDS))
+    except (TypeError, ValueError):
+        return DEFAULT_STOP_SCAN_MAX_SECONDS
+
+
+def _stop_state_path(session_id):
+    """<ledger dir>/state/stop-state-<session_id>.json — read off the
+    CURRENT value of the module-level LEDGER_PATH (never cached), so a
+    test (or SUPERJEV_LEDGER) that redirects the ledger also redirects
+    this state file, the same way _default_ledger_path's own callers
+    expect."""
+    safe = re.sub(r'[^A-Za-z0-9_.\-]', '_', str(session_id))
+    return LEDGER_PATH.parent / "state" / f"stop-state-{safe}.json"
+
+
+def _load_stop_state(session_id):
+    try:
+        obj = json.loads(_stop_state_path(session_id).read_text(encoding="utf-8"))
+        return obj if isinstance(obj, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_stop_state(session_id, state):
+    """Never raises — a state file that cannot be written just means the
+    next Stop event rescans from the same place, which is a duplicate
+    verify at worst, not a crash."""
+    path = _stop_state_path(session_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _is_idle_notification_dup(body):
+    """True when a teammate-message body is a JSON-wrapped
+    {"type":"idle_notification", ...} envelope — the fleet's own duplicate
+    of a report that already landed as plain text moments earlier (an
+    idle-notification echo carries the same "result" text inside its own
+    JSON, not a second, distinct report). Not a report block in its own
+    right, so the Stop scan skips it rather than double-verifying the same
+    content."""
+    try:
+        obj = json.loads(body)
+    except ValueError:
+        return False
+    return isinstance(obj, dict) and obj.get("type") == "idle_notification"
+
+
+def _find_new_teammate_reports(transcript_path, last_uuid, max_reports):
+    """Every NEW <teammate-message> report block in `transcript_path` —
+    "new" meaning found in a transcript record AFTER the one whose uuid is
+    `last_uuid` (or from the start of the file when `last_uuid` is falsy or
+    not found, e.g. a rotated/pruned transcript). A "report block" is one
+    that is not an idle_notification duplicate (see
+    _is_idle_notification_dup) and carries a report marker (see
+    _REPORT_TRIGGER_RE) — chatter and launch acks are skipped. Capped at
+    `max_reports`.
+
+    Returns (reports, new_last_uuid): `reports` is a list of
+    {"teammate_id", "body", "uuid"} dicts, file order; `new_last_uuid` is
+    the uuid of the LAST record actually examined (whether or not it
+    carried a report), so a caller that persists it verbatim resumes
+    exactly where this scan stopped — including a stop mid-file because
+    the report cap was hit. Never raises: any read/parse problem behaves
+    like an empty transcript (`([], last_uuid)`)."""
+    try:
+        records = _read_transcript_records(transcript_path)
+    except Exception:
+        return [], last_uuid
+    if not records:
+        return [], last_uuid
+    start_idx = 0
+    if last_uuid:
+        for i, rec in enumerate(records):
+            if rec.get("uuid") == last_uuid:
+                start_idx = i + 1
+                break
+    reports = []
+    new_last_uuid = last_uuid
+    for rec in records[start_idx:]:
+        rec_uuid = rec.get("uuid")
+        if rec.get("type") == "user":
+            msg = rec.get("message")
+            content = msg.get("content") if isinstance(msg, dict) else None
+            text = content if isinstance(content, str) else None
+            if text and "<teammate-message" in text:
+                for attrs, body in _TEAMMATE_MSG_RE.findall(text):
+                    body = body.strip()
+                    if not body:
+                        continue
+                    if _is_idle_notification_dup(body):
+                        continue
+                    if not _REPORT_TRIGGER_RE.search(body):
+                        continue
+                    idm = _TEAMMATE_ID_RE.search(attrs)
+                    teammate_id = idm.group(1) if idm else "unknown"
+                    reports.append({"teammate_id": teammate_id, "body": body,
+                                    "uuid": rec_uuid})
+        if rec_uuid:
+            new_last_uuid = rec_uuid
+        if len(reports) >= max_reports:
+            break
+    return reports[:max_reports], new_last_uuid
+
+
+def _stop_scan_verify_one(r):
+    """Run `verify` against one report found by _find_new_teammate_reports
+    and print/ledger its verdict — same evidence auto-derivation as
+    `hook prompt-verify`, plus the PR #20 0.80-confidence block rule
+    (_hook_block_decision, with a --dry-run evidence probe spent only when
+    a flag actually crosses the line, same as `hook verify --from-file`),
+    but ADVISORY ONLY: a REJECT/block-worthy verdict here still never
+    raises and the caller never turns it into this Stop event's own exit
+    code. Never raises — any failure prints/logs an advisory 'error' line
+    instead."""
+    teammate_id, body = r["teammate_id"], r["body"]
+    try:
+        derived = _derive_evidence_from_report_text(body)
+        report_text = body
+        pr_url = (_pr_url_from_worktree(derived["worktree"], derived["pr"])
+                 if derived["pr"] else None)
+        if pr_url:
+            report_text += f"\n\nRelated pull request: {pr_url}"
+        elif derived["pr"]:
+            report_text += f"\n\nRelated pull request: PR #{derived['pr']}"
+
+        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                          encoding="utf-8")
+        tmp_path = tmp.name
+        try:
+            tmp.write(report_text)
+            tmp.close()
+            ns = argparse.Namespace(report=tmp_path, worktree=derived["worktree"],
+                                    test_cmd=derived["test_cmd"] or "", paths=[],
+                                    dry_run=False, json=False, hook_mode=True)
+            code, door_out, door_err = cmd_verify(ns)
+
+            flags = _parse_strong_flags(door_out)
+            claim_rows = _parse_claim_rows(door_out)
+            evidence = _evidence_inventory(test_cmd=derived["test_cmd"] or "",
+                                           worktree=derived["worktree"], pr=derived["pr"])
+            line = _block_confidence_line()
+            has_candidate = any(f["verdict"] in _BLOCKABLE_VERDICTS and f["score"] >= line
+                                for f in flags)
+            if has_candidate:
+                probe = _evidence_probe(tmp_path, derived["worktree"], derived["test_cmd"] or "")
+                if probe:
+                    evidence = _evidence_inventory(test_cmd=derived["test_cmd"] or "",
+                                                   worktree=derived["worktree"],
+                                                   pr=derived["pr"], probe_stdout=probe)
+            block_reasons, notes = _hook_block_decision(flags, claim_rows, evidence)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        label = {0: "CLEAN", 3: "READ", 4: "REJECT"}.get(code, "READ")
+        if block_reasons and label != "REJECT":
+            label = "REJECT"
+        flag_str = ("; ".join(f"{f['key']} {f['verdict']} {f['score']:.2f}" for f in flags)
+                   or "no flags")
+        used = ", ".join(f"--{k} {v}" for k, v in
+                         (("worktree", derived["worktree"]),
+                          ("test-cmd", derived["test_cmd"]),
+                          ("pr", derived["pr"])) if v) or "no evidence derived"
+        health = "thin" if evidence.get("thin") else "ok"
+        print(f"super-jev verify {teammate_id}: {label} — {flag_str} — {used} — health {health}")
+        note_tail = (" — " + "; ".join(notes)) if notes else ""
+        _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
+                 f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
+                 hook_mode=True, source="stop-transcript")
+    except Exception as exc:
+        print(f"super-jev verify {teammate_id}: ERROR — {exc.__class__.__name__} (advisory)")
+        _hook_log(f"stop-scan: {teammate_id} — error ({exc.__class__.__name__}), "
+                 "advisory-only", skipped=True, reason="stop-scan-error",
+                 source="stop-transcript")
+
+
+def _hook_stop_scan_teammate_reports(payload):
+    """The Stop-hook companion to `hook prompt-verify`: scans
+    payload["transcript_path"] for teammate-message report blocks this
+    session (payload["session_id"]) has not already processed (tracked in
+    a per-session state file, see _stop_state_path), and runs
+    _stop_scan_verify_one on up to _stop_scan_max_reports() of them,
+    within a _stop_scan_max_seconds() total time budget.
+
+    ALWAYS a no-op on the caller's own exit code/behaviour — this changes
+    nothing about the real `gate` verdict this Stop event is about; it
+    only prints extra advisory lines and appends ledger rows with
+    source="stop-transcript". No session_id or no readable transcript_path
+    is a silent no-op (there is no state to key off, or nothing to scan).
+    A time-budget overrun logs one advisory ledger line and stops taking
+    new reports; the state file then advances only past what was actually
+    attempted, so the remainder is retried on the NEXT Stop event rather
+    than silently dropped. Never raises."""
+    try:
+        session_id = payload.get("session_id")
+        transcript_path = payload.get("transcript_path")
+        if not session_id or not isinstance(transcript_path, str) or not transcript_path:
+            return
+        state = _load_stop_state(session_id)
+        last_uuid = state.get("last_uuid")
+        reports, scan_last_uuid = _find_new_teammate_reports(
+            transcript_path, last_uuid, _stop_scan_max_reports())
+        if not reports:
+            if scan_last_uuid != last_uuid:
+                _save_stop_state(session_id, {"last_uuid": scan_last_uuid})
+            return
+        deadline = time.monotonic() + _stop_scan_max_seconds()
+        last_processed_uuid = last_uuid
+        timed_out = False
+        for r in reports:
+            if time.monotonic() > deadline:
+                timed_out = True
+                _hook_log("stop-scan: time budget exceeded — remaining report(s) "
+                         "deferred to the next Stop event", skipped=True,
+                         reason="stop-scan-timeout", source="stop-transcript")
+                break
+            _stop_scan_verify_one(r)
+            last_processed_uuid = r["uuid"]
+        final_uuid = last_processed_uuid if timed_out else scan_last_uuid
+        if final_uuid != last_uuid:
+            _save_stop_state(session_id, {"last_uuid": final_uuid})
+    except Exception as exc:  # advisory-only contract: never raise, never block
+        _hook_log(f"stop-scan: unexpected error ({exc.__class__.__name__}) — fail-open",
+                 skipped=True, reason="stop-scan-error", source="stop-transcript")
+
+
 def cmd_hook(a):
     """Read a Claude Code hook payload on stdin and map the verdict to hook
     exit semantics. This subcommand's own contract, not the plain wrapper's:
@@ -1978,6 +2244,16 @@ def cmd_hook(a):
         return 0
 
     try:
+        # The teammate-report scan runs off transcript_path/session_id
+        # alone, independent of whatever this Stop event's own gate
+        # verdict turns out to be (allow, block, or the no-evidence
+        # "unchecked" path below, which returns early) — so it fires here,
+        # before any of `gate`'s own early returns, rather than being
+        # threaded through every one of them. See
+        # _hook_stop_scan_teammate_reports's docstring: always a no-op on
+        # this call's own exit code.
+        if door == "gate":
+            _hook_stop_scan_teammate_reports(payload)
         if door == "gate":
             text = _hook_text(payload, ["last_assistant_message", "draft", "text", "prompt"])
             if text is None:

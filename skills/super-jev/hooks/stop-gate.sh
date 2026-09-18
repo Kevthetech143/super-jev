@@ -51,6 +51,13 @@
 #     flags — prints a one-line advisory naming what it would have blocked
 #     on and exits 0, so a gate that keeps disagreeing with a rewritten
 #     reply cannot loop the session forever.
+#   - as of 2026-09-17, this same run ALSO scans transcript_path for
+#     <teammate-message> report blocks this session has not already
+#     checked (Claude Code's UserPromptSubmit payload never actually
+#     fires for those, so `hook prompt-verify` alone never sees a real
+#     one) and runs `verify` against each — up to 3 per Stop event, 120s
+#     total, advisory only, never touching this script's own exit code.
+#     See SKILL.md's "Correction, 2026-09-17" paragraph and docs/hooks.md.
 #
 # This script is NOT installed into ~/.claude/settings.json by this skill —
 # copy the snippet below into your own settings.json to wire it in.
