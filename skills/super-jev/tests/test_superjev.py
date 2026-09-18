@@ -1652,37 +1652,65 @@ def test_unchecked_path_is_not_taken_when_tool_evidence_exists(tmp_path, monkeyp
     assert "unchecked" not in json.loads(sj._ledger_lines()[-1])
 
 
-def test_unchecked_path_ignores_an_earlier_turns_tool_result_and_never_blocks(
+def test_empty_current_turn_with_prior_evidence_is_judged_not_unchecked(
         tmp_path, monkeypatch, capsys):
-    # The live bug this guards: a two-turn transcript where turn 1 gathered
-    # a tool_result and turn 2 (the one actually being gated) ran no tools
-    # at all. Deriving evidence from the WHOLE transcript (the old
-    # behaviour) would find turn 1's tool_result, wrongly call the gather
-    # healthy, and let a confident NOT_SUPPORTED flag block turn 2's reply
-    # even though nothing backs it this turn. Scoped to turn 2 alone there
-    # is no tool_result, so this must take the unchecked/advisory-only
-    # path and exit 0 no matter how strong the fake door's flag is.
-    fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  Duplicate; PR #20 is "
-                              "already merged and live.\n")
+    # 2026-09-17 fix (gate-empty-current-turn): a two-turn transcript where
+    # turn 1 gathered a tool_result and turn 2 (the one actually being
+    # gated) ran no tools of its own. This USED to route to the
+    # advisory-only unchecked path no matter how strong the flag (see the
+    # old version of this test); it now judges the window normally (with
+    # current_turn_empty=True) and the secondary NOT_SUPPORTED arm alone
+    # is suppressed to an advisory, not a block — never "unchecked".
+    fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
+                              "and fully caught up.\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "what about now, any update?"}},
+        _assistant_text_record("The service is now stable and fully caught up."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "The service is now stable and fully caught up."}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out.strip() != UNCHECKED_LINE
+    assert "advisory" in out
+    assert err == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert not rec.get("unchecked")
+
+
+def test_empty_current_turn_with_prior_evidence_overclaims_still_blocks(
+        tmp_path, monkeypatch, capsys):
+    # The primary OVERCLAIMS arm is NOT suppressed by current_turn_empty —
+    # only the secondary NOT_SUPPORTED/CONTRADICTED arm is. Same shape as
+    # the test above, but the fake door reports a strong draft-level
+    # OVERCLAIMS instead of a claim-level NOT_SUPPORTED.
+    fake = FakeDoor(3, stdout="  c1   SUPPORTED       0.60  PR #20 exists\n"
+                              "  overclaim         OVERCLAIMS           0.95   -> SOFTEN IT\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
     t = _write_transcript(tmp_path, [
         {"message": {"role": "user", "content": "is PR #20 open or merged?"}},
         _tool_result_record("PR #20: state=OPEN"),
         _assistant_text_record("PR #20 is open."),
         {"message": {"role": "user", "content": "what about now, any update?"}},
-        _assistant_text_record("Duplicate; PR #20 is already merged and live."),
+        _assistant_text_record("Duplicate; PR #20 is already merged and live, "
+                               "164 tests pass."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "Duplicate; PR #20 is already merged and live."}))
+        "last_assistant_message": "Duplicate; PR #20 is already merged and live, "
+                                  "164 tests pass."}))
     code = sj.main(["hook", "gate"])
     out, err = capsys.readouterr()
-    assert code == 0
-    assert out.strip() == UNCHECKED_LINE
-    assert err == ""
+    assert code == 2
+    assert "OVERCLAIMS" in err
     rec = json.loads(sj._ledger_lines()[-1])
-    assert rec["unchecked"] is True
-    assert rec.get("health") == "none"
+    assert not rec.get("unchecked")
 
 
 def test_unchecked_path_is_not_taken_when_this_turn_has_its_own_tool_result(
@@ -2584,6 +2612,33 @@ def test_a_confident_overclaim_still_blocks_with_no_claim_rows_at_all():
     assert notes == []
 
 
+def test_current_turn_empty_overclaims_still_blocks_under_v3():
+    # 2026-09-17 fix (gate-empty-current-turn): current_turn_empty must NOT
+    # gate the primary OVERCLAIMS arm — only the secondary
+    # NOT_SUPPORTED/CONTRADICTED arm.
+    evidence = {"current_turn_empty": True}
+    flags = [{"key": "overclaim", "verdict": "OVERCLAIMS", "score": 0.95}]
+    reasons, notes = sj._hook_block_decision_v3(flags, [], evidence)
+    assert reasons == ["overclaim OVERCLAIMS 0.95"]
+    assert notes == []
+
+
+def test_current_turn_empty_alone_does_not_block_not_supported_under_v3():
+    evidence = {"current_turn_empty": True}
+    flags = [{"key": "c1", "verdict": "NOT_SUPPORTED", "score": 0.90}]
+    reasons, notes = sj._hook_block_decision_v3(flags, [], evidence)
+    assert reasons == []
+    assert any("current turn ran no tools" in n for n in notes)
+
+
+def test_current_turn_empty_false_leaves_the_secondary_arm_unaffected():
+    evidence = {"current_turn_empty": False}
+    flags = [{"key": "c1", "verdict": "NOT_SUPPORTED", "score": 0.90}]
+    reasons, notes = sj._hook_block_decision_v3(flags, [], evidence)
+    assert reasons == ["c1 NOT_SUPPORTED 0.90"]
+    assert notes == []
+
+
 def test_thin_evidence_suppresses_even_a_confident_contradiction():
     """The generalization of PR #18's precision fix: a thin gather
     suppresses EVERY verdict, not only OVERCLAIMS, because a
@@ -3274,7 +3329,11 @@ def test_evidence_window_includes_previous_turn_at_lower_priority(tmp_path):
     assert "gh pr merge #9" in derived     # previous turn, still present
 
 
-def test_evidence_window_omits_previous_turn_when_current_turn_ran_no_tools(tmp_path):
+def test_evidence_window_includes_previous_turn_when_current_turn_ran_no_tools(tmp_path):
+    # 2026-09-17 fix (gate-empty-current-turn): a tool-free current turn
+    # used to make this function return None outright, discarding real
+    # previous-turn evidence wholesale. It now carries that material
+    # through and marks the window current_turn_empty instead.
     prev_result = {"type": "tool_result", "tool_use_id": "p1", "content": "9 passed"}
     records = [
         {"type": "user", "message": {"role": "user", "content": "turn one"}},
@@ -3284,9 +3343,52 @@ def test_evidence_window_omits_previous_turn_when_current_turn_ran_no_tools(tmp_
         {"type": "user", "message": {"role": "user", "content": "turn two, no tools"}},
     ]
     transcript = _write_transcript(tmp_path, records)
-    # PR #22 health semantics preserved: a tool-free current turn derives
-    # NOTHING, even though the previous turn has real tool_result content.
-    assert sj._derive_evidence_text_from_transcript(transcript) is None
+    derived, meta = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
+    assert derived is not None
+    assert "9 passed" in derived
+    assert meta["current_turn_empty"] is True
+    assert meta["current_bytes"] == 0
+
+
+def test_evidence_window_current_turn_empty_true_only_when_no_tool_results(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn one"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": "17 passed"}]}},
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    derived, meta = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
+    assert derived is not None
+    assert meta["current_turn_empty"] is False
+
+
+def test_evidence_window_returns_none_when_current_turn_and_prior_material_both_empty(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn one, no tools"}},
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    derived, meta = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
+    assert derived is None
+    assert meta["current_turn_empty"] is True
+
+
+def test_public_derive_evidence_window_wraps_the_private_function_identically(tmp_path):
+    # docs/hooks.md, "gate v3 — empty current turn": external benches
+    # should import this stable name rather than reimplementing the
+    # window logic.
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn one"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "c1", "name": "Bash"}]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": "17 passed"}]}},
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    private_result = sj._derive_evidence_text_from_transcript(transcript, return_meta=True)
+    public_result = sj.derive_evidence_window(transcript, return_meta=True)
+    assert public_result == private_result
 
 
 def test_session_receipts_recorded_and_replayed_into_the_evidence_window(tmp_path, monkeypatch):
