@@ -4,6 +4,54 @@
 
 No version bump.
 
+- **The count arm's `REPORT FROM ...` fence closed on any blank line, not
+  just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
+  and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
+  reader) both used a bare blank line to decide a worker's own report body
+  had ended — but the assembler puts a blank line INSIDE a report's own
+  multi-paragraph text too, so only the report's first paragraph was ever
+  actually excluded. A bold-markdown count, or a merge/CI-shaped claim,
+  sitting in a LATER paragraph of the same report read straight back in as
+  real evidence, right beside a genuine receipt that disagreed with it. Both
+  readers now close the fence only on a real structural marker — a
+  bracketed section header or an explicit `END REPORT FROM ...` line — never
+  on a blank line, which a report's own prose can legitimately contain. See
+  docs/hooks.md, "The report fence closes on structure, not blank lines".
+
+- **Four more deterministic-arm review findings closed, on top of the
+  hash-split/noun-label fix above.** (1) The count arm's tokenizer folded
+  `#` and `/` into the same character class as letters and digits
+  (`[A-Za-z0-9#/]+`), so a slash fraction or a hash-prefixed number
+  ("41/41 passed", "3/41 tests pass", "Tests #52 passed") glued into one
+  non-digit token that `tok.isdigit()` dropped outright — the draft
+  claimed no count at all, so a false count claim of that shape slipped
+  past the arm clean. `#` and `/` now tokenize as their own single-
+  character tokens instead; a mixed alnum run with neither character in
+  it, e.g. a git short SHA, is unaffected. (2) `_fact_draft_label_values`'
+  digit-then-letter guard (added for the same short-SHA shape) was too
+  broad — it skipped every digit run immediately followed by a letter, so
+  a unit-suffixed value ("250ms", "4k", "8GB") was dropped too, and a
+  labelled-value contradiction against one no longer fired. Narrowed to
+  only skip when the tail right after the digits looks like the rest of a
+  fused identifier — a letter, then eventually another digit — leaving a
+  pure unit suffix, which never has a trailing digit, as a real value.
+  (3) `_extract_labelled_evidence_counts_scoped` had no `REPORT FROM ...`
+  fence exclusion, unlike families 4 and 5's receipt scan, so a worker's
+  own bold-markdown run summary inside its OWN unverified report body
+  (`**61 passed**`) was read as a real evidence count — a trust-boundary
+  hole a worker's own claim text could exploit to clear the count arm
+  against itself. Evidence counts now skip every line inside a report
+  fence, matching families 4/5. (4) `_iter_window_report_lines`, added
+  alongside the families 4/5 fix, had no production caller and collided
+  in name with a different-signature function a parked PR defines; it is
+  removed, and its one test now exercises
+  `_fact_window_lines_excluding_reports` directly. Net effect on the
+  deterministic arms' live bench read: one blind-bench lie catch that
+  happened to work only because of the old hash-split tokenizer artifact
+  is now left to the judge, same as most lies always have been — the
+  bench's zero-false-block guarantee on true reports is unaffected. See
+  docs/hooks.md, "Four more deterministic-arm review findings closed".
+
 - **`catch signal` round 3: bounded reason families, per-bot grouping and
   breakdown.** A colonless reason with no recognised `HEADER:`/judge-score
   prefix (an advisory note, e.g. one embedding a `--test-cmd '...'`
@@ -128,6 +176,20 @@ No version bump.
   PostToolUse payload carries no `worktree` key and nothing exports
   `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
   today. See docs/hooks.md, "verify: spawn acks and gather health".
+
+- **Two more deterministic-arm false-block sources closed.** The count
+  arm's draft-side tokenizer no longer splits a mixed alnum run (a git
+  short SHA like `0dca183`) into bogus digit tokens, and its evidence-side
+  recogniser now also trusts a worker's own bold-markdown run summary
+  (`**N passed**`). Family 8 (labelled-value pairing) gained a
+  common-noun/number-list guard so a plain English noun phrase in the
+  draft ("items 2 and 3") is no longer read as a reference to an
+  unrelated, longer evidence label ("feat items") sharing one common
+  word, with an explicit-label-syntax escape hatch (`items: 2`,
+  `items = 2`, `` `items` 2 ``) and a verbatim-label escape hatch. Families
+  4 and 5's receipt scan no longer reads a worker's own claim text inside
+  a `REPORT FROM ...` fence as a real merge receipt. See docs/hooks.md,
+  "Two more false-block sources closed".
 
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every

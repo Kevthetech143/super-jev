@@ -1321,6 +1321,181 @@ that one bot's records; without it, the report instead ends with a `by
 bot:` breakdown — record counts per bot, most-records-first — so more than
 one seat sharing this ledger stays visible as a whole and per-bot both.
 
+## Two more false-block sources closed (2026-09-18)
+
+Two live false blocks, found on separate reported drafts, both fixed at the
+same layer they were caused: literal string/regex work, no judge involved.
+
+**The count arm's draft-side tokenizer no longer splits a mixed alnum run.**
+`_extract_labelled_draft_counts` tokenized a clause with `[A-Za-z#/]+|\d+` as
+two *separate* alternatives, so a run with no separator between letters and
+digits — a git short SHA like `0dca183` — matched as three tokens instead of
+one: `0`, `dca`, `183`. A true draft that said "HEAD 0dca183, 61 tests per
+Muse" put both bogus digit tokens inside the four-token window of `tests`,
+alongside the real `61`, and the arm reported `count mismatch (tests):
+draft 0/61/183 vs evidence 53` on a true report. The tokenizer now matches
+one combined character class, `[A-Za-z0-9#/]+`, so a mixed run stays one
+token; the existing `tok.isdigit()` check downstream already excludes
+anything that isn't a pure digit run, so the hash contributes nothing at all
+rather than two counts.
+
+Fixing the tokenizer alone was not enough on that same case: the real
+receipt for the honest `61` was a grep excerpt of a worker's own report,
+`` `test_v2_details` -> **61 passed**. ``, which carries no `in Ns` duration
+and matched none of the registered runner shapes — it sat unmatched while
+an unrelated, in-scope `53 passed in 77.52s` (a different, earlier task's
+baseline run, in scope only because it shared the same relay-tool path)
+paired instead. `_EVIDENCE_COUNT_RES["tests"]` now also recognises a
+worker's bold-markdown summary of a run, `**N passed**`, the same way it
+already trusts the glyph-prefixed node:test line.
+
+**Family 8 (labelled-value pairing) gained a common-noun / number-list
+guard.** A draft saying "items 2 and 3" — the English noun "items" followed
+by a plain enumerated list — paired against an evidence row labelled `feat
+items` (an unrelated table column sharing one common word) and blocked. The
+adjacency pairing in `_fact_draft_label_values` now also tags a pair as
+`guard_word`-bearing when the matched word is a common count noun (`step`,
+`item`, `point`, `option`, `part` — see `_FACT_COUNT_NOUN_STEMS`) sitting
+next to an enumerated number list (`_fact_in_number_list_context`, matching
+"2 and 3" / "1, 2 and 3" shapes). `_facts_labelled_value_claims` only trusts
+a guarded pair when the evidence's own label is **no longer** than the word
+the draft used, or is the exact (multi-word) phrase the draft itself wrote —
+so `feat items` (two words, longer than `items`) is rejected unless the
+draft literally wrote "feat items" itself. The draft can still mark a word
+as an explicit label with real punctuation — `items: 2`, `items = 2`,
+`` `items` 2 `` — via `_fact_explicit_label_word`, which bypasses the guard
+entirely (and, being explicit, is allowed to cross the clause-boundary rule
+the rest of family 8 respects). Separately, the same value-token scan no
+longer reads the leading digits of a mixed alnum run as a standalone value —
+"HEAD 0dca183" does not read as the labelled value `0` for `head` — the
+same fix as the count arm's tokenizer, applied where family 8 extracts
+values instead of counts.
+
+Both changes are re-measured against every recorded bench (gate-bench-
+20260917, -20260918, -20260918-fleet, and the -20260918-blind set) with
+`skills/super-jev/tests/replay_gate_bench.py` and
+`skills/super-jev/tests/replay_fact_block_sweep.py`: zero truths newly
+blocked, and the two count lies (l04, l05) the deterministic arm already
+caught still catch clean.
+
+**Families 4 and 5's receipt scan no longer reads inside a REPORT FROM
+fence.** Both read every window line through `_fact_window_lines`,
+including a worker's own unverified claim text inside a `REPORT FROM ...`
+block — so a report merely *saying* "gh pr merge 39 ran clean, PR 39
+merged" (not an actual `gh` receipt) could be read as a real merge receipt
+by family 4's merge/CI check, or by family 5's stale-report-vs-receipt
+check. `_fact_window_lines_excluding_reports` (and its positive-image
+sibling, `_iter_window_report_lines`, factored out of the in_report
+tracking `_report_not_merged_claims` already used) now feeds the RECEIPT
+half of both families; `_report_not_merged_claims` itself, family 5's own
+"a report claims not-merged" half, still reads a report's body on purpose —
+that check is about what the report says, not about a receipt.
+
+## Four more deterministic-arm review findings closed (2026-09-18)
+
+A review of the section above found four more issues in the same code,
+before it shipped.
+
+**The count arm's tokenizer swallowed a slash fraction or a hash-prefixed
+number.** Folding `#` and `/` into the SAME character class as letters and
+digits (`[A-Za-z0-9#/]+`) fixed the mixed-alnum-run case above, but a slash
+fraction ("41/41 passed"), a short fraction ("3/41 tests pass") or a
+hash-prefixed number ("Tests #52 passed") also glues into one run under
+that class — `41/41`, `3/41`, `#52` — none of which is a pure digit run, so
+`tok.isdigit()` drops all of them and the draft claims no count at all. A
+draft with no claimed count can never mismatch, so a false "41/41 passed"
+next to a true "34 passed in 6.94s" receipt passed clean. `_extract_
+labelled_draft_counts` now tokenizes with `[A-Za-z0-9]+|[#/]` — `#` and `/`
+match as their own single-character tokens instead of gluing onto a
+neighbouring digit run — so `41/41` becomes the two digit tokens `41` and
+`41`, and `#52` becomes `52`. A mixed alnum run with neither character in
+it, e.g. a git short SHA, is untouched and still glues into one non-digit
+token that `tok.isdigit()` excludes.
+
+**The digit-then-letter guard on labelled values was too broad.** The same
+mixed-alnum-run fix for family 8's value scan — skip a digit run immediately
+followed by a letter, so "HEAD 0dca183" is not read as the value `0` — also
+skipped every unit-suffixed value: "latency 250ms", "cache 4k", "heap 8GB"
+all end in a letter right after the digits too, and were silently dropped,
+so a draft's "latency 250ms" next to an evidence row of "latency: 400" no
+longer contradicted. The guard is narrowed to the shape it was meant to
+catch: take the word characters right after the matched digits (the
+"tail"), and only skip when that tail is itself shaped like the rest of a
+fused identifier — starts with a letter, has another digit further in
+(`_FACT_MIXED_ID_TAIL_RE`, `[A-Za-z]\w*\d`, matching "dca183" off
+"0dca183"). A pure unit suffix ("ms", "k", "GB") never has a trailing digit
+and is kept as a value.
+
+**Evidence counts had no REPORT FROM fence exclusion.** Families 4 and 5's
+receipt scan was fixed (above) to stop reading a worker's own claim text
+inside a `REPORT FROM ...` fence as a real receipt; `_extract_labelled_
+evidence_counts_scoped`, the count arm's evidence-side reader, was not — a
+worker's own bold-markdown run summary inside its OWN unverified report
+body (`**61 passed**`) was still read as a real evidence count. That is a
+trust boundary hole distinct from an honest evidence gap: a worker could put
+a false total in its own report text and have the count arm treat it as
+proof of itself, with a real, contradicting receipt sitting right next to
+it unread. Evidence counts now track the same `REPORT FROM ...` fence and
+skip every line inside one entirely, matching the exclusion families 4 and
+5 already use.
+
+**`_iter_window_report_lines` is removed.** It was factored out alongside
+the families 4/5 fix as the positive-image sibling of `_fact_window_lines_
+excluding_reports` (read ONLY a report's own words, instead of everything
+except them), but nothing in this codebase ever called it in production —
+only its own partition test did — and a separately parked change defines a
+different-signature function of the same name. Rather than rename around
+that collision, it is deleted; its test now exercises `_fact_window_lines_
+excluding_reports` directly.
+
+Re-measured against `skills/super-jev/tests/replay_gate_bench.py` and
+`skills/super-jev/tests/replay_fact_block_sweep.py`: zero truths newly
+blocked, zero decision flips on the fact-block sweep. One blind-bench lie
+catch that relied on the old hash-split tokenizer artifact — a count
+mismatch the deterministic arm only reported because of the bug this PR
+fixes — is now left to the judge, same as most lies already were; nothing
+that was a genuine catch is lost.
+
+## The report fence closes on structure, not blank lines (2026-09-18)
+
+The `REPORT FROM ... (unverified worker claim)` fence both
+`_extract_labelled_evidence_counts_scoped` (the count arm's evidence
+reader) and `_fact_window_lines_excluding_reports` (families 4/5's shared
+receipt reader) track used a bare blank line to decide the fence had
+closed. That is the wrong signal: `_build_reports_block` joins several
+DIFFERENT current-turn reports with a bare blank line (`"\n\n".join(items)`)
+inside one `[current turn reports]` section, but a single worker's own
+report is very often more than one paragraph, and the assembler carries
+those paragraph breaks straight through as blank lines too — inside the
+SAME report, inside the SAME fence. Only the report's first paragraph was
+ever actually excluded; a second paragraph, after a blank line, that
+happened to echo a bold-markdown count (`**61 passed**`) or a merge-shaped
+claim ("gh pr merge 39 ran clean") read straight back in as real evidence,
+right beside a genuine receipt that disagreed with it — the exact
+trust-boundary hole the fence exists to close, just one paragraph later
+than the earlier fix covered.
+
+Both readers now close the fence only on a real structural marker —
+`_REPORT_FENCE_CLOSE_RE`, matching either a bracketed header line (`[...]`,
+the generic shape, not just the four names `_WINDOW_SECTION_RE`
+recognises) or an explicit `END REPORT FROM ...` line — never on a blank
+line. A real section separator (`===`/`---`, `_SECTION_SEPARATOR_RE`) still
+closes the fence as before, since that always marks a genuine section
+boundary the assembler itself inserted, not a report's own prose. This
+relies on one assumption about the assembler, now pinned by its own test
+(`test_reports_block_assembler_always_puts_a_section_boundary_after_a_report`):
+`_build_reports_block` only ever joins two different reports with a bare
+blank line, never a bracketed header or an `END REPORT FROM` line, inside
+one section — so nothing inside a `[current turn reports]`/`[previous turn
+-N]` block can accidentally look like a fence-closing marker to the new
+regex, and the real receipt sections that follow are always reached
+through an actual `_WINDOW_SECTION_RE`/`_SECTION_SEPARATOR_RE` boundary
+instead.
+
+Re-measured against `skills/super-jev/tests/replay_gate_bench.py` and
+`skills/super-jev/tests/replay_fact_block_sweep.py`: zero truths newly
+blocked, zero decision flips on the fact-block sweep.
+
 **Turning a repeat pattern into a fix PR.** `superjev.py catch signal
 [--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]
 [--with-reasons] [--with-drafts]` is the first step of the compounding loop
