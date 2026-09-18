@@ -1774,11 +1774,111 @@ def _git_out(args, cwd):
         return False, ""
 
 
-def _gather_local_evidence(report_text, worktree, test_cmd):
-    """Best-effort git/test evidence, gathered read-only, in the shape
+# A PR number named in the report, the fallback's only cue that there is any
+# PR evidence worth gathering at all — "PR #N" or a `/pull/N` URL segment
+# (see _PR_NUM_RE further down for the sibling used by the hook's --pr /
+# --from-file path; this one is deliberately self-contained so this early
+# section of the file has no forward dependency on it).
+_PR_NUM_FALLBACK_RE = re.compile(r'PR\s*#(\d+)|\bpull/(\d+)\b', re.IGNORECASE)
+_GH_PR_TIMEOUT = 10
+
+
+def _run_gh(args, cwd, commands_log):
+    """One `gh` call for the verify fallback's PR evidence: never
+    interactive (GH_PROMPT_DISABLED=1, stdin closed), a 10s timeout, and
+    never raises. Logged into `commands_log` regardless of outcome, so
+    `--explain` can print exactly what ran even when a call failed or timed
+    out. Returns (ok, stdout)."""
+    cmd = ["gh", *args]
+    commands_log.append(" ".join(cmd))
+    env = dict(os.environ)
+    env["GH_PROMPT_DISABLED"] = "1"
+    try:
+        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True,
+                           text=True, timeout=_GH_PR_TIMEOUT, env=env,
+                           stdin=subprocess.DEVNULL)
+        return p.returncode == 0, (p.stdout or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+
+
+def _gh_pr_evidence(report_text, worktree, commands_log):
+    """Best-effort PR state + checks off `gh`, for the verify fallback's
+    derived-facts pass — the fallback's only source of PR truth, since it
+    has no worker-verify door to run `gh pr view` for it. Returns one
+    `evidence.prs[]` entry (the shape src/enhance/derive-facts.ts's
+    `Evidence.prs` already expects) or None. Runs both `gh pr view N --json
+    state,mergedAt,headRefName,baseRefName,statusCheckRollup` and `gh pr
+    checks N` — the checks command is the primary source for the checks
+    list (it is the command the report's claim is actually judged against),
+    `statusCheckRollup` from the view call is only a fallback for when the
+    checks command itself returns nothing parseable. Every call is appended
+    to `commands_log` whether or not it succeeded. Never raises and never
+    guesses: no `gh` on PATH, no PR number named in the report, a timeout,
+    or unparseable JSON all fall through to None (no fact, no rule) rather
+    than fabricating a state."""
+    if not shutil.which("gh"):
+        return None
+    m = _PR_NUM_FALLBACK_RE.search(report_text or "")
+    if not m:
+        return None
+    pr_num = int(m.group(1) or m.group(2))
+    cwd = Path(worktree).expanduser() if worktree else None
+
+    state = None
+    rollup_checks = []
+    ok, out = _run_gh(
+        ["pr", "view", str(pr_num), "--json",
+         "state,mergedAt,headRefName,baseRefName,statusCheckRollup"],
+        cwd, commands_log)
+    if ok and out.strip():
+        try:
+            data = json.loads(out)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            state = {
+                "state": data.get("state") or "UNKNOWN",
+                "isDraft": bool(data.get("isDraft", False)),
+                "headRefName": data.get("headRefName"),
+                "mergedAt": data.get("mergedAt"),
+            }
+            for c in (data.get("statusCheckRollup") or []):
+                if not isinstance(c, dict):
+                    continue
+                name = c.get("name") or c.get("context") or "check"
+                st = c.get("conclusion") or c.get("state") or "UNKNOWN"
+                rollup_checks.append({"name": name, "state": st})
+
+    checks = []
+    ok2, out2 = _run_gh(["pr", "checks", str(pr_num)], cwd, commands_log)
+    if ok2 and out2.strip():
+        # Plain `gh pr checks` output is one check per line, tab-separated
+        # (name, state, elapsed, url).
+        for line in out2.splitlines():
+            parts = [p for p in line.split("\t") if p != ""]
+            if len(parts) >= 2:
+                checks.append({"name": parts[0].strip(), "state": parts[1].strip()})
+    if not checks:
+        checks = rollup_checks
+
+    if state is None and not checks:
+        return None
+    entry = {"number": pr_num}
+    if state is not None:
+        entry["state"] = state
+    if checks:
+        entry["checks"] = checks
+    return entry
+
+
+def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None):
+    """Best-effort git/test/PR evidence, gathered read-only, in the shape
     src/enhance/derive-facts.ts's `Evidence` type expects. Never raises;
     a block this cannot gather is simply left out, same contract as
-    worker-verify's own "not gathered" blocks."""
+    worker-verify's own "not gathered" blocks. `commands_log`, if passed,
+    collects every `gh` command this run attempted (see _gh_pr_evidence),
+    for `--explain`."""
     evidence = {}
     paths, hashes, branches = _light_atoms(report_text)
 
@@ -1861,6 +1961,13 @@ def _gather_local_evidence(report_text, worktree, test_cmd):
         else:
             evidence["tests"] = {"command": test_cmd, "output": f"REFUSED: {bad}"}
 
+    # PR state/checks off `gh` — gated on a PR number actually being named
+    # in the report AND `gh` being on PATH; neither present means no fact,
+    # no rule, same "silence over a guess" contract as every block above.
+    pr_entry = _gh_pr_evidence(report_text, worktree, commands_log if commands_log is not None else [])
+    if pr_entry is not None:
+        evidence["prs"] = [pr_entry]
+
     return evidence
 
 
@@ -1889,20 +1996,23 @@ def _resolve_node():
     return shutil.which("node")
 
 
-def _derived_facts_fallback(report_text, worktree, test_cmd):
+def _derived_facts_fallback(report_text, worktree, test_cmd, explain=False):
     """Run the derive-facts/pre-rules pair through its CLI over locally
     gathered evidence, and return (block_text, verdicts, code) — or None if
     this fallback itself cannot run (no node, no CLI file, or nothing at all
     to gather). `code` is 4 (REJECT) when a pre-rule settles at least one
     claim as CONTRADICTED_BY_FACT, else 3 (READ) — this path never returns 0
     (CLEAN); it has no judge, so an unsettled claim stays unverified, never
-    vouched for."""
+    vouched for. `explain=True` appends the list of `gh` commands this run
+    attempted (see _gh_pr_evidence) to the block, empty when none ran
+    (no PR named in the report, or no `gh` on PATH)."""
     node = _resolve_node()
     if not node or not DERIVE_FACTS_CLI.exists():
         return None
     if not worktree and not test_cmd:
         return None
-    evidence = _gather_local_evidence(report_text, worktree, test_cmd)
+    gh_commands = []
+    evidence = _gather_local_evidence(report_text, worktree, test_cmd, commands_log=gh_commands)
     if not evidence:
         return None
     claims = presplit_claims(report_text) or [report_text.strip()]
@@ -1929,6 +2039,15 @@ def _derived_facts_fallback(report_text, worktree, test_cmd):
     else:
         lines.append("PRE-RULE VERDICTS: none of the facts above contradict a claim in "
                      "this report.")
+    if explain:
+        lines.append("")
+        if gh_commands:
+            lines.append("--explain: gh commands run —")
+            for c in gh_commands:
+                lines.append(f"  {c}")
+        else:
+            lines.append("--explain: no gh commands run (no PR named in the report, "
+                         "or gh is not on PATH).")
     lines.append("")
     lines.append("No judge is reachable in this fallback (worker-verify is not installed "
                 "and SUPERJEV_VERIFY_CMD is not set), so nothing here can be called CLEAN. "
@@ -1954,7 +2073,9 @@ def cmd_verify(a):
             report_text = Path(a.report).read_text(encoding="utf-8", errors="replace")
         except OSError:
             pass
-        fallback = _derived_facts_fallback(report_text, a.worktree, a.test_cmd) if report_text else None
+        explain = bool(getattr(a, "explain", False))
+        fallback = _derived_facts_fallback(report_text, a.worktree, a.test_cmd,
+                                           explain=explain) if report_text else None
         if fallback is None:
             return door_refuse(json_mode, "verify", bad)
         block, verdicts, code = fallback
@@ -5664,6 +5785,9 @@ def build_parser():
     v.add_argument("--test-cmd", default="", help="the test command, exact path")
     v.add_argument("--paths", nargs="*", default=[], help="paths the report claims")
     v.add_argument("--dry-run", action="store_true", help="collect evidence, no judging")
+    v.add_argument("--explain", action="store_true",
+                   help="door-absent fallback only: list the gh commands run "
+                        "gathering PR state/checks")
     _add_json_flag(v)
     v.set_defaults(func=cmd_verify)
 
