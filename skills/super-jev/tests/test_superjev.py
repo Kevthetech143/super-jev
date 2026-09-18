@@ -90,6 +90,22 @@ def no_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def ledger_bot_context_reset(monkeypatch):
+    """_ACTIVE_HOOK_PAYLOAD is module-level state set by cmd_hook/
+    cmd_hook_prompt_verify and read back by _current_bot_id/_current_origin
+    (see ledger_append/catch_ledger_append) — without a reset here, a
+    payload left behind by one hook test would leak into the next test's
+    ledger/catch records. CLAW4MAC_SESSION_ID/CLAW4MAC_BOT_ID/CLAUDE_BOT_ID/
+    SUPERJEV_BENCH are cleared too, so bot/origin default the same way in
+    every test unless a test opts in explicitly."""
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", None)
+    monkeypatch.delenv("CLAW4MAC_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAW4MAC_BOT_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_BOT_ID", raising=False)
+    monkeypatch.delenv("SUPERJEV_BENCH", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def ledger_tmp(tmp_path, monkeypatch):
     """Every test writes its call ledger — and every catch-ledger-family
     path the module owns (catches.jsonl, catch-cases.json, the payloads/
@@ -7699,3 +7715,290 @@ def test_replay_catch_cases_unsupported_shape_gets_its_own_message(tmp_path, mon
     out = capsys.readouterr().out
     assert code == 0
     assert "payload shape unsupported for this door" in out
+
+
+# ------------------------------------------------------------ ledger bot/origin
+
+def test_bot_id_from_transcript_path_extracts_the_agent_cwd_segment():
+    tp = ("/Users/admin/.claude/projects/"
+          "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/abc123.jsonl")
+    assert sj._bot_id_from_transcript_path(tp) == "claw4mac-primary"
+
+
+def test_bot_id_from_transcript_path_handles_a_different_bot():
+    tp = ("/Users/admin/.claude/projects/"
+          "-Users-admin--ai-wrapper-agent-cwd-claw4mac-businessfi/xyz.jsonl")
+    assert sj._bot_id_from_transcript_path(tp) == "claw4mac-businessfi"
+
+
+def test_bot_id_from_transcript_path_none_when_no_agent_cwd_segment():
+    assert sj._bot_id_from_transcript_path("/Users/admin/somewhere/else.jsonl") is None
+
+
+def test_bot_id_from_transcript_path_none_on_non_string():
+    assert sj._bot_id_from_transcript_path(None) is None
+    assert sj._bot_id_from_transcript_path(123) is None
+
+
+def test_current_bot_id_prefers_claw4mac_session_id_env(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "should-not-win")
+    monkeypatch.setenv("CLAUDE_BOT_ID", "should-not-win-either")
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_falls_back_to_claw4mac_bot_id_env(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    monkeypatch.setenv("CLAUDE_BOT_ID", "should-not-win")
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_falls_back_to_claude_bot_id_env(monkeypatch):
+    monkeypatch.setenv("CLAUDE_BOT_ID", "helper1")
+    assert sj._current_bot_id() == "helper1"
+
+
+def test_current_bot_id_derives_from_active_hook_payload_when_no_env(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "b1"
+
+
+def test_current_bot_id_derives_and_strips_claw4mac_prefix_for_primary(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/"
+                            "s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_env_wins_over_transcript_path(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_session_id_env_wins_over_transcript_path(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_unknown_with_no_env_and_no_payload():
+    assert sj._current_bot_id() == "unknown"
+
+
+def test_current_bot_id_unknown_when_payload_has_no_transcript_path(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {"session_id": "abc"})
+    assert sj._current_bot_id() == "unknown"
+
+
+def test_current_origin_live_by_default():
+    assert sj._current_origin() == "live"
+
+
+def test_current_origin_bench_from_env_var(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_BENCH", "1")
+    assert sj._current_origin() == "bench"
+
+
+def test_current_origin_bench_from_session_id_prefix(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {"session_id": "bench-042"})
+    assert sj._current_origin() == "bench"
+
+
+def test_current_origin_live_when_session_id_does_not_start_with_bench(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {"session_id": "real-session-abc"})
+    assert sj._current_origin() == "live"
+
+
+def test_ledger_append_sets_bot_and_origin_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "calls.jsonl")
+    sj.ledger_append({"door": "gate", "argv": [], "exit_code": 0, "ms": 0,
+                      "json_mode": False, "hook_mode": False})
+    rec = json.loads(sj.LEDGER_PATH.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["bot"] == "unknown"
+    assert rec["origin"] == "live"
+
+
+def test_ledger_append_never_overwrites_an_explicit_bot_or_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "calls.jsonl")
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    sj.ledger_append({"door": "gate", "argv": [], "exit_code": 0, "ms": 0,
+                      "json_mode": False, "hook_mode": False,
+                      "bot": "explicit-bot", "origin": "bench"})
+    rec = json.loads(sj.LEDGER_PATH.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["bot"] == "explicit-bot"
+    assert rec["origin"] == "bench"
+
+
+def test_hook_gate_ledger_and_catch_records_carry_bot_from_transcript_path(
+        tmp_path, monkeypatch):
+    ledger_path, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl", "session_id": "s1"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert call_rec["bot"] == "b1"
+    assert call_rec["origin"] == "live"
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["bot"] == "b1"
+    assert catch_rec["origin"] == "live"
+
+
+def test_hook_gate_bot_id_env_wins_over_transcript_path(tmp_path, monkeypatch):
+    ledger_path, _ = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert call_rec["bot"] == "primary"
+
+
+def test_hook_gate_origin_bench_when_session_id_starts_with_bench(tmp_path, monkeypatch):
+    ledger_path, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "session_id": "bench-007"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert call_rec["origin"] == "bench"
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["origin"] == "bench"
+
+
+def test_catch_list_bot_filter(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "primary"},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "b1"},
+    ])
+    code = sj.main(["catch", "list", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "a1" in out
+    assert "a2" not in out
+    assert "bot=primary" in out
+
+
+def test_catch_list_shows_unknown_for_records_without_a_bot_field(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "list"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=unknown" in out
+
+
+def test_catch_list_bot_primary_matches_record_derived_from_transcript_path(
+        tmp_path, monkeypatch, capsys):
+    """--bot primary must match a record whose `bot` field came from
+    _current_bot_id deriving off a real .../agent-cwd-claw4mac-primary/...
+    transcript_path (the seat vocabulary uses "primary", not
+    "claw4mac-primary" — see _current_bot_id's prefix strip)."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl", "session_id": "s1"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["bot"] == "primary"
+    capsys.readouterr()  # discard hook gate's own stdout
+    code = sj.main(["catch", "list", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=primary" in out
+
+
+def test_catch_list_bot_column_width_fits_a_long_bot_name(tmp_path, monkeypatch, capsys):
+    """A long seat name (e.g. "contentcreator") must not run its bot=
+    field into the reason column with no gap — the column widens to fit
+    the widest bot id actually printed rather than a narrower fixed pad."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["some reason"], "draft_excerpt": "",
+         "window_bytes": 1, "ms": 1, "tag": None, "note": None,
+         "bot": "contentcreator"},
+    ])
+    code = sj.main(["catch", "list"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=contentcreator  some reason" in out
+
+
+def test_catch_report_bot_filter_excludes_other_bots(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": "false", "note": None, "bot": "primary"},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": "false", "note": None, "bot": "b1"},
+    ])
+    code = sj.main(["catch", "report", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "false stops: 1" in out
+
+
+def test_catch_report_shows_by_bot_breakdown_when_no_filter(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "primary"},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "primary"},
+        {"id": "a3", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "b1"},
+    ])
+    code = sj.main(["catch", "report"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "by bot:" in out
+    assert "primary: 2" in out
+    assert "b1: 1" in out
