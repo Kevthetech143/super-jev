@@ -5912,8 +5912,8 @@ DERIVED_FACTS_HEADER = (
     "DERIVED FACTS (computed in code from this window's own text plus the "
     "draft, and — for the RECEIPT SHAPE lines — from this turn's tool_use "
     "inputs and tool_result records; no model call. Each line is a literal "
-    "reading of the evidence, never an inference from it; prefer it over "
-    "re-reading the column dump yourself):")
+    "reading of the raw evidence below; prefer it over re-reading the "
+    "column dump yourself):")
 DERIVED_FACTS_BACKING_HEADER = (
     "BACKING (the raw evidence window, unchanged — every fact above was "
     "read out of it):")
@@ -7628,12 +7628,15 @@ def _receipt_shape_acts(records, scope_slices):
 
 
 def _rs_named(items, cap=RECEIPT_SHAPE_TARGETS):
-    """`items` as a plain phrase naming at most `cap` of them, with the
-    overflow counted rather than dropped silently."""
+    """`items` as a plain phrase naming at most `cap` of them. When the
+    list runs past `cap` the phrase ends with an uncounted "and others"
+    rather than a closed count, so it never reads as a total inventory of
+    the turn's acts — a judge should not treat the named items as the
+    whole list."""
     shown = items[:cap]
     tail = len(items) - len(shown)
     phrase = ", ".join(shown)
-    return phrase + (f" and {tail} more" if tail > 0 else "")
+    return phrase + (" and others" if tail > 0 else "")
 
 
 def _rs_iter_segments(masked, raw):
@@ -7805,7 +7808,7 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                     if isinstance(val, str) and val.strip():
                         who = val.strip()[:60]
                         break
-                phrase = f"a {tool} dispatch" + (f" of {who}" if who else "")
+                phrase = f"one {tool} dispatch" + (f" of {who}" if who else "")
                 if phrase not in handed:
                     handed.append(phrase)
         # Relay sends lead the SENT line: when the cap on named targets bites,
@@ -7815,33 +7818,26 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
         facts = []
         if saved:
             facts.append(
-                "RECEIPT SHAPE (saved): this window's tool results include "
-                + _rs_named(saved) + ". Each such act is support for the draft "
+                "RECEIPT SHAPE (saved): among this window's tool results: "
+                + _rs_named(saved) + ". Each such act supports the draft "
                 "saying it saved, logged, wrote, recorded, appended or updated "
-                "THAT file, and support for nothing else — it says nothing about "
-                "what the file now contains, so it cannot back any claim about "
-                "the file's content.")
+                "THAT file.")
         if sent:
             facts.append(
-                "RECEIPT SHAPE (sent): this window's tool results include "
-                + _rs_named(sent) + ". Each such act is support for the draft "
+                "RECEIPT SHAPE (sent): among this window's tool results: "
+                + _rs_named(sent) + ". Each such act supports the draft "
                 "saying it sent, replied, notified, told, escalated or reported "
-                "THAT message, and support for nothing else — it says nothing "
-                "about the other side having received, read or acted on it.")
+                "THAT message.")
         if sched:
             facts.append(
-                "RECEIPT SHAPE (scheduled): this window's tool results include "
-                + _rs_named(sched) + ". Each such act is support for the draft "
-                "saying a job is scheduled, armed or set to fire under THAT id, "
-                "and support for nothing else — it says nothing about the job "
-                "having run or about what it will find.")
+                "RECEIPT SHAPE (scheduled): among this window's tool results: "
+                + _rs_named(sched) + ". Each such act supports the draft "
+                "saying a job is scheduled, armed or set to fire under THAT id.")
         if handed:
             facts.append(
-                "RECEIPT SHAPE (handed off): this window's tool results include "
-                + _rs_named(handed) + ". Each such act is support for the draft "
-                "saying work was handed off, delegated or dispatched, and support "
-                "for nothing else — it says nothing about what the worker then "
-                "did or reported.")
+                "RECEIPT SHAPE (handed off): among this window's tool results: "
+                + _rs_named(handed) + ". Each such act supports the draft "
+                "saying work was handed off, delegated or dispatched.")
         return facts[:cap]
     except Exception:                                  # never break a hook
         return []
