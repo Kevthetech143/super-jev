@@ -3152,3 +3152,236 @@ def test_derived_worktree_none_when_only_a_url_path_is_present(tmp_path):
     derived = sj._derive_evidence_from_report_text(text)
     assert derived["worktree"] is None
     assert derived["pr"] == 13
+
+
+# ------------------------------------------------------------ token accounting
+
+def _jev_header(model="jev-1.13.0", chunks=1, in_tok=2064, ms=436):
+    return f"jev {model} · {chunks} chunk(s) · {in_tok} in_tok · {ms}ms"
+
+
+def test_parse_jev_headers_finds_one_recorded_header():
+    text = "\n" + _jev_header() + "\n\n  c1 SUPPORTED 0.97\n"
+    headers = sj.parse_jev_headers(text)
+    assert headers == [{"model": "jev-1.13.0", "chunks": 1, "in_tok": 2064, "ms": 436}]
+
+
+def test_parse_jev_headers_finds_none_in_plain_output():
+    assert sj.parse_jev_headers("no header here at all") == []
+
+
+def test_token_usage_from_output_sums_multiple_chunk_headers():
+    text = _jev_header(chunks=1, in_tok=1000, ms=100) + "\n" + _jev_header(chunks=2, in_tok=3000, ms=200)
+    usage = sj.token_usage_from_output(text)
+    assert usage["calls"] == 2
+    assert usage["in_tok"] == 4000
+    assert usage["chunks"] == 3
+    assert usage["judge_ms"] == 300
+    assert usage["est_cost_usd"] == round(4000 * sj.DEFAULT_INPUT_USD_PER_MTOK / 1_000_000, 6)
+
+
+def test_token_usage_from_output_none_when_no_header():
+    assert sj.token_usage_from_output("nothing to see here") is None
+
+
+def test_token_usage_respects_env_rate_override(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_INPUT_USD_PER_MTOK", "1.0")
+    usage = sj.token_usage_from_output(_jev_header(in_tok=500))
+    assert usage["est_cost_usd"] == 0.0005
+
+
+def test_run_door_records_token_usage_in_ledger_from_captured_stdout(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=_jev_header(in_tok=2064)))
+    f = tmp_path / "a.md"
+    f.write_text("x", encoding="utf-8")
+    code = sj.main(["gate", str(f), "--draft", str(f), "--json"])
+    capsys.readouterr()
+    assert code == 0
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["door"] == "gate"
+    assert rec["in_tok"] == 2064
+    assert rec["calls"] == 1
+    assert rec["chunks"] == 1
+    assert "est_cost_usd" in rec
+    assert "id" in rec and rec["id"]
+
+
+# ------------------------------------------------------------ input cap + truncation
+
+def test_cap_check_noop_under_cap():
+    items = [("a.md", "x" * 100), ("b.md", "y" * 100)]
+    kept, truncated, est, cap = sj.cap_check_and_truncate(items, "draft text", "gate")
+    assert truncated is False
+    assert kept == items
+
+
+def test_cap_check_drops_oldest_evidence_first(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "10")  # 40 chars
+    # oldest first, current-turn last, per the documented ordering
+    items = [("oldest.md", "A" * 200), ("newest.md", "B" * 20)]
+    kept, truncated, est, cap = sj.cap_check_and_truncate(items, "", "gate")
+    assert truncated is True
+    assert cap == 10
+    kept_names = [p for p, _ in kept]
+    # the newest item must survive; the oldest must be trimmed or dropped
+    assert "newest.md" in kept_names
+    total_chars = sum(len(t) for _, t in kept)
+    assert total_chars <= cap * 4
+    # whatever oldest content survives must be a SUFFIX of the original
+    # (the tail — its most recent content — is what's kept)
+    for p, t in kept:
+        if p == "oldest.md":
+            assert "A" * 200 != t and t == ("A" * 200)[-len(t):] if t else True
+
+
+def test_cap_check_never_touches_the_draft(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "1")  # 4 chars — draft alone is already over
+    draft = "this draft is way over the cap all on its own"
+    items = [("a.md", "some evidence text")]
+    kept, truncated, est, cap = sj.cap_check_and_truncate(items, draft, "gate")
+    assert truncated is True
+    assert kept == []  # every evidence item dropped; draft itself never touched by this function
+
+
+def test_cmd_gate_warns_and_truncates_over_cap(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "5")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=_jev_header()))
+    ev = tmp_path / "ev.md"
+    ev.write_text("x" * 500, encoding="utf-8")
+    draft = tmp_path / "d.md"
+    draft.write_text("short draft", encoding="utf-8")
+    code = sj.main(["gate", str(ev), "--draft", str(draft), "--json"])
+    capsys.readouterr()
+    assert code == 0
+    lines = sj._ledger_lines()
+    rec = json.loads(lines[-1])
+    assert rec["truncated"] is True
+    assert rec["input_cap_tok"] == 5
+
+
+# ------------------------------------------------------------ feedback + calibration
+
+def _seed_hook_decision(door="gate", note_verdict="block (exit 2)", exit_code=2, flags=None):
+    """Write one gate/verify hook ledger line plus its last/ draft+evidence
+    pair, the exact shape `feedback` reads."""
+    sj._hook_log(f"{door}: {note_verdict}", exit_code=exit_code, flags=flags or [])
+    sj._save_last_draft_evidence(door, "the draft text", "the evidence text")
+
+
+def test_feedback_refuses_with_empty_ledger(capsys):
+    code = sj.main(["feedback", "right"])
+    assert code == sj.REFUSED
+    assert "no gate/verify hook ledger line" in capsys.readouterr().err
+
+
+def test_feedback_appends_case_with_expected_fields(capsys):
+    _seed_hook_decision(door="gate", note_verdict="block (exit 2)", exit_code=2,
+                        flags=[{"key": "c1", "verdict": "CONTRADICTED", "score": 0.9}])
+    code = sj.main(["feedback", "right", "--note", "correctly caught a lie"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "human=right" in out
+
+    cases_path = sj.LEDGER_PATH.parent / "calibration" / "cases.jsonl"
+    lines = [l for l in cases_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 1
+    case = json.loads(lines[0])
+    for key in ("id", "ts", "door", "verdict", "exit_code", "flags", "draft",
+                "evidence_path", "human", "note"):
+        assert key in case
+    assert case["door"] == "gate"
+    assert case["verdict"] == "BLOCK"
+    assert case["exit_code"] == 2
+    assert case["draft"] == "the draft text"
+    assert case["human"] == "right"
+    assert case["note"] == "correctly caught a lie"
+    assert Path(case["evidence_path"]).read_text(encoding="utf-8") == "the evidence text"
+
+
+def test_feedback_by_ledger_id(capsys):
+    _seed_hook_decision(door="verify", note_verdict="allow (exit 0)", exit_code=0)
+    rec = json.loads(sj._ledger_lines()[-1])
+    code = sj.main(["feedback", "wrong", "--ledger-id", rec["id"]])
+    assert code == 0
+    cases_path = sj.LEDGER_PATH.parent / "calibration" / "cases.jsonl"
+    case = json.loads(cases_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert case["id"] == rec["id"]
+    assert case["human"] == "wrong"
+    assert case["door"] == "verify"
+    assert case["verdict"] == "ALLOW"
+
+
+def test_calibration_summary_counts_right_wrong_block_allow(capsys):
+    _seed_hook_decision(door="gate", note_verdict="block (exit 2)", exit_code=2)
+    sj.main(["feedback", "right"])
+    _seed_hook_decision(door="gate", note_verdict="block (exit 2)", exit_code=2)
+    sj.main(["feedback", "wrong"])
+    _seed_hook_decision(door="verify", note_verdict="allow (exit 0)", exit_code=0)
+    sj.main(["feedback", "right"])
+    capsys.readouterr()
+    code = sj.main(["calibration", "summary"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "right block : 1" in out
+    assert "wrong block : 1" in out
+    assert "right allow : 1" in out
+    assert "wrong allow : 0" in out
+
+
+def test_calibration_export_layout_matches_gate_bench(tmp_path, capsys):
+    _seed_hook_decision(door="gate", note_verdict="block (exit 2)", exit_code=2)
+    sj.main(["feedback", "right", "--note", "real lie"])
+    capsys.readouterr()
+
+    out_dir = tmp_path / "export"
+    code = sj.main(["calibration", "export", str(out_dir)])
+    capsys.readouterr()
+    assert code == 0
+
+    assert (out_dir / "drafts").is_dir()
+    assert (out_dir / "evidence").is_dir()
+    cases = json.loads((out_dir / "cases.json").read_text(encoding="utf-8"))
+    assert len(cases) == 1
+    c = cases[0]
+    for key in ("id", "kind", "flavor", "draft", "evidence_note"):
+        assert key in c
+    assert c["kind"] == "lie"   # block + human "right" == a confirmed lie
+    cid = c["id"]
+    assert (out_dir / "drafts" / f"{cid}.md").read_text(encoding="utf-8") == "the draft text"
+    assert (out_dir / "evidence" / f"{cid}.md").read_text(encoding="utf-8") == "the evidence text"
+
+
+def test_calibration_kind_maps_all_four_combinations():
+    assert sj._calibration_kind("BLOCK", "right") == "lie"
+    assert sj._calibration_kind("BLOCK", "wrong") == "truth"
+    assert sj._calibration_kind("ALLOW", "right") == "truth"
+    assert sj._calibration_kind("ALLOW", "wrong") == "lie"
+
+
+# ------------------------------------------------------------ ledger token totals
+
+def test_ledger_prints_token_totals(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=_jev_header(in_tok=1234)))
+    f = tmp_path / "a.md"
+    f.write_text("x", encoding="utf-8")
+    sj.main(["gate", str(f), "--draft", str(f), "--json"])
+    capsys.readouterr()
+    code = sj.main(["ledger"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "1234 in_tok" in out
+    assert "token totals, today" in out
+    assert "token totals, session" in out
+
+
+def test_status_json_includes_token_totals_today(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=_jev_header(in_tok=500)))
+    f = tmp_path / "a.md"
+    f.write_text("x", encoding="utf-8")
+    sj.main(["gate", str(f), "--draft", str(f), "--json"])
+    capsys.readouterr()
+    code = sj.main(["status", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert code == 0
+    assert obj["details"]["token_totals_today"]["overall"]["in_tok"] == 500

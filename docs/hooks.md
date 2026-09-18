@@ -199,6 +199,36 @@ seconds, because it gathers evidence first and sends much more of it. On a
 session with many sub-agent spawns those calls add up, and the verify door is
 the expensive one. Both doors have timeouts and both fail open on timeout.
 
+The real number, not just the estimate: every jev call prints an `in_tok`
+header, and `superjev.py` parses it into the ledger entry for that
+invocation, with an estimated `est_cost_usd` at `SUPERJEV_INPUT_USD_PER_MTOK`
+(default `0.042`). `superjev.py ledger` and `superjev.py status --json` total
+that up per door, for today and for the whole ledger. Before either hook
+calls out, the evidence + draft is estimated at chars/4 against
+`SUPERJEV_INPUT_CAP_TOK` (default `32000`); over that, the oldest evidence is
+trimmed first — never the draft or report — and the ledger line for that run
+carries `truncated: true`.
+
+## Feeding a block/allow back into calibration
+
+Each `hook gate`/`hook verify` run now also writes the draft/report and
+evidence it just judged to `ledger/last/<door>-draft.md` and
+`-evidence.md`, overwritten every run. Right after you see a block (or an
+allow you want to double-check), run:
+
+```bash
+python3 skills/super-jev/superjev.py feedback right --note "why"
+python3 skills/super-jev/superjev.py feedback wrong --note "why"
+```
+
+against the LAST hook decision, and it appends one row to
+`ledger/calibration/cases.jsonl`. That log is the growing calibration set —
+`superjev.py calibration summary` gives the right/wrong block/allow counts,
+and `superjev.py calibration export <dir>` writes it out in the exact
+`drafts/`, `evidence/`, `cases.json` shape `gate-bench-20260917/run_bench.sh`
+and `summarize.py` already read, so a threshold re-tune runs against real
+calls instead of only the original synthetic bench.
+
 ## Failure modes, honestly
 
 **False alarms on true reports are the main cost.** On the last live bench, the

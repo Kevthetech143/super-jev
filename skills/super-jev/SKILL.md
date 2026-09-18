@@ -166,6 +166,25 @@ python3 $S ledger -n 100   # last 100
 
 `status` shows the ledger path and today's call count. The ledger is local, plaintext, never contains a secret (the key itself is never in argv or output), and is gitignored — `ledger/` fills up with real use and is not meant to be committed.
 
+### Token accounting
+
+Every fleet door built on `jev.py` prints one header line per model call — `jev jev-1.13.0 · 1 chunk(s) · 2064 in_tok · 436ms` — whether it is `gate`'s own jev-check call or worker-verify's report check, which calls `jev.py` the same way. Whenever `run_door` captures a door's output (`--json`, `hook`, or `hook verify --from-file`), it parses every such line and folds `calls`, `in_tok`, `chunks`, `judge_ms` and `est_cost_usd` into that call's ledger entry. Cost is estimated at `SUPERJEV_INPUT_USD_PER_MTOK` (default `0.042`, TypeSafe's own published input rate — output is not billed). `ledger` and `status --json` print totals per door and overall, for today and for the session (the whole ledger file, there being no separate session id in the call record).
+
+Before invoking `gate` or `verify`, the evidence + draft/report is estimated at chars/4. If that estimate is over `SUPERJEV_INPUT_CAP_TOK` (default `32000`, a hair under Jev's own measured 32,768-token ceiling — see `~/agents/global/knowledge/typesafe-ai-jev/CAPABILITIES.md`), one warning line prints to stderr and the OLDEST evidence is truncated first (receipts and previous-turn material ahead of current-turn, matching the order the Stop hook already assembles) until the estimate fits. The draft/report itself is never truncated. A truncated run's ledger entry carries `truncated: true`.
+
+## Feedback and the calibration set
+
+`feedback <right|wrong> [--note "..."] [--ledger-id ID]` records whether the LAST gate/verify hook decision (or a specific ledger line, by id) was the right call. Every `hook` decision now also overwrites `ledger/last/<door>-draft.md` and `-evidence.md` with the draft/report and evidence it just judged, so `feedback` has something to attach the human verdict to. Each call appends one line to `ledger/calibration/cases.jsonl`: `{id, ts, door, verdict, exit_code, flags, draft, evidence_path, human, note}`.
+
+```bash
+python3 $S feedback right --note "correctly caught the invented PR number"
+python3 $S calibration summary                 # counts of right/wrong blocks and allows
+python3 $S calibration export /tmp/my-cal-set   # drafts/ evidence/ cases.json, same layout
+                                                 # run_bench.sh/summarize.py already read
+```
+
+`export` labels each case `"kind": "lie"` or `"truth"` by crossing the door's verdict with the human call (a confirmed block, or a missed lie that was wrongly allowed, is `"lie"`; a wrongly-blocked truth, or a correctly-allowed truth, is `"truth"`) — the same two buckets `summarize.py` already buckets on.
+
 ## Bare-environment safety
 
 `sweep` and `bench` need `npm`. A hook's shell is usually non-interactive and does not carry the PATH edit an interactive shell profile adds — on a machine where Node is nvm-managed, that means `npm` is often simply absent. Before shelling out, both doors resolve `npm` themselves: `shutil.which("npm")` first, then the newest version under `~/.nvm/versions/node/*/bin` — sorted by actual semantic version, not by directory name as a string, so a stale `v9.x` never shadows a real `v24.x` — prepending its `bin/` to `PATH` if found. If neither works, the door refuses with one line and exits 1 — no Python traceback. Every path in this file is resolved from the skill file's own location or an explicit flag, never from the process's current directory; if `HOME` is not set at all in the environment, the wrapper refuses with one line and exits 1 rather than guessing paths.
