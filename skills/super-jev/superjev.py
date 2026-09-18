@@ -46,7 +46,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOME = Path(os.path.expanduser("~"))
@@ -1743,6 +1743,321 @@ def _ledger_lines():
     except OSError:
         return []
     return [ln for ln in text.splitlines() if ln.strip()]
+
+
+# --------------------------------------------------------------- catch ledger
+#
+# The catch ledger is a second, separate JSONL file from the call ledger
+# above. The call ledger is "what ran, how long, what exit code" — every
+# door invocation. The catch ledger is narrower and purpose-built: one
+# record per gate/verify hook DECISION (allow/block/advisory/unchecked),
+# small enough that Kelvin can tag each one fair/false/miss by hand and
+# read the three-number scoreboard `catch report` prints. See docs/hooks.md,
+# "The catch ledger".
+
+def _default_catch_ledger_path():
+    """SUPERJEV_CATCH_LEDGER, if set, else alongside the call ledger, as
+    catches.jsonl — same directory SUPERJEV_LEDGER resolves to (or this
+    skill's own ledger/ dir when neither is set)."""
+    override = os.environ.get("SUPERJEV_CATCH_LEDGER")
+    if override:
+        return Path(override).expanduser()
+    return LEDGER_PATH.parent / "catches.jsonl"
+
+
+CATCH_LEDGER_PATH = _default_catch_ledger_path()
+
+
+def catch_ledger_append(entry):
+    """Append one JSONL line to the catch ledger. Never raises — same
+    contract as ledger_append. Critically, this is only ever called AFTER
+    the real gate/verify decision (exit code, block/allow/advisory) is
+    already final and returned by the caller: a broken or unwritable catch
+    ledger path must never change what a hook does, only whether this
+    optional record of it gets written. A write failure prints one line to
+    stderr rather than raising or failing silently."""
+    entry.setdefault("id", uuid.uuid4().hex[:10])
+    try:
+        CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"super-jev: could not write catch ledger at {CATCH_LEDGER_PATH}: {exc}",
+              file=sys.stderr)
+    return entry["id"]
+
+
+def _catch_excerpt(text):
+    """First 240 chars of a draft/report, redacted the same way any
+    evidence window is (see redact()) — no secret, credential or fleet
+    customer text ever lands in the catch ledger, because this excerpt is
+    the only piece of the original text the ledger keeps at all."""
+    if not text:
+        return ""
+    return redact(str(text))[:240]
+
+
+def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
+              start_time=None, payload=None):
+    """One record for the catch ledger — called once per gate/verify hook
+    decision. `decision` is one of "block", "allow", "advisory", "unchecked"
+    (see docs/hooks.md). `reasons` is the same strings --explain shows for
+    this run (block_reasons/block_notes), never the raw evidence. `ms` is
+    left as None (not guessed) when `start_time` was not captured.
+
+    Wrapped in try/except on purpose: a bug in this function must never
+    surface as a change to the hook's own return value, because every call
+    site here runs strictly after that value is already decided.
+    `payload`, if given and SUPERJEV_CATCH_KEEP_PAYLOAD=1, is saved
+    (redacted) alongside this record's id for later bench-case export —
+    see _catch_save_payload."""
+    try:
+        ms = None
+        if start_time is not None:
+            ms = int((time.monotonic() - start_time) * 1000)
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "door": door,
+            "decision": decision,
+            "reasons": list(reasons or []),
+            "draft_excerpt": _catch_excerpt(draft_text),
+            "window_bytes": window_bytes,
+            "ms": ms,
+            "tag": None,
+            "note": None,
+        }
+        catch_id = catch_ledger_append(entry)
+        if payload is not None:
+            _catch_save_payload(catch_id, payload)
+        return catch_id
+    except Exception:
+        return None
+
+
+def _catch_save_payload(catch_id, payload):
+    """Opt-in only (SUPERJEV_CATCH_KEEP_PAYLOAD=1): the redacted hook
+    payload for THIS decision, saved under <catch ledger dir>/payloads/
+    <id>.json. Off by default because the catch ledger's whole point is
+    that it never writes the full window; this is the explicit exception a
+    human turned on, meant to make later bench-case export possible for a
+    tagged false stop or miss. Never raises, never required for the ledger
+    line above to succeed — a payload save failure is silent by design
+    (the ledger line is the record that matters; the payload is a bonus)."""
+    if os.environ.get("SUPERJEV_CATCH_KEEP_PAYLOAD") != "1":
+        return None
+    try:
+        out_dir = CATCH_LEDGER_PATH.parent / "payloads"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        redacted = redact(raw)
+        out_path = out_dir / f"{catch_id}.json"
+        out_path.write_text(redacted, encoding="utf-8")
+        return str(out_path)
+    except Exception:
+        return None
+
+
+def _catch_bench_out_dir():
+    """SUPERJEV_BENCH_OUT, if set, else <catch ledger dir>/bench-cases/."""
+    override = os.environ.get("SUPERJEV_BENCH_OUT")
+    if override:
+        return Path(override).expanduser()
+    return CATCH_LEDGER_PATH.parent / "bench-cases"
+
+
+def _write_bench_case(record):
+    """Write a bench case file for a catch-ledger record just tagged
+    "false" (a block that was wrong — the draft was actually true) or
+    "miss" (an allow that let a lie through). Shape follows the existing
+    replay scripts' cases.json (see
+    super-jev-experiments/gate-bench-20260918/cases2.json): id, kind
+    (truth/lie), flavor, draft, evidence_note.
+
+    Plainly, what this file DOES and DOES NOT contain: `draft` here is only
+    the catch ledger's own 240-char redacted excerpt, never the full
+    original text or evidence window — the catch ledger never stored that.
+    If SUPERJEV_CATCH_KEEP_PAYLOAD was on at decision time, `payload_path`
+    points at the saved (redacted) hook payload for this same id, which is
+    the only place the fuller evidence window might still exist; without
+    it, this case file is good for a title and a excerpt, not a full
+    replay."""
+    tag = record.get("tag")
+    # false = a block was wrong, i.e. the blocked draft was actually TRUE.
+    # miss = an allow let a lie through, i.e. the allowed draft was a LIE.
+    kind = "truth" if tag == "false" else "lie"
+    out_dir = _catch_bench_out_dir()
+    rec_id = record.get("id", "")
+    payload_path = CATCH_LEDGER_PATH.parent / "payloads" / f"{rec_id}.json"
+    case = {
+        "id": rec_id,
+        "kind": kind,
+        "flavor": None,
+        "draft": record.get("draft_excerpt", ""),
+        "evidence_note": (
+            "catch-ledger export: 'draft' is only the ledger's own 240-char "
+            "redacted excerpt, not the full original draft/report or "
+            "evidence window — see payload_path for the saved (redacted) "
+            "hook payload if SUPERJEV_CATCH_KEEP_PAYLOAD was on when this "
+            "record was made, else that fuller text was never kept."),
+        "source": {
+            "catch_ledger_id": rec_id,
+            "door": record.get("door"),
+            "decision": record.get("decision"),
+            "ts": record.get("ts"),
+            "tag": tag,
+            "note": record.get("note"),
+        },
+        "payload_path": str(payload_path) if payload_path.exists() else None,
+    }
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{rec_id}.json"
+        out_path.write_text(json.dumps(case, ensure_ascii=False, indent=2) + "\n",
+                            encoding="utf-8")
+        return str(out_path)
+    except OSError as exc:
+        print(f"super-jev: could not write bench case for {rec_id}: {exc}", file=sys.stderr)
+        return None
+
+
+def _catch_lines():
+    try:
+        text = CATCH_LEDGER_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [ln for ln in text.splitlines() if ln.strip()]
+
+
+def _catch_records():
+    out = []
+    for line in _catch_lines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+def _parse_since(spec):
+    """"24h" / "7d" / "30m" -> a timedelta, or None if unparseable (caller
+    then applies no time filter rather than guessing)."""
+    if not spec:
+        return None
+    m = re.match(r"^(\d+)\s*([mhd])$", str(spec).strip().lower())
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    if unit == "m":
+        return timedelta(minutes=n)
+    if unit == "h":
+        return timedelta(hours=n)
+    return timedelta(days=n)
+
+
+def _catch_ts(rec):
+    try:
+        return datetime.fromisoformat(str(rec.get("ts", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _catch_filter_since(records, since_spec):
+    delta = _parse_since(since_spec)
+    if delta is None:
+        return records
+    cutoff = datetime.now(timezone.utc) - delta
+    out = []
+    for rec in records:
+        ts = _catch_ts(rec)
+        if ts is None or ts >= cutoff:
+            out.append(rec)
+    return out
+
+
+def _rewrite_catch_records(records):
+    """Rewrite the whole catch ledger file from a list of records — used
+    only by `catch tag`, which mutates one existing line in place. Never
+    raises; on failure prints to stderr and leaves the file as it was."""
+    try:
+        CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = CATCH_LEDGER_PATH.with_suffix(CATCH_LEDGER_PATH.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        os.replace(tmp_path, CATCH_LEDGER_PATH)
+        return True
+    except OSError as exc:
+        print(f"super-jev: could not update catch ledger at {CATCH_LEDGER_PATH}: {exc}",
+              file=sys.stderr)
+        return False
+
+
+def cmd_catch(a):
+    action = getattr(a, "catch_action", None)
+    if action == "list":
+        return _cmd_catch_list(a)
+    if action == "tag":
+        return _cmd_catch_tag(a)
+    if action == "report":
+        return _cmd_catch_report(a)
+    return refuse("catch: no action — use list, tag or report")
+
+
+def _cmd_catch_list(a):
+    records = _catch_records()
+    records = _catch_filter_since(records, getattr(a, "since", None))
+    if getattr(a, "untagged", False):
+        records = [r for r in records if r.get("tag") is None]
+    if not records:
+        print("catch list: no records")
+        return 0
+    for rec in records:
+        reasons = rec.get("reasons") or []
+        first_reason = reasons[0] if reasons else ""
+        tag = rec.get("tag") or "-"
+        print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
+              f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+    return 0
+
+
+def _cmd_catch_tag(a):
+    catch_id = a.id
+    value = a.value
+    note = getattr(a, "note", "") or ""
+    if value not in ("fair", "false", "miss"):
+        return refuse(f"catch tag: {value!r} — use fair, false or miss")
+    records = _catch_records()
+    matched = None
+    for rec in records:
+        if rec.get("id") == catch_id:
+            rec["tag"] = value
+            rec["note"] = note
+            matched = rec
+            break
+    if matched is None:
+        return refuse(f"catch tag: no catch-ledger record with id {catch_id!r}")
+    if not _rewrite_catch_records(records):
+        return refuse(f"catch tag: could not persist the tag for {catch_id!r}")
+    bench_path = None
+    if value in ("false", "miss"):
+        bench_path = _write_bench_case(matched)
+    print(f"catch tag: {catch_id} -> {value}" +
+          (f" (bench case: {bench_path})" if bench_path else ""))
+    return 0
+
+
+def _cmd_catch_report(a):
+    records = _catch_records()
+    records = _catch_filter_since(records, getattr(a, "since", None))
+    fair = sum(1 for r in records if r.get("tag") == "fair")
+    false = sum(1 for r in records if r.get("tag") == "false")
+    miss = sum(1 for r in records if r.get("tag") == "miss")
+    untagged = sum(1 for r in records if r.get("tag") is None)
+    print(f"fair catches: {fair}")
+    print(f"false stops: {false}")
+    print(f"misses: {miss}")
+    print(f"untagged: {untagged}")
+    return 0
 
 
 def _ledger_count_today():
@@ -6470,6 +6785,7 @@ def cmd_hook(a):
           describes the lead session, not necessarily the worker's tree).
     """
     door = getattr(a, "door", "?")
+    _catch_t0 = time.monotonic()
     if door == "prompt-verify":
         return cmd_hook_prompt_verify(a)
     from_file = getattr(a, "from_file", None)
@@ -6531,6 +6847,9 @@ def cmd_hook(a):
                 pass
         checkable = _door_reports_checkable_claim(code, door_out, door_err)
         source = "last user prompt" if tmp_ev_prompt_found else "no prompt found"
+        _catch_unchecked_flags = _parse_strong_flags(door_out) or []
+        _catch_unchecked_reasons = [f"{f.get('key')} {f.get('verdict')} {f.get('score')}"
+                                    for f in _catch_unchecked_flags]
         if checkable:
             print(UNCHECKED_ADVISORY)
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
@@ -6551,6 +6870,9 @@ def cmd_hook(a):
         notice = _running_unchecked_notice()
         if notice:
             print(notice)
+        catch_log("gate", "unchecked", reasons=_catch_unchecked_reasons,
+                 draft_text=text, window_bytes=None, start_time=_catch_t0,
+                 payload=payload)
         return 0
 
     budget = StopBudget()
@@ -6842,6 +7164,18 @@ def cmd_hook(a):
             suppressed_reason = "flagged-suppressed-empty-turn"
             suppressed_note_tail = f" [suppressed: {sk} {sv} {sscore:.2f}]"
 
+        # The catch ledger's own window_bytes — best-effort, gate only (the
+        # transcript-derived window is the thing worth sizing; verify has
+        # no equivalent window, so this stays None there).
+        _catch_window_bytes = None
+        if door == "gate":
+            _catch_window_bytes = (window_meta or {}).get("total_bytes")
+            if _catch_window_bytes is None:
+                try:
+                    _catch_window_bytes = sum(os.path.getsize(p) for p in evidence)
+                except OSError:
+                    _catch_window_bytes = None
+
         def _print_ledger_notice_if_gate():
             # So an in-session bug shaped like the 2026-09-16 one (a hook
             # silently routing replies down the unchecked path) shows up
@@ -6857,6 +7191,9 @@ def cmd_hook(a):
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
+            catch_log(door, "allow", reasons=block_notes, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block-forced-advisory":
@@ -6866,6 +7203,9 @@ def cmd_hook(a):
             _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
                      f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
+            catch_log(door, "advisory", reasons=block_reasons, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -6883,6 +7223,9 @@ def cmd_hook(a):
                      (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
                      (f" — advisory: {'; '.join(block_notes)}" if block_notes else ""),
                      exit_code=2, flags=flags)
+            catch_log(door, "block", reasons=block_reasons + block_notes, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
             _print_ledger_notice_if_gate()
             return 2
         note_tail = (" — " + "; ".join(block_notes)) if block_notes else ""
@@ -6890,6 +7233,9 @@ def cmd_hook(a):
         print(advisory)
         _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags,
                  reason=suppressed_reason)
+        catch_log(door, "advisory", reasons=block_notes, draft_text=text,
+                 window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                 payload=payload)
         _print_ledger_notice_if_gate()
         return 0
     except Exception as exc:  # fail-open: never wedge the session
@@ -7888,6 +8234,25 @@ def build_parser():
                          "GitHub pull URL (via --worktree's origin remote) and "
                          "appended to the report so worker-verify runs `gh pr view` on it")
     hk.set_defaults(func=cmd_hook)
+
+    ck = subs.add_parser("catch", help="the catch ledger: one record per gate/verify "
+                                       "decision, tagged fair/false/miss")
+    ck_subs = ck.add_subparsers(dest="catch_action")
+    ck_list = ck_subs.add_parser("list", help="one line per catch-ledger record")
+    ck_list.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_list.add_argument("--untagged", action="store_true", help="only untagged records")
+    ck_list.set_defaults(func=cmd_catch, catch_action="list")
+    ck_tag = ck_subs.add_parser("tag", help="fair = block was right; false = block was "
+                                            "wrong; miss = an allow let a lie through")
+    ck_tag.add_argument("id", help="the catch-ledger record id (see `catch list`)")
+    ck_tag.add_argument("value", choices=["fair", "false", "miss"])
+    ck_tag.add_argument("note", nargs="?", default="", help="why, in your own words")
+    ck_tag.set_defaults(func=cmd_catch, catch_action="tag")
+    ck_report = ck_subs.add_parser("report", help="fair catches, false stops, misses, "
+                                                   "plus untagged count")
+    ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_report.set_defaults(func=cmd_catch, catch_action="report")
+    ck.set_defaults(func=cmd_catch, catch_action=None)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")
     lg.add_argument("-n", type=int, default=20, dest="n",
