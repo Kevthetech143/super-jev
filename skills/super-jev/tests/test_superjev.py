@@ -11322,7 +11322,9 @@ def test_receipt_shapes_telegram_outbox_write_is_a_send_not_a_save():
                       _rs_result("a")])
     assert len(facts) == 1
     assert facts[0].startswith("RECEIPT SHAPE (sent):")
-    assert "Telegram outbox file /tmp/ai-wrapper/late-telegram-9b22f267.txt" in facts[0]
+    assert "/tmp/ai-wrapper/late-telegram-9b22f267.txt" in facts[0]
+    assert "claw4mac poller" in facts[0]
+    assert "configured owner's Telegram" in facts[0]
 
 
 def test_receipt_shapes_message_tool_names_its_recipient():
@@ -11340,6 +11342,66 @@ def test_receipt_shapes_message_tool_with_no_recipient_is_suppressed():
                       _rs_use("a", "SendMessage", {"message": "done"}),
                       _rs_result("a", "delivered")])
     assert facts == []
+
+
+def test_receipt_shapes_gmail_create_draft_names_no_sent_line():
+    # The worst case: `create_draft` names a REAL recipient and sends
+    # nothing whatsoever. Without a verb check this reads as support for
+    # "sent"/"replied"/"notified"/"told" on a message that never left.
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__create_draft",
+                              {"to": "kevin@example.com", "subject": "hi",
+                               "body": "draft body"}),
+                      _rs_result("a", "draft created")])
+    assert not any(f.startswith("RECEIPT SHAPE (sent):") for f in facts)
+
+
+def test_receipt_shapes_gmail_get_thread_names_no_line_at_all():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__get_thread",
+                              {"thread_id": "t123"}),
+                      _rs_result("a", "thread contents")])
+    assert facts == []
+
+
+def test_receipt_shapes_gmail_read_and_mutate_tools_name_no_sent_line():
+    # The full blocklist from the live catalog: read and mutate verbs never
+    # produce a "sent" line, even when the tool is Gmail-shaped and its
+    # input happens to carry a recipient-looking field.
+    for tool, extra_input in (
+        ("mcp__claude_ai_Gmail__get_thread", {"thread_id": "t1"}),
+        ("mcp__claude_ai_Gmail__trash_thread", {"thread_id": "t1"}),
+        ("mcp__claude_ai_Gmail__search_threads", {"query": "to:kevin"}),
+        ("mcp__claude_ai_Gmail__label_thread", {"thread_id": "t1", "label": "x"}),
+        ("mcp__claude_ai_Gmail__mark_thread_spam", {"thread_id": "t1"}),
+        ("mcp__claude_ai_Gmail__apply_sensitive_thread_label", {"thread_id": "t1"}),
+        ("mcp__claude_ai_Gmail__update_draft", {"to": "kevin@example.com"}),
+    ):
+        facts = _rs_facts([_rs_user_record(),
+                          _rs_use("a", tool, extra_input),
+                          _rs_result("a", "ok")])
+        assert not any(f.startswith("RECEIPT SHAPE (sent):") for f in facts), tool
+
+
+def test_receipt_shapes_gmail_send_message_names_the_recipient_verbatim():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__send_message",
+                              {"to": "kevin@example.com", "subject": "hi",
+                               "body": "the real send"}),
+                      _rs_result("a", "sent")])
+    assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (sent):")
+    assert "kevin@example.com" in facts[0]
+
+
+def test_receipt_shapes_gmail_reply_is_a_sent_line():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__reply",
+                              {"to": "kevin@example.com", "body": "replying"}),
+                      _rs_result("a", "sent")])
+    assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (sent):")
+    assert "kevin@example.com" in facts[0]
 
 
 def test_receipt_shapes_send_sh_must_be_in_command_position():

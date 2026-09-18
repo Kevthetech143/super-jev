@@ -2388,13 +2388,23 @@ The family emits at most four lines, one per verb class:
   recorded / appended / updated that file*.
 - **sent** — a relay send script matched in command position on the command
   line (never a bare mention like `cat send.sh`), with any task ids that
-  send's own argument named; a write to the Telegram outbox file; or a
-  message-shaped tool call (Telegram/email/chat) whose own input names a
-  recipient. Every case NAMES the recipient or task id — a write to the
-  harness's internal `answer-<hex>.txt` answer-delivery file is deliberately
-  excluded, since that file names no recipient at all and is the draft's own
-  delivery act, not evidence of one. Supports *sent / replied / notified /
-  told / escalated / reported that message*.
+  send's own argument named; a write to the late-Telegram outbox file
+  (named as what it actually is: delivery to the configured owner's
+  Telegram via the claw4mac poller, on its own delayed cadence); or a
+  message-shaped tool call (Telegram/email/chat) whose own NAME carries a
+  send verb (send/reply/forward/post/notify/message) and no read/mutate
+  verb (get/list/search/create/update/label/unlabel/trash/untrash/mark/
+  apply/delete/draft), and whose input names a recipient. The verb check
+  matters: a Gmail-shaped `create_draft` call names a real recipient and
+  sends nothing at all, and without it would read as support for "sent" /
+  "replied" / "notified" / "told" on a message that never left; the same
+  check excludes `get_thread`, `search_threads`, `trash_thread`,
+  `label_thread`, `mark_thread_spam` and `apply_sensitive_thread_label`.
+  Every case NAMES the recipient or task id — a write to the harness's
+  internal `answer-<hex>.txt` answer-delivery file is deliberately
+  excluded, since that file names no recipient at all and is the draft's
+  own delivery act, not evidence of one. Supports *sent / replied /
+  notified / told / escalated / reported that message*.
 - **scheduled** — a scheduler tool call, or a crontab/launchd *install*,
   with whatever id its own result handed back. Supports *scheduled / armed /
   set to fire under that id*.

@@ -175,6 +175,21 @@ No version bump.
   send.sh` no longer fire, and a send's task-id scrape is scoped to that
   send's own command segment so a sibling `&&`-joined command's id is never
   attributed to it. See docs/hooks.md.
+- **RECEIPT SHAPES round 3: the message-tool "sent" subclass was verb-blind
+  — it fired on a channel word in the tool name plus any recipient-ish
+  key, with no check that the tool actually SENDS.** A Gmail-shaped
+  `create_draft` call names a real recipient and delivers nothing at all,
+  and read as support for "sent"/"replied"/"notified"/"told"; `get_thread`,
+  `search_threads`, `trash_thread`, `label_thread`, `mark_thread_spam` and
+  `apply_sensitive_thread_label` all fired the same way. A message-shaped
+  tool call is now a "sent" line only when its own name carries a send verb
+  (send/reply/forward/post/notify/message) AND no read/mutate verb
+  (get/list/search/create/update/label/unlabel/trash/untrash/mark/apply/
+  delete/draft), matched on lower-cased word tokens split on `_` and
+  CamelCase boundaries, never a substring. The late-Telegram outbox line
+  now names what it actually delivers — the configured owner's Telegram,
+  via the claw4mac poller — rather than just the file's name. See
+  docs/hooks.md.
 
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
