@@ -37,6 +37,29 @@ the worktree, pull request and test command from the report's own text, and
 verifies each one. It is advisory only and never blocks, because blocking a
 user's prompt is not a recoverable state.
 
+**Correction, 2026-09-17: `prompt-verify` never actually sees a real report.**
+A real fleet transcript shows a teammate's message landing as ordinary
+`"type":"user"` content in `transcript_path`, but Claude Code's own
+UserPromptSubmit payload capture does not fire for it — so `hook
+prompt-verify` only ever ran in this skill's own tests, never against a real
+session. `hook gate` (the Stop hook above) DOES fire on every turn, and it
+already opens `transcript_path` to derive gate evidence, so it now also scans
+that same file for teammate-message report blocks this session has not
+already checked (tracked in a per-session state file under
+`ledger/state/stop-state-<session_id>.json`) and runs `verify` against each
+one — up to 3 per Stop event, within a 120-second budget
+(`SUPERJEV_STOP_SCAN_MAX_REPORTS` / `SUPERJEV_STOP_SCAN_MAX_SECONDS`). An
+idle-notification echo of a report already seen (a
+`{"type":"idle_notification", ...}`-wrapped duplicate) is skipped, not
+double-checked. This is the same PR #20 0.80-confidence read, but ADVISORY
+ONLY — a REJECT-worthy scanned report never touches this Stop event's own
+exit code, it only prints an extra `super-jev verify <teammate_id>:
+CLEAN|READ|REJECT — <flags> — <evidence used> — health ok|thin` line and logs
+a ledger row with `source="stop-transcript"`. `hook prompt-verify` and its
+UserPromptSubmit wiring are left in place (harmless, and correct if Claude
+Code ever does start firing that payload for a teammate message), but the
+Stop-hook scan is the path that is actually live today.
+
 ## Wiring it in
 
 Copy this into `~/.claude/settings.json`, with absolute paths, and set
