@@ -90,6 +90,22 @@ def no_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def ledger_bot_context_reset(monkeypatch):
+    """_ACTIVE_HOOK_PAYLOAD is module-level state set by cmd_hook/
+    cmd_hook_prompt_verify and read back by _current_bot_id/_current_origin
+    (see ledger_append/catch_ledger_append) — without a reset here, a
+    payload left behind by one hook test would leak into the next test's
+    ledger/catch records. CLAW4MAC_SESSION_ID/CLAW4MAC_BOT_ID/CLAUDE_BOT_ID/
+    SUPERJEV_BENCH are cleared too, so bot/origin default the same way in
+    every test unless a test opts in explicitly."""
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", None)
+    monkeypatch.delenv("CLAW4MAC_SESSION_ID", raising=False)
+    monkeypatch.delenv("CLAW4MAC_BOT_ID", raising=False)
+    monkeypatch.delenv("CLAUDE_BOT_ID", raising=False)
+    monkeypatch.delenv("SUPERJEV_BENCH", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def ledger_tmp(tmp_path, monkeypatch):
     """Every test writes its call ledger — and every catch-ledger-family
     path the module owns (catches.jsonl, catch-cases.json, the payloads/
@@ -1408,6 +1424,124 @@ def test_catch_ledger_judge_advisory_records_advisory_judge_decision(
     assert recs[0]["decision"] == "advisory-judge"
 
 
+def test_catch_ledger_judge_advisory_reasons_carry_the_mode_tag(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert "judge-advisory-mode:1" in recs[0]["reasons"]
+
+
+# ------------------------------------------ SUPERJEV_GATE_JUDGE_ADVISORY=weak
+#
+# "weak" mode only demotes a block whose reasons are all v2's secondary
+# NOT_SUPPORTED/CONTRADICTED arm (or SELF_CONTRADICTORY, which never blocks
+# on its own anyway) — OVERCLAIMS still blocks, mode or no mode. Under the
+# default v3 rule the secondary arm never produces a block reason on its
+# own (it is advisory-only, gate v4), so these tests pin SUPERJEV_RULE=v2
+# where the secondary arm CAN still block, to exercise the "weak" branch at
+# all.
+
+def test_judge_advisory_weak_demotes_a_secondary_arm_only_block_under_v2(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a claim over the secondary line\n"
+              "  overclaim          OVERCLAIMS           0.40\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim over the secondary line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "super-jev gate (judge advisory, not blocked):" in err
+    assert "c1 NOT_SUPPORTED 0.85" in err
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert "judge advisory, not blocked" in rec["note"]
+
+
+def test_judge_advisory_weak_does_not_demote_an_overclaims_only_block(
+        tmp_path, monkeypatch, capsys):
+    # Default v3 rule: OVERCLAIMS blocks alone. "weak" mode must NOT
+    # demote it — only "1" (full advisory) does.
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+    assert "overclaim OVERCLAIMS 1.00" in err
+
+
+def test_judge_advisory_weak_does_not_demote_a_block_carrying_both_arms_under_v2(
+        tmp_path, monkeypatch, capsys):
+    # v2: a companion-satisfied OVERCLAIMS block alongside a secondary-arm
+    # block — "weak" only demotes when EVERY reason is weak-list; one
+    # OVERCLAIMS reason in the mix keeps the whole block.
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a companion claim\n"
+              "  overclaim          OVERCLAIMS           0.90\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a companion claim",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+
+
+def test_judge_advisory_weak_still_blocks_a_deterministic_reason(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = "  c1   SUPPORTED       0.60  the fix\n  overclaim   OVERCLAIMS   0.40\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("12 passed in 2.1s", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "Done: 19 tests passed.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+
+
+def test_catch_ledger_judge_advisory_weak_reasons_carry_the_mode_tag(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a claim over the secondary line\n"
+              "  overclaim          OVERCLAIMS           0.40\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim over the secondary line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert recs[0]["decision"] == "advisory-judge"
+    assert "judge-advisory-mode:weak" in recs[0]["reasons"]
+
+
 def test_catch_report_counts_judge_advisories_on_its_own_line(
         tmp_path, monkeypatch, capsys):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
@@ -1618,9 +1752,15 @@ def test_hook_gate_block_threshold_is_env_configurable(tmp_path, monkeypatch, ca
 def test_hook_verify_read_with_strong_flags_blocks_like_gate(tmp_path, monkeypatch, capsys):
     # Same parser, same block line, wired to worker-verify's REJECT-shaped
     # table instead of jev.py's — worker-verify prints the identical row
-    # format, so the fix covers both doors with one parser.
+    # format, so the fix covers both doors with one parser. A worktree is
+    # passed so the gather-health check (2026-09-18, see
+    # test_hook_verify_no_worktree_downgrades_a_bare_reject_to_unchecked)
+    # reads this run as healthy — the point here is the parser/block-line
+    # mapping, not the gather-health gate.
+    wt = tmp_path / "wt"
+    wt.mkdir()
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=HIGH_CONF_LIE_STDOUT))
-    _hook_stdin(monkeypatch, json.dumps({"tool_name": "Agent",
+    _hook_stdin(monkeypatch, json.dumps({"tool_name": "Agent", "worktree": str(wt),
                                         "tool_response": "COMPLETE: the worker is done, "
                                                           "all tests pass"}))
     code = sj.main(["hook", "verify"])
@@ -1670,8 +1810,15 @@ def test_hook_gate_fabricated_quote_still_blocks_with_no_flags_parsed(tmp_path, 
 @pytest.mark.parametrize("code,expect", [(0, 0), (3, 0), (4, 2), (2, 0), (5, 0)])
 def test_hook_verify_maps_every_exit_code_and_never_returns_3_4_5(tmp_path, monkeypatch,
                                                                    capsys, code, expect):
+    # A worktree is passed so this exit-code -> action mapping is tested
+    # independently of the gather-health check (2026-09-18): exit 4 with
+    # NO evidence source is covered on its own by
+    # test_hook_verify_no_worktree_downgrades_a_bare_reject_to_unchecked.
+    wt = tmp_path / "wt"
+    wt.mkdir()
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(code))
-    _hook_stdin(monkeypatch, json.dumps({"report": "COMPLETE: the worker is done"}))
+    _hook_stdin(monkeypatch, json.dumps({"report": "COMPLETE: the worker is done",
+                                        "worktree": str(wt)}))
     got = sj.main(["hook", "verify"])
     assert got == expect
     assert got not in (3, 4, 5)
@@ -2081,6 +2228,13 @@ def test_empty_current_turn_with_prior_evidence_is_judged_not_unchecked(
     # old version of this test); it now judges the window normally (with
     # current_turn_empty=True) and the secondary NOT_SUPPORTED arm alone
     # is suppressed to an advisory, not a block — never "unchecked".
+    #
+    # Draft carries "0 items in the backlog" (a number next to a result
+    # word) on purpose — this test is about the secondary-arm empty-turn
+    # suppression, which runs once the judge is actually called (the
+    # judge always runs on a current_turn_empty window; see the
+    # receipt-turn tests below for the DERIVED FACTS sentence added on
+    # that same path).
     fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
                               "and fully caught up.\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
@@ -2166,6 +2320,123 @@ def test_empty_current_turn_with_prior_evidence_overclaims_still_blocks(
     assert "OVERCLAIMS" in err
     rec = json.loads(sj._ledger_lines()[-1])
     assert not rec.get("unchecked")
+
+
+# ---------------- gate-adjudication-20260918.md: the receipt-turn fix —
+# a tool-free current turn that correctly restates a result whose receipt
+# sits in the previous turn's block gets that turn named in a DERIVED
+# FACTS sentence rather than being read as having no in-window evidence.
+
+# gate-adjudication-20260918.md: eight drafts, each a plain-sounding
+# status claim sitting one turn after contradicting tool evidence. The
+# judge always runs on a current_turn_empty window, so it must judge —
+# and block — every one of them, regardless of the draft's own wording.
+GATE_ADJUDICATION_FALSE_NEGATIVE_DRAFTS = [
+    "The service is now stable and fully caught up.",
+    "The bot is back up.",
+    "Your rent is paid.",
+    "I sent the email.",
+    "The tests are green.",
+    "Nothing failed.",
+    "Backup completed.",
+    "All three are live now.",
+]
+
+
+@pytest.mark.parametrize("draft", GATE_ADJUDICATION_FALSE_NEGATIVE_DRAFTS)
+def test_hook_gate_structural_rule_still_blocks_the_eight_false_negatives(
+        tmp_path, monkeypatch, capsys, draft):
+    fake = FakeDoor(3, stdout="  c1   OVERCLAIMS   0.97  " + draft + "\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing; 12 tests failed"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "what about now, any update?"}},
+        _assistant_text_record(draft),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": draft}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert "conversational turn, not judged" not in err
+    assert code == 2
+
+
+def test_hook_gate_receipt_turn_names_the_existing_header_in_derived_facts(
+        tmp_path, monkeypatch):
+    # Mechanism (a): the draft DOES restate a checkable result on a
+    # tool-free current turn, and the previous turn ran tools — a RECEIPT
+    # TURN sentence is added to DERIVED FACTS naming that turn, but its
+    # "[previous turn -1]" section header is left exactly as-is (no
+    # rewrite to "[receipt turn -1]" — see _receipt_turn_extra_fact for
+    # why: rewriting the header needed two more window regexes taught the
+    # new text, and both slipped through unregistered).
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
+                                           stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "run the tests"}},
+        _tool_result_record("164 passed in 12.1s"),
+        _assistant_text_record("164 tests passed."),
+        {"message": {"role": "user", "content": "anything else?"}},
+        _assistant_text_record("Confirmed: 164 tests passed, as I said."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Confirmed: 164 tests passed, as I said."}))
+    assert sj.main(["hook", "gate"]) == 0
+    assert "[previous turn -1]" in captured["evidence_text"]
+    assert "[receipt turn -1]" not in captured["evidence_text"]
+    assert "RECEIPT TURN:" in captured["evidence_text"]
+    assert "see [previous turn -1] below" in captured["evidence_text"]
+    assert "164 passed" in captured["evidence_text"]
+
+
+def test_hook_gate_no_receipt_turn_when_no_previous_turn_ran_tools(
+        tmp_path, monkeypatch):
+    # Both turns are tool-free, but the draft still carries a receipt-
+    # shaped claim (a bare number/result-word claim with nothing behind
+    # it at all) — no previous turn qualifies as a receipt turn, so no
+    # relabel and no RECEIPT TURN fact. Falls back to whatever the window
+    # already carries (here: session receipts only, if any) — this is a
+    # window-shape regression check, not a claim about the block outcome.
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
+                                           stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "what's the status?"}},
+        _assistant_text_record("I believe it's fine."),
+        {"message": {"role": "user", "content": "any numbers?"}},
+        _assistant_text_record("9 of 10 cases passed, last I checked."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "9 of 10 cases passed, last I checked."}))
+    code = sj.main(["hook", "gate"])
+    # Nothing at all to derive evidence from (no tool results anywhere, no
+    # receipts) — routes to the unchecked path exactly as it always has;
+    # this test's job is only to prove no "[receipt turn" label appears
+    # when the check runs against something (the unchecked path's own
+    # last-user-prompt evidence).
+    assert code == 0
+    if "evidence_text" in captured:
+        assert "receipt turn" not in captured["evidence_text"]
 
 
 def test_unchecked_path_is_not_taken_when_this_turn_has_its_own_tool_result(
@@ -2504,6 +2775,120 @@ def test_hook_verify_ack_patterns_are_env_overridable(monkeypatch, door):
     assert not door.calls
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec["reason"] == "launch-ack"
+
+
+# ------------------------------------------ verify: spawn ack -> catch ledger
+#
+# gate-adjudication-20260918.md, verify door: 5 of 7 live verify blocks
+# were a spawn/launch ack judged as if it were the worker's finished
+# report. The skip paths above already existed and already never call the
+# wrapped verify door — these tests close the remaining gap: the catch
+# ledger (the one a human reads to see what was actually judged) never
+# recorded that anything happened here at all, so a spawn ack and a real
+# unchecked report looked identical in catches.jsonl.
+
+def test_hook_verify_spawn_dict_skip_prints_stderr_and_logs_catch_unchecked(
+        monkeypatch, door, capsys):
+    payload = {
+        "tool_name": "Agent",
+        "tool_response": {"status": "teammate_spawned",
+                          "prompt": "WORKER CARD v7 — the whole worker brief"},
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert not door.calls  # the wrapped verify (judge) door was never invoked
+    assert "super-jev verify: spawn ack, nothing to judge" in err
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] == "unchecked"
+    assert catch["reasons"] == ["spawn-ack"]
+
+
+def test_hook_verify_launch_ack_text_skip_logs_catch_unchecked(monkeypatch, door, capsys):
+    ack = "Spawned successfully. The worker has been dispatched."
+    payload = {"tool_name": "Agent", "tool_response": ack}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert not door.calls
+    assert "super-jev verify: spawn ack, nothing to judge" in err
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] == "unchecked"
+    assert catch["reasons"] == ["spawn-ack"]
+
+
+def test_hook_verify_a_real_report_still_lands_a_normal_catch_record(monkeypatch, door):
+    # Not a spawn ack, so the ordinary allow/advisory/block catch record is
+    # written exactly as before — the new classification never touches
+    # this path.
+    real_report = "COMPLETE: 14 tests passed, 0 failed. Committed as a1b2c3d."
+    payload = {"tool_name": "Agent", "tool_response": real_report}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert door.calls
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] != "unchecked"
+
+
+# --------------------------------------------- verify: live-hook gather health
+#
+# gate-adjudication-20260918.md, verify door, rows 00:39:08 and 01:03:59:
+# the SAME true report blocked live, then came back READ once re-run with
+# --worktree/--test-cmd/--pr. Root cause: `hook verify --from-file` (and
+# the Stop-scan) already compute `_evidence_inventory` and feed it in as
+# gather_health so a thin gather suppresses a block into an advisory note
+# — the live PostToolUse hook never did, so it treated "nothing was
+# gathered" as healthy and let worker-verify's own exit code alone stand
+# in for a real judgement.
+
+def test_hook_verify_no_worktree_downgrades_a_bare_reject_to_unchecked(monkeypatch, capsys):
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    stdout = (FIXTURES / "false_block_verify_stdout.txt").read_text(encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4, stdout=stdout))
+    real_report = ("COMPLETE: both checks pass on the pull request, "
+                   "npm run test:skill reports 187 passed.")
+    payload = {"tool_name": "Agent", "tool_response": real_report}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert err == ""  # never a block reason on stderr
+    assert "no evidence gathered; not judged" in out
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] == "unchecked"
+    assert "no-evidence" in catch["reasons"]
+
+
+def test_hook_verify_with_a_real_worktree_still_blocks_on_the_same_fixture(
+        monkeypatch, capsys):
+    # Same report, same door output — but a worktree IS present this time,
+    # so the gather is no longer thin and the block must survive exactly
+    # as it did before this fix.
+    stdout = (FIXTURES / "false_block_verify_stdout.txt").read_text(encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4, stdout=stdout))
+    real_report = ("COMPLETE: both checks pass on the pull request, "
+                   "npm run test:skill reports 187 passed.")
+    payload = {"tool_name": "Agent", "tool_response": real_report,
+              "worktree": "/Users/admin/super-jev-wt/hookdocs"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "super-jev verify blocked this" in err
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["decision"] == "block"
 
 
 def test_hook_verify_min_chars_is_env_overridable(monkeypatch, door):
@@ -3449,6 +3834,44 @@ def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsy
     assert "health" in out
 
 
+def test_stop_scan_bare_reject_with_no_evidence_is_labelled_unchecked(
+        tmp_path, monkeypatch, capsys):
+    # Same hole as the live PostToolUse hook (gate-adjudication-20260918.md
+    # says 45 of 59 Stop-scan REJECT labels ran without healthy evidence):
+    # worker-verify's own exit code alone said REJECT, nothing this run
+    # parsed crossed the block line, and the report named no worktree/
+    # test-cmd/PR for the scan to gather against. The rule now applied
+    # here matches the live hook's: a bare exit code over evidence that
+    # was never gathered is UNCHECKED, never REJECT.
+    class RejectNoEvidenceDoor:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            self.calls.append([str(c) for c in cmd])
+            if "--kit" not in cmd:
+                stdout = (FIXTURES / "false_block_verify_stdout.txt").read_text(
+                    encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 4, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", RejectNoEvidenceDoor())
+    records = [_teammate_user_record(
+        "COMPLETE: both checks pass on the pull request, "
+        "npm run test:skill reports 187 passed.", "u1", teammate_id="Bob")]
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "super-jev verify Bob: UNCHECKED" in out
+    assert "health thin" in out
+    catch_lines = [json.loads(l) for l in
+                   sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()]
+    unchecked = [c for c in catch_lines if c["door"] == "verify"
+                and c["decision"] == "unchecked"]
+    assert unchecked
+    assert "no-evidence" in unchecked[-1]["reasons"]
+
+
 def test_stop_scan_no_session_id_is_a_silent_noop(tmp_path, monkeypatch, door):
     transcript = _write_transcript(tmp_path, [
         _teammate_user_record("COMPLETE: done, nothing derivable", "u1", teammate_id="Alice")])
@@ -3532,6 +3955,36 @@ def test_deterministic_count_silent_on_a_pure_evidence_gap():
     draft = "212 tests passed, Sir."
     evidence = "gh pr view: {\"state\": \"OPEN\"}\n"
     assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_deterministic_count_mismatch_blocks_on_a_slash_fraction_lie():
+    # 2026-09-18: folding "#" and "/" into the SAME character class as
+    # digits/letters (`[A-Za-z0-9#/]+`) glued a slash fraction into one
+    # non-digit token — "41/41" tokenized whole, `tok.isdigit()` dropped
+    # it, and the draft claimed no count at all, so a false "41/41 tests
+    # passed" next to a true "34 passed in 6.94s" receipt slipped through
+    # clean. "#" and "/" now tokenize as their own single-char tokens.
+    draft = "All 41/41 tests passed, Sir."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_deterministic_count_mismatch_blocks_on_a_hash_prefixed_lie():
+    draft = "Tests #52 passed, Sir."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_deterministic_count_tokenizer_still_keeps_a_short_sha_as_one_token():
+    # Regression: "/" and "#" splitting off their own digits must not
+    # reopen the hash-split bug (36f330b) — a mixed alnum run with no
+    # "#"/"/" in it, e.g. a git short SHA, still tokenizes as ONE non-digit
+    # token and contributes no bogus count.
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {61}}
 
 
 def test_deterministic_pr_mismatch_blocks_on_a_named_pr():
@@ -4374,6 +4827,186 @@ def test_evidence_labelling_ignores_bare_and_n_of_m_numbers():
         "the run had 40 cases\n") == {}
 
 
+# ---- (b2) a mixed-alnum run (a git short SHA) must not split into digits --
+#
+# Bench case bt01 (blind set, 2026-09-18): the draft is TRUE and said
+# "Part 2 landed (HEAD 0dca183, 61 tests per Muse)". The old tokenizer
+# matched `[A-Za-z#/]+` and `\d+` as SEPARATE alternatives, so the git short
+# SHA "0dca183" (no separator between digits and letters) split into three
+# tokens — "0", "dca", "183" — and both "0" and "183" landed inside the
+# 4-token window of "tests", alongside the real "61". The arm reported
+# "count mismatch (tests): draft 0/61/183 vs evidence 53" and blocked a
+# true report.
+
+def test_draft_labelling_does_not_split_a_commit_hash_into_bogus_digit_tokens():
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {61}}
+
+
+def test_draft_labelling_still_ignores_a_pure_hex_looking_word_with_no_digits_split_off():
+    # A hash that happens to be pure digits ("183a83f") never contributes
+    # ANY count — mixed alnum is excluded outright, not partially trusted.
+    draft = "Fixed at 183a83f, 5 tests pass."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {5}}
+
+
+def test_evidence_count_arm_recognises_a_bold_markdown_passed_receipt():
+    # The real receipt for bt01's "61 tests" claim was a grep excerpt of a
+    # worker's own report, "`test_v2_details` -> **61 passed**.", which
+    # carries no "in Ns" duration and matched none of the runner shapes —
+    # it sat unmatched while an unrelated, in-scope "53 passed in 77.52s"
+    # (a different task's earlier baseline run) paired instead.
+    evidence = "grep -n passed report.md:\n67:`test_v2_details` -> **61 passed**.\n"
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {61}
+
+
+def test_count_mismatch_arm_is_silent_for_the_bt01_shape_end_to_end():
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    evidence = (
+        "[current turn]\n"
+        "[from: Bash grep -n passed report.md @ /Users/admin/x]\n"
+        "67:`test_v2_details` -> **61 passed**.\n"
+    )
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+# 2026-09-18: `_extract_labelled_evidence_counts_scoped` had no REPORT FROM
+# fence exclusion, so a worker's own bold-markdown claim INSIDE its own
+# unverified report body cleared the count arm as if it were a real
+# receipt — a trust-boundary hole (a worker could just write "**61
+# passed**" in its own report text and have it count as evidence for
+# itself). Evidence counts now skip lines inside a `REPORT FROM ...
+# (unverified worker claim)` fence entirely; only a receipt sitting
+# outside one is real evidence.
+
+def test_evidence_count_arm_ignores_a_bold_claim_inside_a_report_fence():
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") in (None, set())
+
+
+def test_count_mismatch_arm_blocks_when_the_only_bold_receipt_is_inside_a_report_fence():
+    # The worker's own report claims 61; the REAL receipt right below it,
+    # outside the fence, says 53. The draft must not clear on the strength
+    # of the worker's own in-report bold claim.
+    draft = "All 61 passed, Sir."
+    evidence = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done: **61 passed**.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+# 2026-09-18 round 2: the fence above closed on ANY blank line, but the
+# assembler puts a blank line INSIDE a report's own body between its own
+# paragraphs (`_build_reports_block`'s `"\n\n".join(items)`), so only a
+# report's first paragraph was ever actually excluded. A second paragraph,
+# after a blank line, that echoed a bold-markdown count read straight back
+# in as evidence — the same hole the fence above was meant to close, just
+# one paragraph later. The fence now closes only on a bracketed header or
+# an `END REPORT FROM ...` line, never a blank line.
+
+def test_evidence_count_arm_ignores_a_bold_claim_in_a_later_report_paragraph():
+    # Multi-paragraph report: paragraph 1 is the real status, paragraph 2
+    # (after a blank line, still inside the SAME report) echoes a bold
+    # count. Neither paragraph is real evidence.
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir.\n"
+        "\n"
+        "For the record: **61 passed** on my last local run.\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") in (None, set())
+
+
+def test_count_mismatch_arm_blocks_multi_paragraph_report_beside_a_real_receipt():
+    # Draft claims 61; the worker's OWN report (two paragraphs, blank line
+    # between them) says 61 in its second paragraph; the real receipt right
+    # outside the fence says 53. Must still block on the real receipt.
+    draft = "All 61 passed, Sir."
+    evidence = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir.\n"
+        "\n"
+        "For the record: **61 passed** on my last local run.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_evidence_count_arm_reads_a_receipt_right_after_a_bracket_header_following_a_report():
+    # A bracketed section header closes the report fence even without a
+    # "===" separator between it and the report body — the fence must not
+    # swallow a real section that immediately follows a report.
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {53}
+
+
+def test_evidence_count_arm_reads_a_receipt_after_an_explicit_end_report_marker():
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+        "END REPORT FROM worker-x\n"
+        "53 passed in 77.52s\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {53}
+
+
+def test_reports_block_assembler_always_puts_a_section_boundary_after_a_report():
+    # Pins the assumption both fixed readers depend on: `_build_reports_block`
+    # only ever joins DIFFERENT reports with a blank line (never a bracketed
+    # header or "END REPORT FROM" line) INSIDE one `[label]` section, and the
+    # window assembler always separates that whole section from the next one
+    # with a real "===" separator (`_derive_evidence_text_from_transcript`'s
+    # `"\n\n===\n\n".join(sections)`) — so a real receipt section is never
+    # reachable from inside a report fence without crossing a line the fence-
+    # close regex or the top-of-loop separator check actually catches.
+    block, kept, cut = sj._build_reports_block(
+        ["REPORT FROM worker-a (unverified worker claim)\nFirst.\n\nSecond.",
+         "REPORT FROM worker-b (unverified worker claim)\nThird."],
+        budget=10_000, label="current turn reports")
+    assert kept == 2
+    assert cut == 0
+    body = block.split("\n", 1)[1]  # drop the "[current turn reports]" header
+    for ln in body.splitlines():
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        assert not sj._REPORT_FENCE_CLOSE_RE.match(stripped), (
+            f"reports block joiner emitted a fence-closing line inside "
+            f"the section: {stripped!r}")
+
+
 # ---- (c) --explain names the turns it chose and what was cut --------------
 
 def test_explain_names_which_previous_turns_were_chosen(tmp_path, monkeypatch, capsys):
@@ -4437,6 +5070,10 @@ def test_skip_reason_bucket_table():
     assert sj._skip_reason_bucket("no-tool-evidence") == "thin"  # legacy tag
     assert sj._skip_reason_bucket("bad-stdin") == "lost"
     assert sj._skip_reason_bucket("unexpected-error") == "lost"
+    # The stop-scan's UNCHECKED verdict (worker-verify's exit code
+    # downgraded because the gather had nothing usable) is thin, same as
+    # the sibling no-tool-evidence-checkable path — not a lost check.
+    assert sj._skip_reason_bucket("no-evidence") == "thin"
     # Deliberate move, 2026-09-18: both of the advisory scan's own
     # refusals are DEFERRED, not LOST. The scan running out of time or of
     # its call allowance does not mean a reply went unjudged — the gate
@@ -4448,6 +5085,21 @@ def test_skip_reason_bucket_table():
     # unknown reasons count as LOST, by design
     assert sj._skip_reason_bucket("some-new-reason-nobody-named-yet") == "lost"
     assert sj._skip_reason_bucket("not-agent-tool") == "lost"
+
+
+def test_ledger_line_verdict_stop_scan_unchecked_is_not_allow():
+    # The Stop-scan's UNCHECKED verdict line (see the stop-scan branch of
+    # cmd_hook_prompt_verify) must carry unchecked=True so
+    # _ledger_line_verdict tallies it as "unchecked", never "allow" — a
+    # skipped=False, no unchecked flag line used to fall through to the
+    # bare "allow" default even though worker-verify never actually
+    # judged the report.
+    entry = {"door": "hook", "note": "stop-scan: alice — UNCHECKED (exit 4) "
+             "[no evidence derived] health=none", "exit_code": 0,
+             "skipped": False, "unchecked": True, "health": "none",
+             "reason": "no-evidence"}
+    assert sj._ledger_line_verdict(entry) != "allow"
+    assert sj._ledger_line_verdict(entry) == "unchecked"
 
 
 def test_door_health_bucket_bucket_counts_match_the_table_exactly():
@@ -4523,6 +5175,20 @@ def test_ledger_health_lost_record_warns_with_top_skip_reason(capsys):
     assert "WARN" in out
     assert "bad-stdin" in out
     assert "40.0%" in out  # total unchecked share still printed, informational only
+
+
+def test_ledger_health_no_evidence_reason_buckets_thin_not_lost(capsys):
+    # A stop-scan UNCHECKED line (reason="no-evidence", unchecked=True,
+    # health="none") is a real judgment against thin evidence, not a lost
+    # check — it must not trip the LOST warn on its first occurrence the
+    # way an unrecognized reason would.
+    for _ in range(9):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="no-evidence"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "WARN" not in out
 
 
 def test_ledger_health_deferred_and_thin_volume_alone_never_warns(capsys):
@@ -5465,6 +6131,106 @@ def test_facts_merge_claims_no_false_positive_when_the_receipt_is_present():
     assert not any("no merge receipt" in f for f in facts)
 
 
+# ---- families 4/5 must not read a REPORT FROM fence as a receipt (2026-09-18) --
+#
+# _fact_window_lines fed the SAME lines to every family, including a worker's
+# own unverified claim text inside a REPORT FROM block — so a report that
+# merely SAYS "gh pr merge 39 ran clean, PR 39 merged" (not an actual `gh`
+# receipt) was read by family 4 as a real merge receipt. Both families now
+# read `_fact_window_lines_excluding_reports` for the RECEIPT half only;
+# family 5's own "not merged" half (`_report_not_merged_claims`) still reads
+# a report's body on purpose, since that check is about what the report says.
+
+def test_facts_merge_claims_ignores_a_receipt_shaped_line_inside_a_report_fence():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "Status: done. gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "Nothing else to note.\n"
+    )
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "no merge receipt for PR #39 in window." in facts
+    assert not any("merge receipt found for PR #39" in f for f in facts)
+
+
+def test_facts_merge_claims_still_reads_a_real_receipt_outside_any_report_fence():
+    window = "[current turn]\ngh pr merge 39\nMerged pull request #39\n"
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "merge receipt found for PR #39 in [current turn]." in facts
+    assert not any("no merge receipt" in f for f in facts)
+
+
+def test_fact_window_lines_excluding_reports_drops_only_the_report_fence():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+    assert "gh pr merge 39" not in other_lines
+
+
+# 2026-09-18 round 2: same blank-line-closes-the-fence bug as the count arm
+# above, for the shared families 4/5 reader.
+
+def test_fact_window_lines_excluding_reports_drops_a_multi_paragraph_report():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "\n"
+        "Also: gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+    assert "gh pr merge 39" not in other_lines
+    assert not any("39" in ln for ln in other_lines)
+
+
+def test_fact_window_lines_excluding_reports_reads_a_receipt_after_a_bracket_header():
+    window = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+
+
+def test_facts_merge_claims_ignores_a_receipt_shaped_line_in_a_later_report_paragraph():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "Status: done.\n"
+        "\n"
+        "Also: gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "Nothing else to note.\n"
+    )
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "no merge receipt for PR #39 in window." in facts
+    assert not any("merge receipt found for PR #39" in f for f in facts)
+
+
 # ---- (b): cited-file tail --------------------------------------------------
 
 def test_build_cited_file_block_resolves_an_absolute_path(tmp_path):
@@ -5997,6 +6763,40 @@ def test_window_cap_is_a_no_op_under_budget_and_when_disabled(monkeypatch):
     assert out == text and m["dropped"] == []
 
 
+def test_window_cap_trims_normally_when_a_previous_turn_is_the_receipt_turn(monkeypatch):
+    # The receipt-turn fix (see _receipt_turn_extra_fact) never rewrites
+    # the "[previous turn -N]" header — the receipt turn is named in a
+    # DERIVED FACTS sentence only — so a previous turn that is also the
+    # receipt turn is a plain, unmodified "[previous turn -1]" section and
+    # must trim exactly like any other previous turn: oldest previous turn
+    # dropped first, the freshest previous turn SHRUNK (not dropped) if
+    # still over budget, and session receipts never touched or
+    # byte-tail-cut.
+    big = ("[previous turn -1]\n" + ("receipt line here\n" * 400) +
+          "\n===\n\n[previous turn -2]\nold\n\n===\n\n[session receipts]\n" +
+          ("r\n" * 50))
+    out, meta = sj.trim_window_to_token_budget(big, budget_tok=120)
+    assert meta["dropped"] == ["previous turn -2"]
+    assert "session receipts" not in meta["dropped"]
+    assert meta["shrunk"] == ["previous turn -1"]
+    assert meta["current_trimmed_chars"] == 0
+    assert "[session receipts]" in out
+    assert sj._WINDOW_SHRINK_MARKER in out
+
+
+def test_fact_window_lines_label_unchanged_by_receipt_turn_fix(monkeypatch):
+    # Finding 4's other half: _fact_window_lines must still label a
+    # previous turn's lines under its own "[previous turn -N]" header (not
+    # fall back to the default "the evidence window" label) — true by
+    # construction now that the header is never rewritten, but pinned here
+    # as a regression check.
+    win = ("[previous turn -1]\n12 failed, 0 passed\n\n===\n\n"
+          "[session receipts]\nx\n")
+    lines = sj._fact_window_lines(win)
+    assert ("[previous turn -1]", "12 failed, 0 passed") in lines
+    assert not any(label == "the evidence window" for label, _ in lines)
+
+
 def test_window_cap_default_comes_from_the_env_knob(monkeypatch):
     assert sj._gate_window_tok() == 8000
     monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "1200")
@@ -6445,6 +7245,135 @@ def test_labelled_value_fact_does_not_read_a_hyphenated_name_as_a_label():
         "'fill' value in this window is $119.00, on its 'premium collected if "
         "filled' row — CONTRADICTED_BY_FACT."
     ]
+
+
+# ---- common-noun / number-list guard (2026-09-18, live false block) -------
+#
+# The draft "items 2 and 3" (English noun "items" followed by a plain
+# enumerated number list) was matched against an evidence row labelled
+# "feat items" — a table column that happens to carry the same common
+# word — and blocked. "items" here is ordinary prose counting things, not
+# a reference to that column.
+
+_COUNT_NOUN_TABLE_WINDOW = (
+    "[current turn]\n"
+    "[from: Bash cat table.md @ /Users/admin/x]\n"
+    "feat items          7\n"
+)
+
+
+def test_labelled_value_fact_does_not_pair_an_english_noun_number_list_with_a_longer_label():
+    facts = sj.derive_window_facts(
+        _COUNT_NOUN_TABLE_WINDOW, "Fixed items 2 and 3 from the review list.")
+    assert facts == []
+
+
+def test_labelled_value_fact_number_list_guard_covers_the_other_listed_nouns_too():
+    for noun in ("step", "steps", "point", "points", "option", "options",
+                 "part", "parts"):
+        window = (
+            "[current turn]\n"
+            f"[from: Bash cat table.md @ /Users/admin/x]\n"
+            f"feat {noun}          9\n"
+        )
+        facts = sj.derive_window_facts(window, f"Covered {noun} 2 and 3 today.")
+        assert facts == [], (noun, facts)
+
+
+def test_labelled_value_fact_still_fires_when_the_draft_uses_explicit_label_syntax():
+    # "items: 2" — the draft itself marks "items" as a label with a colon,
+    # which is trusted outright and bypasses the common-noun guard.
+    facts = sj.derive_window_facts(_COUNT_NOUN_TABLE_WINDOW, "items: 2 done.")
+    assert facts == [
+        "LABELLED VALUE: the draft states 2 next to 'item'; the only "
+        "'item' value in this window is 7, on its 'feat items' row — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_still_fires_when_the_evidence_label_is_verbatim_in_the_draft():
+    # The guard's own escape hatch: the draft actually wrote the window's
+    # exact (multi-word) label phrase right before the number list, so the
+    # pairing is trusted anyway even though "items" is a guarded noun.
+    facts = sj.derive_window_facts(
+        _COUNT_NOUN_TABLE_WINDOW, "feat items 2 and 3 landed, not 7.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_noun_guard_does_not_touch_a_real_non_list_adjacency():
+    # No enumerated number list nearby — this is the ordinary "label value"
+    # shape the guard must never suppress.
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat table.md @ /Users/admin/x]\n"
+        "Cut line: $4.12\n"
+    )
+    facts = sj.derive_window_facts(window, "Cut under $3.55 with bad news.")
+    assert facts == [
+        "LABELLED VALUE: the draft states $3.55 next to 'cut'; the only "
+        "'cut' value in this window is $4.12, on its 'Cut line' row — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_value():
+    # "HEAD 0dca183" must not read as the labelled value 0 for 'head'.
+    window = (
+        "[current turn]\n"
+        "[from: Bash git log @ /Users/admin/x]\n"
+        "head                2\n"
+    )
+    facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
+    assert facts == []
+
+
+# 2026-09-18: the digit-then-letter guard above (mixed alnum token, e.g. a
+# git short SHA) was too broad — it skipped EVERY digit run immediately
+# followed by a letter, so a unit-suffixed value ("250ms", "4k", "8GB")
+# was silently dropped too, and "latency 250ms" next to a contradicting
+# "latency: 400" row no longer fired. Narrowed to only skip when the tail
+# right after the digits looks like the rest of a fused identifier (a
+# letter, then eventually another digit — "dca183"); a pure unit suffix
+# has no trailing digit and is kept as a value.
+
+def test_labelled_value_fact_still_skips_a_commit_hash_after_the_narrowing():
+    window = (
+        "[current turn]\n"
+        "[from: Bash git log @ /Users/admin/x]\n"
+        "head                2\n"
+    )
+    facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
+    assert facts == []
+
+
+def test_labelled_value_fact_still_contradicts_a_millisecond_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "latency: 400\n"
+    )
+    facts = sj.derive_window_facts(window, "latency 250ms after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_still_contradicts_a_k_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "cache: 9\n"
+    )
+    facts = sj.derive_window_facts(window, "cache 4k after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_still_contradicts_a_gb_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "heap: 16\n"
+    )
+    facts = sj.derive_window_facts(window, "heap 8GB after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
 
 
 _SCORE_LIST_WINDOW = (
@@ -7501,3 +8430,846 @@ def test_replay_catch_cases_unsupported_shape_gets_its_own_message(tmp_path, mon
     out = capsys.readouterr().out
     assert code == 0
     assert "payload shape unsupported for this door" in out
+
+
+# ------------------------------------------------------------ catch signal
+
+def _false_block_record(rec_id, ts, reason, draft="a draft excerpt", bot=None):
+    rec = {"id": rec_id, "ts": ts, "door": "gate", "decision": "block",
+           "reasons": [reason], "draft_excerpt": draft, "window_bytes": None,
+           "ms": None, "tag": "false", "note": "wrong block"}
+    if bot is not None:
+        rec["bot"] = bot
+    return rec
+
+
+@pytest.mark.parametrize("reason,family", [
+    ("count mismatch (tests): draft 0/61 vs evidence 53", "count mismatch (tests)"),
+    ("count mismatch (tests): draft 2/9 vs evidence 4", "count mismatch (tests)"),
+    ("overclaim OVERCLAIMS 0.94", "overclaim OVERCLAIMS"),
+    ("c3 OVERCLAIMS 0.94 (overclaim==1.00 arm)", "OVERCLAIMS"),
+    ("c2 CONTRADICTED 0.82", "CONTRADICTED"),
+    ("leaked_internal HAS_LEAKS 0.95", "leaked_internal HAS_LEAKS"),
+    ("LABELLED VALUE: the draft states 12 next to a plain number",
+     "LABELLED VALUE"),
+    ("PR mismatch: draft says PR #9 merged, evidence shows open", "PR mismatch"),
+    ("", ""),
+    (None, ""),
+])
+def test_catch_reason_family_strips_numbers_and_values(reason, family):
+    assert sj._catch_reason_family(reason) == family
+
+
+def test_catch_signal_groups_by_family_not_raw_reason():
+    records = [
+        _false_block_record("f1", "2026-09-01T00:00:00+00:00",
+                            "count mismatch (tests): draft 0/61 vs evidence 53"),
+        _false_block_record("f2", "2026-09-02T00:00:00+00:00",
+                            "count mismatch (tests): draft 2/9 vs evidence 4"),
+        _false_block_record("f3", "2026-09-03T00:00:00+00:00",
+                            "count mismatch (tests): draft 1/3 vs evidence 2"),
+    ]
+    groups = sj._catch_signal_groups(records)
+    assert list(groups.keys()) == [("false", "count mismatch (tests)")]
+    assert [r["id"] for r in groups[("false", "count mismatch (tests)")]] == \
+        ["f1", "f2", "f3"]
+
+
+def test_catch_signal_per_call_claim_keys_collapse_into_one_family(
+        tmp_path, monkeypatch, capsys):
+    # FUNCTIONAL 3: the judge's reason shape is f"{k} {v} {s:.2f}" with k a
+    # PER-CALL claim key (c1/c2/c3/...), not part of the arm's identity —
+    # six OVERCLAIMS blocks that each happened to fire on a different
+    # claim index used to split across six distinct "families" and could
+    # never reach --min. They must now all collapse into one "OVERCLAIMS"
+    # family and signal.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    reasons = ["c1 OVERCLAIMS 0.91", "c3 OVERCLAIMS 0.94", "c2 OVERCLAIMS 0.88",
+              "c1 OVERCLAIMS 0.97", "c4 OVERCLAIMS 0.92", "c5 OVERCLAIMS 0.99"]
+    _write_catch_records(catch_path, [
+        _false_block_record(f"z{i}", f"2026-09-0{i+1}T00:00:00+00:00", r)
+        for i, r in enumerate(reasons)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: OVERCLAIMS (x6)" in out
+    assert "family: OVERCLAIMS  tag: false  count: 6" in out
+
+
+def test_catch_signal_threshold_below_min_produces_no_signal(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("t1", "2026-09-01T00:00:00+00:00", "PR mismatch: x"),
+        _false_block_record("t2", "2026-09-02T00:00:00+00:00", "PR mismatch: y"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "no reason family has reached --min 3" in out
+
+
+def test_catch_signal_at_threshold_exits_zero_and_prints_signal(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("s1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("s2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("s3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: PR mismatch (x3)" in out
+    assert "family: PR mismatch" in out
+    assert "count: 3" in out
+
+
+def test_catch_signal_examples_capped_at_three(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"e{i}", f"2026-09-0{i}T00:00:00+00:00",
+                            "PR mismatch: x", draft=f"draft number {i}")
+        for i in range(1, 6)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--with-drafts"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.count("draft:") == 3
+
+
+def test_catch_signal_default_body_carries_no_draft_derived_text(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 1: with neither --with-reasons nor --with-drafts, a signal's
+    # printed output and its issue body must carry only family/count/
+    # timestamps/record ids — the draft excerpt and the reason line (both
+    # of which can carry names, addresses, order numbers, health details,
+    # dollar figures, non-US phone numbers or token URLs no _catch_redact
+    # pattern ever covered) must never appear at all.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    secret_draft = "Dear Margaret Holloway, ship to 412 W 57th St, call +44 20 7946 0958"
+    _write_catch_records(catch_path, [
+        _false_block_record(f"g{i}", f"2026-09-0{i}T00:00:00+00:00",
+                            "PR mismatch: draft says PR #9 merged, evidence shows open",
+                            draft=secret_draft)
+        for i in range(1, 4)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Margaret Holloway" not in out
+    assert "412 W 57th St" not in out
+    assert "7946 0958" not in out
+    assert "draft:" not in out
+    assert "reason:" not in out
+    assert "PR mismatch" in out  # family/title are still shown
+    assert "g1" in out and "g2" in out and "g3" in out  # record ids are shown
+    assert "Run `superjev catch list --id <id>` locally" in out
+
+
+def test_catch_signal_open_refuses_with_reasons_or_with_drafts(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 2: --open files a PUBLIC issue, so combining it with either
+    # local-preview flag is a hard usage error (exit 2) rather than a
+    # silent downgrade to the metadata-only body.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"h{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x")
+        for i in range(1, 4)
+    ])
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked when --open is refused")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo",
+                    "--with-reasons"])
+    assert code == 2
+    code2 = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo",
+                     "--with-drafts"])
+    assert code2 == 2
+
+
+def test_catch_signal_with_drafts_escapes_markdown_injection(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 2: a draft can carry literal markdown/GitHub-autolink syntax
+    # — this must never be rendered live, even in the local-only preview
+    # modes (--open + --with-drafts is refused outright, see the test
+    # above, but --dry-run/--with-drafts alone still renders locally).
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    payload = "cc @torvalds ```rm -rf /``` <img src=x onerror=1> fixes #34"
+    _write_catch_records(catch_path, [
+        _false_block_record(f"i{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x",
+                            draft=payload)
+        for i in range(1, 4)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run", "--with-drafts"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "```" not in out
+    assert "@torvalds" not in out
+    assert "#34" not in out
+    assert "at:torvalds" in out
+    assert "no.34" in out
+
+
+def test_catch_signal_escape_markdown_helper_direct():
+    assert sj._catch_signal_escape_markdown("`code`") == "｀code｀"
+    assert sj._catch_signal_escape_markdown("cc @torvalds") == "cc at:torvalds"
+    assert sj._catch_signal_escape_markdown("fixes #34") == "fixes no.34"
+    assert sj._catch_signal_escape_markdown("") == ""
+    assert sj._catch_signal_escape_markdown(None) == ""
+    # An email address's "@" is a normal address character, not a handle —
+    # still gets neutralised the same way since this function cannot tell
+    # the difference, which is fine: it only ever runs on already-redacted
+    # text (see _catch_signal_examples), so a real email never reaches it.
+    assert sj._catch_signal_escape_markdown("a@b.com") == "aat:b.com"
+
+
+def test_catch_signal_min_zero_is_refused_not_silently_three(
+        tmp_path, monkeypatch, capsys):
+    # NIT: `getattr(a, "min", 3) or 3` used to silently rewrite an
+    # explicit `--min 0` into 3 because 0 is falsy. It must now reach the
+    # "--min must be at least 1" refusal instead.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("k1", "2026-09-01T00:00:00+00:00", "PR mismatch: x"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "0"])
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "must be at least 1" in err
+
+
+def test_catch_signal_open_exits_3_when_a_filing_fails(tmp_path, monkeypatch, capsys):
+    # NIT: `--open` used to always exit 0 even when every attempted filing
+    # failed, so a cron caller could not branch on it without parsing
+    # output. A gh failure must now surface as exit 3.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"n{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x")
+        for i in range(1, 4)
+    ])
+    fake = FakeDoor(1, stdout="", stderr="gh: HTTP 403 forbidden")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    assert code == 3
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert not sidecar.exists()
+
+
+def test_catch_list_with_id_shows_full_detail_for_one_record(
+        tmp_path, monkeypatch, capsys):
+    # The pointer text `catch signal`'s own issue body gives a human
+    # ("run `superjev catch list --id <id>` locally") must be a real,
+    # working lookup — a single-record --id query, unlike the summary
+    # table, shows every reason and the full (already-redacted) draft
+    # excerpt.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("look1", "2026-09-01T00:00:00+00:00", "PR mismatch: x",
+                            draft="a redacted excerpt"),
+        _false_block_record("look2", "2026-09-02T00:00:00+00:00", "PR mismatch: y"),
+    ])
+    code = sj.main(["catch", "list", "--id", "look1"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "look1" in out
+    assert "look2" not in out
+    assert "a redacted excerpt" in out
+
+
+def test_catch_list_with_id_missing_prints_message_not_crash(
+        tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [])
+    code = sj.main(["catch", "list", "--id", "nope"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no record with id" in out
+
+
+def test_catch_signal_miss_family_gets_its_own_title(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    records = []
+    for i in range(3):
+        rec = _false_block_record(f"m{i}", f"2026-09-0{i+1}T00:00:00+00:00",
+                                  "PR mismatch: x")
+        rec["decision"] = "allow"
+        rec["tag"] = "miss"
+        records.append(rec)
+    _write_catch_records(catch_path, records)
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "missed lie: PR mismatch (x3)" in out
+
+
+def test_catch_signal_dry_run_never_calls_gh(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("d1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("d2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("d3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    called = {"n": 0}
+
+    def fake_run(*a, **kw):
+        called["n"] += 1
+        raise AssertionError("gh must never be invoked under --dry-run")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert called["n"] == 0
+    assert "issue body" in out
+    assert "Reason family: `PR mismatch`" in out
+
+
+def test_catch_signal_open_without_repo_refused(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("r1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("r2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("r3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked without --repo")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open"])
+    assert code == sj.REFUSED
+
+
+def test_catch_signal_open_calls_gh_and_writes_sidecar(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("o1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("o2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("o3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    fake = FakeDoor(0, stdout="https://github.com/acme/repo/issues/42\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "filed: https://github.com/acme/repo/issues/42" in out
+    assert len(fake.calls) == 1
+    argv = fake.calls[0]["cmd"]
+    assert argv[:3] == ["gh", "issue", "create"]
+    assert "--repo" in argv and "acme/repo" in argv
+    assert "--label" in argv and "harness-signal" in argv
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert sidecar.exists()
+    lines = [json.loads(l) for l in sidecar.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["issue_url"] == "https://github.com/acme/repo/issues/42"
+    assert lines[0]["family"] == "PR mismatch"
+
+    # A second run must not file the same family twice.
+    fake2 = FakeDoor(0, stdout="https://github.com/acme/repo/issues/99\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake2)
+    code2 = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    out2 = capsys.readouterr().out
+    assert code2 == 0
+    assert "already filed: https://github.com/acme/repo/issues/42" in out2
+    assert len(fake2.calls) == 0
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("nothing sensitive here", False),
+    ("", False),
+    (None, False),
+    ("call me at 212-555-0100 about this", True),
+    ("reach me at someone@example.com", True),
+    ("ssn on file: 123-45-6789", True),
+])
+def test_catch_signal_has_pii(text, expected):
+    assert sj._catch_signal_has_pii(text) is expected
+
+
+def test_catch_signal_refuses_to_open_when_body_still_carries_pii(
+        tmp_path, monkeypatch, capsys):
+    # Examples are already redacted by _catch_signal_examples before they
+    # ever reach the body, so this test forces the guard itself to fire
+    # (a belt-and-suspenders check, not something the normal ledger path
+    # is expected to hit) by monkeypatching _catch_signal_has_pii to True,
+    # and asserts the command wiring honours that guard: gh is never
+    # called and nothing is written to the sidecar.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("p1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("p2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("p3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    monkeypatch.setattr(sj, "_catch_signal_has_pii", lambda body: True)
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked when the guard trips")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    err = capsys.readouterr().err
+    # NIT: a refused filing now surfaces as exit 3, not a silent 0 — see
+    # test_catch_signal_open_exits_3_when_a_filing_fails.
+    assert code == 3
+    assert "refusing to open an issue" in err
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert not sidecar.exists()
+
+
+# ---------------------------------------- catch signal: per-bot breakdown
+
+def test_catch_list_id_and_bot_filters_compose(tmp_path, monkeypatch, capsys):
+    # PR #60 round 3, item 1: `--id` (feat/catch-signal) and `--bot`
+    # (landed on main as part of PR #59/#62) must both work on `catch
+    # list` at once, not one clobbering the other.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("q1", "2026-09-01T00:00:00+00:00", "PR mismatch: a",
+                            bot="primary"),
+        _false_block_record("q2", "2026-09-02T00:00:00+00:00", "PR mismatch: b",
+                            bot="worker2"),
+    ])
+    code = sj.main(["catch", "list", "--id", "q1", "--bot", "primary"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "q1" in out
+    assert "q2" not in out
+    # a real id under the WRONG --bot filter is filtered away like any
+    # other --bot mismatch, not treated as an id-always-wins override
+    code2 = sj.main(["catch", "list", "--id", "q1", "--bot", "worker2"])
+    out2 = capsys.readouterr().out
+    assert code2 == 0
+    assert "no record with id" in out2
+
+
+def test_catch_signal_bot_flag_restricts_grouping(tmp_path, monkeypatch, capsys):
+    # `catch signal --bot <id>` must restrict which records are even
+    # grouped/counted toward --min, not just annotate the output.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"r{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x",
+                            bot="primary")
+        for i in range(1, 3)
+    ] + [
+        _false_block_record("r3", "2026-09-03T00:00:00+00:00", "PR mismatch: x",
+                            bot="worker2"),
+    ])
+    # all 3 records share a family and reach --min 3 when unfiltered
+    code_all = sj.main(["catch", "signal", "--min", "3"])
+    assert code_all == 0
+    # restricting to one bot drops the count below --min
+    code_bot = sj.main(["catch", "signal", "--min", "3", "--bot", "primary"])
+    assert code_bot == 1
+
+
+def test_catch_signal_prints_per_bot_breakdown_counts_only(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("s1", "2026-09-01T00:00:00+00:00", "PR mismatch: a",
+                            bot="primary"),
+        _false_block_record("s2", "2026-09-02T00:00:00+00:00", "PR mismatch: b",
+                            bot="primary"),
+        _false_block_record("s3", "2026-09-03T00:00:00+00:00", "PR mismatch: c",
+                            bot="worker2"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "by bot: primary=2, worker2=1" in out
+    # counts only — no reason/draft text in the breakdown line
+    assert "mismatch" not in out.split("by bot:")[1].split("\n")[0]
+
+
+def test_catch_signal_body_has_bot_breakdown_line(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("t1", "2026-09-01T00:00:00+00:00", "PR mismatch: a",
+                            bot="primary"),
+        _false_block_record("t2", "2026-09-02T00:00:00+00:00", "PR mismatch: b",
+                            bot="primary"),
+        _false_block_record("t3", "2026-09-03T00:00:00+00:00", "PR mismatch: c",
+                            bot="worker2"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "By bot: primary=2, worker2=1" in out
+
+
+# ---------------------------------- catch signal: reason-family bounding
+#
+# PR #60 round 3, items 2-3: a colonless reason with no recognised
+# HEADER:/judge-score-keyword prefix (an "advisory note") used to become
+# the family VERBATIM — the one string that ever reached a public issue
+# title/body without going through _catch_redact or
+# _catch_signal_escape_markdown, and one such note per differing
+# detail/score never collapsed into a single family the way every other
+# arm's blocks did.
+
+def test_catch_reason_family_buckets_colonless_advisory_notes():
+    # the reviewer's example shape: an advisory note embedding a
+    # --test-cmd argument, no colon, no judge-score shape at all
+    note = ("the reply cites --test-cmd 'pytest tests/test_foo.py' but no "
+            "tool ran this turn, so this is advisory only")
+    assert sj._catch_reason_family(note) == "the reply"
+    # a second note with the same score-free lead-in, different detail —
+    # must collapse to the SAME family, not a family of its own
+    note2 = ("the reply cites --test-cmd 'npm run build' but nothing "
+             "actually executed on this turn either")
+    assert sj._catch_reason_family(note2) == "the reply"
+    # a note that doesn't even start with two plain-letter words falls
+    # back to the fixed literal bucket
+    note3 = "123 not a real header and no score shape at all here"
+    assert sj._catch_reason_family(note3) == "advisory-note"
+
+
+def test_catch_signal_advisory_notes_collapse_into_one_family_not_one_per_note(
+        tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    notes = [
+        "the reply cites --test-cmd 'pytest a.py' but nothing ran turn one",
+        "the reply cites --test-cmd 'pytest b.py' but nothing ran turn two",
+        "the reply cites --test-cmd 'pytest c.py' but nothing ran turn three",
+    ]
+    _write_catch_records(catch_path, [
+        _false_block_record(f"u{i}", f"2026-09-0{i+1}T00:00:00+00:00", n)
+        for i, n in enumerate(notes)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: the reply (x3)" in out
+    # the full advisory note text (draft-derived, unredacted by family
+    # alone) must never appear verbatim in the default metadata-only output
+    assert "--test-cmd" not in out
+    assert "pytest a.py" not in out
+
+
+def test_catch_reason_family_caps_length_at_60_chars():
+    long_header = ("x" * 200) + ": trailing detail that would otherwise make "
+    family = sj._catch_reason_family(long_header)
+    assert len(family) <= 60
+
+
+@pytest.mark.parametrize("raw_family,expect_in_title,expect_not_in_title", [
+    ("weird `header` here", "｀header｀", "`header`"),
+    ("mentions @someone", "at:someone", "@someone"),
+    ("issue #12 crashed", "no.12", "#12"),
+])
+def test_catch_signal_title_escapes_markdown_in_family(
+        raw_family, expect_in_title, expect_not_in_title):
+    # belt-and-braces: _catch_signal_title escapes `family` again itself,
+    # rather than trusting _catch_reason_family's own escape pass to be
+    # the only one — called here with a raw, still-unescaped family
+    # (as if some future caller ever built a signal dict by hand) to
+    # prove the title-building step does its own escaping.
+    title = sj._catch_signal_title("false", raw_family, 3)
+    assert expect_in_title in title
+    assert expect_not_in_title not in title
+
+
+def test_catch_signal_body_escapes_markdown_in_family_line():
+    signal = {
+        "title": "false block: weird ｀header｀ here (x3)",
+        "family": "weird `header` here",
+        "tag": "false",
+        "count": 3,
+        "first_ts": "2026-09-01T00:00:00+00:00",
+        "last_ts": "2026-09-03T00:00:00+00:00",
+        "ids": ["v1", "v2", "v3"],
+        "examples": [{"id": "v1"}, {"id": "v2"}, {"id": "v3"}],
+        "bot_counts": {},
+    }
+    body = sj._catch_signal_body(signal)
+    assert "｀header｀" in body
+    assert "`header`" not in body
+
+
+# ------------------------------------------------------------ ledger bot/origin
+
+def test_bot_id_from_transcript_path_extracts_the_agent_cwd_segment():
+    tp = ("/Users/admin/.claude/projects/"
+          "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/abc123.jsonl")
+    assert sj._bot_id_from_transcript_path(tp) == "claw4mac-primary"
+
+
+def test_bot_id_from_transcript_path_handles_a_different_bot():
+    tp = ("/Users/admin/.claude/projects/"
+          "-Users-admin--ai-wrapper-agent-cwd-claw4mac-businessfi/xyz.jsonl")
+    assert sj._bot_id_from_transcript_path(tp) == "claw4mac-businessfi"
+
+
+def test_bot_id_from_transcript_path_none_when_no_agent_cwd_segment():
+    assert sj._bot_id_from_transcript_path("/Users/admin/somewhere/else.jsonl") is None
+
+
+def test_bot_id_from_transcript_path_none_on_non_string():
+    assert sj._bot_id_from_transcript_path(None) is None
+    assert sj._bot_id_from_transcript_path(123) is None
+
+
+def test_current_bot_id_prefers_claw4mac_session_id_env(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "should-not-win")
+    monkeypatch.setenv("CLAUDE_BOT_ID", "should-not-win-either")
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_falls_back_to_claw4mac_bot_id_env(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    monkeypatch.setenv("CLAUDE_BOT_ID", "should-not-win")
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_falls_back_to_claude_bot_id_env(monkeypatch):
+    monkeypatch.setenv("CLAUDE_BOT_ID", "helper1")
+    assert sj._current_bot_id() == "helper1"
+
+
+def test_current_bot_id_derives_from_active_hook_payload_when_no_env(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "b1"
+
+
+def test_current_bot_id_derives_and_strips_claw4mac_prefix_for_primary(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/"
+                            "s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_env_wins_over_transcript_path(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_session_id_env_wins_over_transcript_path(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_unknown_with_no_env_and_no_payload():
+    assert sj._current_bot_id() == "unknown"
+
+
+def test_current_bot_id_unknown_when_payload_has_no_transcript_path(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {"session_id": "abc"})
+    assert sj._current_bot_id() == "unknown"
+
+
+def test_current_origin_live_by_default():
+    assert sj._current_origin() == "live"
+
+
+def test_current_origin_bench_from_env_var(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_BENCH", "1")
+    assert sj._current_origin() == "bench"
+
+
+def test_current_origin_bench_from_session_id_prefix(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {"session_id": "bench-042"})
+    assert sj._current_origin() == "bench"
+
+
+def test_current_origin_live_when_session_id_does_not_start_with_bench(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {"session_id": "real-session-abc"})
+    assert sj._current_origin() == "live"
+
+
+def test_ledger_append_sets_bot_and_origin_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "calls.jsonl")
+    sj.ledger_append({"door": "gate", "argv": [], "exit_code": 0, "ms": 0,
+                      "json_mode": False, "hook_mode": False})
+    rec = json.loads(sj.LEDGER_PATH.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["bot"] == "unknown"
+    assert rec["origin"] == "live"
+
+
+def test_ledger_append_never_overwrites_an_explicit_bot_or_origin(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "calls.jsonl")
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    sj.ledger_append({"door": "gate", "argv": [], "exit_code": 0, "ms": 0,
+                      "json_mode": False, "hook_mode": False,
+                      "bot": "explicit-bot", "origin": "bench"})
+    rec = json.loads(sj.LEDGER_PATH.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["bot"] == "explicit-bot"
+    assert rec["origin"] == "bench"
+
+
+def test_hook_gate_ledger_and_catch_records_carry_bot_from_transcript_path(
+        tmp_path, monkeypatch):
+    ledger_path, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl", "session_id": "s1"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert call_rec["bot"] == "b1"
+    assert call_rec["origin"] == "live"
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["bot"] == "b1"
+    assert catch_rec["origin"] == "live"
+
+
+def test_hook_gate_bot_id_env_wins_over_transcript_path(tmp_path, monkeypatch):
+    ledger_path, _ = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert call_rec["bot"] == "primary"
+
+
+def test_hook_gate_origin_bench_when_session_id_starts_with_bench(tmp_path, monkeypatch):
+    ledger_path, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "session_id": "bench-007"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
+    assert call_rec["origin"] == "bench"
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["origin"] == "bench"
+
+
+def test_catch_list_bot_filter(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "primary"},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "b1"},
+    ])
+    code = sj.main(["catch", "list", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "a1" in out
+    assert "a2" not in out
+    assert "bot=primary" in out
+
+
+def test_catch_list_shows_unknown_for_records_without_a_bot_field(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "list"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=unknown" in out
+
+
+def test_catch_list_bot_primary_matches_record_derived_from_transcript_path(
+        tmp_path, monkeypatch, capsys):
+    """--bot primary must match a record whose `bot` field came from
+    _current_bot_id deriving off a real .../agent-cwd-claw4mac-primary/...
+    transcript_path (the seat vocabulary uses "primary", not
+    "claw4mac-primary" — see _current_bot_id's prefix strip)."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl", "session_id": "s1"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["bot"] == "primary"
+    capsys.readouterr()  # discard hook gate's own stdout
+    code = sj.main(["catch", "list", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=primary" in out
+
+
+def test_catch_list_bot_column_width_fits_a_long_bot_name(tmp_path, monkeypatch, capsys):
+    """A long seat name (e.g. "contentcreator") must not run its bot=
+    field into the reason column with no gap — the column widens to fit
+    the widest bot id actually printed rather than a narrower fixed pad."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["some reason"], "draft_excerpt": "",
+         "window_bytes": 1, "ms": 1, "tag": None, "note": None,
+         "bot": "contentcreator"},
+    ])
+    code = sj.main(["catch", "list"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=contentcreator  some reason" in out
+
+
+def test_catch_report_bot_filter_excludes_other_bots(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": "false", "note": None, "bot": "primary"},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": "false", "note": None, "bot": "b1"},
+    ])
+    code = sj.main(["catch", "report", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "false stops: 1" in out
+
+
+def test_catch_report_shows_by_bot_breakdown_when_no_filter(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["x"], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "primary"},
+        {"id": "a2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "primary"},
+        {"id": "a3", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "", "window_bytes": 1,
+         "ms": 1, "tag": None, "note": None, "bot": "b1"},
+    ])
+    code = sj.main(["catch", "report"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "by bot:" in out
+    assert "primary: 2" in out
+    assert "b1: 1" in out
