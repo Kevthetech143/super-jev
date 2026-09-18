@@ -10399,3 +10399,62 @@ def test_worktree_roots_unset_or_blank_still_falls_back_to_the_default(monkeypat
     assert sj._worktree_roots() != []
     monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV, os.pathsep)
     assert sj._worktree_roots() != []
+
+
+# ============================================================================
+# filter.<driver>.clean — the third config key that decides what a diff says
+#
+# Found while hardening the two above, and exploitable: a clean filter is a
+# program git runs over the WORKING COPY before comparing it, selected
+# per-path by a checked-in .gitattributes. A filter that echoes the
+# committed content makes `git diff --quiet HEAD -- package.json` answer
+# "unmodified" for a hostile file sitting on disk — which is precisely the
+# check that is supposed to catch an uncommitted edit. `--no-ext-diff` and
+# `--no-textconv` do not cover it, and there is no key to pin, because the
+# driver name is chosen by the attacker. So the working-copy check does not
+# ask git at all: it hashes the bytes.
+
+def test_blob_ids_of_file_matches_what_git_committed(trusted):
+    wt = trusted.worktree()
+    committed = _git("rev-parse", "HEAD:package.json", cwd=wt).strip()
+    assert committed in sj._blob_ids_of_file(str(wt / "package.json"))
+    (wt / "package.json").write_text("changed\n", encoding="utf-8")
+    assert committed not in sj._blob_ids_of_file(str(wt / "package.json"))
+    # unreadable is the empty set, which can never match a blob id
+    assert sj._blob_ids_of_file(str(wt / "nope.json")) == set()
+
+
+def test_npm_gate_catches_a_hostile_package_json_hidden_by_a_clean_filter(trusted):
+    # The filter here is a real script, but it is OURS and it is inert: it
+    # prints the committed bytes on stdout and touches nothing. It stands
+    # in for the hostile one, whose only job is also to lie to git.
+    wt = trusted.worktree()
+    committed_bytes = (wt / "package.json").read_text(encoding="utf-8")
+    liar = trusted.root / "liar-clean-filter.sh"
+    liar.write_text("#!/bin/sh\ncat <<'EOF'\n" + committed_bytes + "EOF\n",
+                    encoding="utf-8")
+    liar.chmod(0o755)
+    _git("config", "filter.f.clean", str(liar), cwd=wt)
+    (wt / ".gitattributes").write_text("*.json filter=f\n", encoding="utf-8")
+
+    (wt / "package.json").write_text('{"scripts":{"test":"echo pwned"}}\n',
+                                     encoding="utf-8")
+
+    # The fixture is real: git itself, with every flag and pin this module
+    # uses, reports the hostile working copy as UNMODIFIED.
+    lied = _REAL_RUN(["git", "-C", str(wt), "diff", "--no-ext-diff",
+                      "--no-textconv", "--quiet", "HEAD", "--", "package.json"],
+                     capture_output=True, text=True, env=sj.safe_git_env())
+    assert lied.returncode == 0, (
+        "fixture is wrong: git did not report the hostile file as clean")
+
+    # The gate is not fooled, because it hashes the bytes instead.
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert (ok, why) == (False, "package.json-modified"), (ok, why)
+    assert "untrusted-test-cmd:package.json-modified" in (
+        sj.check_test_cmd_for_fallback("npm test", str(wt)) or "")
+
+    # and a clean worktree under the same filter still reads as trusted,
+    # i.e. the hash check did not simply refuse everything
+    (wt / "package.json").write_text(committed_bytes, encoding="utf-8")
+    assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo)) == (True, None)

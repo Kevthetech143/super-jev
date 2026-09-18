@@ -284,6 +284,23 @@ No version bump.
   the key is not an option: `-c diff.external=` makes git fatal out with
   "external diff died".
 
+- **Security: a clean filter can no longer hide a hostile
+  `package.json`.** Found while fixing the two entries above, and
+  exploitable. `filter.<driver>.clean` is a program git runs over the
+  WORKING COPY before comparing it, selected per-path by a checked-in
+  `.gitattributes`; a filter that echoes the committed content makes `git
+  diff --quiet HEAD -- package.json` report a hostile working copy as
+  unmodified, defeating the very check meant to catch an uncommitted edit.
+  `--no-ext-diff`/`--no-textconv` do not cover it and no key can be
+  pinned, because the driver name is chosen by whoever writes the
+  `.gitattributes`. So the working-copy half of the provenance check no
+  longer asks git: it reads the bytes and computes the git object id in
+  Python (sha1 and sha256, since the object format is a repository
+  property), and compares that to the vouched-for blob id. `git diff
+  --quiet` is still consulted, but only ever to refuse. The cost is a
+  false refusal on a repo that legitimately filters or CRLF-normalises the
+  file being checked, which is the safe direction.
+
 - **Security: `SUPERJEV_WORKTREE_ROOTS=none` refuses every derived
   worktree.** A reserved value, not a path: no root is allowlisted, so
   nothing derived from report text reaches the filesystem and no test

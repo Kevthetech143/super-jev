@@ -38,6 +38,7 @@ to a call ledger under this skill's own `ledger/` folder; see `ledger` and
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -8216,6 +8217,35 @@ def _blob_sha(args, cwd):
     return sha, None
 
 
+def _blob_ids_of_file(path):
+    """Every git object id the bytes on disk could legitimately have, as a
+    set — sha1 and sha256, since the object format is a repository
+    property. Empty when the file cannot be read.
+
+    Computed IN PYTHON, with no git call, deliberately. This is the one
+    check that must not be answerable by the repository's own
+    configuration: `filter.<driver>.clean`, selected per-path by a
+    checked-in `.gitattributes`, is a program git runs over the WORKING
+    COPY before comparing it, so a filter that echoes the committed
+    content makes `git diff --quiet` report a modified file as clean.
+    Verified, not theorised. `core.autocrlf` and a `text` attribute bend
+    the same comparison more mildly. None of that can touch a hash taken
+    off the raw bytes here.
+
+    The cost is a false refusal on a repo that legitimately puts a clean
+    filter or CRLF normalisation on the file being checked: its committed
+    blob is not its raw bytes, so this reports "differs". That is the safe
+    direction, and it does not arise for the file this is used on.
+    """
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return set()
+    header = b"blob %d\0" % len(data)
+    return {hashlib.sha1(header + data).hexdigest(),
+            hashlib.sha256(header + data).hexdigest()}
+
+
 def _protected_package_json_blob(protected_repo=None):
     """(blob_sha, None) or (None, reason) — the package.json blob the
     PROTECTED repo's default branch committed. Tried against
@@ -8256,9 +8286,14 @@ def _npm_runner_is_trusted(worktree, protected_repo=None):
          protected repo's default-branch blob (see
          PROTECTED_DEFAULT_REFS) — a hostile package.json committed on the
          worker's branch fails here, reason "package-json-differs";
-      3. the worktree's WORKING COPY equals that same committed blob
-         (`git diff --quiet HEAD -- package.json`), so an uncommitted edit
-         is caught too.
+      3. the worktree's WORKING COPY hashes to that same blob id, so an
+         uncommitted edit is caught too. The hash is taken in Python off
+         the raw bytes, NOT read out of `git diff` — a
+         `filter.<driver>.clean` in the repo's config makes git report a
+         modified file as clean, and this is the decision such a filter
+         would be planted to flip. See _blob_ids_of_file. git's own
+         `diff --quiet` is consulted as well, but only to refuse; it can
+         never turn a hash mismatch into a pass.
 
     Either lookup failing to answer is a refusal, not a pass: "could not
     read the vouched-for version" is never grounds for running a script.
@@ -8277,9 +8312,17 @@ def _npm_runner_is_trusted(worktree, protected_repo=None):
         return False, why
     if base_blob != head_blob:
         return False, "package-json-differs"
-    # `--quiet` makes the exit code the answer: 0 identical, 1 differs,
+    # The WORKING COPY, hashed here rather than diffed by git. A clean
+    # filter in the repo's own config can make `git diff` report a
+    # modified file as unmodified (see _blob_ids_of_file), and this is the
+    # exact decision such a filter would be planted to flip, so the
+    # authoritative answer is the hash of the bytes on disk.
+    if base_blob not in _blob_ids_of_file(os.path.join(worktree, "package.json")):
+        return False, "package.json-modified"
+    # git's own view as well, purely additive: if the two ever disagree the
+    # answer is the refusal, never the pass. 0 identical, 1 differs,
     # anything else (including -1, git not runnable) is the command itself
-    # failing, which is its own refusal rather than a silent pass.
+    # failing, which is its own refusal.
     rc, _out = _git_rc(["diff", *GIT_DIFF_SAFE_FLAGS, "--quiet", "HEAD",
                         "--", "package.json"], worktree)
     if rc == 1:

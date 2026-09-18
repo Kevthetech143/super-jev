@@ -776,6 +776,29 @@ them. Pinning the config key instead is not an option: `-c
 diff.external=` makes git fatal out with "external diff died", taking the
 diff with it.
 
+**`filter.<driver>.clean`, and why one check does not ask git at all.**
+There is a third key of this family, and it is the sharpest of the three.
+A clean filter is a program git runs over the WORKING COPY before
+comparing it, selected per-path by a checked-in `.gitattributes`. A filter
+that simply echoes the committed content makes `git diff --quiet HEAD --
+package.json` answer "unmodified" for a hostile file sitting on disk —
+which is exactly the check that is supposed to catch an uncommitted edit.
+`--no-ext-diff` and `--no-textconv` do not cover it. Neither does pinning
+a key, because the driver name is chosen by whoever writes the
+`.gitattributes`. `core.autocrlf` and a `text` attribute bend the same
+comparison more mildly.
+
+So the working-copy half of the `npm` provenance check does not ask git.
+It reads the bytes and computes the git object id in Python, both sha1 and
+sha256 since the object format is a repository property, and compares that
+to the vouched-for blob id. No repository configuration can reach a hash
+taken off raw bytes. `git diff --quiet` is still consulted, but only ever
+to refuse: it cannot turn a hash mismatch into a pass. The cost is a false
+refusal on a repo that legitimately puts a clean filter or CRLF
+normalisation on the file being checked, where the committed blob is not
+the raw bytes. That is the safe direction, and it does not arise for
+`package.json` here.
+
 **A report-derived `npm test` does not vouch for itself.** `npm test`
 names no program. `package.json`'s `scripts` does, and a worker can write
 `package.json`. Left alone, a worker could claim a pass count, have this
