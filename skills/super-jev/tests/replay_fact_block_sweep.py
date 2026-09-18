@@ -197,6 +197,7 @@ def main():
     flips = []
     truths_flipped = []
     fact_family_counts = {}
+    baseline_errors = []
 
     baseline, baseline_ref, baseline_sha = _load_baseline_module()
     print(f"baseline ref: {baseline_ref}  sha: {baseline_sha or '(unresolved)'}")
@@ -233,8 +234,21 @@ def main():
                 try:
                     old_blocked = bool(_window_fact_reasons(baseline, transcript_path, draft))
                 except Exception as e:
-                    print(f"  {set_name}/{cid}: baseline window build raised "
-                          f"{e!r} — assuming not blocked")
+                    # A baseline call that raises is NOT "assume not
+                    # blocked" and quiet about it — that swallowed a real
+                    # TypeError (a kwarg this branch's live side passes
+                    # that the pre-change baseline module doesn't accept)
+                    # on every single case, which hid the baseline's real
+                    # answer for every family, not just receipt shapes, and
+                    # produced decision "flips" that were never real (PR
+                    # #68 round 2). `old_blocked = False` below still lets
+                    # the loop finish and report what it can, but every
+                    # such case is counted, printed, and turns the whole
+                    # run into a hard FAIL — a baseline that cannot run is
+                    # a sweep that cannot tell you anything.
+                    baseline_errors.append((set_name, cid, repr(e)))
+                    print(f"  {set_name}/{cid}: BASELINE ERROR — window build "
+                          f"raised {e!r}")
             new_blocked = old_blocked or bool(fact_reasons)
             if fact_reasons:
                 # Family name only (the fixed prefix before the first
@@ -248,6 +262,9 @@ def main():
 
     print(f"\ncases replayed     : {total_cases}")
     print(f"fact families fired: {fact_family_counts or '(none)'}")
+    print(f"baseline errors    : {len(baseline_errors)}")
+    for set_name, cid, err in baseline_errors:
+        print(f"  BASELINE ERROR  {set_name:<20} {cid:<6} {err}")
     print(f"decision flips     : {len(flips)}")
     for set_name, cid, kind in flips:
         print(f"  NEW BLOCK  {set_name:<20} {cid:<6} kind={kind}")
@@ -255,6 +272,12 @@ def main():
     for set_name, cid in truths_flipped:
         print(f"  TRUTH BLOCKED  {set_name} {cid}")
 
+    if baseline_errors:
+        print(f"\nFAIL — {len(baseline_errors)} baseline call(s) raised instead "
+              "of running; every decision-flip result above is unreliable "
+              "until the baseline module actually runs. Fix the baseline "
+              "call (or the code under test) before trusting this sweep.")
+        return 1
     if truths_flipped:
         print("\nFAIL — a truth flipped to block; see docs above for the "
               "fact family responsible and gate it out.")
