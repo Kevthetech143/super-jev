@@ -210,6 +210,68 @@ Exit codes: `0` safe_to_auto, `2` needs_approval, `3` refuse, `1` usage or
 failure. `src/enhance/permit.ts` is the domain-independent library; the CLI
 is argument parsing and printing around it.
 
+### Pre-rules: settling the free checks before the judge is even asked
+
+Before any of the above runs, `src/enhance/permit-prerules.ts` (default ON;
+`--no-prerules` turns it off) applies a second, code-only layer in front of
+`decidePermit`'s own hard rule. It was ported from an offline experiment that
+replayed the same rules against 30 saved live permit cases plus 20
+hand-labeled real commands with zero dangerous outcomes before this port:
+never once did a rule let an action expected to refuse or need approval
+through as automatically safe.
+
+It does two things the hard rule's flat keyword match cannot do on its own,
+because both need facts about the concrete thing being acted on, not just
+words in the sentence:
+
+- **Parses the verb and its object.** `rm -rf PATH`, `git push --force
+  BRANCH`, `drop table NAME`, a disk/volume/partition target for
+  `format`/`mkfs`/`diskutil erase`, a dollar amount, and a payee are pulled
+  out with narrow, specific patterns, not free text. This is also where the
+  formatter false-refuse is fixed for the pre-rule layer the same way it was
+  already fixed in the hard rule: `format the code` or `run the formatter`
+  never counts as the disk-wipe sense of "format," only an actual storage
+  target (or `mkfs`/`diskutil erase`) does.
+- **Reads live reversibility facts when `--cwd` is given**: does the target
+  path exist, is it tracked and committed in git, is there a backup sibling
+  file, is a named branch `main`/`master` or otherwise protected, and (with
+  `--worktree`) is the resolved path inside the task's own worktree. Without
+  `--cwd` these stay unknown, never a guessed `false`.
+
+On top of those facts, three rules fire, each settling the question with
+**no model call at all**, and the JSON output's `calls` field reads `0` when
+one of them does:
+
+1. **Money above a configurable threshold, or a new payee, always needs
+   approval.** `--money-threshold` sets the dollar line (default `200`, the
+   same number as this fleet's own risk-scaled payments rule); `--new-payee`
+   marks the payee as not already on file. Either one settles the verdict to
+   `needs_approval` regardless of what the judge would have said, and
+   regardless of the amount if a new payee is involved.
+2. **A destructive verb refuses outright, no judge call** — same class,
+   same verdict `decidePermit`'s own hard rule already reaches, just settled
+   one step earlier so the manifest shows `0` calls for this path too.
+3. **The one carve-out**: a destructive verb whose target is tracked and
+   committed in git *and* inside the task's own `--worktree` is not refused
+   sight unseen. It is recoverable from git's own index, so instead it is
+   passed through to the judge with that fact attached (`"recoverable from
+   the index"`), never auto-allowed on the strength of the fact alone.
+
+Nothing here can ever settle a verdict to `safe_to_auto`. The only three
+verdicts a pre-rule can return are `refuse`, `needs_approval`, or
+`defer_to_judge` — a pre-rule can only make the outcome more cautious or
+leave it for the judge, never less cautious. When nothing settles it, the
+derived facts still print first, then whatever the judge (or the CLI's own
+existing hard rule) decides for what is left. `--explain` names which rule
+fired, or that none did.
+
+```bash
+npm run permit -- --snapshot snapshot.json --stub --json \
+  --cwd /path/to/repo --worktree /path/to/repo/worktree \
+  --money-threshold 200 --explain
+npm run permit -- --snapshot snapshot.json --stub --json --no-prerules   # old behavior, pre-rules off
+```
+
 ## Chain: evidence completeness before the final question
 
 `src/chain-cli.ts` (`npm run chain`) wraps the evidence-chain library that
