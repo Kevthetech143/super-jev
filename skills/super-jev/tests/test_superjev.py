@@ -3111,7 +3111,18 @@ def _run_stop_scan(tmp_path, monkeypatch, records, session_id="sess-1", name="t.
     wrote. Returns the exit code of the SECOND (real) call; the ledger and
     any door fixture will also carry the first call's (report-free) gate
     check, which every test below already accounts for by filtering on
-    "--kit" (gate) vs. no "--kit" (verify)."""
+    "--kit" (gate) vs. no "--kit" (verify).
+
+    The scan shares one wall-clock and one live-call budget with the gate
+    verdict (2026-09-18, see StopBudget), and at the shipped defaults —
+    15 s, one call, which the gate takes — it makes no live call at all
+    and defers. These tests are about what the scan DOES when it runs, so
+    they buy it room explicitly: a long budget and a second call. The
+    budget's own refusal path has its own tests
+    (test_stop_scan_defers_when_the_event_budget_is_spent and
+    test_stop_scan_defers_when_no_live_call_is_left)."""
+    monkeypatch.setenv(sj.GATE_BUDGET_S_ENV, "600")
+    monkeypatch.setenv(sj.GATE_MAX_CALLS_ENV, "9")
     seed = [_teammate_user_record("just warming up the transcript, nothing to report",
                                   "seed", teammate_id="Nobody")]
     path = _write_transcript(tmp_path, seed, name=name)
@@ -5415,3 +5426,315 @@ def test_derive_window_facts_stale_report_fact_respects_the_identity_guard():
     facts = sj.derive_window_facts(window, "PR #27 merged.")
     assert not any(f.startswith("PR #28:") for f in facts), facts
     assert not any(f.startswith("PR #27:") and "postdates" in f for f in facts), facts
+
+
+# ---------------------------------------------- gate latency budget (2026-09-18)
+#
+# Measured before any of this existed: on a heavy turn the Stop hook made
+# the user wait minutes, and almost none of that wait was the gate's own
+# verdict. It was the advisory teammate-report scan's live verify checks.
+# These tests pin the four things that fix: one hard window cap enforced
+# before the call, one live call per Stop event, a wall-clock budget whose
+# overrun is ADVISORY and says plainly that nothing was judged, and a
+# ledger reason that lands in the health monitor's LOST bucket.
+
+
+def _window_with_sections(prev_sizes, receipts_size, cited_size, reports_size,
+                          current_size, facts=True):
+    """An assembled window shaped exactly like the one cmd_hook hands the
+    gate: an optional DERIVED FACTS head, then previous turns, receipts,
+    cited files, this turn's reports, and the current turn."""
+    parts = []
+    for i, size in enumerate(prev_sizes, start=1):
+        parts.append(f"[previous turn -{i}]\nP{i}" + "p" * size)
+    if receipts_size:
+        parts.append("[session receipts]\nR" + "r" * receipts_size)
+    if cited_size:
+        parts.append("[cited files]\nCITED FILE /tmp/x.md (tail)\n" + "c" * cited_size)
+    if reports_size:
+        parts.append("[current turn reports]\nREPORT FROM Alice\n" + "m" * reports_size)
+    parts.append("[current turn]\nCUR" + "u" * current_size)
+    body = "\n\n===\n\n".join(parts)
+    if not facts:
+        return body
+    head = (sj.DERIVED_FACTS_HEADER + "\n- the suite reported 9 passed\n\n===\n\n"
+            + sj.DERIVED_FACTS_BACKING_HEADER + "\n")
+    return head + body
+
+
+def test_window_cap_drops_sections_lowest_priority_first(monkeypatch):
+    # The documented order: oldest previous turn, then the receipts
+    # backing layer, then the cited-file tail, then this turn's reports.
+    # Sections of ~1000 tokens each against a budget that leaves room for
+    # the current turn only, so every lower-priority section is smaller
+    # than the remaining overflow and is dropped outright.
+    # Six sections of ~1000 tokens each. Tightening the budget by 1000 at
+    # a time walks the order one section further down: whatever is next to
+    # go pays the overflow out of its own head (shrunk) while everything
+    # cheaper than the overflow above it is already gone (dropped).
+    text = _window_with_sections([4000, 4000], 4000, 4000, 4000, 4000)
+    steps = [
+        (5200, [], ["previous turn -2"]),
+        (4200, ["previous turn -2"], ["previous turn -1"]),
+        (3200, ["previous turn -2", "previous turn -1"], ["session receipts"]),
+        (2200, ["previous turn -2", "previous turn -1", "session receipts"],
+         ["cited files"]),
+        (1200, ["previous turn -2", "previous turn -1", "session receipts",
+                "cited files"], ["current turn reports"]),
+    ]
+    for budget, dropped, shrunk in steps:
+        out, m = sj.trim_window_to_token_budget(text, budget_tok=budget)
+        assert m["dropped"] == dropped, budget
+        assert m["shrunk"] == shrunk, budget
+        assert m["tok_after"] <= budget, budget
+    # At the tightest budget above, what survives whole is exactly the two
+    # sections the cap may not touch.
+    assert sj.DERIVED_FACTS_HEADER in out
+    assert "[current turn]" in out
+    assert "[session receipts]" not in out
+    assert "[cited files]" not in out
+
+
+def test_window_cap_shrinks_a_section_before_dropping_it(monkeypatch):
+    # Giving up a whole 1000-token section to save 50 tokens throws away
+    # evidence the budget never asked for, and missing evidence is how a
+    # true reply gets flagged NOT_SUPPORTED. The oldest previous turn pays
+    # the overflow out of its own head instead, and nothing else moves.
+    text = _window_with_sections([4000, 4000], 4000, 4000, 4000, 4000)
+    before = sj._estimate_tokens(text)
+    out, m = sj.trim_window_to_token_budget(text, budget_tok=before - 50)
+    assert m["dropped"] == []
+    assert m["shrunk"] == ["previous turn -2"]
+    assert m["tok_after"] <= before - 50
+    # Every section is still present, and the shrunk one kept its marker
+    # line and its tail.
+    for marker in ("[previous turn -2]", "[previous turn -1]", "[session receipts]",
+                   "[cited files]", "[current turn reports]", "[current turn]"):
+        assert marker in out
+    assert sj._WINDOW_SHRINK_MARKER in out
+
+
+def test_window_cap_never_drops_derived_facts_or_the_current_turn(monkeypatch):
+    # Facts + current turn ALONE over budget: the facts stay whole and the
+    # current turn keeps its TAIL, the same guarantee the byte cap carried.
+    text = _window_with_sections([2000], 2000, 0, 0, 40_000)
+    out, m = sj.trim_window_to_token_budget(text, budget_tok=2000)
+    assert out.startswith(sj.DERIVED_FACTS_HEADER)
+    assert "the suite reported 9 passed" in out
+    assert m["current_trimmed_chars"] > 0
+    assert m["tok_after"] <= 2000
+    # The tail is what was kept, so the END of the current turn survives.
+    assert out.rstrip().endswith("u")
+
+
+def test_window_cap_holds_over_the_cited_file_block_appended_after_the_byte_cap(monkeypatch):
+    # The hole this cap closes: with NO derived facts,
+    # compose_window_with_facts returned its input untouched, so a
+    # cited-file block appended after the builder's 24 KB cap shipped over
+    # cap. In tokens, one cap, enforced once, regardless.
+    text = _window_with_sections([0], 0, 60_000, 0, 200, facts=False)
+    assert sj._estimate_tokens(text) > 8000
+    out, m = sj.trim_window_to_token_budget(text, budget_tok=8000)
+    assert m["tok_after"] <= 8000
+    assert sj._estimate_tokens(out) <= 8000
+
+
+def test_window_cap_is_a_no_op_under_budget_and_when_disabled(monkeypatch):
+    text = _window_with_sections([10], 10, 10, 10, 10)
+    out, m = sj.trim_window_to_token_budget(text, budget_tok=8000)
+    assert out == text and m["dropped"] == []
+    out, m = sj.trim_window_to_token_budget(text, budget_tok=0)
+    assert out == text and m["dropped"] == []
+
+
+def test_window_cap_default_comes_from_the_env_knob(monkeypatch):
+    assert sj._gate_window_tok() == 8000
+    monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "1200")
+    assert sj._gate_window_tok() == 1200
+    monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "not a number")
+    assert sj._gate_window_tok() == 8000
+
+
+def test_gate_window_is_capped_before_the_call(tmp_path, monkeypatch, capsys):
+    # End to end through the hook: a transcript fat enough to blow the
+    # budget, and the evidence file the door is actually handed is under it.
+    monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "600")
+    seen = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        ev = [c for c in cmd if c.endswith(".md") and "--" not in c]
+        if ev:
+            seen["evidence"] = Path(ev[0]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    records = [{"message": {"role": "user", "content": "go do the thing"}},
+               _tool_result_record("x" * 60_000)]
+    path = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 0
+    assert "evidence" in seen
+    assert sj._estimate_tokens(seen["evidence"]) <= 600
+
+
+def test_stop_event_spends_one_live_call_by_default(tmp_path, monkeypatch, capsys):
+    # The one-call invariant. A transcript carrying a fresh teammate report
+    # would, before this, cost one verify check PER report on top of the
+    # gate's own — the shape that made the user wait. Now the gate takes
+    # the single call and the scan defers.
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [_teammate_user_record(
+        f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
+        teammate_id="Alice")]
+    # Deliberately NOT _run_stop_scan: that helper buys the scan extra
+    # budget so the scan's own behaviour can be tested. This test is about
+    # the SHIPPED defaults, so it runs the same two-Stop sequence by hand.
+    seed = [_teammate_user_record("just warming up, nothing to report", "seed",
+                                  teammate_id="Nobody")]
+    path = _write_transcript(tmp_path, seed)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 0
+    path = _write_transcript(tmp_path, seed + records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 0
+    # The second (real) Stop event: one gate call, no verify call.
+    gate_calls = [c for c in calls if "--kit" in c]
+    verify_calls = [c for c in calls if "--kit" not in c]
+    assert len(gate_calls) == 2      # one per Stop event, seed run included
+    assert verify_calls == []
+
+
+def test_stop_scan_defers_when_the_event_budget_is_spent(tmp_path, monkeypatch, capsys):
+    # Enough calls allowed, but not enough wall clock left to finish a
+    # verify honestly — so no call is started and the reports defer.
+    monkeypatch.setenv(sj.GATE_MAX_CALLS_ENV, "9")
+    monkeypatch.setenv(sj.GATE_BUDGET_S_ENV, "600")
+    monkeypatch.setenv(sj.STOP_SCAN_MIN_BUDGET_S_ENV, "5000")
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    wt = tmp_path / "wt1"
+    wt.mkdir()
+    records = [_teammate_user_record(
+        f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
+        teammate_id="Alice")]
+    assert _run_stop_scan(tmp_path, monkeypatch, records) == 0
+    assert [c for c in calls if "--kit" not in c] == []
+    rows = [json.loads(l) for l in sj._ledger_lines()]
+    budget_rows = [r for r in rows if r.get("reason") == "budget-exceeded"]
+    assert budget_rows, "the deferral must be on the ledger"
+    assert budget_rows[-1]["source"] == "stop-transcript"
+    assert "deferred to the next Stop event" in budget_rows[-1]["note"]
+
+
+def test_gate_budget_exceeded_is_advisory_exit_3_and_says_it_did_not_judge(
+        tmp_path, monkeypatch, capsys):
+    # A budget already spent before the gate's own call: exit 3 (advisory,
+    # never a block), a line that says in plain words the reply was not
+    # checked, and the ledger reason.
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv(sj.GATE_BUDGET_S_ENV, "0.000001")
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps(
+        {"draft": "the sky is blue", "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 3
+    assert "budget exceeded, not judged" in out
+    assert "NOT checked" in out or "unchecked" in out
+    assert err == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["reason"] == "budget-exceeded"
+    assert rec["exit_code"] == 3
+    assert rec["skipped"] is True
+
+
+def test_gate_budget_exceeded_when_no_live_call_is_left(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv(sj.GATE_MAX_CALLS_ENV, "0")
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps(
+        {"draft": "the sky is blue", "evidence": [str(evidence)]}))
+    assert sj.main(["hook", "gate"]) == 3
+    out, _err = capsys.readouterr()
+    assert "budget exceeded, not judged" in out
+    assert json.loads(sj._ledger_lines()[-1])["reason"] == "budget-exceeded"
+
+
+def test_budget_exceeded_is_a_lost_check_not_a_deferral():
+    # The health monitor warns on the first LOST occurrence. A reply that
+    # shipped unjudged belongs there, not in the quiet "deferred" bucket.
+    assert sj._skip_reason_bucket("budget-exceeded") == sj.SKIP_BUCKET_LOST
+
+
+def test_stop_budget_clamps_a_child_call_timeout():
+    b = sj.StopBudget(budget_s=10, max_calls=1)
+    assert b.timeout_for(90) <= 10
+    assert b.timeout_for(2) == 2
+    assert b.claim_call() is True
+    assert b.claim_call() is False
+    unbounded = sj.StopBudget(budget_s=0, max_calls=1)
+    assert unbounded.remaining() is None
+    assert unbounded.timeout_for(90) == 90
+    assert unbounded.expired() is False
+
+
+def test_stop_scan_reads_only_the_transcript_tail(tmp_path, monkeypatch):
+    # An 11 MB transcript is real (the 2026-09-18 set); the scan only ever
+    # wants its recent end.
+    records = [_tool_result_record("old " + "o" * 200) for _ in range(500)]
+    records.append(_tool_result_record("FRESH TAIL MARKER"))
+    path = _write_transcript(tmp_path, records)
+    monkeypatch.setenv(sj.STOP_SCAN_MAX_BYTES_ENV, "4000")
+    bounded = sj._read_transcript_records(path, max_bytes=sj._stop_scan_max_bytes())
+    whole = sj._read_transcript_records(path)
+    assert len(bounded) < len(whole)
+    assert json.dumps(bounded[-1]) == json.dumps(whole[-1])
+    # The gate window builder is deliberately NOT bounded — it walks back
+    # from the end to find the turn boundary and must see whole turns.
+    assert len(sj._read_transcript_records(path)) == len(records)
+
+
+def test_the_advisory_scan_never_takes_the_gates_own_call():
+    # The gate's verdict is the point of the Stop hook; a side-channel
+    # check must never find the allowance already spent.
+    b = sj.StopBudget(budget_s=600, max_calls=1)
+    assert b.claim_call(reserve=1) is False   # the scan asks first
+    assert b.claim_call() is True             # the gate still has it
+    b2 = sj.StopBudget(budget_s=600, max_calls=2)
+    assert b2.claim_call(reserve=1) is True
+    assert b2.claim_call(reserve=1) is False
+    assert b2.claim_call() is True
+
+
+def test_the_unchecked_path_is_the_same_one_call_and_honours_the_budget(
+        tmp_path, monkeypatch, capsys):
+    # A turn that ran no tools still costs exactly one call, and when the
+    # budget is gone it says so rather than quietly advising.
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setenv(sj.GATE_BUDGET_S_ENV, "0.000001")
+    records = [{"message": {"role": "user", "content": "what did we decide?"}}]
+    path = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 3
+    out, _err = capsys.readouterr()
+    assert "budget exceeded, not judged" in out
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["reason"] == "budget-exceeded"

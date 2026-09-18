@@ -55,9 +55,24 @@
 #     <teammate-message> report blocks this session has not already
 #     checked (Claude Code's UserPromptSubmit payload never actually
 #     fires for those, so `hook prompt-verify` alone never sees a real
-#     one) and runs `verify` against each — up to 3 per Stop event, 120s
-#     total, advisory only, never touching this script's own exit code.
+#     one) and runs `verify` against each — advisory only, never touching
+#     this script's own exit code.
 #     See SKILL.md's "Correction, 2026-09-17" paragraph and docs/hooks.md.
+#   - as of 2026-09-18, the whole Stop event is bounded, because that scan
+#     is what used to keep the user waiting. SUPERJEV_GATE_MAX_CALLS
+#     (default 1) is the event's live-call allowance and the gate's own
+#     verdict claims it first, so at the default the scan makes no live
+#     call and defers its reports to the next Stop event. SUPERJEV_GATE_
+#     BUDGET_S (default 15s) bounds the event end to end and clamps every
+#     child check's timeout to what is left of it; when it runs out before
+#     the gate can judge, this script prints "budget exceeded, not judged"
+#     and exits 3 — advisory, never a block — and the ledger records
+#     reason "budget-exceeded" in the health monitor's LOST bucket.
+#     SUPERJEV_GATE_WINDOW_TOK (default 8000) is the one hard cap on the
+#     evidence window, applied once right before the call, giving up
+#     previous turns, then receipts, then the cited-file tail, then worker
+#     reports — never the derived facts or the current turn. See
+#     docs/hooks.md, "The latency budget".
 #
 # This script is NOT installed into ~/.claude/settings.json by this skill —
 # copy the snippet below into your own settings.json to wire it in.

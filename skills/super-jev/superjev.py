@@ -269,6 +269,77 @@ PREV_TURNS_ENV = "SUPERJEV_PREV_TURNS"
 DEFAULT_PREV_TURNS = 2
 EVIDENCE_CAP_BYTES_ENV = "SUPERJEV_EVIDENCE_CAP_BYTES"
 DEFAULT_EVIDENCE_CAP_BYTES = 24_576  # 24 KB, the whole assembled window
+
+# ------------------------------------------------- gate latency budget
+#
+# 2026-09-18. Measured, not assumed: on a heavy turn the Stop hook made
+# the user wait minutes, and almost none of that wait belonged to the
+# gate's own verdict — which was among the fastest things in the event. It
+# belonged to the advisory teammate-report scan
+# (_hook_stop_scan_teammate_reports), which ran SEVERAL live `verify`
+# checks before the gate check ever started. Two things made that
+# possible:
+#
+#   1. Nothing bounded the WHOLE Stop event. The scan had a budget of its
+#      own, but it was checked only BEFORE each report and never during,
+#      so a couple of slow checks sailed straight past it and the budget
+#      only refused the ones that came after them.
+#   2. cap_check_and_truncate cannot see a verify check's real input. It
+#      estimates the files super-jev hands the door; worker-verify then
+#      gathers git/diff/PR evidence ITSELF, inside the check, so the real
+#      input is far larger than anything measured beforehand. A pre-call
+#      size cap is therefore not a latency control for verify at all —
+#      only wall-clock is.
+#
+# So the controls below are wall-clock first and token-cap second:
+#
+#   SUPERJEV_GATE_BUDGET_S     total wall-clock for one Stop event's
+#                              checks. Past it the gate
+#                              returns ADVISORY exit 3 with a "budget
+#                              exceeded, not judged" line and a ledger
+#                              reason of "budget-exceeded" — which lands
+#                              in the health monitor's LOST bucket,
+#                              because a reply that went unjudged is
+#                              exactly the thing that must stay visible.
+#   SUPERJEV_GATE_MAX_CALLS    live judge calls one Stop event may spend
+#                              (default 1). The gate's own verdict has
+#                              first claim on it; the advisory scan may
+#                              only spend what is left, which at the
+#                              default is nothing.
+#   SUPERJEV_GATE_WINDOW_TOK   one hard cap on the assembled gate window,
+#                              enforced ONCE, immediately before the call
+#                              (default 8000 tokens) — see
+#                              trim_window_to_token_budget.
+#   SUPERJEV_STOP_SCAN_MIN_S   the scan will not START a live verify call
+#                              with less than this much budget left
+#                              (default 20 s), rather than starting one it
+#                              would have to kill. Its reports defer to
+#                              the next Stop event, as they already do on
+#                              a timeout.
+#   SUPERJEV_STOP_SCAN_MAX_BYTES  the scan reads only the last N bytes of
+#                              the transcript (default 2 MB) instead of
+#                              all of it; the live transcripts in the
+#                              2026-09-18 set were 11 MB and 13 MB.
+GATE_BUDGET_S_ENV = "SUPERJEV_GATE_BUDGET_S"
+DEFAULT_GATE_BUDGET_S = 15.0
+GATE_MAX_CALLS_ENV = "SUPERJEV_GATE_MAX_CALLS"
+DEFAULT_GATE_MAX_CALLS = 1
+GATE_WINDOW_TOK_ENV = "SUPERJEV_GATE_WINDOW_TOK"
+DEFAULT_GATE_WINDOW_TOK = 8_000
+STOP_SCAN_MIN_BUDGET_S_ENV = "SUPERJEV_STOP_SCAN_MIN_S"
+DEFAULT_STOP_SCAN_MIN_BUDGET_S = 20.0
+STOP_SCAN_MAX_BYTES_ENV = "SUPERJEV_STOP_SCAN_MAX_BYTES"
+DEFAULT_STOP_SCAN_MAX_BYTES = 2_000_000
+
+# The advisory line a budget-exceeded Stop event prints instead of a
+# verdict. Deliberately says "not judged" — the reply was NOT checked, and
+# an advisory that reads like an allow is the failure mode this whole file
+# exists to prevent.
+BUDGET_EXCEEDED_ADVISORY = (
+    "super-jev gate: budget exceeded, not judged — the "
+    f"{GATE_BUDGET_S_ENV} wall-clock budget ran out before this reply could be "
+    "checked. Nothing about it was verified; treat its claims as unchecked.")
+BUDGET_EXCEEDED_REASON = "budget-exceeded"
 RULE_ENV = "SUPERJEV_RULE"
 DEFAULT_RULE = "v3"
 BLOCK_OVERCLAIM_ENV = "SUPERJEV_BLOCK_OVERCLAIM"
@@ -1821,6 +1892,86 @@ def _gate_timeout():
         return DEFAULT_GATE_TIMEOUT_S
 
 
+def _gate_budget_s():
+    """Wall-clock seconds one Stop event's checks may take in total
+    (SUPERJEV_GATE_BUDGET_S, default 15). Zero or negative means no
+    budget at all — the pre-2026-09-18 behaviour, kept reachable so a
+    bench run can measure the unbounded path on purpose."""
+    try:
+        v = float(os.environ.get(GATE_BUDGET_S_ENV, DEFAULT_GATE_BUDGET_S))
+    except (TypeError, ValueError):
+        return DEFAULT_GATE_BUDGET_S
+    return v
+
+
+def _gate_max_calls():
+    """Live judge calls one Stop event may spend (SUPERJEV_GATE_MAX_CALLS,
+    default 1). The gate's own verdict claims it first."""
+    try:
+        n = int(os.environ.get(GATE_MAX_CALLS_ENV, DEFAULT_GATE_MAX_CALLS))
+    except (TypeError, ValueError):
+        return DEFAULT_GATE_MAX_CALLS
+    return n if n >= 0 else DEFAULT_GATE_MAX_CALLS
+
+
+class StopBudget:
+    """One Stop event's wall-clock and call allowance, shared by the gate
+    verdict and the advisory teammate-report scan.
+
+    Two separate limits, because they fail differently. `calls` is what
+    keeps a single Stop event to ONE judge call: the gate claims it, and
+    the advisory scan then finds none left and defers its reports to the
+    next Stop (which is what it already does on a timeout, so nothing is
+    dropped). `deadline` is what keeps the event bounded even when a
+    single check runs long — the input size of a verify check is not
+    knowable before it is made (see the header note), so wall-clock is the
+    only honest control.
+
+    `remaining()` is seconds left, or None when no budget is configured.
+    `expired()` is True once that hits zero. `claim_call()` takes one call
+    off the allowance and returns whether it was there to take."""
+
+    def __init__(self, budget_s=None, max_calls=None):
+        self.budget_s = _gate_budget_s() if budget_s is None else budget_s
+        self.calls_left = _gate_max_calls() if max_calls is None else max_calls
+        self.started = time.monotonic()
+        self.deadline = (self.started + self.budget_s) if self.budget_s > 0 else None
+
+    def remaining(self):
+        if self.deadline is None:
+            return None
+        return self.deadline - time.monotonic()
+
+    def elapsed(self):
+        return time.monotonic() - self.started
+
+    def expired(self):
+        rem = self.remaining()
+        return rem is not None and rem <= 0
+
+    def claim_call(self, reserve=0):
+        """Take one call off the allowance; False when there is none to
+        take. `reserve` is how many calls the caller must leave behind for
+        someone else — the advisory scan passes 1, because the gate's own
+        verdict has first claim on this event and must never find the
+        allowance already spent by a side-channel check."""
+        if self.calls_left is None:
+            return True
+        if self.calls_left - reserve <= 0:
+            return False
+        self.calls_left -= 1
+        return True
+
+    def timeout_for(self, default_timeout):
+        """`default_timeout`, clamped to what is left of the budget — a
+        child call must never be allowed to outlive the event it is part
+        of. Returns the plain default when no budget is configured."""
+        rem = self.remaining()
+        if rem is None:
+            return default_timeout
+        return max(min(default_timeout, rem), 0.0)
+
+
 def cmd_gate(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
@@ -1885,7 +2036,11 @@ def cmd_gate(a):
             cmd += ["--draft", a.draft]
     elif a.draft:
         cmd += ["--draft", a.draft]
-    timeout = _gate_timeout()
+    # An explicit `timeout` on the namespace is the Stop hook's own
+    # wall-clock budget (see StopBudget.timeout_for) — a child call must
+    # never outlive the event it is part of, so the smaller wins.
+    timeout = getattr(a, "timeout", None)
+    timeout = _gate_timeout() if timeout is None else min(timeout, _gate_timeout())
     try:
         # capture_output whenever this isn't a plain terminal call — --json needs
         # exactly one object on stdout, and hook mode must never let the child's
@@ -2375,7 +2530,10 @@ def cmd_verify(a):
         cmd += ["--paths", *paths_for_cmd]
     if a.dry_run:
         cmd += ["--dry-run"]
-    timeout = _verify_timeout()
+    # Same contract as cmd_gate's: an explicit namespace `timeout` is the
+    # Stop hook's remaining wall-clock budget, and the smaller wins.
+    timeout = getattr(a, "timeout", None)
+    timeout = _verify_timeout() if timeout is None else min(timeout, _verify_timeout())
     try:
         if json_mode:
             code, out, err = run_door(cmd, capture=True, door="verify", json_mode=True,
@@ -2750,13 +2908,28 @@ def _hook_report_text(payload):
     return None
 
 
-def _read_transcript_records(transcript_path):
+def _read_transcript_records(transcript_path, max_bytes=None):
     """Every parseable JSON object in a Claude Code transcript JSONL file,
     in file order. [] on any read/parse problem — best-effort, never
-    raises."""
+    raises.
+
+    `max_bytes` reads only the LAST `max_bytes` of the file instead of all
+    of it, dropping the first (probably partial) line of that slice. The
+    Stop-hook teammate-report scan passes it because the live transcripts
+    in the 2026-09-18 set were 11 MB and 13 MB and the scan only ever
+    wants the recent tail; the gate window builder deliberately does not,
+    because it resolves the current turn's start by walking back from the
+    end and must not be handed a truncated view of a turn."""
     try:
         path = Path(transcript_path).expanduser()
-        lines = path.read_text(encoding="utf-8").splitlines()
+        if max_bytes and max_bytes > 0 and path.stat().st_size > max_bytes:
+            with path.open("rb") as fh:
+                fh.seek(-max_bytes, os.SEEK_END)
+                raw = fh.read()
+            text = raw.decode("utf-8", errors="ignore")
+            lines = text.splitlines()[1:]  # first line is probably a fragment
+        else:
+            lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
     records = []
@@ -3834,7 +4007,9 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     window's HEAD is trimmed (its tail — the current turn — is the part the
     window builder already treats as highest priority). Returns
     (text, facts, meta) where meta carries facts_count/facts/facts_bytes/
-    window_trimmed_bytes/guard for `--explain`. With no derivable fact the
+    window_trimmed_bytes/guard for `--explain`. A `cap_bytes` of 0 or less
+    means NO cap here at all — what the Stop-hook gate path passes, so the
+    one cap that runs is `trim_window_to_token_budget` downstream. With no derivable fact the
     redacted window is still returned (byte-for-byte unchanged only when
     nothing secret-shaped was in it).
 
@@ -3858,6 +4033,16 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     meta["facts_bytes"] = len(head.encode("utf-8"))
     body = window_text or ""
     raw = body.encode("utf-8")
+    if cap <= 0:
+        # No cap here. The Stop-hook gate path passes 0 on purpose: this
+        # byte trim cuts the window's HEAD, and the head is where the
+        # first "[previous turn -1]" marker line lives. Losing it turned
+        # 1,630 tokens of t34's window into unlabelled text that the
+        # priority trimmer could no longer rank (measured 2026-09-18), so
+        # the ONE cap that actually runs is now
+        # trim_window_to_token_budget, downstream of this, which trims by
+        # whole labelled sections instead.
+        return head + body, facts, meta
     budget = cap - meta["facts_bytes"]
     if budget <= 0:
         meta["window_trimmed_bytes"] = len(raw)
@@ -3866,6 +4051,189 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
         meta["window_trimmed_bytes"] = len(raw) - budget
         body = raw[-budget:].decode("utf-8", errors="ignore")
     return head + body, facts, meta
+
+
+# ------------------------------------- one hard window cap, before the call
+#
+# 2026-09-18. The window was capped in THREE places that did not compose:
+# `_derive_evidence_text_from_transcript` capped what it assembled
+# (24 KB), the caller then APPENDED a cited-file block of up to 6 KB after
+# that cap, and `compose_window_with_facts` re-applied the cap only when
+# it had at least one derived fact to put at the head — with no facts it
+# returned the over-cap text untouched. Measured on the 2026-09-18 set:
+# t38's builder produced 14,289 bytes and the cited-file block added 3,174
+# more after the cap check.
+#
+# This is the ONE cap, enforced once, on the finished text immediately
+# before the call, in tokens rather than bytes because tokens are what the
+# call is actually priced and timed by. It trims whole sections by
+# priority, lowest first:
+#
+#   1. previous turns, OLDEST first (a fact two turns back is the most
+#      replaceable thing in the window)
+#   2. session receipts — the backing layer, and by far the fattest on the
+#      measured set (12,435 bytes of a 24,576-byte window on all three
+#      cases)
+#   3. the cited-file tail
+#   4. this turn's worker reports
+#
+# DERIVED FACTS and the CURRENT TURN are never dropped. If those two alone
+# still exceed the budget, the current turn's TAIL is kept — the same
+# guarantee the byte cap always carried — and the facts are kept whole,
+# because a fact is a sentence the judge cannot re-derive from a truncated
+# dump.
+_WINDOW_PART_RE = re.compile(
+    r'^\[(current turn reports|current turn|previous turn -(\d+)|session receipts'
+    r'|cited files)\]\s*$')
+
+# Lowest priority first — the order sections are given up in. "other"
+# (anything not under a recognised section marker) is deliberately absent:
+# the byte-level tail cut upstream can slice a marker line off the head of
+# the window, and everything after that point would then look unlabelled.
+# Dropping it would risk dropping the current turn, so unlabelled content
+# is treated as undroppable and left to the tail-keep at the end.
+_WINDOW_TRIM_ORDER = ("previous turn", "session receipts", "cited files",
+                      "current turn reports")
+
+_WINDOW_SHRINK_MARKER = "[...head of this section cut to fit the window budget...]"
+
+
+def _split_window_parts(body):
+    """`body` (a window with no DERIVED FACTS head) as an ordered list of
+    {"kind", "age", "text"} parts, split at the section markers
+    `_WINDOW_PART_RE` recognises. `age` orders previous turns oldest-last
+    so the trimmer can drop the furthest-back one first; it is 0 for every
+    other kind. Text before the first marker (there should be none) is
+    carried as kind "other" so nothing is ever silently lost."""
+    parts = []
+    cur = {"kind": "other", "age": 0, "lines": []}
+    for line in body.split("\n"):
+        m = _WINDOW_PART_RE.match(line)
+        if m:
+            if cur["lines"]:
+                parts.append(cur)
+            kind = m.group(1)
+            age = int(m.group(2)) if m.group(2) else 0
+            if kind.startswith("previous turn"):
+                kind = "previous turn"
+            cur = {"kind": kind, "age": age, "lines": [line]}
+        else:
+            cur["lines"].append(line)
+    if cur["lines"]:
+        parts.append(cur)
+    out = []
+    for part in parts:
+        text = "\n".join(part["lines"]).strip("\n")
+        # A bare "===" separator line left behind by a join is not content.
+        text = "\n".join(l for l in text.split("\n")
+                         if not _SECTION_SEPARATOR_RE.match(l) or l.strip() == "")
+        if text.strip():
+            out.append({"kind": part["kind"], "age": part["age"], "text": text.strip("\n")})
+    return out
+
+
+def _shrink_window_part(text, target_tok):
+    """`text` cut down to roughly `target_tok`, keeping its MARKER line and
+    its TAIL — the same shape `_build_prev_turns_block_detailed` and
+    `_build_reports_block` already use when a single block is over budget,
+    and for the same reason: the freshest end of a section is the part
+    worth keeping, and a section with no header can no longer be
+    identified by the count arm's identity scoping."""
+    lines = text.split("\n")
+    header = lines[0] if lines else ""
+    body = "\n".join(lines[1:])
+    room = max(target_tok * 4 - len(header) - len(_WINDOW_SHRINK_MARKER) - 2, 0)
+    if room <= 0:
+        return header
+    return header + "\n" + _WINDOW_SHRINK_MARKER + "\n" + body[-room:]
+
+
+def _gate_window_tok():
+    """The one hard window cap in tokens (SUPERJEV_GATE_WINDOW_TOK,
+    default 8000). Zero or negative disables the cap entirely."""
+    try:
+        return int(os.environ.get(GATE_WINDOW_TOK_ENV, DEFAULT_GATE_WINDOW_TOK))
+    except (TypeError, ValueError):
+        return DEFAULT_GATE_WINDOW_TOK
+
+
+def trim_window_to_token_budget(text, budget_tok=None):
+    """`text` held under ONE token budget, enforced immediately before the
+    call. Returns (text, meta) where meta carries tok_before/tok_after/
+    budget_tok/dropped (the section labels removed, in the order they were
+    removed), shrunk (the one section, if any, that paid the overflow out
+    of its own head instead of being dropped whole) and
+    current_trimmed_chars.
+
+    Drop order is `_WINDOW_TRIM_ORDER`, previous turns oldest-first within
+    their own kind. The DERIVED FACTS head and the `[current turn]`
+    section are never dropped; if they alone exceed the budget, the
+    current turn keeps its TAIL. A budget of zero or less returns the text
+    untouched."""
+    budget = _gate_window_tok() if budget_tok is None else budget_tok
+    text = text or ""
+    meta = {"tok_before": _estimate_tokens(text), "tok_after": _estimate_tokens(text),
+            "budget_tok": budget, "dropped": [], "shrunk": [],
+            "current_trimmed_chars": 0}
+    if budget <= 0 or meta["tok_before"] <= budget:
+        return text, meta
+
+    head = ""
+    body = text
+    if text.startswith(DERIVED_FACTS_HEADER):
+        marker = DERIVED_FACTS_BACKING_HEADER + "\n"
+        idx = text.find(marker)
+        if idx != -1:
+            head = text[:idx + len(marker)]
+            body = text[idx + len(marker):]
+
+    parts = _split_window_parts(body)
+
+    def assemble(kept):
+        return head + "\n\n===\n\n".join(p["text"] for p in kept)
+
+    kept = list(parts)
+    for kind in _WINDOW_TRIM_ORDER:
+        # Oldest previous turn first; every other kind has a single part.
+        victims = sorted([p for p in kept if p["kind"] == kind],
+                         key=lambda p: -p["age"])
+        for victim in victims:
+            over = _estimate_tokens(assemble(kept)) - budget
+            if over <= 0:
+                break
+            label = (f"previous turn -{victim['age']}" if victim["kind"] == "previous turn"
+                    else victim["kind"])
+            # SHRINK before DROP. Giving up a whole 3,000-token receipts
+            # block to save 200 tokens throws away evidence the budget
+            # never asked for, and evidence missing from the window is how
+            # a true reply gets flagged NOT_SUPPORTED. So a section that
+            # can pay the overflow out of its own head does exactly that
+            # and the trimming stops there; only a section too small to
+            # cover it is dropped whole.
+            size = _estimate_tokens(victim["text"])
+            if size > over:
+                victim["text"] = _shrink_window_part(victim["text"], size - over)
+                meta["shrunk"].append(label)
+                break
+            kept.remove(victim)
+            meta["dropped"].append(label)
+        if _estimate_tokens(assemble(kept)) <= budget:
+            break
+
+    out = assemble(kept)
+    if _estimate_tokens(out) > budget:
+        # Facts + the current turn alone are over. Keep the facts whole and
+        # the current turn's TAIL, same guarantee the byte cap carried.
+        room_chars = max(budget * 4 - len(head), 0)
+        rest = "\n\n===\n\n".join(p["text"] for p in kept)
+        if room_chars <= 0:
+            meta["current_trimmed_chars"] = len(rest)
+            out = head
+        else:
+            meta["current_trimmed_chars"] = max(len(rest) - room_chars, 0)
+            out = head + rest[-room_chars:]
+    meta["tok_after"] = _estimate_tokens(out)
+    return out, meta
 
 
 # ------------------------------------------------------------- cited-file tail
@@ -4684,6 +5052,22 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
         g = m.get("guard") or {}
         print(f"  evidence guard    : {g.get('paths_skipped', 0)} path(s) skipped, "
               f"{g.get('redactions', 0)} redaction(s) made over this window")
+        b = m.get("window_budget") or {}
+        if b:
+            print(f"  window budget     : {b.get('budget_tok', 0)} tok "
+                  f"({GATE_WINDOW_TOK_ENV}) — {b.get('tok_before', 0)} tok before, "
+                  f"{b.get('tok_after', 0)} tok after")
+            if b.get("dropped"):
+                print("    dropped         : " + ", ".join(b["dropped"])
+                      + " (lowest priority first; DERIVED FACTS and the current "
+                        "turn are never dropped)")
+            if b.get("shrunk"):
+                print("    shrunk          : " + ", ".join(b["shrunk"])
+                      + " (head cut, tail kept — paid the overflow rather than "
+                        "being dropped whole)")
+            if b.get("current_trimmed_chars"):
+                print(f"    current turn    : tail kept, {b['current_trimmed_chars']} "
+                      "chars cut (facts + current turn alone exceeded the budget)")
         print(f"  total             : {m.get('total_bytes', 0)} bytes")
         print(f"  current turn empty: {'YES — secondary NS/CONTRADICTED arm suppressed, '
               'primary OVERCLAIMS arm unaffected' if m.get('current_turn_empty') else 'no'}")
@@ -5118,6 +5502,29 @@ def _stop_scan_max_seconds():
         return DEFAULT_STOP_SCAN_MAX_SECONDS
 
 
+def _stop_scan_max_bytes():
+    """How much of the transcript's TAIL the teammate-report scan reads
+    (SUPERJEV_STOP_SCAN_MAX_BYTES, default 2 MB). Zero or negative reads
+    all of it, the pre-2026-09-18 behaviour."""
+    try:
+        return int(os.environ.get(STOP_SCAN_MAX_BYTES_ENV, DEFAULT_STOP_SCAN_MAX_BYTES))
+    except (TypeError, ValueError):
+        return DEFAULT_STOP_SCAN_MAX_BYTES
+
+
+def _stop_scan_min_budget_s():
+    """The scan will not START a live verify call with less than this many
+    seconds of the Stop event's budget left (SUPERJEV_STOP_SCAN_MIN_S,
+    default 20). Starting a call we would only have to kill costs a real
+    TypeSafe call and buys nothing — the report defers to the next Stop
+    event instead, exactly as it already does on a timeout."""
+    try:
+        return float(os.environ.get(STOP_SCAN_MIN_BUDGET_S_ENV,
+                                    DEFAULT_STOP_SCAN_MIN_BUDGET_S))
+    except (TypeError, ValueError):
+        return DEFAULT_STOP_SCAN_MIN_BUDGET_S
+
+
 def _stop_state_path(session_id):
     """<ledger dir>/state/stop-state-<session_id>.json — read off the
     CURRENT value of the module-level LEDGER_PATH (never cached), so a
@@ -5181,7 +5588,8 @@ def _find_new_teammate_reports(transcript_path, last_uuid, max_reports):
     the report cap was hit. Never raises: any read/parse problem behaves
     like an empty transcript (`([], last_uuid)`)."""
     try:
-        records = _read_transcript_records(transcript_path)
+        records = _read_transcript_records(transcript_path,
+                                           max_bytes=_stop_scan_max_bytes())
     except Exception:
         return [], last_uuid
     if not records:
@@ -5220,7 +5628,7 @@ def _find_new_teammate_reports(transcript_path, last_uuid, max_reports):
     return reports[:max_reports], new_last_uuid
 
 
-def _stop_scan_verify_one(r):
+def _stop_scan_verify_one(r, budget=None):
     """Run `verify` against one report found by _find_new_teammate_reports
     and print/ledger its verdict — same evidence auto-derivation as
     `hook prompt-verify`, plus the PR #20 0.80-confidence block rule
@@ -5249,7 +5657,9 @@ def _stop_scan_verify_one(r):
             tmp.close()
             ns = argparse.Namespace(report=tmp_path, worktree=derived["worktree"],
                                     test_cmd=derived["test_cmd"] or "", paths=[],
-                                    dry_run=False, json=False, hook_mode=True)
+                                    dry_run=False, json=False, hook_mode=True,
+                                    timeout=(budget.timeout_for(_verify_timeout())
+                                             if budget is not None else None))
             code, door_out, door_err = cmd_verify(ns)
 
             flags = _parse_strong_flags(door_out)
@@ -5294,7 +5704,7 @@ def _stop_scan_verify_one(r):
                  source="stop-transcript")
 
 
-def _hook_stop_scan_teammate_reports(payload):
+def _hook_stop_scan_teammate_reports(payload, budget=None):
     """The Stop-hook companion to `hook prompt-verify`: scans
     payload["transcript_path"] for teammate-message report blocks this
     session (payload["session_id"]) has not already processed (tracked in
@@ -5343,6 +5753,7 @@ def _hook_stop_scan_teammate_reports(payload):
         deadline = time.monotonic() + _stop_scan_max_seconds()
         last_processed_uuid = last_uuid
         timed_out = False
+        min_start = _stop_scan_min_budget_s()
         for r in reports:
             if time.monotonic() > deadline:
                 timed_out = True
@@ -5350,7 +5761,31 @@ def _hook_stop_scan_teammate_reports(payload):
                          "deferred to the next Stop event", skipped=True,
                          reason="stop-scan-timeout", source="stop-transcript")
                 break
-            _stop_scan_verify_one(r)
+            # The Stop event's OWN budget, which this advisory scan shares
+            # with the gate verdict and never outranks. Two independent
+            # refusals, both deferrals:
+            #   - no live call left (SUPERJEV_GATE_MAX_CALLS, default 1 —
+            #     the gate has it), so this scan makes none;
+            #   - too little wall clock left to finish one honestly, so we
+            #     do not start a call only to kill it.
+            # A verify check here can take many times the whole event's
+            # budget, which is the entire reason this guard exists.
+            if budget is not None:
+                remaining = budget.remaining()
+                short = remaining is not None and remaining < min_start
+                if short or not budget.claim_call(reserve=1):
+                    timed_out = True
+                    why = (f"only {remaining:.1f}s left, under "
+                           f"{STOP_SCAN_MIN_BUDGET_S_ENV}={min_start:g}s"
+                           if short else
+                           f"no live call left under {GATE_MAX_CALLS_ENV} once the "
+                           "gate's own verdict is reserved")
+                    _hook_log(f"stop-scan: budget exceeded, not judged ({why}) — "
+                             "remaining report(s) deferred to the next Stop event",
+                             skipped=True, reason="budget-exceeded",
+                             source="stop-transcript")
+                    break
+            _stop_scan_verify_one(r, budget=budget)
             last_processed_uuid = r["uuid"]
         final_uuid = last_processed_uuid if timed_out else scan_last_uuid
         if final_uuid != last_uuid:
@@ -5456,7 +5891,19 @@ def cmd_hook(a):
     def _hook_unchecked(tp, evidence, tmp_ev_prompt_found):
         """The no-tool-evidence path: run the gate against the user's last
         prompt, advise once if the door reports a checkable claim, stay
-        silent if it reports none, log unchecked=True, exit 0 always."""
+        silent if it reports none, log unchecked=True, exit 0 always.
+
+        This is still the gate's ONE call for the event (it claims the
+        allowance and clamps its timeout to the remaining budget the same
+        way the normal path does), so "unchecked" never costs an extra
+        one."""
+        if budget.expired() or not budget.claim_call():
+            print(BUDGET_EXCEEDED_ADVISORY)
+            _hook_log("gate: budget exceeded, not judged (no tool evidence, and the "
+                      f"budget was spent after {budget.elapsed():.1f}s) — advisory, "
+                      "the reply was NOT checked", exit_code=3, skipped=True,
+                      reason=BUDGET_EXCEEDED_REASON)
+            return 3
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                           encoding="utf-8")
         tmp_path = tmp.name
@@ -5464,7 +5911,8 @@ def cmd_hook(a):
             tmp.write(text)
             tmp.close()
             ns = argparse.Namespace(evidence=evidence, draft=tmp_path, claim=None,
-                                    json=False, hook_mode=True)
+                                    json=False, hook_mode=True,
+                                    timeout=budget.timeout_for(_gate_timeout()))
             code, door_out, door_err = cmd_gate(ns)
         finally:
             try:
@@ -5495,6 +5943,7 @@ def cmd_hook(a):
             print(notice)
         return 0
 
+    budget = StopBudget()
     try:
         # The teammate-report scan runs off transcript_path/session_id
         # alone, independent of whatever this Stop event's own gate
@@ -5505,7 +5954,7 @@ def cmd_hook(a):
         # _hook_stop_scan_teammate_reports's docstring: always a no-op on
         # this call's own exit code.
         if door == "gate":
-            _hook_stop_scan_teammate_reports(payload)
+            _hook_stop_scan_teammate_reports(payload, budget=budget)
         if door == "gate":
             text = _hook_text(payload, ["last_assistant_message", "draft", "text", "prompt"])
             if text is None:
@@ -5545,11 +5994,22 @@ def cmd_hook(a):
                     # as a sentence instead of leaving it as a column in a
                     # card.py dump. Facts first, raw window below as
                     # BACKING, cap applied after the facts.
+                    # cap_bytes=0: no trim HERE (see compose_window_with_facts)
+                    # — the single cap is trim_window_to_token_budget on the
+                    # next line, which cuts whole labelled sections in
+                    # priority order rather than slicing bytes off the head.
                     derived, _facts, _fmeta = compose_window_with_facts(
-                        derived, text,
-                        cap_bytes=(window_meta or {}).get("cap_bytes"))
+                        derived, text, cap_bytes=0)
+                    # THE cap — one budget, in tokens, enforced here and
+                    # nowhere else, on the finished text right before the
+                    # call. Everything above (the builder's byte cap, the
+                    # cited-file append, the facts head) may compose to
+                    # something over budget; this is what makes that
+                    # impossible to ship. See trim_window_to_token_budget.
+                    derived, _tmeta = trim_window_to_token_budget(derived)
                     if window_meta is not None:
                         window_meta.update(_fmeta)
+                        window_meta["window_budget"] = _tmeta
                         window_meta["total_bytes"] = len(derived.encode("utf-8"))
                     tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md",
                                                           delete=False, encoding="utf-8")
@@ -5583,6 +6043,23 @@ def cmd_hook(a):
                     evidence_source = "unchecked: last user prompt"
                     return _hook_unchecked(tp, evidence, tmp_ev_prompt_found=prompt is not None)
 
+            # The gate's own verdict has FIRST claim on this event's one
+            # judge call and on what is left of its wall clock. If either
+            # is already gone before we start — the window build alone can
+            # eat it on an 11 MB transcript — say so out loud rather than
+            # printing something that reads like an allow.
+            if budget.expired() or not budget.claim_call():
+                why = ("wall-clock" if budget.expired() else
+                       f"{GATE_MAX_CALLS_ENV} call")
+                print(BUDGET_EXCEEDED_ADVISORY)
+                _hook_log(f"gate: budget exceeded, not judged ({why} budget spent "
+                          f"after {budget.elapsed():.1f}s) — advisory, the reply was "
+                          "NOT checked", exit_code=3, skipped=True,
+                          reason=BUDGET_EXCEEDED_REASON)
+                _budget_notice = _running_unchecked_notice()
+                if _budget_notice:
+                    print(_budget_notice)
+                return 3
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
             tmp_path = tmp.name
@@ -5590,7 +6067,8 @@ def cmd_hook(a):
                 tmp.write(text)
                 tmp.close()
                 ns = argparse.Namespace(evidence=evidence, draft=tmp_path, claim=None,
-                                        json=False, hook_mode=True)
+                                        json=False, hook_mode=True,
+                                        timeout=budget.timeout_for(_gate_timeout()))
                 code, door_out, door_err = cmd_gate(ns)
             finally:
                 try:
@@ -5908,6 +6386,11 @@ SKIP_REASON_BUCKETS = {
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
     "stop-scan-timeout": SKIP_BUCKET_LOST,
+    # A reply that went unjudged because the event ran out of wall clock
+    # is a LOST check, not a deferral — the turn ended, the reply shipped,
+    # and nothing checked it. It belongs in the bucket the health monitor
+    # warns on at the first occurrence.
+    "budget-exceeded": SKIP_BUCKET_LOST,
 }
 
 DEFAULT_LOST_WARN_COUNT = 1
