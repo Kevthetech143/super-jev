@@ -231,6 +231,48 @@ test('pre-rule does not fire: an honest "not yet pushed" claim against a real ah
   assert.equal(verdicts.length, 0);
 });
 
+test('pre-rule fires: claims PR #N merged, but gh pr view reports it OPEN', () => {
+  const facts = deriveFacts({
+    prs: [{ number: 12, state: { state: 'OPEN', isDraft: false, headRefName: 'feat/x', mergedAt: null } }]
+  });
+  const verdicts = preRules(['PR #12 open, checks green, merged.'], facts);
+  assert.equal(verdicts.length, 1);
+  assert.match(verdicts[0].reason, /claims PR #12 is merged, but its state is OPEN/);
+});
+
+test('pre-rule does not fire: claims PR #N merged, and it genuinely is MERGED', () => {
+  const facts = deriveFacts({
+    prs: [{ number: 12, state: { state: 'MERGED', isDraft: false, headRefName: 'feat/x', mergedAt: '2026-09-17T00:00:00Z' } }]
+  });
+  const verdicts = preRules(['PR #12 is merged.'], facts);
+  assert.equal(verdicts.length, 0);
+});
+
+test('pre-rule fires: claims PR #N checks are green, but a check failed', () => {
+  const facts = deriveFacts({
+    prs: [{ number: 34, checks: [{ name: 'build', state: 'SUCCESS' }, { name: 'lint', state: 'FAILURE' }] }]
+  });
+  const verdicts = preRules(['PR #34 checks are green, ready to merge.'], facts);
+  assert.equal(verdicts.length, 1);
+  assert.match(verdicts[0].reason, /failing: lint/);
+});
+
+test('pre-rule does not fire: claims PR #N checks green, and every check passes', () => {
+  const facts = deriveFacts({
+    prs: [{ number: 34, checks: [{ name: 'build', state: 'SUCCESS' }, { name: 'lint', state: 'SUCCESS' }] }]
+  });
+  const verdicts = preRules(['PR #34 checks are green.'], facts);
+  assert.equal(verdicts.length, 0);
+});
+
+test('pre-rule does not fire: a claim naming a PR number no fact was gathered for', () => {
+  const facts = deriveFacts({
+    prs: [{ number: 12, state: { state: 'OPEN', isDraft: false, headRefName: 'feat/x', mergedAt: null } }]
+  });
+  const verdicts = preRules(['PR #99 is merged.'], facts);
+  assert.equal(verdicts.length, 0);
+});
+
 // --------------------------------------------------------------- ordering / no-judge-call contract
 
 test('facts come first: deriveFacts output precedes any judge involvement — preRules never needs a judge', () => {

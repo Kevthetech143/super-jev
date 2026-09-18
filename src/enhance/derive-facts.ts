@@ -342,6 +342,9 @@ export type PreRuleVerdict = {
 
 const DELTA_WORDS = /\b(added|removed|deleted|new|extra|more|additional|fewer|introduced)\b/i;
 const RUN_CUES = /\b(ran|run|passed|failed|collected|total|the (?:full|whole) (?:suite|run))\b/i;
+const PR_NUM_IN_CLAIM = /\bPR\s*#(\d+)\b/i;
+const MERGED_CLAIM_WORD = /\bmerged\b/i;
+const CHECKS_GREEN_CLAIM = /\bchecks?\s+(?:are\s+|all\s+)?(?:green|pass(?:ed|ing)?)\b|\ball\s+checks?\s+(?:are\s+)?(?:green|pass(?:ed|ing)?)\b/i;
 
 /**
  * When a derived fact flatly contradicts a claim's own number, path, hash,
@@ -358,6 +361,8 @@ export function preRules(claims: string[], facts: DerivedFact[]): PreRuleVerdict
   const commitByHash = new Map(facts.filter((f): f is CommitFact => f.kind === 'commit').map(f => [f.hash, f]));
   const branchByName = new Map(facts.filter((f): f is BranchFact => f.kind === 'branch').map(f => [f.name, f]));
   const pushFact = facts.find((f): f is PushStateFact => f.kind === 'push-state');
+  const prStateByNumber = new Map(facts.filter((f): f is PrStateFact => f.kind === 'pr-state').map(f => [f.number, f]));
+  const prChecksByNumber = new Map(facts.filter((f): f is PrChecksFact => f.kind === 'pr-checks').map(f => [f.number, f]));
 
   for (const claim of claims) {
     // 1. a claimed PASSING count, only when the sentence reads as a report of
@@ -434,6 +439,33 @@ export function preRules(claims: string[], facts: DerivedFact[]): PreRuleVerdict
           claim, verdict: 'CONTRADICTED_BY_FACT', confidence: 1.0, fact: pushFact,
           reason: `claims pushed, but ${pushFact.branch} has ${pushFact.ahead} commit(s) not pushed`
         });
+      }
+    }
+
+    // 7/8. "PR #N ... merged" or "PR #N ... checks green" contradicted by
+    // the PR's own state/checks facts (from `gh pr view`/`gh pr checks`,
+    // see superjev.py's _gh_pr_evidence). Only fires when the claim names
+    // the same PR number a fact was actually gathered for — a claim about
+    // an unrelated PR number is left to the judge, same discipline as the
+    // path/hash/branch rules above.
+    const prNumMatch = claim.match(PR_NUM_IN_CLAIM);
+    if (prNumMatch) {
+      const n = parseInt(prNumMatch[1], 10);
+      const stateFact = prStateByNumber.get(n);
+      if (stateFact && MERGED_CLAIM_WORD.test(claim) && stateFact.state.toUpperCase() !== 'MERGED') {
+        out.push({
+          claim, verdict: 'CONTRADICTED_BY_FACT', confidence: 1.0, fact: stateFact,
+          reason: `claims PR #${n} is merged, but its state is ${stateFact.state}`
+        });
+        continue;
+      }
+      const checksFact = prChecksByNumber.get(n);
+      if (checksFact && CHECKS_GREEN_CLAIM.test(claim) && checksFact.failing.length > 0) {
+        out.push({
+          claim, verdict: 'CONTRADICTED_BY_FACT', confidence: 1.0, fact: checksFact,
+          reason: `claims PR #${n} checks are green, but failing: ${checksFact.failing.join(', ')}`
+        });
+        continue;
       }
     }
   }

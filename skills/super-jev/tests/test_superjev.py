@@ -456,6 +456,134 @@ def test_verify_fallback_declines_with_no_worktree_and_no_test_cmd(tmp_path, mon
     assert "no door at" in capsys.readouterr().err
 
 
+# ------------------------------------------- verify fallback: PR state via gh
+#
+# A fake `gh` script on PATH, never the real CLI and never live — it just
+# prints a fixed JSON/text fixture keyed off $GH_FAKE_MODE so each test can
+# pick a scenario (open, merged, a failing check) without touching a real
+# GitHub repo.
+
+_FAKE_GH_SCRIPT = """#!/usr/bin/env bash
+mode="${GH_FAKE_MODE:-open}"
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  case "$mode" in
+    open)
+      echo '{"state":"OPEN","isDraft":false,"headRefName":"feat/x","baseRefName":"main","mergedAt":null,"statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"}]}'
+      ;;
+    merged)
+      echo '{"state":"MERGED","isDraft":false,"headRefName":"feat/x","baseRefName":"main","mergedAt":"2026-09-17T00:00:00Z","statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"}]}'
+      ;;
+    failed)
+      echo '{"state":"OPEN","isDraft":false,"headRefName":"feat/x","baseRefName":"main","mergedAt":null,"statusCheckRollup":[{"name":"build","conclusion":"FAILURE"}]}'
+      ;;
+  esac
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
+  case "$mode" in
+    open) printf "build\\tpass\\t5s\\thttps://x\\n" ;;
+    merged) printf "build\\tpass\\t5s\\thttps://x\\n" ;;
+    failed) printf "build\\tfail\\t5s\\thttps://x\\n" ;;
+  esac
+  exit 0
+fi
+exit 1
+"""
+
+
+@pytest.fixture
+def fake_gh(tmp_path, monkeypatch):
+    """Puts a fake `gh` on PATH (ahead of any real one) and returns a
+    setter for GH_FAKE_MODE. Never interactive, never live."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    gh_path = bin_dir / "gh"
+    gh_path.write_text(_FAKE_GH_SCRIPT, encoding="utf-8")
+    gh_path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+
+    def _set_mode(mode):
+        monkeypatch.setenv("GH_FAKE_MODE", mode)
+    return _set_mode
+
+
+@requires_node
+def test_verify_fallback_pr_open_contradicts_merged_claim(tmp_path, bare_git_repo,
+                                                           monkeypatch, capsys, fake_gh):
+    """The report claims PR #12 is merged; the fake `gh pr view` says OPEN —
+    settled as CONTRADICTED_BY_FACT before any judge call."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    fake_gh("open")
+    report = tmp_path / "r.md"
+    report.write_text("PR #12 open, checks green, merged.", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo), "--explain"])
+    assert code == 4  # REJECT
+    out = capsys.readouterr().out
+    assert "pull request #12: state OPEN" in out
+    assert "claims PR #12 is merged, but its state is OPEN" in out
+    assert "CONTRADICTED_BY_FACT 1.00" in out
+    assert "--explain: gh commands run" in out
+    assert "gh pr view 12" in out
+    assert "gh pr checks 12" in out
+
+
+@requires_node
+def test_verify_fallback_pr_merged_and_green_is_not_contradicted(tmp_path, bare_git_repo,
+                                                                  monkeypatch, capsys, fake_gh):
+    """An honest "PR #12 is merged" claim against a real MERGED state, all
+    checks passing: no pre-rule fires, still READ (no judge), never REJECT."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    fake_gh("merged")
+    report = tmp_path / "r.md"
+    report.write_text("PR #12 is merged, checks green.", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
+    assert code == 3  # READ, never 0/CLEAN, and not 4 — nothing contradicts here
+    out = capsys.readouterr().out
+    assert "pull request #12: state MERGED" in out
+    assert "none of the facts above contradict a claim" in out
+
+
+@requires_node
+def test_verify_fallback_pr_failed_check_contradicts_green_claim(tmp_path, bare_git_repo,
+                                                                  monkeypatch, capsys, fake_gh):
+    """The report claims PR #12's checks are green; the fake `gh pr checks`
+    reports one failing — settled as CONTRADICTED_BY_FACT."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    fake_gh("failed")
+    report = tmp_path / "r.md"
+    report.write_text("PR #12 checks are green, ready to merge.", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
+    assert code == 4  # REJECT
+    out = capsys.readouterr().out
+    assert "NOT all pass — failing: build" in out
+    assert "claims PR #12 checks are green, but failing: build" in out
+
+
+@requires_node
+def test_verify_fallback_no_gh_on_path_is_graceful(tmp_path, bare_git_repo, monkeypatch, capsys):
+    """No `gh` on PATH at all: no PR fact, no pre-rule, no crash — same
+    "no fact, no rule" contract as every other missing block."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    # git and node are still needed for the rest of the fallback's evidence
+    # gather; only `gh` needs to be unreachable. Drop any PATH entry that
+    # actually has a `gh` binary in it, keep everything else.
+    kept = [d for d in os.environ.get("PATH", "").split(os.pathsep)
+           if d and not (Path(d) / "gh").exists()]
+    monkeypatch.setenv("PATH", os.pathsep.join(kept))
+    report = tmp_path / "r.md"
+    report.write_text("PR #12 is merged, checks green.", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
+    assert code == 3  # READ — no gh, so no PR fact and no pre-rule fired
+    out = capsys.readouterr().out
+    assert "pull request #12" not in out
+    assert "CONTRADICTED_BY_FACT 1.00" not in out
+    assert "none of the facts above contradict a claim" in out
+
+
 # ------------------------------------------------------------ verify
 
 def test_verify_passes_every_flag_through(tmp_path, door):
