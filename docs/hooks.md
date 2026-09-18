@@ -1195,20 +1195,48 @@ stops or misses, because nothing has been judged right or wrong yet — the
 retry just held a block back.
 
 **Turning a repeat pattern into a fix PR.** `superjev.py catch signal
-[--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]` is the
-first step of the compounding loop this ledger exists to feed: harness
-catches -> tags -> issue -> fix PR -> bench robot. It groups every record
-tagged `false` (a block that was wrong) or `miss` (an allow that let a lie
-through) by **reason family** — the reason string with its numbers/values
-stripped off, so "count mismatch (tests): draft 0/61 vs evidence 53" and
-"count mismatch (tests): draft 2/9 vs evidence 4" collapse into the same
-family, "count mismatch (tests)", because it is the same detection arm
-misfiring twice with different numbers, not two different problems. Once a
-family reaches `--min` (default 3), it prints a signal block: the family,
-the count, first/last timestamps and up to three redacted examples (each
-already run through the same `_catch_redact` the ledger's own excerpt
-uses). Exit 0 when at least one family reached the threshold, exit 1 when
-none did, so a cron job can branch on it without parsing output.
+[--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]
+[--with-reasons] [--with-drafts]` is the first step of the compounding loop
+this ledger exists to feed: harness catches -> tags -> issue -> fix PR ->
+bench robot. It groups every record tagged `false` (a block that was wrong)
+or `miss` (an allow that let a lie through) by **reason family** — the
+reason string with its numbers/values (and, for a per-call judge reason
+like `c2 OVERCLAIMS 0.82`, its per-call claim key `c2`) stripped off, so
+"count mismatch (tests): draft 0/61 vs evidence 53" and "count mismatch
+(tests): draft 2/9 vs evidence 4" collapse into the same family, "count
+mismatch (tests)", and six separate `c1`/`c2`/`c3`/... `OVERCLAIMS` blocks
+all collapse into one "OVERCLAIMS" family — same detection arm misfiring
+repeatedly, not several different problems each too small to reach
+`--min` on its own. Once a family reaches `--min` (default 3, and an
+explicit `--min 0` is refused rather than silently treated as the
+default), it prints a signal block: the family, the count, first/last
+timestamps, and the record id of each matching record. Exit 0 when at
+least one family reached the threshold, exit 1 when none did, so a cron
+job can branch on it without parsing output.
+
+**A signal carries no draft-derived text by default.** Earlier, every
+signal's "examples" included a 300-char redacted draft excerpt and reason
+line straight in the printed output and the issue body, and the only
+redaction those went through, `_catch_redact`, covered a handful of narrow
+shapes: secrets/credentials, emails, US-shaped phone numbers, SSNs, and
+card numbers. A name, a street address, an order number, a health detail,
+a dollar figure, a non-US phone number, or a token-bearing URL all reached
+a *public* GitHub issue untouched. The default now is metadata only —
+family, count, first/last timestamps, and the id of every matching record
+— plus a pointer: `Run \`superjev catch list --id <id>\` locally for the
+redacted detail behind any record id above`. `catch list --id <id>` shows
+that one record's full (already-redacted) reason(s) and draft excerpt for
+someone with local ledger access; nothing draft-derived ever leaves the
+machine on its own. The reason line can still be added to the *local*
+printed/`--dry-run` output with `--with-reasons`, and the draft excerpt
+with `--with-drafts` — both are local-preview-only and are refused (exit
+2, before touching the ledger) in combination with `--open`, so a public
+issue can never carry draft-derived text no matter what flags are passed.
+Any draft-derived text `--with-reasons`/`--with-drafts` does render still
+goes through `_catch_redact` again first, then through a markdown-escape
+pass (backtick -> fullwidth lookalike, `@handle` -> `at:handle`, `#123` ->
+`no.123`) so a draft that happens to contain a code fence, a `@mention`,
+or a `#NN` auto-link/auto-close form can never render live even locally.
 
 By itself `catch signal` only prints — nothing is filed anywhere. `--open`
 actually drafts the GitHub issue via `gh issue create --repo <repo> --label
@@ -1218,8 +1246,11 @@ family is never filed twice even across separate cron runs. `--dry-run`
 prints the exact issue body for each signal and never calls `gh` at all —
 the safe way to see what would be filed. Before any real `gh issue create`
 call, the fully assembled issue body is checked once more for anything
-email/phone/SSN-shaped; a signal that still trips that check after every
-example already went through `_catch_redact` is refused rather than filed.
+email/phone/SSN-shaped — belt-and-braces on top of the metadata-only
+default body, which should never trip it. `--open` now exits 3 (not a
+silent 0) if any signal's filing was refused or failed — the same exit
+code `catch`'s other domain refusals use — so a cron job can branch on
+"ran, but nothing got filed" too.
 
 ## Judge-advisory mode
 

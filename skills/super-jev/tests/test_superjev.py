@@ -7515,7 +7515,9 @@ def _false_block_record(rec_id, ts, reason, draft="a draft excerpt"):
     ("count mismatch (tests): draft 0/61 vs evidence 53", "count mismatch (tests)"),
     ("count mismatch (tests): draft 2/9 vs evidence 4", "count mismatch (tests)"),
     ("overclaim OVERCLAIMS 0.94", "overclaim OVERCLAIMS"),
-    ("c3 OVERCLAIMS 0.94 (overclaim==1.00 arm)", "c3 OVERCLAIMS"),
+    ("c3 OVERCLAIMS 0.94 (overclaim==1.00 arm)", "OVERCLAIMS"),
+    ("c2 CONTRADICTED 0.82", "CONTRADICTED"),
+    ("leaked_internal HAS_LEAKS 0.95", "leaked_internal HAS_LEAKS"),
     ("LABELLED VALUE: the draft states 12 next to a plain number",
      "LABELLED VALUE"),
     ("PR mismatch: draft says PR #9 merged, evidence shows open", "PR mismatch"),
@@ -7539,6 +7541,28 @@ def test_catch_signal_groups_by_family_not_raw_reason():
     assert list(groups.keys()) == [("false", "count mismatch (tests)")]
     assert [r["id"] for r in groups[("false", "count mismatch (tests)")]] == \
         ["f1", "f2", "f3"]
+
+
+def test_catch_signal_per_call_claim_keys_collapse_into_one_family(
+        tmp_path, monkeypatch, capsys):
+    # FUNCTIONAL 3: the judge's reason shape is f"{k} {v} {s:.2f}" with k a
+    # PER-CALL claim key (c1/c2/c3/...), not part of the arm's identity —
+    # six OVERCLAIMS blocks that each happened to fire on a different
+    # claim index used to split across six distinct "families" and could
+    # never reach --min. They must now all collapse into one "OVERCLAIMS"
+    # family and signal.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    reasons = ["c1 OVERCLAIMS 0.91", "c3 OVERCLAIMS 0.94", "c2 OVERCLAIMS 0.88",
+              "c1 OVERCLAIMS 0.97", "c4 OVERCLAIMS 0.92", "c5 OVERCLAIMS 0.99"]
+    _write_catch_records(catch_path, [
+        _false_block_record(f"z{i}", f"2026-09-0{i+1}T00:00:00+00:00", r)
+        for i, r in enumerate(reasons)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: OVERCLAIMS (x6)" in out
+    assert "family: OVERCLAIMS  tag: false  count: 6" in out
 
 
 def test_catch_signal_threshold_below_min_produces_no_signal(tmp_path, monkeypatch, capsys):
@@ -7575,10 +7599,161 @@ def test_catch_signal_examples_capped_at_three(tmp_path, monkeypatch, capsys):
                             "PR mismatch: x", draft=f"draft number {i}")
         for i in range(1, 6)
     ])
-    code = sj.main(["catch", "signal", "--min", "3"])
+    code = sj.main(["catch", "signal", "--min", "3", "--with-drafts"])
     out = capsys.readouterr().out
     assert code == 0
     assert out.count("draft:") == 3
+
+
+def test_catch_signal_default_body_carries_no_draft_derived_text(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 1: with neither --with-reasons nor --with-drafts, a signal's
+    # printed output and its issue body must carry only family/count/
+    # timestamps/record ids — the draft excerpt and the reason line (both
+    # of which can carry names, addresses, order numbers, health details,
+    # dollar figures, non-US phone numbers or token URLs no _catch_redact
+    # pattern ever covered) must never appear at all.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    secret_draft = "Dear Margaret Holloway, ship to 412 W 57th St, call +44 20 7946 0958"
+    _write_catch_records(catch_path, [
+        _false_block_record(f"g{i}", f"2026-09-0{i}T00:00:00+00:00",
+                            "PR mismatch: draft says PR #9 merged, evidence shows open",
+                            draft=secret_draft)
+        for i in range(1, 4)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Margaret Holloway" not in out
+    assert "412 W 57th St" not in out
+    assert "7946 0958" not in out
+    assert "draft:" not in out
+    assert "reason:" not in out
+    assert "PR mismatch" in out  # family/title are still shown
+    assert "g1" in out and "g2" in out and "g3" in out  # record ids are shown
+    assert "Run `superjev catch list --id <id>` locally" in out
+
+
+def test_catch_signal_open_refuses_with_reasons_or_with_drafts(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 2: --open files a PUBLIC issue, so combining it with either
+    # local-preview flag is a hard usage error (exit 2) rather than a
+    # silent downgrade to the metadata-only body.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"h{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x")
+        for i in range(1, 4)
+    ])
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked when --open is refused")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo",
+                    "--with-reasons"])
+    assert code == 2
+    code2 = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo",
+                     "--with-drafts"])
+    assert code2 == 2
+
+
+def test_catch_signal_with_drafts_escapes_markdown_injection(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 2: a draft can carry literal markdown/GitHub-autolink syntax
+    # — this must never be rendered live, even in the local-only preview
+    # modes (--open + --with-drafts is refused outright, see the test
+    # above, but --dry-run/--with-drafts alone still renders locally).
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    payload = "cc @torvalds ```rm -rf /``` <img src=x onerror=1> fixes #34"
+    _write_catch_records(catch_path, [
+        _false_block_record(f"i{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x",
+                            draft=payload)
+        for i in range(1, 4)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run", "--with-drafts"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "```" not in out
+    assert "@torvalds" not in out
+    assert "#34" not in out
+    assert "at:torvalds" in out
+    assert "no.34" in out
+
+
+def test_catch_signal_escape_markdown_helper_direct():
+    assert sj._catch_signal_escape_markdown("`code`") == "｀code｀"
+    assert sj._catch_signal_escape_markdown("cc @torvalds") == "cc at:torvalds"
+    assert sj._catch_signal_escape_markdown("fixes #34") == "fixes no.34"
+    assert sj._catch_signal_escape_markdown("") == ""
+    assert sj._catch_signal_escape_markdown(None) == ""
+    # An email address's "@" is a normal address character, not a handle —
+    # still gets neutralised the same way since this function cannot tell
+    # the difference, which is fine: it only ever runs on already-redacted
+    # text (see _catch_signal_examples), so a real email never reaches it.
+    assert sj._catch_signal_escape_markdown("a@b.com") == "aat:b.com"
+
+
+def test_catch_signal_min_zero_is_refused_not_silently_three(
+        tmp_path, monkeypatch, capsys):
+    # NIT: `getattr(a, "min", 3) or 3` used to silently rewrite an
+    # explicit `--min 0` into 3 because 0 is falsy. It must now reach the
+    # "--min must be at least 1" refusal instead.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("k1", "2026-09-01T00:00:00+00:00", "PR mismatch: x"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "0"])
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "must be at least 1" in err
+
+
+def test_catch_signal_open_exits_3_when_a_filing_fails(tmp_path, monkeypatch, capsys):
+    # NIT: `--open` used to always exit 0 even when every attempted filing
+    # failed, so a cron caller could not branch on it without parsing
+    # output. A gh failure must now surface as exit 3.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"n{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x")
+        for i in range(1, 4)
+    ])
+    fake = FakeDoor(1, stdout="", stderr="gh: HTTP 403 forbidden")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    assert code == 3
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert not sidecar.exists()
+
+
+def test_catch_list_with_id_shows_full_detail_for_one_record(
+        tmp_path, monkeypatch, capsys):
+    # The pointer text `catch signal`'s own issue body gives a human
+    # ("run `superjev catch list --id <id>` locally") must be a real,
+    # working lookup — a single-record --id query, unlike the summary
+    # table, shows every reason and the full (already-redacted) draft
+    # excerpt.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("look1", "2026-09-01T00:00:00+00:00", "PR mismatch: x",
+                            draft="a redacted excerpt"),
+        _false_block_record("look2", "2026-09-02T00:00:00+00:00", "PR mismatch: y"),
+    ])
+    code = sj.main(["catch", "list", "--id", "look1"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "look1" in out
+    assert "look2" not in out
+    assert "a redacted excerpt" in out
+
+
+def test_catch_list_with_id_missing_prints_message_not_crash(
+        tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [])
+    code = sj.main(["catch", "list", "--id", "nope"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no record with id" in out
 
 
 def test_catch_signal_miss_family_gets_its_own_title(tmp_path, monkeypatch, capsys):
@@ -7704,7 +7879,9 @@ def test_catch_signal_refuses_to_open_when_body_still_carries_pii(
     monkeypatch.setattr(sj.subprocess, "run", fake_run)
     code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
     err = capsys.readouterr().err
-    assert code == 0
+    # NIT: a refused filing now surfaces as exit 3, not a silent 0 — see
+    # test_catch_signal_open_exits_3_when_a_filing_fails.
+    assert code == 3
     assert "refusing to open an issue" in err
     sidecar = catch_path.parent / "signals.jsonl"
     assert not sidecar.exists()
