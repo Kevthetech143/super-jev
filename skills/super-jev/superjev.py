@@ -789,9 +789,12 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
       2. A claim-level NOT_SUPPORTED/CONTRADICTED at or above
          SUPERJEV_BLOCK_CONF (default 0.80) is a SECONDARY trigger, and
          only fires when the evidence gather was healthy (same
-         `_gather_healthy` check v2 uses) — a confident red verdict
-         against evidence too thin to judge is still a statement about
-         the gather, not the worker.
+         `_gather_healthy` check v2 uses) AND the current turn itself
+         contributed evidence (`evidence["current_turn_empty"]` is not
+         True — 2026-09-17, see docs/hooks.md, "gate v3 — empty current
+         turn") — a confident red verdict against evidence too thin to
+         judge, or against a window this turn added nothing to, is still
+         a statement about the gather, not the worker.
       3. SELF_CONTRADICTORY is never a block reason, alone or in company,
          same as v2 — it still prints as an advisory.
       4. The OVERCLAIM_100_BLOCK fragile arm (SUPERJEV_OVERCLAIM_100_BLOCK)
@@ -799,29 +802,45 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
          is a near no-op, kept only so the old 0.995-floor A/B is still
          reachable.
 
+    `current_turn_empty` deliberately does NOT gate rule 1 — OVERCLAIMS
+    still blocks on its own at or above the line even when this turn ran
+    no tools, as long as the gather is otherwise healthy. A reply is not
+    made safe by the fact that this turn ran no tools; suppressing the
+    primary arm on an empty current turn was worth three caught lies
+    against zero blocked truths on the 40-case bench (docs/hooks.md).
+
     Deterministic count/PR mismatches are computed and merged in by the
     caller (cmd_hook), same as v2 — this function never sees them."""
     overclaim_line = _block_overclaim_line()
     conf_line = _block_confidence_line()
     healthy = _gather_healthy(evidence)
+    empty_current_turn = bool(evidence) and evidence.get("current_turn_empty") is True
 
     reasons, notes = [], []
     for f in flags:
         v, s, k = f["verdict"], f["score"], f["key"]
-        candidate = (v == "OVERCLAIMS" and
-                    (s >= overclaim_line or (_overclaim_100_enabled() and s >= OVERCLAIM_100_FLOOR)))
-        candidate = candidate or (v in _RED_CLAIM_VERDICTS and s >= conf_line)
-        if candidate:
-            if not healthy:
-                line = overclaim_line if v == "OVERCLAIMS" else conf_line
-                first = (evidence.get("reasons") or ["no evidence was gathered"])[0]
-                headline = first.split(",")[0].split(" so ")[0].strip()
-                notes.append(
-                    f"{k} {v} {s:.2f} crossed the {line:.2f} line but the "
-                    f"evidence cannot carry a verdict ({headline}) — advisory, "
-                    "not a block; run with --explain for the full gather")
-                continue
-            reasons.append(f"{k} {v} {s:.2f}")
+        is_overclaim = (v == "OVERCLAIMS" and
+                        (s >= overclaim_line or (_overclaim_100_enabled() and s >= OVERCLAIM_100_FLOOR)))
+        is_secondary = v in _RED_CLAIM_VERDICTS and s >= conf_line
+        if not (is_overclaim or is_secondary):
+            continue
+        line = overclaim_line if is_overclaim else conf_line
+        if not healthy:
+            first = (evidence.get("reasons") or ["no evidence was gathered"])[0]
+            headline = first.split(",")[0].split(" so ")[0].strip()
+            notes.append(
+                f"{k} {v} {s:.2f} crossed the {line:.2f} line but the "
+                f"evidence cannot carry a verdict ({headline}) — advisory, "
+                "not a block; run with --explain for the full gather")
+            continue
+        if is_secondary and empty_current_turn:
+            notes.append(
+                f"{k} {v} {s:.2f} crossed the {line:.2f} line but the current "
+                "turn ran no tools of its own (evidence is previous-turn/"
+                "receipts material only) — advisory, not a block; the primary "
+                "OVERCLAIMS arm is unaffected")
+            continue
+        reasons.append(f"{k} {v} {s:.2f}")
     return reasons, notes
 
 
@@ -2079,7 +2098,25 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     (or, when `return_meta=True`, a (None, meta) pair with the same
     shape). `meta` (used by `hook gate --explain`) carries
     prev_turns_found/prev_dropped/prev_bytes/receipts_count/
-    receipts_bytes/current_bytes/cap_bytes/total_bytes.
+    receipts_bytes/current_bytes/cap_bytes/total_bytes/
+    current_turn_empty.
+
+    `meta["current_turn_empty"]` is True whenever the CURRENT turn
+    contributed no tool_result content, regardless of whether previous-turn
+    or receipt material exists (2026-09-17, see docs/hooks.md, "gate v3 —
+    empty current turn"). Before this, a tool-free current turn made this
+    function return None outright — even with 10 KB of previous-turn
+    evidence sitting right there — which routed `cmd_hook` to the
+    advisory-only `_hook_unchecked` branch no matter how confidently the
+    reply overclaimed against that prior material. `cmd_hook` now judges
+    that window normally and uses `current_turn_empty` to suppress only
+    the SECONDARY NOT_SUPPORTED/CONTRADICTED arm (a confident red verdict
+    against a window this turn did not itself add to is still, in part, a
+    statement about what we chose to carry forward) — the PRIMARY
+    OVERCLAIMS arm still blocks, because a reply is not made safe by the
+    fact that this turn ran no tools. This function returns None only when
+    the fully assembled window (current + previous + receipts) is still
+    empty.
     """
     n = n if n is not None else _hook_evidence_n()
     max_bytes = max_bytes if max_bytes is not None else _hook_evidence_max_bytes()
@@ -2099,19 +2136,24 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
 
     meta = {"prev_turns_found": len(prev_windows), "prev_bytes": 0, "prev_dropped": 0,
            "receipts_count": 0, "receipts_bytes": 0, "current_bytes": 0,
-           "cap_bytes": effective_cap, "total_bytes": 0}
+           "cap_bytes": effective_cap, "total_bytes": 0,
+           "current_turn_empty": not cur_results}
 
-    if not cur_results:
-        # PR #22's health semantics: a turn that ran no tools of its own
-        # gets NO evidence here, however much prior-turn or receipt
-        # material exists — that keeps this turn on the advisory-only
-        # "unchecked" path in cmd_hook rather than letting stale evidence
-        # from an earlier turn silently back (or block) a fresh, tool-free
-        # reply.
-        return (None, meta) if return_meta else None
-
-    cur_section = "[current turn]\n" + "\n\n---\n\n".join(cur_results[-n:])
-    meta["current_bytes"] = len(cur_section.encode("utf-8"))
+    if cur_results:
+        cur_section = "[current turn]\n" + "\n\n---\n\n".join(cur_results[-n:])
+        meta["current_bytes"] = len(cur_section.encode("utf-8"))
+    else:
+        # 2026-09-17: this used to return None here outright (PR #22's
+        # health semantics) — a tool-free current turn discarded any
+        # previous-turn/receipts material wholesale. That stopped stale
+        # evidence from silently BACKING a tool-free reply, but it also
+        # stopped that same evidence from BLOCKING one, and those two are
+        # not symmetric (see docs/hooks.md, "gate v3 — empty current
+        # turn"). Now we keep going and let the previous-turn/receipts
+        # sections below fill the window; `current_turn_empty` (set above)
+        # is how cmd_hook tells the block decision this window's current
+        # turn added nothing of its own.
+        cur_section = ""
 
     receipts_section = ""
     if session_id:
@@ -2143,6 +2185,24 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
 
     result = joined if joined.strip() else None
     return (result, meta) if return_meta else result
+
+
+def derive_evidence_window(transcript_path, n=None, max_bytes=None, session_id=None,
+                           prev_turns=None, cap_bytes=None, return_meta=False):
+    """Public wrapper around `_derive_evidence_text_from_transcript` — the
+    exact wide-evidence-window assembler `hook gate` judges a draft
+    against, exposed under a stable, non-underscore name for a bench or
+    any other external caller to import directly rather than
+    reimplementing turn-boundary logic of its own (see docs/hooks.md,
+    "gate v3 — empty current turn": a second implementation of the window
+    is why the 2026-09-17 bench and the live shim ever disagreed in the
+    first place). Same arguments, same return shape — a text string or
+    `None`, or a `(text, meta)` pair when `return_meta=True` — as the
+    private function it wraps; see that docstring for the full field-by-
+    field meaning of `meta`, including `current_turn_empty`."""
+    return _derive_evidence_text_from_transcript(
+        transcript_path, n=n, max_bytes=max_bytes, session_id=session_id,
+        prev_turns=prev_turns, cap_bytes=cap_bytes, return_meta=return_meta)
 
 
 def _last_assistant_text(transcript_path):
@@ -2377,6 +2437,8 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
         print(f"  session receipts  : {m.get('receipts_count', 0)} line(s), "
               f"{m.get('receipts_bytes', 0)} bytes")
         print(f"  total             : {m.get('total_bytes', 0)} bytes")
+        print(f"  current turn empty: {'YES — secondary NS/CONTRADICTED arm suppressed, '
+              'primary OVERCLAIMS arm unaffected' if m.get('current_turn_empty') else 'no'}")
     print(f"\n  rule              : {rule} "
           f"({'legacy — SUPERJEV_RULE=v2' if rule == 'v2' else 'default'})")
     if rule == "v3":
@@ -3324,7 +3386,18 @@ def cmd_hook(a):
         # prove a test-count claim — docs/hooks.md says so in plain words.
         flags = _parse_strong_flags(door_out)
         claim_rows = _parse_claim_rows(door_out)
-        block_reasons, block_notes = _hook_block_decision(flags, claim_rows)
+        # Only the gate door ever derives a wide window from the transcript
+        # (see window_meta above; verify has no equivalent), so only gate
+        # can carry a current_turn_empty signal into the block decision —
+        # the secondary NOT_SUPPORTED/CONTRADICTED arm is suppressed on an
+        # empty current turn, the primary OVERCLAIMS arm is not (see
+        # _hook_block_decision_v3).
+        gather_health = None
+        if door == "gate" and window_meta and window_meta.get("current_turn_empty"):
+            gather_health = {"current_turn_empty": True,
+                             "reasons": ["the current turn ran no tools of its own; this "
+                                        "window is previous-turn/receipts evidence only"]}
+        block_reasons, block_notes = _hook_block_decision(flags, claim_rows, gather_health)
         # Deterministic reasons are never suppressed by the gather-health
         # check the judge-driven flags above go through — arithmetic on
         # text that WAS in the evidence window carries no "the gather was
