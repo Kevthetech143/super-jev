@@ -1,0 +1,16 @@
+
+jev claude-fable-5-1 · 2 chunk(s) · 12800 in_tok · 1880ms · 2026-09-18T00:30:00Z
+
+  c1   SUPPORTED       0.99  commit 9f2a1c0 is pushed on branch docs/hooks-critique
+  c2   SUPPORTED       0.94  docs/hooks.md exists in that worktree
+  c3   SUPPORTED       0.88  the README links to docs/hooks.md
+
+  leaked_internal    CLEAN                0.96
+  time_sensitive     NOT_TIME_SENSITIVE   0.92
+  self_contradictory CONSISTENT           0.90
+  overclaim          OVERCLAIMS           1.00   -> SOFTEN IT — the evidence shows less than the draft claims
+
+  1 of 7 need a human: overclaim
+  the line is 0.80 — under it, re-read the source before you speak.
+
+  Jev advises. It never decides. Read the flags, then you decide.

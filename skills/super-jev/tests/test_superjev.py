@@ -2199,3 +2199,371 @@ def test_prompt_verify_non_json_stdin_fails_open(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# The 2026-09-17 false block, and the precision fix for it.
+#
+# A TRUE report ("187 passed", "both checks pass", "hook verify now exits 0 or
+# skipped"), checked with --worktree/--test-cmd/--pr, came back
+#   c2 NOT_SUPPORTED 0.68 · c3 NOT_SUPPORTED 0.97 · c4 CONTRADICTED 0.72
+#   overclaim OVERCLAIMS 1.00
+# and BLOCKED, while the lead had already confirmed by hand that the tests and
+# the CI checks both passed.
+#
+# Two things matter about that table, and both are load-bearing here.
+#
+# 1. worker-verify's OWN verdict for it is READ (exit 3), not REJECT: its
+#    `verdict()` only REJECTs on a CONTRADICTED claim at or above the 0.80
+#    line, and 0.72 is under it. So the door said "a human should read this".
+#    The SHIM upgraded that to a hard block, all on its own, via the
+#    OVERCLAIMS >= 0.80 rule. The shim was stricter than the door it wraps,
+#    in the one direction that door's author explicitly declined.
+# 2. The evidence was missing, not the honesty. --test-cmd was a
+#    directory-level pytest, which worker-verify refuses outright, so no test
+#    output was ever collected; and --pr only ever gathers `gh pr view --json
+#    state,isDraft,headRefName,mergedAt`, which carries no check-run data at
+#    all. "187 passed" and "both checks pass" had nothing to be checked
+#    against, so OVERCLAIMS at 1.00 was the correct answer about OUR gather,
+#    not a finding about the worker.
+#
+# Every fixture below is recorded stdout in the exact table shape jev.py and
+# worker-verify print. Nothing here runs a door or touches the network.
+FALSE_BLOCK_STDOUT = (FIXTURES / "false_block_verify_stdout.txt").read_text(encoding="utf-8")
+FALSE_BLOCK_PROBE = (FIXTURES / "false_block_dryrun_probe.txt").read_text(encoding="utf-8")
+ALL_SUPPORTED_STDOUT = (FIXTURES / "all_supported_overclaim_stdout.txt").read_text(encoding="utf-8")
+REAL_LIE_STDOUT = (FIXTURES / "real_lie_verify_stdout.txt").read_text(encoding="utf-8")
+
+# The exact flags the lead's live false block came back with.
+LIVE_FALSE_BLOCK_FLAGS = [
+    {"key": "c2", "verdict": "NOT_SUPPORTED", "score": 0.68},
+    {"key": "c3", "verdict": "NOT_SUPPORTED", "score": 0.97},
+    {"key": "c4", "verdict": "CONTRADICTED", "score": 0.72},
+    {"key": "overclaim", "verdict": "OVERCLAIMS", "score": 1.00},
+]
+
+HEALTHY_PROBE = ("EVIDENCE: 7 blocks, 24196 chars (limit 100000)\n"
+                 "  [1] $ git -c color.ui=false -C /tmp/wt status --porcelain=v1 -b\n"
+                 "  [2] $ python3 -m pytest tests/test_x.py -q\n"
+                 "      187 passed in 2.71s\n")
+
+
+class SplitDoor:
+    """A fake door that answers the real run and the free --dry-run probe
+    differently — because that is what the actual door does. Returns the
+    verdict table for a normal call and the recorded gather for a
+    --dry-run call. Records every argv."""
+
+    def __init__(self, stdout, probe_stdout, code=3, probe_code=0):
+        self.stdout, self.probe_stdout = stdout, probe_stdout
+        self.code, self.probe_code = code, probe_code
+        self.calls = []
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        argv = [str(c) for c in cmd]
+        self.calls.append(argv)
+        if "--dry-run" in argv:
+            return subprocess.CompletedProcess(cmd, self.probe_code,
+                                               stdout=self.probe_stdout, stderr="")
+        return subprocess.CompletedProcess(cmd, self.code, stdout=self.stdout, stderr="")
+
+    @property
+    def dry_runs(self):
+        return [c for c in self.calls if "--dry-run" in c]
+
+
+# ---- the parsers -----------------------------------------------------------
+
+def test_parse_claim_rows_keeps_the_supported_rows_strong_flags_drops():
+    # _parse_strong_flags keeps only red verdicts, so it can never answer
+    # "was every claim supported?". _parse_claim_rows is what can.
+    rows = sj._parse_claim_rows(FALSE_BLOCK_STDOUT)
+    assert [r["key"] for r in rows] == ["c1", "c2", "c3", "c4"]
+    assert rows[0] == {"key": "c1", "verdict": "SUPPORTED", "score": 0.99}
+    assert [f["key"] for f in sj._parse_strong_flags(FALSE_BLOCK_STDOUT)] == \
+        ["c2", "c3", "c4", "overclaim"]
+
+
+def test_parse_claim_rows_never_raises_on_junk():
+    assert sj._parse_claim_rows("") == []
+    assert sj._parse_claim_rows(None) == []
+    assert sj._parse_claim_rows("no table here at all") == []
+
+
+def test_parse_claim_rows_ignores_the_draft_level_rows():
+    rows = sj._parse_claim_rows(ALL_SUPPORTED_STDOUT)
+    assert all(r["key"].startswith("c") for r in rows)
+    assert "overclaim" not in [r["key"] for r in rows]
+
+
+# ---- the guardrail mirror --------------------------------------------------
+
+@pytest.mark.parametrize("cmd,refused", [
+    # The exact command behind `npm run test:skill`, and the exact reason
+    # "187 passed" was unprovable: worker-verify refuses a directory-level
+    # pytest, so it collects NO test output.
+    ("python3 -m pytest skills/super-jev/tests -q", True),
+    ("pytest", True),
+    ("python3 -m pytest", True),
+    # Naming the file, or a ::selector, is accepted.
+    ("python3 -m pytest skills/super-jev/tests/test_superjev.py -q", False),
+    ("python3 -m pytest tests/test_x.py::test_one", False),
+    # Not a pytest invocation at all — the guardrail has no opinion. Note
+    # that this is ALSO how the directory-level run gets in anyway: the npm
+    # script wraps the very command the guardrail refuses. Recorded here on
+    # purpose; docs/hooks.md names it as a failure mode.
+    ("npm run test:skill", False),
+    ("node --test test/*.test.ts", False),
+    ("", False),
+])
+def test_test_cmd_will_be_refused_mirrors_worker_verifys_guardrail(cmd, refused):
+    assert sj._test_cmd_will_be_refused(cmd) is refused
+
+
+def test_test_cmd_will_be_refused_survives_an_unparseable_command():
+    assert sj._test_cmd_will_be_refused('pytest "unclosed') is False
+
+
+# ---- the evidence inventory ------------------------------------------------
+
+def test_evidence_inventory_is_thin_when_nothing_at_all_was_passed():
+    inv = sj._evidence_inventory()
+    assert inv["thin"] is True
+    assert any("no evidence source" in r for r in inv["reasons"])
+
+
+def test_evidence_inventory_is_thin_on_a_directory_level_pytest():
+    inv = sj._evidence_inventory(test_cmd="python3 -m pytest skills/super-jev/tests -q",
+                                 worktree="/tmp/wt")
+    assert inv["thin"] is True
+    assert any("directory-level pytest" in r for r in inv["reasons"])
+
+
+def test_evidence_inventory_records_that_pr_state_carries_no_check_data():
+    # Why "both checks pass" came back NOT_SUPPORTED: `gh pr view --json
+    # state,isDraft,headRefName,mergedAt` has no check-run field.
+    inv = sj._evidence_inventory(worktree="/tmp/wt", pr=18,
+                                 test_cmd="python3 -m pytest tests/test_x.py")
+    assert any("NO check-run data" in r for r in inv["reasons"])
+    # On its own that is NOT thinness — the PR block is real evidence.
+    assert inv["thin"] is False
+
+
+def test_evidence_inventory_reads_the_size_line_and_the_absent_markers():
+    inv = sj._evidence_inventory(test_cmd="python3 -m pytest skills/super-jev/tests -q",
+                                 worktree="/tmp/wt", pr=18,
+                                 probe_stdout=FALSE_BLOCK_PROBE)
+    assert (inv["blocks"], inv["chars"]) == (4, 9120)
+    assert "NO TEST OUTPUT WAS COLLECTED" in inv["missing"]
+    assert inv["thin"] is True
+
+
+def test_evidence_inventory_is_thin_below_the_char_floor():
+    inv = sj._evidence_inventory(worktree="/tmp/wt",
+                                 probe_stdout="EVIDENCE: 1 blocks, 12 chars (limit 100000)\n")
+    assert inv["thin"] is True
+    assert any("under the" in r for r in inv["reasons"])
+
+
+def test_evidence_inventory_is_not_thin_when_the_gather_was_healthy():
+    inv = sj._evidence_inventory(test_cmd="python3 -m pytest tests/test_x.py -q",
+                                 worktree="/tmp/wt", probe_stdout=HEALTHY_PROBE)
+    assert inv["thin"] is False
+    assert inv["missing"] == []
+    assert (inv["blocks"], inv["chars"]) == (7, 24196)
+
+
+def test_evidence_inventory_treats_an_unreadable_probe_as_unknown_not_absent():
+    # Unknown is not absent. A probe we could not parse must NOT drop a
+    # block — we would rather keep one we cannot justify than lose one.
+    inv = sj._evidence_inventory(worktree="/tmp/wt", probe_stdout="garbage, no size line")
+    assert inv["thin"] is False
+    assert inv["blocks"] is None
+
+
+# ---- the block decision ----------------------------------------------------
+
+def test_the_live_false_block_becomes_advisory_once_evidence_is_measured():
+    """THE case. The lead's exact flags, plus the recorded gather showing the
+    test command was refused, must not block."""
+    evidence = sj._evidence_inventory(
+        test_cmd="python3 -m pytest skills/super-jev/tests -q",
+        worktree="/tmp/wt", pr=18, probe_stdout=FALSE_BLOCK_PROBE)
+    rows = sj._parse_claim_rows(FALSE_BLOCK_STDOUT)
+    reasons, notes = sj._hook_block_decision(LIVE_FALSE_BLOCK_FLAGS, rows, evidence)
+    assert reasons == []
+    assert any("cannot carry a verdict" in n for n in notes)
+
+
+def test_the_same_flags_still_block_when_the_gather_was_healthy():
+    """The gate is conditional on the EVIDENCE, not a blanket weakening. Same
+    OVERCLAIMS 1.00, healthy gather -> still a block."""
+    evidence = sj._evidence_inventory(test_cmd="python3 -m pytest tests/test_x.py -q",
+                                      worktree="/tmp/wt", probe_stdout=HEALTHY_PROBE)
+    rows = sj._parse_claim_rows(FALSE_BLOCK_STDOUT)
+    reasons, notes = sj._hook_block_decision(LIVE_FALSE_BLOCK_FLAGS, rows, evidence)
+    assert reasons == ["overclaim OVERCLAIMS 1.00"]
+    assert notes == []
+
+
+def test_overclaims_alone_is_advisory_when_every_claim_came_back_supported():
+    """No evidence inventory at all here — all-claims-SUPPORTED is enough on
+    its own, and it is what makes this work on the real hook path, which
+    never has a --test-cmd to measure."""
+    rows = sj._parse_claim_rows(ALL_SUPPORTED_STDOUT)
+    flags = sj._parse_strong_flags(ALL_SUPPORTED_STDOUT)
+    reasons, notes = sj._hook_block_decision(flags, rows)
+    assert reasons == []
+    assert any("SUPPORTED" in n for n in notes)
+
+
+def test_a_confident_overclaim_still_blocks_with_no_claim_rows_at_all():
+    # Unparseable table: we know nothing, so nothing is suppressed.
+    flags = [{"key": "overclaim", "verdict": "OVERCLAIMS", "score": 0.98}]
+    reasons, notes = sj._hook_block_decision(flags, [], None)
+    assert reasons == ["overclaim OVERCLAIMS 0.98"]
+    assert notes == []
+
+
+def test_a_real_lie_still_blocks_even_on_thin_evidence():
+    """The direction that must never soften. NOT_SUPPORTED at 0.15 is under
+    the block line, so it blocks on its own, and it drags the confident
+    OVERCLAIMS and the SELF_CONTRADICTORY along with it — however thin the
+    gather was."""
+    thin = sj._evidence_inventory()
+    rows = sj._parse_claim_rows(REAL_LIE_STDOUT)
+    flags = sj._parse_strong_flags(REAL_LIE_STDOUT)
+    reasons, notes = sj._hook_block_decision(flags, rows, thin)
+    assert "c2 NOT_SUPPORTED 0.15" in reasons
+    assert "overclaim OVERCLAIMS 1.00" in reasons
+    assert "self_contradictory SELF_CONTRADICTORY 0.22" in reasons
+    assert notes == []
+
+
+def test_the_original_lie_fixture_is_unchanged_by_this_fix():
+    rows = sj._parse_claim_rows(LIE_STDOUT)
+    flags = sj._parse_strong_flags(LIE_STDOUT)
+    reasons, _ = sj._hook_block_decision(flags, rows)
+    assert "c1 NOT_SUPPORTED 0.18" in reasons
+    assert "overclaim OVERCLAIMS 0.98" in reasons
+
+
+def test_the_weak_flags_fixture_is_still_advisory():
+    rows = sj._parse_claim_rows(WEAK_FLAGS_STDOUT)
+    flags = sj._parse_strong_flags(WEAK_FLAGS_STDOUT)
+    assert sj._hook_block_decision(flags, rows)[0] == []
+
+
+def test_hook_block_reasons_still_takes_one_argument():
+    # Back-compat: every existing caller and test passes flags only.
+    assert sj._hook_block_reasons(LIVE_FALSE_BLOCK_FLAGS) == ["overclaim OVERCLAIMS 1.00"]
+
+
+# ---- end to end, through `hook verify --from-file` -------------------------
+
+def _report_file(tmp_path):
+    p = tmp_path / "report.md"
+    p.write_text(
+        "COMPLETE. npm run test:skill reports 187 passed. Both checks pass on "
+        "the pull request. The verify hook now exits 0 or skips on a spawn "
+        "dict. Worktree /tmp/wt on docs/hooks-critique.\n", encoding="utf-8")
+    return p
+
+
+def test_from_file_does_not_block_the_live_false_block(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(FALSE_BLOCK_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    rc = sj._hook_verify_from_file(
+        "verify", str(_report_file(tmp_path)), worktree="/tmp/wt",
+        test_cmd="python3 -m pytest skills/super-jev/tests -q", pr=18)
+    out = capsys.readouterr()
+    assert rc == 0
+    assert "advisory" in out.out
+    assert "cannot carry a verdict" in out.out
+    # The free dry-run probe was spent exactly once, and only because the
+    # block would have rested on OVERCLAIMS alone.
+    assert len(fake.dry_runs) == 1
+
+
+def test_from_file_blocks_a_real_lie(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(REAL_LIE_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    rc = sj._hook_verify_from_file(
+        "verify", str(_report_file(tmp_path)), worktree="/tmp/wt",
+        test_cmd="python3 -m pytest skills/super-jev/tests -q", pr=18)
+    out = capsys.readouterr()
+    assert rc == 2
+    assert "blocked this" in out.err
+    assert "c2 NOT_SUPPORTED 0.15" in out.err
+    # No probe was needed: a blocking NOT_SUPPORTED settles it without one.
+    assert fake.dry_runs == []
+
+
+def test_from_file_does_not_probe_when_nothing_would_block(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(WEAK_FLAGS_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    rc = sj._hook_verify_from_file("verify", str(_report_file(tmp_path)),
+                                   worktree="/tmp/wt")
+    capsys.readouterr()
+    assert rc == 0
+    assert fake.dry_runs == []
+
+
+def test_explain_prints_the_evidence_size_and_the_claim_table(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(FALSE_BLOCK_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    rc = sj._hook_verify_from_file(
+        "verify", str(_report_file(tmp_path)), worktree="/tmp/wt",
+        test_cmd="python3 -m pytest skills/super-jev/tests -q", pr=18, explain=True)
+    out = capsys.readouterr().out
+    assert rc == 0
+    # the evidence file size, in blocks and chars
+    assert "4 block(s), 9120 chars" in out
+    assert "evidence too thin : YES" in out
+    assert "NO TEST OUTPUT WAS COLLECTED" in out
+    # the per-claim table, every row of it
+    for key in ("c1", "c2", "c3", "c4"):
+        assert key in out
+    assert "SUPPORTED" in out and "NOT_SUPPORTED" in out and "CONTRADICTED" in out
+    # the thresholds and the direction warning, so nobody misreads the float
+    assert "CONFIDENCE in its verdict" in out
+    assert "decision          : ADVISORY" in out
+
+
+def test_explain_runs_the_probe_even_when_nothing_would_block(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(WEAK_FLAGS_STDOUT, HEALTHY_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    sj._hook_verify_from_file("verify", str(_report_file(tmp_path)),
+                              worktree="/tmp/wt", explain=True)
+    out = capsys.readouterr().out
+    assert len(fake.dry_runs) == 1
+    assert "7 block(s), 24196 chars" in out
+    assert "evidence too thin : no" in out
+
+
+def test_explain_is_wired_to_the_cli_flag(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(FALSE_BLOCK_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    rc = sj.main(["hook", "verify", "--from-file", str(_report_file(tmp_path)),
+                  "--worktree", "/tmp/wt",
+                  "--test-cmd", "python3 -m pytest skills/super-jev/tests -q",
+                  "--pr", "18", "--explain"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "--- super-jev verify --explain ---" in out
+
+
+def test_the_ledger_records_a_suppressed_block_as_an_advisory(tmp_path, monkeypatch, capsys):
+    fake = SplitDoor(FALSE_BLOCK_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    sj._hook_verify_from_file(
+        "verify", str(_report_file(tmp_path)), worktree="/tmp/wt",
+        test_cmd="python3 -m pytest skills/super-jev/tests -q", pr=18)
+    capsys.readouterr()
+    rows = [json.loads(l) for l in
+            sj.LEDGER_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
+    hook_rows = [r for r in rows if r.get("door") == "hook"]
+    assert hook_rows, rows
+    last = hook_rows[-1]
+    assert last["exit_code"] == 0
+    assert "cannot carry a verdict" in last["note"]

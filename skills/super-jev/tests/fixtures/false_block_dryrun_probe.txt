@@ -1,0 +1,18 @@
+CLAIMS (4, split automatically)
+  c1  the worktree is at /Users/admin/super-jev-wt/hookdocs on docs/hooks
+  c2  both checks pass on the pull request
+  c3  npm run test:skill reports 187 passed
+  c4  the verify hook now exits 0 or skips on a spawn dict
+
+EVIDENCE: 4 blocks, 9120 chars (limit 100000)
+
+  [1] $ git -c color.ui=false -C /Users/admin/super-jev-wt/hookdocs status --porcelain=v1 -b
+  [2] $ python3 -m pytest skills/super-jev/tests -q
+      REFUSED: a directory-level pytest can launch an app or hit a live system.
+      Name the test file, or pass --allow-dir-tests if you know the suite is safe.
+      NO TEST OUTPUT WAS COLLECTED. Any claim about a test count, a pass count or a
+      fail count is UNPROVABLE from this evidence.
+  [3] $ gh pr view https://github.com/Kevthetech143/super-jev/pull/18 --json state,isDraft,headRefName,mergedAt
+  [4] $ grep -rn --untracked -- _hook_block_decision /Users/admin/super-jev-wt/hookdocs
+
+Would send 9120 chars of evidence plus the report as the draft.
