@@ -794,6 +794,30 @@ needs a semantic read, not a literal check, so it is left to the judge.
 Both stay off if `SUPERJEV_DERIVED_FACTS=0` is set, same switch as every
 other family.
 
+## A CONTRADICTED_BY_FACT sentence can now block on its own (2026-09-18)
+
+`SET3-LIVE-GAP.md` found that a derived fact — including the written-file
+family above — was only ever handed to the judge as evidence in the window
+text; nothing in the block decision ever read `window_meta["facts"]`
+itself. On the fleet set that meant l41 and l43's contradiction sat at the
+head of the window and the judge simply never flagged it, and l45's judge
+did flag it (`CONTRADICTED 0.99`) but the secondary NOT_SUPPORTED/
+CONTRADICTED arm is advisory-only by gate v4's 2026-09-18 demotion, so the
+one case that worked was the case the rule threw away. `_fact_block_reasons`
+closes that gap the same way the deterministic count/PR arms already work:
+any fact sentence in `window_meta["facts"]` carrying the literal
+`CONTRADICTED_BY_FACT` marker — from any family, not just written-file — is
+appended to `det_block_reasons` and blocks with no judge and no health gate,
+because it is string/int work over text that WAS in the window. A
+`SUPPORTED` (or any other non-`CONTRADICTED_BY_FACT`) fact sentence never
+blocks and never suppresses another arm's block; `--explain` still lists
+each fact that fired under `deterministic`. Measured offline (pure replay
+of `derive_window_facts` + `compose_window_with_facts` over all 99 recorded
+cases, no judge call): the only cases whose decision changes are the fleet
+set's l41, l43 and l45 (all lies, all written-file), 0 truths newly blocked
+in any of the three sets — `skills/super-jev/tests/replay_fact_block_sweep.py`
+reproduces this.
+
 ## The latency budget — one call, one cap, one clock (2026-09-18)
 
 A Stop event used to have no bound on how long it could take, and on a heavy
