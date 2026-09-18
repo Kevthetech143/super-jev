@@ -399,6 +399,25 @@ bench output for numbers).
   The gate needs evidence to check against; a turn with none gets a silent
   advisory pass, which looks identical in the ledger to "checked and clean"
   unless you read the ledger's own notes.
+- **A declined check must still speak.** A pre-rule can do its job — check a
+  claim, find the fact and the claim actually agree once a tolerance or a
+  policy is applied — and still hurt you, if the only trace of that work is
+  silence. What this looks like: a truth-side claim gets flagged as if it
+  were contradicted, evidence for it is technically "present" in the pack
+  but never paired with the thing it was meant to settle, or a pre-rule's
+  own tolerance (a clock-drift window, a numeric-match check, a labelling
+  check) is never surfaced in the prose the judge actually reads. The judge
+  only sees the rendered sentences, not the code path that decided not to
+  fire; a bare number or a flat unqualified statement sitting next to a
+  claim reads as an open contradiction even when the check that produced it
+  already cleared the claim. The rule going forward: every free check a
+  door runs writes exactly one sentence either way — fired (a stated
+  conflict), declined (a stated reason it is *not* a conflict, naming the
+  tolerance or policy that applied), or not applicable (nothing was
+  checkable, so nothing is said). A door that runs a check and then says
+  nothing about the result it got has a hole here, whichever of the three
+  outcomes actually happened. See `docs/coverage.md` for where this has been
+  wired in and where it has not.
 
 ## 5. The loop: how you calibrate this yourself
 
