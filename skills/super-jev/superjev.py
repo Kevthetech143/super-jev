@@ -59,6 +59,11 @@ REPO_ROOT = SKILL_DIR.parent.parent  # skills/super-jev/superjev.py -> repo root
 FLEET_JEV_LIB = HOME / ".claude/skills/jev-check/lib/jev.py"
 FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 
+# The pure derive-facts/pre-rules pair (src/enhance/derive-facts.ts), reached
+# through its own tiny CLI so a Python process can call it without an FFI.
+# Only used by `verify`'s door-absent fallback — see _derived_facts_fallback.
+DERIVE_FACTS_CLI = REPO_ROOT / "src" / "derive-facts-cli.ts"
+
 GATE_CMD_ENV = "SUPERJEV_GATE_CMD"
 VERIFY_CMD_ENV = "SUPERJEV_VERIFY_CMD"
 
@@ -1716,12 +1721,253 @@ def _verify_timeout():
         return DEFAULT_VERIFY_TIMEOUT_S
 
 
+# ------------------------------------------------- derived-facts fallback
+#
+# worker-verify (FLEET_VERIFY_PY) is a fleet-local install; on a fresh clone
+# with no SUPERJEV_VERIFY_CMD it is simply absent, and `verify` used to just
+# refuse. That is honest but throws away the one part of the pattern that
+# needs no external tool at all: reading git/test/gh output in CODE instead
+# of by eye. This fallback runs ONLY when the real door is unreachable. It
+# gathers a small, best-effort evidence set itself (never as thorough as
+# worker-verify's own atom extraction), hands it to the pure
+# src/enhance/derive-facts.ts pair over its CLI, and prints the DERIVED FACTS
+# block plus the pre-rule verdicts it settles for free. It never calls a
+# judge — there is no evidence gathered here worth paying for a model call
+# over — so it can say CONTRADICTED_BY_FACT with confidence 1.00, but it can
+# never say CLEAN. A report with no settled contradiction is READ: unverified,
+# not vouched for.
+_PATH_RE = re.compile(r'(?<![\w@:])((?:~/|\./|/)?(?:[\w.\-]+/){1,8}[\w.\-]+)')
+_HASH_RE = re.compile(r'\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)([0-9a-f]{7,40})\b')
+_BRANCH_RE = re.compile(r'\b((?:feat|feature|fix|proto|chore|docs|bench|test|refactor|perf|'
+                        r'release|hotfix|wip|exp)/[\w.\-/]+)')
+
+
+def _light_atoms(text):
+    """A cut-down version of worker-verify's atom extraction: just enough to
+    find candidate paths, commit hashes and branch names in a report, for a
+    fallback that has no jev.py to lean on. Not a replacement for the real
+    thing — see worker-verify's extract_atoms for the thorough version."""
+    paths, hashes, branches = [], [], []
+    for m in _PATH_RE.finditer(text):
+        p = m.group(1).rstrip('.,;:!?)')
+        if p and p not in paths:
+            paths.append(p)
+    for m in _HASH_RE.finditer(text):
+        h = m.group(1)
+        if h not in hashes:
+            hashes.append(h)
+    for m in _BRANCH_RE.finditer(text):
+        b = m.group(1).rstrip('.,;:!?)')
+        if b not in branches:
+            branches.append(b)
+    # A branch is not also a path.
+    paths = [p for p in paths if p not in branches]
+    return paths[:20], hashes[:20], branches[:20]
+
+
+def _git_out(args, cwd):
+    try:
+        p = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                           text=True, timeout=20)
+        return p.returncode == 0, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+
+
+def _gather_local_evidence(report_text, worktree, test_cmd):
+    """Best-effort git/test evidence, gathered read-only, in the shape
+    src/enhance/derive-facts.ts's `Evidence` type expects. Never raises;
+    a block this cannot gather is simply left out, same contract as
+    worker-verify's own "not gathered" blocks."""
+    evidence = {}
+    paths, hashes, branches = _light_atoms(report_text)
+
+    if worktree:
+        wt = Path(worktree).expanduser()
+        ok, branch_out = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], wt)
+        if ok:
+            branch = branch_out.strip()
+            ok2, _up = _git_out(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], wt)
+            ahead = behind = 0
+            if ok2:
+                ok3, counts = _git_out(["rev-list", "--left-right", "--count", "HEAD...@{u}"], wt)
+                if ok3:
+                    parts = counts.split()
+                    if len(parts) == 2:
+                        try:
+                            ahead, behind = int(parts[0]), int(parts[1])
+                        except ValueError:
+                            pass
+            evidence["pushState"] = {"branch": branch, "hasUpstream": ok2,
+                                     "ahead": ahead, "behind": behind}
+
+        if paths:
+            tracked = []
+            lengths = []
+            for p in paths:
+                full = p if os.path.isabs(p) else (wt / p)
+                full = Path(full)
+                exists = full.exists() and full.is_file()
+                ok_tr, _ = _git_out(["ls-files", "--error-unmatch", p], wt)
+                tracked.append({"path": p, "existsOnDisk": full.exists(), "tracked": ok_tr})
+                if exists:
+                    try:
+                        with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                            n = sum(1 for _ in fh)
+                    except OSError:
+                        n = None
+                    lengths.append({"path": p, "exists": True, "lines": n})
+                else:
+                    lengths.append({"path": p, "exists": False})
+            evidence["tracked"] = tracked
+            evidence["lengths"] = lengths
+
+        ok_d, diff_out = _git_out(["diff", "--shortstat", "origin/main...HEAD"], wt)
+        if ok_d and diff_out.strip():
+            m = re.search(r'(\d+) files? changed(?:, (\d+) insertions?\(\+\))?'
+                          r'(?:, (\d+) deletions?\(-\))?', diff_out)
+            if m:
+                evidence["diffstat"] = {
+                    "base": "origin/main", "head": "HEAD",
+                    "filesChanged": int(m.group(1) or 0),
+                    "insertions": int(m.group(2) or 0),
+                    "deletions": int(m.group(3) or 0),
+                }
+
+        if hashes:
+            commits = []
+            for h in hashes:
+                ok_c, _ = _git_out(["cat-file", "-e", h], wt)
+                commits.append({"hash": h, "branch": "HEAD", "inLog": ok_c})
+            evidence["commits"] = commits
+
+        if branches:
+            branch_facts = []
+            for b in branches:
+                ok_b, listing = _git_out(["branch", "-a", "--list", b], wt)
+                branch_facts.append({"name": b, "exists": bool(ok_b and listing.strip())})
+            evidence["branches"] = branch_facts
+
+    if test_cmd:
+        bad = check_test_cmd_for_fallback(test_cmd, worktree)
+        if bad is None:
+            try:
+                p = subprocess.run(shlex.split(test_cmd), cwd=worktree or None,
+                                   capture_output=True, text=True, timeout=300)
+                out = (p.stdout or "") + (p.stderr or "")
+            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+                out = f"TEST COMMAND FAILED TO RUN: {exc}"
+            evidence["tests"] = {"command": test_cmd, "output": out}
+        else:
+            evidence["tests"] = {"command": test_cmd, "output": f"REFUSED: {bad}"}
+
+    return evidence
+
+
+def check_test_cmd_for_fallback(cmd, worktree):
+    """The same directory-level-pytest refusal worker-verify enforces
+    (see verify.py's check_test_cmd), kept small here because this fallback
+    has no import of verify.py to reuse — the whole point of this path is
+    that verify.py is ABSENT. Returns a refusal string, or None if fine."""
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return f"not parseable as a shell command: {cmd}"
+    if not toks:
+        return "empty test command"
+    is_pytest = toks[0] == "pytest" or ("pytest" in toks and toks[0] in ("python", "python3"))
+    if not is_pytest:
+        return None
+    named = [t for t in toks[1:] if t.endswith(".py") or "::" in t]
+    if named:
+        return None
+    return ("a directory-level pytest can launch an app or hit a live system; "
+            "name the test file instead")
+
+
+def _resolve_node():
+    return shutil.which("node")
+
+
+def _derived_facts_fallback(report_text, worktree, test_cmd):
+    """Run the derive-facts/pre-rules pair through its CLI over locally
+    gathered evidence, and return (block_text, verdicts, code) — or None if
+    this fallback itself cannot run (no node, no CLI file, or nothing at all
+    to gather). `code` is 4 (REJECT) when a pre-rule settles at least one
+    claim as CONTRADICTED_BY_FACT, else 3 (READ) — this path never returns 0
+    (CLEAN); it has no judge, so an unsettled claim stays unverified, never
+    vouched for."""
+    node = _resolve_node()
+    if not node or not DERIVE_FACTS_CLI.exists():
+        return None
+    if not worktree and not test_cmd:
+        return None
+    evidence = _gather_local_evidence(report_text, worktree, test_cmd)
+    if not evidence:
+        return None
+    claims = presplit_claims(report_text) or [report_text.strip()]
+    payload = json.dumps({"evidence": evidence, "claims": claims})
+    try:
+        p = subprocess.run([node, str(DERIVE_FACTS_CLI)], input=payload,
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if p.returncode != 0 or not p.stdout.strip():
+        return None
+    try:
+        result = json.loads(p.stdout)
+    except ValueError:
+        return None
+    formatted = result.get("formatted", "")
+    verdicts = result.get("verdicts", [])
+    lines = ["DERIVED FACTS (this evidence was gathered by super-jev's own "
+            "fallback path, not worker-verify — see docs/playbook.md):", formatted, ""]
+    if verdicts:
+        lines.append("PRE-RULE VERDICTS (settled in code, before any judge call):")
+        for v in verdicts:
+            lines.append(f"  CONTRADICTED_BY_FACT 1.00 — {v['claim']!r}: {v['reason']}")
+    else:
+        lines.append("PRE-RULE VERDICTS: none of the facts above contradict a claim in "
+                     "this report.")
+    lines.append("")
+    lines.append("No judge is reachable in this fallback (worker-verify is not installed "
+                "and SUPERJEV_VERIFY_CMD is not set), so nothing here can be called CLEAN. "
+                "Any claim not listed above as CONTRADICTED_BY_FACT is UNVERIFIED — read it "
+                "yourself.")
+    code = 4 if verdicts else 3
+    return "\n".join(lines), verdicts, code
+
+
 def cmd_verify(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
     bad = door_missing(VERIFY_CMD_ENV, FLEET_VERIFY_PY)
     if bad is not None:
-        return door_refuse(json_mode, "verify", bad)
+        # No door installed and no override. Before refusing outright, try
+        # the offline derived-facts/pre-rules fallback (src/enhance/
+        # derive-facts.ts via its CLI) — it needs no external door and no
+        # TypeSafe key, only git/test output this process gathers itself.
+        # See _derived_facts_fallback's docstring for exactly what it can
+        # and cannot settle.
+        report_text = ""
+        try:
+            report_text = Path(a.report).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+        fallback = _derived_facts_fallback(report_text, a.worktree, a.test_cmd) if report_text else None
+        if fallback is None:
+            return door_refuse(json_mode, "verify", bad)
+        block, verdicts, code = fallback
+        summary = VERIFY_VERDICT.get(code, f"exit {code}")
+        if json_mode:
+            emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code, summary,
+                      {"stdout": block, "stderr": "", "fallback": "derive-facts"}, [])
+            return code
+        if hook_mode:
+            return code, block, ""
+        print(block)
+        print(f"\nVERDICT: {summary}")
+        return code
     # Cap estimate + truncation, same rule as gate: a.report (the worker's
     # report — verify's equivalent of the draft) is never touched; --paths
     # (extra evidence files a caller named) is the only thing trimmed,
