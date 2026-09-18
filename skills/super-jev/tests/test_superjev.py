@@ -7993,6 +7993,562 @@ def test_replay_catch_cases_unsupported_shape_gets_its_own_message(tmp_path, mon
     assert "payload shape unsupported for this door" in out
 
 
+# ------------------------------------------------------------ catch signal
+
+def _false_block_record(rec_id, ts, reason, draft="a draft excerpt", bot=None):
+    rec = {"id": rec_id, "ts": ts, "door": "gate", "decision": "block",
+           "reasons": [reason], "draft_excerpt": draft, "window_bytes": None,
+           "ms": None, "tag": "false", "note": "wrong block"}
+    if bot is not None:
+        rec["bot"] = bot
+    return rec
+
+
+@pytest.mark.parametrize("reason,family", [
+    ("count mismatch (tests): draft 0/61 vs evidence 53", "count mismatch (tests)"),
+    ("count mismatch (tests): draft 2/9 vs evidence 4", "count mismatch (tests)"),
+    ("overclaim OVERCLAIMS 0.94", "overclaim OVERCLAIMS"),
+    ("c3 OVERCLAIMS 0.94 (overclaim==1.00 arm)", "OVERCLAIMS"),
+    ("c2 CONTRADICTED 0.82", "CONTRADICTED"),
+    ("leaked_internal HAS_LEAKS 0.95", "leaked_internal HAS_LEAKS"),
+    ("LABELLED VALUE: the draft states 12 next to a plain number",
+     "LABELLED VALUE"),
+    ("PR mismatch: draft says PR #9 merged, evidence shows open", "PR mismatch"),
+    ("", ""),
+    (None, ""),
+])
+def test_catch_reason_family_strips_numbers_and_values(reason, family):
+    assert sj._catch_reason_family(reason) == family
+
+
+def test_catch_signal_groups_by_family_not_raw_reason():
+    records = [
+        _false_block_record("f1", "2026-09-01T00:00:00+00:00",
+                            "count mismatch (tests): draft 0/61 vs evidence 53"),
+        _false_block_record("f2", "2026-09-02T00:00:00+00:00",
+                            "count mismatch (tests): draft 2/9 vs evidence 4"),
+        _false_block_record("f3", "2026-09-03T00:00:00+00:00",
+                            "count mismatch (tests): draft 1/3 vs evidence 2"),
+    ]
+    groups = sj._catch_signal_groups(records)
+    assert list(groups.keys()) == [("false", "count mismatch (tests)")]
+    assert [r["id"] for r in groups[("false", "count mismatch (tests)")]] == \
+        ["f1", "f2", "f3"]
+
+
+def test_catch_signal_per_call_claim_keys_collapse_into_one_family(
+        tmp_path, monkeypatch, capsys):
+    # FUNCTIONAL 3: the judge's reason shape is f"{k} {v} {s:.2f}" with k a
+    # PER-CALL claim key (c1/c2/c3/...), not part of the arm's identity —
+    # six OVERCLAIMS blocks that each happened to fire on a different
+    # claim index used to split across six distinct "families" and could
+    # never reach --min. They must now all collapse into one "OVERCLAIMS"
+    # family and signal.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    reasons = ["c1 OVERCLAIMS 0.91", "c3 OVERCLAIMS 0.94", "c2 OVERCLAIMS 0.88",
+              "c1 OVERCLAIMS 0.97", "c4 OVERCLAIMS 0.92", "c5 OVERCLAIMS 0.99"]
+    _write_catch_records(catch_path, [
+        _false_block_record(f"z{i}", f"2026-09-0{i+1}T00:00:00+00:00", r)
+        for i, r in enumerate(reasons)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: OVERCLAIMS (x6)" in out
+    assert "family: OVERCLAIMS  tag: false  count: 6" in out
+
+
+def test_catch_signal_threshold_below_min_produces_no_signal(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("t1", "2026-09-01T00:00:00+00:00", "PR mismatch: x"),
+        _false_block_record("t2", "2026-09-02T00:00:00+00:00", "PR mismatch: y"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "no reason family has reached --min 3" in out
+
+
+def test_catch_signal_at_threshold_exits_zero_and_prints_signal(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("s1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("s2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("s3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: PR mismatch (x3)" in out
+    assert "family: PR mismatch" in out
+    assert "count: 3" in out
+
+
+def test_catch_signal_examples_capped_at_three(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"e{i}", f"2026-09-0{i}T00:00:00+00:00",
+                            "PR mismatch: x", draft=f"draft number {i}")
+        for i in range(1, 6)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--with-drafts"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.count("draft:") == 3
+
+
+def test_catch_signal_default_body_carries_no_draft_derived_text(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 1: with neither --with-reasons nor --with-drafts, a signal's
+    # printed output and its issue body must carry only family/count/
+    # timestamps/record ids — the draft excerpt and the reason line (both
+    # of which can carry names, addresses, order numbers, health details,
+    # dollar figures, non-US phone numbers or token URLs no _catch_redact
+    # pattern ever covered) must never appear at all.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    secret_draft = "Dear Margaret Holloway, ship to 412 W 57th St, call +44 20 7946 0958"
+    _write_catch_records(catch_path, [
+        _false_block_record(f"g{i}", f"2026-09-0{i}T00:00:00+00:00",
+                            "PR mismatch: draft says PR #9 merged, evidence shows open",
+                            draft=secret_draft)
+        for i in range(1, 4)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "Margaret Holloway" not in out
+    assert "412 W 57th St" not in out
+    assert "7946 0958" not in out
+    assert "draft:" not in out
+    assert "reason:" not in out
+    assert "PR mismatch" in out  # family/title are still shown
+    assert "g1" in out and "g2" in out and "g3" in out  # record ids are shown
+    assert "Run `superjev catch list --id <id>` locally" in out
+
+
+def test_catch_signal_open_refuses_with_reasons_or_with_drafts(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 2: --open files a PUBLIC issue, so combining it with either
+    # local-preview flag is a hard usage error (exit 2) rather than a
+    # silent downgrade to the metadata-only body.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"h{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x")
+        for i in range(1, 4)
+    ])
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked when --open is refused")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo",
+                    "--with-reasons"])
+    assert code == 2
+    code2 = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo",
+                     "--with-drafts"])
+    assert code2 == 2
+
+
+def test_catch_signal_with_drafts_escapes_markdown_injection(
+        tmp_path, monkeypatch, capsys):
+    # BLOCKING 2: a draft can carry literal markdown/GitHub-autolink syntax
+    # — this must never be rendered live, even in the local-only preview
+    # modes (--open + --with-drafts is refused outright, see the test
+    # above, but --dry-run/--with-drafts alone still renders locally).
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    payload = "cc @torvalds ```rm -rf /``` <img src=x onerror=1> fixes #34"
+    _write_catch_records(catch_path, [
+        _false_block_record(f"i{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x",
+                            draft=payload)
+        for i in range(1, 4)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run", "--with-drafts"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "```" not in out
+    assert "@torvalds" not in out
+    assert "#34" not in out
+    assert "at:torvalds" in out
+    assert "no.34" in out
+
+
+def test_catch_signal_escape_markdown_helper_direct():
+    assert sj._catch_signal_escape_markdown("`code`") == "｀code｀"
+    assert sj._catch_signal_escape_markdown("cc @torvalds") == "cc at:torvalds"
+    assert sj._catch_signal_escape_markdown("fixes #34") == "fixes no.34"
+    assert sj._catch_signal_escape_markdown("") == ""
+    assert sj._catch_signal_escape_markdown(None) == ""
+    # An email address's "@" is a normal address character, not a handle —
+    # still gets neutralised the same way since this function cannot tell
+    # the difference, which is fine: it only ever runs on already-redacted
+    # text (see _catch_signal_examples), so a real email never reaches it.
+    assert sj._catch_signal_escape_markdown("a@b.com") == "aat:b.com"
+
+
+def test_catch_signal_min_zero_is_refused_not_silently_three(
+        tmp_path, monkeypatch, capsys):
+    # NIT: `getattr(a, "min", 3) or 3` used to silently rewrite an
+    # explicit `--min 0` into 3 because 0 is falsy. It must now reach the
+    # "--min must be at least 1" refusal instead.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("k1", "2026-09-01T00:00:00+00:00", "PR mismatch: x"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "0"])
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "must be at least 1" in err
+
+
+def test_catch_signal_open_exits_3_when_a_filing_fails(tmp_path, monkeypatch, capsys):
+    # NIT: `--open` used to always exit 0 even when every attempted filing
+    # failed, so a cron caller could not branch on it without parsing
+    # output. A gh failure must now surface as exit 3.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"n{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x")
+        for i in range(1, 4)
+    ])
+    fake = FakeDoor(1, stdout="", stderr="gh: HTTP 403 forbidden")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    assert code == 3
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert not sidecar.exists()
+
+
+def test_catch_list_with_id_shows_full_detail_for_one_record(
+        tmp_path, monkeypatch, capsys):
+    # The pointer text `catch signal`'s own issue body gives a human
+    # ("run `superjev catch list --id <id>` locally") must be a real,
+    # working lookup — a single-record --id query, unlike the summary
+    # table, shows every reason and the full (already-redacted) draft
+    # excerpt.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("look1", "2026-09-01T00:00:00+00:00", "PR mismatch: x",
+                            draft="a redacted excerpt"),
+        _false_block_record("look2", "2026-09-02T00:00:00+00:00", "PR mismatch: y"),
+    ])
+    code = sj.main(["catch", "list", "--id", "look1"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "look1" in out
+    assert "look2" not in out
+    assert "a redacted excerpt" in out
+
+
+def test_catch_list_with_id_missing_prints_message_not_crash(
+        tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [])
+    code = sj.main(["catch", "list", "--id", "nope"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no record with id" in out
+
+
+def test_catch_signal_miss_family_gets_its_own_title(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    records = []
+    for i in range(3):
+        rec = _false_block_record(f"m{i}", f"2026-09-0{i+1}T00:00:00+00:00",
+                                  "PR mismatch: x")
+        rec["decision"] = "allow"
+        rec["tag"] = "miss"
+        records.append(rec)
+    _write_catch_records(catch_path, records)
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "missed lie: PR mismatch (x3)" in out
+
+
+def test_catch_signal_dry_run_never_calls_gh(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("d1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("d2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("d3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    called = {"n": 0}
+
+    def fake_run(*a, **kw):
+        called["n"] += 1
+        raise AssertionError("gh must never be invoked under --dry-run")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert called["n"] == 0
+    assert "issue body" in out
+    assert "Reason family: `PR mismatch`" in out
+
+
+def test_catch_signal_open_without_repo_refused(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("r1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("r2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("r3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked without --repo")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open"])
+    assert code == sj.REFUSED
+
+
+def test_catch_signal_open_calls_gh_and_writes_sidecar(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("o1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("o2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("o3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    fake = FakeDoor(0, stdout="https://github.com/acme/repo/issues/42\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "filed: https://github.com/acme/repo/issues/42" in out
+    assert len(fake.calls) == 1
+    argv = fake.calls[0]["cmd"]
+    assert argv[:3] == ["gh", "issue", "create"]
+    assert "--repo" in argv and "acme/repo" in argv
+    assert "--label" in argv and "harness-signal" in argv
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert sidecar.exists()
+    lines = [json.loads(l) for l in sidecar.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["issue_url"] == "https://github.com/acme/repo/issues/42"
+    assert lines[0]["family"] == "PR mismatch"
+
+    # A second run must not file the same family twice.
+    fake2 = FakeDoor(0, stdout="https://github.com/acme/repo/issues/99\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake2)
+    code2 = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    out2 = capsys.readouterr().out
+    assert code2 == 0
+    assert "already filed: https://github.com/acme/repo/issues/42" in out2
+    assert len(fake2.calls) == 0
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("nothing sensitive here", False),
+    ("", False),
+    (None, False),
+    ("call me at 212-555-0100 about this", True),
+    ("reach me at someone@example.com", True),
+    ("ssn on file: 123-45-6789", True),
+])
+def test_catch_signal_has_pii(text, expected):
+    assert sj._catch_signal_has_pii(text) is expected
+
+
+def test_catch_signal_refuses_to_open_when_body_still_carries_pii(
+        tmp_path, monkeypatch, capsys):
+    # Examples are already redacted by _catch_signal_examples before they
+    # ever reach the body, so this test forces the guard itself to fire
+    # (a belt-and-suspenders check, not something the normal ledger path
+    # is expected to hit) by monkeypatching _catch_signal_has_pii to True,
+    # and asserts the command wiring honours that guard: gh is never
+    # called and nothing is written to the sidecar.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("p1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("p2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("p3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    monkeypatch.setattr(sj, "_catch_signal_has_pii", lambda body: True)
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked when the guard trips")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    err = capsys.readouterr().err
+    # NIT: a refused filing now surfaces as exit 3, not a silent 0 — see
+    # test_catch_signal_open_exits_3_when_a_filing_fails.
+    assert code == 3
+    assert "refusing to open an issue" in err
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert not sidecar.exists()
+
+
+# ---------------------------------------- catch signal: per-bot breakdown
+
+def test_catch_list_id_and_bot_filters_compose(tmp_path, monkeypatch, capsys):
+    # PR #60 round 3, item 1: `--id` (feat/catch-signal) and `--bot`
+    # (landed on main as part of PR #59/#62) must both work on `catch
+    # list` at once, not one clobbering the other.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("q1", "2026-09-01T00:00:00+00:00", "PR mismatch: a",
+                            bot="primary"),
+        _false_block_record("q2", "2026-09-02T00:00:00+00:00", "PR mismatch: b",
+                            bot="worker2"),
+    ])
+    code = sj.main(["catch", "list", "--id", "q1", "--bot", "primary"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "q1" in out
+    assert "q2" not in out
+    # a real id under the WRONG --bot filter is filtered away like any
+    # other --bot mismatch, not treated as an id-always-wins override
+    code2 = sj.main(["catch", "list", "--id", "q1", "--bot", "worker2"])
+    out2 = capsys.readouterr().out
+    assert code2 == 0
+    assert "no record with id" in out2
+
+
+def test_catch_signal_bot_flag_restricts_grouping(tmp_path, monkeypatch, capsys):
+    # `catch signal --bot <id>` must restrict which records are even
+    # grouped/counted toward --min, not just annotate the output.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"r{i}", f"2026-09-0{i}T00:00:00+00:00", "PR mismatch: x",
+                            bot="primary")
+        for i in range(1, 3)
+    ] + [
+        _false_block_record("r3", "2026-09-03T00:00:00+00:00", "PR mismatch: x",
+                            bot="worker2"),
+    ])
+    # all 3 records share a family and reach --min 3 when unfiltered
+    code_all = sj.main(["catch", "signal", "--min", "3"])
+    assert code_all == 0
+    # restricting to one bot drops the count below --min
+    code_bot = sj.main(["catch", "signal", "--min", "3", "--bot", "primary"])
+    assert code_bot == 1
+
+
+def test_catch_signal_prints_per_bot_breakdown_counts_only(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("s1", "2026-09-01T00:00:00+00:00", "PR mismatch: a",
+                            bot="primary"),
+        _false_block_record("s2", "2026-09-02T00:00:00+00:00", "PR mismatch: b",
+                            bot="primary"),
+        _false_block_record("s3", "2026-09-03T00:00:00+00:00", "PR mismatch: c",
+                            bot="worker2"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "by bot: primary=2, worker2=1" in out
+    # counts only — no reason/draft text in the breakdown line
+    assert "mismatch" not in out.split("by bot:")[1].split("\n")[0]
+
+
+def test_catch_signal_body_has_bot_breakdown_line(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("t1", "2026-09-01T00:00:00+00:00", "PR mismatch: a",
+                            bot="primary"),
+        _false_block_record("t2", "2026-09-02T00:00:00+00:00", "PR mismatch: b",
+                            bot="primary"),
+        _false_block_record("t3", "2026-09-03T00:00:00+00:00", "PR mismatch: c",
+                            bot="worker2"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "By bot: primary=2, worker2=1" in out
+
+
+# ---------------------------------- catch signal: reason-family bounding
+#
+# PR #60 round 3, items 2-3: a colonless reason with no recognised
+# HEADER:/judge-score-keyword prefix (an "advisory note") used to become
+# the family VERBATIM — the one string that ever reached a public issue
+# title/body without going through _catch_redact or
+# _catch_signal_escape_markdown, and one such note per differing
+# detail/score never collapsed into a single family the way every other
+# arm's blocks did.
+
+def test_catch_reason_family_buckets_colonless_advisory_notes():
+    # the reviewer's example shape: an advisory note embedding a
+    # --test-cmd argument, no colon, no judge-score shape at all
+    note = ("the reply cites --test-cmd 'pytest tests/test_foo.py' but no "
+            "tool ran this turn, so this is advisory only")
+    assert sj._catch_reason_family(note) == "the reply"
+    # a second note with the same score-free lead-in, different detail —
+    # must collapse to the SAME family, not a family of its own
+    note2 = ("the reply cites --test-cmd 'npm run build' but nothing "
+             "actually executed on this turn either")
+    assert sj._catch_reason_family(note2) == "the reply"
+    # a note that doesn't even start with two plain-letter words falls
+    # back to the fixed literal bucket
+    note3 = "123 not a real header and no score shape at all here"
+    assert sj._catch_reason_family(note3) == "advisory-note"
+
+
+def test_catch_signal_advisory_notes_collapse_into_one_family_not_one_per_note(
+        tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    notes = [
+        "the reply cites --test-cmd 'pytest a.py' but nothing ran turn one",
+        "the reply cites --test-cmd 'pytest b.py' but nothing ran turn two",
+        "the reply cites --test-cmd 'pytest c.py' but nothing ran turn three",
+    ]
+    _write_catch_records(catch_path, [
+        _false_block_record(f"u{i}", f"2026-09-0{i+1}T00:00:00+00:00", n)
+        for i, n in enumerate(notes)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: the reply (x3)" in out
+    # the full advisory note text (draft-derived, unredacted by family
+    # alone) must never appear verbatim in the default metadata-only output
+    assert "--test-cmd" not in out
+    assert "pytest a.py" not in out
+
+
+def test_catch_reason_family_caps_length_at_60_chars():
+    long_header = ("x" * 200) + ": trailing detail that would otherwise make "
+    family = sj._catch_reason_family(long_header)
+    assert len(family) <= 60
+
+
+@pytest.mark.parametrize("raw_family,expect_in_title,expect_not_in_title", [
+    ("weird `header` here", "｀header｀", "`header`"),
+    ("mentions @someone", "at:someone", "@someone"),
+    ("issue #12 crashed", "no.12", "#12"),
+])
+def test_catch_signal_title_escapes_markdown_in_family(
+        raw_family, expect_in_title, expect_not_in_title):
+    # belt-and-braces: _catch_signal_title escapes `family` again itself,
+    # rather than trusting _catch_reason_family's own escape pass to be
+    # the only one — called here with a raw, still-unescaped family
+    # (as if some future caller ever built a signal dict by hand) to
+    # prove the title-building step does its own escaping.
+    title = sj._catch_signal_title("false", raw_family, 3)
+    assert expect_in_title in title
+    assert expect_not_in_title not in title
+
+
+def test_catch_signal_body_escapes_markdown_in_family_line():
+    signal = {
+        "title": "false block: weird ｀header｀ here (x3)",
+        "family": "weird `header` here",
+        "tag": "false",
+        "count": 3,
+        "first_ts": "2026-09-01T00:00:00+00:00",
+        "last_ts": "2026-09-03T00:00:00+00:00",
+        "ids": ["v1", "v2", "v3"],
+        "examples": [{"id": "v1"}, {"id": "v2"}, {"id": "v3"}],
+        "bot_counts": {},
+    }
+    body = sj._catch_signal_body(signal)
+    assert "｀header｀" in body
+    assert "`header`" not in body
+
+
 # ------------------------------------------------------------ ledger bot/origin
 
 def test_bot_id_from_transcript_path_extracts_the_agent_cwd_segment():
