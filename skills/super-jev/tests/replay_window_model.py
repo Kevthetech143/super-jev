@@ -10,8 +10,7 @@ and compares, offline, with no network and no TYPESAFE_API_KEY:
      `meta` dict, field for field.
   3. The round-trip property `from_text(render(from_transcript(t))) ==
      from_transcript(t)` — the two constructors agreeing on PIECES, not
-     just on bytes. Reported twice: as the default parser sees it, and
-     under `bodies_fenced=True`.
+     just on bytes, under `from_text`'s one fail-closed parse.
   4. The SAFETY direction, on every case including the ones property 3
      does not hold for: every line `from_text` marks trusted is a line
      `from_transcript` also marks trusted, AND carries the same PIECE
@@ -29,11 +28,12 @@ often is a measurement worth having rather than a bug. This checkout's
 composer copies a worker's report body in VERBATIM, so once a report
 label appears, `from_text` cannot prove that a later `===` is the
 composer's section separator rather than the worker's own text, and folds
-everything after it into the report. The `bodies_fenced=True` figure is
-the same parse under the assertion that the composer bounds its bodies
-(PR #53's `_render_report_block`), and the gap between the two numbers IS
-the cost of failing closed. Property 4 is what makes it acceptable, and
-properties 1, 2 and 4 cover every case regardless.
+everything after it into the report. There is no flag that recovers the
+exact parse on this checkout's bytes — `from_text` takes no assertion
+about the composer on faith, because trusting an unverified claim about
+the composer is exactly the hole it exists to close (see
+`window_model.from_text`). Property 4 is what makes the loss acceptable,
+and properties 1, 2 and 4 cover every case regardless.
 
     python3 skills/super-jev/tests/replay_window_model.py
 
@@ -85,13 +85,6 @@ def _load_superjev(directory):
 
 sj = _load_superjev(COMPOSER_DIR)
 import window_model as wm        # noqa: E402
-
-#: True when the loaded composer BOUNDS its report bodies — closes each
-#: with its own fence and quotes structure lines out of it (PR #53's
-#: `_render_report_block`). Feature-detected, never branch-named, and the
-#: one condition under which `from_text` may honour a section boundary
-#: that follows a report. See `window_model.from_text`.
-BODIES_FENCED = hasattr(sj, "_render_report_block")
 
 #: True when the composer under test is this checkout's own. Byte and meta
 #: identity is then required on EVERY case. Against a foreign composer it
@@ -157,13 +150,11 @@ def main():
               f"(set SUPERJEV_BENCH_ROOT) — nothing to replay, skipping")
         return 0
 
-    print(f"composer under test: {COMPOSER_DIR}"
-          f" (report bodies {'fenced' if BODIES_FENCED else 'verbatim'})")
+    print(f"composer under test: {COMPOSER_DIR}")
 
     byte_ok, byte_bad = [], []
     meta_ok, meta_bad = [], []
     trip_ok, trip_lossy = [], []
-    trip_fenced_ok = []
     cut_diff = []
     unsafe = []
     empty = []
@@ -201,20 +192,13 @@ def main():
                     if want_meta.get(k) != got_meta.get(k)}
             meta_bad.append((cid, diff))
 
-        reparsed = wm.from_text(got, byte_cap=win.byte_cap,
-                                bodies_fenced=BODIES_FENCED)
+        reparsed = wm.from_text(got, byte_cap=win.byte_cap)
         if win.truncated.legacy_tail_cut:
             tail_cut.append(cid)
         elif reparsed == win:
             trip_ok.append(cid)
-            trip_fenced_ok.append(cid)
         else:
             trip_lossy.append(cid)
-            # The same parse under the assertion that the composer bounds
-            # its report bodies. The gap is what failing closed costs.
-            if wm.from_text(got, byte_cap=win.byte_cap,
-                            bodies_fenced=True) == win:
-                trip_fenced_ok.append(cid)
         # Property 4: re-parsing bytes may LOSE trust, never invent it.
         if win.truncated.legacy_tail_cut:
             # The tail cut lands mid-line, so whole-line identity says
@@ -245,8 +229,6 @@ def main():
     print(f"from_text round-trips to the same pieces: "
           f"{len(trip_ok)}/{n - len(tail_cut)} (excluding "
           f"{len(tail_cut)} legacy tail-cut windows)")
-    print(f"  the same, if report bodies were bounded: "
-          f"{len(trip_fenced_ok)}/{n - len(tail_cut)}")
     if empty:
         print(f"windows the composer returns None for: {len(empty)}")
     for cid, diff in meta_bad:

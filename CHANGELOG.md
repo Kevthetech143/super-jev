@@ -59,9 +59,10 @@ No version bump.
   because this branch's composer copies report bodies in verbatim, and
   past a byte-cut marker nothing is structure in either direction. The
   cost is that a window carrying a relayed report no longer re-parses to
-  the same pieces; `bodies_fenced=True` is the flag a migration flips
-  once the composer fences its bodies, and the replay prints both numbers
-  so the gap is visible.
+  the same pieces, and there is no flag that buys the exact parse back —
+  `from_text` never takes a caller's word for how its bytes were built,
+  so it fails closed on every input, always. The replay prints the
+  round-trip count so the gap is visible.
 
   New `skills/super-jev/tests/test_window_model.py` (offline) and
   `skills/super-jev/tests/replay_window_model.py`, which replays every
