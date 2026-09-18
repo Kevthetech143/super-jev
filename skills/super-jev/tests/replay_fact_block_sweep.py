@@ -198,6 +198,7 @@ def main():
     truths_flipped = []
     fact_family_counts = {}
     baseline_errors = []
+    live_errors = []
 
     baseline, baseline_ref, baseline_sha = _load_baseline_module()
     print(f"baseline ref: {baseline_ref}  sha: {baseline_sha or '(unresolved)'}")
@@ -226,8 +227,19 @@ def main():
             draft = sj._strip_machine_tags(case.get("draft") or "")
             try:
                 fact_reasons = _window_fact_reasons(sj, transcript_path, draft)
-            except Exception as e:                       # never let one bad
-                print(f"  {set_name}/{cid}: window build raised {e!r} — skipped")
+            except Exception as e:
+                # Mirrors the baseline treatment below: a live-side
+                # exception used to print-and-`continue` with no counter
+                # and no effect on the exit code, so a live-module crash
+                # quietly shrank coverage (fewer cases replayed, no sign
+                # anything went wrong) instead of failing the sweep. Now
+                # every one is counted, printed under its own "LIVE ERROR"
+                # line, and turns the run into a hard FAIL — a live module
+                # that cannot run on a case is not a case this sweep
+                # silently gets to skip.
+                live_errors.append((set_name, cid, repr(e)))
+                print(f"  {set_name}/{cid}: LIVE ERROR — window build "
+                      f"raised {e!r}")
                 continue
             old_blocked = False
             if baseline is not None:
@@ -262,6 +274,9 @@ def main():
 
     print(f"\ncases replayed     : {total_cases}")
     print(f"fact families fired: {fact_family_counts or '(none)'}")
+    print(f"live errors        : {len(live_errors)}")
+    for set_name, cid, err in live_errors:
+        print(f"  LIVE ERROR  {set_name:<20} {cid:<6} {err}")
     print(f"baseline errors    : {len(baseline_errors)}")
     for set_name, cid, err in baseline_errors:
         print(f"  BASELINE ERROR  {set_name:<20} {cid:<6} {err}")
@@ -272,6 +287,13 @@ def main():
     for set_name, cid in truths_flipped:
         print(f"  TRUTH BLOCKED  {set_name} {cid}")
 
+    if live_errors:
+        print(f"\nFAIL — {len(live_errors)} live-side call(s) raised instead "
+              "of running; that case never had a chance to fire any fact "
+              "family, so this sweep's coverage is smaller than it looks. "
+              "Fix the live call (or the code under test) before trusting "
+              "this sweep.")
+        return 1
     if baseline_errors:
         print(f"\nFAIL — {len(baseline_errors)} baseline call(s) raised instead "
               "of running; every decision-flip result above is unreliable "
