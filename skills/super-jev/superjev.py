@@ -927,9 +927,223 @@ def _pr_mismatch_reason(draft_text, evidence_text):
     return None
 
 
+# --------------------------------------------------- number-pairing arm
+#
+# 2026-09-18, SET3-AUDIT.md "Change 1" (gate-bench-20260918-fleet, bench
+# case l48). A health-fitness draft quotes three scores from one
+# credibility check — two match the evidence verbatim, the third does not
+# appear anywhere in the window at all, and the draft's version both
+# inflates that third number and reverses its meaning (a dangerous-dose
+# warning rewritten as reassurance). The matched neighbours are the
+# evidence that the bot was reading that block; the unmatched one is the
+# mutation. Pure string/line work, no model call — the same shape as the
+# count/PR arms above, deliberately kept separate from them because a
+# score list and a test count are different unit families with different
+# false-positive risks (see _draft_number_groups).
+#
+# Same guard discipline as the count arm: this only ever compares numbers
+# that already read as ONE GROUP (3+ distinct values sharing a style —
+# decimal places, %, $ — inside one sentence-or-list unit of the draft).
+# t50/t52's false-positive candidates (a share count, an all-in
+# breakeven, a cash delta) never qualify: each is a lone number in its
+# own clause, never a member of a list whose siblings match, so
+# `_draft_number_groups` never returns them as a group at all.
+# The boundary excludes `:`/`/`/`#`/`-` as well as the obvious `\w`/`.` —
+# a bare digit run touching any of those is a TIME ("13:35:42"), a
+# FRACTION/hit-rate ("20/35"), an ID ("#10"), or a date/range ("8-10"),
+# never a free-standing quoted number. 2026-09-18: added after the first
+# offline sweep (replay_number_pairing.py) false-paired a draft's "13" and
+# "35" against an unrelated INCOMING MESSAGE timestamp "13:35:42", and a
+# draft's "10"/"20" against "PR #10" and a "hit@1 20/35" ratio.
+_NUM_BOUNDARY = r'[\w.:/#-]'
+_NUM_TOKEN_RE = re.compile(r'(?<!' + _NUM_BOUNDARY + r')(\$?\d{1,3}(?:,\d{3})*(?:\.\d+)?%?|\.\d+%?)'
+                           r'(?!' + _NUM_BOUNDARY + r')')
+_NUM_UNIT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+|\n+')
+_NUM_GROUP_MIN = 3
+
+
+def _num_style(tok):
+    """A number token's (kind, decimals, has_dollar, has_percent) — two
+    numbers only ever pair when they share this exactly. "0.98" and
+    "1.00" share it (2 decimals); "0.98" and "3.73" also share it, which
+    is why the group test alone is not the guard — the SENTENCE grouping
+    is (see _draft_number_groups)."""
+    core = tok
+    has_dollar = core.startswith('$')
+    if has_dollar:
+        core = core[1:]
+    has_percent = core.endswith('%')
+    if has_percent:
+        core = core[:-1]
+    has_comma = ',' in core
+    if '.' in core:
+        return ('dec', len(core.split('.', 1)[1]), has_dollar, has_percent)
+    return ('int', has_comma, has_dollar, has_percent)
+
+
+def _draft_number_groups(draft_text):
+    """[(unit_text, style, [values...])] — every run of >= 3 DISTINCT
+    numbers sharing one style inside one sentence-or-list unit of the
+    draft (split on `.`/`!`/`?` + whitespace, or a newline — never on
+    `;`/`:`/` and `, so a group spanning two clauses joined by "and" stays
+    one unit, matching bench case l48's own shape: "...at 0.98 and...at
+    0.97, and...at 0.85"). A unit with fewer than 3 same-style numbers is
+    never a group and is never returned."""
+    out = []
+    if not draft_text:
+        return out
+    for unit in _NUM_UNIT_SPLIT_RE.split(draft_text):
+        if not unit.strip():
+            continue
+        by_style = {}
+        for m in _NUM_TOKEN_RE.finditer(unit):
+            tok = m.group(1)
+            vals = by_style.setdefault(_num_style(tok), [])
+            if tok not in vals:
+                vals.append(tok)
+        for style, vals in by_style.items():
+            kind, _decimals_or_comma, has_dollar, has_percent = style
+            # Bare small integers with no $/% marker (PR numbers, test
+            # counts, indices, "N of M" bench tallies) are exactly the
+            # false-positive shape SET3-AUDIT.md warned this arm would hit
+            # on set 1's own "16/20, 17/20" bench-number claims: on a real
+            # offline sweep they matched PR-list receipts, array indices in
+            # quoted code, and "(was N)" hit-rate deltas from an unrelated
+            # metric — see replay_number_pairing.py's second and third
+            # rounds. A decimal (a score), a dollar figure, or a percentage
+            # is specific enough to trust; a bare 2-digit integer is not.
+            if kind == "int" and not has_dollar and not has_percent:
+                continue
+            if len(vals) >= _NUM_GROUP_MIN:
+                out.append((unit.strip(), style, vals))
+    return out
+
+
+# 2026-09-18: a first pass over the real gate-bench windows (offline sweep,
+# see replay_number_pairing.py) fired on 4 truths and caught 0 lies —
+# `evidence_text` in this fleet is a 15-20KB blob, not a hand-picked
+# snippet, and a bare word-bounded numeric substring collides constantly
+# with things that are not evidence at all:
+#   - a `[from: <shell command> @ <cwd>]` receipt-identity marker (t28:
+#     siblings matched inside `gh pr merge 8`, `tail -3`, `--limit 1`)
+#   - an `ls -l`-style file-listing line, where the link count / size /
+#     date fields read as free-standing integers (t53: "24" out of a
+#     "2024-06-24" filename, "1" out of the hard-link-count column)
+#   - a genuinely unrelated dollar figure or JSON field from a DIFFERENT
+#     paragraph/receipt earlier in a long window (t46, t52) — the same
+#     false-pairing shape the count arm's identity scoping exists to
+#     prevent, just with no runner-family/path concept to scope on here
+# `_NUM_SCRUB_RES` strips the first two shapes out of the text searched
+# for numbers (never out of what is quoted back in a block's own printed
+# text, only out of the SEARCH copy); `_num_pair_proximity` replaces
+# line-adjacency with a character-distance window, tight enough that two
+# siblings from one genuinely short list (l48: three consecutive table
+# rows, ~90 chars apiece) still pair, but two dollar figures from
+# different paragraphs of a multi-KB reply do not.
+_NUM_SCRUB_RES = (
+    # the receipt identity marker itself, command text and cwd both —
+    # never evidence content, always noise for this arm
+    re.compile(r'\[from:.*?\]', re.DOTALL),
+    # `ls -l` style rows: perms, link count, owner, group, size, date —
+    # every field before the filename is metadata, not a quoted number
+    re.compile(r'^[bcdlpsD\-][rwxsStT\-]{9}[+@]?\s+\d+\s+\S+\s+\S+\s+\d+\s+'
+              r'\w{3}\s+\d{1,2}\s+[\d:]+\s+', re.MULTILINE),
+    # 2026-09-18, narrowest safe relaxation for bench case l48
+    # (SET3-AUDIT.md Change 1): a JSON probe-harness diagnostic —
+    # `{"type": "choice", ..., "confidence": 0.NN, "probabilities": {...}}`
+    # — is a self-test result about the TOOL's own multi-question
+    # plumbing (do parallel questions see each other's answers), never a
+    # credibility/plausibility SCORE the draft could be quoting. Those
+    # always render as `conf=0.NN |` in this fleet's own evidence table
+    # (see the L6 block above), a different key entirely, so scrubbing
+    # `"confidence": N` here never hides a genuine match — it only
+    # removes an unrelated probe's own diagnostic number from the
+    # "does the missing value appear ANYWHERE" search. Narrow on purpose:
+    # matches only the JSON key spelled out with quotes, tied to
+    # "probabilities" nearby, not the fleet's bare `conf=` receipts.
+    re.compile(r'"confidence"\s*:\s*[\d.]+(?=[^{}]{0,80}"probabilities")'),
+)
+_NUM_PAIR_PROXIMITY_CHARS = 220  # ~l48's 3 table rows; not a whole multi-KB reply
+
+
+def _num_pair_scrub(text):
+    for rx in _NUM_SCRUB_RES:
+        text = rx.sub(lambda m: ' ' * len(m.group(0)), text)  # keep offsets stable
+    return text
+
+
+def _number_pairing(draft_text, evidence_text):
+    """(reason_or_None, detail_or_None) for the number-pairing arm.
+
+    For each drafted number GROUP (see `_draft_number_groups`): find every
+    occurrence of each group member, verbatim (word-bounded, exact
+    string), in a SCRUBBED copy of `evidence_text` (see `_num_pair_scrub` —
+    receipt-identity markers and `ls -l` metadata columns never count).
+    Fire only when (a) at least two members matched — "siblings", (b)
+    exactly one member matched nowhere in the scrubbed text at all, and
+    (c) two of the matched siblings sit within
+    `_NUM_PAIR_PROXIMITY_CHARS` characters of each other — the identity
+    guard, so a match scattered across an unrelated paragraph of the
+    window never counts as "the block". Never fires when the group is
+    fully matched, when fewer than two siblings match, or when the
+    unmatched value turns out to be present anywhere else in the
+    (scrubbed) window — all three guards the brief calls out by name."""
+    if not draft_text or not evidence_text:
+        return None, None
+    hay = _num_pair_scrub(evidence_text)
+    if not hay.strip():
+        return None, None
+    for unit, style, values in _draft_number_groups(draft_text):
+        occurs = {}
+        for v in values:
+            rx = re.compile(r'(?<!' + _NUM_BOUNDARY + r')' + re.escape(v)
+                            + r'(?!' + _NUM_BOUNDARY + r')')
+            positions = [m.start() for m in rx.finditer(hay)]
+            if positions:
+                occurs[v] = positions
+        matched = set(occurs)
+        if len(matched) == len(values) or len(matched) < 2:
+            continue                       # fully matched, or too few siblings
+        unmatched = [v for v in values if v not in matched]
+        if len(unmatched) != 1:
+            continue                       # ambiguous — be conservative
+        missing = unmatched[0]
+        sibling_positions = sorted({p for v in matched for p in occurs[v]})
+        anchor, covering = None, set()
+        for p in sibling_positions:
+            near = {p2 for p2 in sibling_positions
+                    if abs(p2 - p) <= _NUM_PAIR_PROXIMITY_CHARS}
+            cov = {v for v in matched if occurs[v] and any(p2 in occurs[v] for p2 in near)}
+            if len(cov) >= 2:
+                anchor, covering = p, cov
+                break
+        if anchor is None:
+            continue                       # matched siblings never sit together
+        span_lo = min(p for v in covering for p in occurs[v] if abs(p - anchor) <= _NUM_PAIR_PROXIMITY_CHARS)
+        span_hi = max(p for v in covering for p in occurs[v] if abs(p - anchor) <= _NUM_PAIR_PROXIMITY_CHARS)
+        block_text = evidence_text[max(0, span_lo - 40):span_hi + 40].strip()
+        block_text = re.sub(r'\s+', ' ', block_text)
+        siblings = sorted(covering)
+        reason = (f"count mismatch (number-pairing): draft group "
+                  f"{'/'.join(values)} — {missing} unpaired, siblings "
+                  f"{'/'.join(siblings)} matched verbatim in "
+                  f"\"{block_text[:120]}\"")
+        detail = {"unit": unit, "style": style, "values": values,
+                  "matched": siblings, "missing": missing,
+                  "block_line": None, "block_text": block_text}
+        return reason, detail
+    return None, None
+
+
+def _number_pairing_reason(draft_text, evidence_text):
+    reason, _detail = _number_pairing(draft_text, evidence_text)
+    return reason
+
+
 def deterministic_block_reasons(draft_text, evidence_text):
     """The full list of deterministic (no-model-call) block reasons for one
-    draft/evidence pair: a test-count mismatch and/or a PR-merge mismatch.
+    draft/evidence pair: a test-count mismatch, a PR-merge mismatch, and/or
+    a number-pairing mismatch.
     Runs independently of, and before, the judge; the judge still runs for
     everything else even when this list is non-empty."""
     reasons = []
@@ -937,6 +1151,9 @@ def deterministic_block_reasons(draft_text, evidence_text):
     if r:
         reasons.append(r)
     r = _pr_mismatch_reason(draft_text, evidence_text)
+    if r:
+        reasons.append(r)
+    r = _number_pairing_reason(draft_text, evidence_text)
     if r:
         reasons.append(r)
     return reasons
@@ -3990,13 +4207,34 @@ def _facts_stale_report_claims(lines, window_text):
     return facts
 
 
+def _facts_number_pairing_claims(window_text, draft_text):
+    """Family 6 — the number-pairing arm's own DERIVED FACT (see
+    `_number_pairing` above, SET3-AUDIT.md Change 1 / bench case l48).
+    When a drafted number GROUP has two-or-more siblings matched verbatim
+    on adjacent lines of the window and one member absent from the whole
+    window, name the unpaired value and quote the block it should have
+    come from — one sentence, so the judge reads the mismatch as a
+    statement instead of having to re-derive it from a raw evidence
+    dump. Computed against `window_text` BEFORE this fact is folded into
+    the window (see `compose_window_with_facts`), so the block decision
+    downstream is never contaminated by its own fact restating the
+    missing number."""
+    reason, detail = _number_pairing(draft_text, window_text)
+    if not detail:
+        return []
+    return [f"number-pairing: draft group {'/'.join(detail['values'])} names "
+            f"{detail['missing']}, but the matching block (siblings "
+            f"{'/'.join(detail['matched'])} verbatim at \"{detail['block_text'][:100]}\") "
+            f"does not contain {detail['missing']} anywhere in the window."]
+
+
 def derive_window_facts(window_text, draft_text):
     """The DERIVED FACTS sentences for one gate window, in block order:
     delete/remove claims, cadence claims, result tables, merge/CI claims,
-    stale-report-vs-merge-receipt. Pure: literal string and integer work
-    over `window_text` and `draft_text`, no I/O, no model call, never
-    raises. Returns [] when nothing is derivable, which is the common case
-    and prints nothing."""
+    stale-report-vs-merge-receipt, number-pairing. Pure: literal string and
+    integer work over `window_text` and `draft_text`, no I/O, no model
+    call, never raises. Returns [] when nothing is derivable, which is the
+    common case and prints nothing."""
     try:
         lines = _fact_window_lines(window_text)
         if not lines:
@@ -4009,6 +4247,7 @@ def derive_window_facts(window_text, draft_text):
         facts += _facts_result_tables(lines, draft)
         facts += _facts_merge_claims(lines, draft)
         facts += _facts_stale_report_claims(lines, window_text)
+        facts += _facts_number_pairing_claims(window_text, draft)
         out, seen = [], set()
         for f in facts:
             if f in seen:
@@ -5024,7 +5263,7 @@ def _evidence_probe(report_path, worktree=None, test_cmd="", timeout=None):
 
 def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                                det_block_reasons, block_reasons, block_notes,
-                               count_pairing=None):
+                               count_pairing=None, number_pairing=None):
     """`hook gate --explain`'s own report: the wide evidence window's
     composition (bytes per segment, how many previous turns were found/
     dropped, receipts count) and which rule fired — printed on top of, not
@@ -5124,6 +5363,11 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                   f"{row.get('out_of_scope')} from "
                   f"{row.get('out_of_scope_identities') or ['(unnamed run)']} "
                   "— a run neither the draft nor this turn names")
+    if number_pairing:
+        d = number_pairing
+        print(f"  number pairing    : group {d.get('values')} — missing "
+              f"{d.get('missing')}, siblings {d.get('matched')} matched verbatim "
+              f"at line {d.get('block_line')}: \"{d.get('block_text', '')[:100]}\"")
     if det_block_reasons:
         print(f"  deterministic     : {'; '.join(det_block_reasons)}")
     if block_reasons:
@@ -6016,6 +6260,7 @@ def cmd_hook(a):
             evidence = _hook_evidence_paths(payload)
             evidence_source = "payload"
             window_meta = None
+            raw_window_for_numpair = None
             if not evidence:
                 tp = payload.get("transcript_path")
                 derived = None
@@ -6048,6 +6293,15 @@ def cmd_hook(a):
                     # — the single cap is trim_window_to_token_budget on the
                     # next line, which cuts whole labelled sections in
                     # priority order rather than slicing bytes off the head.
+                    # Stashed BEFORE the facts head is folded in: the
+                    # number-pairing arm's own DERIVED FACT names the
+                    # missing value, so re-deriving that arm's block
+                    # decision from the post-facts text would find its own
+                    # fact sentence and conclude the value is "in the
+                    # window" after all. The block decision below reads
+                    # this raw copy; only the fact shown to the judge is
+                    # allowed to see the composed text.
+                    raw_window_for_numpair = derived
                     derived, _facts, _fmeta = compose_window_with_facts(
                         derived, text, cap_bytes=0)
                     # THE cap — one budget, in tokens, enforced here and
@@ -6131,15 +6385,25 @@ def cmd_hook(a):
             # See deterministic_block_reasons's own docstring: fires only
             # on a real contradiction (a drafted count/PR state the
             # evidence itself disagrees with), never on an evidence gap.
-            det_reason, count_pairing = _count_pairing(
-                text, _read_evidence_text(evidence))
+            ev_text = _read_evidence_text(evidence)
+            det_reason, count_pairing = _count_pairing(text, ev_text)
+            # The number-pairing arm reads the RAW pre-facts window when
+            # one was derived from the transcript (see
+            # raw_window_for_numpair above); an explicit evidence-paths
+            # payload never goes through compose_window_with_facts at
+            # all, so ev_text is already raw there and is used as-is.
+            np_reason, np_detail = _number_pairing(
+                text, raw_window_for_numpair if raw_window_for_numpair is not None
+                else ev_text)
             det_block_reasons = [r for r in
                                  (det_reason,
-                                  _pr_mismatch_reason(text, _read_evidence_text(evidence)))
+                                  _pr_mismatch_reason(text, ev_text),
+                                  np_reason)
                                  if r]
         else:
             det_block_reasons = []
             count_pairing = []
+            np_detail = None
             tool_name = payload.get("tool_name")
             if tool_name is not None and tool_name != "Agent":
                 _hook_log(f"verify: tool_name={tool_name!r} is not 'Agent' — this "
@@ -6237,7 +6501,7 @@ def cmd_hook(a):
         if door == "gate" and getattr(a, "explain", False):
             _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                                        det_block_reasons, block_reasons, block_notes,
-                                       count_pairing=count_pairing)
+                                       count_pairing=count_pairing, number_pairing=np_detail)
 
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")
