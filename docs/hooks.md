@@ -192,3 +192,39 @@ printed, but nothing redacts the evidence itself.
 - As a substitute for reading the work. The judge advises. It never decides,
   and on true reports it is wrong often enough that a block is a reason to
   look, not a verdict.
+
+## Where super-jev plugs in, per harness
+
+super-jev's three doors — the reply gate, the worker-report verify, and the
+action permit (a CLI today, `npm run permit`, not yet wired to any hook) —
+are built against Claude Code's hook contract: `settings.json`, exit 2 to
+block, JSON on stdin/stdout. That contract is not unique to Claude Code. The
+full survey, harness by harness, with sources and a verified/unverified label
+on every claim, lives in `docs/harnesses.md`. The short version:
+
+- **Native-hook harnesses that match Claude Code's contract closely enough to
+  port directly:** OpenHands SDK (explicitly documents the same exit-code
+  semantics) and Gemini CLI (same JSON-in/JSON-out shape, and ships a
+  `CLAUDE_PROJECT_DIR` compatibility alias). Both can block.
+- **Native-hook harnesses with a different contract, needing an adapter, not a
+  copy-paste:** Hermes Agent (Python plugin callbacks, not subprocess
+  commands — 27 lifecycle events, `pre_tool_call` blocks and fails closed),
+  Cursor (`hooks.json`, blocks on the `before*` events, but the CLI has been
+  reported to drop non-shell events), Cline (`cancel` field in JSON response
+  blocks, but no documented reply-final-message hook), and Codex CLI (hooks
+  are experimental, opt-in, and this pass could not confirm the block
+  semantics — treat as unverified, not as working).
+- **No native hook system found — any integration means wrapping the
+  process or the transcript, not hooking it:** Aider (git `pre-commit` only,
+  skipped by default) and Goose (an MCP client/extension host, not a
+  hook/middleware framework; enforcement today means a proxy in front of it,
+  not a hook inside it).
+- **Not found in this pass, so left as an open question rather than a guess:**
+  Roo Code's own hook system (if any, distinct from Cline's), OpenClaw's
+  agent-harness plugin mechanics (a docs page exists but was not fetched),
+  and Sourcegraph Amp's Plugin API block/advisory semantics (secondary
+  sources only; ampcode.com itself was not reached).
+
+None of this is wired up. It is a map of where the three doors *could* attach
+if someone builds the adapter, not a claim that they do today on anything but
+Claude Code.
