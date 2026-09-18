@@ -953,7 +953,8 @@ def test_hook_verify_read_with_strong_flags_blocks_like_gate(tmp_path, monkeypat
     # format, so the fix covers both doors with one parser.
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=LIE_STDOUT))
     _hook_stdin(monkeypatch, json.dumps({"tool_name": "Agent",
-                                        "tool_response": "the worker is done, all tests pass"}))
+                                        "tool_response": "COMPLETE: the worker is done, "
+                                                          "all tests pass"}))
     code = sj.main(["hook", "verify"])
     out, err = capsys.readouterr()
     assert code == 2
@@ -1002,7 +1003,7 @@ def test_hook_gate_fabricated_quote_still_blocks_with_no_flags_parsed(tmp_path, 
 def test_hook_verify_maps_every_exit_code_and_never_returns_3_4_5(tmp_path, monkeypatch,
                                                                    capsys, code, expect):
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(code))
-    _hook_stdin(monkeypatch, json.dumps({"report": "the worker is done"}))
+    _hook_stdin(monkeypatch, json.dumps({"report": "COMPLETE: the worker is done"}))
     got = sj.main(["hook", "verify"])
     assert got == expect
     assert got not in (3, 4, 5)
@@ -1487,7 +1488,8 @@ def test_posttooluse_verify_uses_tool_response_as_the_report(monkeypatch, door):
     payload = {
         "hook_event_name": "PostToolUse",
         "tool_name": "Agent",
-        "tool_response": [{"type": "text", "text": "the worker pushed commit abc123"}],
+        "tool_response": [{"type": "text",
+                          "text": "COMPLETE: the worker pushed commit abc123"}],
     }
     _hook_stdin(monkeypatch, json.dumps(payload))
     code = sj.main(["hook", "verify"])
@@ -1523,7 +1525,8 @@ def test_posttooluse_verify_ignores_payload_cwd_for_worktree(monkeypatch):
 
     monkeypatch.setattr(sj.subprocess, "run", fake_run)
     monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
-    payload = {"tool_name": "Agent", "tool_response": "done", "cwd": "/lead/session/cwd"}
+    payload = {"tool_name": "Agent", "tool_response": "COMPLETE: done",
+               "cwd": "/lead/session/cwd"}
     _hook_stdin(monkeypatch, json.dumps(payload))
     sj.main(["hook", "verify"])
     assert "--worktree" not in captured["cmd"]
@@ -1538,11 +1541,152 @@ def test_posttooluse_verify_worktree_from_env_var_only(monkeypatch):
 
     monkeypatch.setattr(sj.subprocess, "run", fake_run)
     monkeypatch.setenv(sj.HOOK_WORKTREE_ENV, "/the/worktree")
-    payload = {"tool_name": "Agent", "tool_response": "done", "cwd": "/lead/session/cwd"}
+    payload = {"tool_name": "Agent", "tool_response": "COMPLETE: done",
+               "cwd": "/lead/session/cwd"}
     _hook_stdin(monkeypatch, json.dumps(payload))
     sj.main(["hook", "verify"])
     assert "--worktree" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--worktree") + 1] == "/the/worktree"
+
+
+# ------------------------------------------------ verify: launch-ack skip
+
+def test_hook_verify_skips_a_spawn_launch_acknowledgement(monkeypatch, door):
+    # The 2026-09-17 false alarm this fixes: a background Agent spawn's
+    # tool_response is only a launch ack, not a report. The wrapped verify
+    # tool must never even be called.
+    ack = ("Spawned successfully. The worker has been dispatched. "
+          "The agent is now running in the background.")
+    payload = {"tool_name": "Agent", "tool_response": ack}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+    assert rec["reason"] == "launch-ack"
+
+
+def test_hook_verify_skips_an_async_launch_acknowledgement(monkeypatch, door):
+    ack = "Async agent launched successfully. You will be notified automatically when it completes."
+    payload = {"tool_name": "Agent", "tool_response": ack}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+    assert rec["reason"] == "launch-ack"
+
+
+def test_hook_verify_skips_short_non_report_text(monkeypatch, door):
+    # Short text with no COMPLETE/INCOMPLETE/verdict/test-count content is
+    # skipped even without matching a named ack phrase.
+    payload = {"tool_name": "Agent", "tool_response": "ok, working on it now"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+    assert rec["reason"] == "launch-ack"
+
+
+def test_hook_verify_short_text_with_a_report_marker_still_runs(monkeypatch, door):
+    # Short text that DOES carry a report marker (COMPLETE) is not skipped
+    # just for being short.
+    payload = {"tool_name": "Agent", "tool_response": "COMPLETE: done, 4 tests passed"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert door.calls  # the wrapped verify tool really ran
+
+
+def test_hook_verify_a_real_long_report_still_runs_and_is_verified(monkeypatch, door):
+    real_report = (
+        "I fixed the off-by-one in the paginator and re-ran the suite. "
+        "COMPLETE: 14 tests passed, 0 failed. Committed as a1b2c3d on "
+        "branch fix/paginator-offset. No open questions."
+    )
+    payload = {"tool_name": "Agent", "tool_response": real_report}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is False
+
+
+def test_hook_verify_ack_patterns_are_env_overridable(monkeypatch, door):
+    monkeypatch.setenv(sj.HOOK_ACK_PATTERNS_ENV, "custom marker phrase")
+    payload = {"tool_name": "Agent",
+              "tool_response": "this text carries the custom marker phrase somewhere in it "
+                                "and is long enough on its own to not hit the short-text rule"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["reason"] == "launch-ack"
+
+
+def test_hook_verify_min_chars_is_env_overridable(monkeypatch, door):
+    monkeypatch.setenv(sj.VERIFY_MIN_CHARS_ENV, "5")
+    payload = {"tool_name": "Agent", "tool_response": "done now"}  # 8 chars, no markers
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert door.calls  # 8 >= min_chars(5), so it is not skipped
+
+
+# ------------------------------------------------ hook verify --from-file
+
+def test_hook_verify_from_file_runs_the_same_check_and_prints_the_same_verdict(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("COMPLETE: worker finished, 6 tests passed", encoding="utf-8")
+    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    out, err = capsys.readouterr()
+    assert code == 0
+
+
+def test_hook_verify_from_file_blocks_on_reject(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4))
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("COMPLETE: worker finished, evidence disproves a claim",
+                           encoding="utf-8")
+    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "blocked" in err
+
+
+def test_hook_verify_from_file_ledger_marks_manual_source(tmp_path, monkeypatch):
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(sj, "LEDGER_PATH", ledger)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("COMPLETE: worker finished cleanly", encoding="utf-8")
+    sj.main(["hook", "verify", "--from-file", str(report_file)])
+    rec = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
+    assert rec["hook_mode"] is False
+    assert rec["source"] == "manual"
+
+
+def test_hook_verify_from_file_does_not_read_stdin(tmp_path, monkeypatch):
+    # No stdin fixture set up at all — proves --from-file bypasses the
+    # stdin-JSON-payload path entirely.
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("COMPLETE: fine", encoding="utf-8")
+    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    assert code == 0
+
+
+def test_hook_verify_from_file_missing_file_fails_open(tmp_path, monkeypatch):
+    code = sj.main(["hook", "verify", "--from-file", str(tmp_path / "missing.txt")])
+    assert code == 0
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+    assert rec["reason"] == "from-file-unreadable"
 
 
 def test_run_door_timeout_returns_124_and_logs_ledger(monkeypatch):
