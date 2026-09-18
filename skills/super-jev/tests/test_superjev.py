@@ -3957,6 +3957,36 @@ def test_deterministic_count_silent_on_a_pure_evidence_gap():
     assert sj.deterministic_block_reasons(draft, evidence) == []
 
 
+def test_deterministic_count_mismatch_blocks_on_a_slash_fraction_lie():
+    # 2026-09-18: folding "#" and "/" into the SAME character class as
+    # digits/letters (`[A-Za-z0-9#/]+`) glued a slash fraction into one
+    # non-digit token — "41/41" tokenized whole, `tok.isdigit()` dropped
+    # it, and the draft claimed no count at all, so a false "41/41 tests
+    # passed" next to a true "34 passed in 6.94s" receipt slipped through
+    # clean. "#" and "/" now tokenize as their own single-char tokens.
+    draft = "All 41/41 tests passed, Sir."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_deterministic_count_mismatch_blocks_on_a_hash_prefixed_lie():
+    draft = "Tests #52 passed, Sir."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_deterministic_count_tokenizer_still_keeps_a_short_sha_as_one_token():
+    # Regression: "/" and "#" splitting off their own digits must not
+    # reopen the hash-split bug (36f330b) — a mixed alnum run with no
+    # "#"/"/" in it, e.g. a git short SHA, still tokenizes as ONE non-digit
+    # token and contributes no bogus count.
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {61}}
+
+
 def test_deterministic_pr_mismatch_blocks_on_a_named_pr():
     draft = "PR #11 is merged into main, Sir."
     evidence = '{"number": 11, "state": "OPEN"}\n'
@@ -4795,6 +4825,186 @@ def test_evidence_labelling_ignores_bare_and_n_of_m_numbers():
     assert sj._extract_labelled_evidence_counts(
         "152/152 passed   all green\n10 of 10 need a human\n"
         "the run had 40 cases\n") == {}
+
+
+# ---- (b2) a mixed-alnum run (a git short SHA) must not split into digits --
+#
+# Bench case bt01 (blind set, 2026-09-18): the draft is TRUE and said
+# "Part 2 landed (HEAD 0dca183, 61 tests per Muse)". The old tokenizer
+# matched `[A-Za-z#/]+` and `\d+` as SEPARATE alternatives, so the git short
+# SHA "0dca183" (no separator between digits and letters) split into three
+# tokens — "0", "dca", "183" — and both "0" and "183" landed inside the
+# 4-token window of "tests", alongside the real "61". The arm reported
+# "count mismatch (tests): draft 0/61/183 vs evidence 53" and blocked a
+# true report.
+
+def test_draft_labelling_does_not_split_a_commit_hash_into_bogus_digit_tokens():
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {61}}
+
+
+def test_draft_labelling_still_ignores_a_pure_hex_looking_word_with_no_digits_split_off():
+    # A hash that happens to be pure digits ("183a83f") never contributes
+    # ANY count — mixed alnum is excluded outright, not partially trusted.
+    draft = "Fixed at 183a83f, 5 tests pass."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {5}}
+
+
+def test_evidence_count_arm_recognises_a_bold_markdown_passed_receipt():
+    # The real receipt for bt01's "61 tests" claim was a grep excerpt of a
+    # worker's own report, "`test_v2_details` -> **61 passed**.", which
+    # carries no "in Ns" duration and matched none of the runner shapes —
+    # it sat unmatched while an unrelated, in-scope "53 passed in 77.52s"
+    # (a different task's earlier baseline run) paired instead.
+    evidence = "grep -n passed report.md:\n67:`test_v2_details` -> **61 passed**.\n"
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {61}
+
+
+def test_count_mismatch_arm_is_silent_for_the_bt01_shape_end_to_end():
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    evidence = (
+        "[current turn]\n"
+        "[from: Bash grep -n passed report.md @ /Users/admin/x]\n"
+        "67:`test_v2_details` -> **61 passed**.\n"
+    )
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+# 2026-09-18: `_extract_labelled_evidence_counts_scoped` had no REPORT FROM
+# fence exclusion, so a worker's own bold-markdown claim INSIDE its own
+# unverified report body cleared the count arm as if it were a real
+# receipt — a trust-boundary hole (a worker could just write "**61
+# passed**" in its own report text and have it count as evidence for
+# itself). Evidence counts now skip lines inside a `REPORT FROM ...
+# (unverified worker claim)` fence entirely; only a receipt sitting
+# outside one is real evidence.
+
+def test_evidence_count_arm_ignores_a_bold_claim_inside_a_report_fence():
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") in (None, set())
+
+
+def test_count_mismatch_arm_blocks_when_the_only_bold_receipt_is_inside_a_report_fence():
+    # The worker's own report claims 61; the REAL receipt right below it,
+    # outside the fence, says 53. The draft must not clear on the strength
+    # of the worker's own in-report bold claim.
+    draft = "All 61 passed, Sir."
+    evidence = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done: **61 passed**.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+# 2026-09-18 round 2: the fence above closed on ANY blank line, but the
+# assembler puts a blank line INSIDE a report's own body between its own
+# paragraphs (`_build_reports_block`'s `"\n\n".join(items)`), so only a
+# report's first paragraph was ever actually excluded. A second paragraph,
+# after a blank line, that echoed a bold-markdown count read straight back
+# in as evidence — the same hole the fence above was meant to close, just
+# one paragraph later. The fence now closes only on a bracketed header or
+# an `END REPORT FROM ...` line, never a blank line.
+
+def test_evidence_count_arm_ignores_a_bold_claim_in_a_later_report_paragraph():
+    # Multi-paragraph report: paragraph 1 is the real status, paragraph 2
+    # (after a blank line, still inside the SAME report) echoes a bold
+    # count. Neither paragraph is real evidence.
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir.\n"
+        "\n"
+        "For the record: **61 passed** on my last local run.\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") in (None, set())
+
+
+def test_count_mismatch_arm_blocks_multi_paragraph_report_beside_a_real_receipt():
+    # Draft claims 61; the worker's OWN report (two paragraphs, blank line
+    # between them) says 61 in its second paragraph; the real receipt right
+    # outside the fence says 53. Must still block on the real receipt.
+    draft = "All 61 passed, Sir."
+    evidence = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir.\n"
+        "\n"
+        "For the record: **61 passed** on my last local run.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_evidence_count_arm_reads_a_receipt_right_after_a_bracket_header_following_a_report():
+    # A bracketed section header closes the report fence even without a
+    # "===" separator between it and the report body — the fence must not
+    # swallow a real section that immediately follows a report.
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {53}
+
+
+def test_evidence_count_arm_reads_a_receipt_after_an_explicit_end_report_marker():
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+        "END REPORT FROM worker-x\n"
+        "53 passed in 77.52s\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {53}
+
+
+def test_reports_block_assembler_always_puts_a_section_boundary_after_a_report():
+    # Pins the assumption both fixed readers depend on: `_build_reports_block`
+    # only ever joins DIFFERENT reports with a blank line (never a bracketed
+    # header or "END REPORT FROM" line) INSIDE one `[label]` section, and the
+    # window assembler always separates that whole section from the next one
+    # with a real "===" separator (`_derive_evidence_text_from_transcript`'s
+    # `"\n\n===\n\n".join(sections)`) — so a real receipt section is never
+    # reachable from inside a report fence without crossing a line the fence-
+    # close regex or the top-of-loop separator check actually catches.
+    block, kept, cut = sj._build_reports_block(
+        ["REPORT FROM worker-a (unverified worker claim)\nFirst.\n\nSecond.",
+         "REPORT FROM worker-b (unverified worker claim)\nThird."],
+        budget=10_000, label="current turn reports")
+    assert kept == 2
+    assert cut == 0
+    body = block.split("\n", 1)[1]  # drop the "[current turn reports]" header
+    for ln in body.splitlines():
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        assert not sj._REPORT_FENCE_CLOSE_RE.match(stripped), (
+            f"reports block joiner emitted a fence-closing line inside "
+            f"the section: {stripped!r}")
 
 
 # ---- (c) --explain names the turns it chose and what was cut --------------
@@ -5921,6 +6131,106 @@ def test_facts_merge_claims_no_false_positive_when_the_receipt_is_present():
     assert not any("no merge receipt" in f for f in facts)
 
 
+# ---- families 4/5 must not read a REPORT FROM fence as a receipt (2026-09-18) --
+#
+# _fact_window_lines fed the SAME lines to every family, including a worker's
+# own unverified claim text inside a REPORT FROM block — so a report that
+# merely SAYS "gh pr merge 39 ran clean, PR 39 merged" (not an actual `gh`
+# receipt) was read by family 4 as a real merge receipt. Both families now
+# read `_fact_window_lines_excluding_reports` for the RECEIPT half only;
+# family 5's own "not merged" half (`_report_not_merged_claims`) still reads
+# a report's body on purpose, since that check is about what the report says.
+
+def test_facts_merge_claims_ignores_a_receipt_shaped_line_inside_a_report_fence():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "Status: done. gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "Nothing else to note.\n"
+    )
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "no merge receipt for PR #39 in window." in facts
+    assert not any("merge receipt found for PR #39" in f for f in facts)
+
+
+def test_facts_merge_claims_still_reads_a_real_receipt_outside_any_report_fence():
+    window = "[current turn]\ngh pr merge 39\nMerged pull request #39\n"
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "merge receipt found for PR #39 in [current turn]." in facts
+    assert not any("no merge receipt" in f for f in facts)
+
+
+def test_fact_window_lines_excluding_reports_drops_only_the_report_fence():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+    assert "gh pr merge 39" not in other_lines
+
+
+# 2026-09-18 round 2: same blank-line-closes-the-fence bug as the count arm
+# above, for the shared families 4/5 reader.
+
+def test_fact_window_lines_excluding_reports_drops_a_multi_paragraph_report():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "\n"
+        "Also: gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+    assert "gh pr merge 39" not in other_lines
+    assert not any("39" in ln for ln in other_lines)
+
+
+def test_fact_window_lines_excluding_reports_reads_a_receipt_after_a_bracket_header():
+    window = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+
+
+def test_facts_merge_claims_ignores_a_receipt_shaped_line_in_a_later_report_paragraph():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "Status: done.\n"
+        "\n"
+        "Also: gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "Nothing else to note.\n"
+    )
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "no merge receipt for PR #39 in window." in facts
+    assert not any("merge receipt found for PR #39" in f for f in facts)
+
+
 # ---- (b): cited-file tail --------------------------------------------------
 
 def test_build_cited_file_block_resolves_an_absolute_path(tmp_path):
@@ -6935,6 +7245,135 @@ def test_labelled_value_fact_does_not_read_a_hyphenated_name_as_a_label():
         "'fill' value in this window is $119.00, on its 'premium collected if "
         "filled' row — CONTRADICTED_BY_FACT."
     ]
+
+
+# ---- common-noun / number-list guard (2026-09-18, live false block) -------
+#
+# The draft "items 2 and 3" (English noun "items" followed by a plain
+# enumerated number list) was matched against an evidence row labelled
+# "feat items" — a table column that happens to carry the same common
+# word — and blocked. "items" here is ordinary prose counting things, not
+# a reference to that column.
+
+_COUNT_NOUN_TABLE_WINDOW = (
+    "[current turn]\n"
+    "[from: Bash cat table.md @ /Users/admin/x]\n"
+    "feat items          7\n"
+)
+
+
+def test_labelled_value_fact_does_not_pair_an_english_noun_number_list_with_a_longer_label():
+    facts = sj.derive_window_facts(
+        _COUNT_NOUN_TABLE_WINDOW, "Fixed items 2 and 3 from the review list.")
+    assert facts == []
+
+
+def test_labelled_value_fact_number_list_guard_covers_the_other_listed_nouns_too():
+    for noun in ("step", "steps", "point", "points", "option", "options",
+                 "part", "parts"):
+        window = (
+            "[current turn]\n"
+            f"[from: Bash cat table.md @ /Users/admin/x]\n"
+            f"feat {noun}          9\n"
+        )
+        facts = sj.derive_window_facts(window, f"Covered {noun} 2 and 3 today.")
+        assert facts == [], (noun, facts)
+
+
+def test_labelled_value_fact_still_fires_when_the_draft_uses_explicit_label_syntax():
+    # "items: 2" — the draft itself marks "items" as a label with a colon,
+    # which is trusted outright and bypasses the common-noun guard.
+    facts = sj.derive_window_facts(_COUNT_NOUN_TABLE_WINDOW, "items: 2 done.")
+    assert facts == [
+        "LABELLED VALUE: the draft states 2 next to 'item'; the only "
+        "'item' value in this window is 7, on its 'feat items' row — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_still_fires_when_the_evidence_label_is_verbatim_in_the_draft():
+    # The guard's own escape hatch: the draft actually wrote the window's
+    # exact (multi-word) label phrase right before the number list, so the
+    # pairing is trusted anyway even though "items" is a guarded noun.
+    facts = sj.derive_window_facts(
+        _COUNT_NOUN_TABLE_WINDOW, "feat items 2 and 3 landed, not 7.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_noun_guard_does_not_touch_a_real_non_list_adjacency():
+    # No enumerated number list nearby — this is the ordinary "label value"
+    # shape the guard must never suppress.
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat table.md @ /Users/admin/x]\n"
+        "Cut line: $4.12\n"
+    )
+    facts = sj.derive_window_facts(window, "Cut under $3.55 with bad news.")
+    assert facts == [
+        "LABELLED VALUE: the draft states $3.55 next to 'cut'; the only "
+        "'cut' value in this window is $4.12, on its 'Cut line' row — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_value():
+    # "HEAD 0dca183" must not read as the labelled value 0 for 'head'.
+    window = (
+        "[current turn]\n"
+        "[from: Bash git log @ /Users/admin/x]\n"
+        "head                2\n"
+    )
+    facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
+    assert facts == []
+
+
+# 2026-09-18: the digit-then-letter guard above (mixed alnum token, e.g. a
+# git short SHA) was too broad — it skipped EVERY digit run immediately
+# followed by a letter, so a unit-suffixed value ("250ms", "4k", "8GB")
+# was silently dropped too, and "latency 250ms" next to a contradicting
+# "latency: 400" row no longer fired. Narrowed to only skip when the tail
+# right after the digits looks like the rest of a fused identifier (a
+# letter, then eventually another digit — "dca183"); a pure unit suffix
+# has no trailing digit and is kept as a value.
+
+def test_labelled_value_fact_still_skips_a_commit_hash_after_the_narrowing():
+    window = (
+        "[current turn]\n"
+        "[from: Bash git log @ /Users/admin/x]\n"
+        "head                2\n"
+    )
+    facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
+    assert facts == []
+
+
+def test_labelled_value_fact_still_contradicts_a_millisecond_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "latency: 400\n"
+    )
+    facts = sj.derive_window_facts(window, "latency 250ms after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_still_contradicts_a_k_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "cache: 9\n"
+    )
+    facts = sj.derive_window_facts(window, "cache 4k after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_still_contradicts_a_gb_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "heap: 16\n"
+    )
+    facts = sj.derive_window_facts(window, "heap 8GB after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
 
 
 _SCORE_LIST_WINDOW = (
