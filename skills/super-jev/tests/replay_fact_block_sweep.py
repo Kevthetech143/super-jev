@@ -20,7 +20,11 @@ reproduce the window. See docs/hooks.md.
 
 "New" is decided against a REAL pre-change baseline, not a recorded exit
 file: this script also imports `superjev.py` AS OF `BASELINE_REF` (default
-the parent of HEAD, override with SUPERJEV_SWEEP_BASELINE_REF) and runs
+`git merge-base HEAD origin/main` — the point this branch diverged from
+main, not just HEAD's immediate parent, so a multi-commit branch's own
+earlier commits are never mistaken for "the baseline"; falls back to
+HEAD~1 only when origin/main does not resolve; override with
+SUPERJEV_SWEEP_BASELINE_REF) and runs
 the identical window-assembly + fact-derivation pipeline through IT. A
 recorded `results-v3-shim*/*.exit` file's timing relative to the code
 under test is not guaranteed — the set-2 results directory here was
@@ -61,14 +65,62 @@ SETS = [
 ]
 
 
+def _resolve_baseline_ref():
+    """The git ref this sweep diffs against. SUPERJEV_SWEEP_BASELINE_REF
+    always wins when set. Otherwise `git merge-base HEAD origin/main` —
+    the commit this branch actually diverged from, not just HEAD's
+    immediate parent (HEAD~1 would be wrong for any branch more than one
+    commit ahead of main: it would compare against this branch's OWN
+    earlier commit, not against main). Falls back to HEAD~1 only when
+    origin/main does not resolve at all (no fetch, detached clone, no
+    remote configured)."""
+    override = os.environ.get("SUPERJEV_SWEEP_BASELINE_REF")
+    if override:
+        return override
+    try:
+        subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--verify", "origin/main"],
+            capture_output=True, text=True, timeout=30, check=True)
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return "HEAD~1"
+    try:
+        mb = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "merge-base", "HEAD", "origin/main"],
+            capture_output=True, text=True, timeout=30, check=True).stdout.strip()
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return "HEAD~1"
+    return mb or "HEAD~1"
+
+
+def _resolve_ref_sha(ref):
+    """`ref` resolved to a full commit sha for the header line, or None
+    when git cannot resolve it (never raises)."""
+    try:
+        return subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", ref],
+            capture_output=True, text=True, timeout=30, check=True).stdout.strip() or None
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+        return None
+
+
 def _load_baseline_module():
-    """superjev.py as of SUPERJEV_SWEEP_BASELINE_REF (default HEAD's own
-    parent) loaded as a SEPARATE module `sj_old`, so `old_blocked` below is
-    a real run of the pre-change deterministic arm, not a guess from a
-    possibly-stale recorded exit file. Returns None (sweep falls back to
-    "assume not blocked", the conservative direction — it can only
-    OVER-report a flip, never hide one) when git or the import fails."""
-    ref = os.environ.get("SUPERJEV_SWEEP_BASELINE_REF", "HEAD~1")
+    """superjev.py as of `_resolve_baseline_ref()` loaded as a SEPARATE
+    module `sj_old`, so `old_blocked` below is a real run of the
+    pre-change deterministic arm, not a guess from a possibly-stale
+    recorded exit file. Returns (None, ref, sha) — sweep falls back to
+    "assume not blocked", the conservative direction; it can only
+    OVER-report a flip, never hide one — when git or the import fails.
+
+    The exec'd module's own `SKILL_DIR`/`REPO_ROOT` are computed from
+    `__file__`, which for this module is the throwaway NamedTemporaryFile
+    path below, not this repo — so left alone, `_cited_file_roots()` on
+    the baseline side searches the temp directory instead of this repo
+    and silently finds nothing, making the baseline blind to any
+    cited-file tail the live side sees (2026-09-18, PR #67 round 2, t38).
+    Both path constants are overwritten from the live `sj` module
+    immediately after exec so both sides assemble the identical window."""
+    ref = _resolve_baseline_ref()
+    sha = _resolve_ref_sha(ref)
     try:
         src = subprocess.run(
             ["git", "-C", str(REPO_ROOT), "show", f"{ref}:skills/super-jev/superjev.py"],
@@ -76,7 +128,7 @@ def _load_baseline_module():
     except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as e:
         print(f"  baseline: could not read superjev.py @ {ref} ({e!r}) — "
               f"falling back to 'assume not blocked' for the old side")
-        return None
+        return None, ref, sha
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix="_superjev_baseline.py",
                                       delete=False, encoding="utf-8")
     tmp.write(src)
@@ -85,11 +137,15 @@ def _load_baseline_module():
         spec = importlib.util.spec_from_file_location("superjev_baseline", tmp.name)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod
+        # See docstring: without this, mod.SKILL_DIR/mod.REPO_ROOT point at
+        # tmp's directory, not this repo.
+        mod.SKILL_DIR = sj.SKILL_DIR
+        mod.REPO_ROOT = sj.REPO_ROOT
+        return mod, ref, sha
     except Exception as e:
         print(f"  baseline: superjev.py @ {ref} failed to import ({e!r}) — "
               f"falling back to 'assume not blocked' for the old side")
-        return None
+        return None, ref, sha
 
 
 def _window_fact_reasons(mod, transcript_path, draft):
@@ -121,7 +177,8 @@ def main():
     truths_flipped = []
     fact_family_counts = {}
 
-    baseline = _load_baseline_module()
+    baseline, baseline_ref, baseline_sha = _load_baseline_module()
+    print(f"baseline ref: {baseline_ref}  sha: {baseline_sha or '(unresolved)'}")
 
     for set_name, bench_dir, cases_file, payloads_dir in SETS:
         bench_dir = Path(bench_dir)
@@ -138,7 +195,13 @@ def main():
             if not transcript_path.exists():
                 continue
             total_cases += 1
-            draft = case.get("draft") or ""
+            # Mirror cmd_hook's own "hook gate" branch, which strips
+            # machine tags from the draft before it ever reaches the
+            # window builder (see superjev.py's `text =
+            # _strip_machine_tags(text)` in the Stop-hook gate path). A
+            # no-op for today's recorded drafts, but keeps this replay an
+            # exact mirror rather than a close one.
+            draft = sj._strip_machine_tags(case.get("draft") or "")
             try:
                 fact_reasons = _window_fact_reasons(sj, transcript_path, draft)
             except Exception as e:                       # never let one bad
