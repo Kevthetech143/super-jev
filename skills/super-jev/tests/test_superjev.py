@@ -20,6 +20,17 @@ import pytest
 SKILL = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("superjev", SKILL / "superjev.py")
 sj = importlib.util.module_from_spec(spec)
+# Register under "superjev" in sys.modules BEFORE exec, and before any test
+# runs. replay_catch_cases.py (loaded per-test by _load_replay_module()
+# below) does `import superjev as sj` — without this registration that
+# statement finds nothing in sys.modules and re-imports superjev.py fresh
+# from disk, producing a SECOND, distinct module object with its own
+# LEDGER_PATH/CATCH_LEDGER_PATH copies that the autouse ledger_tmp fixture
+# below never touches (it only patches attributes on THIS sj object) — so
+# door calls made through that second object land in the real repo
+# ledgers. Registering here means replay.sj IS this same object, so every
+# autouse patch (ledger_tmp, no_key, reachable_doors) already covers it.
+sys.modules["superjev"] = sj
 spec.loader.exec_module(sj)
 
 # A real, harmless file standing in for the fleet-local doors
@@ -80,10 +91,17 @@ def no_key(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def ledger_tmp(tmp_path, monkeypatch):
-    """Every test writes its call ledger to a scratch path, never into this
-    checkout's real skills/super-jev/ledger/ — so a test run leaves no trace
-    and tests can inspect sj.LEDGER_PATH freely."""
+    """Every test writes its call ledger — and every catch-ledger-family
+    path the module owns (catches.jsonl, catch-cases.json, the payloads/
+    dir, the .lock file, all of which derive from CATCH_LEDGER_PATH) — to
+    a scratch path, never into this checkout's real skills/super-jev/
+    ledger/. LEDGER_PATH and CATCH_LEDGER_PATH are computed once at import
+    time (module load, before any test runs), so patching LEDGER_PATH
+    alone does NOT move CATCH_LEDGER_PATH — it was already resolved off
+    the real path by then. Both must be patched explicitly so a test run
+    leaves no trace and tests can inspect either path freely."""
     monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger" / "calls.jsonl")
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "ledger" / "catches.jsonl")
 
 
 @pytest.fixture(autouse=True)
@@ -1097,6 +1115,43 @@ def test_hook_gate_reject_blocks_with_reason_on_stderr(tmp_path, monkeypatch, ca
     assert code == 2
     assert out == ""
     assert "blocked" in err
+
+
+def test_hook_gate_never_touches_the_real_repo_ledger_dir(tmp_path, monkeypatch, capsys):
+    """B4 guard: proves ledger_tmp's redirection actually holds. A
+    representative gate hook call (REJECT, same as the test above) reaches
+    BOTH ledgers this module owns — ledger_append (the call ledger) and
+    catch_log/catch_ledger_append (the catch ledger, plus whatever a block
+    decision writes under it) — so it is the right shape to catch a leak
+    on either path. Snapshots this checkout's real skills/super-jev/
+    ledger/ directory before and after; asserts it is byte-identical
+    (which for a clean checkout means "still absent"). This is what B4
+    found broken: CATCH_LEDGER_PATH was not redirected by ledger_tmp, so
+    every hook test like the one above was silently appending real
+    records to skills/super-jev/ledger/catches.jsonl."""
+    real_ledger_dir = SKILL / "ledger"
+
+    def _snapshot():
+        if not real_ledger_dir.exists():
+            return {}
+        return {p: p.read_bytes() for p in sorted(real_ledger_dir.rglob("*"))
+                if p.is_file()}
+
+    before = _snapshot()
+
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(2))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a fabricated quote",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    capsys.readouterr()
+    assert code == 2
+
+    after = _snapshot()
+    assert before == after, (
+        "hook gate wrote into the real repo ledger dir — ledger_tmp's "
+        "redirection of LEDGER_PATH/CATCH_LEDGER_PATH did not hold")
 
 
 # ------------------------------------------------- strong-flag block mapping
@@ -6743,6 +6798,32 @@ def test_catch_redact_card_number_dotted_separators():
     assert "REDACTED:card-number" in out
 
 
+def test_catch_redact_card_number_amex_dashed_4_6_5():
+    # N3: the Amex grouping (4-6-5, 15 digits) redacts too, not just
+    # 4-4-4-4 — same-separator backreference either way.
+    out = sj._catch_redact("amex 3782-822463-10005 on file")
+    assert "3782-822463-10005" not in out
+    assert "REDACTED:card-number" in out
+
+
+def test_catch_redact_dotted_timestamp_id_is_not_a_card_number():
+    # N3: a dotted date+time id (this repo's own card-hint format) has
+    # plenty of digits and dot separators but is NOT a 4-4-4-4/4-6-5
+    # grouping — it must never be mistaken for a card number.
+    out = sj._catch_redact("tagged as 2026.09.18.10.46.33.123 in the log")
+    assert "2026.09.18.10.46.33.123" in out
+    assert "REDACTED:card-number" not in out
+
+
+def test_catch_redact_grouped_shape_with_year_first_group_is_kept():
+    # N3: even a genuine 4-4-4-4 shape is left alone when the first group
+    # looks like a plausible year (starts 19 or 20) — a date that happens
+    # to fall on a card-shaped grouping is a false positive, not a card.
+    out = sj._catch_redact("run id 2026.1234.5678.9012 recorded")
+    assert "2026.1234.5678.9012" in out
+    assert "REDACTED:card-number" not in out
+
+
 def test_catch_redact_13_digit_unix_ms_timestamp_kept():
     # N1: a bare 13-digit run shaped like a real unix-ms timestamp
     # (starts 1, second digit 5-9) is left alone, not redacted as a card.
@@ -6989,13 +7070,16 @@ def test_catch_tag_allows_matching_decisions(tmp_path, monkeypatch):
     assert _read_catch_records(catch_path)[0]["tag"] == "miss"
 
 
-# --------------------------------------------------- N3: --since validation
+# --------------------------------------------------- --since validation
 
 def test_catch_list_rejects_unparseable_since(tmp_path, monkeypatch, capsys):
     _set_catch_paths(monkeypatch, tmp_path)
     code = sj.main(["catch", "list", "--since", "yesterday"])
     err = capsys.readouterr().err
-    assert code == 2
+    # N4: exit 3, same family as the catch-tag contradiction refusal — not
+    # 2 (argparse's own usage-error convention; --since is a valid flag
+    # with a bad value, not a usage error).
+    assert code == 3
     assert "not a valid duration" in err
 
 
@@ -7003,7 +7087,7 @@ def test_catch_report_rejects_unparseable_since(tmp_path, monkeypatch, capsys):
     _set_catch_paths(monkeypatch, tmp_path)
     code = sj.main(["catch", "report", "--since", "not-a-duration"])
     err = capsys.readouterr().err
-    assert code == 2
+    assert code == 3  # N4
     assert "not a valid duration" in err
 
 
@@ -7168,6 +7252,34 @@ def test_replay_catch_cases_refuses_live_door_by_default(tmp_path, monkeypatch, 
     err = capsys.readouterr().err
     assert code == 2
     assert "refusing to run" in err
+    assert not real_ledger.exists()
+
+
+def test_replay_catch_cases_refuses_per_door_when_only_the_other_door_is_set(
+        tmp_path, monkeypatch, capsys):
+    # N5: B1's refusal is PER-DOOR, not all-or-nothing — a cases file that
+    # needs `gate` must still refuse even when SUPERJEV_VERIFY_CMD (the
+    # OTHER door) is set and SUPERJEV_GATE_CMD is not. Catches a refusal
+    # that only checked "is *some* door env var set" rather than checking
+    # the specific door(s) this file's cases actually need.
+    replay = _load_replay_module()
+    monkeypatch.delenv(replay.sj.GATE_CMD_ENV, raising=False)
+    monkeypatch.setenv(replay.sj.VERIFY_CMD_ENV, f"{sys.executable} {FAKE_DOOR}")
+    real_ledger = tmp_path / "real-catches.jsonl"
+    monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", real_ledger)
+
+    payload_path = tmp_path / "n3b-payload.json"
+    payload_path.write_text(json.dumps({"draft": "the sky is blue"}), encoding="utf-8")
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n3b", "kind": "lie", "door": "gate", "payload_path": str(payload_path)},
+    ]), encoding="utf-8")
+
+    code = replay.main([str(cases_file)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "refusing to run" in err
+    assert replay.sj.GATE_CMD_ENV in err
     assert not real_ledger.exists()
 
 

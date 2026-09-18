@@ -1131,11 +1131,11 @@ fair|false|miss "why"` records a human verdict on that one decision:
 
 A tag that contradicts its record's own decision (e.g. `false` against an
 `allow`) is refused, exit 3, with a plain message — never silently
-accepted. Exit 3, not 2: exit 2 is argparse's own usage-error convention
-(and `--since`'s own refusal below leans on that overlap on purpose, since
-a bad duration really is a usage error), while a tag/decision mismatch is
-a semantic refusal on arguments argparse already accepted fine, so it gets
-its own code rather than being indistinguishable from a typo in the flags.
+accepted. Exit 3, not 2: exit 2 is argparse's own usage-error convention,
+while a tag/decision mismatch (like an unparseable `--since`, below) is a
+semantic refusal on arguments argparse already accepted fine, so both
+share exit 3 rather than being indistinguishable from a typo in the
+flags.
 
 Re-tagging the same id is an upsert, not an append: `catch tag <id>
 false` then later `catch tag <id> miss` replaces the earlier tag and, if a
@@ -1154,10 +1154,11 @@ waits its turn rather than reading stale data and clobbering the first
 one's write.
 
 **`--since`.** An unparseable `--since` value (anything that isn't
-`<N>m`/`<N>h`/`<N>d`) is refused, exit 2 — it never silently falls back to
-"all time". A record with a missing or unparseable timestamp is excluded
-from a real `--since` window (never silently treated as "recent enough to
-keep") and counted on its own `undated: N` line instead.
+`<N>m`/`<N>h`/`<N>d`) is refused, exit 3, same family as the tag/decision
+contradiction refusal above — it never silently falls back to "all time".
+A record with a missing or unparseable timestamp is excluded from a real
+`--since` window (never silently treated as "recent enough to keep") and
+counted on its own `undated: N` line instead.
 
 **The numbers.** `superjev.py catch report [--since 7d]` prints:
 

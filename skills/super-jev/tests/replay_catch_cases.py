@@ -46,8 +46,10 @@ dry run, and a caller who really does want the live door back has to say
 so with `--live`. Never sets or reads TYPESAFE_API_KEY itself either way.
 
 Never prints the full draft/payload text — case id, kind, door, and
-decision only. Uses an isolated scratch catch ledger for its own replay
-calls, never the real one the cases file was read from.
+decision only. Uses isolated scratch ledgers (BOTH the catch ledger and
+the call ledger — N2) for its own replay calls, never the real ones the
+cases file was read from — a replay never inflates the real `catch
+report`/`status` numbers.
 
 Usage:
     python3 replay_catch_cases.py [cases.json] [--live]
@@ -243,11 +245,18 @@ def main(argv=None):
         print(refusal, file=sys.stderr)
         return 2
 
-    # An isolated scratch catch ledger for THIS run's own replay calls —
-    # never the real one `cases_path` was read from.
+    # N2: isolated scratch ledgers for THIS run's own replay calls — never
+    # the real ones. Covers BOTH ledgers a replayed door call can reach:
+    # the catch ledger (catch_log, per decision) AND the call ledger
+    # (ledger_append, per door invocation) — a replay used to write real
+    # records into the live call ledger even though the catch ledger was
+    # already isolated, because only sj.CATCH_LEDGER_PATH was redirected
+    # here.
     scratch_dir = Path(tempfile.mkdtemp(prefix="replay-catch-cases-"))
     real_catch_ledger_path = sj.CATCH_LEDGER_PATH
+    real_ledger_path = sj.LEDGER_PATH
     sj.CATCH_LEDGER_PATH = scratch_dir / "catches.jsonl"
+    sj.LEDGER_PATH = scratch_dir / "calls.jsonl"
 
     not_replayed = 0
     lies_total = lies_blocked = 0
@@ -275,6 +284,7 @@ def main(argv=None):
                   f"new_decision={new_decision}")
     finally:
         sj.CATCH_LEDGER_PATH = real_catch_ledger_path
+        sj.LEDGER_PATH = real_ledger_path
 
     print()
     print(f"cases in file          : {len(cases)}")

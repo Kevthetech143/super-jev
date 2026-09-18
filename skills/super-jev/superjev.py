@@ -216,43 +216,77 @@ def redact(text, redact_emails=False):
 # strings, and 13+ digit card numbers (space, dash or dot separators).
 #
 # Card numbers are handled separately from the table below (see
-# _CARD_NUMBER_RX/_catch_redact_card_repl), not as a plain find-and-replace
-# pattern, for two reasons (see N1):
+# _CARD_NUMBER_*_RX/_catch_redact_card_repl), not as a plain find-and-replace
+# pattern, for three reasons (see N1, N3):
 #   - the old `\b(?:\d[ \-]?){13,19}\b` form silently missed any run of 20+
 #     digits: \b requires a transition into/out of a word character, and
 #     inside a longer all-digit run there is no such transition anywhere
 #     except at the run's own true start/end — capped at 19 reps, the
 #     regex could never land a cut point on a real \b, so it just never
-#     matched at all. Removing the upper bound (still one leading \d, then
-#     12+ more) fixes that: the match always grows to the run's real edges,
-#     where \b is genuinely satisfied.
-#   - a bare 13-digit run is often a plausible unix-millisecond timestamp
-#     (this repo's own ledger timestamps and payload fields are full of
-#     them), not a card number, and redacting those made ordinary catch
-#     records unreadable for no privacy benefit. Only a 13-digit run
+#     matched at all. An ungrouped (no separator) run just needs its upper
+#     bound removed — see _CARD_NUMBER_PLAIN_RX.
+#   - a bare 13-digit ungrouped run is often a plausible unix-millisecond
+#     timestamp (this repo's own ledger timestamps and payload fields are
+#     full of them), not a card number, and redacting those made ordinary
+#     catch records unreadable for no privacy benefit. Only a 13-digit run
 #     shaped like one (starts "1", second digit 5-9 — roughly the
 #     2015-2029 range any real timestamp here falls in) is left alone;
 #     13 digits in any other shape, and every run of 14+ digits, still
 #     redacts.
+#   - N3: a SEPARATED (space/dash/dot) digit run is a different animal.
+#     The old "13+ digits, any mix of separators" form matched things that
+#     were never a card number at all — most sharply, a dotted
+#     date+time stamp like "2026.09.18.10.46.33.123" (a card-hint id
+#     format this repo uses elsewhere), which has 17 digits and plenty of
+#     dot separators but no card shape whatsoever. A separated match is
+#     now required to be an EXACT card grouping — 4-4-4-4 (Visa/MC/Discover,
+#     16 digits) or 4-6-5 (Amex, 15 digits) — using the SAME separator
+#     throughout (a backreference), so "4111.1111.1111.1111" still
+#     redacts but a 7-group dotted timestamp never matches the shape at
+#     all. As a second guard, even a genuine 4-4-4-4/4-6-5 shape is left
+#     alone when its first group looks like a plausible year (starts "19"
+#     or "20") — a date that happens to fall into a 4-digit-group pattern
+#     is a false positive, not a card number.
 # \b at both ends is kept for exactly the reason it always had one: a
 # digit run glued to a letter (e.g. inside a git id or other alphanumeric
 # token) is never a card number and is never matched, because \b treats
 # letters and digits as the same "word" character class.
-_CARD_NUMBER_RX = re.compile(r"\b\d(?:[ \-.]?\d){12,}\b")
+_CARD_NUMBER_PLAIN_RX = re.compile(r"\b\d{13,}\b")
+_CARD_NUMBER_GROUPED_RX = re.compile(
+    r"\b\d{4}([ \-.])\d{4}\1\d{4}\1\d{4}\b"      # 4-4-4-4 (Visa/MC/Discover)
+    r"|"
+    r"\b\d{4}([ \-.])\d{6}\2\d{5}\b"             # 4-6-5 (Amex)
+)
 
 
 def _looks_like_unix_ms_timestamp(digits):
     """True for a 13-digit run shaped like a plausible unix-millisecond
     timestamp (starts "1", second digit 5-9) — see the module note above
-    _CARD_NUMBER_RX. Only ever checked against exactly 13 digits; anything
-    longer is never a timestamp candidate and always redacts."""
+    _CARD_NUMBER_PLAIN_RX. Only ever checked against exactly 13 digits;
+    anything longer is never a timestamp candidate and always redacts."""
     return len(digits) == 13 and digits[0] == "1" and digits[1] in "56789"
 
 
-def _catch_redact_card_repl(m):
-    digits = re.sub(r"[ \-.]", "", m.group(0))
+def _looks_like_a_year_group(first_group):
+    """True when a 4-digit group (the first group of a grouped card-shape
+    match) looks like a plausible year — starts "19" or "20" — the N3
+    guard against a date string that happens to land on a 4-4-4-4/4-6-5
+    shape."""
+    return first_group[:2] in ("19", "20")
+
+
+def _catch_redact_card_plain_repl(m):
+    digits = m.group(0)
     if _looks_like_unix_ms_timestamp(digits):
-        return m.group(0)
+        return digits
+    return "[REDACTED:card-number]"
+
+
+def _catch_redact_card_grouped_repl(m):
+    text = m.group(0)
+    first_group = text[:4]
+    if _looks_like_a_year_group(first_group):
+        return text
     return "[REDACTED:card-number]"
 
 
@@ -275,14 +309,17 @@ def _catch_redact(text):
     """The redaction used ONLY by the catch ledger (draft excerpt + saved
     payload) — never applied to the gate/verify evidence window. Runs the
     general redact() with redact_emails=True (secrets, credentials, plus
-    emails), then, catch-ledger-only, redacts card numbers (13+ digits,
-    unix-ms timestamps excepted — see _CARD_NUMBER_RX), US-shaped phone
-    numbers, and SSN-shaped 3-2-4 digit strings. Never raises: an
-    empty/None input returns ""."""
+    emails), then, catch-ledger-only, redacts card numbers — an ungrouped
+    13+ digit run (unix-ms timestamps excepted) or a separated run in an
+    exact 4-4-4-4/4-6-5 card grouping (a plausible year first group
+    excepted — see N3, _CARD_NUMBER_PLAIN_RX/_CARD_NUMBER_GROUPED_RX) —
+    US-shaped phone numbers, and SSN-shaped 3-2-4 digit strings. Never
+    raises: an empty/None input returns ""."""
     if not text:
         return text or ""
     out = redact(str(text), redact_emails=True)
-    out = _CARD_NUMBER_RX.sub(_catch_redact_card_repl, out)
+    out = _CARD_NUMBER_GROUPED_RX.sub(_catch_redact_card_grouped_repl, out)
+    out = _CARD_NUMBER_PLAIN_RX.sub(_catch_redact_card_plain_repl, out)
     for kind, rx in _COMPILED_CATCH_REDACT:
         out = rx.sub(f"[REDACTED:{kind}]", out)
     return out
@@ -2069,7 +2106,15 @@ def _catch_cases_write(cases):
     """Atomic overwrite of the whole catch-cases array file. Must be
     called with the catch lock already held (see _catch_lock) whenever the
     caller also touched the catch ledger in the same command, so the two
-    files never observe a partial update from a concurrent `catch tag`."""
+    files never observe a partial update from a concurrent `catch tag`.
+
+    Sorted by `ts` (ISO 8601, so this is also chronological string order;
+    a missing/unparseable ts sorts first via "") before writing — N1: a
+    re-tag removes and re-appends a case (see _upsert_catch_case), which
+    without this would silently move it to the end of the file, reordering
+    every case that already existed just because one of them got
+    re-tagged."""
+    cases = sorted(cases, key=lambda c: c.get("ts") or "")
     cases_path = _catch_cases_path()
     try:
         cases_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2203,27 +2248,22 @@ def cmd_catch(a):
     return refuse("catch: no action — use list, tag or report")
 
 
-def _catch_refuse2(line):
-    """Same shape as refuse(), but exit 2 — used only by `catch list`'s and
-    `catch report`'s shared --since validation refusal, distinguishable
-    from the generic REFUSED (5) other `catch` errors use. NOT used for
-    `catch tag`'s tag-vs-decision contradiction refusal — see
-    _catch_refuse3 (N6) for why that one needs its own code."""
-    print(f"super-jev: {line}", file=sys.stderr)
-    return 2
-
-
 def _catch_refuse3(line):
-    """Same shape as refuse()/_catch_refuse2, but exit 3 — used only by
-    `catch tag`'s tag-vs-decision contradiction refusal (see N6). Exit 2
-    is argparse's own usage-error convention, and every other `catch`
-    exit code (0, 2 for --since, 5 for a generic refuse()) was already
-    spoken for — a tag that contradicts the record it names is not a
-    usage error at all (argparse already accepted the arguments fine), so
-    a caller branching on "was this a bad flag" vs "was this a real
-    refusal" could not tell the two exit-2 cases apart. `catch tag`
-    itself never returns 3 for any other reason, so a caller can treat 3
-    as this one refusal unambiguously."""
+    """Same shape as refuse(), but exit 3 — the shared exit code for every
+    `catch` refusal that is NOT a plain usage error and NOT the generic
+    REFUSED (5): `catch tag`'s tag-vs-decision contradiction refusal
+    (N6 — a tag that contradicts the record it names, e.g. "false" on a
+    record whose decision was "allow"), and `catch list`'s/`catch
+    report`'s shared --since validation refusal (N4 — an unparseable
+    --since value). Both used to exit differently (2 for --since, 3 for
+    the tag contradiction) even though neither is an argparse usage error
+    (argparse already accepted the arguments fine in both cases) and
+    neither is the generic "missing input/door" refusal(5) — exit 2 is
+    argparse's own usage-error convention, so overloading it here made a
+    caller unable to tell "bad flag" apart from "refused for a domain
+    reason" by exit code alone. N4 moved --since onto this same code so
+    both refusal families now share one, unambiguous, non-usage-error
+    exit."""
     print(f"super-jev: {line}", file=sys.stderr)
     return 3
 
@@ -2231,7 +2271,7 @@ def _catch_refuse3(line):
 def _cmd_catch_list(a):
     since = getattr(a, "since", None)
     if since and _parse_since(since) is None:
-        return _catch_refuse2(f"catch list: --since {since!r} is not a valid duration "
+        return _catch_refuse3(f"catch list: --since {since!r} is not a valid duration "
                               "(e.g. 24h, 7d, 30m) — refusing rather than silently "
                               "showing all time")
     records = _catch_records()
@@ -2313,7 +2353,7 @@ def _cmd_catch_tag(a):
 def _cmd_catch_report(a):
     since = getattr(a, "since", None)
     if since and _parse_since(since) is None:
-        return _catch_refuse2(f"catch report: --since {since!r} is not a valid duration "
+        return _catch_refuse3(f"catch report: --since {since!r} is not a valid duration "
                               "(e.g. 24h, 7d, 30m) — refusing rather than silently "
                               "showing all time")
     records = _catch_records()
