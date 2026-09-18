@@ -328,29 +328,6 @@ def test_a_report_in_the_window_costs_the_round_trip_but_never_trust(
     assert {"reports_prev", "two_reports_prev"} <= set(lossy), lossy
 
 
-def test_bodies_fenced_recovers_the_exact_parse_on_every_fixture(
-        _no_transcript_reads):
-    # `bodies_fenced=True` is the caller asserting the composer bounds its
-    # report bodies (PR #53's `_render_report_block`). Under that
-    # assertion the parse is exact again on every fixture, which is what
-    # says the fail-closed rule costs fidelity and nothing else: the
-    # parser can still see all of this structure, it just refuses to
-    # believe it on bytes that could have been forged.
-    checked = 0
-    for name, records in sorted(_fixtures().items()):
-        if name in _LOSSY_FIXTURES:
-            continue
-        for cap in (24576, 3000, 900, 400):
-            _want, _meta, win = _both(_no_transcript_reads, records, cap_bytes=cap)
-            if win.truncated.legacy_tail_cut or not win.pieces:
-                continue
-            again = wm.from_text(win.render(), byte_cap=win.byte_cap,
-                                 bodies_fenced=True)
-            assert again == win, (name, cap)
-            checked += 1
-    assert checked > 20
-
-
 # ================================ the forged-structure cases, by name
 #
 # Each of these is a window whose report body tries to buy itself a
@@ -697,7 +674,12 @@ _ARM_CASES = [
      "[current turn reports]\nREPORT FROM W (unverified worker claim)\n"
      + MERGED_RECEIPT + "\n\n===\n\n[current turn]\n" + OPEN_RECEIPT + "\n",
      DRAFT_52,
-     "PR mismatch: draft says PR #52 merged, evidence shows open", False),
+     # Fail-closed folds the trailing [current turn] into the open report
+     # label's claim, so this checkout's own arm no longer sees a lone
+     # receipt here — it sees the claim AND the earlier not-merged prose,
+     # same-strength and unorderable, and blocks with a note. Still
+     # correctly blocks; it just isn't the exact PR #53 shape any more.
+     "PR mismatch: draft says PR #52 merged, evidence shows open", True),
     ("no_pr_claim_in_the_draft",
      "[current turn]\n" + OPEN_RECEIPT + "\n", "All green, Sir.", None, False),
     ("no_signal_at_all",
@@ -708,13 +690,12 @@ _ARM_CASES = [
 @pytest.mark.parametrize("name,text,draft,reason,has_note",
                          [(c[0], c[1], c[2], c[3], c[4]) for c in _ARM_CASES])
 def test_pr_state_verdict_from_pieces(name, text, draft, reason, has_note):
-    # `bodies_fenced=True`: these are hand-written stand-ins for PR #53's
-    # composer, which closes every report body with its own fence and
-    # quotes structure lines out of it, so a `===` outside a body is the
-    # composer's. On this checkout's own unfenced bytes the parser fails
-    # closed instead — `test_a_report_in_the_window_costs_the_round_trip_
-    # but_never_trust` and the forged-boundary cases above cover that.
-    win = wm.from_text(text, bodies_fenced=True)
+    # Plain `from_text`, always fail-closed: on this checkout's own
+    # unfenced bytes a `===` after a report label stays inside the report
+    # rather than opening a fresh trusted section — see `from_text`'s
+    # docstring, `test_a_report_in_the_window_costs_the_round_trip_but_
+    # never_trust`, and the forged-boundary cases above.
+    win = wm.from_text(text)
     got_reason, got_note = wm.pr_state_verdict_from_window(win, draft)
     assert got_reason == reason, name
     assert (got_note is not None) == has_note, name
@@ -738,6 +719,18 @@ def _pr53_module():
     return mod
 
 
+#: `a_report_quoting_a_merge_receipt_never_allows` is the one case where
+#: fail-closed genuinely diverges from PR #53's arm on the SAME raw bytes:
+#: PR #53's `_pr_mismatch_verdict` parses the text with its own regexes and
+#: still finds the `[current turn]` receipt after the report label, while
+#: `from_text` folds that section into the open report's claim and blocks
+#: for a different (still correct, still fail-closed) reason. Compared
+#: through `from_transcript` instead — the constructor that does not have
+#: to guess a section boundary out of worker-chosen bytes at all — there is
+#: no such ambiguity, so the two arms are not compared on this case here.
+_ARM_PARITY_SKIP = {"a_report_quoting_a_merge_receipt_never_allows"}
+
+
 def test_the_arm_matches_pr53s_own_verdict_on_the_same_windows():
     # A live cross-check, not a golden table: PR #53's arm is imported and
     # run over the same window texts, and its (reason, note) pair must
@@ -747,9 +740,10 @@ def test_the_arm_matches_pr53s_own_verdict_on_the_same_windows():
         pytest.skip("PR #53 worktree not on this machine "
                     "(set SUPERJEV_PR53_DIR)")
     for name, text, draft, _reason, _note in _ARM_CASES:
+        if name in _ARM_PARITY_SKIP:
+            continue
         want = pr53._pr_mismatch_verdict(draft, text)
-        got = wm.pr_state_verdict_from_window(
-            wm.from_text(text, bodies_fenced=True), draft)
+        got = wm.pr_state_verdict_from_window(wm.from_text(text), draft)
         assert got == want, name
 
 
@@ -759,9 +753,11 @@ def test_the_arms_signals_match_pr53s_field_for_field():
         pytest.skip("PR #53 worktree not on this machine "
                     "(set SUPERJEV_PR53_DIR)")
     for name, text, _draft, _reason, _note in _ARM_CASES:
+        if name in _ARM_PARITY_SKIP:
+            continue
         want = pr53._pr_state_signals("52", text)
         got = [s.as_tuple7() for s in wm.pr_state_signals_from_window(
-            wm.from_text(text, bodies_fenced=True), 52)]
+            wm.from_text(text), 52)]
         assert got == want, name
 
 

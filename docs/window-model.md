@@ -184,22 +184,35 @@ into an allow. Fail closed.
 What that costs: on a window with no relayed report, nothing — the parse
 is exact. On a window that carries one, every section after the first
 report label folds into that report, so its receipts re-parse as worker
-text. `replay_window_model.py` prints both numbers on every run, the
-default parse and the same parse under `bodies_fenced=True`, and the gap
-between them is the price.
+text. `replay_window_model.py` prints that number on every run, and it is
+the price of never taking a caller's word for how its bytes were built.
 
-`bodies_fenced=True` is a caller *asserting* that the composer which
-wrote these bytes bounds its report bodies the way PR #53's
-`_render_report_block` does — closes each with its own `END REPORT FROM`
-line and quotes structure lines out of the body — so a `===` outside a
-body is necessarily the composer's. It is the flag a migration flips once
-the composer fences, not a tuning knob, and passing it for this branch's
-bytes would re-open the hole above.
+There is no flag that buys the exact parse back. A caller cannot assert
+that the composer which wrote a given block of bytes bounds its report
+bodies the way PR #53's `_render_report_block` does — closes each with
+its own `END REPORT FROM` line and quotes structure lines out of the
+body — because `from_text` has no way to verify that assertion from the
+bytes alone, and trusting an unverified claim about the composer is
+exactly the hole this function exists to close. `from_text` is fail-closed
+on every input it is ever given, full stop.
 
-What no flag repairs: a genuine tool result whose own output contains
-`\n\n---\n\n` splits into two receipt pieces, and one that prints a
-`REPORT FROM` line demotes itself and its neighbours to claims. Both are
-safe directions and both are invisible in flat text.
+That is also why this checkout does not yet port PR #53's
+`_repair_report_tail`, which re-opens a fence a byte cut sliced through
+and quotes the fragment left behind back out of the body — a genuine
+capability gap, not a byte-identity nit. Until it is ported, a
+truncation that lands inside a fenced report body on PR #53's composer
+replays here as an unfenced, fail-closed parse that folds more into the
+claim than PR #53's own reader would. Every case that diverges for this
+reason is still safe — folding costs trust, never grants it — but it is
+a TRUST gap between the two composers that a migration onto PR #53's
+fencing has to close by PORTING THE REPAIR ITSELF, not by asserting the
+bytes already match. `replay_window_model.py`'s `cut_diff` tally is where
+that gap gets counted on every run instead of being waved at.
+
+What nothing here repairs: a genuine tool result whose own output
+contains `\n\n---\n\n` splits into two receipt pieces, and one that
+prints a `REPORT FROM` line demotes itself and its neighbours to claims.
+Both are safe directions and both are invisible in flat text.
 
 That asymmetry is the case for `from_transcript` being what a live gate
 uses. `from_text` is for benches.
