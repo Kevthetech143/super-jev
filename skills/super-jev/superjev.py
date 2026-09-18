@@ -1583,8 +1583,8 @@ def build_parser():
     ft.add_argument("--budget", type=int, help="maxInputTokens per call")
     ft.add_argument("--batch", type=int, help="max records per call")
     ft.add_argument("--prefilter", type=int,
-                    help="keep only the top N records by local token overlap before the "
-                         "one provider call (harness default 40; 0 disables)")
+                    help="keep only the top N records by local narrowing before the "
+                         "one provider call (harness default 8; 0 disables)")
     ft.add_argument("--dry-run", action="store_true", help="print the plan, no network")
     ft.add_argument("--stub", action="store_true", help="offline stub, no key, no network")
     _add_json_flag(ft)

@@ -17,6 +17,7 @@
     "permit": "node src/permit-cli.ts",
     "chain": "node src/chain-cli.ts",
     "fetch": "node src/fetch-cli.ts",
+    "catalog": "node src/catalog-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
     "bench:live": "node bench/live-measure.ts",
     "bench:fetch": "node bench/fetch-bench.ts",

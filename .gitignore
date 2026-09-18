@@ -11,3 +11,4 @@ __pycache__/
 *.pyc
 
 skills/super-jev/ledger/
+.superjev/
