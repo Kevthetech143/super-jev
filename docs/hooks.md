@@ -30,6 +30,30 @@ returned text is only a launch acknowledgement, or a spawn dictionary carrying
 the brief rather than a report, because judging a brief as if it were a report
 is a category error that produced false blocks.
 
+**verify: spawn acks and gather health (2026-09-18).** Two fixes off
+`gate-adjudication-20260918.md`'s hand-adjudicated read of the verify door's
+live traffic (7 blocks, 0 fair). First, the spawn-ack/launch-dict skip above
+already ran before this change — it just left no trace: the catch ledger
+carried nothing for those runs, so a spawn ack and an actual unchecked report
+looked identical in `catches.jsonl`. It now prints `super-jev verify: spawn
+ack, nothing to judge` on stderr and writes a `door="verify"`,
+`decision="unchecked"`, `reasons=["spawn-ack"]` catch record, same as every
+other hook decision gets one. Second, the real bug: `hook verify
+--from-file` and the Stop-scan (below) both already compute an
+`_evidence_inventory` gather-health check and feed it into the block
+decision so a thin gather suppresses a would-be block into an advisory note
+— but the live PostToolUse hook never did, because it has no `--test-cmd`/
+`--pr` to measure and the code assumed "nothing to measure" meant "healthy."
+A worker-verify exit 4 (REJECT) could therefore block a report even when the
+only evidence source a live hook ever has (`--worktree`) was absent, empty,
+or unreadable — the judge saw claims with no receipts, said NOT_SUPPORTED,
+and the hook blocked on the bare exit code even though nothing it parsed
+actually crossed the block line. `hook verify` now runs the same
+`_evidence_inventory` check against its own worktree; when the gather comes
+back thin, a would-be block is downgraded to one advisory line (`no evidence
+gathered; not judged`, exit 0) and logged as `decision="unchecked"`,
+`reasons=["no-evidence", ...]` instead of blocking.
+
 **UserPromptSubmit → `hook prompt-verify`.** A background sub-agent's real
 final report never arrives through PostToolUse. It lands later, inside the next
 user turn, as a teammate-message block. This hook reads those blocks, derives
@@ -54,8 +78,24 @@ idle-notification echo of a report already seen (a
 double-checked. This is the same PR #20 0.80-confidence read, but ADVISORY
 ONLY — a REJECT-worthy scanned report never touches this Stop event's own
 exit code, it only prints an extra `super-jev verify <teammate_id>:
-CLEAN|READ|REJECT — <flags> — <evidence used> — health ok|thin` line and logs
-a ledger row with `source="stop-transcript"`. `hook prompt-verify` and its
+CLEAN|READ|REJECT|UNCHECKED — <flags> — <evidence used> — health ok|thin`
+line and logs a ledger row with `source="stop-transcript"`.
+
+**Correction, 2026-09-18: a bare REJECT with `health thin` is now
+UNCHECKED, not REJECT.** The same hole the live `hook verify` gather-health
+fix above closes existed here too — `gate-adjudication-20260918.md` found
+45 of the 59 scanned REJECT labels ran at `health=thin`: worker-verify's
+own exit code said REJECT, but every flag this scan actually parsed had
+already been suppressed into an advisory note because the gather itself had
+nothing usable to judge against. A bare exit code over evidence that was
+never gathered means "we could not check," never "we checked and it
+failed," so this scan no longer labels that shape REJECT — it prints
+`UNCHECKED` and logs the same `decision="unchecked"`, `reasons=["no-
+evidence", ...]` catch record `hook verify` writes for the identical case.
+A REJECT label still requires at least one flag that actually crossed the
+block line against a healthy gather.
+
+`hook prompt-verify` and its
 UserPromptSubmit wiring are left in place (harmless, and correct if Claude
 Code ever does start firing that payload for a teammate message), but the
 Stop-hook scan is the path that is actually live today.
