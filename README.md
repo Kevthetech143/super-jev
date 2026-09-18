@@ -287,3 +287,14 @@ ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
 `gate` and `verify` wrap a claim-gate tool and a report-verify tool that are not part of this repo — point `SUPERJEV_GATE_CMD` and `SUPERJEV_VERIFY_CMD` at your own. `sweep` and `bench` need no env var at all: `SUPERJEV_REPO` defaults to this checkout's own root. Full docs, the exit-code table, and the routing keywords are in [`skills/super-jev/SKILL.md`](skills/super-jev/SKILL.md).
 
 Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill`. Fully offline — every wrapped door is a fake in the test, so no test reaches TypeSafe, npm or git.
+
+### Hooks
+
+`skills/super-jev/hooks/` wires three Claude Code hook events to `superjev.py
+hook`, so a draft reply or a sub-agent's report is checked against machine
+evidence before anyone acts on it. **[`docs/hooks.md`](docs/hooks.md)** is the
+page to read first: what each hook does, the `settings.json` snippet, the loop
+guard, what "block" and "advisory" mean, the call ledger, what it costs, the
+measured failure modes, and when not to install it. Nothing is installed for
+you, and with `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` unset every hook fails
+open.

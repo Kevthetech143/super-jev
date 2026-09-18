@@ -129,6 +129,187 @@ DEFAULT_BLOCK_NOT_SUPPORTED = 0.20
 DEFAULT_BLOCK_OVERCLAIM = 0.80
 BLOCK_SELF_CONTRADICTORY = 0.30
 
+# READ THIS BEFORE CHANGING EITHER THRESHOLD ABOVE.
+#
+# The float on a jev/worker-verify row is the judge's CONFIDENCE IN ITS OWN
+# VERDICT, not a measure of how well the evidence supports the claim. See
+# jev.py `_row`: it reads `ans["confidence"]`, and `escalate_below` (0.80)
+# means "under this line the judge is unsure, so a human must read the
+# source". So "c3 NOT_SUPPORTED 0.97" reads as "I am 97% sure the evidence
+# does not address this claim" — the STRONGEST unsupported-claim signal
+# there is — while "c1 NOT_SUPPORTED 0.18" reads as "I barely think so, do
+# not act on me".
+#
+# DEFAULT_BLOCK_NOT_SUPPORTED therefore blocks in the direction that is
+# hardest to defend: it fires on the judge's LEAST confident
+# unsupported-claim findings and fails OPEN on its most confident ones. It
+# is left as-is here on purpose — this change is a precision fix, and
+# making the gate stricter without a bench run would trade tonight's false
+# blocks for a new, unmeasured set of them. docs/hooks.md records it as the
+# top open decision. Do not "fix" the direction without re-running bench/.
+NOT_SUPPORTED_DIRECTION_NOTE = (
+    "the float is the judge's CONFIDENCE in its verdict, not a support score; "
+    "NOT_SUPPORTED blocks at or BELOW the line, so a high-confidence "
+    "unsupported claim fails open (docs/hooks.md, open decision 1)")
+
+# ------------------------------------------------- the evidence inventory
+#
+# The 2026-09-17 false block. A TRUE report ("187 passed", "both checks
+# pass", "hook verify now exits 0/skipped"), checked with
+# --worktree/--test-cmd/--pr, came back c2 NOT_SUPPORTED 0.68, c3
+# NOT_SUPPORTED 0.97, c4 CONTRADICTED 0.72, overclaim OVERCLAIMS 1.00 and
+# BLOCKED, while the lead had already confirmed by hand that the tests and
+# CI both passed. The judge was not wrong about its evidence. THE EVIDENCE
+# WAS MISSING, in two specific and reproducible ways:
+#
+#   1. --test-cmd was a DIRECTORY-level pytest. worker-verify's
+#      `check_test_cmd` refuses those (a bare pytest in claw4mac launches
+#      the live app) and writes "NO TEST OUTPUT WAS COLLECTED" into the
+#      evidence instead of a test run. So "187 passed" had literally
+#      nothing to be checked against.
+#   2. --pr only ever produces `gh pr view --json
+#      state,isDraft,headRefName,mergedAt`. That JSON carries NO check-run
+#      data at all, so "both checks pass" is unprovable BY CONSTRUCTION,
+#      however green the PR actually is.
+#
+# With three of four claims unprovable, "does the DRAFT state something as
+# tested/verified/done when the EVIDENCE shows it only inferred or
+# partial?" is honestly answered OVERCLAIMS at 1.00 — and OVERCLAIMS alone
+# was enough to block. That is the bug: the shim turned an EVIDENCE GAP
+# into a verdict about the report. A gate that cannot tell "you lied" from
+# "I could not look" must not block on the second.
+EVIDENCE_MIN_CHARS_ENV = "SUPERJEV_EVIDENCE_MIN_CHARS"
+DEFAULT_EVIDENCE_MIN_CHARS = 400
+# worker-verify's --dry-run printer emits exactly:
+#   "EVIDENCE: 7 blocks, 24196 chars (limit 100000)"
+_EVIDENCE_SIZE_RE = re.compile(r'^EVIDENCE:\s+(\d+)\s+blocks?,\s+(\d+)\s+chars',
+                               re.MULTILINE)
+# Sentences worker-verify writes INTO the evidence when a kind of evidence
+# could not be collected. Each one means "this claim has nothing to be
+# judged against", never "this claim is false".
+EVIDENCE_ABSENT_MARKERS = (
+    "NO TEST OUTPUT WAS COLLECTED",
+    "NO REPOSITORY WAS INSPECTED",
+    "gh IS NOT INSTALLED",
+    "(no --test-cmd given)",
+    "(no --worktree given)",
+)
+# A claim-level row, INCLUDING the SUPPORTED ones _parse_strong_flags drops
+# (it keeps only red verdicts). Needed to answer "was every claim
+# supported?", which _parse_strong_flags alone can never tell us.
+_CLAIM_ROW_RE = re.compile(r'^\s*(?P<key>c\d+)\s+(?P<verdict>[A-Z][A-Z_]*)\s+'
+                           r'(?P<score>\d+\.\d+)', re.MULTILINE)
+
+
+def _evidence_min_chars():
+    try:
+        return int(os.environ.get(EVIDENCE_MIN_CHARS_ENV, DEFAULT_EVIDENCE_MIN_CHARS))
+    except (TypeError, ValueError):
+        return DEFAULT_EVIDENCE_MIN_CHARS
+
+
+def _parse_claim_rows(text):
+    """Every c<N> row in a captured verdict table, SUPPORTED ones included.
+    Returns [{"key", "verdict", "score"}] in table order; never raises."""
+    if not text:
+        return []
+    rows = []
+    for m in _CLAIM_ROW_RE.finditer(text):
+        try:
+            score = float(m.group("score"))
+        except ValueError:
+            continue
+        rows.append({"key": m.group("key"), "verdict": m.group("verdict"),
+                     "score": score})
+    return rows
+
+
+def _test_cmd_will_be_refused(cmd):
+    """True when worker-verify's own `check_test_cmd` guardrail will refuse
+    this --test-cmd, so we KNOW before spending a model call that no test
+    output will reach the evidence. A deliberate mirror of verify.py's rule
+    (that file is fleet-local and is not edited from here): a pytest
+    invocation naming no .py file and no ::test selector is a
+    directory-level run, and is refused.
+
+    This is the check that catches tonight's false block with no probe and
+    no network: `python3 -m pytest skills/super-jev/tests -q` is refused,
+    so "187 passed" was never provable from that evidence."""
+    if not cmd:
+        return False
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        return False
+    if not toks:
+        return False
+    is_pytest = toks[0] == "pytest" or ("pytest" in toks and toks[0] in ("python", "python3"))
+    if not is_pytest:
+        return False
+    return not any(t.endswith(".py") or "::" in t for t in toks[1:])
+
+
+def _evidence_inventory(test_cmd="", worktree=None, pr=None, probe_stdout=""):
+    """What evidence this run could ACTUALLY have gathered, and whether that
+    is too thin to carry a verdict about the report.
+
+    `probe_stdout` is the captured stdout of a free `--dry-run` gather (no
+    model call) when one was run. Returns a dict that the ledger, --explain
+    and the block gate all read:
+
+      blocks/chars  — from worker-verify's own "EVIDENCE: N blocks, M chars"
+                      line, or None when no probe ran or it printed none
+      missing       — the absent-evidence sentences found in the probe
+      thin          — True when we have POSITIVE reason to believe the
+                      evidence cannot carry a judgement about the report
+      reasons       — plain-words explanation, for --explain and the ledger
+
+    `thin` is deliberately conservative. It is True only on positive
+    evidence of a gap: no evidence source was passed at all, the --test-cmd
+    will be refused, the probe reported a gathered size under the floor, or
+    the probe printed an absent-evidence sentence. An unparseable or failed
+    probe leaves `thin` False — unknown is not the same as absent, and we
+    would rather keep a block we cannot justify than drop one we should
+    have kept."""
+    inv = {"blocks": None, "chars": None, "missing": [], "thin": False,
+           "reasons": [], "test_cmd": test_cmd or "",
+           "worktree": worktree or None, "pr": pr}
+    if not (worktree or test_cmd or pr):
+        inv["thin"] = True
+        inv["reasons"].append("no evidence source was passed (no worktree, "
+                              "no test command, no PR)")
+    if test_cmd and _test_cmd_will_be_refused(test_cmd):
+        inv["thin"] = True
+        inv["reasons"].append(
+            f"--test-cmd {test_cmd!r} is a directory-level pytest, which "
+            "worker-verify refuses, so NO test output reaches the evidence "
+            "and any test-count claim is unprovable")
+    if pr:
+        # Not a thinness trigger on its own — the PR block IS real evidence
+        # about state. It is recorded so --explain can say plainly why a
+        # "checks pass" claim came back unsupported.
+        inv["reasons"].append(
+            "--pr gathers `gh pr view --json state,isDraft,headRefName,"
+            "mergedAt` only, which carries NO check-run data, so a claim "
+            "about CI checks passing is unprovable by construction")
+    probe = probe_stdout or ""
+    m = _EVIDENCE_SIZE_RE.search(probe)
+    if m:
+        inv["blocks"], inv["chars"] = int(m.group(1)), int(m.group(2))
+        if inv["chars"] < _evidence_min_chars() or inv["blocks"] == 0:
+            inv["thin"] = True
+            inv["reasons"].append(
+                f"the gather produced {inv['blocks']} block(s) / "
+                f"{inv['chars']} chars, under the {_evidence_min_chars()}-char floor")
+    for marker in EVIDENCE_ABSENT_MARKERS:
+        if marker in probe:
+            inv["missing"].append(marker)
+    if inv["missing"]:
+        inv["thin"] = True
+        inv["reasons"].append("the gather reported absent evidence: "
+                              + "; ".join(inv["missing"]))
+    return inv
+
 # Machine tags a reply carries for fleet bookkeeping (board-bus footer,
 # rung-line, Add/Skip buttons, raw system tags) are not part of the reply's
 # own content, but jev's leaked_internal/self_contradictory scoring has been
@@ -201,46 +382,94 @@ def _parse_strong_flags(text):
     return flags
 
 
-def _hook_block_reasons(flags):
-    """Which of these already-notable flags cross THIS hook's own block
-    line (stricter, and in the opposite direction for NOT_SUPPORTED/
-    SELF_CONTRADICTORY, than jev's own 0.80 escalate-below line — see the
-    block above). Returns a list of "key VERDICT score" strings, in
-    argument order, for the stderr reason and the ledger line.
+def _hook_block_decision(flags, claim_rows=None, evidence=None):
+    """The full block decision: (reasons, notes).
 
-    SELF_CONTRADICTORY never blocks on its own: it only counts as a block
-    reason when the SAME run also carries a blocking NOT_SUPPORTED or
-    OVERCLAIMS flag. A calmer, more careful rewrite of a reply can still
-    read as mildly self-contradictory to jev's scoring (hedging language
-    reads that way) even once the actual overclaim/unsupported-claim
-    problem is fixed — blocking on self-contradiction alone in that case
-    is exactly what looped the Stop gate on 2026-09-17: the same short
-    reply blocked three times running on self_contradictory scores of
-    0.10/0.15/0.05 while overclaim dropped from 0.87 to 0.25 to 0.30,
-    because self-contradiction alone was a block trigger. NOT_SUPPORTED
-    and OVERCLAIMS keep blocking entirely on their own — nothing here
-    weakens either of those."""
+    `reasons` are the "key VERDICT score" strings for the flags that cross
+    THIS hook's block line — empty means do not block. `notes` are
+    plain-words lines explaining any flag that WOULD have blocked and was
+    suppressed, for stderr, --explain and the ledger.
+
+    Directions, because they are not symmetric (see the long comment on
+    the thresholds): NOT_SUPPORTED and SELF_CONTRADICTORY block at or
+    BELOW their line, OVERCLAIMS blocks at or ABOVE its line.
+
+    Two suppressions, both of them fixes for real 2026-09-17 incidents:
+
+    SELF_CONTRADICTORY never blocks on its own. It counts only when the
+    SAME run also carries a blocking NOT_SUPPORTED or OVERCLAIMS. A calmer
+    rewrite of a reply still reads as mildly self-contradictory to jev's
+    scoring (hedging language does), so blocking on it alone is what
+    looped the Stop gate: the same short reply blocked three times running
+    on self_contradictory 0.10/0.15/0.05 while overclaim fell 0.87 ->
+    0.25 -> 0.30.
+
+    OVERCLAIMS never blocks ON ITS OWN when the run gives us no standing
+    to act on it — that is, when EVERY claim-level row came back
+    SUPPORTED, or when the evidence inventory says the evidence is absent
+    or too thin to judge against. "The draft claims more than the
+    evidence carries" is the expected, correct answer when the evidence
+    carries nothing, so on its own it is a statement about OUR gather, not
+    about the worker's honesty. It still prints as an advisory and still
+    lands in the ledger. A blocking NOT_SUPPORTED in the same run is
+    untouched: OVERCLAIMS alongside a real unsupported-claim finding
+    blocks exactly as before, and nothing here weakens a fabricated quote
+    (already exit 2/4 and "block" via the action map)."""
     not_supported_line = _block_not_supported_threshold()
     overclaim_line = _block_overclaim_threshold()
+    notes = []
     has_not_supported_block = any(
         f["verdict"] == "NOT_SUPPORTED" and f["score"] <= not_supported_line
         for f in flags)
     has_overclaim_block = any(
         f["verdict"] == "OVERCLAIMS" and f["score"] >= overclaim_line
         for f in flags)
+
+    # The OVERCLAIMS-alone gate.
+    overclaim_suppressed = False
+    if has_overclaim_block and not has_not_supported_block:
+        rows = [r for r in (claim_rows or []) if r["key"].startswith("c")]
+        all_supported = bool(rows) and all(r["verdict"] == "SUPPORTED" for r in rows)
+        thin = bool(evidence) and evidence.get("thin") is True
+        if all_supported:
+            overclaim_suppressed = True
+            notes.append(
+                f"OVERCLAIMS was the only blocking flag and all {len(rows)} "
+                "claim(s) came back SUPPORTED — advisory, not a block")
+        elif thin:
+            overclaim_suppressed = True
+            # Kept to one line on purpose: this string goes into stderr, the
+            # ledger and the session's own context. The full list of gaps is
+            # what --explain is for.
+            first = (evidence.get("reasons") or ["no evidence was gathered"])[0]
+            headline = first.split(",")[0].split(" so ")[0].strip()
+            notes.append(
+                "OVERCLAIMS was the only blocking flag and the evidence "
+                f"cannot carry a verdict ({headline}) — advisory, not a "
+                "block; run with --explain for the full gather")
+        if overclaim_suppressed:
+            has_overclaim_block = False
+
     reasons = []
     for f in flags:
         v, s, k = f["verdict"], f["score"], f["key"]
         if v == "NOT_SUPPORTED" and s <= not_supported_line:
             blocked = True
         elif v == "OVERCLAIMS" and s >= overclaim_line:
-            blocked = True
+            blocked = not overclaim_suppressed
         elif v == "SELF_CONTRADICTORY" and s <= BLOCK_SELF_CONTRADICTORY:
             blocked = has_not_supported_block or has_overclaim_block
         else:
             blocked = False
         if blocked:
             reasons.append(f"{k} {v} {s:.2f}")
+    return reasons, notes
+
+
+def _hook_block_reasons(flags, claim_rows=None, evidence=None):
+    """Just the block reasons from _hook_block_decision. Kept as the name
+    every caller and test already uses."""
+    reasons, _notes = _hook_block_decision(flags, claim_rows, evidence)
     return reasons
 
 
@@ -1256,11 +1485,76 @@ def _pr_url_from_worktree(worktree, pr_num):
     return f"https://github.com/{m.group(1)}/{m.group(2)}/pull/{pr_num}"
 
 
+def _evidence_probe(report_path, worktree=None, test_cmd=""):
+    """A FREE gather: worker-verify's own `--dry-run`, which assembles every
+    evidence block and prints "EVIDENCE: N blocks, M chars" plus each
+    block, and never calls the model. Returns its captured stdout, or ""
+    when the probe could not run.
+
+    It is only ever run when the answer changes something — a block that
+    would rest on OVERCLAIMS alone, or an explicit --explain — so the
+    common path still pays for exactly one gather."""
+    try:
+        ns = argparse.Namespace(report=report_path, worktree=worktree,
+                                test_cmd=test_cmd or "", paths=[], dry_run=True,
+                                json=False, hook_mode=True)
+        result = cmd_verify(ns)
+    except Exception:
+        return ""
+    if isinstance(result, tuple) and len(result) == 3:
+        return result[1] or ""
+    return ""
+
+
+def _print_explain(door, code, action, flags, claim_rows, evidence, notes,
+                   block_reasons):
+    """The `--explain` report: what evidence was gathered, how big it was,
+    every claim row, and which rule decided. Written so a human can see
+    WHY without reading this file."""
+    ev = evidence or {}
+    print(f"\n--- super-jev {door} --explain ---")
+    size = ("not measured (no dry-run probe was needed)"
+            if ev.get("chars") is None else
+            f"{ev['blocks']} block(s), {ev['chars']} chars")
+    print(f"  evidence gathered : {size}")
+    print(f"  worktree          : {ev.get('worktree') or '(none)'}")
+    print(f"  test command      : {ev.get('test_cmd') or '(none)'}")
+    print(f"  pull request      : {ev.get('pr') if ev.get('pr') else '(none)'}")
+    print(f"  evidence too thin : {'YES' if ev.get('thin') else 'no'}")
+    for r in ev.get("reasons") or []:
+        print(f"      - {r}")
+    for m in ev.get("missing") or []:
+        print(f"      - MISSING: {m}")
+    if claim_rows:
+        print("\n  claim                verdict          confidence")
+        for row in claim_rows:
+            print(f"      {row['key']:<17s} {row['verdict']:<16s} {row['score']:.2f}")
+    else:
+        print("\n  claim rows        : none found in the door's output")
+    other = [f for f in (flags or []) if not f["key"].startswith("c")]
+    if other:
+        print("\n  draft-level flags")
+        for f in other:
+            print(f"      {f['key']:<17s} {f['verdict']:<16s} {f['score']:.2f}")
+    print(f"\n  thresholds        : NOT_SUPPORTED blocks at or below "
+          f"{_block_not_supported_threshold():.2f}, OVERCLAIMS at or above "
+          f"{_block_overclaim_threshold():.2f}")
+    print(f"  note              : {NOT_SUPPORTED_DIRECTION_NOTE}")
+    print(f"\n  door exit         : {code}")
+    print(f"  decision          : {action.upper()}")
+    if block_reasons:
+        print(f"  blocking on       : {'; '.join(block_reasons)}")
+    for n in notes or []:
+        print(f"  suppressed        : {n}")
+    print("--- end --explain ---\n")
+
+
 NO_EVIDENCE_ADVISORY = ("super-jev hook verify --from-file: no evidence source given; "
                         "run with --worktree/--test-cmd/--pr")
 
 
-def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None):
+def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
+                           explain=False):
     """`hook verify --from-file <report.txt>`: run the exact same verify
     check `hook verify` runs off a real PostToolUse payload, but against a
     report file that arrived out of band — a worker's final report message
@@ -1329,17 +1623,48 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None):
                                 test_cmd=test_cmd or "", paths=[], dry_run=False, json=False,
                                 hook_mode=True)
         code, door_out, door_err = cmd_verify(ns)
+
+        flags = _parse_strong_flags(door_out)
+        claim_rows = _parse_claim_rows(door_out)
+        evidence = _evidence_inventory(test_cmd=test_cmd, worktree=resolved_worktree,
+                                       pr=pr)
+        block_reasons, notes = _hook_block_decision(flags, claim_rows, evidence)
+
+        # Would this block rest on OVERCLAIMS alone? If so, the answer turns
+        # on whether we actually gathered anything to judge against — so
+        # spend the free `--dry-run` gather and decide on real numbers
+        # rather than on what we hoped the flags meant. Also run it for
+        # --explain, where the whole point is showing the human the size.
+        overclaim_only = (
+            any(f["verdict"] == "OVERCLAIMS"
+                and f["score"] >= _block_overclaim_threshold() for f in flags)
+            and not any(f["verdict"] == "NOT_SUPPORTED"
+                        and f["score"] <= _block_not_supported_threshold()
+                        for f in flags))
+        if explain or overclaim_only:
+            probe = _evidence_probe(tmp_path, resolved_worktree, test_cmd)
+            if probe:
+                evidence = _evidence_inventory(test_cmd=test_cmd,
+                                               worktree=resolved_worktree, pr=pr,
+                                               probe_stdout=probe)
+                block_reasons, notes = _hook_block_decision(flags, claim_rows, evidence)
     finally:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
 
-    flags = _parse_strong_flags(door_out)
-    block_reasons = _hook_block_reasons(flags)
     action = VERIFY_HOOK_ACTION.get(code, "advisory")
     if block_reasons:
         action = "block"
+    elif notes:
+        # A suppressed block is never a silent allow. It is an advisory, so
+        # the session sees the flag and the reason it did not block.
+        action = "advisory"
+    if explain:
+        _print_explain("verify", code, action, flags, claim_rows, evidence, notes,
+                       block_reasons)
+    note_tail = (" — " + "; ".join(notes)) if notes else ""
     if action == "allow":
         _hook_log(f"verify: allow (exit {code}) [from-file {path!r}]", exit_code=0,
                  flags=flags, hook_mode=False, source="manual")
@@ -1353,10 +1678,10 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None):
                  (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
                  exit_code=2, flags=flags, hook_mode=False, source="manual")
         return 2
-    advisory = f"super-jev verify advisory (exit {code})"
+    advisory = f"super-jev verify advisory (exit {code}){note_tail}"
     print(advisory)
-    _hook_log(f"verify: advisory (exit {code}) [from-file {path!r}]", exit_code=0,
-             flags=flags, hook_mode=False, source="manual")
+    _hook_log(f"verify: advisory (exit {code}) [from-file {path!r}]{note_tail}",
+             exit_code=0, flags=flags, hook_mode=False, source="manual")
     return 0
 
 
@@ -1587,7 +1912,8 @@ def cmd_hook(a):
     if from_file:
         return _hook_verify_from_file(door, from_file, worktree=getattr(a, "worktree", None),
                                       test_cmd=getattr(a, "test_cmd", "") or "",
-                                      pr=getattr(a, "pr", None))
+                                      pr=getattr(a, "pr", None),
+                                      explain=bool(getattr(a, "explain", False)))
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -1767,8 +2093,16 @@ def cmd_hook(a):
         # (exit 2/4) is already "block" via the action map below and is
         # unaffected — flags is still parsed and logged for it, but there
         # is no weaker action to upgrade.
+        # claim_rows carries the SUPPORTED rows too, which _parse_strong_flags
+        # drops — without them the OVERCLAIMS-alone gate could never see
+        # that every claim was in fact supported. No evidence inventory is
+        # passed on this path: a real hook payload gives us no --test-cmd
+        # and no --pr (see the hardcoded test_cmd="" above), so there is no
+        # gather to measure. That also means a hook-driven verify can NEVER
+        # prove a test-count claim — docs/hooks.md says so in plain words.
         flags = _parse_strong_flags(door_out)
-        block_reasons = _hook_block_reasons(flags)
+        claim_rows = _parse_claim_rows(door_out)
+        block_reasons, block_notes = _hook_block_decision(flags, claim_rows)
 
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")
@@ -1806,9 +2140,10 @@ def cmd_hook(a):
                      (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
                      exit_code=2, flags=flags)
             return 2
-        advisory = f"super-jev {door} advisory (exit {code})"
+        note_tail = (" — " + "; ".join(block_notes)) if block_notes else ""
+        advisory = f"super-jev {door} advisory (exit {code}){note_tail}"
         print(advisory)
-        _hook_log(f"{door}: advisory (exit {code})", exit_code=0, flags=flags)
+        _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags)
         return 0
     except Exception as exc:  # fail-open: never wedge the session
         _hook_log(f"{door}: unexpected error ({exc.__class__.__name__}) — fail-open",
@@ -2099,6 +2434,10 @@ def build_parser():
     hk.add_argument("--test-cmd", dest="test_cmd", default="",
                     help="verify --from-file only: the test command, passed straight "
                          "to worker-verify's own --test-cmd")
+    hk.add_argument("--explain", action="store_true",
+                    help="verify --from-file only: print how much evidence was "
+                         "gathered, the per-claim table and which rule decided, "
+                         "so a human can see why it blocked or did not")
     hk.add_argument("--pr", type=int, default=None,
                     help="verify --from-file only: a PR number, turned into a full "
                          "GitHub pull URL (via --worktree's origin remote) and "
