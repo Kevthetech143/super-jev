@@ -14,8 +14,9 @@ import { Jev } from './jev.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
 import {
   DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN,
-  applyNoneGate, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry
+  applyNoneGate, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry, type FetchRun
 } from './enhance/fetch.ts';
+import { applyPreRules, buildTriggerIndex, formatPreRuleExplain, type PreRuleExplain } from './enhance/fetch-prerules.ts';
 import { CatalogError, parseCatalogText } from './enhance/catalog.ts';
 import type { Answer, Evaluator, Question, Request } from './types.ts';
 
@@ -38,6 +39,17 @@ clarifying question instead of a best guess. A confident top-1 sitting in a
 crowded field — a runner-up almost as confident — is still a guess, so the
 margin catches what the floor alone can't. Set --margin 0 to gate on the
 floor alone.
+
+Free checks first, judge for the rest: before the local narrowing pass even
+runs, three pre-rules (ported from the offline skill-pick research) look for
+a plain string match between the request and each record's own
+\`utterances\`/\`negatives\`. R1 serves the record directly, zero judge
+calls, when the request contains exactly one record's own unique
+multi-word trigger phrase and none of its negatives. R2 demotes the judge's
+top-1 pick to review when it has a negative-phrase hit in the request. R3
+returns noMatch when no record's trigger appears anywhere in the request and
+the judge's top-1 confidence is under the floor. Pre-rules are ON by
+default; \`--no-prerules\` disables them.
 
   --catalog FILE   JSON: an array of {"id","text",...} records (v1 {id,text}
                    or v2 with optional "utterances"/"negatives"/"tags"), or
@@ -72,6 +84,12 @@ floor alone.
                     same directory overwrites rather than failing.
   --budget  N      maxInputTokens per call. Default ${DEFAULT_FETCH_MAX_INPUT_TOKENS}.
   --batch   N      Max records per call.
+  --no-prerules    Skip the free pre-judge checks (R1/R2/R3) and go straight
+                   to the judge + none gate, the pre-v2 behaviour. Pre-rules
+                   are ON by default.
+  --explain        Print the derived pre-rule facts (which trigger hit, which
+                   negatives, how many utterances the ambiguity guard
+                   dropped) before the plan. Has no effect with --no-prerules.
   --dry-run        Print the plan and cost. Zero network.
   --stub           Run against the offline stub. Synthetic answers, zero
                    network, no API key. Never evidence about ranking quality.
@@ -156,7 +174,7 @@ async function main(): Promise<number> {
   let catalogPath = '', request = '', outDir = '', contextPath = '', recordId = '', ledgerPath = '';
   let maxInputTokens: number | undefined, batch: number | undefined, k: number | undefined, prefilter: number | undefined;
   let contextTurns: number | undefined, floor: number | undefined, margin: number | undefined;
-  let dryRun = false, stub = false, json = false;
+  let dryRun = false, stub = false, json = false, noPrerules = false, explain = false;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
     const next = () => { const v = args[++i]; if (!v || v.startsWith('--')) throw new CliError(`${flag} needs a value`); return v; };
@@ -176,6 +194,8 @@ async function main(): Promise<number> {
     else if (flag === '--dry-run') dryRun = true;
     else if (flag === '--stub') stub = true;
     else if (flag === '--json') json = true;
+    else if (flag === '--no-prerules') noPrerules = true;
+    else if (flag === '--explain') explain = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
   if (!catalogPath) throw new CliError(usage);
@@ -246,14 +266,106 @@ async function main(): Promise<number> {
   if (!json) console.log(formatFetchPlan(plan));
 
   const transport: Evaluator = stub ? stubEvaluator() : new Jev();
-  let run;
-  try { run = await runFetch(catalog, request, { ...options, transport }); }
-  catch (error) {
-    console.error(`Fetch transport failed: ${(error as Error).message}`);
-    return 2;
+
+  // Free checks first, judge for the rest: R1 (unique multi-word trigger,
+  // no negatives) can settle a request with zero judge calls; when it
+  // doesn't, R2/R3 still need the judge's own top-1, so `applyPreRules`
+  // makes the one call itself and post-processes it. `--no-prerules` skips
+  // straight to the pre-v2 behaviour.
+  let preRuleExplainText: string | undefined;
+  let preRuleReason: string | undefined;
+  let triggerServedId: string | undefined;
+  let preRuleGateOverride: { ask: string; candidates: import('./enhance/fetch.ts').FetchRankedEntry[] } | undefined;
+  let run: FetchRun | undefined;
+
+  if (!noPrerules) {
+    const triggerIndex = buildTriggerIndex(catalog);
+    let outcome;
+    try { outcome = await applyPreRules(catalog, request, triggerIndex, { ...options, transport }, floorN); }
+    catch (error) { console.error(`Fetch transport failed: ${(error as Error).message}`); return 2; }
+    const { decision, facts } = outcome;
+    if (explain) {
+      const explainText = formatPreRuleExplain({ facts, droppedSingleWord: triggerIndex.droppedSingleWord, droppedShared: triggerIndex.droppedShared, decision } as PreRuleExplain);
+      preRuleExplainText = explainText;
+      console.error(explainText);
+    }
+    if (decision.kind === 'serve') {
+      triggerServedId = decision.id;
+      preRuleReason = decision.reason;
+    } else if (decision.kind === 'demote') {
+      run = decision.run;
+      preRuleReason = decision.reason;
+      preRuleGateOverride = { ask: decision.reason, candidates: run.allScored.slice(0, 3) };
+    } else if (decision.kind === 'noMatch') {
+      run = decision.run;
+      preRuleReason = decision.reason;
+      preRuleGateOverride = { ask: decision.reason, candidates: [] };
+    } else {
+      run = decision.run;
+    }
+  } else {
+    try { run = await runFetch(catalog, request, { ...options, transport }); }
+    catch (error) { console.error(`Fetch transport failed: ${(error as Error).message}`); return 2; }
   }
 
-  const gate = applyNoneGate(run, floorN, marginN);
+  // R1 served directly: no run, no judge call. Build the whole result by
+  // hand so the manifest and cost both plainly show zero calls.
+  if (triggerServedId) {
+    const triggerResultJson = {
+      mode: 'trigger' as const,
+      request,
+      context: context ?? [],
+      k: plan.k,
+      catalogSize: plan.catalogSize,
+      prefilter: plan.prefilter,
+      floor: floorN,
+      margin: marginN,
+      source: 'trigger' as const,
+      reason: preRuleReason,
+      ranked: [{ id: triggerServedId, score: 1, confidence: 1 }],
+      noMatch: false,
+      noMatchConfidence: 0,
+      gated: false,
+      candidates: [],
+      ask: null,
+      calls: 0,
+      model: 'pre-rule-trigger',
+      manifestComplete: true,
+      errors: []
+    };
+    if (recordId) {
+      const path = ledgerPath || resolve('.superjev', 'fetch-ledger.jsonl');
+      try {
+        await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+        const line = JSON.stringify({ request, context: context ?? [], ranked: triggerResultJson.ranked, chosen: recordId, ts: new Date().toISOString() }) + '\n';
+        const handle = await open(path, 'a', 0o600);
+        try { await handle.writeFile(line); } finally { await handle.close(); }
+      } catch { throw new CliError('Cannot write the ledger file'); }
+      if (!json) console.error(`Recorded chosen=${recordId} to ${path}`);
+    }
+    if (outDir) {
+      await writeOut(outDir, 'ranked.json', JSON.stringify(triggerResultJson, null, 2) + '\n');
+      await writeOut(outDir, 'manifest.json', JSON.stringify({
+        totalRecords: 1, complete: true, problems: [],
+        counts: { accepted: 1, review: 0, abstain: 0, insufficient_evidence: 0, failed_validation: 0, unanswered: 0, unaccounted: 0 }
+      }, null, 2) + '\n');
+      await writeOut(outDir, 'cost.json', JSON.stringify({
+        calls: 0, inputTokens: 0, outputTokens: 0, retries: 0, wallMs: 0, perCallLatency: [], estimated: false,
+        model: 'pre-rule-trigger', note: 'R1 served this record from the catalog\'s own utterances; no provider call was made'
+      }, null, 2) + '\n');
+    }
+    if (json) { process.stdout.write(JSON.stringify(triggerResultJson) + '\n'); return 0; }
+    console.error(`Served by pre-rule: ${triggerServedId} (${preRuleReason})`);
+    console.error('calls: 0 (R1 unique-trigger bypass; no judge call was made)');
+    if (outDir) console.error(`Wrote ranked.json, manifest.json and cost.json to ${outDir}`);
+    return 0;
+  }
+
+  if (!run) throw new CliError('Internal error: no fetch run was produced');
+
+  const gate = preRuleGateOverride
+    ? { noMatch: true as const, candidates: preRuleGateOverride.candidates, ask: preRuleGateOverride.ask }
+    : applyNoneGate(run, floorN, marginN);
 
   const resultJson = {
     mode: stub ? 'stub' : 'live',
@@ -274,6 +386,8 @@ async function main(): Promise<number> {
     gated: gate.noMatch,
     candidates: gate.noMatch ? gate.candidates : [],
     ask: gate.noMatch ? gate.ask : null,
+    source: preRuleGateOverride ? 'pre-rule' : 'judge',
+    reason: preRuleReason ?? null,
     calls: run.calls,
     model: run.model,
     manifestComplete: run.manifest.complete,
@@ -309,7 +423,8 @@ async function main(): Promise<number> {
 
   if (run.noMatch) console.error(`No match: "none of these" won for every record judged (confidence ${run.noMatchConfidence.toFixed(2)}); nothing in the catalog serves this request.`);
   else console.error(`Top ${run.ranked.length} of ${run.plan.catalogSize}: ${run.ranked.map(r => `${r.id}=${r.score.toFixed(2)}`).join(', ') || '(none)'}`);
-  if (gate.noMatch) console.error(`Gate: below floor ${floorN.toFixed(2)} or margin ${marginN.toFixed(2)} — ${gate.ask}`);
+  if (gate.noMatch && preRuleGateOverride) console.error(`Gate: ${gate.ask}`);
+  else if (gate.noMatch) console.error(`Gate: below floor ${floorN.toFixed(2)} or margin ${marginN.toFixed(2)} — ${gate.ask}`);
   console.error(`calls: ${run.calls}${run.plan.prefilter.dropped ? ` (prefilter dropped ${run.plan.prefilter.dropped} of ${run.plan.catalogSize} locally)` : ''}`);
   if (outDir) console.error(`Wrote ranked.json, manifest.json and cost.json to ${outDir}`);
   if (run.errors.length) console.error(`${run.errors.length} validation or mapping problem(s) recorded`);
