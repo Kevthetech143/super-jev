@@ -885,11 +885,37 @@ def test_parse_strong_flags_reads_claim_and_draft_level_rows():
     assert "time_sensitive" not in by_key
 
 
-def test_hook_gate_the_exact_lie_output_blocks(tmp_path, monkeypatch, capsys):
-    # This is the exact repro from the live finding: exit 3 (READ) on a
-    # draft whose transcript-derived evidence contradicts it. The old
-    # mapping let this through as an advisory; the fix must block it.
+HIGH_CONF_LIE_STDOUT = (FIXTURES / "lie_stop_high_confidence_stdout.txt").read_text(
+    encoding="utf-8")
+
+
+def test_hook_gate_the_exact_lie_output_is_now_advisory(tmp_path, monkeypatch, capsys):
+    # The original 2026-09-17 repro (exit 3/READ; c1 NOT_SUPPORTED 0.18,
+    # overclaim OVERCLAIMS 0.98). Kept as a regression marker for the
+    # 2026-09-17 confidence-direction fix (docs/hooks.md, "Decided: the
+    # block rule follows confidence"): the float is the judge's CONFIDENCE
+    # in the verdict, and 0.18 means the judge barely suspects c1 at all —
+    # the strongest defensible reading is "a human should read this", not
+    # "block it". The honest trade-off: this exact table no longer blocks.
+    # See test_hook_gate_a_high_confidence_lie_blocks for the case that
+    # still does, and still must.
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "all 30 permit cases matched... merged "
+                                        "PRs 8, 9 and 10", "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "advisory" in out
+    assert err == ""
+
+
+def test_hook_gate_a_high_confidence_lie_blocks(tmp_path, monkeypatch, capsys):
+    # Same shape as the original lie fixture, but the judge is 0.91 sure
+    # c1 is unsupported instead of 0.18 sure — the direction the new rule
+    # is built to catch.
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=HIGH_CONF_LIE_STDOUT))
     evidence = tmp_path / "notes.md"
     evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched", encoding="utf-8")
     _hook_stdin(monkeypatch, json.dumps({"draft": "all 30 permit cases matched... merged "
@@ -899,9 +925,9 @@ def test_hook_gate_the_exact_lie_output_blocks(tmp_path, monkeypatch, capsys):
     assert code == 2
     assert out == ""
     assert "blocked" in err
-    assert "c1" in err and "NOT_SUPPORTED" in err and "0.18" in err
+    assert "c1" in err and "NOT_SUPPORTED" in err and "0.91" in err
     assert "overclaim" in err and "OVERCLAIMS" in err and "0.98" in err
-    assert "self_contradictory" in err and "SELF_CONTRADICTORY" in err and "0.28" in err
+    assert "self_contradictory" not in err
 
 
 def test_hook_gate_read_with_only_weak_flags_stays_advisory(tmp_path, monkeypatch, capsys):
@@ -929,9 +955,11 @@ def test_hook_gate_read_with_only_weak_flags_stays_advisory(tmp_path, monkeypatc
 # this hook now never blocks — advisory at most, flags still printed.
 
 def test_hook_gate_stop_hook_active_forces_advisory_not_block(tmp_path, monkeypatch, capsys):
-    # These flags (overclaim 0.87) would block on a first pass — see
-    # test_hook_gate_self_contradictory_blocks_alongside_overclaim above.
-    stdout = ("  c2                 NOT_SUPPORTED        0.45\n"
+    # These flags (overclaim 0.87, companion c2 0.55) would block on a
+    # first pass — see
+    # test_hook_gate_self_contradictory_never_blocks_even_alongside_a_real_overclaim
+    # above.
+    stdout = ("  c2                 NOT_SUPPORTED        0.55\n"
               "  leaked_internal    HAS_LEAKS            0.26\n"
               "  self_contradictory SELF_CONTRADICTORY   0.10\n"
               "  overclaim          OVERCLAIMS           0.87\n")
@@ -1035,14 +1063,29 @@ def test_hook_gate_strips_board_tag_before_checking_draft(tmp_path, monkeypatch,
     assert "Done, filed the PR." in captured["draft_text"]
 
 
-@pytest.mark.parametrize("verdict,score", [("NOT_SUPPORTED", 0.20), ("OVERCLAIMS", 0.80)])
-def test_hook_gate_blocks_exactly_at_each_threshold(tmp_path, monkeypatch, capsys,
-                                                     verdict, score):
-    stdout = f"  c1   {verdict:14s} {score:.2f}  a claim right on the line\n"
+@pytest.mark.parametrize("verdict", ["NOT_SUPPORTED", "CONTRADICTED"])
+def test_hook_gate_blocks_exactly_at_the_confidence_line(tmp_path, monkeypatch, capsys,
+                                                          verdict):
+    stdout = f"  c1   {verdict:14s} 0.80  a claim right on the line\n"
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
     evidence = tmp_path / "notes.md"
     evidence.write_text("some evidence", encoding="utf-8")
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim right on the line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+
+
+def test_hook_gate_overclaims_blocks_at_the_line_with_a_companion_claim(tmp_path, monkeypatch,
+                                                                        capsys):
+    # OVERCLAIMS needs a companion: a claim-level NOT_SUPPORTED/CONTRADICTED
+    # at or above the (fixed, non-env) 0.50 companion floor in the SAME run.
+    stdout = ("  c1   NOT_SUPPORTED   0.50  a companion claim right at its own floor\n"
+              "  overclaim          OVERCLAIMS           0.80\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a companion claim right at its own floor",
                                         "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
     assert code == 2
@@ -1070,13 +1113,15 @@ def test_hook_gate_self_contradictory_alone_does_not_block(tmp_path, monkeypatch
     assert err == ""
 
 
-def test_hook_gate_self_contradictory_blocks_alongside_overclaim(tmp_path, monkeypatch, capsys):
-    # SELF_CONTRADICTORY still counts as a block reason when the SAME run
-    # also carries a blocking OVERCLAIMS flag (>= 0.80) — this is the
-    # first pass of the 2026-09-17 loop, and it must still block.
-    stdout = ("  c2                 NOT_SUPPORTED        0.45\n"
+def test_hook_gate_self_contradictory_never_blocks_even_alongside_a_real_overclaim(
+        tmp_path, monkeypatch, capsys):
+    # SELF_CONTRADICTORY never blocks — not alone, and not in company
+    # either, which generalizes the 2026-09-17 loop fix (it used to count
+    # as a block reason when paired with a genuine blocking flag). c2 at
+    # 0.55 is the companion OVERCLAIMS needs to block on its own.
+    stdout = ("  c2                 NOT_SUPPORTED        0.55\n"
               "  leaked_internal    HAS_LEAKS            0.26\n"
-              "  self_contradictory SELF_CONTRADICTORY   0.10\n"
+              "  self_contradictory SELF_CONTRADICTORY   0.95\n"
               "  overclaim          OVERCLAIMS           0.87\n")
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
     evidence = tmp_path / "notes.md"
@@ -1087,10 +1132,11 @@ def test_hook_gate_self_contradictory_blocks_alongside_overclaim(tmp_path, monke
     out, err = capsys.readouterr()
     assert code == 2
     assert "overclaim OVERCLAIMS" in err
+    assert "self_contradictory" not in err
 
 
-def test_hook_gate_block_thresholds_are_env_configurable(tmp_path, monkeypatch, capsys):
-    # A NOT_SUPPORTED at 0.35 does not block under the default 0.20 line...
+def test_hook_gate_block_threshold_is_env_configurable(tmp_path, monkeypatch, capsys):
+    # A NOT_SUPPORTED at 0.35 does not block under the default 0.80 line...
     stdout = "  c1   NOT_SUPPORTED   0.35  a claim\n"
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
     evidence = tmp_path / "notes.md"
@@ -1098,8 +1144,8 @@ def test_hook_gate_block_thresholds_are_env_configurable(tmp_path, monkeypatch, 
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim", "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
     assert code == 0
-    # ...but does once the env var raises the line above 0.35.
-    monkeypatch.setenv("SUPERJEV_BLOCK_NOT_SUPPORTED", "0.40")
+    # ...but does once the env var lowers the line below 0.35.
+    monkeypatch.setenv("SUPERJEV_BLOCK_CONF", "0.30")
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim", "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
     assert code == 2
@@ -1109,7 +1155,7 @@ def test_hook_verify_read_with_strong_flags_blocks_like_gate(tmp_path, monkeypat
     # Same parser, same block line, wired to worker-verify's REJECT-shaped
     # table instead of jev.py's — worker-verify prints the identical row
     # format, so the fix covers both doors with one parser.
-    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=LIE_STDOUT))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=HIGH_CONF_LIE_STDOUT))
     _hook_stdin(monkeypatch, json.dumps({"tool_name": "Agent",
                                         "tool_response": "COMPLETE: the worker is done, "
                                                           "all tests pass"}))
@@ -1117,14 +1163,14 @@ def test_hook_verify_read_with_strong_flags_blocks_like_gate(tmp_path, monkeypat
     out, err = capsys.readouterr()
     assert code == 2
     assert "blocked" in err
-    assert "c1" in err and "0.18" in err
+    assert "c1" in err and "0.91" in err
 
 
 def test_hook_ledger_carries_parsed_flags_on_block_and_advisory(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(sj, "LEDGER_PATH", ledger)
 
-    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=LIE_STDOUT))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=HIGH_CONF_LIE_STDOUT))
     evidence = tmp_path / "notes.md"
     evidence.write_text("evidence", encoding="utf-8")
     _hook_stdin(monkeypatch, json.dumps({"draft": "a lie", "evidence": [str(evidence)]}))
@@ -2094,7 +2140,7 @@ def test_hook_gate_real_subprocess_the_exact_lie_fixture_blocks(tmp_path):
     payload = {"hook_event_name": "Stop",
               "last_assistant_message": "all 30 permit cases matched... merged PRs 8, 9 and 10",
               "evidence": [str(evidence)]}
-    lie_stdout_path = FIXTURES / "lie_stop_stdout.txt"
+    lie_stdout_path = FIXTURES / "lie_stop_high_confidence_stdout.txt"
     proc = _run_real_hook(f"{sys.executable} {FAKE_DOOR}", payload,
                           extra_env={"FAKE_DOOR_STDOUT_FILE": str(lie_stdout_path),
                                      "FAKE_DOOR_EXIT": "3"},
@@ -2102,7 +2148,7 @@ def test_hook_gate_real_subprocess_the_exact_lie_fixture_blocks(tmp_path):
     assert proc.returncode == 2
     assert proc.stdout == ""
     assert "blocked" in proc.stderr
-    assert "c1" in proc.stderr and "NOT_SUPPORTED" in proc.stderr and "0.18" in proc.stderr
+    assert "c1" in proc.stderr and "NOT_SUPPORTED" in proc.stderr and "0.91" in proc.stderr
     ledger_lines = (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
     last = json.loads(ledger_lines[-1])
     assert last["exit_code"] == 2
@@ -2397,12 +2443,14 @@ def test_the_live_false_block_becomes_advisory_once_evidence_is_measured():
 
 def test_the_same_flags_still_block_when_the_gather_was_healthy():
     """The gate is conditional on the EVIDENCE, not a blanket weakening. Same
-    OVERCLAIMS 1.00, healthy gather -> still a block."""
+    table, healthy gather -> c3 NOT_SUPPORTED 0.97 blocks on its own
+    confidence, and OVERCLAIMS 1.00 blocks alongside it (c3/c2 both clear
+    the 0.50 companion floor)."""
     evidence = sj._evidence_inventory(test_cmd="python3 -m pytest tests/test_x.py -q",
                                       worktree="/tmp/wt", probe_stdout=HEALTHY_PROBE)
     rows = sj._parse_claim_rows(FALSE_BLOCK_STDOUT)
     reasons, notes = sj._hook_block_decision(LIVE_FALSE_BLOCK_FLAGS, rows, evidence)
-    assert reasons == ["overclaim OVERCLAIMS 1.00"]
+    assert reasons == ["c3 NOT_SUPPORTED 0.97", "overclaim OVERCLAIMS 1.00"]
     assert notes == []
 
 
@@ -2425,27 +2473,37 @@ def test_a_confident_overclaim_still_blocks_with_no_claim_rows_at_all():
     assert notes == []
 
 
-def test_a_real_lie_still_blocks_even_on_thin_evidence():
-    """The direction that must never soften. NOT_SUPPORTED at 0.15 is under
-    the block line, so it blocks on its own, and it drags the confident
-    OVERCLAIMS and the SELF_CONTRADICTORY along with it — however thin the
-    gather was."""
+def test_thin_evidence_suppresses_even_a_confident_contradiction():
+    """The generalization of PR #18's precision fix: a thin gather
+    suppresses EVERY verdict, not only OVERCLAIMS, because a
+    confident-but-ungrounded verdict and a real problem print the
+    identical red table. c2 NOT_SUPPORTED 0.15 was never a candidate (it
+    is under the 0.80 line); c3 CONTRADICTED 0.99 and the OVERCLAIMS both
+    would have blocked, but the gather here is measured thin, so neither
+    does — see the healthy-gather counterpart in
+    test_from_file_blocks_a_real_lie."""
     thin = sj._evidence_inventory()
     rows = sj._parse_claim_rows(REAL_LIE_STDOUT)
     flags = sj._parse_strong_flags(REAL_LIE_STDOUT)
     reasons, notes = sj._hook_block_decision(flags, rows, thin)
-    assert "c2 NOT_SUPPORTED 0.15" in reasons
-    assert "overclaim OVERCLAIMS 1.00" in reasons
-    assert "self_contradictory SELF_CONTRADICTORY 0.22" in reasons
-    assert notes == []
+    assert reasons == []
+    assert any("cannot carry a verdict" in n for n in notes)
 
 
-def test_the_original_lie_fixture_is_unchanged_by_this_fix():
+def test_the_original_lie_fixture_is_now_advisory_not_a_block():
+    """Regression marker for the 2026-09-17 direction fix (see docs/hooks.md,
+    "Decided: the block rule follows confidence"). c1 NOT_SUPPORTED 0.18
+    means the judge barely suspects c1 — under the new >= line it is not a
+    block candidate at all, and OVERCLAIMS 0.98 has no companion claim at
+    or above 0.50 to block alongside (c1's own 0.18 does not qualify), so
+    the whole table reads as advisory now. This is the documented
+    trade-off, not a bug — the case that still blocks is
+    test_hook_gate_a_high_confidence_lie_blocks."""
     rows = sj._parse_claim_rows(LIE_STDOUT)
     flags = sj._parse_strong_flags(LIE_STDOUT)
-    reasons, _ = sj._hook_block_decision(flags, rows)
-    assert "c1 NOT_SUPPORTED 0.18" in reasons
-    assert "overclaim OVERCLAIMS 0.98" in reasons
+    reasons, notes = sj._hook_block_decision(flags, rows)
+    assert reasons == []
+    assert any("companion" in n for n in notes)
 
 
 def test_the_weak_flags_fixture_is_still_advisory():
@@ -2455,8 +2513,13 @@ def test_the_weak_flags_fixture_is_still_advisory():
 
 
 def test_hook_block_reasons_still_takes_one_argument():
-    # Back-compat: every existing caller and test passes flags only.
-    assert sj._hook_block_reasons(LIVE_FALSE_BLOCK_FLAGS) == ["overclaim OVERCLAIMS 1.00"]
+    # Back-compat: every existing caller and test passes flags only. With
+    # no claim_rows/evidence given at all, the gather defaults to healthy
+    # (nothing was measured to be thin) and the companion check treats
+    # "no rows" as unknown rather than "zero" — so both the confident
+    # NOT_SUPPORTED and the OVERCLAIMS block.
+    assert sj._hook_block_reasons(LIVE_FALSE_BLOCK_FLAGS) == \
+        ["c3 NOT_SUPPORTED 0.97", "overclaim OVERCLAIMS 1.00"]
 
 
 # ---- end to end, through `hook verify --from-file` -------------------------
@@ -2486,17 +2549,22 @@ def test_from_file_does_not_block_the_live_false_block(tmp_path, monkeypatch, ca
 
 
 def test_from_file_blocks_a_real_lie(tmp_path, monkeypatch, capsys):
-    fake = SplitDoor(REAL_LIE_STDOUT, FALSE_BLOCK_PROBE, code=3)
+    # A HEALTHY gather this time — a file-level test command, not the
+    # directory-level one refused above — so c3 CONTRADICTED 0.99 is
+    # trusted and blocks. (c2 NOT_SUPPORTED 0.15 is under the confidence
+    # line and is never a candidate either way.)
+    fake = SplitDoor(REAL_LIE_STDOUT, HEALTHY_PROBE, code=3)
     monkeypatch.setattr(sj.subprocess, "run", fake)
     rc = sj._hook_verify_from_file(
         "verify", str(_report_file(tmp_path)), worktree="/tmp/wt",
-        test_cmd="python3 -m pytest skills/super-jev/tests -q", pr=18)
+        test_cmd="python3 -m pytest tests/test_x.py -q", pr=18)
     out = capsys.readouterr()
     assert rc == 2
     assert "blocked this" in out.err
-    assert "c2 NOT_SUPPORTED 0.15" in out.err
-    # No probe was needed: a blocking NOT_SUPPORTED settles it without one.
-    assert fake.dry_runs == []
+    assert "c3 CONTRADICTED 0.99" in out.err
+    # Every candidate is gated on the gather's health now, so the probe is
+    # always spent to confirm it — even though it turns out healthy here.
+    assert len(fake.dry_runs) == 1
 
 
 def test_from_file_does_not_probe_when_nothing_would_block(tmp_path, monkeypatch, capsys):
