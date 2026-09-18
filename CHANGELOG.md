@@ -51,9 +51,25 @@ No version bump.
   policies, what `from_text` cannot know, and a per-reader migration
   plan.
 
+  `from_text` states one guarantee and keeps it: no byte the composer
+  copied out of a worker's report can end up inside a TRUSTED piece. A
+  section header only bounds a section where the composer could have
+  emitted it (its slot steps strictly upward in the composer's own emit
+  order), a `===` run after a report label does not bound one at all
+  because this branch's composer copies report bodies in verbatim, and
+  past a byte-cut marker nothing is structure in either direction. The
+  cost is that a window carrying a relayed report no longer re-parses to
+  the same pieces; `bodies_fenced=True` is the flag a migration flips
+  once the composer fences its bodies, and the replay prints both numbers
+  so the gap is visible.
+
   New `skills/super-jev/tests/test_window_model.py` (offline) and
-  `skills/super-jev/tests/replay_window_model.py`, which replays the 99
-  recorded gate-bench transcripts with no network and no key.
+  `skills/super-jev/tests/replay_window_model.py`, which replays every
+  recorded gate-bench transcript with no network and no key, against this
+  checkout's composer and then against PR #53's — whose previous-turn
+  reports sit behind a `[relayed reports in this turn]` mark that `main`
+  does not emit, and which `render()` now reproduces by feature-detecting
+  the composer rather than by assuming a branch.
 
 - **The catch ledger.** A new, separate JSONL file (`SUPERJEV_CATCH_LEDGER`,
   default `catches.jsonl` next to the call ledger) records one small line
