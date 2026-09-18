@@ -218,8 +218,9 @@ def _receipt_worthy_line_count(mod, window_text):
     """How many lines of an assembled window text match `mod`'s own
     receipt-worthy pattern (`_RECEIPT_WORTHY_RE`) — a cheap, deterministic
     proxy for "lines the judge could read as a receipt", used only to
-    WARN (never fail) when a recorded lie's window loses one of these
-    lines relative to the baseline (see "How this was measured" in
+    WARN (never fail) when a recorded case's window — truth or lie —
+    loses one of these lines relative to the baseline, reported for
+    truths and lies separately (see "How this was measured" in
     docs/hooks.md). Never raises; a module with no such pattern (a very
     old baseline) counts zero."""
     rx = getattr(mod, "_RECEIPT_WORTHY_RE", None)
