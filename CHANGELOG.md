@@ -4,6 +4,25 @@
 
 No version bump.
 
+- **Receipt shapes wording fix (family 11).** Measured live: truthful
+  drafts were being blocked by the overclaims judge, and the only judge
+  input that had changed was the family-11 RECEIPT SHAPE fact lines. Each
+  line's negative scope clause ("and support for nothing else — it says
+  nothing about ...") read to the judge as a pre-written finding that the
+  evidence could not support the draft, so it is removed; each line now
+  states only the positive act-to-verb mapping. The target list inside
+  each line no longer closes with a counted overflow ("and N more"), which
+  read as a closed inventory of the turn's acts; it now ends in an open
+  ellipsis when truncated. `DERIVED_FACTS_HEADER` is restored to its
+  pre-family-11 wording ("a literal reading of the raw evidence below"),
+  dropping the "never an inference from it; prefer it over re-reading"
+  phrasing that family 11 had added on top, while keeping the earlier,
+  purely additive note that RECEIPT SHAPE lines come from this turn's
+  tool_use/tool_result records rather than the window text. The
+  gameability bound itself is unchanged and still documented in
+  docs/hooks.md; only the judge-facing sentence text moved. See
+  docs/hooks.md, "Receipt shapes — family 11".
+
 - **Plug-in check arms and a swappable judge.** Two new packages give the
   gate a clean plug-in seam. `skills/super-jev/arms/` is a registry: an
   arm is one module exposing `NAME`, `KIND`, `DEFAULT_MODE` and

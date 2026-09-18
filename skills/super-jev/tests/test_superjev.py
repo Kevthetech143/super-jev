@@ -11216,16 +11216,23 @@ def test_receipt_shapes_write_tool_names_the_path_and_the_saved_verbs():
         assert verb in facts[0]
 
 
-def test_receipt_shapes_write_fact_disclaims_the_files_content():
-    # The gameability bound, stated in the fact itself: a worker can name a
-    # file after its own claim, so the fact must say out loud that it backs
-    # nothing about what is inside. See docs/hooks.md, "receipt shapes".
+def test_receipt_shapes_write_fact_is_a_positive_mapping_only():
+    # The gameability bound (a worker can name a file after its own claim,
+    # so the act alone never proves the claim's content) is real, but a
+    # negative "and nothing else" clause in the fact's own text reads to
+    # the overclaims judge as a pre-written finding that the draft cannot
+    # be supported — measured live as false-positive blocks on truthful
+    # drafts and traced to this family (see CHANGELOG). The bound stays
+    # documented in docs/hooks.md, "receipt shapes"; the fact sentence
+    # itself now states only the positive act-to-verb mapping.
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "Write",
                               {"file_path": "/work/all-36-verified.md"}),
                       _rs_result("a", "File created successfully")])
     assert "a write to /work/all-36-verified.md" in facts[0]
-    assert "says nothing about what the file now contains" in facts[0]
+    assert "supports the draft saying" in facts[0]
+    assert "nothing else" not in facts[0]
+    assert "says nothing about" not in facts[0]
 
 
 def test_receipt_shapes_shell_append_is_reported_as_an_append():
@@ -11276,7 +11283,7 @@ def test_receipt_shapes_reads_a_write_past_the_identity_string_truncation():
     assert "a write to /work/deep/nested/BRIEF-mobile.md" in facts[0]
 
 
-def test_receipt_shapes_relay_send_names_the_task_ids_and_disclaims_delivery():
+def test_receipt_shapes_relay_send_names_the_task_ids():
     cmd = ('bash ~/tools/muse-link/send.sh "STATUS-CHECK: no ACK for '
           'mobile-193800 and snapshot3-193800, are you receiving?"')
     facts = _rs_facts([_rs_user_record(),
@@ -11288,7 +11295,8 @@ def test_receipt_shapes_relay_send_names_the_task_ids_and_disclaims_delivery():
     assert "mobile-193800" in facts[0] and "snapshot3-193800" in facts[0]
     for verb in ("sent", "notified", "escalated", "reported"):
         assert verb in facts[0]
-    assert "received, read or acted on it" in facts[0]
+    assert "supports the draft saying" in facts[0]
+    assert "nothing else" not in facts[0]
 
 
 def test_receipt_shapes_answer_file_write_yields_no_sent_line():
@@ -11506,7 +11514,8 @@ def test_receipt_shapes_scheduler_call_names_the_id_from_its_own_result():
     assert "a CronCreate call whose result names id 6422053e" in facts[0]
     for verb in ("scheduled", "armed", "set to fire"):
         assert verb in facts[0]
-    assert "nothing about the job having run" in facts[0]
+    assert "supports the draft saying" in facts[0]
+    assert "nothing else" not in facts[0]
 
 
 def test_receipt_shapes_ignores_a_crontab_listing_and_a_quoted_crontab_label():
@@ -11521,7 +11530,7 @@ def test_receipt_shapes_ignores_a_crontab_listing_and_a_quoted_crontab_label():
     assert facts == []
 
 
-def test_receipt_shapes_dispatch_names_the_skill_and_disclaims_its_report():
+def test_receipt_shapes_dispatch_names_the_skill():
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "Skill",
                               {"skill": "downside-monitor", "args": "CLOV"}),
@@ -11529,7 +11538,8 @@ def test_receipt_shapes_dispatch_names_the_skill_and_disclaims_its_report():
     assert len(facts) == 1
     assert facts[0].startswith("RECEIPT SHAPE (handed off):")
     assert "a Skill dispatch of downside-monitor" in facts[0]
-    assert "what the worker then did or reported" in facts[0]
+    assert "supports the draft saying" in facts[0]
+    assert "nothing else" not in facts[0]
 
 
 def test_receipt_shapes_emits_nothing_when_the_turn_ran_no_act_of_any_shape():
@@ -11620,8 +11630,8 @@ def test_receipt_shapes_dedupes_by_verb_class_and_caps_the_family():
     assert [f.split(":")[0] for f in facts] == [
         "RECEIPT SHAPE (saved)", "RECEIPT SHAPE (sent)",
         "RECEIPT SHAPE (scheduled)", "RECEIPT SHAPE (handed off)"]
-    # The overflow is counted, never dropped in silence.
-    assert "and 3 more" in facts[0]
+    # The overflow ends in an open ellipsis, never a closed count.
+    assert ", ..." in facts[0]
 
 
 def test_receipt_shapes_land_after_every_contradicted_by_fact_line():
@@ -11631,7 +11641,7 @@ def test_receipt_shapes_land_after_every_contradicted_by_fact_line():
     draft = "Reply written to answer-bbbb2222e2.txt. Done, Sir."
     contradictions = sj.derive_window_facts(window, draft)
     assert any("CONTRADICTED_BY_FACT" in f for f in contradictions)
-    shape = "RECEIPT SHAPE (saved): this window's tool results include a write to /x."
+    shape = "RECEIPT SHAPE (saved): among this window's tool results: a write to /x."
     combined = sj.derive_window_facts(window, draft, receipt_facts=[shape])
     assert shape in combined
     assert combined.index(shape) > max(
@@ -11640,7 +11650,7 @@ def test_receipt_shapes_land_after_every_contradicted_by_fact_line():
 
 
 def test_receipt_shapes_are_never_a_block_reason():
-    shape = ("RECEIPT SHAPE (sent): this window's tool results include a relay "
+    shape = ("RECEIPT SHAPE (sent): among this window's tool results: a relay "
             "send via ~/tools/send.sh naming job-1200.")
     assert sj._fact_block_reasons([shape]) == []
 
