@@ -30,6 +30,31 @@ returned text is only a launch acknowledgement, or a spawn dictionary carrying
 the brief rather than a report, because judging a brief as if it were a report
 is a category error that produced false blocks.
 
+**verify: spawn acks and gather health (2026-09-18).** Two fixes off
+`gate-adjudication-20260918.md`'s hand-adjudicated read of the verify door's
+live traffic — every adjudicated live verify block was false. First, the
+spawn-ack/launch-dict skip above
+already ran before this change — it just left no trace: the catch ledger
+carried nothing for those runs, so a spawn ack and an actual unchecked report
+looked identical in `catches.jsonl`. It now prints `super-jev verify: spawn
+ack, nothing to judge` on stderr and writes a `door="verify"`,
+`decision="unchecked"`, `reasons=["spawn-ack"]` catch record, same as every
+other hook decision gets one. Second, the real bug: `hook verify
+--from-file` and the Stop-scan (below) both already compute an
+`_evidence_inventory` gather-health check and feed it into the block
+decision so a thin gather suppresses a would-be block into an advisory note
+— but the live PostToolUse hook never did, because it has no `--test-cmd`/
+`--pr` to measure and the code assumed "nothing to measure" meant "healthy."
+A worker-verify exit 4 (REJECT) could therefore block a report even when the
+only evidence source a live hook ever has (`--worktree`) was absent, empty,
+or unreadable — the judge saw claims with no receipts, said NOT_SUPPORTED,
+and the hook blocked on the bare exit code even though nothing it parsed
+actually crossed the block line. `hook verify` now runs the same
+`_evidence_inventory` check against its own worktree; when the gather comes
+back thin, a would-be block is downgraded to one advisory line (`no evidence
+gathered; not judged`, exit 0) and logged as `decision="unchecked"`,
+`reasons=["no-evidence", ...]` instead of blocking.
+
 **UserPromptSubmit → `hook prompt-verify`.** A background sub-agent's real
 final report never arrives through PostToolUse. It lands later, inside the next
 user turn, as a teammate-message block. This hook reads those blocks, derives
@@ -54,8 +79,33 @@ idle-notification echo of a report already seen (a
 double-checked. This is the same PR #20 0.80-confidence read, but ADVISORY
 ONLY — a REJECT-worthy scanned report never touches this Stop event's own
 exit code, it only prints an extra `super-jev verify <teammate_id>:
-CLEAN|READ|REJECT — <flags> — <evidence used> — health ok|thin` line and logs
-a ledger row with `source="stop-transcript"`. `hook prompt-verify` and its
+CLEAN|READ|REJECT|UNCHECKED — <flags> — <evidence used> — health ok|thin`
+line and logs a ledger row with `source="stop-transcript"`.
+
+**Correction, 2026-09-18: a bare REJECT with `health thin` is now
+UNCHECKED, not REJECT.** The same hole the live `hook verify` gather-health
+fix above closes existed here too — `gate-adjudication-20260918.md` found
+that most of the scanned REJECT labels ran at `health=thin`: worker-verify's
+own exit code said REJECT, but every flag this scan actually parsed had
+already been suppressed into an advisory note because the gather itself had
+nothing usable to judge against. A bare exit code over evidence that was
+never gathered means "we could not check," never "we checked and it
+failed," so this scan no longer labels that shape REJECT — it prints
+`UNCHECKED` and logs the same `decision="unchecked"`, `reasons=["no-
+evidence", ...]` catch record `hook verify` writes for the identical case.
+A REJECT label still requires at least one flag that actually crossed the
+block line against a healthy gather.
+
+**In practice, the live verify door is advisory-only until a worktree is
+supplied.** A real PostToolUse payload carries no `worktree` key, and
+nothing in the live hook path exports `SUPERJEV_HOOK_WORKTREE`, so the
+gather-health check above finds nothing to gather on every live call today
+and every report is judged `health=thin`, never blocked outright. This is
+by design — the alternative was blocking on a bare exit code with no
+evidence behind it — but it means the live door will not actually stop a
+false report until something upstream starts passing a worktree.
+
+`hook prompt-verify` and its
 UserPromptSubmit wiring are left in place (harmless, and correct if Claude
 Code ever does start firing that payload for a teammate message), but the
 Stop-hook scan is the path that is actually live today.
@@ -887,6 +937,52 @@ set's l41, l43 and l45 (all lies, all written-file), 0 truths newly blocked
 in any of the three sets — `skills/super-jev/tests/replay_fact_block_sweep.py`
 reproduces this.
 
+## OVERCLAIMS arm — the receipt-turn fix (2026-09-18)
+
+`ops/gate-adjudication-20260918.md` hand-adjudicated every live `hook gate`
+block reachable in a real session transcript — not a bench, not a replay —
+matching each one against the actual draft and evidence the agent had at
+the time. This fix addresses one mechanism the adjudication found: a
+tool-free current turn (`window_meta["current_turn_empty"]`) whose reply
+correctly restates a result from the *previous* turn's own tool activity.
+
+**The receipt is one turn old.** A tool ran, the lead replied, got a
+follow-up question, and answered from that same receipt — the follow-up
+turn ran no tools of its own, but the reply is a correct restatement of
+something the window's own previous-turn block already carries. The judge
+still scored some of these OVERCLAIMS because nothing in the window said
+"this previous-turn material is what the current turn's claim is *about*"
+— it just looked like unlabelled history. When the current turn is
+tool-free, the most recent previous turn that ran its own tools (and is
+still kept in the assembled window; see `prev_turn_detail` from
+`_derive_evidence_text_from_transcript`) is now named in a new DERIVED
+FACTS sentence: `RECEIPT TURN: the current turn ran no tools of its own;
+turn -N (see [previous turn -N] below) is the most recent turn that did,
+and counts as this reply's receipt, not out-of-window material.` No
+previous turn ran tools (receipts-only, or nothing at all) — no fact,
+window unchanged. See `_receipt_turn_index` and `_receipt_turn_extra_fact`
+in `superjev.py`, and `compose_window_with_facts`'s `extra_facts`
+parameter, which lets a caller add a fact computed from `window_meta`
+(something `derive_window_facts` cannot see on its own, since it only ever
+reads the window text and the draft) ahead of the same no-drop guarantee
+every other derived fact gets. See
+`skills/super-jev/tests/test_superjev.py`,
+`test_window_cap_trims_normally_when_a_previous_turn_is_the_receipt_turn`
+and `test_fact_window_lines_label_unchanged_by_receipt_turn_fix`.
+
+This fix is additive to the window/judge path only — it does not touch the
+deterministic count/PR/`CONTRADICTED_BY_FACT` arms, and it is not gated
+behind `SUPERJEV_DERIVED_FACTS` (a correctness fix to what the judge sees,
+not part of the optional derived-facts feature). It addresses only the
+case above: a tool-free current turn whose receipt sits in the previous
+turn's own window block. It does not address a false block whose receipt
+lies further back than the previous turn, a block that was really the
+deterministic PR-state arm's job, or a false block on a turn that itself
+ran a tool. The adjudication's other findings — the per-claim
+NOT_SUPPORTED/CONTRADICTED arm and SELF_CONTRADICTORY — are not fixed
+here; see "Judge-advisory mode" below for `weak` mode, the way to keep
+OVERCLAIMS blocking while demoting those two arms to advisory.
+
 ## The latency budget — one call, one cap, one clock (2026-09-18)
 
 A Stop event used to have no bound on how long it could take, and on a heavy
@@ -1017,6 +1113,20 @@ prints recent calls and per-door counts. Read it before you trust any claim on
 this page, including ours. It is the only record that distinguishes "the gate
 approved this" from "the gate could not look".
 
+**Every record also carries `bot` and `origin`.** `bot` is
+`CLAW4MAC_BOT_ID` or `CLAUDE_BOT_ID` from the environment if either is
+set, else the claw4mac project-dir segment out of the hook payload's
+`transcript_path` (the part after `agent-cwd-` up to the next path
+separator — e.g. `claw4mac-primary`), else `"unknown"`. `origin` is
+`"bench"` when `SUPERJEV_BENCH=1` or the hook payload's `session_id`
+starts with `bench-`, else `"live"`. Neither field changes what a hook
+does — they are set once a real decision is already final, the same
+best-effort, never-raises contract the rest of the ledger writer has —
+they only say which of possibly many Claude Code seats produced the
+record, and whether it came from a real session or a bench/replay run.
+A record from before this field existed simply has no `bot`/`origin` key;
+readers should treat a missing key the same as `"unknown"`/`"live"`.
+
 **Watch the ledger, don't just keep it.** A recorded line is not the same
 thing as a noticed one. On 2026-09-16 a hook bug silently routed 9 of 40
 replies down the "unchecked" path — no tool evidence was derivable, so the
@@ -1121,6 +1231,12 @@ anything else about the write fails), one line goes to stderr and the
 gate/verify decision that already happened is completely unaffected — the
 catch ledger is a report on a decision, never part of making one.
 
+Every record also carries `bot` and `origin`, same derivation and same
+best-effort contract as the call ledger's own `bot`/`origin` (see "The
+ledger" above) — useful here because more than one Claude Code seat can
+share this same catch ledger, and a human tagging records benefits from
+knowing which seat produced the one they are looking at.
+
 **What still writes no record, on purpose.** Every fail-open path in this
 file — bad/empty/non-JSON stdin, no usable text field, a non-`gate`/
 `non-verify`/`non-prompt-verify` door, a non-Agent tool call, a spawn dict
@@ -1128,8 +1244,12 @@ or launch-ack shape that never reaches a verdict, the outer
 unexpected-exception catch — stays unrecorded. Nothing there ever reached a
 real decision, so there is nothing to tag.
 
-**Tagging.** `superjev.py catch list [--since 24h] [--untagged]` prints one
-line per record so you can find the id. `superjev.py catch tag <id>
+**Tagging.** `superjev.py catch list [--since 24h] [--untagged] [--bot
+<id>]` prints one line per record so you can find the id, now including a
+`bot=<id>` column (`bot=unknown` for a record with no `bot` field —
+either a pre-existing record from before this field existed, or one where
+neither the env vars nor the transcript_path derivation found anything).
+`--bot <id>` narrows the list to that one bot. `superjev.py catch tag <id>
 fair|false|miss "why"` records a human verdict on that one decision:
 
 - `fair` — the block was right. A real overclaim or contradiction, caught.
@@ -1175,7 +1295,8 @@ A record with a missing or unparseable timestamp is excluded from a real
 `--since` window (never silently treated as "recent enough to keep") and
 counted on its own `undated: N` line instead.
 
-**The numbers.** `superjev.py catch report [--since 7d]` prints:
+**The numbers.** `superjev.py catch report [--since 7d] [--bot <id>]`
+prints:
 
     fair catches: N
     false stops: N
@@ -1184,6 +1305,9 @@ counted on its own `undated: N` line instead.
     blocks suppressed: N
     judge advisories: N
     undated: N          (only printed when --since is given)
+    by bot:              (only printed when --bot is NOT given)
+      <bot>: N
+      ...
 
 Fair/false/miss/untagged is the same scoreboard as before: how often the
 gate is catching something real, how often it is wrongly getting in the
@@ -1192,7 +1316,10 @@ different thing entirely — a count of `advisory-forced` records, a real
 block that the stop_hook_active second pass demoted to advisory-only rather
 than blocking twice. By itself, being suppressed is not folded into false
 stops or misses, because nothing has been judged right or wrong yet — the
-retry just held a block back.
+retry just held a block back. `--bot <id>` narrows every number above to
+that one bot's records; without it, the report instead ends with a `by
+bot:` breakdown — record counts per bot, most-records-first — so more than
+one seat sharing this ledger stays visible as a whole and per-bot both.
 
 **Turning a repeat pattern into a fix PR.** `superjev.py catch signal
 [--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]
@@ -1252,9 +1379,34 @@ silent 0) if any signal's filing was refused or failed — the same exit
 code `catch`'s other domain refusals use — so a cron job can branch on
 "ran, but nothing got filed" too.
 
+**A reason family is a bounded, always-escaped token.** One shape used to
+skip both `_catch_redact` and the markdown-escape pass entirely: a
+colonless reason with no recognised `HEADER:`/judge-score-keyword prefix
+(an advisory note — e.g. one embedding a `--test-cmd '...'` argument)
+fell through the generic family-stripping logic unchanged, so the whole,
+unbounded reason became the family verbatim, and reached a public issue
+title/body untouched. Such a reason now buckets instead: its first two
+words (letters only, max 40 chars) if it has them, else the fixed literal
+`advisory-note` — so several advisory notes sharing the same score-free
+lead-in collapse into one family, same as every other arm's repeat
+blocks, rather than one family per note. Every family, whichever path
+produced it, is capped at 60 characters and passed through the same
+markdown-escape pass `--with-reasons`/`--with-drafts` text gets; the
+title- and body-building steps escape it again on top of that, belt-and-
+braces, since a *recognised*-header family (the text before a reason's
+own colon) can still carry a backtick/`@handle`/`#NN` if the draft text
+before that colon did.
+
+**Grouping and breakdown by bot.** `catch signal --bot <id>` restricts
+which records are grouped (and so which count toward `--min`) to one bot,
+same filter `catch list --bot`/`catch report --bot` already offer. Every
+printed signal and issue body also shows a per-bot breakdown line —
+counts only, e.g. `by bot: primary=2, worker2=1` — never reason or draft
+text, so it is as safe as the rest of the default metadata-only body.
+
 ## Judge-advisory mode
 
-`SUPERJEV_GATE_JUDGE_ADVISORY=1` is a third, opt-in failsafe next to the
+`SUPERJEV_GATE_JUDGE_ADVISORY` is a third, opt-in failsafe next to the
 stop_hook_active one above, for the same underlying worry from a different
 angle: the judge's own confidence score (OVERCLAIMS, or under
 `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm) is a model
@@ -1263,19 +1415,44 @@ wrong in a way that stops a true turn for no reason. Turning this on tells
 the gate: when a block's only reasons are the judge's, print the reason and
 let the turn end anyway, rather than stopping it.
 
-It never weakens the deterministic side of the gate. A block that carries
-even one deterministic reason — a drafted test/claim count the evidence
-contradicts, a PR-state mismatch, or a `CONTRADICTED_BY_FACT` fact sentence
-(literal string/int work over text that was already in the window, no model
-call involved) — blocks exactly as it does with the env unset, exit 2, no
-exceptions. Only a block whose reasons are judge-only is demoted.
+Two levels, granular since 2026-09-18b (`ops/gate-adjudication-20260918.md`,
+the hand adjudication of every live gate block on the primary's own seat):
+
+- **`1`** — every judge arm is advisory: OVERCLAIMS, and under
+  `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm too. The
+  original, unconditional behavior.
+- **`weak`** — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
+  secondary arm) and SELF_CONTRADICTORY are advisory; **OVERCLAIMS still
+  blocks**. The adjudication found OVERCLAIMS the only judge arm with a
+  positive live record on the primary's seat, while the per-claim arm and
+  SELF_CONTRADICTORY were not. `weak` is the setting for a session that
+  wants the judge's high-confidence catches kept live while giving up on
+  everything else it flags. Under the default v3 rule the secondary arm
+  never produces a block reason on its own in the first place (gate v4
+  demoted it to advisory-only, see below), so `weak` only changes anything
+  live under `SUPERJEV_RULE=v2`.
+- **`0`/unset** — unchanged: off, every block reason (judge or
+  deterministic) blocks exactly as it does today.
+
+It never weakens the deterministic side of the gate at any level. A block
+that carries even one deterministic reason — a drafted test/claim count the
+evidence contradicts, a PR-state mismatch, or a `CONTRADICTED_BY_FACT` fact
+sentence (literal string/int work over text that was already in the window,
+no model call involved) — blocks exactly as it does with the env unset,
+exit 2, no exceptions. Only a block whose reasons are judge-only, and (under
+`weak`) whose judge reasons are all outside OVERCLAIMS, is demoted.
 
 When that happens, `hook gate` prints the same reason line a real block
 would, prefixed `super-jev gate (judge advisory, not blocked):` instead of
 `super-jev gate blocked this`, and exits 0 instead of 2 — the turn is
 allowed to end. The catch ledger records the decision as `advisory-judge`
-rather than `block`, so `catch report` can count how many turns this mode
-let through that the gate would otherwise have stopped, on their own line:
+rather than `block`, with a `judge-advisory-mode:1` or
+`judge-advisory-mode:weak` tag appended to its `reasons` alongside the
+usual `key VERDICT score` strings (which already name the arm — OVERCLAIMS,
+NOT_SUPPORTED, CONTRADICTED — that fired), so a read of the ledger later
+can tell which mode demoted the block without re-deriving it from the
+session's own env. `catch report` can count how many turns this mode let
+through that the gate would otherwise have stopped, on their own line:
 
     judge advisories: N
 
