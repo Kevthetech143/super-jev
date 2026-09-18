@@ -102,7 +102,7 @@ _CLAIM_SPLIT_RE = re.compile(r'(?<=[.!?])\s+|;\s*|:\s+(?=\S)|\s+and\s+')
 
 
 def _presplit_enabled():
-    return os.environ.get(CLAIM_PRESPLIT_ENV, "1") != "0"
+    return os.environ.get(CLAIM_PRESPLIT_ENV, "0") == "1"  # default OFF: live bench 2026-09-17 showed presplit +1 false block, no lie gain
 
 
 def presplit_claims(draft_text, cap=CLAIM_PRESPLIT_CAP):
