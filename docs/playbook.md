@@ -397,6 +397,97 @@ the measurement is how you find out whether it's good enough for your use.
   agent) can find out what actually ran, distinct from what a summary claims
   ran.
 
+## 7. Onboarding a new area
+
+`verify` today only knows how to check a coding report: a commit, a pushed
+branch, a tracked file, a test count, a PR's own checks. Bringing the same
+kind of checking to a different area — research, a browser task, a config
+change, a sent message, a payment — is not a new judge and not a new
+harness. It is the same recipe, run again, learned from doing it once for
+real tonight.
+
+1. **List the claim types an agent actually makes in that area.** Not every
+   sentence it could write — the specific, checkable things it tends to
+   claim. For a coding report that's a test count, a commit pushed, a file
+   tracked in git, a PR's checks. For research it's a source existing and a
+   quote matching what the source actually says. For a browser task it's
+   the state of a page after an action. For a config change it's a diff
+   existing plus a backup of what it replaced. For a sent message it's a
+   delivery receipt.
+2. **For each claim type, name the free check** — one command or one file
+   read, no model call — **and the one-sentence fact it yields.** "The
+   report says 312 tests passed; `npm test` printed 312 passed" is a free
+   check. "The report says the PR is up; `gh pr view` printed its real
+   state" is a free check. If there is no free check for a claim type yet,
+   that is the actual gap to close, not a reason to skip straight to asking
+   the judge.
+3. **Put the derived facts first in the evidence, and label the raw command
+   output as backing.** A judge (or a person) reading "git log shows commit
+   a1b2c3d on this branch, pushed to origin" decides faster and more
+   consistently than one reading a raw `git log`/`git push` transcript and
+   having to work out what it proves. The raw output stays in the evidence
+   too — as the receipt behind the fact, not the thing being handed over
+   first.
+4. **Settle by fact what a fact flatly contradicts.** If the free check
+   already proves a claim false — the file the report names does not exist,
+   the test count in the report does not match what the test command
+   printed — that claim is decided right there, for free, before any model
+   call. Only the claims a free check cannot settle go to the judge. This is
+   the same split `verify` already runs for coding reports: a `MISSING` path
+   or a mismatched test count is settled by fact; everything else goes to
+   the claim gate.
+5. **Plant lies and truths pulled from real transcripts, and run the bench
+   through the real hook path — never only offline.** A bench that only
+   calls the checking code directly can pass while the actual hook that
+   fires in a live session disagrees, because the hook has its own evidence
+   collection, its own scaffolding-stripping, its own fail-open rules in
+   front of the same judge. That gap was not theoretical: on 2026-09-16, a
+   hook bug silently routed several replies down the "unchecked" path — no
+   evidence was derivable, so the gate fell back to checking the last prompt
+   instead of the real transcript — and every one of those calls still
+   logged an ordinary-looking exit-0 line. The offline bench never saw that
+   bug because it never went through the hook. Test the thing that actually
+   runs in production, not a shortcut that skips the part that broke.
+6. **Ship only what beats the previous live run.** A new claim type, a new
+   free check, a reworded question to the judge — none of it goes live on
+   the strength of sounding right. Run the bench (real hooks, real
+   transcripts) before the change and after, and ship only if the after run
+   is actually better, not merely different.
+7. **Watch ledger health after a day.** A new area adds new ways for
+   evidence collection to come up empty — a source that can't be fetched, a
+   page that changed before the check ran, a payment API with no read-only
+   endpoint. Read `superjev.py ledger health` (or the ledger-health block
+   `status` prints) after the new area has been live about a day, and treat
+   a rising unchecked share the same as a wrong verdict: a signal that this
+   area's evidence collection needs work, not proof the area is fine because
+   nothing got blocked.
+
+### Coverage today
+
+What claim types the `verify` door actually checks today, and what still
+needs a free check written before it can join it.
+
+| area | claim types | covered by `verify` today | intended free check |
+|---|---|---|---|
+| coding | test count, commit pushed, file tracked, PR checks | yes | `git log`/`git status`, a path listing, the test command's own output, `gh pr view` |
+| research | source exists, quote matches the source | no | fetch the cited source and grep for the quoted text |
+| browser | page state after an action | no | a fresh read of the page (DOM text or a screenshot diff) after the claimed action |
+| config | diff exists, a backup of the prior value exists | no | `diff` against the backup file, and a file-exists check on the backup itself |
+| messages | delivery receipt | no | the sending API's own delivery/read-receipt or message-id lookup |
+| payments | amount, payee, and confirmation id match a real transaction | no | the payment provider's own transaction-lookup call, read-only |
+
+### What the judge is and is not
+
+The judge behind every door here is a fast, consistent scorer: hand it a
+claim and the evidence for it, and it tells you whether the evidence carries
+the claim. It is not a reader that goes hunting through a pile of context to
+find the one line that matters. The more you hand it beyond what actually
+bears on the claim, the softer and less reliable its answer gets — a big,
+loosely relevant evidence window does not make it smarter, it makes the real
+fact harder to find inside the noise. This is exactly why the free checks and
+the derived facts above come first: they do the finding, so the judge only
+ever has to do the judging.
+
 ## Related pages
 
 - [`skills/super-jev/SKILL.md`](../skills/super-jev/SKILL.md) — the full
