@@ -3278,20 +3278,20 @@ def _build_prev_turns_block_detailed(windows, budget):
         block = render(labeled)
     if len(block.encode("utf-8")) > budget and labeled:
         idx, joined = labeled[0]
-        keep = max(budget - 48, 0)
-        tail = joined.encode("utf-8")[-keep:].decode("utf-8", errors="ignore")
+        prefix = f"[previous turn -{idx}]\n[...older content in this turn dropped...]\n"
         # If this tail-keep cuts into the middle of a fenced worker report,
-        # repair it: re-emit any dropped opening fence and neutralise any
-        # fragment of a real fence line left dangling at the cut, so the
-        # surviving body still reads as an unverified claim rather than
-        # being promoted to ordinary window text (mirrors the same guard
-        # _build_reports_block already applies to its own tail-cut; see
-        # _repair_report_tail).
-        cut_bytes = len(joined.encode("utf-8")) - len(tail.encode("utf-8"))
-        tail = _repair_report_tail(joined, keep, tail)
-        block = (f"[previous turn -{idx}]\n[...older content in this turn dropped...]\n"
-                f"{tail}")
-        truncated = (idx, cut_bytes)
+        # repair it: re-emit any dropped opening fence, quote the fragment
+        # left dangling at the cut, and shrink the slice until the
+        # REPAIRED tail still fits the budget — so the block never
+        # overshoots and the whole-window safety cut never has to slice a
+        # fence off again (see _fence_safe_tail / _repair_report_tail).
+        got = _fence_safe_tail(joined, budget - len(prefix.encode("utf-8")))
+        if got is None:
+            block, dropped, truncated = "", dropped + 1, None
+        else:
+            tail, cut_bytes = got
+            block = prefix + tail
+            truncated = (idx, cut_bytes)
     kept = len(windows) - dropped
     return block, dropped, kept, truncated
 
@@ -3444,6 +3444,50 @@ _TASK_PART_RES = (
 # a claim, and a relayed report is a claim with a named source.
 REPORT_LABEL = "REPORT FROM {who} (unverified worker claim)"
 
+# 2026-09-18 (PR-STATE-REVIEW5 F1/F3) — the ONE place the `who` that goes
+# into a fence label is decided, and the one alphabet the fence matcher
+# accepts, so the renderer and the matcher cannot disagree about what a
+# fence looks like. `who` is worker-controlled text (a `teammate_id="..."`
+# attribute, an agent name out of a task notification): before this, a
+# blank id rendered `REPORT FROM  (unverified worker claim)` — two spaces —
+# which the matcher's `(.+)` did not accept, so the whole body read as
+# trusted window text; and a receipt-shaped id (`Worker MERGED PR #52`)
+# put receipt text INTO the label line itself, where a truncation could
+# leave it bare. The label now carries only a single word-character token:
+# `[A-Za-z0-9_]`, at most REPORT_WHO_MAX_CHARS long, never empty. That is
+# tighter than the `[A-Za-z0-9_.-]` a review suggested, on purpose: a
+# token with no `.`/`-` has no INTERNAL word boundary, so no `\bmerged\b`,
+# `\bopen\b`, `gh pr merge N` or `#N` can ever match inside it, and
+# `(unverified worker claim)` follows it on the same line, so the fence
+# line as a whole matches none of the arm's or the derived facts' per-line
+# patterns whatever the worker chose as their id. The raw id is NOT
+# carried anywhere else in the window: it is worker text, and the
+# sanitised token keeps enough of it for a reader to know who spoke.
+REPORT_WHO_MAX_CHARS = 64
+_REPORT_WHO_UNSAFE_RE = re.compile(r'[^A-Za-z0-9_]')
+
+
+def _report_label_who(who):
+    """The label-safe `who` for a report fence: whitespace collapsed,
+    every character outside `[A-Za-z0-9_]` replaced by `_`, cut to
+    REPORT_WHO_MAX_CHARS, and never empty (`teammate` when nothing is
+    left). Total: for ANY input, `_report_open_label(who)` matches
+    `_REPORT_MARKER_LINE_RE` and `_report_end_label(who)` matches
+    `_REPORT_END_LINE_RE`, with this same value as group(1)."""
+    collapsed = " ".join((who or "").split())
+    safe = _REPORT_WHO_UNSAFE_RE.sub("_", collapsed)[:REPORT_WHO_MAX_CHARS]
+    return safe or "teammate"
+
+
+def _report_open_label(who):
+    """The opening fence line for `who` (sanitised here, not by the caller)."""
+    return REPORT_LABEL.format(who=_report_label_who(who))
+
+
+def _report_end_label(who):
+    """The closing fence line for `who` (sanitised here, not by the caller)."""
+    return REPORT_END_LABEL.format(who=_report_label_who(who))
+
 # How much of any ONE report block is carried, before the window's own cap
 # even applies. A worker report is often a page long; the load-bearing
 # lines (counts, PR links, COMPLETE/INCOMPLETE) are near its start.
@@ -3532,21 +3576,21 @@ def _build_reports_block(reports, budget, label):
         cut += len(dropped.encode("utf-8"))
         block = render(kept)
     if len(block.encode("utf-8")) > budget:
-        room = max(budget - len(header.encode("utf-8")) - 40, 0)
-        if room <= 0:
-            return "", 0, sum(len(r.encode("utf-8")) for r in reports)
-        raw = kept[0].encode("utf-8")
-        tail = raw[-room:].decode("utf-8", errors="ignore")
-        cut += len(raw) - len(tail.encode("utf-8"))
+        prefix = header + "[...head of this report dropped...]\n"
+        room = budget - len(prefix.encode("utf-8"))
         # Cutting the head can take the report's own opening fence with it,
         # which would leave the body reading as ordinary window text (and a
         # worker-written line reading as a tool receipt). Repair it: re-emit
-        # the dropped opening fence and neutralise any fragment of a real
-        # fence line left dangling at the cut (see _repair_report_tail —
-        # the same scan _build_prev_turns_block_detailed uses for its own
+        # the dropped opening fence, quote the fragment left at the cut, and
+        # shrink until the repaired tail fits `room` (see _fence_safe_tail —
+        # the same path _build_prev_turns_block_detailed takes for its own
         # tail-cut).
-        tail = _repair_report_tail(kept[0], room, tail)
-        block = header + "[...head of this report dropped...]\n" + tail
+        got = _fence_safe_tail(kept[0], room) if room > 0 else None
+        if got is None:
+            return "", 0, sum(len(r.encode("utf-8")) for r in reports)
+        tail, cut_here = got
+        cut += cut_here
+        block = prefix + tail
     return block, len(kept), cut
 
 
@@ -3850,7 +3894,19 @@ _FACT_REPORT_NOT_MERGED_RES = (
     re.compile(r'\b(?:not\s+merged|open|pending)\b[^.\n]{0,40}?'
               r'\bPR\s*#?(\d+)\b', re.IGNORECASE),
 )
-_REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM (.+) \(unverified worker claim\)\s*$')
+# The fence matchers accept exactly the alphabet `_report_label_who` emits
+# and nothing else (PR-STATE-REVIEW5 F1/F3): `(.+)` used to accept a `who`
+# the renderer could not produce and reject one it could (the blank id).
+_REPORT_MARKER_LINE_RE = re.compile(
+    r'^REPORT FROM ([A-Za-z0-9_]{1,64}) \(unverified worker claim\)\s*$')
+# Fail closed on a fence that does not parse: any line that merely BEGINS
+# like a fence is treated as one by everything that reads the window (an
+# opener opens a body, `_report_end_closes` decides what closes it), and
+# is quoted out of every body on the way in. A `REPORT FROM` line the
+# strict matcher rejects is either composer output from before this rule
+# or text something upstream forged; in neither case may the lines under
+# it read as trusted receipts.
+_REPORT_FENCE_LOOSE_RE = re.compile(r'^(END )?REPORT FROM\b')
 # 2026-09-18 (PR-STATE-REVIEW2 R1) — the CLOSING half of a report block.
 # A report body is text a worker wrote, so no pattern inside it can be
 # trusted to say where the body ends: a worker who writes the literal line
@@ -3862,8 +3918,36 @@ _REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM (.+) \(unverified worker clai
 # (`_neutralise_report_body`). The boundary is therefore structure the
 # COMPOSER controls, never text the worker controls.
 _REPORT_END_LINE_RE = re.compile(
-    r'^END REPORT FROM (.+) \(unverified worker claim\)\s*$')
+    r'^END REPORT FROM ([A-Za-z0-9_]{1,64}) \(unverified worker claim\)\s*$')
 REPORT_END_LABEL = "END REPORT FROM {who} (unverified worker claim)"
+
+
+def _report_marker_who(stripped):
+    """(is_opener, who) for one stripped window line. `who` is the parsed
+    label token for a strict opener, or None for a loose `REPORT FROM`
+    line that does not parse (an opener all the same — fail closed).
+    `(False, None)` for any other line."""
+    rm = _REPORT_MARKER_LINE_RE.match(stripped)
+    if rm:
+        return True, rm.group(1)
+    lm = _REPORT_FENCE_LOOSE_RE.match(stripped)
+    if lm and not lm.group(1):
+        return True, None
+    return False, None
+
+
+def _report_end_closes(stripped, who):
+    """True when `stripped` is the closing fence for a body opened by
+    `who`: the strict `END REPORT FROM <who>` line for a parsed `who`, or
+    ANY line beginning `END REPORT FROM` when the opener itself did not
+    parse (`who is None`) — the one shared answer to "does this line
+    close that block" for the walker, the truncation repair and the
+    balance check, so none of them can disagree."""
+    em = _REPORT_END_LINE_RE.match(stripped)
+    if who is None:
+        return bool(em) or bool(_REPORT_FENCE_LOOSE_RE.match(stripped)
+                                and stripped.startswith("END "))
+    return bool(em) and em.group(1) == who
 
 # What gets quoted out inside a report body: the two fences, the window's
 # own section headers, and the window's section separators. `> ` is a plain
@@ -3871,7 +3955,7 @@ REPORT_END_LABEL = "END REPORT FROM {who} (unverified worker claim)"
 # one of those anchored patterns from matching.
 _REPORT_BODY_NEUTRALISE_RES = (
     _WINDOW_SECTION_RE, _SECTION_SEPARATOR_RE,
-    _REPORT_MARKER_LINE_RE, _REPORT_END_LINE_RE,
+    _REPORT_MARKER_LINE_RE, _REPORT_END_LINE_RE, _REPORT_FENCE_LOOSE_RE,
 )
 
 
@@ -3894,24 +3978,19 @@ def _render_report_block(who, body):
     """One fenced, neutralised report block — the only shape the window
     ever carries a worker/teammate report in.
 
-    `who` is collapsed to single-spaced, stripped text before either
-    fence label is built. `who` comes straight from a `teammate_id="..."`
-    attribute or an agent/task name lifted out of transcript text
-    (`_extract_report_blocks_from_text`, `_TEAMMATE_ID_RE`), neither of
-    which forbids embedded newlines. Left alone, a `who` containing a
-    newline splits the `REPORT FROM {who} (unverified worker claim)`
-    label itself across two physical lines: the first no longer ends in
-    that suffix and the second no longer starts with `REPORT FROM`, so
-    neither half matches `_REPORT_MARKER_LINE_RE` and the opener is
-    never recognised as one — the whole body, including whatever the
-    forged second "line" of `who` says, reads as ordinary window text
-    instead of confined, unverified report prose. Collapsing here keeps
-    both labels — and therefore every downstream fence match, which
-    reads `who` back out of this same rendered text — on one line."""
-    who = " ".join((who or "").split())
-    return (f"{REPORT_LABEL.format(who=who)}\n"
+    `who` comes straight from a `teammate_id="..."` attribute or an
+    agent/task name lifted out of transcript text
+    (`_extract_report_blocks_from_text`, `_TEAMMATE_ID_RE`), which forbid
+    nothing: an embedded newline used to split the label across two
+    physical lines (fourth review), a blank id used to render a label the
+    matcher rejected (fifth review, F1), and a receipt-shaped id used to
+    put `MERGED PR #52` on the label line itself (fifth review, F2). Both
+    labels are therefore built through `_report_label_who` — the same
+    sanitiser whose alphabet the fence matchers accept — so every
+    rendered fence is one the reader recognises, whatever `who` was."""
+    return (f"{_report_open_label(who)}\n"
             f"{_neutralise_report_body(body)}\n"
-            f"{REPORT_END_LABEL.format(who=who)}")
+            f"{_report_end_label(who)}")
 
 
 def _report_fence_state_at_cut(head_text, keep_bytes):
@@ -3934,8 +4013,11 @@ def _report_fence_state_at_cut(head_text, keep_bytes):
     `mid_line_cut` is True when the cut point falls STRICTLY INSIDE a
     line rather than exactly on a line boundary — meaning the kept
     tail's own first line is a FRAGMENT of whatever real line was split,
-    not a genuine complete line (`_repair_report_tail` neutralises it on
-    that basis, regardless of what the fragment happens to look like).
+    not a genuine complete line. `_repair_report_tail` quotes that
+    fragment out UNCONDITIONALLY on this flag alone — it does not first
+    ask whether the fragment still looks like structure, because a
+    fragment of a fence label with a worker-chosen `who` in it can look
+    like a receipt without looking like any fence (fifth review, F2).
     The straddling line's OWN effect on `open_marker` is still applied
     from its full, untruncated text before returning — `line` here is
     always the complete original line (`head_text.splitlines()`), never
@@ -3947,15 +4029,17 @@ def _report_fence_state_at_cut(head_text, keep_bytes):
     seen = 0
     open_marker = ""
     mid_line_cut = False
+    open_who = None
     for line in (head_text or "").splitlines(keepends=True):
         line_bytes = len(line.encode("utf-8"))
         if seen >= cut_at:
             break
         stripped = line.strip()
-        if _REPORT_MARKER_LINE_RE.match(stripped):
-            open_marker = stripped
-        elif _REPORT_END_LINE_RE.match(stripped):
-            open_marker = ""
+        is_open, who = _report_marker_who(stripped)
+        if is_open:
+            open_marker, open_who = stripped, who
+        elif open_marker and _report_end_closes(stripped, open_who):
+            open_marker, open_who = "", None
         if seen + line_bytes > cut_at:
             mid_line_cut = True
             break
@@ -3978,18 +4062,17 @@ def _repair_report_tail(head_text, keep_bytes, tail_text):
        when `_report_fence_state_at_cut` says one is still open.
 
     2. The cut lands mid-line, so `tail_text`'s own first line is a
-       FRAGMENT of whatever real line was split — most often the
-       CLOSING `END REPORT FROM ...` line, but the composer also
-       neutralises fences, section headers and `---`/`===` separators
-       inside a body (`_REPORT_BODY_NEUTRALISE_RES`), and a tail-keep
-       that lands two bytes into any ONE of those four patterns hands
-       the window that same bare fragment un-neutralised — a bare `---`
-       two bytes into a `> ---` body line closes the report early just
-       as surely as a mangled `END REPORT FROM` does. Checked against
-       all four patterns, not just the two fence lines, for that reason.
-       Left alone that fragment is itself forged structure. Quoted out
-       with `> ` — the same convention `_neutralise_report_body` already
-       uses for worker-controlled text — it reads as plain text instead.
+       FRAGMENT of whatever real line was split. It is quoted out with
+       `> ` — the convention `_neutralise_report_body` already uses for
+       worker-controlled text — UNCONDITIONALLY, on the mid-line flag
+       alone. Earlier rounds only quoted a fragment that still re-matched
+       one of the neutralised patterns, which caught a bare `---` two
+       bytes into a `> ---` body line (fourth review) but not a fragment
+       of a fence label whose worker-chosen `who` made it read like a
+       receipt without reading like a fence (fifth review, F2: `<who-
+       tail> (unverified worker claim)` left bare at the cut). A fragment
+       is never a genuine complete line, so nothing is lost by quoting
+       every one of them, and nothing about its shape has to be guessed.
 
     Belt and braces: after both repairs, if nothing in the result closes
     the marker being reopened (the real closer was itself cut away or
@@ -3999,23 +4082,51 @@ def _repair_report_tail(head_text, keep_bytes, tail_text):
     marker, mid_line_cut = _report_fence_state_at_cut(head_text, keep_bytes)
     lines = tail_text.splitlines(keepends=True)
     if mid_line_cut and lines:
-        stripped = lines[0].strip()
-        if any(rx.match(stripped) for rx in _REPORT_BODY_NEUTRALISE_RES):
-            lines[0] = "> " + lines[0]
-            tail_text = "".join(lines)
+        lines[0] = "> " + lines[0]
+        tail_text = "".join(lines)
     if not marker:
         return tail_text
     # Deliberately an exact-text compare here, not a re-match against
-    # _REPORT_MARKER_LINE_RE: a mangled fragment (handled above) is never
-    # byte-identical to the real marker line, so this cannot be fooled by
-    # one the way a pattern re-match could.
+    # _REPORT_MARKER_LINE_RE: a fragment is always quoted above, so it is
+    # never byte-identical to the real marker line and cannot stand in
+    # for it.
     if not (tail_text.startswith(marker + "\n") or tail_text.rstrip("\n") == marker):
         tail_text = marker + "\n" + tail_text
-    who_match = _REPORT_MARKER_LINE_RE.match(marker)
-    who = who_match.group(1) if who_match else ""
-    if not any(_REPORT_END_LINE_RE.match(l.strip()) for l in tail_text.splitlines()):
-        tail_text = tail_text.rstrip("\n") + "\n" + REPORT_END_LABEL.format(who=who)
+    _is_open, who = _report_marker_who(marker)
+    if not any(_report_end_closes(l.strip(), who) for l in tail_text.splitlines()):
+        # `who` None (a loose marker) closes with the sanitiser's fallback
+        # token, which `_report_end_closes` accepts for a None opener.
+        tail_text = tail_text.rstrip("\n") + "\n" + _report_end_label(who)
     return tail_text
+
+
+def _fence_safe_tail(text, keep_bytes):
+    """(tail, bytes_cut) — the freshest bytes of `text` that fit in
+    `keep_bytes` AFTER `_repair_report_tail` has re-fenced and quoted
+    them, or None when not even a repaired sliver fits.
+
+    The repair adds bytes (a re-emitted opener, a closer, a `> ` on a
+    fragment), and a caller that sliced first and repaired second could
+    hand back a block bigger than its budget. The window's final safety
+    cut (`_derive_evidence_text_from_transcript`'s whole-window tail-keep)
+    then sliced THAT, dropping the opener the repair had just put back —
+    a body read as trusted text again, found by this round's composer
+    fuzz with a long worker-chosen `who` making the fences large. So the
+    slice shrinks until the repaired result itself fits: every truncation
+    site goes through here, and the whole-window cut never fires on a
+    fenced body. Converges because the repair's overhead is bounded (two
+    fence lines of at most REPORT_WHO_MAX_CHARS plus a fixed suffix, and
+    two quote bytes) and each round shrinks the slice by the overshoot."""
+    raw = (text or "").encode("utf-8")
+    keep = min(keep_bytes, len(raw))
+    while keep > 0:
+        tail = raw[-keep:].decode("utf-8", errors="ignore")
+        repaired = _repair_report_tail(text, keep, tail)
+        size = len(repaired.encode("utf-8"))
+        if size <= keep_bytes:
+            return repaired, len(raw) - len(tail.encode("utf-8"))
+        keep -= (size - keep_bytes)
+    return None
 
 
 def _section_emit_slot(label):
@@ -4065,14 +4176,15 @@ def _report_block_close(lines, open_at, who):
     marker inside the span is likewise ignored, so a worker cannot open a
     decoy block and close that instead — at worst the span swallows a
     second, genuinely-reported block whose body is untrusted prose anyway.
+    `who` is None for an opener that did not parse (`_report_marker_who`);
+    then any `END REPORT FROM` line closes it (`_report_end_closes`).
     """
     close = None
     for j in range(open_at + 1, len(lines)):
         stripped = lines[j].strip()
         if _SECTION_SEPARATOR_RE.match(stripped):
             break
-        em = _REPORT_END_LINE_RE.match(stripped)
-        if em and em.group(1) == who:
+        if _report_end_closes(stripped, who):
             close = j
     return close
 
@@ -4095,6 +4207,9 @@ def _iter_window_report_lines(text):
     * A section header is only accepted as a boundary when it is OUTSIDE a
       report body and its `_section_emit_slot` steps strictly upward from
       the last accepted header. Anything else is prose.
+    * Any line that begins `REPORT FROM` opens a body — the strict fence
+      the composer emits, or a loose one that fails to parse (fail
+      closed; see `_report_marker_who`). It never reads as prose.
     * A report body ends at its own closing fence (`_report_block_close`),
       at a section separator, or at end of text — and at nothing else. In
       particular a blank line no longer ends a body (a worker writing a
@@ -4107,17 +4222,18 @@ def _iter_window_report_lines(text):
     lines = (text or "").splitlines()
     label = None
     slot = None
+    in_report = False
     who = None
     close_at = None
     for pos, raw in enumerate(lines, start=1):
         i = pos - 1
         stripped = raw.strip()
-        if who is not None:
+        if in_report:
             if i == close_at:
-                who, close_at = None, None
+                in_report, who, close_at = False, None, None
                 continue
             if _SECTION_SEPARATOR_RE.match(stripped):
-                who, close_at = None, None
+                in_report, who, close_at = False, None, None
                 continue
             if not stripped:
                 continue
@@ -4129,15 +4245,17 @@ def _iter_window_report_lines(text):
                     continue
                 # A header the composer could not have emitted here.
                 # Fall through: it is prose, and it moves no boundary.
-            rm = _REPORT_MARKER_LINE_RE.match(stripped)
-            if rm:
-                who = rm.group(1)
+            is_open, who = _report_marker_who(stripped)
+            if is_open:
+                # A strict fence, or a loose `REPORT FROM` line that does
+                # not parse (who None): either opens a body — fail closed.
+                in_report = True
                 close_at = _report_block_close(lines, i, who)
                 continue
             if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
                 continue
         rank = _section_recency_rank(label) if label is not None else None
-        yield pos, raw, stripped, label, rank, who is not None
+        yield pos, raw, stripped, label, rank, in_report
 
 
 # Family 6 (2026-09-18, SET3-AUDIT2.md section 5 #1) — written-file identity.
@@ -5776,8 +5894,14 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     joined = "\n\n===\n\n".join(sections)
     if len(joined.encode("utf-8")) > effective_cap:
         # The current turn alone (plus receipts) is bigger than the cap —
-        # keep the tail, same guarantee this function always carried.
-        joined = joined.encode("utf-8")[-effective_cap:].decode("utf-8", errors="ignore")
+        # keep the tail, same guarantee this function always carried. The
+        # sections above are each held inside their own budget, so this
+        # only fires when the current turn and receipts alone overflow;
+        # still, the cut goes through the same fence-aware path as every
+        # other tail-keep, so it can never leave a report body unfenced.
+        got = _fence_safe_tail(joined, effective_cap)
+        joined = got[0] if got else \
+            joined.encode("utf-8")[-effective_cap:].decode("utf-8", errors="ignore")
     meta["total_bytes"] = len(joined.encode("utf-8"))
 
     result = joined if joined.strip() else None

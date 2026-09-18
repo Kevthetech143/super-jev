@@ -831,6 +831,36 @@ signal with no header, and two signals inside one section, are **unordered
 — which is a tie, and a tie fails closed** on the not-merged signal with the
 ambiguity note.
 
+**The who-label rule and the unconditional fragment quote (2026-09-18,
+round 6).** The `<who>` in both fence labels is worker-controlled text (a
+`teammate_id="..."` attribute, an agent name out of a task notification), and
+five review rounds found three ways it could break the fence from inside:
+an embedded newline split the label across two lines, a blank id rendered a
+label the matcher rejected (so the whole body read as trusted text), and a
+receipt-shaped id (`Worker MERGED PR #52`) put receipt text on the label line
+itself, where a byte cap landing inside the closing fence left it bare and
+newer than the genuine receipt. The rule now: ONE function
+(`_report_label_who`) decides the label token, and the fence matchers accept
+exactly its alphabet and nothing else. The token is a single word-character
+run, `[A-Za-z0-9_]`, at most 64 long, never empty (`teammate` when nothing is
+left), every other character replaced by `_`. That is deliberately tighter
+than `[A-Za-z0-9_.-]`: a token with no `.` or `-` has no internal word
+boundary, so `\bmerged\b`, `\bopen\b`, `gh pr merge N` and `#N` cannot match
+inside it, and with `(unverified worker claim)` following on the same line the
+fence line as a whole matches none of the arm's or the derived facts' per-line
+patterns whatever id the worker chose. The raw id is carried nowhere else in
+the window: it is worker text, the derived-fact families read every line
+without the walker, and the sanitised token keeps enough for a reader to know
+who spoke. Reading back, any line that merely *begins* `REPORT FROM` opens a
+body even when it does not parse (fail closed), and a body opened that way
+closes on any `END REPORT FROM` line. At every tail-keep truncation, the first
+line of the kept tail is quoted with `> ` **unconditionally** whenever the cut
+fell inside a line, because a fragment is never a genuine line and its shape
+is not something to guess at; and every tail-keep (both builders and the
+whole-window safety cut) now shrinks its slice until the *repaired* tail fits
+the budget (`_fence_safe_tail`), since the repair adds bytes and a block that
+overshot was being sliced a second time with its opener cut off.
+
 **Accepted tradeoff.** Strength is compared before recency, so a receipt
 sitting in an *older* window section still outranks *current-turn* prose
 saying the PR was reverted or reopened — a worker who reverts or reopens a
