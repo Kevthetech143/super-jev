@@ -11327,6 +11327,28 @@ def test_receipt_shapes_telegram_outbox_write_is_a_send_not_a_save():
     assert "configured owner's Telegram" in facts[0]
 
 
+def test_receipt_shapes_telegram_outbox_line_never_names_the_bare_path_alone():
+    # The regression this guards: a fact that names only the outbox FILE
+    # (a session-id-shaped path a reader cannot recognize) instead of
+    # what the claw4mac poller (core/app.py's `_relay_late_telegram_once`)
+    # actually does with it — deliver to the configured owner's Telegram.
+    # A "sent" line has to name a real recipient, and a raw file path is
+    # not one.
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "Write",
+                              {"file_path": "/tmp/ai-wrapper/late-telegram-primary.txt"}),
+                      _rs_result("a")])
+    sent = [f for f in facts if f.startswith("RECEIPT SHAPE (sent):")]
+    assert len(sent) == 1
+    assert "owner's Telegram" in sent[0]
+    assert "claw4mac poller" in sent[0]
+    # The bare path never appears on its own without that wording right
+    # alongside it — i.e. this is never just "a write to <path>." with no
+    # recipient named.
+    bare = "a write to /tmp/ai-wrapper/late-telegram-primary.txt."
+    assert bare not in sent[0]
+
+
 def test_receipt_shapes_message_tool_names_its_recipient():
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "SendMessage",
