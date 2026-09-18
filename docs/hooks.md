@@ -2573,9 +2573,9 @@ judge, as a pre-written finding that the evidence could not support the
 draft, which blocked truthful drafts live. The gameability bound below is
 still true and still documented here; it is simply no longer restated
 inside the fact sentence the judge reads. The same pass changed the
-per-line target list from a closed count ("A, B and N more") to an open
-one (an ellipsis with no count of the omitted items), since a closed count
-reads as an inventory of the whole turn's acts rather than a sample of them.
+per-line target list from a closed count ("A, B and N more") to an open,
+uncounted one ("A, B and others"), since a closed count reads as an
+inventory of the whole turn's acts rather than a sample of them.
 
 - **saved** — a `Write`/`Edit`/`NotebookEdit` call, a shell redirection, a
   `tee`/`cp`/`mv` destination, or an `open(..., "w")` inside a python
@@ -2684,8 +2684,11 @@ input, so undercounting here costs nothing a block decision depends on.
 
 A write says nothing about what the file now **contains**. A send says
 nothing about **delivery**. A scheduler call says nothing about the job
-having **run**. Every line carries its own bound in its own text, because
-the bound is the gameable edge:
+having **run**. That bound is documented here rather than carried inside
+each line's own text (see "Receipt shapes — family 11" above for why:
+stating it in the line itself read to the overclaims judge as a
+pre-written finding against the draft), because the bound is the gameable
+edge:
 
 > A worker that writes an empty file named `all-36-targets-verified.md` and
 > does nothing else gets a line naming that path, and no support whatsoever

@@ -12,12 +12,13 @@ No version bump.
   evidence could not support the draft, so it is removed; each line now
   states only the positive act-to-verb mapping. The target list inside
   each line no longer closes with a counted overflow ("and N more"), which
-  read as a closed inventory of the turn's acts; it now ends in an open
-  ellipsis when truncated. `DERIVED_FACTS_HEADER` is restored to its
-  pre-family-11 wording ("a literal reading of the raw evidence below"),
-  dropping the "never an inference from it; prefer it over re-reading"
-  phrasing that family 11 had added on top, while keeping the earlier,
-  purely additive note that RECEIPT SHAPE lines come from this turn's
+  read as a closed inventory of the turn's acts; it now ends with an open,
+  uncounted "and others" when truncated. `DERIVED_FACTS_HEADER` is restored
+  to its pre-family-11 wording ("a literal reading of the raw evidence
+  below"), dropping the "never an inference from it" clause that family 11
+  had added on top — "prefer it over re-reading the column dump yourself"
+  predates family 11 and is retained — while keeping the earlier, purely
+  additive note that RECEIPT SHAPE lines come from this turn's
   tool_use/tool_result records rather than the window text. The
   gameability bound itself is unchanged and still documented in
   docs/hooks.md; only the judge-facing sentence text moved. See
