@@ -794,6 +794,75 @@ needs a semantic read, not a literal check, so it is left to the judge.
 Both stay off if `SUPERJEV_DERIVED_FACTS=0` is set, same switch as every
 other family.
 
+## Pairing a label to a value — families 8, 9 and 10 (2026-09-18)
+
+`FLEET-FACTS-ROUND2.md` re-read the fleet-set lies that survived
+families 6 and 7 and found that most of them share one shape: the draft restates
+a value that a tool in the window already stated **under a label**, and the
+mutation moves only the value. The naive form of that check — every number
+in the draft must appear verbatim in the window — was measured on the fleet set
+and blocks far too many truths to be usable, because these bots legitimately
+quote session-level aggregates established upstream of the window. What
+makes the three families below safe is that a value is never compared on
+bare membership: it is compared only when an **identity anchor** ties it to
+one specific labelled value in the window, and no anchor means silence.
+
+**8. Labelled-value pairing.** The window's tool-emitted labelled rows are
+read in two literal shapes, `LABEL: ... VALUE` and a whitespace-column
+`LABEL  ...  VALUE`, into `label word -> value` (a row whose label carries a
+digit is prose, not a label, and is skipped; one row may carry several
+labelled values, as in `confidence: min 0.47 median 1.00 max 1.00`). The
+draft side pairs a value to a label only by explicit adjacency — `LABEL
+<linker>* VALUE` ("cut under $3.55") or `VALUE <preposition> LABEL` ("$219
+in on fill") — and **never across a comma, semicolon, colon, slash, paren
+or another value**, so a pairing that would have to jump a clause boundary
+is not asserted at all. A `from A to B` range gives its label only to `B`:
+the window's row holds the current value, so a correct "before" figure that
+predates the window is never called a contradiction. The family then fires
+only when the window carries **exactly one** value for that label word, in
+the same shape class (same `$`/`%` marker, and a 0-1 confidence score is
+never compared against a plain count). Two values under one label means the
+check knows nothing and stays silent rather than pick one.
+
+**9. Score-list membership, scoped to one run.** A prior audit proposed and
+then withdrew this rule, having measured its window-wide form — it blocked
+truths and missed the very case it was built for, because the mutated
+score occurred legitimately elsewhere in the window under a different tool's
+output. Scoping membership to **one run's own `conf=` receipt lines** rather
+than to the whole window is what fixes it. The family needs at least two
+distinct `conf=` values in the window and at least three scores quoted in
+the draft, of which **two or more must be members** before it will call a
+third a stranger — so a draft that merely mentions a score in passing never
+fires.
+
+**10. Claimed extremum.** When the draft calls a value the least/lowest/
+worst (or most/highest/best) of something and the window carries an explicit
+`min`/`max` row for a quantity of the **same name**, a recorded value beyond
+the claimed bound settles the claim with arithmetic. Both the extremum sense
+and the quantity name must match; the name match is a fixed six-character
+prefix (a receipt's "confidence" against a draft's "confident"), not a
+synonym table, so it ties two words that are the same word and nothing else.
+
+All three name a match as `SUPPORTED` and a mismatch as
+`CONTRADICTED_BY_FACT`, in the same sentence shape as every other family, so
+a fact reads the same whether the draft is honest or not. Measured offline
+over every recorded case across the three benches, with no judge call
+(`skills/super-jev/tests/replay_fact_block_sweep.py`): together they fire on
+**the fleet-set lies of this shape and on no truth in any of the three sets**.
+The one remaining fleet-set lie is not a numbers case —
+the draft's mutated token is present in the window under a genuinely related
+finding, and separating the two needs a semantic read, so it stays with the
+judge.
+
+One related safety change came out of the same measurement.
+`derive_window_facts` now orders `CONTRADICTED_BY_FACT` sentences ahead of
+everything else before applying `DERIVED_FACTS_CAP`. One recorded case already
+derives nearly as many `SUPPORTED` facts from the result-table and merge
+families alone as the cap allows, so on a slightly busier turn a plain first-come truncation
+could have dropped the one fact the deterministic block arm reads and
+silently turned a block into an allow. Ordering by verdict makes that
+impossible.
+
 ## A CONTRADICTED_BY_FACT sentence can now block on its own (2026-09-18)
 
 `SET3-LIVE-GAP.md` found that a derived fact — including the written-file
