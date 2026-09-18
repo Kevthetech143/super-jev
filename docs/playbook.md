@@ -404,3 +404,5 @@ the measurement is how you find out whether it's good enough for your use.
   where possible.
 - [`docs/wishlist.md`](wishlist.md) — the seven items this repo is building
   toward, and the honest status of each one today.
+- [`docs/lessons.md`](lessons.md) — what live use on real drafts and real hook
+  payloads has taught us: feed rules, hook lessons, and the calibration loop.
