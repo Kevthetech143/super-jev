@@ -854,6 +854,16 @@ def test_judge_advisory_weak_demote_runs_the_whole_hook_path(
     import io
     import subprocess
     sj = _superjev()
+    # The same two patches test_superjev.py applies autouse to every test
+    # it runs: a reachable door (on a fresh checkout the real fleet path
+    # does not exist, and `door_missing()` refuses before `subprocess.run`
+    # is reached whether or not it is mocked), and a scratch ledger, so
+    # this test never writes into the checkout's own ledger/ directory.
+    monkeypatch.setattr(sj, "FLEET_JEV_LIB", FAKE_DOOR)
+    monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger" / "calls.jsonl")
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH",
+                        tmp_path / "ledger" / "catches.jsonl")
+    monkeypatch.delenv("SUPERJEV_GATE_CMD", raising=False)
     monkeypatch.setenv("SUPERJEV_RULE", "v2")
     monkeypatch.setenv(sj.JUDGE_ADVISORY_ENV, "weak")
 
