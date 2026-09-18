@@ -10,7 +10,11 @@ import { mkdir, open, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Jev } from './jev.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
-import { formatSweepPlan, formatSweepReport, planSweep, runSweep, MAX_QUESTIONS_PER_CALL, DEFAULT_SWEEP_GATE, type SweepInputRecord, type SweepQuestion } from './enhance/sweep.ts';
+import {
+  formatSweepPlan, formatSweepReport, planSweep, runSweep,
+  MAX_QUESTIONS_PER_CALL, DEFAULT_SWEEP_GATE, DEFAULT_SWEEP_BATCH, DEFAULT_REASK_BAND, MAX_REASK_RECORDS_PER_CALL,
+  type ReaskBand, type SweepInputRecord, type SweepQuestion
+} from './enhance/sweep.ts';
 import type { Answer, Evaluator, Question, Request } from './types.ts';
 
 // Only deliberate, local diagnostics are printed. A raw parser or filesystem
@@ -27,16 +31,28 @@ Asks every question of every record, across as many calls as the budget needs.
                      Each is {"name","instructions","criteria":{option:desc}}.
   --out       DIR    Output directory. Files are created, never overwritten.
   --budget    N      maxInputTokens per call. Default 8000.
-  --batch     N      Max records per call. Lowered automatically so that
-                     records x questions stays within the ${MAX_QUESTIONS_PER_CALL}-question call cap.
+  --batch     N      Max records per call. Default ${DEFAULT_SWEEP_BATCH} (falls back to the
+                     SWEEP_BATCH env var, then this default, when omitted).
+                     Lowered automatically so that records x questions stays
+                     within the ${MAX_QUESTIONS_PER_CALL}-question call cap; larger batches
+                     are allowed up to that cap.
   --gate      N      Accept gate, 0..1. A record is ACCEPTED only when every
                      question about it clears this. Default ${DEFAULT_SWEEP_GATE}.
+  --reask-band LO,HI Re-ask a record a second time, in a smaller call (at most
+                     ${MAX_REASK_RECORDS_PER_CALL} records per call), when its pass-1 deciding
+                     (lowest) confidence lands in [LO, HI). The final label is
+                     ACCEPTED only when both passes accept; otherwise REVIEW.
+                     Default ${DEFAULT_REASK_BAND.lo},${DEFAULT_REASK_BAND.hi}.
+  --no-reask         Disable the re-ask band. One pass only.
   --dry-run          Print the plan and write plan.json. Zero network.
   --stub             Run against the offline stub. Synthetic answers, zero
                      network, no API key. Never evidence about anything.
 
 Live mode is the default and needs TYPESAFE_API_KEY. It sends record text to
 TypeSafe. Writes results.jsonl, manifest.json, cost.json, report.md, plan.json.
+Each record in results.jsonl carries a "reask" block with its pass-1 and
+pass-2 scores when it was re-asked. cost.json's call count includes any
+re-ask calls.
 Exit codes: 0 the run completed and the manifest is complete, 1 failure.`;
 
 const MAX_RECORDS_BYTES = 32 * 1024 * 1024;
@@ -132,7 +148,8 @@ try {
 
   let recordsPath = '', questionsPath = '', outDir = '';
   let maxInputTokens: number | undefined, batch: number | undefined, gate: number | undefined;
-  let dryRun = false, stub = false;
+  let dryRun = false, stub = false, noReask = false;
+  let reaskBandArg: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
     const next = () => { const v = args[++i]; if (!v || v.startsWith('--')) throw new CliError(`${flag} needs a value`); return v; };
@@ -142,6 +159,8 @@ try {
     else if (flag === '--budget') { if (maxInputTokens !== undefined) throw new CliError('Repeated --budget'); maxInputTokens = number(next(), '--budget'); }
     else if (flag === '--batch') { if (batch !== undefined) throw new CliError('Repeated --batch'); batch = number(next(), '--batch'); }
     else if (flag === '--gate') { if (gate !== undefined) throw new CliError('Repeated --gate'); gate = number(next(), '--gate'); }
+    else if (flag === '--reask-band') { if (reaskBandArg !== undefined) throw new CliError('Repeated --reask-band'); reaskBandArg = next(); }
+    else if (flag === '--no-reask') noReask = true;
     else if (flag === '--dry-run') dryRun = true;
     else if (flag === '--stub') stub = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
@@ -150,6 +169,23 @@ try {
   if (!outDir && !dryRun) throw new CliError('--out is required unless --dry-run');
   if (gate !== undefined && (gate <= 0 || gate > 1)) throw new CliError('--gate must be greater than 0 and at most 1');
   if (batch !== undefined && (!Number.isInteger(batch) || batch < 1)) throw new CliError('--batch must be a positive integer');
+  if (reaskBandArg !== undefined && noReask) throw new CliError('--reask-band and --no-reask cannot both be given');
+  // The sweep command line enables the re-ask band by default; a bare
+  // library caller of runSweep/planSweep (the fetch door, for one) does not
+  // get this unless it opts in itself.
+  let reaskBand: ReaskBand | false = DEFAULT_REASK_BAND;
+  if (noReask) reaskBand = false;
+  else if (reaskBandArg !== undefined) {
+    const parts = reaskBandArg.split(',');
+    if (parts.length !== 2) throw new CliError('--reask-band needs LO,HI');
+    const lo = Number(parts[0]), hi = Number(parts[1]);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo < 0 || hi > 1 || lo >= hi) throw new CliError('--reask-band needs 0 <= LO < HI <= 1');
+    reaskBand = { lo, hi };
+  }
+  // The batch default lives here, not in a shared budget default, so it never
+  // touches the classifier or any other caller of the enhance primitives.
+  // Precedence: --batch, then the SWEEP_BATCH env var, then DEFAULT_SWEEP_BATCH.
+  if (batch === undefined && process.env.SWEEP_BATCH) batch = number(process.env.SWEEP_BATCH, 'SWEEP_BATCH');
   // The key check happens before any file is read, so a run that cannot
   // possibly reach the provider fails immediately and cheaply.
   if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live sweep, or use --dry-run or --stub');
@@ -157,7 +193,7 @@ try {
   const records = parseRecords(await readSmallFile(recordsPath, MAX_RECORDS_BYTES, 'records'));
   const questions = parseQuestions(await readSmallFile(questionsPath, MAX_QUESTIONS_BYTES, 'questions'));
   const config = {
-    records, questions, gate,
+    records, questions, gate, reaskBand,
     budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) }
   };
 
@@ -202,7 +238,18 @@ try {
     id: r.id, outcome: r.kind, meta: r.meta,
     answers: Object.fromEntries(r.cells.map(c => [c.questionName, {
       key: c.logicalKey, choice: c.choice, confidence: c.confidence, probabilities: c.probabilities, outcome: c.kind, reason: c.reason
-    }]))
+    }])),
+    ...(r.reask ? {
+      reask: {
+        pass1: { outcome: r.reask.pass1Kind, minConfidence: r.reask.pass1MinConfidence },
+        pass2: {
+          outcome: r.reask.pass2Kind, minConfidence: r.reask.pass2MinConfidence,
+          answers: Object.fromEntries(r.reask.pass2Cells.map(c => [c.questionName, {
+            key: c.logicalKey, choice: c.choice, confidence: c.confidence, probabilities: c.probabilities, outcome: c.kind, reason: c.reason
+          }]))
+        }
+      }
+    } : {})
   })).join('\n') + '\n');
   await writeNew(outDir, 'manifest.json', JSON.stringify({
     totalRecords: run.manifest.totalRecords,

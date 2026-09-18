@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
-  DEFAULT_SWEEP_GATE, MAX_QUESTIONS_PER_CALL, cellsFor, buildSweepRequest, foldRecordKind,
+  DEFAULT_SWEEP_GATE, DEFAULT_SWEEP_BATCH, DEFAULT_REASK_BAND, MAX_QUESTIONS_PER_CALL, cellsFor, buildSweepRequest, foldRecordKind,
   formatSweepReport, planSweep, runSweep, validateCells, validateQuestions,
   type SweepInputRecord, type SweepQuestion, type SweepRun
 } from '../../src/enhance/sweep.ts';
@@ -64,6 +64,39 @@ function uniformTable(ids: string[], questions: SweepQuestion[], confidence: num
   const table: Record<string, { choice: string; confidence: number }> = {};
   for (const id of ids) for (const q of questions) table[`q.${q.name}.${id}`] = { choice: Object.keys(q.criteria)[0], confidence };
   return table;
+}
+
+/**
+ * An evaluator like `tableEvaluator`, but keyed on which call it is: the Nth
+ * distinct `evaluate()` invocation uses `tables[N]` (the last table is reused
+ * once its list runs out). This is how a re-ask's second pass is given
+ * different answers than its first, by logical key, without the test having
+ * to know anything about how the sweep batched either pass.
+ */
+function phasedTableEvaluator(tables: Record<string, { choice: string; confidence: number }>[]) {
+  const requests: Request[] = [];
+  let callIndex = 0;
+  const evaluator: Evaluator = {
+    evaluate: async (request: Request) => {
+      const table = tables[Math.min(callIndex, tables.length - 1)];
+      callIndex++;
+      requests.push(request);
+      const state = (request.state as { records: Record<string, { id: string }> }).records;
+      const answers: Record<string, Answer> = {};
+      for (const [wireKey, question] of Object.entries(request.questions) as [string, Question][]) {
+        const recordKey = Object.keys(state).find(k => wireKey === `q_${wireKey.slice(2, wireKey.length - k.length - 1)}_${k}`);
+        assert.ok(recordKey, `wire key ${wireKey} does not name a record in the state`);
+        const name = wireKey.slice(2, wireKey.length - recordKey.length - 1);
+        const logical = `q.${name}.${state[recordKey].id}`;
+        const entry = table[logical];
+        assert.ok(entry, `no table entry for ${logical}`);
+        if (question.type !== 'choice') throw new Error('expected a choice question');
+        answers[wireKey] = choiceAnswer(entry.choice, entry.confidence, Object.keys(question.criteria));
+      }
+      return { model: 'phased-offline', answers } satisfies Evaluation;
+    }
+  };
+  return { evaluator, requests };
 }
 
 // ---------------------------------------------------------------- expansion
@@ -329,6 +362,122 @@ test('the report groups accepted and review with counts that add up', async () =
   assert.match(report, /Not an accuracy claim/);
 });
 
+// --------------------------------------------------------------- default batch
+
+test('planSweep defaults to 45 records per call when nothing overrides it', () => {
+  const plan = planSweep({ records: records(200, 10), questions: QUESTIONS, budget: { maxInputTokens: 200_000 } });
+  assert.equal(DEFAULT_SWEEP_BATCH, 45);
+  assert.equal(plan.effectiveRecordsPerCall, 45);
+  assert.match(plan.recordsPerCallReason, /requested 45 record\(s\) per call fits/);
+});
+
+test('an explicit maxRecordsPerCall still overrides the 45 default, in either direction', () => {
+  const small = planSweep({ records: records(10), questions: QUESTIONS, budget: { maxRecordsPerCall: 5, maxInputTokens: 200_000 } });
+  assert.equal(small.effectiveRecordsPerCall, 5);
+  // Larger than the default is allowed up to the question cap (85 here).
+  const large = planSweep({ records: records(200, 10), questions: QUESTIONS, budget: { maxRecordsPerCall: 85, maxInputTokens: 200_000 } });
+  assert.equal(large.effectiveRecordsPerCall, 85);
+});
+
+// -------------------------------------------------------------- re-ask band
+
+test('runSweep never re-asks unless reaskBand is set: a bare library caller is unaffected', async () => {
+  const input = records(2);
+  const table = uniformTable(input.map(r => r.id!), QUESTIONS, 0.85); // inside DEFAULT_REASK_BAND if it were on
+  const { evaluator, requests } = tableEvaluator(table);
+  const run = await runSweep({ records: input, questions: QUESTIONS, budget: { maxInputTokens: 40_000 } }, evaluator);
+  assert.equal(requests.length, 1, 'no reask call without an explicit reaskBand');
+  assert.deepEqual(run.results.map(r => r.kind), ['accepted', 'accepted']);
+  assert.ok(run.results.every(r => !r.reask));
+});
+
+test('a band record confirmed on both passes is accepted; a band record that disagrees on re-ask is downgraded to review', async () => {
+  const input = records(4);
+  const pass1: Record<string, { choice: string; confidence: number }> = {
+    ...uniformTable(['rec-0'], QUESTIONS, 0.95), // clear accept, above the band: untouched
+    'q.kind.rec-1': { choice: 'FACT', confidence: 0.85 }, 'q.safe.rec-1': { choice: 'SAFE', confidence: 0.95 }, 'q.fresh.rec-1': { choice: 'FRESH', confidence: 0.95 }, // band, will confirm
+    'q.kind.rec-2': { choice: 'FACT', confidence: 0.82 }, 'q.safe.rec-2': { choice: 'SAFE', confidence: 0.95 }, 'q.fresh.rec-2': { choice: 'FRESH', confidence: 0.95 }, // band, will disagree
+    'q.kind.rec-3': { choice: 'FACT', confidence: 0.60 }, 'q.safe.rec-3': { choice: 'SAFE', confidence: 0.95 }, 'q.fresh.rec-3': { choice: 'FRESH', confidence: 0.95 } // below the band, out-of-band, already review
+  };
+  const pass2: Record<string, { choice: string; confidence: number }> = {
+    'q.kind.rec-1': { choice: 'FACT', confidence: 0.85 }, 'q.safe.rec-1': { choice: 'SAFE', confidence: 0.95 }, 'q.fresh.rec-1': { choice: 'FRESH', confidence: 0.95 }, // confirms accept
+    'q.kind.rec-2': { choice: 'FACT', confidence: 0.60 }, 'q.safe.rec-2': { choice: 'SAFE', confidence: 0.95 }, 'q.fresh.rec-2': { choice: 'FRESH', confidence: 0.95 } // disagrees: kind now under the gate
+  };
+  const { evaluator, requests } = phasedTableEvaluator([pass1, pass2]);
+  const run = await runSweep({ records: input, questions: QUESTIONS, budget: { maxRecordsPerCall: 4, maxInputTokens: 40_000 }, reaskBand: DEFAULT_REASK_BAND }, evaluator);
+
+  assert.equal(requests.length, 2, 'exactly one pass-1 call and one re-ask call, since both band records fit under the 20-record re-ask cap');
+  const byId = new Map(run.results.map(r => [r.id, r]));
+
+  assert.equal(byId.get('rec-0')!.kind, 'accepted');
+  assert.ok(!byId.get('rec-0')!.reask, 'rec-0 never entered the band, so it was never re-asked');
+
+  assert.equal(byId.get('rec-1')!.kind, 'accepted', 'both passes accepted, so the record is confirmed accepted');
+  assert.equal(byId.get('rec-1')!.reask!.pass1Kind, 'accepted');
+  assert.equal(byId.get('rec-1')!.reask!.pass2Kind, 'accepted');
+  assert.equal(byId.get('rec-1')!.reask!.pass1MinConfidence, 0.85);
+  assert.equal(byId.get('rec-1')!.reask!.pass2MinConfidence, 0.85);
+
+  assert.equal(byId.get('rec-2')!.kind, 'review', 'pass 1 accepted but pass 2 did not agree, so the record is downgraded');
+  assert.equal(byId.get('rec-2')!.reask!.pass1Kind, 'accepted');
+  assert.equal(byId.get('rec-2')!.reask!.pass2Kind, 'review');
+
+  assert.equal(byId.get('rec-3')!.kind, 'review', 'below the band: already review from pass 1, untouched by a second pass');
+  assert.ok(!byId.get('rec-3')!.reask, 'out-of-band records are never sent a second time');
+
+  assert.deepEqual(run.manifest.byKind.accepted.sort(), ['rec-0', 'rec-1']);
+  assert.deepEqual(run.manifest.byKind.review.sort(), ['rec-2', 'rec-3']);
+  assert.equal(run.manifest.complete, true);
+});
+
+test('--no-reask disables the second pass entirely: one call, pass-1 decides alone', async () => {
+  const input = records(2);
+  const table = { ...uniformTable(['rec-0'], QUESTIONS, 0.85), ...uniformTable(['rec-1'], QUESTIONS, 0.60) };
+  const { evaluator, requests } = tableEvaluator(table);
+  const run = await runSweep({ records: input, questions: QUESTIONS, budget: { maxInputTokens: 40_000 }, reaskBand: false }, evaluator);
+  assert.equal(requests.length, 1);
+  const byId = new Map(run.results.map(r => [r.id, r]));
+  assert.equal(byId.get('rec-0')!.kind, 'accepted', '0.85 clears the 0.80 gate on pass 1 alone; no reask means no second chance to change it');
+  assert.equal(byId.get('rec-1')!.kind, 'review');
+  assert.ok(run.results.every(r => !r.reask));
+});
+
+test('a re-ask never sends more than 20 records in its own call, even at a large primary batch', async () => {
+  const n = 30;
+  const input = records(n);
+  const ids = input.map(r => r.id!);
+  const pass1 = uniformTable(ids, QUESTIONS, 0.85); // every record lands in the band
+  const pass2 = uniformTable(ids, QUESTIONS, 0.85);
+  const { evaluator, requests } = phasedTableEvaluator([pass1, pass2]);
+  const run = await runSweep({ records: input, questions: QUESTIONS, budget: { maxRecordsPerCall: 100, maxInputTokens: 200_000 }, reaskBand: DEFAULT_REASK_BAND }, evaluator);
+  assert.equal(requests.length, 1 + 2, 'pass 1 fits in one 100-record call; the 30-record reask splits into two calls of at most 20');
+  for (const req of requests.slice(1)) assert.ok(Object.keys((req.state as { records: object }).records).length <= 20);
+  assert.equal(run.results.filter(r => r.kind === 'accepted').length, n);
+});
+
+test('band selection and re-ask batching are order-safe: shuffling the input never changes a final label', async () => {
+  const input = records(8);
+  const shuffled = [input[5], input[1], input[7], input[0], input[3], input[6], input[2], input[4]];
+  const named: Record<string, { choice: string; confidence: number }> = {};
+  input.forEach((r, i) => {
+    const c = i % 2 === 0 ? 0.83 : 0.96; // half the records sit in the band, half clearly accept
+    for (const q of QUESTIONS) named[`q.${q.name}.${r.id}`] = { choice: Object.keys(q.criteria)[0], confidence: c };
+  });
+  const pass2 = uniformTable(input.filter((_, i) => i % 2 === 0).map(r => r.id!), QUESTIONS, 0.88); // band records all confirm
+
+  const forwardTables = [named, pass2];
+  const reverseTables = [named, pass2]; // same logical-key tables; order of records in the request must not matter
+
+  const { evaluator: fwdEval } = phasedTableEvaluator(forwardTables);
+  const forward = await runSweep({ records: input, questions: QUESTIONS, budget: { maxRecordsPerCall: 8, maxInputTokens: 200_000 }, reaskBand: DEFAULT_REASK_BAND }, fwdEval);
+
+  const { evaluator: revEval } = phasedTableEvaluator(reverseTables);
+  const reverse = await runSweep({ records: shuffled, questions: QUESTIONS, budget: { maxRecordsPerCall: 8, maxInputTokens: 200_000 }, reaskBand: DEFAULT_REASK_BAND }, revEval);
+
+  const pick = (run: SweepRun) => new Map(run.results.map(r => [r.id, r.kind]));
+  assert.deepEqual(pick(forward), pick(reverse), 'shuffling the record order must not change any record\'s final label');
+});
+
 // ------------------------------------------------------------------- the CLI
 
 const cliPath = new URL('../../src/sweep-cli.ts', import.meta.url).pathname;
@@ -373,7 +522,7 @@ test('the CLI refuses a live run with no API key, before reading any file', asyn
 test('the CLI stub run writes every output file and a complete manifest', async () => {
   const dir = await fixtureDir(9);
   try {
-    const result = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--out', join(dir, 'out'), '--stub', '--batch', '4'],
+    const result = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--out', join(dir, 'out'), '--stub', '--batch', '4', '--no-reask'],
       { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
     assert.equal(result.status, 0, result.stderr);
     const manifest = JSON.parse(await readFile(join(dir, 'out', 'manifest.json'), 'utf8'));
@@ -423,5 +572,66 @@ test('the CLI rejects malformed records and unknown flags', async () => {
     const unknown = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--frobnicate'], { encoding: 'utf8' });
     assert.equal(unknown.status, 1);
     assert.match(unknown.stderr, /Unknown argument --frobnicate/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('the CLI defaults to 45 records per call, overridable by --batch or SWEEP_BATCH', async () => {
+  const dir = await fixtureDir(50);
+  try {
+    const noFlag = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--dry-run'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
+    assert.equal(noFlag.status, 0, noFlag.stderr);
+    assert.match(noFlag.stdout, /45 record\(s\) per call max/);
+
+    const envOnly = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--dry-run'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '', SWEEP_BATCH: '10' } });
+    assert.equal(envOnly.status, 0, envOnly.stderr);
+    assert.match(envOnly.stdout, /10 record\(s\) per call max/);
+
+    const flagWinsOverEnv = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--batch', '7', '--dry-run'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '', SWEEP_BATCH: '10' } });
+    assert.equal(flagWinsOverEnv.status, 0, flagWinsOverEnv.stderr);
+    assert.match(flagWinsOverEnv.stdout, /7 record\(s\) per call max/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('the CLI re-asks the default band by default, and --no-reask turns it off', async () => {
+  const dir = await fixtureDir(12);
+  try {
+    const on = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--out', join(dir, 'on'), '--stub', '--batch', '12'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
+    assert.equal(on.status, 0, on.stderr);
+    const costOn = JSON.parse(await readFile(join(dir, 'on', 'cost.json'), 'utf8'));
+
+    const off = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--out', join(dir, 'off'), '--stub', '--batch', '12', '--no-reask'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
+    assert.equal(off.status, 0, off.stderr);
+    const costOff = JSON.parse(await readFile(join(dir, 'off', 'cost.json'), 'utf8'));
+
+    // The stub's confidences are drawn from [0.70, 1.00], so with 12 records
+    // and 3 questions each some record's minimum lands in the default
+    // [0.70, 0.90) band; --no-reask must make that impossible.
+    assert.equal(costOff.calls, 1, 'no reask means exactly the one pass-1 call');
+    assert.ok(costOn.calls >= costOff.calls, 'the default run never spends fewer calls than the no-reask run');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('the CLI --reask-band flag is validated and, when given, is used instead of the default', async () => {
+  const dir = await fixtureDir(4);
+  try {
+    const bad = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--dry-run', '--reask-band', '0.9,0.2'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
+    assert.equal(bad.status, 1);
+    assert.match(bad.stderr, /--reask-band needs 0 <= LO < HI <= 1/);
+
+    const conflict = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--dry-run', '--reask-band', '0.6,0.8', '--no-reask'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
+    assert.equal(conflict.status, 1);
+    assert.match(conflict.stderr, /cannot both be given/);
+
+    // A dry run never calls the evaluator, so this only proves the flag parses.
+    const ok = spawnSync(process.execPath, [cliPath, '--records', join(dir, 'records.jsonl'), '--questions', join(dir, 'questions.json'), '--dry-run', '--reask-band', '0.6,0.8'],
+      { encoding: 'utf8', env: { ...process.env, TYPESAFE_API_KEY: '' } });
+    assert.equal(ok.status, 0, ok.stderr);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
