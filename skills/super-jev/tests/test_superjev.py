@@ -1408,6 +1408,124 @@ def test_catch_ledger_judge_advisory_records_advisory_judge_decision(
     assert recs[0]["decision"] == "advisory-judge"
 
 
+def test_catch_ledger_judge_advisory_reasons_carry_the_mode_tag(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert "judge-advisory-mode:1" in recs[0]["reasons"]
+
+
+# ------------------------------------------ SUPERJEV_GATE_JUDGE_ADVISORY=weak
+#
+# "weak" mode only demotes a block whose reasons are all v2's secondary
+# NOT_SUPPORTED/CONTRADICTED arm (or SELF_CONTRADICTORY, which never blocks
+# on its own anyway) — OVERCLAIMS still blocks, mode or no mode. Under the
+# default v3 rule the secondary arm never produces a block reason on its
+# own (it is advisory-only, gate v4), so these tests pin SUPERJEV_RULE=v2
+# where the secondary arm CAN still block, to exercise the "weak" branch at
+# all.
+
+def test_judge_advisory_weak_demotes_a_secondary_arm_only_block_under_v2(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a claim over the secondary line\n"
+              "  overclaim          OVERCLAIMS           0.40\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim over the secondary line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "super-jev gate (judge advisory, not blocked):" in err
+    assert "c1 NOT_SUPPORTED 0.85" in err
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert "judge advisory, not blocked" in rec["note"]
+
+
+def test_judge_advisory_weak_does_not_demote_an_overclaims_only_block(
+        tmp_path, monkeypatch, capsys):
+    # Default v3 rule: OVERCLAIMS blocks alone. "weak" mode must NOT
+    # demote it — only "1" (full advisory) does.
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+    assert "overclaim OVERCLAIMS 1.00" in err
+
+
+def test_judge_advisory_weak_does_not_demote_a_block_carrying_both_arms_under_v2(
+        tmp_path, monkeypatch, capsys):
+    # v2: a companion-satisfied OVERCLAIMS block alongside a secondary-arm
+    # block — "weak" only demotes when EVERY reason is weak-list; one
+    # OVERCLAIMS reason in the mix keeps the whole block.
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a companion claim\n"
+              "  overclaim          OVERCLAIMS           0.90\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a companion claim",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+
+
+def test_judge_advisory_weak_still_blocks_a_deterministic_reason(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = "  c1   SUPPORTED       0.60  the fix\n  overclaim   OVERCLAIMS   0.40\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("12 passed in 2.1s", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "Done: 19 tests passed.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+
+
+def test_catch_ledger_judge_advisory_weak_reasons_carry_the_mode_tag(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a claim over the secondary line\n"
+              "  overclaim          OVERCLAIMS           0.40\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim over the secondary line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert recs[0]["decision"] == "advisory-judge"
+    assert "judge-advisory-mode:weak" in recs[0]["reasons"]
+
+
 def test_catch_report_counts_judge_advisories_on_its_own_line(
         tmp_path, monkeypatch, capsys):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
@@ -2081,19 +2199,29 @@ def test_empty_current_turn_with_prior_evidence_is_judged_not_unchecked(
     # old version of this test); it now judges the window normally (with
     # current_turn_empty=True) and the secondary NOT_SUPPORTED arm alone
     # is suppressed to an advisory, not a block — never "unchecked".
+    #
+    # Draft carries "0 items in the backlog" (a number next to a result
+    # word) on purpose — gate-adjudication-20260918.md mechanism (b) skips
+    # the judge outright on a tool-free turn with NO receipt-shaped claim,
+    # and this test is about the SEPARATE mechanism (the secondary-arm
+    # empty-turn suppression) that only runs once the judge is actually
+    # called; see test_hook_gate_conversational_turn_is_not_judged for the
+    # skip itself.
     fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
-                              "and fully caught up.\n")
+                              "and fully caught up, 0 items in the backlog.\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
     t = _write_transcript(tmp_path, [
         {"message": {"role": "user", "content": "how's the service doing?"}},
         _tool_result_record("service status: degraded, backlog growing"),
         _assistant_text_record("The service is degraded right now."),
         {"message": {"role": "user", "content": "what about now, any update?"}},
-        _assistant_text_record("The service is now stable and fully caught up."),
+        _assistant_text_record("The service is now stable and fully caught up, "
+                               "0 items in the backlog."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "The service is now stable and fully caught up."}))
+        "last_assistant_message": "The service is now stable and fully caught up, "
+                                  "0 items in the backlog."}))
     code = sj.main(["hook", "gate"])
     out, err = capsys.readouterr()
     assert code == 0
@@ -2114,18 +2242,20 @@ def test_empty_current_turn_suppressed_secondary_arm_is_recorded_for_health(
     # with the top label+score, and ledger_health counts it in the
     # SUPPRESSED bucket without ever warning on it.
     fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
-                              "and fully caught up.\n")
+                              "and fully caught up, 0 items in the backlog.\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
     t = _write_transcript(tmp_path, [
         {"message": {"role": "user", "content": "how's the service doing?"}},
         _tool_result_record("service status: degraded, backlog growing"),
         _assistant_text_record("The service is degraded right now."),
         {"message": {"role": "user", "content": "what about now, any update?"}},
-        _assistant_text_record("The service is now stable and fully caught up."),
+        _assistant_text_record("The service is now stable and fully caught up, "
+                               "0 items in the backlog."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "The service is now stable and fully caught up."}))
+        "last_assistant_message": "The service is now stable and fully caught up, "
+                                  "0 items in the backlog."}))
     code = sj.main(["hook", "gate"])
     capsys.readouterr()
     assert code == 0
@@ -2166,6 +2296,160 @@ def test_empty_current_turn_with_prior_evidence_overclaims_still_blocks(
     assert "OVERCLAIMS" in err
     rec = json.loads(sj._ledger_lines()[-1])
     assert not rec.get("unchecked")
+
+
+# ---------------- gate-adjudication-20260918.md: the two OVERCLAIMS false
+# mechanisms — (b) zero-tool conversational turns, (a) the receipt is one
+# turn old
+
+def test_hook_gate_conversational_turn_is_not_judged(tmp_path, monkeypatch, capsys):
+    # Mechanism (b): a tool-free current turn whose draft carries no
+    # receipt-shaped claim at all (no number next to a result word, no
+    # file path, no PR/#N, no completion verb) — a plain status opinion,
+    # "the proof is what Jev alone could not have done today"-shaped. The
+    # judge must never be called: subprocess.run stays untouched.
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "how do you feel about that design?"}},
+        _assistant_text_record("Honestly, I think the retry approach was the right call."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Honestly, I think the retry approach was the "
+                                  "right call."}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert calls == []
+    assert err.strip() == "super-jev gate: conversational turn, not judged"
+    assert out == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("reason") == "conversational"
+    assert rec["exit_code"] == 0
+
+
+def test_catch_ledger_records_conversational_turn_as_unchecked(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "how do you feel about that design?"}},
+        _assistant_text_record("Honestly, I think the retry approach was the right call."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Honestly, I think the retry approach was the "
+                                  "right call."}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert len(recs) == 1
+    assert recs[0]["decision"] == "unchecked"
+    assert recs[0]["reasons"] == ["conversational"]
+
+
+def test_draft_has_receipt_shaped_claim_true_for_numbers_paths_prs_verbs():
+    assert sj._draft_has_receipt_shaped_claim("48 tests passed") is True
+    assert sj._draft_has_receipt_shaped_claim("passed 9 of 10 cases") is True
+    assert sj._draft_has_receipt_shaped_claim("wrote skills/super-jev/superjev.py") is True
+    assert sj._draft_has_receipt_shaped_claim("PR #20 is merged") is True
+    assert sj._draft_has_receipt_shaped_claim("merged #20") is True
+    assert sj._draft_has_receipt_shaped_claim("Done, the fix is in.") is True
+    assert sj._draft_has_receipt_shaped_claim("Written the file for you.") is True
+
+
+def test_draft_has_receipt_shaped_claim_false_for_plain_conversation():
+    assert sj._draft_has_receipt_shaped_claim(
+        "I think the retry approach was the right call.") is False
+    assert sj._draft_has_receipt_shaped_claim(
+        "The splitter cuts by sentence, semicolon and colon.") is False
+    assert sj._draft_has_receipt_shaped_claim(
+        "When the runners land I'll fire the live passes back to back.") is False
+    assert sj._draft_has_receipt_shaped_claim("") is False
+    assert sj._draft_has_receipt_shaped_claim(None) is False
+
+
+def test_hook_gate_receipt_turn_relabels_the_window_and_adds_a_derived_fact(
+        tmp_path, monkeypatch):
+    # Mechanism (a): the draft DOES carry a receipt-shaped claim on a
+    # tool-free current turn, and the previous turn ran tools — that turn's
+    # "[previous turn -1]" header is relabelled "[receipt turn -1]" and a
+    # RECEIPT TURN sentence is added to DERIVED FACTS, so a correct
+    # restatement of a one-turn-old receipt is not scored as unsupported.
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
+                                           stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "run the tests"}},
+        _tool_result_record("164 passed in 12.1s"),
+        _assistant_text_record("164 tests passed."),
+        {"message": {"role": "user", "content": "anything else?"}},
+        _assistant_text_record("Confirmed: 164 tests passed, as I said."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Confirmed: 164 tests passed, as I said."}))
+    assert sj.main(["hook", "gate"]) == 0
+    assert "[receipt turn -1]" in captured["evidence_text"]
+    assert "[previous turn -1]" not in captured["evidence_text"]
+    assert "RECEIPT TURN:" in captured["evidence_text"]
+    assert "164 passed" in captured["evidence_text"]
+
+
+def test_hook_gate_no_receipt_turn_when_no_previous_turn_ran_tools(
+        tmp_path, monkeypatch):
+    # Both turns are tool-free, but the draft still carries a receipt-
+    # shaped claim (a bare number/result-word claim with nothing behind
+    # it at all) — no previous turn qualifies as a receipt turn, so no
+    # relabel and no RECEIPT TURN fact. Falls back to whatever the window
+    # already carries (here: session receipts only, if any) — this is a
+    # window-shape regression check, not a claim about the block outcome.
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
+                                           stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "what's the status?"}},
+        _assistant_text_record("I believe it's fine."),
+        {"message": {"role": "user", "content": "any numbers?"}},
+        _assistant_text_record("9 of 10 cases passed, last I checked."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "9 of 10 cases passed, last I checked."}))
+    code = sj.main(["hook", "gate"])
+    # Nothing at all to derive evidence from (no tool results anywhere, no
+    # receipts) — routes to the unchecked path exactly as it always has;
+    # this test's job is only to prove no "[receipt turn" label appears
+    # when the check runs against something (the unchecked path's own
+    # last-user-prompt evidence).
+    assert code == 0
+    if "evidence_text" in captured:
+        assert "receipt turn" not in captured["evidence_text"]
 
 
 def test_unchecked_path_is_not_taken_when_this_turn_has_its_own_tool_result(
