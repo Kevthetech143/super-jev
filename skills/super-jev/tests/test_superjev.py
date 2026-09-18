@@ -4539,3 +4539,208 @@ def test_explain_shows_the_count_pairing_and_what_it_scoped_out(
     assert "count pairing     : tests" in out
     assert "paired with evidence [158]" in out
     assert "scoped OUT by command identity: [29]" in out
+
+
+# ---------------------------------------------------------------- derived
+# facts at the head of the gate window
+#
+# Fixtures are the remaining misses of the 2026-09-17 gate analysis, with
+# every window line copied verbatim from
+# super-jev-experiments/gate-bench-20260917/analysis/LAST-MISSES.md (l09,
+# l17, t06, t12) — plus no-op cases that must add nothing. The SAME JSON
+# fixture pins test/enhance/derive-facts.test.ts, which is what keeps the
+# pure-Python mirror in superjev.py and the TypeScript `windowFacts` from
+# drifting apart. No transcript, no door, no model call is involved: these
+# functions take window text and draft text and return sentences.
+WINDOW_FACT_FIXTURES = SKILL.parent.parent / "test" / "fixtures" / "gate-window-facts.json"
+
+
+def _window_fact_cases():
+    if not WINDOW_FACT_FIXTURES.exists():      # skill installed away from the repo
+        return []
+    return json.loads(WINDOW_FACT_FIXTURES.read_text(encoding="utf-8"))["cases"]
+
+
+@pytest.mark.parametrize("case", _window_fact_cases(),
+                         ids=[c["id"] for c in _window_fact_cases()])
+def test_derive_window_facts_matches_the_bench_fixtures(case):
+    assert sj.derive_window_facts(case["window"], case["draft"]) == case["expect"], \
+        case["why"]
+
+
+def test_l09_states_the_listing_row_the_judge_read_as_a_column_dump():
+    """The lie in l09 is a trailing clause on a verified sentence, and its
+    refutation is a post-write listing row one line above the REMOVED
+    receipt for a DIFFERENT card. Both halves must be stated."""
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l09" not in cases:
+        pytest.skip("fixtures not on disk")
+    facts = sj.derive_window_facts(cases["l09"]["window"], cases["l09"]["draft"])
+    assert any("fable_awareness still present" in f for f in facts)
+    assert any("fable_operating_manual removed per" in f for f in facts)
+    # and it does NOT claim the card the draft only described in prose
+    # ("the operating manual card is gone") was left in place.
+    assert not any("fable_operating_manual still present" in f for f in facts)
+
+
+def test_l17_does_the_integer_comparison_the_judge_did_not():
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l17" not in cases:
+        pytest.skip("fixtures not on disk")
+    facts = sj.derive_window_facts(cases["l17"]["window"], cases["l17"]["draft"])
+    assert len(facts) == 1
+    assert "every 152 turns, not every turn" in facts[0]
+    # The other card on the same listing is not named: the draft never
+    # mentions it, so there is no claim to state a cadence against.
+    assert "fable_operating_manual" not in facts[0]
+
+
+def test_a_cadence_line_with_no_draft_cadence_claim_stays_silent():
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l17" not in cases:
+        pytest.skip("fixtures not on disk")
+    quiet = "Created, Sir. fable_awareness is on my role file, Fable-only, no bus."
+    assert sj.derive_window_facts(cases["l17"]["window"], quiet) == []
+
+
+def test_compose_window_with_facts_puts_facts_first_and_keeps_the_window_intact():
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l09" not in cases:
+        pytest.skip("fixtures not on disk")
+    window, draft = cases["l09"]["window"], cases["l09"]["draft"]
+    text, facts, meta = sj.compose_window_with_facts(window, draft, cap_bytes=24576)
+    assert text.startswith("DERIVED FACTS")
+    assert sj.DERIVED_FACTS_BACKING_HEADER in text
+    assert text.endswith(window)                      # raw window, byte-for-byte
+    assert meta["facts_count"] == len(facts) == 2
+    assert meta["window_trimmed_bytes"] == 0
+    # every fact sits above the raw evidence it was read from
+    backing_at = text.index(sj.DERIVED_FACTS_BACKING_HEADER)
+    for f in facts:
+        assert text.index(f) < backing_at
+
+
+def test_compose_window_with_facts_is_a_byte_for_byte_noop_when_nothing_is_derivable():
+    window = "[current turn]\n$ ls -la /tmp/x\ntotal 8\n"
+    text, facts, meta = sj.compose_window_with_facts(
+        window, "Listed the directory, Sir.", cap_bytes=24576)
+    assert text == window
+    assert facts == []
+    assert meta == {"facts_count": 0, "facts": [], "facts_bytes": 0,
+                    "window_trimmed_bytes": 0}
+
+
+def test_the_cap_applies_after_the_facts_and_never_drops_one():
+    """Facts are computed first and kept; the raw window's HEAD is what the
+    cap cuts, because its tail (the current turn) is the part the window
+    builder itself treats as highest priority."""
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l09" not in cases:
+        pytest.skip("fixtures not on disk")
+    window = ("[previous turn -1]\n" + ("filler line to burn the budget\n" * 400)
+              + "\n===\n\n" + cases["l09"]["window"])
+    facts_only = sj.derive_window_facts(window, cases["l09"]["draft"])
+    cap = 2000
+    text, facts, meta = sj.compose_window_with_facts(
+        window, cases["l09"]["draft"], cap_bytes=cap)
+    assert facts == facts_only                        # nothing dropped
+    for f in facts:
+        assert f in text
+    assert len(text.encode("utf-8")) <= cap
+    assert meta["window_trimmed_bytes"] > 0
+    # the tail survived: the current turn's own lines are still there
+    assert "REMOVED: agent_role::fable_operating_manual" in text
+    assert "filler line to burn the budget" not in text.split(
+        sj.DERIVED_FACTS_BACKING_HEADER)[0]
+
+
+def test_facts_survive_a_cap_smaller_than_the_facts_block_itself():
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "t12" not in cases:
+        pytest.skip("fixtures not on disk")
+    text, facts, meta = sj.compose_window_with_facts(
+        cases["t12"]["window"], cases["t12"]["draft"], cap_bytes=10)
+    assert facts and all(f in text for f in facts)
+    assert meta["window_trimmed_bytes"] == len(cases["t12"]["window"].encode("utf-8"))
+
+
+def test_derived_facts_can_be_switched_off(monkeypatch):
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l09" not in cases:
+        pytest.skip("fixtures not on disk")
+    monkeypatch.setenv(sj.DERIVED_FACTS_ENV, "0")
+    text, facts, meta = sj.compose_window_with_facts(
+        cases["l09"]["window"], cases["l09"]["draft"], cap_bytes=24576)
+    assert facts == [] and text == cases["l09"]["window"]
+
+
+def test_derive_window_facts_never_raises_on_junk():
+    for window, draft in (("", ""), (None, None), ("[current turn]\n\x00\x01", "!!!"),
+                          ("(" * 5000, "every all each merged #1 deleted")):
+        assert isinstance(sj.derive_window_facts(window, draft), list)
+
+
+def test_stop_hook_gate_hands_the_door_a_window_with_derived_facts_at_its_head(
+        tmp_path, monkeypatch, capsys):
+    """End to end on the l09 window: the evidence file the gate door
+    actually receives must open with DERIVED FACTS, carry the two sentences
+    the judge could not infer from the column dump, and still contain the
+    raw window below them as BACKING."""
+    cases = {c["id"]: c for c in _window_fact_cases()}
+    if "l09" not in cases:
+        pytest.skip("fixtures not on disk")
+    current_turn = cases["l09"]["window"].split("[current turn]\n", 1)[1]
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    transcript = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "rename the card and clean up the duplicate"}},
+        _tool_result_record(current_turn),
+        _assistant_text_record(cases["l09"]["draft"]),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": cases["l09"]["draft"]}))
+    assert sj.main(["hook", "gate", "--explain"]) == 0
+    text = captured["evidence_text"]
+    assert text.startswith("DERIVED FACTS")
+    for fact in cases["l09"]["expect"]:
+        assert fact in text
+    assert sj.DERIVED_FACTS_BACKING_HEADER in text
+    assert "REMOVED: agent_role::fable_operating_manual" in text.split(
+        sj.DERIVED_FACTS_BACKING_HEADER)[1]
+    # --explain names the facts it put at the head of the window
+    out = capsys.readouterr().out
+    assert "derived facts     : 2 at the HEAD of the window" in out
+    assert "still present in [current turn] after the claimed removal" in out
+
+
+def test_stop_hook_gate_leaves_an_ordinary_window_untouched(tmp_path, monkeypatch):
+    """No derivable fact means the door sees exactly the window it saw
+    before this change — no header, no extra bytes."""
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    transcript = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "what is in /tmp/x"}},
+        _tool_result_record("$ ls -la /tmp/x\ntotal 8\n"),
+        _assistant_text_record("Listed it, Sir. Two entries."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "Listed it, Sir. Two entries."}))
+    assert sj.main(["hook", "gate"]) == 0
+    assert "DERIVED FACTS" not in captured["evidence_text"]
+    assert captured["evidence_text"].startswith("[current turn]")

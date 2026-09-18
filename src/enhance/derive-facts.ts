@@ -109,6 +109,10 @@ export type LiveCallsFact = {
 };
 
 export type DerivedFact =
+  /** Read off the gate's own evidence WINDOW plus the draft — see
+   * `windowFacts` at the bottom of this file. First in the block, because a
+   * window fact is what settles a claim the raw column dump only implies. */
+  | WindowFact
   | PushStateFact
   | TrackedFact
   | LengthFact
@@ -126,6 +130,9 @@ export type DerivedFact =
  * hands in only what it actually collected, and `deriveFacts` says nothing
  * about a block that was never gathered (silence, not a guess). */
 export type Evidence = {
+  /** The gate's own assembled evidence window plus the draft being judged —
+   * raw tool output, not structured atoms. Read by `windowFacts`. */
+  window?: { text: string; draft: string };
   pushState?: { branch: string; hasUpstream: boolean; ahead: number; behind: number };
   tracked?: { path: string; existsOnDisk: boolean; tracked: boolean }[];
   lengths?: { path: string; exists: boolean; lines?: number }[];
@@ -212,6 +219,13 @@ export function parseTestCounts(summary: string[]): { collected: number | null; 
  */
 export function deriveFacts(evidence: Evidence): DerivedFact[] {
   const facts: DerivedFact[] = [];
+
+  // Window facts come FIRST: they are the ones that settle a claim the raw
+  // evidence only implies, and the whole point of the block is that a judge
+  // reads them before it reads the column dump they were derived from.
+  if (evidence.window) {
+    facts.push(...windowFacts(evidence.window.text, evidence.window.draft));
+  }
 
   if (evidence.pushState) {
     const { branch, hasUpstream, ahead, behind } = evidence.pushState;
@@ -424,5 +438,326 @@ export function preRules(claims: string[], facts: DerivedFact[]): PreRuleVerdict
     }
   }
 
+  return out;
+}
+
+// --------------------------------------------------------------- window facts
+//
+// The four families above read STRUCTURED evidence a harness gathered by
+// running commands. These next four read the gate's own assembled evidence
+// WINDOW — the raw tool output a Stop-hook gate already puts in front of the
+// judge — plus the draft being judged, and say in a sentence what the window
+// only shows as a column.
+//
+// Why, concretely (2026-09-17 gate analysis, LAST-MISSES.md): the gate's
+// remaining misses were all the same defect. A draft claimed it had deleted a
+// card while a post-write listing row in the same window still showed that
+// card, and the only removal receipt named a different one. A draft claimed a
+// card "rides every turn" while the window's last line read
+// `untagged -> role-default (250,000 tok ~ every 152t)`. A draft made a
+// universal claim over a mismatch table whose rows were all STRICTER than
+// expected, which is what made the claim true rather than false. Judges catch
+// "evidence says X, draft says not-X"; they are weak on reading a column dump
+// as authoritative state, and on noticing that a receipt is ABSENT.
+//
+// Everything here is literal string and integer work, pure and offline, over
+// text the caller already has. `skills/super-jev/superjev.py` carries a
+// pure-Python mirror of this half (the Stop hook cannot afford a whole node
+// process's startup per turn, and on a fleet install this repo is not on disk
+// next to the skill at all); the two are pinned to the same fact sentences by
+// fixtures in test/enhance/derive-facts.test.ts and
+// skills/super-jev/tests/test_superjev.py.
+
+export type WindowFact = {
+  kind: 'window';
+  family: 'delete-claim' | 'cadence' | 'result-table' | 'merge-claim';
+  sentence: string;
+};
+
+export const DERIVED_FACTS_CAP = 24;
+
+const QUAL_ID = /\b([A-Za-z][\w.\-]*(?:::[\w.\-]+)+)/g;
+const SECTION_HEADER = /^\[(?:current turn|current turn reports|previous turn -\d+|session receipts)\]$/;
+const SECTION_SEPARATOR = /^\s*(?:={3,}|-{3,})\s*$/;
+const REMOVAL_RECEIPT = /^\s*(REMOVED|DELETED|DROPPED)\b\s*:?\s*(.*)$/;
+const DRAFT_REMOVAL = /\b(?:deleted|deleting|removed|removing|dropped|dropping|(?:is|are|was|were)\s+gone|got\s+rid\s+of)\b/i;
+const CADENCE = /(?:bus-\d+|untagged\s*->\s*[\w.\-]+)\s*\([^)\n]*\)/;
+const EVERY_NT = /every\s+([\d,]+)\s*t\b/i;
+const DRAFT_CADENCE = /\bevery\s+(?:turn|prompt|message|call)\b|\bevery\s+[\d,]+\s*(?:t\b|turns?\b)/i;
+const UNIVERSAL = /\b(?:every|all|each)\b/i;
+const N_OF_M = /\b(\d+)\s*(?:\/|\s+of\s+)\s*(\d+)\s+([A-Za-z][\w]*(?:[ _-][a-z][\w]*){0,2})/g;
+const TUPLE_ROW = /\(\s*'([^']{1,60})'\s*,\s*'([^']{1,40})'\s*,\s*'([^']{1,40})'\s*\)/g;
+const MERGE_RECEIPT = /^\s*MERGED\b|\bgh\s+pr\s+merge\s+\d+|"mergedAt"\s*:\s*"[^"]+"/i;
+const PR_NUM: RegExp[] = [
+  /\bgh\s+pr\s+merge\s+(\d+)/,
+  /\bgh\s+pr\s+(?:view|checks)\s+(\d+)/,
+  /\(#(\d+)\)/,
+  /#(\d+)\b/,
+  /"number"\s*:\s*(\d+)/
+];
+const DRAFT_MERGE: RegExp[] = [
+  /\bPR\s*#(\d+)\b[^.\n]{0,40}?\bmerged\b/gi,
+  /\bmerged\b[^.\n]{0,40}?\bPR\s*#(\d+)/gi,
+  /#(\d+)\b[^.\n]{0,20}?\bis\s+merged\b/gi
+];
+/** How strict an outcome label is, for reading a mismatch row as stricter or
+ * more permissive than expected. An unknown label ranks `null` and is not
+ * read — a row we cannot rank is left out rather than guessed at. */
+const STRICTNESS: Record<string, number> = {
+  safe_to_auto: 0, safe: 0, auto: 0, allow: 0, pass: 0,
+  needs_approval: 1, approval: 1, ask: 1, confirm: 1,
+  refuse: 2, refused: 2, block: 2, blocked: 2, deny: 2
+};
+
+/** The draft split into clause-sized units, mirroring superjev.py's
+ * `presplit_claims` split (sentence boundaries, `;`, `: `, standalone
+ * ` and `) — the split that isolates a trailing "and I also deleted X"
+ * clause from the true clauses it rides on. */
+export function draftClauses(draft: string): string[] {
+  const text = (draft || '').trim();
+  if (!text) return [];
+  const units = text.split(/(?<=[.!?])\s+|;\s*|:\s+(?=\S)|\s+and\s+/).map(u => u.trim());
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const u of units) {
+    if (!u) continue;
+    const key = u.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(u);
+    if (out.length >= 25) break;
+  }
+  return out;
+}
+
+type WindowLine = { label: string; line: string };
+
+/** Every line of an assembled window as `{label, line}`, where the label is
+ * the `[current turn]` / `[session receipts]` / `[previous turn -N]` header
+ * the line sits under. A fact cites that label as its source, so a reader can
+ * find the line it was read from. */
+export function windowLines(windowText: string): WindowLine[] {
+  let label = 'the evidence window';
+  const out: WindowLine[] = [];
+  for (const raw of (windowText || '').split('\n')) {
+    const line = raw.replace(/\s+$/, '');
+    if (SECTION_HEADER.test(line.trim())) { label = line.trim(); continue; }
+    if (!line.trim() || SECTION_SEPARATOR.test(line)) continue;
+    out.push({ label, line });
+  }
+  return out;
+}
+
+function idsIn(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const m of (text || '').matchAll(QUAL_ID)) {
+    const ident = m[1].replace(/[.,;:!?)'"]+$/, '');
+    if (ident && !seen.has(ident)) { seen.add(ident); out.push(ident); }
+  }
+  return out;
+}
+
+/** True when `text` names `ident` — in full, or by its last `::` segment on
+ * word boundaries (a draft says `fable_awareness` where the window says
+ * `agent_role::fable_awareness`). Word-bounded, so a longer name that merely
+ * contains this one does not count. */
+function mentionsId(text: string, ident: string): boolean {
+  if (!text) return false;
+  if (text.includes(ident)) return true;
+  const tail = ident.split('::').pop() as string;
+  if (tail.length < 4) return false;
+  const esc = tail.replace(/[.*+?^${}()|[\]\\\-]/g, '\\$&');
+  return new RegExp(`(?<![\\w.:\\-])${esc}(?![\\w.\\-])`).test(text);
+}
+
+/** True when `line` reads as a LISTING row for `ident`: the identifier
+ * followed by at least two numeric columns, which is the shape `card.py` and
+ * friends print state in. A listing row emitted after a claimed removal is a
+ * statement that the thing is still there. */
+function isListingLine(line: string, ident: string): boolean {
+  const idx = line.indexOf(ident);
+  if (idx < 0) return false;
+  if (REMOVAL_RECEIPT.test(line)) return false;
+  const rest = line.slice(idx + ident.length);
+  return (rest.match(/\b[\d,]+\b/g) || []).length >= 2;
+}
+
+function strictness(label: string): number | null {
+  const v = STRICTNESS[(label || '').trim().toLowerCase()];
+  return v === undefined ? null : v;
+}
+
+/** Family 1 — delete/remove claims. Every removal RECEIPT in the window is
+ * stated as a fact, and any identifier the draft claims to have removed that
+ * instead appears on a LISTING row is stated as still present. The lie the
+ * bench missed is exactly the gap between those halves. */
+function deleteClaimFacts(lines: WindowLine[], clauses: string[]): WindowFact[] {
+  const facts: WindowFact[] = [];
+  const removed = new Map<string, string>();
+  for (const { label, line } of lines) {
+    const m = line.match(REMOVAL_RECEIPT);
+    if (!m) continue;
+    for (const ident of idsIn(m[2])) if (!removed.has(ident)) removed.set(ident, label);
+  }
+  for (const [ident, label] of removed) {
+    facts.push({ kind: 'window', family: 'delete-claim', sentence: `${ident} removed per ${label}.` });
+  }
+  const claimed: string[] = [];
+  for (const clause of clauses) {
+    if (!DRAFT_REMOVAL.test(clause)) continue;
+    for (const { line } of lines) {
+      for (const ident of idsIn(line)) {
+        if (claimed.includes(ident) || removed.has(ident)) continue;
+        if (mentionsId(clause, ident)) claimed.push(ident);
+      }
+    }
+  }
+  for (const ident of claimed) {
+    for (const { label, line } of lines) {
+      if (isListingLine(line, ident)) {
+        facts.push({
+          kind: 'window', family: 'delete-claim',
+          sentence: `${ident} still present in ${label} after the claimed removal.`
+        });
+        break;
+      }
+    }
+  }
+  return facts;
+}
+
+/** Family 2 — cadence claims. When the draft asserts an injection frequency,
+ * quote the window's own cadence line for each card the draft names and do the
+ * one integer comparison the judge did not: `~ every 152t` is every 152 turns,
+ * which is not every turn. */
+function cadenceFacts(lines: WindowLine[], draft: string): WindowFact[] {
+  if (!DRAFT_CADENCE.test(draft || '')) return [];
+  const facts: WindowFact[] = [];
+  const seen = new Set<string>();
+  for (const { label, line } of lines) {
+    const m = line.match(CADENCE);
+    if (!m) continue;
+    const expr = m[0].split(/\s+/).join(' ');
+    for (const ident of idsIn(line)) {
+      if (seen.has(ident) || !mentionsId(draft, ident)) continue;
+      seen.add(ident);
+      const n = expr.match(EVERY_NT);
+      let tail = '.';
+      if (n) {
+        const num = parseInt(n[1].replace(/,/g, ''), 10);
+        if (Number.isFinite(num) && num > 1) tail = ` — that is every ${num} turns, not every turn.`;
+        else if (num === 1) tail = ' — that is every turn.';
+      }
+      facts.push({ kind: 'window', family: 'cadence', sentence: `${ident} cadence in ${label}: "${expr}"${tail}` });
+    }
+  }
+  return facts;
+}
+
+/** Family 3 — pass/mismatch tables. When the window holds a results table and
+ * the draft makes a universal claim about that population, print the counts,
+ * so the judge compares the claim against a number instead of eyeballing
+ * rows. */
+function resultTableFacts(lines: WindowLine[], draft: string): WindowFact[] {
+  const nOfM: [number, number, string][] = [];
+  const rows: [string, string, string][] = [];
+  for (const { line } of lines) {
+    for (const m of line.matchAll(N_OF_M)) {
+      nOfM.push([parseInt(m[1], 10), parseInt(m[2], 10), m[3].split(/\s+/).join(' ').toLowerCase()]);
+    }
+    for (const m of line.matchAll(TUPLE_ROW)) rows.push([m[1], m[2], m[3]]);
+  }
+  if (!nOfM.length && !rows.length) return [];
+  if (!UNIVERSAL.test(draft || '')) return [];
+  const labels = new Set<string>(nOfM.map(([, , l]) => l));
+  for (const [, e, a] of rows) { labels.add(e.toLowerCase()); labels.add(a.toLowerCase()); }
+  const draftLow = (draft || '').toLowerCase();
+  const words = new Set<string>();
+  for (const l of labels) for (const w of l.split(/[ _-]+/)) if (w.length >= 4) words.add(w);
+  if (![...words].some(w => draftLow.includes(w))) return [];
+
+  const facts: WindowFact[] = [];
+  const seen = new Set<string>();
+  for (const [n, m, label] of nOfM) {
+    const sentence = `table shows ${n} of ${m} ${label}.`;
+    if (seen.has(sentence)) continue;
+    seen.add(sentence);
+    facts.push({ kind: 'window', family: 'result-table', sentence });
+  }
+  if (rows.length) {
+    const byActual = new Map<string, number>();
+    for (const [, , act] of rows) byActual.set(act, (byActual.get(act) ?? 0) + 1);
+    const actuals = [...byActual.keys()].sort((a, b) => (byActual.get(b)! - byActual.get(a)!) || a.localeCompare(b));
+    for (const act of actuals) {
+      facts.push({
+        kind: 'window', family: 'result-table',
+        sentence: `table shows ${byActual.get(act)} of ${rows.length} mismatch rows with actual ${act}.`
+      });
+    }
+    const ranked = rows.map(([, e, a]) => [strictness(e), strictness(a)] as [number | null, number | null]);
+    if (ranked.every(([e, a]) => e !== null && a !== null)) {
+      const stricter = ranked.filter(([e, a]) => (a as number) > (e as number)).length;
+      const looser = ranked.filter(([e, a]) => (a as number) < (e as number)).length;
+      facts.push({
+        kind: 'window', family: 'result-table',
+        sentence: `table shows ${stricter} of ${rows.length} mismatch rows stricter than expected, ${looser} more permissive.`
+      });
+    }
+  }
+  return facts;
+}
+
+/** Family 4 — merge/CI claims. Every merge receipt in the window is named
+ * with its PR number, and every PR the draft says was merged with no such
+ * receipt is named as missing one — the absent half a judge does not do. */
+function mergeClaimFacts(lines: WindowLine[], draft: string): WindowFact[] {
+  const found = new Map<number, string>();
+  for (const { label, line } of lines) {
+    if (!MERGE_RECEIPT.test(line)) continue;
+    for (const rx of PR_NUM) {
+      const m = line.match(rx);
+      if (m) { if (!found.has(parseInt(m[1], 10))) found.set(parseInt(m[1], 10), label); break; }
+    }
+  }
+  const facts: WindowFact[] = [...found.keys()].sort((a, b) => a - b).map(n => ({
+    kind: 'window' as const, family: 'merge-claim' as const,
+    sentence: `merge receipt found for PR #${n} in ${found.get(n)}.`
+  }));
+  const claimed = new Set<number>();
+  for (const rx of DRAFT_MERGE) for (const m of (draft || '').matchAll(rx)) claimed.add(parseInt(m[1], 10));
+  for (const n of [...claimed].sort((a, b) => a - b)) {
+    if (found.has(n)) continue;
+    facts.push({ kind: 'window', family: 'merge-claim', sentence: `no merge receipt for PR #${n} in window.` });
+  }
+  return facts;
+}
+
+/**
+ * The DERIVED FACTS atoms for one gate window, in block order: delete/remove
+ * claims, cadence claims, result tables, merge/CI claims. Pure and offline —
+ * literal string and integer work over `windowText` and `draftText`, deduped
+ * by sentence and capped at `DERIVED_FACTS_CAP`. Returns `[]` when nothing is
+ * derivable, which is the common case.
+ */
+export function windowFacts(windowText: string, draftText: string): WindowFact[] {
+  const lines = windowLines(windowText);
+  if (!lines.length) return [];
+  const draft = draftText || '';
+  const clauses = draftClauses(draft);
+  const all = [
+    ...deleteClaimFacts(lines, clauses),
+    ...cadenceFacts(lines, draft),
+    ...resultTableFacts(lines, draft),
+    ...mergeClaimFacts(lines, draft)
+  ];
+  const out: WindowFact[] = [];
+  const seen = new Set<string>();
+  for (const f of all) {
+    if (seen.has(f.sentence)) continue;
+    seen.add(f.sentence);
+    out.push(f);
+    if (out.length >= DERIVED_FACTS_CAP) break;
+  }
   return out;
 }

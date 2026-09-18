@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   deriveFacts, formatDerivedFacts, preRules, testSummaryLines, parseTestCounts,
+  windowFacts, windowLines, draftClauses,
   type Evidence
 } from '../../src/enhance/derive-facts.ts';
 
@@ -268,4 +270,110 @@ test('testSummaryLines / parseTestCounts are usable standalone, e.g. for a harne
   assert.equal(lines.length, 1);
   const counts = parseTestCounts(lines);
   assert.deepEqual(counts, { collected: 5, passed: 5, failed: 0 });
+});
+
+// --------------------------------------------------------------- windowFacts
+//
+// The fixtures are the remaining misses of the 2026-09-17 gate analysis —
+// l09, l17, t06, t12 — with every window line copied verbatim from
+// super-jev-experiments/gate-bench-20260917/analysis/LAST-MISSES.md, plus
+// no-op cases that must add nothing. The SAME JSON file pins the pure-Python
+// mirror in skills/super-jev/superjev.py (see
+// skills/super-jev/tests/test_superjev.py), which is what stops the two
+// implementations from drifting. Nothing here reaches a judge, a shell or a
+// network: window text and draft text in, sentences out.
+
+type WindowFactCase = { id: string; why: string; window: string; draft: string; expect: string[] };
+const windowFactCases: WindowFactCase[] = JSON.parse(
+  readFileSync(new URL('../fixtures/gate-window-facts.json', import.meta.url), 'utf8')
+).cases;
+
+for (const c of windowFactCases) {
+  test(`windowFacts fixture ${c.id}: ${c.why}`, () => {
+    assert.deepEqual(windowFacts(c.window, c.draft).map(f => f.sentence), c.expect);
+  });
+}
+
+const fixture = (id: string): WindowFactCase => {
+  const c = windowFactCases.find(x => x.id === id);
+  assert.ok(c, `fixture ${id} missing`);
+  return c!;
+};
+
+test('l09: the deleted card is stated as still present, and the receipt that names a DIFFERENT card is stated too', () => {
+  const facts = windowFacts(fixture('l09').window, fixture('l09').draft);
+  assert.ok(facts.some(f => /fable_awareness still present/.test(f.sentence)));
+  assert.ok(facts.some(f => /fable_operating_manual removed per/.test(f.sentence)));
+  // The draft's prose-only claim ("the operating manual card is gone") must
+  // not be turned into a refutation of a card that really was removed.
+  assert.ok(!facts.some(f => /fable_operating_manual still present/.test(f.sentence)));
+  assert.ok(facts.every(f => f.family === 'delete-claim'));
+});
+
+test('l17: the cadence line is quoted and the integer comparison is done in code', () => {
+  const facts = windowFacts(fixture('l17').window, fixture('l17').draft);
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0].family, 'cadence');
+  assert.match(facts[0].sentence, /every 152 turns, not every turn/);
+  // the other card on the same listing is never mentioned: the draft makes
+  // no claim about it, so there is nothing to state.
+  assert.ok(!facts[0].sentence.includes('fable_operating_manual'));
+});
+
+test('l17: with no cadence claim in the draft, the same window derives nothing', () => {
+  const quiet = 'Created, Sir. fable_awareness is on my role file, Fable-only, no bus.';
+  assert.deepEqual(windowFacts(fixture('l17').window, quiet), []);
+});
+
+test('t12: the mismatch table is counted, including how many rows were STRICTER than expected', () => {
+  const facts = windowFacts(fixture('t12').window, fixture('t12').draft);
+  const sentences = facts.map(f => f.sentence);
+  assert.ok(sentences.includes('table shows 4 of 4 mismatch rows stricter than expected, 0 more permissive.'));
+  assert.ok(sentences.includes('table shows 26 of 30 match.'));
+  assert.ok(sentences.includes('merge receipt found for PR #11 in [current turn].'));
+});
+
+test('t12: the same table with no universal claim in the draft derives no counts', () => {
+  const facts = windowFacts(fixture('t12').window, 'Permit is shipped, Sir. The rerun looks healthy.');
+  assert.ok(!facts.some(f => f.family === 'result-table'));
+});
+
+test('t06: one merge receipt is named, and the two merges with no receipt are not invented', () => {
+  const facts = windowFacts(fixture('t06').window, fixture('t06').draft);
+  assert.deepEqual(facts.map(f => f.sentence), ['merge receipt found for PR #4 in [session receipts].']);
+});
+
+test('a mismatch row with a label we cannot rank is counted but not read as stricter or looser', () => {
+  const window = "[current turn]\n('x-01', 'weird_label', 'other_label')\n";
+  const facts = windowFacts(window, 'Every case now refuses, Sir.');
+  // no strictness sentence, because a rank we do not have is not guessed at
+  assert.ok(!facts.some(f => /stricter than expected/.test(f.sentence)));
+});
+
+test('windowLines labels each line with the window section it sits under', () => {
+  const lines = windowLines('[session receipts]\nMERGED 1\n\n===\n\n[current turn]\nWROTE  : x\n');
+  assert.deepEqual(lines, [
+    { label: '[session receipts]', line: 'MERGED 1' },
+    { label: '[current turn]', line: 'WROTE  : x' }
+  ]);
+});
+
+test('draftClauses isolates a trailing "and I also deleted X" clause from the true clauses it rides on', () => {
+  const clauses = draftClauses(fixture('l09').draft);
+  assert.ok(clauses.some(c => /^I also deleted the old fable_awareness duplicate\.$/.test(c)));
+});
+
+test('window facts ride at the HEAD of deriveFacts, above the structured atoms', () => {
+  const facts = deriveFacts({
+    window: { text: fixture('l17').window, draft: fixture('l17').draft },
+    tests: { command: 'npm test', output: '10 passed, 0 failed in 1.0s' }
+  });
+  assert.equal(facts[0].kind, 'window');
+  assert.ok(facts.some(f => f.kind === 'tests'));
+  assert.match(formatDerivedFacts(facts).split('\n')[0], /every 152 turns/);
+});
+
+test('an evidence object with no window is unchanged by any of this', () => {
+  const facts = deriveFacts({ branches: [{ name: 'feat/x', exists: true }] });
+  assert.ok(!facts.some(f => f.kind === 'window'));
 });
