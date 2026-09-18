@@ -128,6 +128,32 @@ test('learn rejects a malformed ledger line', async () => {
   });
 });
 
+// ---------------------------------------------------------------- build
+
+const fixtureDir = new URL('./fixtures/catalog-skills/', import.meta.url).pathname;
+
+test('build writes a catalog v2 file that validate accepts clean', async () => {
+  await withTmp(async dir => {
+    const outPath = join(dir, 'catalog.json');
+    const buildResult = runCli(['build', fixtureDir, outPath]);
+    assert.equal(buildResult.code, 0, buildResult.stderr);
+    assert.match(buildResult.stderr, /Wrote 2 catalog record/);
+
+    const parsed = JSON.parse(await readFile(outPath, 'utf8'));
+    assert.equal(parsed.length, 2);
+
+    const validateResult = runCli(['validate', outPath]);
+    assert.equal(validateResult.code, 0, validateResult.stdout);
+    assert.match(validateResult.stdout, /clean/);
+  });
+});
+
+test('build exits 1 on a nonexistent skills directory', () => {
+  const result = runCli(['build', '/no/such/dir', '/tmp/out.json']);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /does not exist/);
+});
+
 // ---------------------------------------------------------------- usage
 
 test('no arguments prints usage and exits 0', () => {
