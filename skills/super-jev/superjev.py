@@ -129,6 +129,23 @@ DEFAULT_BLOCK_NOT_SUPPORTED = 0.20
 DEFAULT_BLOCK_OVERCLAIM = 0.80
 BLOCK_SELF_CONTRADICTORY = 0.30
 
+# Machine tags a reply carries for fleet bookkeeping (board-bus footer,
+# rung-line, Add/Skip buttons, raw system tags) are not part of the reply's
+# own content, but jev's leaked_internal/self_contradictory scoring has been
+# seen reading them as internal leakage or a contradiction (see the
+# 2026-09-17 loop where the SAME short reply blocked three times running
+# while the lead rewrote it more carefully each time). Stripped out of the
+# draft before it goes to the gate. Env-overridable as a JSON list of regex
+# strings so a fleet with a different tag vocabulary is not stuck patching
+# this file.
+STRIP_PATTERNS_ENV = "SUPERJEV_STRIP_PATTERNS"
+DEFAULT_STRIP_PATTERNS = [
+    r'^\[BOARD:.*\]\s*$',
+    r'^Rung(?:\s+line)?:.*$',
+    r'^\[Add\]\s*\[Skip\].*$',
+    r'</?[a-zA-Z][^>\n]*>',
+]
+
 # jev.py's --kit reply table (_print_reply) and worker-verify's own table
 # (same row shape, same function pattern) print one line per claim as
 #   "  c3   NOT_SUPPORTED   0.18  <subject text...>"
@@ -189,20 +206,90 @@ def _hook_block_reasons(flags):
     line (stricter, and in the opposite direction for NOT_SUPPORTED/
     SELF_CONTRADICTORY, than jev's own 0.80 escalate-below line — see the
     block above). Returns a list of "key VERDICT score" strings, in
-    argument order, for the stderr reason and the ledger line."""
+    argument order, for the stderr reason and the ledger line.
+
+    SELF_CONTRADICTORY never blocks on its own: it only counts as a block
+    reason when the SAME run also carries a blocking NOT_SUPPORTED or
+    OVERCLAIMS flag. A calmer, more careful rewrite of a reply can still
+    read as mildly self-contradictory to jev's scoring (hedging language
+    reads that way) even once the actual overclaim/unsupported-claim
+    problem is fixed — blocking on self-contradiction alone in that case
+    is exactly what looped the Stop gate on 2026-09-17: the same short
+    reply blocked three times running on self_contradictory scores of
+    0.10/0.15/0.05 while overclaim dropped from 0.87 to 0.25 to 0.30,
+    because self-contradiction alone was a block trigger. NOT_SUPPORTED
+    and OVERCLAIMS keep blocking entirely on their own — nothing here
+    weakens either of those."""
     not_supported_line = _block_not_supported_threshold()
     overclaim_line = _block_overclaim_threshold()
+    has_not_supported_block = any(
+        f["verdict"] == "NOT_SUPPORTED" and f["score"] <= not_supported_line
+        for f in flags)
+    has_overclaim_block = any(
+        f["verdict"] == "OVERCLAIMS" and f["score"] >= overclaim_line
+        for f in flags)
     reasons = []
     for f in flags:
         v, s, k = f["verdict"], f["score"], f["key"]
-        blocked = (
-            (v == "NOT_SUPPORTED" and s <= not_supported_line) or
-            (v == "OVERCLAIMS" and s >= overclaim_line) or
-            (v == "SELF_CONTRADICTORY" and s <= BLOCK_SELF_CONTRADICTORY)
-        )
+        if v == "NOT_SUPPORTED" and s <= not_supported_line:
+            blocked = True
+        elif v == "OVERCLAIMS" and s >= overclaim_line:
+            blocked = True
+        elif v == "SELF_CONTRADICTORY" and s <= BLOCK_SELF_CONTRADICTORY:
+            blocked = has_not_supported_block or has_overclaim_block
+        else:
+            blocked = False
         if blocked:
             reasons.append(f"{k} {v} {s:.2f}")
     return reasons
+
+
+def _strip_patterns():
+    """The compiled-pattern source strings to strip from a draft before it
+    goes to the gate: SUPERJEV_STRIP_PATTERNS (a JSON list of regex
+    strings), if set and parseable, else DEFAULT_STRIP_PATTERNS. Never
+    raises: a bad env value falls back to the default list."""
+    raw = os.environ.get(STRIP_PATTERNS_ENV)
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list) and parsed:
+                return [str(p) for p in parsed]
+        except (ValueError, TypeError):
+            pass
+    return DEFAULT_STRIP_PATTERNS
+
+
+def _strip_machine_tags(text):
+    """Remove fleet machine tags — a trailing `[BOARD: ...]` line, a
+    `Rung:`/`Rung line:` line, `[Add] [Skip]` button lines, and any
+    `<...>` system tag — from a reply before it is checked against the
+    claim gate. These are bookkeeping the fleet's own tooling reads, not
+    content the reply's author is claiming, and jev's leaked_internal /
+    self_contradictory scoring has misread them as internal leakage or a
+    contradiction. Line-level patterns that consume a whole line drop
+    that line entirely rather than leaving a blank line behind. Never
+    raises: an unparseable pattern in the list is skipped, not fatal."""
+    if not text:
+        return text
+    patterns = []
+    for p in _strip_patterns():
+        try:
+            patterns.append(re.compile(p))
+        except re.error:
+            continue
+    if not patterns:
+        return text
+    out = []
+    for line in text.split("\n"):
+        stripped = line
+        for pat in patterns:
+            stripped = pat.sub("", stripped)
+        if line.strip() and not stripped.strip():
+            # The whole line was a machine tag — drop it, not just blank it.
+            continue
+        out.append(stripped)
+    return "\n".join(out)
 
 # The wishlist ships in this repo, not in a private fleet path.
 WISHLIST = REPO_ROOT / "docs" / "wishlist.md"
@@ -1299,6 +1386,7 @@ def cmd_hook(a):
                 _hook_log("gate: no usable text field in payload or transcript — "
                           "fail-open", skipped=True)
                 return 0
+            text = _strip_machine_tags(text)
 
             evidence = _hook_evidence_paths(payload)
             evidence_source = "payload"
@@ -1408,8 +1496,28 @@ def cmd_hook(a):
         action = action_map.get(code, "advisory")
         if block_reasons:
             action = "block"
+
+        # stop_hook_active=true is Claude Code's own signal that this Stop
+        # event is a RE-RUN — a previous hook already blocked once this
+        # turn and the transcript was already re-run because of it. A gate
+        # that can still say "block" on a re-run has no way to ever let
+        # the turn end: the 2026-09-17 loop was exactly this, the same
+        # short reply blocked three times running while the lead rewrote
+        # it more carefully each pass. On a re-run this hook never blocks
+        # again — advisory at most, with the flags still printed so the
+        # session can see why the gate is unhappy, and the ledger line
+        # says plainly this was a fail-open, not a real allow.
+        if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
+            action = "block-forced-advisory"
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code})", exit_code=0, flags=flags)
+            return 0
+        if action == "block-forced-advisory":
+            reason_bits = "; ".join(block_reasons) if block_reasons else f"exit {code}"
+            advisory = f"super-jev gate: second pass (stop_hook_active) — advisory only, would have blocked on: {reason_bits}"
+            print(advisory)
+            _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
+                     f"blocked on: {reason_bits}", exit_code=0, flags=flags)
             return 0
         if action == "block":
             reason = f"super-jev {door} blocked this (exit {code})"
