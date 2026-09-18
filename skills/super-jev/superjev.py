@@ -2283,7 +2283,9 @@ def cmd_catch(a):
         return _cmd_catch_tag(a)
     if action == "report":
         return _cmd_catch_report(a)
-    return refuse("catch: no action — use list, tag or report")
+    if action == "signal":
+        return _cmd_catch_signal(a)
+    return refuse("catch: no action — use list, tag, report or signal")
 
 
 def _catch_refuse3(line):
@@ -2442,6 +2444,347 @@ def _cmd_catch_report(a):
               "fair/false answer different questions, see docs/hooks.md)")
     if since:
         print(f"undated: {undated}")
+    return 0
+
+
+# --------------------------------------------------------- catch signal
+#
+# `catch signal` is the first step of the compounding loop: harness
+# catches -> tags -> issue -> fix PR -> bench robot. It never invents a
+# pattern — it only groups catch-ledger records a human already tagged
+# "false" (a block that was wrong: the draft was actually true) or "miss"
+# (an allow that let a lie through) by REASON FAMILY: the reason string
+# with its numbers/values stripped, so "count mismatch (tests): draft
+# 0/61 vs evidence 53" and "count mismatch (tests): draft 2/9 vs evidence
+# 4" collapse into the same family, "count mismatch (tests)" — same
+# detection arm, different numbers. Once a family reaches --min, `catch
+# signal` offers to draft (or, with --open, actually file) a GitHub issue
+# describing the pattern with a handful of redacted examples pulled
+# straight from the ledger's own excerpts — never the raw payload.
+
+_CATCH_FAMILY_COUNT_MISMATCH_RE = re.compile(r'^(count mismatch \([^)]*\))')
+
+
+def _catch_reason_family(reason):
+    """The reason string with its numbers/values stripped off, so repeat
+    false/miss blocks from the SAME detection arm collapse into one
+    family regardless of which numbers or claim key fired that time.
+    Three shapes are named outright: "count mismatch (<label>)" keeps its
+    label (the label is the identity that matters, the draft/evidence
+    counts are not), "PR mismatch: ..." and "LABELLED VALUE: ..." collapse
+    to their own bare header. Anything else falls back to a generic strip:
+    drop a trailing parenthetical (e.g. "(overclaim==1.00 arm)"), then a
+    trailing run of numbers (a score like "0.94", or a key/verdict/score
+    triple's own score) — so "c3 OVERCLAIMS 0.94" and "c1 OVERCLAIMS 0.91
+    (overclaim==1.00 arm)" both collapse to "c3 OVERCLAIMS"/"c1 OVERCLAIMS"
+    (still distinct — the claim key is kept, only the score is stripped,
+    same as the docstring's own "overclaim OVERCLAIMS 0.94" ->
+    "overclaim OVERCLAIMS" example). Never raises; an empty/falsy reason
+    returns ""."""
+    if not reason:
+        return ""
+    reason = str(reason).strip()
+    m = _CATCH_FAMILY_COUNT_MISMATCH_RE.match(reason)
+    if m:
+        return m.group(1)
+    if reason.startswith("PR mismatch"):
+        return "PR mismatch"
+    if reason.startswith("LABELLED VALUE"):
+        return "LABELLED VALUE"
+    prefix = reason.split(":", 1)[0].strip()
+    prefix = re.sub(r'\s*\([^)]*\)\s*$', '', prefix)
+    prefix = re.sub(r'\s+\d+(\.\d+)?(/\d+(\.\d+)?)*\s*$', '', prefix)
+    return prefix.strip()
+
+
+def _catch_signal_groups(records, tags=("false", "miss")):
+    """{(tag, family): [records...]}, sorted by ts ascending within each
+    group, for every record whose tag is in `tags` and whose first
+    reason string is non-empty — a tagged record with no reasons has
+    nothing to group by and is silently skipped, never a crash."""
+    groups = {}
+    for rec in records:
+        tag = rec.get("tag")
+        if tag not in tags:
+            continue
+        reasons = rec.get("reasons") or []
+        if not reasons:
+            continue
+        family = _catch_reason_family(reasons[0])
+        if not family:
+            continue
+        groups.setdefault((tag, family), []).append(rec)
+    for key in groups:
+        groups[key].sort(key=lambda r: r.get("ts") or "")
+    return groups
+
+
+def _catch_signal_examples(records, limit=3):
+    """Up to `limit` redacted examples off the front of `records` (already
+    sorted oldest-first by the caller). Both fields go through
+    _catch_redact again here even though draft_excerpt was already
+    redacted when the record was first written — belt and suspenders, and
+    the ONLY source for what a `catch signal --open` issue body ever
+    shows: no example here ever comes from anywhere but a ledger record's
+    own already-redacted fields."""
+    out = []
+    for rec in records[:limit]:
+        draft = _catch_redact(rec.get("draft_excerpt") or "")[:300]
+        reasons = rec.get("reasons") or []
+        reason_line = _catch_redact(reasons[0]) if reasons else ""
+        out.append({"id": rec.get("id", ""), "draft": draft, "reason": reason_line})
+    return out
+
+
+_CATCH_SIGNAL_TITLE_TEMPLATES = {
+    "false": "false block: {family} (x{count})",
+    "miss": "missed lie: {family} (x{count})",
+}
+
+
+def _catch_signal_title(tag, family, count):
+    tmpl = _CATCH_SIGNAL_TITLE_TEMPLATES.get(tag, "{tag} pattern: {family} (x{count})")
+    return tmpl.format(tag=tag, family=family, count=count)
+
+
+def _build_catch_signals(records, since_spec, min_count):
+    """(signals, undated) — one signal dict per (tag, family) that has
+    reached `min_count` records, sorted by count desc then tag/family for
+    a stable order across runs. `since_spec` is applied via the same
+    _catch_filter_since every other `catch` subcommand uses, so an
+    undated record is excluded from the window (never silently "recent")
+    and its count is returned separately, same contract as `catch
+    list`/`catch report`."""
+    filtered, undated = _catch_filter_since(records, since_spec)
+    groups = _catch_signal_groups(filtered)
+    signals = []
+    for (tag, family), recs in groups.items():
+        if len(recs) < min_count:
+            continue
+        signals.append({
+            "tag": tag,
+            "family": family,
+            "count": len(recs),
+            "first_ts": recs[0].get("ts"),
+            "last_ts": recs[-1].get("ts"),
+            "ids": [r.get("id") for r in recs],
+            "examples": _catch_signal_examples(recs),
+            "title": _catch_signal_title(tag, family, len(recs)),
+        })
+    signals.sort(key=lambda s: (-s["count"], s["tag"], s["family"]))
+    return signals, undated
+
+
+def _print_catch_signal(signal):
+    print(f"signal: {signal['title']}")
+    print(f"  family: {signal['family']}  tag: {signal['tag']}  count: {signal['count']}")
+    print(f"  first: {signal['first_ts']}  last: {signal['last_ts']}")
+    for i, ex in enumerate(signal["examples"], 1):
+        print(f"  example {i} ({ex['id']}): draft: {ex['draft']!r}")
+        if ex["reason"]:
+            print(f"              reason: {ex['reason']!r}")
+
+
+def _catch_signal_body(signal):
+    """The full GitHub issue body (markdown) for one signal — every piece
+    of draft/reason text in it already passed through _catch_redact via
+    _catch_signal_examples, so this function only assembles strings, it
+    never touches raw text itself."""
+    lines = [
+        f"## {signal['title']}",
+        "",
+        f"Reason family: `{signal['family']}`",
+        f"Tag: {signal['tag']}",
+        f"Count: {signal['count']}",
+        f"First seen: {signal['first_ts']}",
+        f"Last seen: {signal['last_ts']}",
+        "",
+        "### Examples (redacted, up to 3)",
+        "",
+    ]
+    for i, ex in enumerate(signal["examples"], 1):
+        lines.append(f"{i}. draft: `{ex['draft']}`")
+        if ex["reason"]:
+            lines.append(f"   reason: `{ex['reason']}`")
+    lines += [
+        "",
+        "---",
+        "Filed automatically by `superjev catch signal` from the catch ledger — "
+        "the first step of the compounding loop: harness catches -> tags -> "
+        "issue -> fix PR -> bench robot.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _catch_signal_has_pii(text):
+    """True if `text` still matches an email/phone/SSN pattern — the
+    last-ditch guard `catch signal --open` runs on the FULL assembled
+    issue body right before it would call `gh issue create`, on top of
+    the per-example _catch_redact each example already went through.
+    Never raises; empty/falsy text is never a match."""
+    if not text:
+        return False
+    if _COMPILED_EMAIL[1].search(text):
+        return True
+    for _kind, rx in _COMPILED_CATCH_REDACT:
+        if rx.search(text):
+            return True
+    return False
+
+
+def _catch_signals_sidecar_path():
+    """<catch ledger dir>/signals.jsonl — one line per (tag, family) this
+    process has ever filed an issue for via `catch signal --open`, so the
+    same family is never filed twice. Deliberately a sidecar file, not a
+    note written back onto the matched catch-ledger records themselves:
+    a record's `note` field already carries the human's own tag reason
+    (see `catch tag`), and overwriting it with an issue URL would destroy
+    that annotation."""
+    return CATCH_LEDGER_PATH.parent / "signals.jsonl"
+
+
+def _catch_signal_already_filed(tag, family):
+    """The issue URL already on file for this (tag, family) pair, from an
+    earlier `catch signal --open` run (this process or any other), or
+    None. Reads the sidecar fresh every call — never cached — so a filed
+    signal is never re-filed even across separate cron invocations."""
+    path = _catch_signals_sidecar_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("tag") == tag and rec.get("family") == family:
+            return rec.get("issue_url")
+    return None
+
+
+def _catch_signal_record_filed(tag, family, count, ids, issue_url):
+    """Appends one line to the signals.jsonl sidecar recording that this
+    (tag, family) has now been filed — see _catch_signal_already_filed.
+    Never raises: a write failure prints to stderr and is otherwise
+    silent, same contract as catch_ledger_append/_rewrite_catch_records —
+    the issue is already filed by the time this runs, so a sidecar write
+    failure must never look like the filing itself failed."""
+    path = _catch_signals_sidecar_path()
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tag": tag,
+        "family": family,
+        "count": count,
+        "ids": ids,
+        "issue_url": issue_url,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"super-jev: could not write catch signals sidecar at {path}: {exc}",
+              file=sys.stderr)
+
+
+_GH_ISSUE_TIMEOUT = 15
+
+
+def _run_gh_issue_create(repo, title, body):
+    """One `gh issue create` call for `catch signal --open`: never
+    interactive (GH_PROMPT_DISABLED=1, stdin closed), a 15s timeout, and
+    never raises. Returns (True, issue_url) on success or (False,
+    stderr-or-message) otherwise. The body is written to a temp file
+    (--body-file) rather than passed as an argv string, so a large body
+    or one containing shell-special characters is never mangled or
+    truncated by argv limits."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(body)
+            tmp_path = f.name
+        cmd = ["gh", "issue", "create", "--repo", repo, "--title", title,
+               "--body-file", tmp_path, "--label", "harness-signal"]
+        env = dict(os.environ)
+        env["GH_PROMPT_DISABLED"] = "1"
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=_GH_ISSUE_TIMEOUT, env=env,
+                           stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            return False, (p.stderr or p.stdout or "gh issue create failed").strip()
+        out_lines = (p.stdout or "").strip().splitlines()
+        url = out_lines[-1].strip() if out_lines else ""
+        return True, url
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _cmd_catch_signal(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse3(f"catch signal: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
+    min_count = getattr(a, "min", 3) or 3
+    if min_count < 1:
+        return refuse("catch signal: --min must be at least 1")
+    open_issues = getattr(a, "open", False)
+    dry_run = getattr(a, "dry_run", False)
+    repo = getattr(a, "repo", None)
+    if open_issues and not repo:
+        return refuse("catch signal --open needs --repo owner/name")
+
+    records = _catch_records()
+    signals, undated = _build_catch_signals(records, since, min_count)
+    if not signals:
+        print(f"catch signal: no reason family has reached --min {min_count} "
+              "false/miss block(s)")
+        if since and undated:
+            print(f"catch signal: {undated} undated record(s) excluded from the "
+                  "--since window")
+        return 1
+
+    for signal in signals:
+        _print_catch_signal(signal)
+        body = _catch_signal_body(signal)
+        if dry_run:
+            print("  --- issue body (--dry-run, gh never called) ---")
+            for line in body.splitlines():
+                print(f"  {line}")
+            print("  --- end issue body ---")
+            continue
+        if not open_issues:
+            continue
+        already = _catch_signal_already_filed(signal["tag"], signal["family"])
+        if already:
+            print(f"  already filed: {already}")
+            continue
+        if _catch_signal_has_pii(body):
+            print("  refusing to open an issue for this signal: the assembled "
+                  "body still matches an email/phone/SSN pattern after "
+                  "redaction — not filed", file=sys.stderr)
+            continue
+        ok, result = _run_gh_issue_create(repo, signal["title"], body)
+        if not ok:
+            print(f"  gh issue create failed: {result}", file=sys.stderr)
+            continue
+        print(f"  filed: {result}")
+        _catch_signal_record_filed(signal["tag"], signal["family"], signal["count"],
+                                   signal["ids"], result)
+
+    if since and undated:
+        print(f"catch signal: {undated} undated record(s) excluded from the --since "
+              "window")
     return 0
 
 
@@ -8696,6 +9039,21 @@ def build_parser():
                                                    "plus untagged count")
     ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
     ck_report.set_defaults(func=cmd_catch, catch_action="report")
+    ck_signal = ck_subs.add_parser("signal", help="group false/miss blocks by reason "
+                                                   "family; draft (or --open, file) a "
+                                                   "GitHub issue once one crosses --min")
+    ck_signal.add_argument("--min", type=int, default=3,
+                           help="how many same-family false/miss blocks before a "
+                                "signal fires (default 3)")
+    ck_signal.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_signal.add_argument("--open", action="store_true", dest="open",
+                           help="actually file the issue via `gh issue create` "
+                                "(needs --repo); default just prints the signal")
+    ck_signal.add_argument("--repo", default=None,
+                           help="owner/name — required with --open")
+    ck_signal.add_argument("--dry-run", action="store_true", dest="dry_run",
+                           help="print the issue body for each signal; never calls gh")
+    ck_signal.set_defaults(func=cmd_catch, catch_action="signal")
     ck.set_defaults(func=cmd_catch, catch_action=None)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")

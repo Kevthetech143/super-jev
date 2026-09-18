@@ -365,4 +365,8 @@ page to read first: what each hook does, the `settings.json` snippet, the loop
 guard, what "block" and "advisory" mean, the call ledger, what it costs, the
 measured failure modes, and when not to install it. Nothing is installed for
 you, and with `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` unset every hook fails
-open.
+open. Once a human has been tagging catch-ledger records `fair`/`false`/`miss`
+for a while, `superjev.py catch signal` groups the `false`/`miss` records by
+repeat reason family and, past a threshold, drafts (or, with `--open`, files)
+a GitHub issue describing the pattern — see [`docs/hooks.md`](docs/hooks.md#the-catch-ledger),
+"Turning a repeat pattern into a fix PR."

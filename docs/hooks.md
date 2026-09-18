@@ -1194,6 +1194,33 @@ than blocking twice. By itself, being suppressed is not folded into false
 stops or misses, because nothing has been judged right or wrong yet — the
 retry just held a block back.
 
+**Turning a repeat pattern into a fix PR.** `superjev.py catch signal
+[--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]` is the
+first step of the compounding loop this ledger exists to feed: harness
+catches -> tags -> issue -> fix PR -> bench robot. It groups every record
+tagged `false` (a block that was wrong) or `miss` (an allow that let a lie
+through) by **reason family** — the reason string with its numbers/values
+stripped off, so "count mismatch (tests): draft 0/61 vs evidence 53" and
+"count mismatch (tests): draft 2/9 vs evidence 4" collapse into the same
+family, "count mismatch (tests)", because it is the same detection arm
+misfiring twice with different numbers, not two different problems. Once a
+family reaches `--min` (default 3), it prints a signal block: the family,
+the count, first/last timestamps and up to three redacted examples (each
+already run through the same `_catch_redact` the ledger's own excerpt
+uses). Exit 0 when at least one family reached the threshold, exit 1 when
+none did, so a cron job can branch on it without parsing output.
+
+By itself `catch signal` only prints — nothing is filed anywhere. `--open`
+actually drafts the GitHub issue via `gh issue create --repo <repo> --label
+harness-signal`, and records the (family, tag) pair plus the issue URL in
+a sidecar file, `signals.jsonl` next to the catch ledger, so the same
+family is never filed twice even across separate cron runs. `--dry-run`
+prints the exact issue body for each signal and never calls `gh` at all —
+the safe way to see what would be filed. Before any real `gh issue create`
+call, the fully assembled issue body is checked once more for anything
+email/phone/SSN-shaped; a signal that still trips that check after every
+example already went through `_catch_redact` is refused rather than filed.
+
 ## Judge-advisory mode
 
 `SUPERJEV_GATE_JUDGE_ADVISORY=1` is a third, opt-in failsafe next to the
