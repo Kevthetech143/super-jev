@@ -5738,3 +5738,90 @@ def test_the_unchecked_path_is_the_same_one_call_and_honours_the_budget(
     assert "budget exceeded, not judged" in out
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec["reason"] == "budget-exceeded"
+
+
+def test_the_gate_path_shells_out_to_nothing_but_the_judge(tmp_path, monkeypatch):
+    # 2026-09-18 audit: the long-timeout waits in this file (a git call, a
+    # `gh` call, a derived test command, the derive-facts bridge) all live
+    # on the verify/fallback paths. None of them may appear on a Stop gate
+    # event, because a wait there is a wait the user sits through. This
+    # pins that: one subprocess call, and it is the gate door.
+    calls = []
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    records = [{"message": {"role": "user", "content": "go do the thing"}},
+               _tool_result_record("ran the suite, 9 passed")]
+    path = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 0
+    assert len(calls) == 1, calls
+    assert "--kit" in calls[0]
+    for forbidden in ("git", "gh", "npm", "pytest"):
+        assert not any(Path(c[0]).name == forbidden for c in calls), calls
+
+
+def test_the_dry_run_probe_gets_the_events_remaining_budget(tmp_path, monkeypatch):
+    # The probe re-runs the same gather the verify check just ran,
+    # including any derived test command, under the verify door's own
+    # ceiling of minutes. On the Stop path it must be clamped like
+    # everything else.
+    seen = {}
+    real_cmd_verify = sj.cmd_verify
+
+    def spy(ns):
+        seen.setdefault("timeouts", []).append(getattr(ns, "timeout", None))
+        return (0, "EVIDENCE: 1 blocks, 400 chars", "")
+
+    monkeypatch.setattr(sj, "cmd_verify", spy)
+    b = sj.StopBudget(budget_s=12, max_calls=9)
+    out = sj._evidence_probe(str(tmp_path / "r.md"), None, "",
+                             timeout=b.timeout_for(sj._verify_timeout()))
+    assert out.startswith("EVIDENCE:")
+    assert seen["timeouts"][0] is not None
+    assert seen["timeouts"][0] <= 12
+    assert sj.cmd_verify is spy and real_cmd_verify is not None
+    # And with no budget in play the probe is unchanged: no timeout at all.
+    sj._evidence_probe(str(tmp_path / "r.md"), None, "")
+    assert seen["timeouts"][1] is None
+
+
+def test_the_pr_url_git_call_is_clamped_by_the_budget(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["timeout"] = kw.get("timeout")
+        return subprocess.CompletedProcess(
+            [str(c) for c in cmd], 0,
+            stdout="https://github.com/org/repo.git\n", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    url = sj._pr_url_from_worktree(str(wt), 47, timeout=3)
+    assert url == "https://github.com/org/repo/pull/47"
+    assert seen["timeout"] == 3
+    sj._pr_url_from_worktree(str(wt), 47)
+    assert seen["timeout"] == 10   # unchanged when no budget is in play
+
+
+def test_the_scan_reads_a_bounded_tail_of_a_large_transcript(tmp_path, monkeypatch):
+    # The scan's own read is bounded and the bound is env-tunable. The gate
+    # window builder deliberately keeps reading the whole file: it resolves
+    # the current turn by walking back from the end and must see whole turns.
+    records = [_tool_result_record("filler " + "f" * 400) for _ in range(400)]
+    records.append(_tool_result_record("FRESH TAIL"))
+    path = _write_transcript(tmp_path, records)
+    monkeypatch.setenv(sj.STOP_SCAN_MAX_BYTES_ENV, "8000")
+    assert sj._stop_scan_max_bytes() == 8000
+    bounded = sj._read_transcript_records(path, max_bytes=sj._stop_scan_max_bytes())
+    assert 0 < len(bounded) < len(records)
+    assert len(sj._read_transcript_records(path)) == len(records)
+    # Zero means "read it all", the behaviour before the bound existed.
+    monkeypatch.setenv(sj.STOP_SCAN_MAX_BYTES_ENV, "0")
+    assert len(sj._read_transcript_records(path, max_bytes=sj._stop_scan_max_bytes())) \
+        == len(records)
