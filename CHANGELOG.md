@@ -295,18 +295,36 @@ No version bump.
   originating turn (`REPORT_LABEL_PREV_TURN`), and `_report_not_merged_claims`
   reads that turn back out instead of collapsing every previous-turn
   report to one rank. (3) `tests/replay_fact_block_sweep.py` now also
-  WARNS (never fails) when a recorded case's window — truth or lie —
-  carries fewer receipt-worthy lines than the baseline's, reported for
-  truths and lies separately, closing the gap between what docs/hooks.md
-  claimed the sweep checked and what it actually ran. (4)
-  Matched docs/hooks.md's wording to the source comment it was
-  paraphrasing loosely. (5) The merge-count derived fact now quotes the
-  draft's own claimed total alongside the window's receipt count, and
-  states plainly when the window carries no merge receipt at all, rather
-  than reading as amnesty for an unsupported claim. (6) The cited-file
-  relevant-line block is relabelled to say it is a number match, not
-  confirmation that a picked line says what the draft says, and the
-  picked lines now sit below the tail rather than above it.
+  WARNS (never fails) when a recorded case's window loses a
+  receipt-worthy line the baseline carried, closing the gap between what
+  docs/hooks.md claimed the sweep checked and what it actually ran — see
+  "Window-budget round 3" below for how this check widened again shortly
+  after landing. (4) docs/hooks.md's wording matched to the source
+  comment it was paraphrasing loosely — see round 3 below for a further
+  correction to that same wording. (5) The merge-count derived fact now
+  quotes the draft's own claimed total alongside the window's receipt
+  count, and states plainly when the window carries no merge receipt at
+  all, rather than reading as amnesty for an unsupported claim. (6) The
+  cited-file relevant-line block is relabelled to say it is a number
+  match, not confirmation that a picked line says what the draft says,
+  and the picked lines now sit below the tail rather than above it.
+
+- **Window-budget round 3.** The receipt-line warning above now covers
+  truths as well as lies, printed separately — restricting it to lies
+  alone could not see the real signal, since the recorded case that
+  actually loses a line is a truth, not a lie. `_receipts_relevant_to_draft`
+  now ranks a receipt the draft names by a concrete identifier (a PR
+  number, a cited file, a task id) above one that merely shares a generic
+  stemmed word: a draft naming one PR out of many shares the same
+  "merged" stem with every OTHER merge receipt in the window, so stem
+  overlap alone could not tell them apart and left age to drop the very
+  receipt the draft was about — mirrored in `window_model.py` so the two
+  stay byte-identical. `test/fixtures/gate-window-facts.json` now also
+  pins the zero-receipt merge-count sentence, holding the Python and
+  TypeScript mirrors identical on that branch too, through the same
+  shared-fixture mechanism as the rest of the file. Docs and the
+  `RECEIPTS_BUDGET_SHARE` comment reworded to "a sizeable share of the
+  recorded cases" — what was actually measured, not a fixed count.
 
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
