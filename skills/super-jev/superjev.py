@@ -48,6 +48,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1222,20 +1223,66 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
-# Judge-advisory mode (2026-09-18). SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a
-# `hook gate` block to an advisory print + exit 0 when EVERY reason behind it
-# came from the judge (the OVERCLAIMS arm, or — under SUPERJEV_RULE=v2 — the
-# secondary NOT_SUPPORTED/CONTRADICTED arm). It never touches a block that
-# carries even one deterministic reason (a count mismatch, a PR mismatch, or
-# a CONTRADICTED_BY_FACT fact sentence) — those still block with the same
-# exit code as today, unconditionally. See cmd_hook's "block-judge-advisory"
-# branch, which checks this against `det_block_reasons` being empty rather
-# than special-casing which judge arm fired, so it covers v2 and v3 alike.
+# Judge-advisory mode (2026-09-18, granular 2026-09-18b). SUPERJEV_GATE_
+# JUDGE_ADVISORY demotes a `hook gate` block to an advisory print + exit 0
+# when EVERY reason behind it came from the judge. Two levels:
+#
+#   "1"    — every judge arm is advisory (the OVERCLAIMS arm, or — under
+#            SUPERJEV_RULE=v2 — the secondary NOT_SUPPORTED/CONTRADICTED
+#            arm). This is the original, unconditional behavior.
+#   "weak" — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
+#            secondary arm) and SELF_CONTRADICTORY are advisory; OVERCLAIMS
+#            still blocks. Added after the 2026-09-18 live adjudication
+#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS the only
+#            judge arm worth trusting to block, while the per-claim arm and
+#            SELF_CONTRADICTORY were not. Under the default v3 rule the
+#            secondary arm already never produces a block reason on its
+#            own, so "weak" is a real change only under SUPERJEV_RULE=v2.
+#   "0"/unset — unchanged: judge-advisory mode off, every block reason
+#            (judge or deterministic) blocks exactly as it does today.
+#
+# It never touches a block that carries even one deterministic reason (a
+# count mismatch, a PR mismatch, or a CONTRADICTED_BY_FACT fact sentence) —
+# those still block with the same exit code as today, unconditionally
+# regardless of mode. See cmd_hook's "block-judge-advisory" branch, which
+# checks this against `det_block_reasons` being empty rather than special-
+# casing which judge arm fired, so it covers v2 and v3 alike.
 JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
+# Verdicts a "weak" judge-advisory mode still demotes — never OVERCLAIMS.
+_JUDGE_ADVISORY_WEAK_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "SELF_CONTRADICTORY")
+_JUDGE_ADVISORY_REASON_VERDICT_RE = re.compile(r'^\S+\s+([A-Z_]+)\s+\d')
+
+
+def _judge_advisory_mode():
+    """"1" (all judge arms advisory), "weak" (only the per-claim NOT_
+    SUPPORTED/CONTRADICTED and SELF_CONTRADICTORY arms advisory — OVERCLAIMS
+    still blocks), or "0" (off, any other value or unset)."""
+    v = os.environ.get(JUDGE_ADVISORY_ENV, "0")
+    if v == "weak":
+        return "weak"
+    if v == "1":
+        return "1"
+    return "0"
 
 
 def _judge_advisory_enabled():
-    return os.environ.get(JUDGE_ADVISORY_ENV, "0") == "1"
+    return _judge_advisory_mode() != "0"
+
+
+def _judge_advisory_reasons_are_weak_only(block_reasons):
+    """True when every "key VERDICT score" string in `block_reasons` names
+    a verdict `_JUDGE_ADVISORY_WEAK_VERDICTS` covers (never OVERCLAIMS) —
+    what "weak" mode requires before it will demote a block. An empty or
+    unparsed list is NOT weak-only (nothing to safely demote), matching the
+    fail-closed direction every other block-suppression check in this file
+    takes."""
+    if not block_reasons:
+        return False
+    for r in block_reasons:
+        m = _JUDGE_ADVISORY_REASON_VERDICT_RE.match(r.strip())
+        if not m or m.group(1) not in _JUDGE_ADVISORY_WEAK_VERDICTS:
+            return False
+    return True
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -1707,6 +1754,48 @@ def _hook_block_reasons(flags, claim_rows=None, evidence=None):
     return reasons
 
 
+# --------------------------------------- gate-adjudication-20260918.md fixes
+#
+# The receipt is one turn old — the current turn ran no tools but the
+# draft correctly restates a result whose receipt sits in the
+# previous-turn block, not this turn's own (a merge, a spawn or a log read
+# a turn or two earlier, still real evidence for a reply about it now).
+# The most recent previous turn that ran tools is named in a DERIVED FACTS
+# sentence pointing at its existing "[previous turn -N]" header (no header
+# rewrite — see _receipt_turn_index and _receipt_turn_extra_fact).
+
+
+def _receipt_turn_index(window_meta):
+    """The most recent previous turn (lowest -N, i.e. turn -1 before turn
+    -2) that ran its own tools AND is still kept in the assembled window —
+    `window_meta["prev_turn_detail"]` from `_derive_evidence_text_from_
+    transcript`, ordered turn=1 (most recent) upward — or None when no
+    previous turn qualifies (nothing kept, or every kept turn ran no tools
+    of its own, receipts-only). This is "the receipt turn" mechanism (a)
+    targets: a current turn that ran no tools can still be a correct,
+    checkable restatement of a result from the turn right before it."""
+    for d in (window_meta or {}).get("prev_turn_detail") or []:
+        if d.get("kept") and (d.get("tool_results") or 0) > 0:
+            return d.get("turn")
+    return None
+
+
+def _receipt_turn_extra_fact(receipt_idx):
+    """The DERIVED FACTS sentence naming the receipt turn, for
+    `compose_window_with_facts`'s `extra_facts`. Points at the receipt
+    turn's existing "[previous turn -N]" header rather than rewriting it,
+    so every existing window-parsing regex (_WINDOW_PART_RE for the trim
+    order, _WINDOW_SECTION_RE for fact-line labelling) stays correct with
+    nothing new to keep in sync. None when there is no receipt turn to
+    name."""
+    if receipt_idx is None:
+        return None
+    return (f"RECEIPT TURN: the current turn ran no tools of its own; turn "
+           f"-{receipt_idx} (see [previous turn -{receipt_idx}] below) is the "
+           "most recent turn that did, and counts as this reply's receipt, not "
+           "out-of-window material.")
+
+
 def _strip_patterns():
     """The compiled-pattern source strings to strip from a draft before it
     goes to the gate: SUPERJEV_STRIP_PATTERNS (a JSON list of regex
@@ -1880,6 +1969,65 @@ def _npm_missing_refusal(json_mode, door):
     return 1
 
 
+# The hook payload (stdin JSON from a real Claude Code Stop/PostToolUse/
+# UserPromptSubmit event) for the invocation currently running, if any —
+# set once by cmd_hook/cmd_hook_prompt_verify right after stdin is parsed,
+# and read back by _current_bot_id/_current_origin below so every ledger
+# write in this same process (including the ones inside run_door, which
+# fire from deep inside cmd_gate/cmd_verify) can attribute itself without
+# payload having to be threaded through every call site. A manual CLI
+# invocation (no hook) leaves this None, which both helpers treat as "no
+# hook context" rather than an error.
+_ACTIVE_HOOK_PAYLOAD = None
+
+
+def _bot_id_from_transcript_path(transcript_path):
+    """The claw4mac project-dir segment out of a transcript_path — the
+    part after "agent-cwd-" up to the next path separator, e.g.
+    "claw4mac-primary" out of ".../-Users-admin--ai-wrapper-agent-cwd-
+    claw4mac-primary/<uuid>.jsonl". None if transcript_path is not a
+    string, or carries no such segment."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    m = re.search(r'agent-cwd-([^/]+)', transcript_path)
+    return m.group(1) if m else None
+
+
+def _current_bot_id():
+    """The bot id a ledger entry attributes itself to: CLAW4MAC_SESSION_ID
+    (the env var the fleet actually sets on each seat, e.g. "primary"),
+    else CLAW4MAC_BOT_ID, else CLAUDE_BOT_ID from the environment if any of
+    the three is set, else derived from the active hook payload's
+    transcript_path (see _bot_id_from_transcript_path) with the
+    "claw4mac-" prefix stripped so a derived id lands in the same
+    vocabulary as the env vars (e.g. "primary", not "claw4mac-primary"),
+    else "unknown"."""
+    env_bot = (os.environ.get("CLAW4MAC_SESSION_ID")
+               or os.environ.get("CLAW4MAC_BOT_ID")
+               or os.environ.get("CLAUDE_BOT_ID"))
+    if env_bot:
+        return env_bot
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    derived = _bot_id_from_transcript_path(payload.get("transcript_path"))
+    if derived and derived.startswith("claw4mac-"):
+        derived = derived[len("claw4mac-"):]
+    return derived or "unknown"
+
+
+def _current_origin():
+    """"bench" when SUPERJEV_BENCH=1 in the environment, or the active hook
+    payload's session_id starts with "bench-"; "live" otherwise (including
+    every ordinary hook firing from a real Claude Code session, and every
+    manual CLI invocation with no bench markers)."""
+    if os.environ.get("SUPERJEV_BENCH") == "1":
+        return "bench"
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith("bench-"):
+        return "bench"
+    return "live"
+
+
 def ledger_append(entry):
     """Append one JSONL line to the call ledger. Never raises — a ledger
     problem must never break a door — but an unwritable ledger is not
@@ -1888,8 +2036,11 @@ def ledger_append(entry):
 
     Every entry gets a short unique `id` (if it does not already carry
     one) — `feedback --ledger-id` and the calibration export both address
-    a ledger line by this."""
+    a ledger line by this. Every entry also gets `bot` and `origin` (if
+    not already carrying them) — see _current_bot_id/_current_origin."""
     entry.setdefault("id", uuid.uuid4().hex[:12])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -1941,8 +2092,11 @@ def catch_ledger_append(entry):
     Exception, not just OSError (a bad entry that json.dumps chokes on, a
     permissions error, anything at all), because this call sits strictly
     after a real decision has already been returned and must never
-    propagate."""
+    propagate. Gets `bot` and `origin` the same way ledger_append does, if
+    not already carrying them."""
     entry.setdefault("id", uuid.uuid4().hex[:10])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -2341,15 +2495,25 @@ def _cmd_catch_list(a):
     records, undated = _catch_filter_since(records, since)
     if getattr(a, "untagged", False):
         records = [r for r in records if r.get("tag") is None]
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     if not records:
         print("catch list: no records")
     else:
+        # Width sized to the longest bot id actually being printed this call
+        # (floored at len("unknown")) rather than a fixed pad — a fixed pad
+        # narrower than a real seat name (e.g. "contentcreator") let that
+        # row's bot field run into the reason column with no gap.
+        bot_width = max([len(str(rec.get("bot") or "unknown")) for rec in records]
+                        + [len("unknown")])
         for rec in records:
             reasons = rec.get("reasons") or []
             first_reason = reasons[0] if reasons else ""
             tag = rec.get("tag") or "-"
+            bot = rec.get("bot") or "unknown"
             print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
-                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  bot={bot:<{bot_width}s}  {first_reason}")
     if since and undated:
         print(f"catch list: {undated} undated record(s) excluded from the --since window")
     return 0
@@ -2428,6 +2592,9 @@ def _cmd_catch_report(a):
                               "showing all time")
     records = _catch_records()
     records, undated = _catch_filter_since(records, since)
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     fair = sum(1 for r in records if r.get("tag") == "fair")
     false = sum(1 for r in records if r.get("tag") == "false")
     miss = sum(1 for r in records if r.get("tag") == "miss")
@@ -2467,6 +2634,12 @@ def _cmd_catch_report(a):
               "fair/false answer different questions, see docs/hooks.md)")
     if since:
         print(f"undated: {undated}")
+    if not bot_filter:
+        by_bot = Counter(r.get("bot") or "unknown" for r in records)
+        if by_bot:
+            print("by bot:")
+            for bot, n in sorted(by_bot.items(), key=lambda kv: (-kv[1], kv[0])):
+                print(f"  {bot}: {n}")
     return 0
 
 
@@ -5471,7 +5644,7 @@ def derive_window_facts(window_text, draft_text):
         return []
 
 
-def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
+def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_facts=None):
     """`window_text` with a DERIVED FACTS block at its HEAD and the raw
     window below it as BACKING. The cap applies AFTER the facts: facts are
     never dropped, and if facts + raw window exceed the cap the raw
@@ -5484,6 +5657,16 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     redacted window is still returned (byte-for-byte unchanged only when
     nothing secret-shaped was in it).
 
+    `extra_facts` (optional): sentences the caller has already computed
+    from information `derive_window_facts` cannot see on its own — e.g.
+    the receipt-turn note from `_receipt_turn_extra_fact` (gate-
+    adjudication-20260918.md mechanism (a)), which depends on
+    `window_meta`'s `prev_turn_detail`, not just the window text. Appended
+    ahead of the cap, same guarantee as every other fact: never dropped,
+    deduped against what `derive_window_facts` already found. Included
+    regardless of `SUPERJEV_DERIVED_FACTS` — this is a correctness fix to
+    the window itself, not part of the optional derived-facts feature.
+
     Every window is redacted (evidence-guard's `redact`) before it is used
     for anything — deriving facts from it or handing it to the judge —
     which is the Stop-hook gate window's half of the blocklist+redactor
@@ -5493,6 +5676,10 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     window_text = guard.redact(window_text)
     meta_guard = guard.to_dict()
     facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
+    if extra_facts:
+        for f in extra_facts:
+            if f and f not in facts:
+                facts.append(f)
     meta = {"facts_count": len(facts), "facts": list(facts), "facts_bytes": 0,
             "window_trimmed_bytes": 0, "guard": meta_guard}
     if not facts:
@@ -6886,6 +7073,8 @@ def cmd_hook_prompt_verify(a):
         except (ValueError, TypeError):
             _hook_log("prompt-verify: non-JSON stdin — fail-open", skipped=True)
             return 0
+        global _ACTIVE_HOOK_PAYLOAD
+        _ACTIVE_HOOK_PAYLOAD = payload
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             _hook_log("prompt-verify: no usable 'prompt' field — fail-open", skipped=True)
@@ -7425,6 +7614,9 @@ def cmd_hook(a):
         _hook_log("non-JSON stdin — fail-open", skipped=True)
         return 0
 
+    global _ACTIVE_HOOK_PAYLOAD
+    _ACTIVE_HOOK_PAYLOAD = payload
+
     evidence_tmp_path = None
 
     def _hook_unchecked(tp, evidence, tmp_ev_prompt_found):
@@ -7525,6 +7717,23 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
+                    # gate-adjudication-20260918.md: the receipt-turn fix,
+                    # scoped to a current turn that ran no tools of its own
+                    # (window_meta["current_turn_empty"]).
+                    receipt_extra_facts = None
+                    if window_meta is not None and window_meta.get("current_turn_empty"):
+                        # The current turn ran no tools of its own — if the
+                        # most recent previous turn that ran tools is still
+                        # kept in the window, name it in a DERIVED FACTS
+                        # sentence (no header rewrite — see
+                        # _receipt_turn_extra_fact) so a correct
+                        # restatement of a one-turn-old result is not
+                        # scored as having no in-window evidence.
+                        receipt_idx = _receipt_turn_index(window_meta)
+                        window_meta["receipt_turn"] = receipt_idx
+                        if receipt_idx is not None:
+                            fact = _receipt_turn_extra_fact(receipt_idx)
+                            receipt_extra_facts = [fact] if fact else None
                     # Cited-file tail (see build_cited_file_block, 2026-09-18
                     # SET2-AUDIT.md recommendation (b)): when the draft names
                     # its own source ("per SUMMARY.md"), fold that file's
@@ -7551,7 +7760,7 @@ def cmd_hook(a):
                     # next line, which cuts whole labelled sections in
                     # priority order rather than slicing bytes off the head.
                     derived, _facts, _fmeta = compose_window_with_facts(
-                        derived, text, cap_bytes=0)
+                        derived, text, cap_bytes=0, extra_facts=receipt_extra_facts)
                     # THE cap — one budget, in tokens, enforced here and
                     # nowhere else, on the finished text right before the
                     # call. Everything above (the builder's byte cap, the
@@ -7804,18 +8013,22 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
-        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1): a block whose
-        # ONLY reasons came from the judge — det_block_reasons is empty, so
-        # nothing deterministic (count mismatch, PR mismatch,
-        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory. A
-        # block carrying even one deterministic reason is untouched: it
-        # falls through to the "block" branch below exactly as it does
-        # today, env or no env. Checked after stop_hook_active so a re-run
-        # keeps its own (already advisory) handling rather than being
-        # relabeled here.
-        elif (door == "gate" and action == "block" and _judge_advisory_enabled()
-              and not det_block_reasons):
-            action = "block-judge-advisory"
+        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1/weak): a block
+        # whose ONLY reasons came from the judge — det_block_reasons is
+        # empty, so nothing deterministic (count mismatch, PR mismatch,
+        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory,
+        # mode "1" unconditionally, mode "weak" only when every one of
+        # those judge reasons names a verdict "weak" covers (never
+        # OVERCLAIMS — see _judge_advisory_reasons_are_weak_only). A block
+        # carrying even one deterministic reason is untouched: it falls
+        # through to the "block" branch below exactly as it does today, env
+        # or no env. Checked after stop_hook_active so a re-run keeps its
+        # own (already advisory) handling rather than being relabeled here.
+        elif door == "gate" and action == "block" and not det_block_reasons:
+            _jam = _judge_advisory_mode()
+            if _jam == "1" or (_jam == "weak"
+                               and _judge_advisory_reasons_are_weak_only(block_reasons)):
+                action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
         # above the block line, but the empty-current-turn health gate
@@ -7896,11 +8109,18 @@ def cmd_hook(a):
                 advisory += " (advisory: " + "; ".join(block_notes) + ")"
             print(advisory, file=sys.stderr)
             _hook_log(f"gate: judge advisory, not blocked (exit {code}) — would have "
-                     f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
+                     f"blocked on: {reason_bits}{suppressed_note_tail} "
+                     f"[judge-advisory-mode:{_jam}]", exit_code=0,
                      flags=flags, reason=suppressed_reason)
-            catch_log(door, "advisory-judge", reasons=block_reasons, draft_text=text,
-                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
-                     payload=payload)
+            # The arm name (NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS) already
+            # rides inside each block_reasons string ("key VERDICT score");
+            # the mode tag is appended so the ledger also names WHICH
+            # judge-advisory mode demoted this block, without needing to
+            # re-derive it from the env at read time.
+            catch_log(door, "advisory-judge",
+                     reasons=block_reasons + [f"judge-advisory-mode:{_jam}"],
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -8942,6 +9162,8 @@ def build_parser():
     ck_list = ck_subs.add_parser("list", help="one line per catch-ledger record")
     ck_list.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
     ck_list.add_argument("--untagged", action="store_true", help="only untagged records")
+    ck_list.add_argument("--bot", default=None, help="only records from this bot id "
+                                                      "(see the `bot` field, e.g. primary)")
     ck_list.set_defaults(func=cmd_catch, catch_action="list")
     ck_tag = ck_subs.add_parser("tag", help="fair = block was right; false = block was "
                                             "wrong; miss = an allow let a lie through")
@@ -8952,6 +9174,8 @@ def build_parser():
     ck_report = ck_subs.add_parser("report", help="fair catches, false stops, misses, "
                                                    "plus untagged count")
     ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_report.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. primary)")
     ck_report.set_defaults(func=cmd_catch, catch_action="report")
     ck.set_defaults(func=cmd_catch, catch_action=None)
 
