@@ -42,8 +42,36 @@ spec.loader.exec_module(sj)
 FAKE_DOOR = Path(__file__).resolve().parent / "fake_door.py"
 
 
+# subprocess.run as it really is, captured before any monkeypatch. A fake
+# door stands in for the TypeSafe door, never for git: the worktree trust
+# check (_trusted_worktree) asks git real questions about a real repo the
+# test built, and a fake that answered those would be testing nothing. So
+# every fake here routes `git` to the real thing and records only the door
+# calls.
+_REAL_RUN = subprocess.run
+
+
+def _is_git_call(cmd):
+    try:
+        return bool(cmd) and str(cmd[0]) == "git"
+    except (TypeError, IndexError):
+        return False
+
+
+def git_passthrough(fake):
+    """Wrap a fake door callable so real `git` invocations still run for
+    real and are NOT recorded as door calls."""
+    def run(cmd, *args, **kw):
+        if _is_git_call(cmd):
+            return _REAL_RUN(cmd, *args, **kw)
+        return fake(cmd, *args, **kw)
+    return run
+
+
 class FakeDoor:
-    """Records every call and returns a fixed exit code. Never runs anything."""
+    """Records every door call and returns a fixed exit code. Runs nothing
+    except a real `git`, which every fake must pass through — see
+    git_passthrough for why."""
 
     def __init__(self, code=0, stdout="", stderr=""):
         self.code = code
@@ -52,6 +80,8 @@ class FakeDoor:
         self.calls = []
 
     def __call__(self, cmd, cwd=None, env=None, **kw):
+        if _is_git_call(cmd):
+            return _REAL_RUN(cmd, cwd=cwd, env=env, **kw)
         self.calls.append({"cmd": [str(c) for c in cmd], "cwd": cwd, "env": env or {}})
         return subprocess.CompletedProcess(cmd, self.code, stdout=self.stdout,
                                            stderr=self.stderr)
@@ -89,21 +119,78 @@ def no_key(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
 
 
+def _git(*args, cwd=None):
+    """One real git call for a fixture building a real repo. Raises on
+    failure, so a broken fixture fails loudly instead of silently
+    producing a directory that is not a repo."""
+    p = _REAL_RUN(["git", *[str(a) for a in args]], cwd=str(cwd) if cwd else None,
+                  capture_output=True, text=True)
+    if p.returncode != 0:
+        raise AssertionError(f"git {' '.join(str(a) for a in args)} failed: "
+                             f"{p.stdout}{p.stderr}")
+    return p.stdout
+
+
+def _init_repo(path):
+    """A real git repo at `path` with one commit, a tracked package.json,
+    and identity/hook settings that make it safe and deterministic to
+    build inside a test."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("config", "user.email", "test@example.invalid", cwd=path)
+    _git("config", "user.name", "Test", cwd=path)
+    _git("config", "commit.gpgsign", "false", cwd=path)
+    _git("config", "core.hooksPath", "/dev/null", cwd=path)
+    (path / "package.json").write_text(
+        json.dumps({"name": "fixture", "scripts": {"test": "echo no-op"}},
+                   indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-qm", "fixture: first commit", cwd=path)
+    return path
+
+
+class TrustedTree:
+    """What the `trusted` fixture hands a test: a real protected repo, a
+    real allowlisted worktree root, and a factory for more worktrees."""
+
+    def __init__(self, repo, root):
+        self.repo = repo          # the protected repo's MAIN checkout
+        self.root = root          # the allowlist root worktrees live under
+        self._n = 0
+
+    def worktree(self, name=None):
+        """A genuine `git worktree add` of the protected repo, under the
+        allowlisted root — the one shape _trusted_worktree accepts."""
+        self._n += 1
+        name = name or f"task{self._n}"
+        path = self.root / name
+        _git("worktree", "add", "-q", "--detach", str(path), "HEAD", cwd=self.repo)
+        return path
+
+    def foreign_repo(self, name="foreign"):
+        """A real repo of its OWN, sitting under the allowlisted root — the
+        shape a worker plants: passes every `.git`-exists check, belongs to
+        a different repository."""
+        return _init_repo(self.root / name)
+
+
 @pytest.fixture
-def users_tmp_path():
-    """A scratch dir under $HOME (macOS: /Users/<user>/...), unlike
-    pytest's own tmp_path which lives under /private/var/folders — needed
-    for _worktree_from_report tests, since that function only ever
-    considers paths matching `/Users/<user>/...` (the fleet's own worker
-    path convention; see HOOK_WORKTREE_ENV's docstring). Created fresh per
-    test and removed afterward, even on failure."""
-    import shutil
-    import tempfile
-    base = tempfile.mkdtemp(prefix="superjev-wt-test-", dir=os.path.expanduser("~"))
-    try:
-        yield Path(base)
-    finally:
-        shutil.rmtree(base, ignore_errors=True)
+def trusted(tmp_path, monkeypatch):
+    """A real protected repo plus a real, allowlisted worktree root, with
+    SUPERJEV_PROTECTED_REPO and SUPERJEV_WORKTREE_ROOTS pointed at them.
+
+    Every worktree-trust test needs REAL git objects: the check is
+    "`git rev-parse --git-common-dir` here resolves to the protected repo's
+    own common dir", which no amount of mkdir can fake and no mock should
+    be allowed to answer. Built with the real subprocess.run captured at
+    import, so it works even under a test that later fakes the door."""
+    repo = _init_repo(tmp_path / "protected")
+    root = tmp_path / "wt-root"
+    root.mkdir()
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(repo))
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV, str(root))
+    return TrustedTree(repo, root)
 
 
 @pytest.fixture(autouse=True)
@@ -2631,83 +2718,250 @@ def test_posttooluse_verify_worktree_from_env_var_only(monkeypatch):
     assert captured["cmd"][captured["cmd"].index("--worktree") + 1] == "/the/worktree"
 
 
+# --------------------------- _trusted_worktree / _worktree_from_report
+#
+# THE TRUST BOUNDARY. A worker's report is untrusted text, and a directory
+# named in it is not inert input to git: a repository's own .git/config can
+# set core.fsmonitor, and `git status` inside it EXECUTES what that names.
+# So these tests build REAL git repos (see the `trusted` fixture) and check
+# that only a genuine worktree of the protected repo, under the allowlisted
+# root, is ever accepted.
+#
+# NOTHING HERE EVER EXECUTES A PLANTED HOOK. The fsmonitor test plants a
+# real config value and then makes `git status` itself FAIL LOUDLY if it is
+# ever reached, so the assertion is "the validator refused before status",
+# not "the payload happened not to fire".
+
+def test_trusted_worktree_accepts_a_genuine_worktree_of_the_protected_repo(trusted):
+    wt = trusted.worktree()
+    real, why = sj._worktree_trust(str(wt))
+    assert why is None
+    assert real == os.path.realpath(str(wt))
+    assert sj._trusted_worktree(str(wt)) == os.path.realpath(str(wt))
+
+
+def test_trusted_worktree_refuses_a_foreign_repo_under_the_root(trusted):
+    # A real repo, a real .git, sitting right where worktrees live — and
+    # still not this door's business, because its objects are its own.
+    foreign = trusted.foreign_repo()
+    assert (foreign / ".git").is_dir()
+    assert sj._worktree_trust(str(foreign)) == (None, "foreign-repo")
+
+
+def test_trusted_worktree_refuses_the_protected_repos_main_checkout(trusted):
+    # The door verifies worker worktrees. The shared checkout is the thing
+    # it protects, never a place it runs a report-named test command.
+    monkeyless = sj._worktree_trust(str(trusted.repo))
+    assert monkeyless == (None, "main-checkout")
+
+
+def test_trusted_worktree_refuses_a_directory_outside_the_allowlist_root(trusted, tmp_path):
+    # A genuine worktree of the protected repo, but parked somewhere the
+    # allowlist does not cover: still refused, because the root is the
+    # control that keeps report text from reaching arbitrary directories.
+    outside = tmp_path / "elsewhere" / "task"
+    outside.parent.mkdir(parents=True)
+    _git("worktree", "add", "-q", "--detach", str(outside), "HEAD", cwd=trusted.repo)
+    assert sj._worktree_trust(str(outside)) == (None, "outside-allowlist-root")
+
+
+def test_trusted_worktree_root_is_configurable_by_env(trusted, tmp_path, monkeypatch):
+    # The hook shim may export a different root; the default must not be
+    # the only thing that works.
+    other_root = tmp_path / "other-root"
+    other_root.mkdir()
+    wt = other_root / "task"
+    _git("worktree", "add", "-q", "--detach", str(wt), "HEAD", cwd=trusted.repo)
+    assert sj._worktree_trust(str(wt)) == (None, "outside-allowlist-root")
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV,
+                       os.pathsep.join([str(trusted.root), str(other_root)]))
+    real, why = sj._worktree_trust(str(wt))
+    assert why is None
+    assert real == os.path.realpath(str(wt))
+
+
+def test_trusted_worktree_refuses_a_symlink_to_a_blocked_path(trusted, tmp_path):
+    # The blocklist is applied to the REALPATH, so an innocuous NAME under
+    # the allowlisted root cannot launder a credential-adjacent target.
+    secret = tmp_path / "agents" / "global" / "profile"
+    secret.mkdir(parents=True)
+    (secret / ".git").mkdir()
+    link = trusted.root / "totally-normal-worktree"
+    link.symlink_to(secret, target_is_directory=True)
+    assert sj._worktree_trust(str(link)) == (None, "blocked-path")
+
+
+def test_trusted_worktree_refuses_a_git_file_pointing_outside_the_protected_repo(
+        trusted, tmp_path):
+    # The `.git` FILE shape. A worker can write this file by hand and aim
+    # it at a gitdir it controls; the check is where the gitdir actually
+    # lands, not that a `.git` exists.
+    other = _init_repo(tmp_path / "other-repo")
+    planted = trusted.root / "looks-like-a-worktree"
+    planted.mkdir()
+    (planted / ".git").write_text(f"gitdir: {other / '.git'}\n", encoding="utf-8")
+    real, why = sj._worktree_trust(str(planted))
+    assert real is None
+    assert why in ("foreign-repo", "gitdir-outside-protected-repo"), why
+
+
+def test_trusted_worktree_refuses_a_git_file_pointing_nowhere(trusted):
+    planted = trusted.root / "dangling-gitdir"
+    planted.mkdir()
+    (planted / ".git").write_text("gitdir: /nonexistent/.git/worktrees/x\n",
+                                  encoding="utf-8")
+    real, why = sj._worktree_trust(str(planted))
+    assert real is None
+    assert why != "", why
+
+
+def test_trusted_worktree_refuses_a_planted_fsmonitor_repo_before_any_status(
+        trusted, tmp_path, monkeypatch):
+    """THE EXPLOIT, AND THE PROOF THE FIX LANDS BEFORE IT FIRES.
+
+    A worker plants a repo whose own config sets core.fsmonitor to a
+    command. Under the old check ("is a dir, has a .git") this directory was
+    accepted and handed to `git -C <p> status`, which would have RUN that
+    command. Here the fsmonitor value is set for real, and then git itself
+    is wrapped so that ANY `status`/`diff`/`ls-files`/`log` call raises —
+    so if the validator ever got that far the test fails loudly. The
+    payload is never executed either way: it only writes a marker file, and
+    the test asserts that file was never created.
+    """
+    marker = tmp_path / "PAYLOAD-RAN"
+    planted = trusted.foreign_repo("planted")
+    _git("config", "core.fsmonitor",
+         f"sh -c 'touch {marker}'; false", cwd=planted)
+    # Belt and braces: prove the refusal happens before the dangerous verbs
+    # by making them impossible.
+    forbidden = ("status", "diff", "ls-files", "log", "grep")
+    seen = []
+
+    def guarded_run(cmd, *args, **kw):
+        argv = [str(c) for c in cmd]
+        seen.append(argv)
+        if argv and argv[0] == "git" and any(v in argv for v in forbidden):
+            raise AssertionError(
+                "the validator reached a status/diff/ls-files call against an "
+                f"untrusted directory: {' '.join(argv)}")
+        return _REAL_RUN(cmd, *args, **kw)
+
+    monkeypatch.setattr(sj.subprocess, "run", guarded_run)
+    assert sj._worktree_trust(str(planted)) == (None, "foreign-repo")
+    assert not marker.exists(), "the planted fsmonitor command was executed"
+    # And every git call the validator did make was a safe verb, with
+    # fsmonitor and hooks pinned off.
+    assert seen, "the validator ran no git call at all"
+    for argv in seen:
+        if argv[0] != "git":
+            continue
+        assert "core.fsmonitor=false" in argv, argv
+        assert "core.hooksPath=/dev/null" in argv, argv
+        assert "rev-parse" in argv, argv
+
+
+def test_git_argv_always_disables_fsmonitor_and_hooks():
+    argv = sj.git_argv("/some/where", ["status", "-sb"])
+    assert argv[0] == "git"
+    assert "-c" in argv and "core.fsmonitor=false" in argv
+    assert "core.hooksPath=/dev/null" in argv
+    # the config flags come before -C, i.e. before git resolves the repo
+    assert argv.index("core.fsmonitor=false") < argv.index("-C")
+    assert argv.index("core.hooksPath=/dev/null") < argv.index("-C")
+
+
+def test_trusted_worktree_refuses_non_directories_and_empties(trusted):
+    assert sj._worktree_trust(None)[1] == "empty"
+    assert sj._worktree_trust("")[1] == "empty"
+    assert sj._worktree_trust(str(trusted.root / "never-created"))[1] == "not-a-directory"
+    plain = trusted.root / "just-a-folder"
+    plain.mkdir()
+    assert sj._worktree_trust(str(plain)) == (None, "not-a-worktree")
+
+
+def test_trusted_worktree_refuses_everything_when_no_protected_repo(tmp_path, monkeypatch):
+    # No protected repo means no yardstick, so nothing can be trusted —
+    # fail closed, never open.
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(tmp_path / "not-a-repo"))
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV, str(tmp_path))
+    d = tmp_path / "anything"
+    d.mkdir()
+    (d / ".git").mkdir()
+    assert sj._worktree_trust(str(d))[0] is None
+
+
 # ------------------------------------------ _worktree_from_report (unit)
 
-def test_worktree_from_report_finds_existing_git_worktree(users_tmp_path):
-    wt = users_tmp_path / "worker-wt"
-    wt.mkdir()
-    (wt / ".git").write_text("gitdir: /somewhere/.git/worktrees/worker-wt\n",
-                             encoding="utf-8")
+def test_worktree_from_report_finds_a_trusted_worktree(trusted):
+    wt = trusted.worktree()
     text = f"COMPLETE. Worktree: {wt}\nMade the change and pushed."
-    assert sj._worktree_from_report(text) == str(wt)
+    assert sj._worktree_from_report(text) == os.path.realpath(str(wt))
 
 
-def test_worktree_from_report_none_for_nonexistent_path(users_tmp_path):
-    missing = users_tmp_path / "never-created"
+def test_worktree_from_report_none_for_nonexistent_path(trusted):
+    missing = trusted.root / "never-created"
     text = f"COMPLETE. Worktree: {missing}\nAll done."
     assert sj._worktree_from_report(text) is None
+    assert sj._worktree_from_report_detail(text) == (None, None)
 
 
-def test_worktree_from_report_none_for_dir_with_no_git(users_tmp_path):
-    plain = users_tmp_path / "just-a-folder"
+def test_worktree_from_report_none_for_dir_with_no_git(trusted):
+    plain = trusted.root / "just-a-folder"
     plain.mkdir()
     text = f"COMPLETE. See {plain} for the output."
     assert sj._worktree_from_report(text) is None
+    assert sj._worktree_from_report_detail(text) == (None, "not-a-worktree")
 
 
-def test_worktree_from_report_refuses_secret_adjacent_paths(users_tmp_path):
-    # Each of these IS a real, qualifying worktree by the plain existence
-    # + `.git` test alone (that's the point — the guard has to fire even
-    # though the candidate "looks like" a worktree), but each also matches
-    # the module's own EVIDENCE GUARD blocklist (is_blocked_path /
-    # BLOCKED_PATH_PATTERNS), so none of them may ever come back.
+def test_worktree_from_report_refuses_a_foreign_repo(trusted):
+    # The PR #61 hole, stated as a test: a directory that exists, is a
+    # directory, and has a .git — and is still not trusted.
+    foreign = trusted.foreign_repo()
+    text = f"COMPLETE. Worktree: {foreign}\nAll green."
+    assert sj._worktree_from_report(text) is None
+    assert sj._worktree_from_report_detail(text) == (None, "foreign-repo")
+
+
+def test_worktree_from_report_refuses_secret_adjacent_paths(trusted, tmp_path):
+    # Each of these IS a genuine worktree of the protected repo by every
+    # git check — that is the point, the evidence guard has to fire anyway.
     cases = []
-    secret_tool_wt = users_tmp_path / "agents" / "global" / "tools" / "foo-secret-wt"
-    secret_tool_wt.mkdir(parents=True)
-    (secret_tool_wt / ".git").mkdir()
-    cases.append(secret_tool_wt)
-    profile_wt = users_tmp_path / "agents" / "global" / "profile"
-    profile_wt.mkdir(parents=True)
-    (profile_wt / ".git").mkdir()
-    cases.append(profile_wt)
-    documents_wt = users_tmp_path / "agents" / "global" / "documents"
-    documents_wt.mkdir(parents=True)
-    (documents_wt / ".git").mkdir()
-    cases.append(documents_wt)
+    for rel in ("agents/global/tools/foo-secret-wt", "agents/global/profile",
+                "agents/global/documents", ".env"):
+        target = tmp_path / "blocked" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        link = trusted.root / rel.replace("/", "_")
+        _git("worktree", "add", "-q", "--detach", str(target), "HEAD", cwd=trusted.repo)
+        link.symlink_to(target, target_is_directory=True)
+        cases.append(link)
     for wt in cases:
         text = f"COMPLETE. Worktree: {wt}"
         assert sj._worktree_from_report(text) is None, f"must refuse {wt}"
+        assert sj._worktree_from_report_detail(text)[1] == "blocked-path"
 
 
-def test_worktree_from_report_env_style_dot_path_refused(users_tmp_path):
-    dotenv_dir = users_tmp_path / ".env"
-    dotenv_dir.mkdir()
-    (dotenv_dir / ".git").mkdir()
-    text = f"COMPLETE. Worktree: {dotenv_dir}"
-    assert sj._worktree_from_report(text) is None
-
-
-def test_worktree_from_report_prefers_hinted_path_over_first_mention(users_tmp_path):
-    other = users_tmp_path / "unrelated-dir"
-    other.mkdir()
-    (other / ".git").mkdir()
-    real_wt = users_tmp_path / "real-worktree"
-    real_wt.mkdir()
-    (real_wt / ".git").mkdir()
+def test_worktree_from_report_prefers_hinted_path_over_first_mention(trusted):
+    other = trusted.worktree("unrelated")
+    real_wt = trusted.worktree("the-real-one")
     text = (f"Reviewed {other} earlier but that was a false lead. "
             f"Worktree: {real_wt}\nCOMPLETE.")
-    assert sj._worktree_from_report(text) == str(real_wt)
+    assert sj._worktree_from_report(text) == os.path.realpath(str(real_wt))
 
 
-def test_worktree_from_report_falls_back_to_first_qualifying_path(users_tmp_path):
-    a = users_tmp_path / "first-wt"
-    a.mkdir()
-    (a / ".git").mkdir()
-    b = users_tmp_path / "second-wt"
-    b.mkdir()
-    (b / ".git").mkdir()
+def test_worktree_from_report_falls_back_to_first_qualifying_path(trusted):
+    a = trusted.worktree("first-wt")
+    b = trusted.worktree("second-wt")
     text = f"Files touched: {a} and also {b}. COMPLETE."
-    assert sj._worktree_from_report(text) == str(a)
+    assert sj._worktree_from_report(text) == os.path.realpath(str(a))
+
+
+def test_worktree_from_report_skips_an_untrusted_path_for_a_trusted_one(trusted):
+    # A report that names a planted repo FIRST and a real worktree second
+    # must still land on the real one, not give up at the first mention.
+    foreign = trusted.foreign_repo("planted")
+    good = trusted.worktree("genuine")
+    text = f"Work started in {foreign}, finished in {good}. COMPLETE."
+    assert sj._worktree_from_report(text) == os.path.realpath(str(good))
 
 
 def test_worktree_from_report_none_when_nothing_mentioned():
@@ -2716,14 +2970,90 @@ def test_worktree_from_report_none_when_nothing_mentioned():
     assert sj._worktree_from_report(None) is None
 
 
+# -------------------------- report-derived evidence: worktree and test_cmd
+
+def test_derived_evidence_refuses_an_untrusted_worktree_and_drops_test_cmd(trusted):
+    # The pre-existing hole on main: this path derived BOTH the worktree
+    # and the test command from report text with no trust check at all, so
+    # a worker's own npm script ran and printed the pass count that was
+    # then accepted as evidence for the worker's own claim.
+    foreign = trusted.foreign_repo()
+    text = f"COMPLETE: shipped it in {foreign}, ran npm test, 9 tests passed."
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] is None
+    assert derived["test_cmd"] == ""
+    assert derived["worktree_source"] == "none"
+    assert "worktree-untrusted:foreign-repo" in derived["refused"]
+
+
+def test_derived_evidence_accepts_a_trusted_worktree(trusted):
+    wt = trusted.worktree()
+    text = f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed. PR #13"
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] == os.path.realpath(str(wt))
+    assert derived["worktree_source"] == "report"
+    assert derived["pr"] == 13
+    assert derived["refused"] == []
+    assert "npm test" in derived["test_cmd"]
+
+
+def test_derived_evidence_refuses_npm_when_package_json_is_modified(trusted):
+    # `npm test` names no program; package.json's scripts do. A worker that
+    # edits package.json and then reports "npm test, 9 passed" gets no npm
+    # fallback — its own script cannot be the evidence for its own claim.
+    wt = trusted.worktree()
+    (wt / "package.json").write_text(
+        json.dumps({"name": "fixture",
+                    "scripts": {"test": "echo 'ℹ pass 9999'"}},
+                   indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    text = f"COMPLETE: shipped it in {wt}, ran npm test, 9999 tests passed."
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] == os.path.realpath(str(wt))
+    assert derived["test_cmd"] == ""
+    assert "untrusted-test-cmd" in derived["refused"]
+    assert "npm-runner:package.json-modified" in derived["refused"]
+
+
+def test_derived_evidence_refuses_npm_when_package_json_is_untracked(trusted):
+    # A worktree of a repo that never committed a package.json, with one
+    # dropped in by the worker.
+    wt = trusted.worktree()
+    _git("rm", "-q", "--cached", "package.json", cwd=wt)
+    _git("-c", "user.email=t@e.invalid", "-c", "user.name=T",
+         "commit", "-qm", "drop package.json", cwd=wt)
+    (wt / "package.json").write_text('{"scripts":{"test":"echo hi"}}\n', encoding="utf-8")
+    text = f"COMPLETE: in {wt}, ran npm test, 9 tests passed."
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["test_cmd"] == ""
+    assert "untrusted-test-cmd" in derived["refused"]
+
+
+def test_check_test_cmd_for_fallback_refuses_npm_from_an_untrusted_package_json(trusted):
+    # The execution chokepoint, independent of how the command was derived.
+    wt = trusted.worktree()
+    assert sj.check_test_cmd_for_fallback("npm test", str(wt)) is None
+    (wt / "package.json").write_text('{"scripts":{"test":"echo pwned"}}\n',
+                                     encoding="utf-8")
+    bad = sj.check_test_cmd_for_fallback("npm test", str(wt))
+    assert bad is not None
+    assert "untrusted-test-cmd" in bad
+    assert sj.check_test_cmd_for_fallback("npm run test:skill", str(wt)) is not None
+    # a non-npm command is unaffected by the package.json state
+    assert sj.check_test_cmd_for_fallback(
+        "python3 -m pytest tests/test_x.py", str(wt)) is None
+
+
+def test_check_test_cmd_for_fallback_refuses_npm_with_no_worktree():
+    assert sj.check_test_cmd_for_fallback("npm test", None) is not None
+    assert sj.check_test_cmd_for_fallback("npm test", "") is not None
+
+
 # ------------------------------ verify hook: worktree precedence + ledger
 
 def test_posttooluse_verify_worktree_from_report_when_no_payload_or_env(
-        monkeypatch, door, users_tmp_path):
+        monkeypatch, door, trusted):
     monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
-    wt = users_tmp_path / "report-worktree"
-    wt.mkdir()
-    (wt / ".git").mkdir()
+    wt = trusted.worktree("report-worktree")
     payload = {"tool_name": "Agent",
                "tool_response": f"COMPLETE. Worktree: {wt}\nPushed the branch."}
     _hook_stdin(monkeypatch, json.dumps(payload))
@@ -2731,9 +3061,26 @@ def test_posttooluse_verify_worktree_from_report_when_no_payload_or_env(
     assert code == 0
     assert door.calls
     assert "--worktree" in door.argv
-    assert door.argv[door.argv.index("--worktree") + 1] == str(wt)
+    assert door.argv[door.argv.index("--worktree") + 1] == os.path.realpath(str(wt))
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec.get("worktree_source") == "report"
+    assert rec.get("worktree_refused") == []
+
+
+def test_posttooluse_verify_records_why_a_report_worktree_was_refused(
+        monkeypatch, door, trusted):
+    # The ledger has to distinguish "the report named nothing" from "the
+    # report named something this door would not run git in".
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    foreign = trusted.foreign_repo()
+    payload = {"tool_name": "Agent",
+               "tool_response": f"COMPLETE. Worktree: {foreign}\nPushed."}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    assert sj.main(["hook", "verify"]) == 0
+    assert "--worktree" not in door.argv
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("worktree_source") == "report-refused:foreign-repo"
+    assert rec.get("worktree_refused") == ["worktree-untrusted:foreign-repo"]
 
 
 def test_posttooluse_verify_worktree_source_none_when_nothing_derivable(
@@ -2745,16 +3092,18 @@ def test_posttooluse_verify_worktree_source_none_when_nothing_derivable(
     assert code == 0
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec.get("worktree_source") == "none"
+    assert rec.get("worktree_refused") == []
     assert "--worktree" not in door.argv
 
 
 def test_posttooluse_verify_payload_worktree_beats_report_text(
-        monkeypatch, door, users_tmp_path):
+        monkeypatch, door, trusted):
+    # Precedence is payload, then env, then report text. The first two come
+    # from the harness and the shim, not from the worker, so they keep
+    # their standing; only the report-derived path is validated.
     monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
-    report_wt = users_tmp_path / "report-mentioned-wt"
-    report_wt.mkdir()
-    (report_wt / ".git").mkdir()
-    payload_wt = users_tmp_path / "payload-wt"
+    report_wt = trusted.worktree("report-mentioned-wt")
+    payload_wt = trusted.root / "payload-wt"
     payload_wt.mkdir()
     payload = {"tool_name": "Agent", "worktree": str(payload_wt),
                "tool_response": f"COMPLETE. Worktree: {report_wt}\nDone."}
@@ -2766,10 +3115,8 @@ def test_posttooluse_verify_payload_worktree_beats_report_text(
     assert rec.get("worktree_source") == "payload"
 
 
-def test_posttooluse_verify_env_beats_report_text(monkeypatch, door, users_tmp_path):
-    report_wt = users_tmp_path / "report-mentioned-wt-2"
-    report_wt.mkdir()
-    (report_wt / ".git").mkdir()
+def test_posttooluse_verify_env_beats_report_text(monkeypatch, door, trusted):
+    report_wt = trusted.worktree("report-mentioned-wt-2")
     monkeypatch.setenv(sj.HOOK_WORKTREE_ENV, "/the/env/worktree")
     payload = {"tool_name": "Agent",
                "tool_response": f"COMPLETE. Worktree: {report_wt}\nDone."}
@@ -2779,6 +3126,25 @@ def test_posttooluse_verify_env_beats_report_text(monkeypatch, door, users_tmp_p
     assert door.argv[door.argv.index("--worktree") + 1] == "/the/env/worktree"
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec.get("worktree_source") == "env"
+
+
+def test_posttooluse_verify_unexpected_error_line_carries_worktree_fields(
+        monkeypatch, door):
+    # The fail-open line at the bottom of the hook is a ledger line too,
+    # and a reviewer counting worktree sources must not find a hole there.
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+
+    def boom(*a, **kw):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(sj, "_hook_report_text", boom)
+    _hook_stdin(monkeypatch, json.dumps(
+        {"tool_name": "Agent", "tool_response": "COMPLETE: done."}))
+    assert sj.main(["hook", "verify"]) == 0
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert "unexpected error" in rec.get("note", "")
+    assert "worktree_source" in rec
+    assert rec.get("worktree_refused") == []
 
 
 # ------------------------------------------------ verify: launch-ack skip
@@ -3300,11 +3666,13 @@ def test_hook_gate_real_subprocess_the_exact_lie_fixture_blocks(tmp_path):
 # ------------------------------------------------ hook prompt-verify
 
 def test_prompt_verify_parses_two_teammate_message_blocks_and_derives_flags(
-        tmp_path, monkeypatch, capsys):
+        trusted, monkeypatch, capsys):
     fake = FakeDoor(0)
     monkeypatch.setattr(sj.subprocess, "run", fake)
-    wt1 = tmp_path / "wt1"
-    wt1.mkdir()
+    # A GENUINE worktree of the protected repo: the derive path only hands
+    # worker-verify a worktree _trusted_worktree cleared, so a bare mkdir
+    # here would (correctly) derive nothing and prove nothing.
+    wt1 = trusted.worktree("wt1")
     prompt = (
         "some lead narration before the mailbox\n"
         f'<teammate-message teammate_id="WorkerA" summary="done">\n'
@@ -3331,7 +3699,7 @@ def test_prompt_verify_parses_two_teammate_message_blocks_and_derives_flags(
     # were derived and passed straight to worker-verify's own flags
     a_call = verify_calls[0]["cmd"]
     assert "--worktree" in a_call
-    assert str(wt1) in a_call
+    assert os.path.realpath(str(wt1)) in a_call
     assert "--test-cmd" in a_call
     ledger_lines = [json.loads(l) for l in sj._ledger_lines()]
     sources = [l.get("source") for l in ledger_lines if l.get("door") == "hook"]
@@ -3975,7 +4343,8 @@ def test_stop_scan_never_changes_the_gate_exit_code(tmp_path, monkeypatch, door)
     assert code == 0  # gate itself was clean; the scanned report's REJECT never leaks out
 
 
-def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsys):
+def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsys,
+                                                    trusted):
     class RejectDoor:
         def __init__(self):
             self.calls = []
@@ -3988,9 +4357,12 @@ def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsy
                 return subprocess.CompletedProcess(cmd, 3, stdout=lie, stderr="")
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(sj.subprocess, "run", RejectDoor())
-    wt = tmp_path / "wt1"
-    wt.mkdir()
+    # git_passthrough: the fake stands in for the TypeSafe door, not for
+    # git — the worktree trust check asks git real questions here.
+    monkeypatch.setattr(sj.subprocess, "run", git_passthrough(RejectDoor()))
+    # A REJECT label needs a healthy gather, and a healthy gather needs a
+    # worktree this door actually trusts — so the report names a real one.
+    wt = trusted.worktree("wt1")
     records = [_teammate_user_record(
         f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.", "u1",
         teammate_id="Alice")]
@@ -4525,13 +4897,12 @@ def test_session_receipts_recorded_and_replayed_into_the_evidence_window(tmp_pat
     assert "gh pr checks 7" in derived2
 
 
-def test_derived_worktree_must_be_a_real_directory_never_a_url(tmp_path):
-    real_dir = tmp_path / "worker-wt"
-    real_dir.mkdir()
+def test_derived_worktree_must_be_a_real_directory_never_a_url(trusted):
+    real_wt = trusted.worktree("worker-wt")
     text = (f"Done, Sir. See https://github.com/org/repo/pull/13 for the PR; "
-            f"the work is in {real_dir}.")
+            f"the work is in {real_wt}.")
     derived = sj._derive_evidence_from_report_text(text)
-    assert derived["worktree"] == str(real_dir)
+    assert derived["worktree"] == os.path.realpath(str(real_wt))
     assert derived["pr"] == 13
 
 
