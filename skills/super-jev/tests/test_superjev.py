@@ -11299,14 +11299,71 @@ def test_receipt_shapes_relay_send_names_the_task_ids_and_disclaims_delivery():
     assert "received, read or acted on it" in facts[0]
 
 
-def test_receipt_shapes_outbox_write_is_a_send_not_a_save():
+def test_receipt_shapes_answer_file_write_yields_no_sent_line():
+    # `answer-<hex>.txt` is the harness's OWN answer-delivery file — the
+    # draft's own delivery act, not a channel with a knowable recipient.
+    # A write there used to hand the judge blanket "sent"/"notified"/
+    # "escalated"/"reported" support on almost any window. It still WROTE a
+    # file, so it falls into the ordinary "saved" shape (support for
+    # saved/logged/wrote, nothing about delivery) — it just names no send.
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "Write",
                               {"file_path": "/tmp/ai-wrapper/answer-9b22f267.txt"}),
                       _rs_result("a")])
     assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (saved):")
+    assert not any(f.startswith("RECEIPT SHAPE (sent):") for f in facts)
+
+
+def test_receipt_shapes_telegram_outbox_write_is_a_send_not_a_save():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "Write",
+                              {"file_path": "/tmp/ai-wrapper/late-telegram-9b22f267.txt"}),
+                      _rs_result("a")])
+    assert len(facts) == 1
     assert facts[0].startswith("RECEIPT SHAPE (sent):")
-    assert "outbox file /tmp/ai-wrapper/answer-9b22f267.txt" in facts[0]
+    assert "Telegram outbox file /tmp/ai-wrapper/late-telegram-9b22f267.txt" in facts[0]
+
+
+def test_receipt_shapes_message_tool_names_its_recipient():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "SendMessage",
+                              {"to": "health-fitness", "message": "done"}),
+                      _rs_result("a", "delivered")])
+    assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (sent):")
+    assert "a SendMessage send naming health-fitness" in facts[0]
+
+
+def test_receipt_shapes_message_tool_with_no_recipient_is_suppressed():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "SendMessage", {"message": "done"}),
+                      _rs_result("a", "delivered")])
+    assert facts == []
+
+
+def test_receipt_shapes_send_sh_must_be_in_command_position():
+    # A phrase that merely NAMES the script — reading it, grepping it,
+    # chmodding it — is not a send. The script has to be what the segment
+    # itself runs.
+    for cmd in ("cat send.sh", "grep task send.sh", "chmod +x send.sh"):
+        facts = _rs_facts([_rs_user_record(),
+                          _rs_use("a", "Bash", {"command": cmd}),
+                          _rs_result("a", "ok")])
+        assert facts == [], cmd
+
+
+def test_receipt_shapes_send_sh_ids_scoped_to_its_own_segment():
+    # A task id after the send, joined on with `&&`, belongs to the NEXT
+    # command, not to the send — only the id inside the send's own
+    # argument may be named.
+    cmd = ('bash send.sh "task JOB-20260101" && echo Other-20260102 >> log')
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "Bash", {"command": cmd}),
+                      _rs_result("a", "queued")])
+    assert len(facts) == 1
+    assert "JOB-20260101" in facts[0]
+    assert "Other-20260102" not in facts[0]
 
 
 def test_receipt_shapes_scheduler_call_names_the_id_from_its_own_result():
@@ -11422,7 +11479,7 @@ def test_receipt_shapes_dedupes_by_verb_class_and_caps_the_family():
         records += [_rs_use(f"w{i}", "Write", {"file_path": f"/work/f{i}.md"}),
                     _rs_result(f"w{i}")]
         records += [_rs_use(f"o{i}", "Write",
-                            {"file_path": f"/tmp/ai-wrapper/answer-0000000{i}.txt"}),
+                            {"file_path": f"/tmp/ai-wrapper/late-telegram-0000000{i}.txt"}),
                     _rs_result(f"o{i}")]
         records += [_rs_use(f"c{i}", "CronCreate", {"prompt": "x"}),
                     _rs_result(f"c{i}", f"task 1111111{i} created")]
