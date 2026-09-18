@@ -709,21 +709,59 @@ replies down the "unchecked" path — no tool evidence was derivable, so the
 gate ran against the last prompt instead of the real transcript, printed a
 one-line advisory at most, and logged an ordinary-looking exit-0 line every
 time. The ledger had the whole story from the first occurrence. Nobody was
-reading it, so nobody noticed until the next morning. `superjev.py status`
-now prints a ledger-health block every time it runs — for the last 50 hook
-runs (`--window` to change it), a per-door count of blocked, advisory, and
-unchecked/skipped runs, plus the unchecked share, with a `WARN` line and the
-most common skip reason once any door's unchecked share crosses 25%
-(`SUPERJEV_UNCHECKED_WARN` to change the threshold; a door needs at least
-five runs in the window before its share counts, so one unlucky run never
-trips a false alarm). The same read is available on its own as `superjev.py
-ledger health`, which exits 0 when things look healthy and 4 when they
-don't, for wiring into a script or a cron check. And because a bug like this
-one is worth catching the same turn it happens rather than the next time
-someone runs `status`, the Stop-hook gate itself now checks its own last 20
-runs and appends a one-line notice to its own output whenever that running
-share is over threshold — so the notice shows up in-session, not just in a
-file nobody opened.
+reading it, so nobody noticed until the next morning.
+
+**One "unchecked" bucket was hiding three very different things
+(2026-09-18).** A 300-record read of the hook ledger (see
+`SKIPS-20260918.md`) found the single unchecked share pinned around 45% at
+all times, but almost none of it was a real miss: most of it was a hook
+firing on the wrong axis entirely (a worker's spawn acknowledged, not
+reported yet; the next prompt carrying no teammate report to check) or a
+judgment that DID run and DID surface, just against thinner evidence than
+the current turn's own tool output. A genuine lost check — a checkable
+reply that existed and nothing ever judged it — was 0 out of 300. Reporting
+one blended percentage meant the number that was supposed to catch the next
+2026-09-16 could never move, healthy or not. `superjev.py status` and
+`superjev.py ledger health` now split every skip reason into three buckets:
+
+- **deferred** — nothing user-facing to check yet, or the hook fired on the
+  wrong axis for this turn's own reply (a spawn acknowledgement, the next
+  prompt having no teammate message to check). Not a miss.
+- **thin** — a judgment ran and surfaced to the user, just against the last
+  prompt instead of this turn's own tool output. Real signal about gather
+  quality, never a hard miss.
+- **lost** — evidence or a checkable reply existed and nothing judged it.
+  This is the 2026-09-16 shape. Any skip reason superjev doesn't recognize
+  also counts as lost, by design — an unfamiliar reason is exactly the kind
+  of thing that should be visible, not silently absorbed into "nothing to
+  see here."
+
+The old total unchecked share still prints, informational only — nothing
+warns off it anymore. `WARN` now fires only when a door's **lost** count in
+the window reaches `SUPERJEV_LOST_WARN` (default 1 — a real lost check
+should be rare-to-never, so even one is worth surfacing; no minimum-runs
+guard applies, unlike the softer note below). A separate, softer `NOTE`
+fires when a door's **thin** share crosses `SUPERJEV_THIN_NOTE` (default
+25%), same five-runs-minimum guard the old unchecked-share warning used, so
+one unlucky run never trips a false alarm — this is visibility, not an
+alarm; nothing exits non-zero for it.
+
+There is also a fourth, separate count: **suppressed**. When the judge
+flags a claim at or above the block line but the current-turn-empty health
+gate lets it through anyway (see "Gate v3 — empty current turn" above), the
+ledger now records that with the flagged claim's label and score. It is not
+a skip or an unchecked run at all — the claim WAS judged and flagged — so it
+never drives a WARN, but `status`/`ledger health` always print the count so
+it stays visible rather than invisible the way it was before this change.
+
+The same read is available on its own as `superjev.py ledger health`, which
+exits 0 when nothing is lost and 4 when a door's lost count trips the dial,
+for wiring into a script or a cron check. And because a bug like this one is
+worth catching the same turn it happens rather than the next time someone
+runs `status`, the Stop-hook gate itself still checks its own last 20 runs
+and appends a one-line notice to its own output whenever a lost check shows
+up in that window — so the notice shows up in-session, not just in a file
+nobody opened.
 
 ## What it costs
 
