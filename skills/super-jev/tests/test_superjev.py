@@ -5435,6 +5435,172 @@ def test_derive_window_facts_stale_report_fact_respects_the_identity_guard():
     assert not any(f.startswith("PR #27:") and "postdates" in f for f in facts), facts
 
 
+# ----------------------------------- family 6 — written-file identity (2026-09-18)
+#
+# SET3-AUDIT2.md section 5 #1: ten of thirty set-3 drafts open with "reply
+# written to file X", and the window already carries the Write/Edit receipt —
+# the gate never compared the identifier. Synthetic fixtures only (never the
+# real set-3 payloads, which carry another bot's customer/health replies —
+# WORKER CARD PRIVACY). The shapes below mirror the real receipt/draft text
+# without quoting it: `[from: Write <path> @ <cwd>]` + `File created
+# successfully at: <path> (...)`, and the draft's own written-file sentence.
+
+_WRITTEN_FILE_WINDOW = (
+    "[previous turn -1]\n"
+    "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/admin/x]\n"
+    "File created successfully at: /tmp/ai-wrapper/answer-aaaa1111.txt "
+    "(file state is current in your context — no need to Read it back)\n"
+    "\n===\n\n"
+    "[current turn]\n"
+    "[from: Write /tmp/ai-wrapper/answer-bbbb2222.txt @ /Users/admin/x]\n"
+    "File created successfully at: /tmp/ai-wrapper/answer-bbbb2222.txt "
+    "(file state is current in your context — no need to Read it back)\n"
+)
+
+
+def test_written_file_fact_contradicts_a_basename_the_window_never_wrote():
+    draft = "Reply written to answer-bbbb2222e2.txt. Done, Sir."
+    facts = sj.derive_window_facts(_WRITTEN_FILE_WINDOW, draft)
+    assert facts == [
+        "WRITTEN FILE: the draft names answer-bbbb2222e2.txt; the only file "
+        "written in this window is answer-bbbb2222.txt — CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_written_file_fact_states_support_when_the_basename_matches():
+    draft = "Reply written to answer-bbbb2222.txt. Done, Sir."
+    facts = sj.derive_window_facts(_WRITTEN_FILE_WINDOW, draft)
+    assert facts == [
+        "WRITTEN FILE: the draft names answer-bbbb2222.txt; that file was "
+        "written in this turn — SUPPORTED."
+    ]
+
+
+def test_written_file_fact_covers_a_comma_and_list_without_losing_the_last_item():
+    # Regression for the exact gap SET3-AUDIT2.md's l45 named: a "written to
+    # A, B, and C" sentence must not be split on the standalone " and " the
+    # way presplit_claims splits claims, which would silently drop C.
+    draft = ("Replies written to answer-cccc9999.txt, answer-bbbb2222.txt, "
+             "and answer-dddd8888.txt.")
+    facts = sj.derive_window_facts(_WRITTEN_FILE_WINDOW, draft)
+    named = {f.split("names ")[1].split(";")[0] for f in facts}
+    assert named == {"answer-cccc9999.txt", "answer-bbbb2222.txt", "answer-dddd8888.txt"}
+    assert sum("CONTRADICTED_BY_FACT" in f for f in facts) == 2
+    assert sum("SUPPORTED" in f for f in facts) == 1
+
+
+def test_written_file_fact_stays_silent_when_the_write_predates_the_current_turn():
+    # A file written in an OLDER turn is real, but is not "the only file
+    # written in this window" for a claim about THIS turn's write — a claim
+    # naming a different file must not be turned into a false contradiction
+    # against a receipt that isn't even from this turn.
+    window = (
+        "[previous turn -1]\n"
+        "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/admin/x]\n"
+        "File created successfully at: /tmp/ai-wrapper/answer-aaaa1111.txt "
+        "(file state is current in your context — no need to Read it back)\n"
+        "\n===\n\n"
+        "[current turn]\n"
+        "some unrelated text, no write receipt here\n"
+    )
+    facts = sj.derive_window_facts(window, "Reply written to answer-zzzz0000.txt.")
+    assert facts == []
+
+
+def test_written_file_fact_stays_silent_with_no_write_verb_in_the_draft():
+    draft = "The reply mentions answer-bbbb2222e2.txt somewhere, Sir."
+    assert sj.derive_window_facts(_WRITTEN_FILE_WINDOW, draft) == []
+
+
+def test_written_file_fact_reads_an_edit_receipt_too():
+    window = (
+        "[current turn]\n"
+        "[from: Edit /tmp/notes/plan-real.md @ /Users/admin/x]\n"
+        "The file /tmp/notes/plan-real.md has been updated successfully. "
+        "(file state is current in your context — no need to Read it back)\n"
+    )
+    facts = sj.derive_window_facts(window, "Updated plan-fake.md with the new figures.")
+    assert facts == [
+        "WRITTEN FILE: the draft names plan-fake.md; the only file written "
+        "in this window is plan-real.md — CONTRADICTED_BY_FACT."
+    ]
+
+
+# ----------------------------------------- family 7 — file read-back (2026-09-18)
+#
+# SET3-AUDIT2.md section 5 #3: a value the draft claims to be "from"/"in" a
+# file the window shows was read is invisible to the gate today, because a
+# Read/cat receipt returns content but nothing pins a value out of it.
+# Synthetic fixtures only — see the privacy note above family 6.
+
+_READBACK_WINDOW = (
+    "[current turn]\n"
+    "[from: Read /tmp/report.md @ /Users/admin/x]\n"
+    "Line one: the score in the report is 42.\n"
+    "Line two: filed 2018-09-01.\n"
+)
+
+
+def test_read_back_fact_contradicts_a_value_absent_from_the_readback_block():
+    draft = "The value from report.md is 87, confirmed."
+    facts = sj.derive_window_facts(_READBACK_WINDOW, draft)
+    assert facts == [
+        "FILE READ-BACK: the draft states 87 from report.md; the read-back "
+        "of report.md in this window does not contain 87 and instead shows "
+        "42 — CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_read_back_fact_stays_silent_when_the_value_is_present():
+    draft = "The value from report.md is 42, confirmed."
+    assert sj.derive_window_facts(_READBACK_WINDOW, draft) == []
+
+
+def test_read_back_fact_stays_silent_with_no_readback_block_for_that_file():
+    draft = "The value from report.md is 87, confirmed."
+    assert sj.derive_window_facts("[current turn]\nsome text\n", draft) == []
+
+
+def test_read_back_fact_reads_a_cat_receipt_too():
+    window = ("[current turn]\n"
+             "[from: cat /tmp/report.md @ /Users/admin/x]\n"
+             "score is 42\n")
+    draft = "The score in report.md was 87."
+    facts = sj.derive_window_facts(window, draft)
+    assert facts == [
+        "FILE READ-BACK: the draft states 87 from report.md; the read-back "
+        "of report.md in this window does not contain 87 and instead shows "
+        "42 — CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_read_back_fact_requires_the_value_to_sit_next_to_the_file_reference():
+    # Regression for a real false-positive this rule almost shipped with
+    # (set 2, t22): a PR number sharing a sentence with an unrelated file
+    # mention is not a claim that the number comes FROM that file's content.
+    window = ("[current turn]\n"
+             "[from: Read /tmp/package.json @ /Users/admin/x]\n"
+             "19: some script line\n")
+    draft = "PR #13 conflicts with it in package.json, so a worker rebases it."
+    assert sj.derive_window_facts(window, draft) == []
+
+
+def test_read_back_fact_requires_the_same_shape_before_naming_a_contradiction():
+    # A single-digit incidental number (a line index) in the read-back block
+    # must never stand in as "the different value" — it has to share the
+    # claimed value's shape ($-prefixed, %, or digit-count bucket).
+    window = ("[current turn]\n"
+             "[from: Read /tmp/quote.md @ /Users/admin/x]\n"
+             "1: strike price is $4.50, limit $90.\n")
+    draft = "The price from quote.md is $128."
+    facts = sj.derive_window_facts(window, draft)
+    assert facts == [
+        "FILE READ-BACK: the draft states $128 from quote.md; the read-back "
+        "of quote.md in this window does not contain $128 and instead shows "
+        "$4.50 — CONTRADICTED_BY_FACT."
+    ]
+
+
 # ---------------------------------------------- gate latency budget (2026-09-18)
 #
 # Measured before any of this existed: on a heavy turn the Stop hook made

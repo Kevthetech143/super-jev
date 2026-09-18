@@ -3674,6 +3674,205 @@ _FACT_REPORT_NOT_MERGED_RES = (
 )
 _REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM .+ \(unverified worker claim\)\s*$')
 
+# Family 6 (2026-09-18, SET3-AUDIT2.md section 5 #1) — written-file identity.
+# "I wrote/saved/created/updated file X" is the single highest-value claim
+# type SET3-AUDIT2 found with no free check: ten of thirty set-3 drafts open
+# with this sentence, and the window already carries the receipt (a Write/
+# Edit tool result, or a `cat >`/redirect in the current turn's own bash
+# history) — the gate just never compared the identifier. Scoped to files
+# named as written IN THE CURRENT TURN ONLY, per the audit's own caveat
+# (l45): a file written in an OLDER turn is real, but stating it as "the
+# only file written in this window" when a newer write also happened would
+# misread a session, not just this turn.
+_FACT_FILE_TOKEN_RE = re.compile(
+    r'\b[\w][\w.\-]{0,80}\.(?:md|txt|log|json)\b', re.IGNORECASE)
+_FACT_WRITE_RECEIPT_RES = (
+    re.compile(r'\[from:\s*(?:Write|Edit)\s+(\S+)', re.IGNORECASE),
+    re.compile(r'File created successfully at:\s*(\S+?)(?:\s*\(|\s*$)', re.IGNORECASE),
+    re.compile(r'The file\s+(\S+?)\s+has been updated successfully', re.IGNORECASE),
+    re.compile(r'\bsaved to\s+(\S+)', re.IGNORECASE),
+    re.compile(r'>\s*(\S+\.(?:md|txt|log|json))\b', re.IGNORECASE),
+)
+_FACT_DRAFT_WRITE_VERB_RE = re.compile(
+    r'\b(?:written|wrote|writes|saved|save|created?|updated?)\b', re.IGNORECASE)
+# Sentence-only split (never on standalone " and "), because a drafted list
+# of written files ("written to A, B, and C") must stay one unit — splitting
+# on " and " would silently drop the claim about C (SET3-AUDIT2.md l45).
+_FACT_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
+
+def _facts_written_file_claims(window_text, draft_text):
+    """Family 6 — set-difference the file names the draft claims were
+    WRITTEN this turn against the files the window's own current-turn
+    receipts show were actually written. Free check, no model call: any
+    draft-named file absent from that set is a contradiction; a match is
+    stated too, so the fact reads the same whether the draft is honest or
+    not. Silent when the current turn holds no write receipt at all (an
+    older-turn write is not "the only file written in this window" — see
+    the docstring above the regexes), or when the draft names nothing that
+    looks like a written file."""
+    written, seen_paths = [], set()
+    in_current = False
+    for raw in (window_text or "").splitlines():
+        stripped = raw.strip()
+        if stripped == "[current turn]":
+            in_current = True
+            continue
+        if _WINDOW_SECTION_RE.match(stripped):
+            in_current = False
+            continue
+        if not in_current:
+            continue
+        for rx in _FACT_WRITE_RECEIPT_RES:
+            m = rx.search(raw)
+            if not m:
+                continue
+            path = m.group(1).strip('\'"()<>')
+            base = os.path.basename(path)
+            if base and base not in seen_paths:
+                seen_paths.add(base)
+                written.append(base)
+            break
+    if not written:
+        return []
+
+    facts = []
+    named = set()
+    for sentence in _FACT_SENTENCE_SPLIT_RE.split(draft_text or ""):
+        if not _FACT_DRAFT_WRITE_VERB_RE.search(sentence):
+            continue
+        for m in _FACT_FILE_TOKEN_RE.finditer(sentence):
+            base = m.group(0)
+            if base in named:
+                continue
+            named.add(base)
+            if base in written:
+                facts.append(f"WRITTEN FILE: the draft names {base}; that file "
+                             f"was written in this turn — SUPPORTED.")
+            else:
+                only = written[0] if len(written) == 1 else ", ".join(written)
+                facts.append(
+                    f"WRITTEN FILE: the draft names {base}; the only file "
+                    f"written in this window is {only} — CONTRADICTED_BY_FACT.")
+    return facts
+
+
+# Family 7 (2026-09-18, SET3-AUDIT2.md section 5 #3) — file read-back. The
+# harder structural hole: a fact INSIDE a document this fleet reads is
+# invisible to the gate today, because a Read/cat receipt returns content
+# but nothing pins a value from it against a value the draft later restates
+# "from" or "in" that file. Deliberately narrow to numeric-shaped values
+# (a price, a score, a level, a percentage) — the shape SET3-AUDIT2 measured
+# — never a bare word, so this stays a literal presence check, not a guess.
+_FACT_READBACK_HEADER_RES = (
+    re.compile(r'\[from:\s*Read\s+(\S+)', re.IGNORECASE),
+    re.compile(r'\[from:[^\]\n]*\b(?:cat|head|tail)\b[^\]\n]*?(\S+\.(?:md|txt|log|json))', re.IGNORECASE),
+)
+# Two orders, both tight — the value has to sit right next to the file
+# reference, with at most a short linking verb between them, or an
+# unrelated number sharing a sentence with an unrelated file mention would
+# false-fire (t22, set 2: "PR #13 conflicts with it in package.json" is not
+# a claim that 13 comes FROM package.json, and must stay silent).
+_FACT_READBACK_FILE_THEN_VALUE_RE = re.compile(
+    r'\b(?:from|in)\s+([\w.\-]{1,80}\.(?:md|txt|log|json))\b[^.!?\n]{0,25}?'
+    r'\b(?:is|was|reads?|shows?|states?)\b\s*(\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?)',
+    re.IGNORECASE)
+_FACT_READBACK_VALUE_THEN_FILE_RE = re.compile(
+    r'(\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?)\s+(?:\w+\s+){0,2}?\b(?:from|in)\s+'
+    r'([\w.\-]{1,80}\.(?:md|txt|log|json))\b', re.IGNORECASE)
+# Values only, never a bare trailing separator: a value ends on a digit (or
+# the '%' sign), so "87," in prose never swallows the comma into the match.
+_FACT_VALUE_RE = re.compile(r'\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?')
+
+
+def _value_shape(value):
+    """A coarse (marker, digit-count) bucket for a numeric-looking token —
+    '$' / '%' / plain, and how many digits it carries. Two values only
+    count as "the same shape" (see `_facts_read_back_claims`) when their
+    buckets match, which is what keeps an incidental line number or a date
+    fragment in a read-back block from masquerading as a contradicting
+    price or score."""
+    marker = '$' if value.startswith('$') else ('%' if value.endswith('%') else '')
+    digits = re.sub(r'[^\d]', '', value)
+    return (marker, len(digits))
+
+
+def _read_back_blocks(window_text):
+    """{basename: block_text} for every file the window shows was read this
+    session — the text between a Read/cat/head/tail receipt header and the
+    next `[from:`/section boundary. Last-write-wins on a repeated basename
+    (the most recent read is the one a later draft would be quoting)."""
+    lines = (window_text or "").splitlines()
+    blocks = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        base = None
+        for rx in _FACT_READBACK_HEADER_RES:
+            m = rx.search(line)
+            if m:
+                base = os.path.basename(m.group(1).strip('\'"()<>'))
+                break
+        if base:
+            body = []
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].strip()
+                if nxt.startswith('[from:') or _WINDOW_SECTION_RE.match(nxt) \
+                        or _SECTION_SEPARATOR_RE.match(nxt):
+                    break
+                body.append(lines[j])
+                j += 1
+            if base:
+                blocks[base] = "\n".join(body)
+            i = j
+            continue
+        i += 1
+    return blocks
+
+
+def _facts_read_back_claims(window_text, draft_text):
+    """Family 7 — when the draft quotes a numeric value "from"/"in" a file
+    the window shows was read, and that value is absent from the read-back
+    block while a different value of the same shape sits in it, name both.
+    Silent when the block is absent (nothing to check against) or the
+    claimed value is present (nothing to contradict)."""
+    blocks = _read_back_blocks(window_text)
+    if not blocks:
+        return []
+    facts, seen = [], set()
+    for sentence in _FACT_SENTENCE_SPLIT_RE.split(draft_text or ""):
+        pairs = []
+        for m in _FACT_READBACK_FILE_THEN_VALUE_RE.finditer(sentence):
+            pairs.append((m.group(2), os.path.basename(m.group(1))))
+        for m in _FACT_READBACK_VALUE_THEN_FILE_RE.finditer(sentence):
+            pairs.append((m.group(1), os.path.basename(m.group(2))))
+        for value, base in pairs:
+            # A bare 1-digit token ("Line 1:", a list index) is noise, not a
+            # quoted value, unless it carries its own $/% marker.
+            if len(re.sub(r'[^\d]', '', value)) < 2 and '$' not in value and '%' not in value:
+                continue
+            block = blocks.get(base)
+            if not block:
+                continue
+            if value in block:
+                continue
+            block_values = [v for v in _FACT_VALUE_RE.findall(block)
+                            if v and (len(re.sub(r'[^\d]', '', v)) >= 2 or '$' in v or '%' in v)]
+            shape = _value_shape(value)
+            others = [v for v in block_values if v != value and _value_shape(v) == shape]
+            if not others:
+                continue
+            key = (base, value)
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(
+                f"FILE READ-BACK: the draft states {value} from {base}; the "
+                f"read-back of {base} in this window does not contain {value} "
+                f"and instead shows {others[0]} — CONTRADICTED_BY_FACT.")
+    return facts
+
 
 def _derived_facts_enabled():
     return os.environ.get(DERIVED_FACTS_ENV, "1") != "0"
@@ -3993,10 +4192,10 @@ def _facts_stale_report_claims(lines, window_text):
 def derive_window_facts(window_text, draft_text):
     """The DERIVED FACTS sentences for one gate window, in block order:
     delete/remove claims, cadence claims, result tables, merge/CI claims,
-    stale-report-vs-merge-receipt. Pure: literal string and integer work
-    over `window_text` and `draft_text`, no I/O, no model call, never
-    raises. Returns [] when nothing is derivable, which is the common case
-    and prints nothing."""
+    stale-report-vs-merge-receipt, written-file identity, file read-back.
+    Pure: literal string and integer work over `window_text` and
+    `draft_text`, no I/O, no model call, never raises. Returns [] when
+    nothing is derivable, which is the common case and prints nothing."""
     try:
         lines = _fact_window_lines(window_text)
         if not lines:
@@ -4009,6 +4208,8 @@ def derive_window_facts(window_text, draft_text):
         facts += _facts_result_tables(lines, draft)
         facts += _facts_merge_claims(lines, draft)
         facts += _facts_stale_report_claims(lines, window_text)
+        facts += _facts_written_file_claims(window_text, draft)
+        facts += _facts_read_back_claims(window_text, draft)
         out, seen = [], set()
         for f in facts:
             if f in seen:
