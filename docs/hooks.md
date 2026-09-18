@@ -60,6 +60,13 @@ UserPromptSubmit wiring are left in place (harmless, and correct if Claude
 Code ever does start firing that payload for a teammate message), but the
 Stop-hook scan is the path that is actually live today.
 
+**Correction, 2026-09-17 (2):** the "no evidence" advisory above only
+scoped correctly as of this fix — it used to scan the WHOLE transcript for
+tool_result content, so an earlier turn's tool call could make a genuinely
+tool-free turn look "healthy" and let a confident flag block it; evidence
+is now scoped to the current turn only, and a truly tool-free turn always
+advises (`health="none"`), never blocks.
+
 ## Wiring it in
 
 Copy this into `~/.claude/settings.json`, with absolute paths, and set
