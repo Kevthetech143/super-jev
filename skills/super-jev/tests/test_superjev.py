@@ -89,6 +89,23 @@ def no_key(monkeypatch):
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
 
 
+@pytest.fixture
+def users_tmp_path():
+    """A scratch dir under $HOME (macOS: /Users/<user>/...), unlike
+    pytest's own tmp_path which lives under /private/var/folders — needed
+    for _worktree_from_report tests, since that function only ever
+    considers paths matching `/Users/<user>/...` (the fleet's own worker
+    path convention; see HOOK_WORKTREE_ENV's docstring). Created fresh per
+    test and removed afterward, even on failure."""
+    import shutil
+    import tempfile
+    base = tempfile.mkdtemp(prefix="superjev-wt-test-", dir=os.path.expanduser("~"))
+    try:
+        yield Path(base)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 @pytest.fixture(autouse=True)
 def ledger_bot_context_reset(monkeypatch):
     """_ACTIVE_HOOK_PAYLOAD is module-level state set by cmd_hook/
@@ -2612,6 +2629,156 @@ def test_posttooluse_verify_worktree_from_env_var_only(monkeypatch):
     sj.main(["hook", "verify"])
     assert "--worktree" in captured["cmd"]
     assert captured["cmd"][captured["cmd"].index("--worktree") + 1] == "/the/worktree"
+
+
+# ------------------------------------------ _worktree_from_report (unit)
+
+def test_worktree_from_report_finds_existing_git_worktree(users_tmp_path):
+    wt = users_tmp_path / "worker-wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: /somewhere/.git/worktrees/worker-wt\n",
+                             encoding="utf-8")
+    text = f"COMPLETE. Worktree: {wt}\nMade the change and pushed."
+    assert sj._worktree_from_report(text) == str(wt)
+
+
+def test_worktree_from_report_none_for_nonexistent_path(users_tmp_path):
+    missing = users_tmp_path / "never-created"
+    text = f"COMPLETE. Worktree: {missing}\nAll done."
+    assert sj._worktree_from_report(text) is None
+
+
+def test_worktree_from_report_none_for_dir_with_no_git(users_tmp_path):
+    plain = users_tmp_path / "just-a-folder"
+    plain.mkdir()
+    text = f"COMPLETE. See {plain} for the output."
+    assert sj._worktree_from_report(text) is None
+
+
+def test_worktree_from_report_refuses_secret_adjacent_paths(users_tmp_path):
+    # Each of these IS a real, qualifying worktree by the plain existence
+    # + `.git` test alone (that's the point — the guard has to fire even
+    # though the candidate "looks like" a worktree), but each also matches
+    # the module's own EVIDENCE GUARD blocklist (is_blocked_path /
+    # BLOCKED_PATH_PATTERNS), so none of them may ever come back.
+    cases = []
+    secret_tool_wt = users_tmp_path / "agents" / "global" / "tools" / "foo-secret-wt"
+    secret_tool_wt.mkdir(parents=True)
+    (secret_tool_wt / ".git").mkdir()
+    cases.append(secret_tool_wt)
+    profile_wt = users_tmp_path / "agents" / "global" / "profile"
+    profile_wt.mkdir(parents=True)
+    (profile_wt / ".git").mkdir()
+    cases.append(profile_wt)
+    documents_wt = users_tmp_path / "agents" / "global" / "documents"
+    documents_wt.mkdir(parents=True)
+    (documents_wt / ".git").mkdir()
+    cases.append(documents_wt)
+    for wt in cases:
+        text = f"COMPLETE. Worktree: {wt}"
+        assert sj._worktree_from_report(text) is None, f"must refuse {wt}"
+
+
+def test_worktree_from_report_env_style_dot_path_refused(users_tmp_path):
+    dotenv_dir = users_tmp_path / ".env"
+    dotenv_dir.mkdir()
+    (dotenv_dir / ".git").mkdir()
+    text = f"COMPLETE. Worktree: {dotenv_dir}"
+    assert sj._worktree_from_report(text) is None
+
+
+def test_worktree_from_report_prefers_hinted_path_over_first_mention(users_tmp_path):
+    other = users_tmp_path / "unrelated-dir"
+    other.mkdir()
+    (other / ".git").mkdir()
+    real_wt = users_tmp_path / "real-worktree"
+    real_wt.mkdir()
+    (real_wt / ".git").mkdir()
+    text = (f"Reviewed {other} earlier but that was a false lead. "
+            f"Worktree: {real_wt}\nCOMPLETE.")
+    assert sj._worktree_from_report(text) == str(real_wt)
+
+
+def test_worktree_from_report_falls_back_to_first_qualifying_path(users_tmp_path):
+    a = users_tmp_path / "first-wt"
+    a.mkdir()
+    (a / ".git").mkdir()
+    b = users_tmp_path / "second-wt"
+    b.mkdir()
+    (b / ".git").mkdir()
+    text = f"Files touched: {a} and also {b}. COMPLETE."
+    assert sj._worktree_from_report(text) == str(a)
+
+
+def test_worktree_from_report_none_when_nothing_mentioned():
+    assert sj._worktree_from_report("COMPLETE: done, all tests passed.") is None
+    assert sj._worktree_from_report("") is None
+    assert sj._worktree_from_report(None) is None
+
+
+# ------------------------------ verify hook: worktree precedence + ledger
+
+def test_posttooluse_verify_worktree_from_report_when_no_payload_or_env(
+        monkeypatch, door, users_tmp_path):
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    wt = users_tmp_path / "report-worktree"
+    wt.mkdir()
+    (wt / ".git").mkdir()
+    payload = {"tool_name": "Agent",
+               "tool_response": f"COMPLETE. Worktree: {wt}\nPushed the branch."}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert door.calls
+    assert "--worktree" in door.argv
+    assert door.argv[door.argv.index("--worktree") + 1] == str(wt)
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("worktree_source") == "report"
+
+
+def test_posttooluse_verify_worktree_source_none_when_nothing_derivable(
+        monkeypatch, door):
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    payload = {"tool_name": "Agent", "tool_response": "COMPLETE: done, all good."}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("worktree_source") == "none"
+    assert "--worktree" not in door.argv
+
+
+def test_posttooluse_verify_payload_worktree_beats_report_text(
+        monkeypatch, door, users_tmp_path):
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    report_wt = users_tmp_path / "report-mentioned-wt"
+    report_wt.mkdir()
+    (report_wt / ".git").mkdir()
+    payload_wt = users_tmp_path / "payload-wt"
+    payload_wt.mkdir()
+    payload = {"tool_name": "Agent", "worktree": str(payload_wt),
+               "tool_response": f"COMPLETE. Worktree: {report_wt}\nDone."}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert door.argv[door.argv.index("--worktree") + 1] == str(payload_wt)
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("worktree_source") == "payload"
+
+
+def test_posttooluse_verify_env_beats_report_text(monkeypatch, door, users_tmp_path):
+    report_wt = users_tmp_path / "report-mentioned-wt-2"
+    report_wt.mkdir()
+    (report_wt / ".git").mkdir()
+    monkeypatch.setenv(sj.HOOK_WORKTREE_ENV, "/the/env/worktree")
+    payload = {"tool_name": "Agent",
+               "tool_response": f"COMPLETE. Worktree: {report_wt}\nDone."}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert door.argv[door.argv.index("--worktree") + 1] == "/the/env/worktree"
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("worktree_source") == "env"
 
 
 # ------------------------------------------------ verify: launch-ack skip

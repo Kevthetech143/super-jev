@@ -96,14 +96,30 @@ evidence", ...]` catch record `hook verify` writes for the identical case.
 A REJECT label still requires at least one flag that actually crossed the
 block line against a healthy gather.
 
-**In practice, the live verify door is advisory-only until a worktree is
-supplied.** A real PostToolUse payload carries no `worktree` key, and
-nothing in the live hook path exports `SUPERJEV_HOOK_WORKTREE`, so the
-gather-health check above finds nothing to gather on every live call today
-and every report is judged `health=thin`, never blocked outright. This is
-by design — the alternative was blocking on a bare exit code with no
-evidence behind it — but it means the live door will not actually stop a
-false report until something upstream starts passing a worktree.
+**Correction, 2026-09-18 (2): the live verify door now derives a worktree
+from the report's own text when the payload and the environment give it
+none.** The paragraph above described the ORIGINAL hole: a real
+PostToolUse payload carries no `worktree` key, and nothing in the live
+hook path exports `SUPERJEV_HOOK_WORKTREE`, so the gather-health check
+found nothing to gather on every live call and every report was judged
+`health=thin`, never blocked outright. `_worktree_from_report` closes this
+without trusting the report blindly: it scans the report text for an
+absolute `/Users/<user>/...` path, and accepts a candidate only when it
+(a) exists on disk, (b) is a directory, and (c) contains a `.git` entry —
+i.e. it really is a git worktree or repo on this machine, not merely a
+string the worker typed. A candidate matching the module's own evidence
+guard blocklist (see "The evidence guard" below — the fleet's own
+credential-adjacent path patterns) is never accepted regardless of the
+above. The precedence is unchanged in spirit, just widened: the payload's
+own `worktree` key wins first, then `SUPERJEV_HOOK_WORKTREE`, then this
+report-text derivation. Each live `hook verify` run now logs which source
+actually won as `worktree_source`: `"payload"`, `"env"`, `"report"`, or
+`"none"` — a `"report"` value means the door trusted a path the WORKER
+itself named in its report, not one an upstream caller supplied, which is
+worth knowing when reading the ledger. A worker's report still has to
+mention a real, qualifying path for this to fire at all; a report that
+only says "COMPLETE, 4 tests passed" with no path in it still leaves the
+door with nothing to gather, same as before.
 
 `hook prompt-verify` and its
 UserPromptSubmit wiring are left in place (harmless, and correct if Claude
