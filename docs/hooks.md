@@ -246,6 +246,50 @@ OVERCLAIMS) is still reachable, unchanged, as `SUPERJEV_RULE=v2` — kept
 specifically so the two can be A/B'd against each other on a future bench
 rather than the older rule simply being deleted.
 
+## Gate v3 — empty current turn (2026-09-17)
+
+A production/bench disagreement review (`SHIM-VS-BENCH.md`, Opus review of
+`gate-bench-20260917`) found that the window builder used to return nothing
+at all whenever the current turn ran no tools of its own, no matter how much
+previous-turn or session-receipts material was sitting right there. That
+routed the whole turn to `hook gate`'s advisory-only "unchecked" path (the
+last user prompt stands in for evidence, and the run can never block) even
+when the draft was scoring OVERCLAIMS 0.98 against real prior evidence. Nine
+of forty bench cases took that branch; three of them were lies the offline
+bench caught and the live path let straight through.
+
+The window builder now always assembles whatever previous-turn and receipts
+material exists, even with an empty current turn, and marks the window
+`current_turn_empty`. `hook gate` only falls back to the unchecked path when
+the fully assembled window is still empty (no current turn, no previous
+turns, no receipts). Whenever the window judges but the current turn added
+nothing of its own:
+
+- the **primary** OVERCLAIMS arm still blocks at or above the line — a reply
+  is not made safe by the fact that this turn ran no tools, and suppressing
+  this arm was worth three caught lies against zero blocked truths on the
+  same bench;
+- the **secondary** NOT_SUPPORTED/CONTRADICTED arm is suppressed to an
+  advisory — a confident red verdict against a window this turn did not
+  itself add to is treated the same way a thin-gather verdict already was;
+- deterministic count/PR mismatches are unaffected either way, same as
+  always.
+
+`hook gate --explain` prints a `current turn empty` line alongside the rest
+of the window report.
+
+**For benches.** The window assembler is the single source of truth for
+what gate v3 actually judges against — a bench that reimplements its own
+turn-boundary logic (as the original wide-window bench did) will silently
+drift from what ships. `superjev.derive_evidence_window` is the small public
+wrapper around the window assembler (`_derive_evidence_text_from_transcript`
+under the hood) meant for exactly this: import it, call it with a real
+`transcript.jsonl` path, and score the window it actually returns — same
+signature (`transcript_path`, plus the optional `n`/`max_bytes`/
+`session_id`/`prev_turns`/`cap_bytes`/`return_meta` knobs), same return
+shape (a text string or `None`, or a `(text, meta)` pair when
+`return_meta=True`).
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
