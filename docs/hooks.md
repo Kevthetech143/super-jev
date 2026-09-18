@@ -1478,5 +1478,6 @@ partly chooses. It renders byte-identically to the composer today and is
 wired to nothing yet.
 
 The design note, the one trust rule, the two truncation policies, what
-the 100,000-case fuzz proves, and the per-reader migration plan are in
+the fuzzes prove, what `from_text` can and cannot know about bytes a
+worker partly chose, and the per-reader migration plan are in
 [docs/window-model.md](window-model.md).
