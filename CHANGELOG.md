@@ -27,10 +27,47 @@ No version bump.
   first rather than all of them: the switch is the proof harness. See
   docs/plugins.md.
 
+  The arm contract carries four more things. **One judge call per run:**
+  `ctx["judge"]()` is a memoised accessor that performs the single
+  TypeSafe classify on first use and hands every later caller the same
+  `JudgeResult`, so zero `KIND = "judge"` arms cost zero calls and N of
+  them cost exactly one, each interpreting the shared result in its own
+  `check`. **An evidence hook:** an arm may also expose
+  `contribute(window, draft, ctx) -> list[str]`, and those lines are
+  appended to the evidence — under one `[contributed by check arms]`
+  block, wrapping rather than mutating the `Window` — before any judge
+  call happens, which is what a derived-fact family needs to put something
+  in front of the judge rather than only ruling on what is already there.
+  **`ctx` is a named contract:** every key is documented in one table in
+  docs/plugins.md, every key is optional, and adding one means adding the
+  row in the same change. **Discovery is one keyspace:** an arm whose
+  `NAME` is not its own file stem is rejected with one stderr line and
+  skipped, and a search path (`SUPERJEV_ARMS_EXTRA_DIR`, or `extra=`)
+  means a test double is never written into the shipped package
+  directory.
+
+- **The gate records which arms it consulted.** The catch-ledger row for a
+  gate decision now carries `arms` (every arm consulted with the mode it
+  ran in, `["pr_state:block", ...]`, or `pr_state:legacy-inline` while
+  `SUPERJEV_ARMS` is off) and, separately, `arm_errors` (every arm that
+  raised, with its exception class). `run_arms` returned that information
+  and the gate threw it away. Two fields rather than one because "we asked
+  this arm" and "this arm broke" are different facts: a raising blocking
+  arm still fails open, but it is no longer invisible. Both are `null` on
+  a row that consulted no arms, which is not `[]`.
+
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
-  reason behind it came from the judge (the OVERCLAIMS arm, or under
-  `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm) — the
+  blocking verdict behind it came from an arm whose `KIND` is `judge`.
+  That rule is the registry's own (`arms.judge_only_blocks`); the gate
+  adapts this call's reason lists into verdicts for it rather than keeping
+  a second copy, so it covers the OVERCLAIMS arm and, under
+  `SUPERJEV_RULE=v2`, the secondary NOT_SUPPORTED/CONTRADICTED arm without
+  naming either. `=weak` is recognised as the seam for the `weak` setting
+  landing on main and demotes nothing here, saying so once per process.
+  This failsafe is a different object from a per-arm mode: a mode is one
+  arm's standing on every run, this is one gate call's outcome demoted
+  after the fact. The
   judge's confidence score is a guess, and a wrong guess should not stop a
   true turn. A block carrying even one deterministic reason (count
   mismatch, PR mismatch, `CONTRADICTED_BY_FACT`) still blocks exactly as

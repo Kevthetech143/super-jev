@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 SKILL = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SKILL))
+sys.path.append(str(SKILL))
 
 import judges                                            # noqa: E402
 import window_model as wm                                # noqa: E402

@@ -117,8 +117,10 @@ class TypeSafeJudge(Judge):
         self.timeout = timeout
 
     def _sj(self):
+        # Appended, not inserted: this backend must not reorder the
+        # importing process's own module search path.
         if str(_SKILL_DIR) not in sys.path:
-            sys.path.insert(0, str(_SKILL_DIR))
+            sys.path.append(str(_SKILL_DIR))
         import superjev                                   # noqa: PLC0415
         return superjev
 

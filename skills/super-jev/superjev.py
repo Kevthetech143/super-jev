@@ -50,6 +50,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 HOME = Path(os.path.expanduser("~"))
 SKILL_DIR = Path(__file__).resolve().parent
@@ -1078,6 +1079,30 @@ def _fact_block_reasons(facts):
 # one arm first rather than all of them: the switch is the proof harness.
 # See docs/plugins.md.
 
+class _ArmRunNote(NamedTuple):
+    """One registry (or legacy-inline) arm run, as the ledger records it.
+
+    `consulted` is `(arm name, mode)`; `errors` is `(arm name, exception
+    class name)`. Two separate lists on purpose: "we asked this arm" and
+    "this arm broke" are different facts, and a row that merged them
+    could not tell a quiet arm from a crashed one.
+    """
+    consulted: list
+    errors: list
+
+
+def _arm_run_ledger_fields(runs):
+    """`(arms, arm_errors)` for the catch-ledger row, over every arm run
+    this gate call made — `["pr_state:block", ...]` and
+    `["pr_state:RuntimeError", ...]`. Empty lists become None so a row
+    that consulted nothing does not claim an empty consultation."""
+    consulted, errors = [], []
+    for run in runs or []:
+        consulted.extend(f"{n}:{m}" for n, m in run.consulted)
+        errors.extend(f"{n}:{e}" for n, e in run.errors)
+    return (consulted or None), (errors or None)
+
+
 def _arms_registry():
     """The arm registry module, or None if it cannot be imported.
 
@@ -1085,8 +1110,10 @@ def _arms_registry():
     leave the gate on its legacy path, not take it down.
     """
     try:
+        # Appended, not inserted: the gate must not reorder the running
+        # process's own module search path to find its own packages.
         if str(SKILL_DIR) not in sys.path:
-            sys.path.insert(0, str(SKILL_DIR))
+            sys.path.append(str(SKILL_DIR))
         import arms                                        # noqa: PLC0415
         return arms
     except Exception as e:                                  # pragma: no cover
@@ -1095,7 +1122,7 @@ def _arms_registry():
         return None
 
 
-def _pr_state_reason(draft_text, evidence_text):
+def _pr_state_reason(draft_text, evidence_text, run_sink=None):
     """The PR-state arm's reason line, or None.
 
     With `SUPERJEV_ARMS` off (the default) this is `_pr_mismatch_reason`
@@ -1103,19 +1130,34 @@ def _pr_state_reason(draft_text, evidence_text):
     arm over a window parsed out of the same evidence text, and the
     legacy inline call is skipped rather than run alongside — running
     both would hide exactly the difference the switch exists to expose.
+
+    `run_sink`, if given, is a list this appends one `_ArmRunNote` to,
+    recording which arms were consulted in which modes and which of them
+    raised. The gate used to throw that away; the catch ledger's `arms`
+    and `arm_errors` fields are it. A raising blocking arm still fails
+    open — but it is no longer invisible.
     """
     arms = _arms_registry() if evidence_text else None
     if arms is None or not arms.arms_enabled():
+        # The legacy inline twin is still an arm being consulted, so the
+        # ledger says so rather than reading as "no arms ran".
+        if run_sink is not None:
+            run_sink.append(_ArmRunNote(consulted=[("pr_state", "legacy-inline")],
+                                        errors=[]))
         return _pr_mismatch_reason(draft_text, evidence_text)
     from arms import pr_state as pr_state_arm              # noqa: PLC0415
     window = pr_state_arm.window_from_text(evidence_text)
-    reasons = arms.block_reasons(window, draft_text, ctx={
+    verdicts, run = arms.run_arms(window, draft_text, ctx={
         "evidence_text": evidence_text, "caller": "deterministic"},
         names=["pr_state"])
+    if run_sink is not None:
+        run_sink.append(_ArmRunNote(consulted=list(run.consulted),
+                                    errors=list(run.errors)))
+    reasons = [v.reason for v in verdicts if v.is_block()]
     return reasons[0] if reasons else None
 
 
-def deterministic_block_reasons(draft_text, evidence_text):
+def deterministic_block_reasons(draft_text, evidence_text, run_sink=None):
     """The full list of deterministic (no-model-call) block reasons for one
     draft/evidence pair: a test-count mismatch and/or a PR-merge mismatch.
     Runs independently of, and before, the judge; the judge still runs for
@@ -1124,7 +1166,7 @@ def deterministic_block_reasons(draft_text, evidence_text):
     r = _count_mismatch_reason(draft_text, evidence_text)
     if r:
         reasons.append(r)
-    r = _pr_state_reason(draft_text, evidence_text)
+    r = _pr_state_reason(draft_text, evidence_text, run_sink=run_sink)
     if r:
         reasons.append(r)
     return reasons
@@ -1248,20 +1290,132 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
-# Judge-advisory mode (2026-09-18). SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a
-# `hook gate` block to an advisory print + exit 0 when EVERY reason behind it
-# came from the judge (the OVERCLAIMS arm, or — under SUPERJEV_RULE=v2 — the
-# secondary NOT_SUPPORTED/CONTRADICTED arm). It never touches a block that
-# carries even one deterministic reason (a count mismatch, a PR mismatch, or
-# a CONTRADICTED_BY_FACT fact sentence) — those still block with the same
-# exit code as today, unconditionally. See cmd_hook's "block-judge-advisory"
-# branch, which checks this against `det_block_reasons` being empty rather
-# than special-casing which judge arm fired, so it covers v2 and v3 alike.
+# Judge-advisory mode (2026-09-18) — the GATE-LEVEL failsafe.
+# SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a `hook gate` block to an advisory
+# print + exit 0 when EVERY blocking verdict behind it came from an arm whose
+# KIND is `judge`. That is the rule, and it is the registry's own
+# (`arms.judge_only_blocks`) rather than a second copy living here: this
+# module only adapts today's reason lists into verdicts for it
+# (_gate_blocking_verdicts), so the rule covers the judge arms under v2 and
+# v3 alike without naming any of them.
+#
+# It never touches a block carrying even one deterministic reason (a count
+# mismatch, a PR mismatch, a CONTRADICTED_BY_FACT fact sentence): those still
+# block with the same exit code as today, unconditionally.
+#
+# This is NOT per-arm mode (SUPERJEV_ARM_<NAME>=block|advisory|off). The two
+# are different objects. A mode is one arm's own standing, set once and read
+# on every run, and an `advisory` arm never blocks in the first place. The
+# failsafe is one gate call's OUTCOME, demoted after the fact, over whatever
+# mix of arms happened to fire. See docs/plugins.md.
 JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
+#: `=1` turns the failsafe on, whole hog: a block every one of whose
+#: blocking verdicts came from a judge-kind arm is demoted to advisory.
+JUDGE_ADVISORY_ON = "1"
+#: The seam, not the feature. PR #59 (landing on main) adds a `weak`
+#: setting, which demotes only the WEAK judge findings and leaves the
+#: confident ones blocking. It is recognised here so the env var has one
+#: documented keyspace across both branches, and it is deliberately NOT
+#: implemented here: setting it on this branch demotes nothing.
+JUDGE_ADVISORY_WEAK = "weak"
+JUDGE_ADVISORY_VALUES = (JUDGE_ADVISORY_ON, JUDGE_ADVISORY_WEAK)
+
+_judge_advisory_seam_said = False
+
+
+def _judge_advisory_mode():
+    """The failsafe setting: `"1"`, `"weak"`, or `""` for off.
+
+    `weak` is a seam on this branch (see JUDGE_ADVISORY_WEAK). It says so
+    once per process rather than silently doing nothing, and once rather
+    than on every hook event.
+    """
+    global _judge_advisory_seam_said
+    raw = os.environ.get(JUDGE_ADVISORY_ENV, "0")
+    if raw == JUDGE_ADVISORY_ON:
+        return JUDGE_ADVISORY_ON
+    if str(raw).strip().lower() == JUDGE_ADVISORY_WEAK:
+        if not _judge_advisory_seam_said:
+            _judge_advisory_seam_said = True
+            print(f"super-jev: {JUDGE_ADVISORY_ENV}={JUDGE_ADVISORY_WEAK!r} is not "
+                  "implemented on this branch — no block is demoted; use "
+                  f"{JUDGE_ADVISORY_ENV}={JUDGE_ADVISORY_ON} for the whole "
+                  "failsafe", file=sys.stderr)
+        return JUDGE_ADVISORY_WEAK
+    return ""
 
 
 def _judge_advisory_enabled():
-    return os.environ.get(JUDGE_ADVISORY_ENV, "0") == "1"
+    return _judge_advisory_mode() == JUDGE_ADVISORY_ON
+
+
+class _GateVerdict(NamedTuple):
+    """A `Verdict`-shaped view of one blocking reason THIS gate call has.
+
+    The gate's own reasons do not come from the registry yet (only the
+    `pr_state` arm has moved, and only behind `SUPERJEV_ARMS`), so this is
+    the adapter that lets the failsafe rule be stated once, in registry
+    terms, over both. `arm` names the ORIGIN of the reason, not a registry
+    key; `kind` is the thing the rule actually reads.
+    """
+    arm: str
+    kind: str
+    reason: str
+
+    def is_block(self):
+        return True
+
+
+#: The two arm names the adapter above uses for a reason that did not
+#: come through the registry.
+GATE_ARM_INLINE = "deterministic-inline"
+GATE_ARM_JUDGE = "judge"
+
+
+def _gate_blocking_verdicts(det_block_reasons, block_reasons, code=None):
+    """This gate call's blocking reasons as `(verdicts, kinds)`.
+
+    Deterministic reasons (a count mismatch, a PR-state mismatch, a
+    CONTRADICTED_BY_FACT fact sentence) are `deterministic`. Everything
+    else in `block_reasons` came from the judge's own flags, so it is
+    `judge`. A block with no reason line at all came from the judge's
+    exit code, which is a judge finding too — without that case an
+    exit-code block would look like it came from nobody.
+    """
+    verdicts, kinds = [], {GATE_ARM_INLINE: "deterministic",
+                           GATE_ARM_JUDGE: "judge"}
+    det = list(det_block_reasons or [])
+    for r in det:
+        verdicts.append(_GateVerdict(GATE_ARM_INLINE, "deterministic", r))
+    judge_reasons = [r for r in (block_reasons or []) if r not in det]
+    for r in judge_reasons:
+        verdicts.append(_GateVerdict(GATE_ARM_JUDGE, "judge", r))
+    if not verdicts:
+        verdicts.append(_GateVerdict(GATE_ARM_JUDGE, "judge",
+                                     f"exit {code}" if code is not None else "exit code"))
+    return verdicts, kinds
+
+
+def _judge_advisory_demotes(det_block_reasons, block_reasons, code=None):
+    """Does the gate-level failsafe demote THIS block?
+
+    One rule, and it is the registry's: demote when there is at least one
+    blocking verdict and EVERY blocking verdict came from an arm whose
+    KIND is `judge` (`arms.judge_only_blocks`). Per-arm mode is a
+    different object — one arm's own standing, set once and read on every
+    run. This is one gate call's outcome, demoted after the fact.
+
+    With the registry unimportable this returns False: the block stands.
+    A failsafe that cannot read its own rule must not guess at it.
+    """
+    if _judge_advisory_mode() != JUDGE_ADVISORY_ON:
+        return False
+    arms = _arms_registry()
+    if arms is None:                                      # pragma: no cover
+        return False
+    verdicts, kinds = _gate_blocking_verdicts(det_block_reasons, block_reasons,
+                                              code=code)
+    return arms.judge_only_blocks(verdicts, kinds)
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -1996,7 +2150,7 @@ def _catch_excerpt(text):
 
 
 def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
-              start_time=None, payload=None):
+              start_time=None, payload=None, arms=None, arm_errors=None):
     """One record for the catch ledger — called once per gate/verify hook
     decision. `decision` is one of "block", "allow", "advisory", "unchecked",
     "advisory-forced" (the stop_hook_active re-run failsafe), or
@@ -2010,7 +2164,16 @@ def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
     site here runs strictly after that value is already decided.
     `payload`, if given and SUPERJEV_CATCH_KEEP_PAYLOAD=1, is saved
     (redacted) alongside this record's id for later bench-case export —
-    see _catch_save_payload."""
+    see _catch_save_payload.
+
+    `arms` and `arm_errors` are this call's arm ledger, two separate
+    fields on purpose (see _arm_run_ledger_fields): `arms` is every arm
+    consulted with the mode it ran in, `["pr_state:block", ...]`, and
+    `arm_errors` is every arm that raised with the exception class,
+    `["pr_state:RuntimeError", ...]`. An arm that raises still fails open
+    — the point of the second field is that it stops being invisible when
+    it does. Both are None on a row that consulted no arms (the verify
+    door, an unchecked gate row), which is not the same as `[]`."""
     try:
         ms = None
         if start_time is not None:
@@ -2023,6 +2186,8 @@ def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
             "draft_excerpt": _catch_excerpt(draft_text),
             "window_bytes": window_bytes,
             "ms": ms,
+            "arms": list(arms) if arms else None,
+            "arm_errors": list(arm_errors) if arm_errors else None,
             "tag": None,
             "note": None,
         }
@@ -7245,6 +7410,10 @@ def cmd_hook(a):
     """
     door = getattr(a, "door", "?")
     _catch_t0 = time.monotonic()
+    # Every arm run THIS hook event makes, appended to as the checks run
+    # (see _pr_state_reason's run_sink) and read once, below, for the
+    # catch-ledger row's `arms`/`arm_errors` fields.
+    _arm_runs = []
     if door == "prompt-verify":
         return cmd_hook_prompt_verify(a)
     from_file = getattr(a, "from_file", None)
@@ -7486,7 +7655,8 @@ def cmd_hook(a):
                 text, _read_evidence_text(evidence))
             det_block_reasons = [r for r in
                                  (det_reason,
-                                  _pr_state_reason(text, _read_evidence_text(evidence)))
+                                  _pr_state_reason(text, _read_evidence_text(evidence),
+                                                   run_sink=_arm_runs))
                                  if r]
             # A derived fact the window already carries (any family —
             # written-file identity, removal, missing path, diffstat,
@@ -7618,16 +7788,18 @@ def cmd_hook(a):
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
         # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1): a block whose
-        # ONLY reasons came from the judge — det_block_reasons is empty, so
-        # nothing deterministic (count mismatch, PR mismatch,
-        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory. A
+        # every blocking verdict came from a judge-kind arm — nothing
+        # deterministic (count mismatch, PR mismatch, CONTRADICTED_BY_FACT)
+        # in the mix — is demoted to advisory. The rule is the registry's
+        # (_judge_advisory_demotes -> arms.judge_only_blocks). A
         # block carrying even one deterministic reason is untouched: it
         # falls through to the "block" branch below exactly as it does
         # today, env or no env. Checked after stop_hook_active so a re-run
         # keeps its own (already advisory) handling rather than being
         # relabeled here.
-        elif (door == "gate" and action == "block" and _judge_advisory_enabled()
-              and not det_block_reasons):
+        elif (door == "gate" and action == "block"
+              and _judge_advisory_demotes(det_block_reasons, block_reasons,
+                                          code=code)):
             action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
@@ -7648,6 +7820,9 @@ def cmd_hook(a):
         # The catch ledger's own window_bytes — best-effort, gate only (the
         # transcript-derived window is the thing worth sizing; verify has
         # no equivalent window, so this stays None there).
+        # What the arms said they did, for the ledger row. Computed here,
+        # once, so every decision branch below writes the same two fields.
+        _catch_arms, _catch_arm_errors = _arm_run_ledger_fields(_arm_runs)
         _catch_window_bytes = None
         if door == "gate":
             _catch_window_bytes = (window_meta or {}).get("total_bytes")
@@ -7674,6 +7849,7 @@ def cmd_hook(a):
                      flags=flags, reason=suppressed_reason)
             catch_log(door, "allow", reasons=block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 0
@@ -7686,6 +7862,7 @@ def cmd_hook(a):
                      flags=flags, reason=suppressed_reason)
             catch_log(door, "advisory-forced", reasons=block_reasons, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 0
@@ -7700,6 +7877,7 @@ def cmd_hook(a):
                      flags=flags, reason=suppressed_reason)
             catch_log(door, "advisory-judge", reasons=block_reasons, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 0
@@ -7720,6 +7898,7 @@ def cmd_hook(a):
                      exit_code=2, flags=flags)
             catch_log(door, "block", reasons=block_reasons + block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 2
@@ -7730,6 +7909,7 @@ def cmd_hook(a):
                  reason=suppressed_reason)
         catch_log(door, "advisory", reasons=block_notes, draft_text=text,
                  window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                 arms=_catch_arms, arm_errors=_catch_arm_errors,
                  payload=payload)
         _print_ledger_notice_if_gate()
         return 0

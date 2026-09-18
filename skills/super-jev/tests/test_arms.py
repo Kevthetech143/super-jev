@@ -1,35 +1,40 @@
 #!/usr/bin/env python3
 """Offline tests for the arm registry (skills/super-jev/arms).
 
-No network, no door, no model call. Discovery is tested by writing a
-throwaway arm into the package directory inside a temp fixture and taking
-it away again, because "the registry lists the directory" is the claim,
-and a test that imports a hard-coded name would not test it.
+No network, no door, no model call. Discovery is tested by writing
+throwaway arms into a TEMP directory that the registry is pointed at
+(`SUPERJEV_ARMS_EXTRA_DIR`), because "the registry lists its search path"
+is the claim and a test that imported a hard-coded name would not test
+it. Test doubles are never written into the shipped package directory: a
+test run must not be able to leave an arm behind in a live checkout.
 
     python3 -m pytest skills/super-jev/tests/test_arms.py -q
 """
-import importlib
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 SKILL = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(SKILL))
+sys.path.append(str(SKILL))
 
 import arms                                              # noqa: E402
+import judges                                            # noqa: E402
 import window_model as wm                                # noqa: E402
 
 ARMS_DIR = SKILL / "arms"
+FAKE_DOOR = Path(__file__).resolve().parent / "fake_door.py"
 
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
     """Every test starts with no arm env set and no warning spent."""
-    for k in list(__import__("os").environ):
+    for k in list(os.environ):
         if k.startswith(arms.ARM_MODE_ENV_PREFIX) or k in (
-                arms.ARMS_CONFIG_ENV, arms.ARMS_SWITCH_ENV):
+                arms.ARMS_CONFIG_ENV, arms.ARMS_SWITCH_ENV,
+                arms.ARMS_EXTRA_DIR_ENV):
             monkeypatch.delenv(k, raising=False)
     arms.reset_mode_warnings()
     yield
@@ -37,42 +42,88 @@ def _clean_env(monkeypatch):
 
 
 @pytest.fixture
-def temp_arm():
-    """Write an extra arm module into the package, remove it after.
+def temp_arm(tmp_path, monkeypatch):
+    """Write throwaway arm modules into a temp dir on the search path.
 
-    Returns a callable taking the module body; yields the arm's name.
+    Returns a callable taking (name, module body) and yielding the arm's
+    name. Nothing is ever written into `arms/` itself.
     """
+    extra = tmp_path / "extra_arms"
+    extra.mkdir()
+    monkeypatch.setenv(arms.ARMS_EXTRA_DIR_ENV, str(extra))
     written = []
 
     def _write(name, body):
-        p = ARMS_DIR / f"{name}.py"
-        assert not p.exists(), f"{p} already exists — pick another test name"
+        p = extra / f"{name}.py"
         p.write_text(body, encoding="utf-8")
         written.append(p)
         sys.modules.pop(f"arms.{name}", None)
-        importlib.invalidate_caches()
         return name
 
     yield _write
     for p in written:
         sys.modules.pop(f"arms.{p.stem}", None)
-        p.unlink(missing_ok=True)
+
+
+class CountingJudge(judges.FakeJudge):
+    """The `fake` judge backend, counting its own classify calls.
+
+    A real subclass of the shipped fake rather than a stub, so what the
+    memoisation test proves is that ONE actual classify crossed the door
+    boundary — not that a test double was called once.
+    """
+
+    def __init__(self):
+        self.calls = 0
+        self.windows = []
+
+    def classify(self, draft, window):
+        self.calls += 1
+        self.windows.append(window)
+        return super().classify(draft, window)
+
+
+@pytest.fixture
+def counting_judge(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_GATE_CMD", f"{sys.executable} {FAKE_DOOR}")
+    monkeypatch.delenv("FAKE_DOOR_STDOUT_FILE", raising=False)
+    monkeypatch.setenv("FAKE_DOOR_EXIT", "0")
+    return CountingJudge()
 
 
 # --------------------------------------------------------- discovery
 
-def test_discovery_lists_the_package_not_a_hard_coded_list(temp_arm):
+def test_discovery_lists_the_search_path_not_a_hard_coded_list(temp_arm):
     before = arms.arm_names()
     assert "pr_state" in before, "the migrated template arm should be found"
-    name = temp_arm("zz_test_probe", ARM_BODY.format(mode="block"))
+    name = temp_arm("zz_test_probe", arm_body("zz_test_probe"))
     after = arms.arm_names()
     assert name in after
     assert after == sorted(after), "arm_names should be deterministic order"
     assert set(after) - set(before) == {name}
 
 
+def test_a_test_double_is_never_written_into_the_shipped_package(temp_arm):
+    name = temp_arm("zz_test_elsewhere", arm_body("zz_test_elsewhere"))
+    spec = arms.load_arm(name)
+    assert spec is not None
+    assert not (ARMS_DIR / f"{name}.py").exists()
+    assert Path(spec.path).parent != ARMS_DIR
+
+
+def test_the_extra_dir_can_also_be_passed_as_an_argument(tmp_path):
+    (tmp_path / "zz_test_param.py").write_text(arm_body("zz_test_param"),
+                                               encoding="utf-8")
+    try:
+        assert "zz_test_param" in arms.arm_names(extra=tmp_path)
+        assert arms.load_arm("zz_test_param", extra=tmp_path) is not None
+        assert "zz_test_param" not in arms.arm_names()
+    finally:
+        sys.modules.pop("arms.zz_test_param", None)
+
+
 def test_discovery_skips_private_modules(temp_arm):
-    temp_arm("_zz_test_private", ARM_BODY.format(mode="block"))
+    temp_arm("_zz_test_private", arm_body("_zz_test_private"))
     assert "_zz_test_private" not in arms.arm_names()
 
 
@@ -82,17 +133,45 @@ def test_a_module_without_check_is_not_an_arm(temp_arm, capsys):
     assert "no callable check" in capsys.readouterr().err
 
 
+def test_a_name_that_is_not_the_module_stem_is_rejected(temp_arm, capsys):
+    """Names and stems are ONE keyspace. If they could differ, the env
+    key, the config key, `names=[...]` and the file on disk would be four
+    keyspaces pretending to be one."""
+    temp_arm("zz_test_misnamed", arm_body("something_else"))
+    assert arms.load_arm("zz_test_misnamed") is None
+    err = capsys.readouterr().err
+    assert "NAME='something_else'" in err
+    assert "must be its file stem" in err
+    assert err.count("\n") == 1
+    # and it is skipped by a whole-registry run, not fatal to it
+    verdicts, run = arms.run_arms(None, "x")
+    assert "zz_test_misnamed" not in run.names
+
+
+def test_load_arms_uses_the_same_keyspace_as_the_stems(temp_arm):
+    temp_arm("zz_test_keyspace", arm_body("zz_test_keyspace"))
+    specs = arms.load_arms(names=["zz_test_keyspace", "pr_state"])
+    assert [s.name for s in specs] == ["zz_test_keyspace", "pr_state"]
+    assert all(s.name == s.module for s in specs)
+
+
+def test_an_unknown_name_is_one_warning_not_an_exception(capsys):
+    assert arms.load_arm("zz_no_such_arm") is None
+    assert "no arm module named" in capsys.readouterr().err
+
+
 def test_load_arms_returns_specs_with_declared_metadata():
     spec = arms.load_arm("pr_state")
     assert spec is not None
     assert (spec.name, spec.kind, spec.default_mode) == (
         "pr_state", "deterministic", "block")
+    assert spec.contribute is None
 
 
 # ------------------------------------------------------ mode parsing
 
 def test_mode_defaults_to_the_arms_own_default(temp_arm):
-    temp_arm("zz_test_adv", ARM_BODY.format(mode="advisory"))
+    temp_arm("zz_test_adv", arm_body("zz_test_adv", mode="advisory"))
     assert arms.arm_mode(arms.load_arm("zz_test_adv")) == "advisory"
 
 
@@ -182,8 +261,8 @@ OPEN_WINDOW = (
 
 def test_pr_state_arm_blocks_a_merge_claim_the_window_contradicts():
     window = wm.from_text(OPEN_WINDOW)
-    verdicts, ran = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
-    assert ran == [("pr_state", "block")]
+    verdicts, run = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
+    assert run.consulted == (("pr_state", "block"),)
     assert len(verdicts) == 1
     v = verdicts[0]
     assert v.arm == "pr_state"
@@ -193,13 +272,13 @@ def test_pr_state_arm_blocks_a_merge_claim_the_window_contradicts():
 
 def test_pr_state_arm_says_nothing_when_the_window_agrees():
     window = wm.from_text(OPEN_WINDOW.replace("OPEN", "MERGED"))
-    verdicts, _ran = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
+    verdicts, _run = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
     assert verdicts == []
 
 
 def test_pr_state_arm_says_nothing_about_a_pr_the_draft_never_names():
     window = wm.from_text(OPEN_WINDOW)
-    verdicts, _ran = arms.run_arms(window, "Done. Tests pass.",
+    verdicts, _run = arms.run_arms(window, "Done. Tests pass.",
                                    names=["pr_state"])
     assert verdicts == []
 
@@ -207,8 +286,8 @@ def test_pr_state_arm_says_nothing_about_a_pr_the_draft_never_names():
 def test_advisory_mode_downgrades_the_same_verdict(monkeypatch):
     monkeypatch.setenv(arms.ARM_MODE_ENV_PREFIX + "PR_STATE", "advisory")
     window = wm.from_text(OPEN_WINDOW)
-    verdicts, ran = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
-    assert ran == [("pr_state", "advisory")]
+    verdicts, run = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
+    assert run.consulted == (("pr_state", "advisory"),)
     assert [v.decision for v in verdicts] == ["advisory"]
     assert not verdicts[0].is_block()
     assert arms.block_reasons(window, MERGED_DRAFT, names=["pr_state"]) == []
@@ -217,8 +296,9 @@ def test_advisory_mode_downgrades_the_same_verdict(monkeypatch):
 def test_off_mode_does_not_run_the_arm(monkeypatch):
     monkeypatch.setenv(arms.ARM_MODE_ENV_PREFIX + "PR_STATE", "off")
     window = wm.from_text(OPEN_WINDOW)
-    verdicts, ran = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
-    assert (verdicts, ran) == ([], [])
+    verdicts, run = arms.run_arms(window, MERGED_DRAFT, names=["pr_state"])
+    assert verdicts == []
+    assert run.consulted == ()
 
 
 def test_block_reasons_matches_the_windows_own_verdict_string():
@@ -228,16 +308,35 @@ def test_block_reasons_matches_the_windows_own_verdict_string():
         expected]
 
 
-def test_a_raising_arm_is_skipped_not_fatal(temp_arm, capsys):
+# ------------------------------------------------- a broken arm is visible
+
+def test_a_raising_arm_is_skipped_not_fatal_and_is_recorded(temp_arm, capsys):
     temp_arm("zz_test_boom",
              "NAME = 'zz_test_boom'\nKIND = 'deterministic'\n"
              "DEFAULT_MODE = 'block'\n"
              "def check(window, draft, ctx):\n"
              "    raise RuntimeError('boom')\n")
-    verdicts, ran = arms.run_arms(None, "anything", names=["zz_test_boom"])
+    verdicts, run = arms.run_arms(None, "anything", names=["zz_test_boom"])
     assert verdicts == []
-    assert ran == [("zz_test_boom", "block")]
+    assert run.consulted == (("zz_test_boom", "block"),)
+    assert run.errors == (("zz_test_boom", "RuntimeError"),)
     assert "raised" in capsys.readouterr().err
+
+
+def test_consulted_and_errors_are_two_separate_lists(temp_arm):
+    """A quiet arm and a crashed arm must not look the same on a row."""
+    temp_arm("zz_test_quiet", arm_body("zz_test_quiet"))
+    temp_arm("zz_test_crash",
+             "NAME = 'zz_test_crash'\nKIND = 'deterministic'\n"
+             "DEFAULT_MODE = 'block'\n"
+             "def check(window, draft, ctx):\n"
+             "    raise ValueError('nope')\n")
+    _v, run = arms.run_arms(None, "x", names=["zz_test_quiet", "zz_test_crash"])
+    assert sorted(run.names) == ["zz_test_crash", "zz_test_quiet"]
+    assert run.errors == (("zz_test_crash", "ValueError"),)
+    consulted, errors = run.as_ledger()
+    assert "zz_test_quiet:block" in consulted
+    assert errors == ["zz_test_crash:ValueError"]
 
 
 def test_a_non_verdict_return_is_ignored(temp_arm, capsys):
@@ -246,7 +345,7 @@ def test_a_non_verdict_return_is_ignored(temp_arm, capsys):
              "DEFAULT_MODE = 'block'\n"
              "def check(window, draft, ctx):\n"
              "    return 'just a string'\n")
-    verdicts, _ran = arms.run_arms(None, "x", names=["zz_test_wrongtype"])
+    verdicts, _run = arms.run_arms(None, "x", names=["zz_test_wrongtype"])
     assert verdicts == []
     assert "not a Verdict" in capsys.readouterr().err
 
@@ -259,9 +358,223 @@ def test_an_arm_sees_the_ctx_it_was_handed(temp_arm):
              "def check(window, draft, ctx):\n"
              "    return Verdict(arm=NAME, decision='block',\n"
              "                   reason='saw ' + str(ctx.get('caller')))\n")
-    verdicts, _ran = arms.run_arms(None, "x", ctx={"caller": "test"},
+    verdicts, _run = arms.run_arms(None, "x", ctx={"caller": "test"},
                                    names=["zz_test_ctx"])
     assert [v.reason for v in verdicts] == ["saw test"]
+
+
+def test_run_arms_does_not_mutate_the_caller_s_ctx(temp_arm):
+    temp_arm("zz_test_nomutate", arm_body("zz_test_nomutate"))
+    ctx = {"caller": "test"}
+    arms.run_arms(None, "x", ctx=ctx, names=["zz_test_nomutate"])
+    assert ctx == {"caller": "test"}, "the judge accessor is not the caller's"
+
+
+# ------------------------------------------------------- ONE judge call
+
+JUDGE_ARM = """\
+from . import Verdict
+
+NAME = "{name}"
+KIND = "judge"
+DEFAULT_MODE = "block"
+
+
+def check(window, draft, ctx):
+    result = ctx["judge"]()
+    SEEN.append(result)
+    if result.clean:
+        return None
+    return Verdict(arm=NAME, decision="block",
+                   reason="the judge rejected this draft (exit %d)" % result.code)
+
+
+SEEN = []
+"""
+
+
+def test_zero_judge_arms_make_zero_judge_calls(temp_arm, counting_judge):
+    temp_arm("zz_test_det_only", arm_body("zz_test_det_only"))
+    _v, run = arms.run_arms(None, "x", names=["zz_test_det_only"],
+                            judge=counting_judge)
+    assert counting_judge.calls == 0, "an arm that never asks costs no call"
+    assert run.judge_calls == 0
+
+
+def test_two_judge_arms_share_exactly_one_judge_call(temp_arm, counting_judge):
+    a = temp_arm("zz_test_judge_a", JUDGE_ARM.format(name="zz_test_judge_a"))
+    b = temp_arm("zz_test_judge_b", JUDGE_ARM.format(name="zz_test_judge_b"))
+    window = wm.from_text(OPEN_WINDOW)
+    _v, run = arms.run_arms(window, MERGED_DRAFT, names=[a, b],
+                            judge=counting_judge)
+    assert counting_judge.calls == 1, "N judge arms, one classify"
+    assert run.judge_calls == 1
+    mod_a = sys.modules[f"arms.{a}"]
+    mod_b = sys.modules[f"arms.{b}"]
+    assert len(mod_a.SEEN) == len(mod_b.SEEN) == 1
+    assert mod_a.SEEN[0] is mod_b.SEEN[0], "the same JudgeResult object"
+
+
+def test_the_shared_result_is_interpreted_by_each_judge_arm(
+        temp_arm, counting_judge, monkeypatch):
+    monkeypatch.setenv("FAKE_DOOR_EXIT", "2")               # a rejection
+    a = temp_arm("zz_test_judge_c", JUDGE_ARM.format(name="zz_test_judge_c"))
+    b = temp_arm("zz_test_judge_d", JUDGE_ARM.format(name="zz_test_judge_d"))
+    verdicts, _run = arms.run_arms(None, MERGED_DRAFT, names=[a, b],
+                                   judge=counting_judge)
+    assert counting_judge.calls == 1
+    assert sorted(v.arm for v in verdicts) == [a, b]
+    assert all("exit 2" in v.reason for v in verdicts)
+
+
+def test_an_off_judge_arm_is_not_a_judge_call(temp_arm, counting_judge,
+                                              monkeypatch):
+    a = temp_arm("zz_test_judge_off", JUDGE_ARM.format(name="zz_test_judge_off"))
+    monkeypatch.setenv(arms.ARM_MODE_ENV_PREFIX + a.upper(), "off")
+    _v, run = arms.run_arms(None, "x", names=[a], judge=counting_judge)
+    assert (counting_judge.calls, run.judge_calls) == (0, 0)
+
+
+def test_the_accessor_memoises_rather_than_re_asking(counting_judge):
+    accessor = arms.make_judge_accessor(None, "draft", judge=counting_judge)
+    first = accessor()
+    assert accessor() is first
+    assert accessor() is first
+    assert counting_judge.calls == 1
+    assert accessor.calls == 1
+
+
+# --------------------------------------------- the evidence (contribute) hook
+
+CONTRIBUTOR_ARM = """\
+NAME = "{name}"
+KIND = "deterministic"
+DEFAULT_MODE = "block"
+
+SAW_JUDGE = []
+
+
+def contribute(window, draft, ctx):
+    SAW_JUDGE.append("judge" in ctx)
+    return ["DERIVED: the branch in the draft is not the branch in the window"]
+
+
+def check(window, draft, ctx):
+    return None
+"""
+
+JUDGE_WINDOW_ARM = """\
+from . import Verdict
+
+NAME = "{name}"
+KIND = "judge"
+DEFAULT_MODE = "block"
+
+EVIDENCE = []
+
+
+def check(window, draft, ctx):
+    ctx["judge"]()
+    EVIDENCE.append(ctx["judge_window"].render())
+    return None
+"""
+
+
+def test_an_arm_can_contribute_window_lines(temp_arm):
+    name = temp_arm("zz_test_contrib", CONTRIBUTOR_ARM.format(name="zz_test_contrib"))
+    _v, run = arms.run_arms(wm.from_text(OPEN_WINDOW), MERGED_DRAFT,
+                            names=[name])
+    assert run.contributed == (
+        "DERIVED: the branch in the draft is not the branch in the window",)
+
+
+def test_contributed_lines_are_in_front_of_the_judge_when_it_runs(
+        temp_arm, counting_judge):
+    contrib = temp_arm("zz_test_contrib2",
+                       CONTRIBUTOR_ARM.format(name="zz_test_contrib2"))
+    judge_arm = temp_arm("zz_test_judge_w",
+                         JUDGE_WINDOW_ARM.format(name="zz_test_judge_w"))
+    window = wm.from_text(OPEN_WINDOW)
+    arms.run_arms(window, MERGED_DRAFT, names=[contrib, judge_arm],
+                  judge=counting_judge)
+    assert counting_judge.calls == 1
+    handed = counting_judge.windows[0].render()
+    assert "DERIVED: the branch in the draft" in handed
+    assert OPEN_WINDOW.strip().splitlines()[-1] in handed, "the window is still there"
+    # and the arm itself sees the same composed evidence
+    seen = sys.modules[f"arms.{judge_arm}"].EVIDENCE
+    assert seen == [handed]
+
+
+def test_the_judge_is_not_in_ctx_during_the_evidence_phase(temp_arm):
+    name = temp_arm("zz_test_contrib3",
+                    CONTRIBUTOR_ARM.format(name="zz_test_contrib3"))
+    arms.run_arms(None, "x", names=[name])
+    assert sys.modules[f"arms.{name}"].SAW_JUDGE == [False]
+
+
+def test_the_underlying_window_is_never_mutated_by_a_contribution(temp_arm):
+    name = temp_arm("zz_test_contrib4",
+                    CONTRIBUTOR_ARM.format(name="zz_test_contrib4"))
+    window = wm.from_text(OPEN_WINDOW)
+    before = window.render()
+    arms.run_arms(window, MERGED_DRAFT, names=[name])
+    assert window.render() == before
+
+
+def test_no_contribution_hands_the_judge_the_window_itself(
+        temp_arm, counting_judge):
+    judge_arm = temp_arm("zz_test_judge_plain",
+                         JUDGE_ARM.format(name="zz_test_judge_plain"))
+    window = wm.from_text(OPEN_WINDOW)
+    arms.run_arms(window, MERGED_DRAFT, names=[judge_arm], judge=counting_judge)
+    assert counting_judge.windows[0] is window
+
+
+def test_a_raising_contribute_is_recorded_not_fatal(temp_arm, capsys):
+    temp_arm("zz_test_contrib_boom",
+             "NAME = 'zz_test_contrib_boom'\nKIND = 'deterministic'\n"
+             "DEFAULT_MODE = 'block'\n"
+             "def contribute(window, draft, ctx):\n"
+             "    raise KeyError('k')\n"
+             "def check(window, draft, ctx):\n"
+             "    return None\n")
+    _v, run = arms.run_arms(None, "x", names=["zz_test_contrib_boom"])
+    assert run.contributed == ()
+    assert run.errors == (("zz_test_contrib_boom", "KeyError"),)
+    assert "contribute() raised" in capsys.readouterr().err
+
+
+# ------------------------------------- the failsafe rule, in registry terms
+
+def test_judge_only_blocks_is_true_when_every_block_is_a_judge_arm():
+    v = [arms.Verdict(arm="overclaims", decision="block", reason="r")]
+    assert arms.judge_only_blocks(v, {"overclaims": "judge"}) is True
+
+
+def test_judge_only_blocks_is_false_with_one_deterministic_block():
+    v = [arms.Verdict(arm="overclaims", decision="block", reason="r"),
+         arms.Verdict(arm="pr_state", decision="block", reason="r2")]
+    assert arms.judge_only_blocks(
+        v, {"overclaims": "judge", "pr_state": "deterministic"}) is False
+
+
+def test_judge_only_blocks_ignores_advisory_verdicts():
+    v = [arms.Verdict(arm="overclaims", decision="block", reason="r"),
+         arms.Verdict(arm="pr_state", decision="advisory", reason="r2")]
+    assert arms.judge_only_blocks(
+        v, {"overclaims": "judge", "pr_state": "deterministic"}) is True
+
+
+def test_judge_only_blocks_is_false_with_nothing_blocking():
+    assert arms.judge_only_blocks([], {}) is False
+    v = [arms.Verdict(arm="overclaims", decision="advisory", reason="r")]
+    assert arms.judge_only_blocks(v, {"overclaims": "judge"}) is False
+
+
+def test_an_arm_missing_from_the_kinds_map_fails_closed():
+    v = [arms.Verdict(arm="mystery", decision="block", reason="r")]
+    assert arms.judge_only_blocks(v, {}) is False
 
 
 # ----------------------------------------------- the gate-side switch
@@ -296,6 +609,95 @@ def test_switch_on_and_off_give_the_same_deterministic_reasons(monkeypatch):
     assert sj.deterministic_block_reasons(draft, OPEN_WINDOW) == first
 
 
+# ------------------------------------------------ the gate's arm ledger
+
+def test_the_gate_records_which_arms_it_consulted(monkeypatch):
+    sj = _superjev()
+    monkeypatch.setenv(arms.ARMS_SWITCH_ENV, "1")
+    sink = []
+    sj.deterministic_block_reasons(MERGED_DRAFT, OPEN_WINDOW, run_sink=sink)
+    consulted, errors = sj._arm_run_ledger_fields(sink)
+    assert consulted == ["pr_state:block"]
+    assert errors is None
+
+
+def test_the_gate_records_the_legacy_inline_arm_too(monkeypatch):
+    sj = _superjev()
+    monkeypatch.delenv(arms.ARMS_SWITCH_ENV, raising=False)
+    sink = []
+    sj.deterministic_block_reasons(MERGED_DRAFT, OPEN_WINDOW, run_sink=sink)
+    consulted, errors = sj._arm_run_ledger_fields(sink)
+    assert consulted == ["pr_state:legacy-inline"]
+    assert errors is None
+
+
+def test_an_empty_sink_writes_no_ledger_fields():
+    sj = _superjev()
+    assert sj._arm_run_ledger_fields([]) == (None, None)
+
+
+def test_the_ledger_row_carries_both_fields(monkeypatch, tmp_path):
+    sj = _superjev()
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "catch.jsonl")
+    sj.catch_log("gate", "block", reasons=["r"], draft_text="d",
+                 arms=["pr_state:block"], arm_errors=["flaky:RuntimeError"])
+    row = json.loads((tmp_path / "catch.jsonl").read_text().splitlines()[-1])
+    assert row["arms"] == ["pr_state:block"]
+    assert row["arm_errors"] == ["flaky:RuntimeError"]
+
+
+def test_a_row_that_consulted_nothing_says_none(monkeypatch, tmp_path):
+    sj = _superjev()
+    monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "catch.jsonl")
+    sj.catch_log("verify", "allow", reasons=[], draft_text="d")
+    row = json.loads((tmp_path / "catch.jsonl").read_text().splitlines()[-1])
+    assert row["arms"] is None and row["arm_errors"] is None
+
+
+# ---------------------------------------- the gate-level failsafe object
+
+def test_the_failsafe_is_off_by_default(monkeypatch):
+    sj = _superjev()
+    monkeypatch.delenv(sj.JUDGE_ADVISORY_ENV, raising=False)
+    assert sj._judge_advisory_mode() == ""
+    assert sj._judge_advisory_demotes([], ["the judge rejected this"]) is False
+
+
+def test_the_failsafe_demotes_a_judge_only_block(monkeypatch):
+    sj = _superjev()
+    monkeypatch.setenv(sj.JUDGE_ADVISORY_ENV, "1")
+    assert sj._judge_advisory_demotes([], ["the judge rejected this"]) is True
+
+
+def test_the_failsafe_leaves_a_deterministic_block_alone(monkeypatch):
+    sj = _superjev()
+    monkeypatch.setenv(sj.JUDGE_ADVISORY_ENV, "1")
+    det = ["PR mismatch: the draft says #58 merged, the window says OPEN"]
+    assert sj._judge_advisory_demotes(det, det + ["judge says no"]) is False
+
+
+def test_an_exit_code_block_with_no_reason_is_a_judge_block(monkeypatch):
+    """A block with no reason line came from the judge's own exit code.
+    Without that case it would look like it came from nobody."""
+    sj = _superjev()
+    monkeypatch.setenv(sj.JUDGE_ADVISORY_ENV, "1")
+    assert sj._judge_advisory_demotes([], [], code=2) is True
+
+
+def test_weak_is_a_seam_and_demotes_nothing_here(monkeypatch, capsys):
+    """PR #59 (on main) adds `weak`. It is recognised here so the env var
+    is one keyspace across both branches, and it demotes nothing yet."""
+    sj = _superjev()
+    monkeypatch.setenv(sj.JUDGE_ADVISORY_ENV, "weak")
+    monkeypatch.setattr(sj, "_judge_advisory_seam_said", False)
+    assert sj._judge_advisory_mode() == sj.JUDGE_ADVISORY_WEAK
+    assert sj._judge_advisory_enabled() is False
+    assert sj._judge_advisory_demotes([], ["judge says no"]) is False
+    err = capsys.readouterr().err
+    assert "not implemented on this branch" in err
+    assert err.count("\n") == 1, "once per process, not once per event"
+
+
 def _superjev():
     import importlib.util
     if "superjev" in sys.modules:
@@ -308,14 +710,12 @@ def _superjev():
     return mod
 
 
-ARM_BODY = """\
-from . import Verdict
-
-NAME = "probe"
-KIND = "deterministic"
-DEFAULT_MODE = "{mode}"
-
-
-def check(window, draft, ctx):
-    return None
-"""
+def arm_body(name, mode="block", kind="deterministic"):
+    """A throwaway arm that says nothing. `NAME` is the module stem,
+    because the registry requires it (see load_arm)."""
+    return (f"from . import Verdict\n\n"
+            f"NAME = \"{name}\"\n"
+            f"KIND = \"{kind}\"\n"
+            f"DEFAULT_MODE = \"{mode}\"\n\n\n"
+            f"def check(window, draft, ctx):\n"
+            f"    return None\n")

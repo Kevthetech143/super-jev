@@ -7,6 +7,7 @@ propagates. Nothing here reaches TypeSafe, npm or git.
 
     python3 -m pytest ~/.claude/skills/super-jev/tests/test_superjev.py -q
 """
+import importlib
 import importlib.util
 import io
 import json
@@ -6590,6 +6591,66 @@ def test_catch_ledger_writes_record_on_block(tmp_path, monkeypatch):
     assert rec["tag"] is None
     assert rec["note"] is None
     assert rec.get("id")
+
+
+def test_catch_ledger_records_the_arms_the_gate_consulted(tmp_path, monkeypatch):
+    """`arms` says which check arms this gate call asked, and in which
+    mode — with the registry switch off, the legacy inline twin."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv("SUPERJEV_ARMS", raising=False)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "all 30 permit cases matched... merged PRs 8, 9 and 10",
+        "evidence": [str(evidence)]}))
+    sj.main(["hook", "gate"])
+    rec = _read_catch_records(catch_path)[0]
+    assert rec["arms"] == ["pr_state:legacy-inline"]
+    assert rec["arm_errors"] is None
+
+
+def test_catch_ledger_records_the_registry_arm_with_the_switch_on(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_ARMS", "1")
+    monkeypatch.delenv("SUPERJEV_ARM_PR_STATE", raising=False)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("only PR 8 merged; 24 of 30 permit cases matched",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "all 30 permit cases matched... merged PRs 8, 9 and 10",
+        "evidence": [str(evidence)]}))
+    sj.main(["hook", "gate"])
+    rec = _read_catch_records(catch_path)[0]
+    assert rec["arms"] == ["pr_state:block"]
+    assert rec["arm_errors"] is None
+
+
+def test_catch_ledger_records_a_raising_blocking_arm(tmp_path, monkeypatch,
+                                                     capsys):
+    """A blocking arm that raises still fails open — and is no longer
+    invisible: the row names it and the exception class."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_ARMS", "1")
+    arm_mod = importlib.import_module("arms.pr_state")
+
+    def boom(window, draft, ctx):
+        raise RuntimeError("arm bug")
+
+    monkeypatch.setattr(arm_mod, "check", boom)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("PR 8 is still open", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "PR #8 merged.", "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0, "a broken arm must not be the reason a reply is stopped"
+    rec = _read_catch_records(catch_path)[0]
+    assert rec["arms"] == ["pr_state:block"]
+    assert rec["arm_errors"] == ["pr_state:RuntimeError"]
 
 
 def test_catch_ledger_writes_record_on_allow(tmp_path, monkeypatch):
