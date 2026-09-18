@@ -212,6 +212,13 @@ skillpick, permits) call `check_rules` yet — their own tolerance/policy
 checks (an mtime gap, a repo count, an unverified label) are not yet wired
 to speak when declined.
 
+A shared **residue ruling** helper belongs here too, one edit reaching all
+four area doors: when a claim's core is backed by a fact from this library,
+render one ruling sentence over any unobservable trailing clause instead of
+labelling it unprovable, so the judge is told what to do with it rather than
+left to read silence as unsupported (see "Rule on the residue, do not label
+it unprovable" in `playbook.md` §4). Not implemented in this pass.
+
 ## Cross-door NOT COVERED, at a glance
 
 These claim types have **no free check anywhere in the repo today**:
