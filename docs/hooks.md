@@ -2079,6 +2079,192 @@ score variance on a borderline reply, not a code regression #64
 introduced, and `replay_gate_bench.py` now lists `l01` among the lies the
 deterministic arm does not catch and correctly leaves to the judge. No
 code change follows from this case.
+## The window budget — reservations, not ceilings (2026-09-18)
+
+The gate's wide evidence window is four layers of material under one byte
+cap, and until this change the cap was spent first-come. That is fine when
+everything fits. When it does not, the layer that loses is whichever one
+happens to be assembled last — and on the recorded benches that was
+repeatedly the layer holding the one line that made a true reply true.
+
+Five gathering faults, measured with `hook gate --explain` against the
+recorded payloads, each one able to hide a supporting receipt on its own.
+
+### A worker's report went out of the window with its turn
+
+A report relayed in an earlier turn arrives as a `role: "user"` text
+record, not a tool result, so `_collect_report_blocks` is the only thing
+that can see it. It used to be concatenated onto that turn's tool results
+and rendered inside the turn's own `[previous turn -N]` block. That made it
+share the turn's fate, and the previous-turn block is the FIRST thing both
+trimmers give up. A worker's "the suite is green, here is the PR" was
+therefore the most fragile thing in the window, despite being, routinely,
+the only proof of what the reply was relaying.
+
+Relayed reports from previous turns now get their own section, under
+`[relayed reports in previous turns]`, with their own share of the cap
+(`PREV_REPORTS_BUDGET_SHARE`). They go through `_build_reports_block`, the
+same fence renderer this turn's reports already used, so every one still
+carries its `REPORT FROM <who> (unverified worker claim)` marker and is
+read as a relayed claim rather than a receipt. They are kept newest-first
+across turns: turn -1's reports before turn -2's, and within a turn, the
+later report first.
+
+The marker is registered everywhere a section label matters —
+`_WINDOW_PART_RE` and `_WINDOW_TRIM_ORDER` so the one hard token cap can
+rank and trim it, `_WINDOW_SECTION_RE` so a sticky `[from: ...]` identity
+stops at its boundary, and `_section_recency_rank` so family 5 can still
+tell whether a merge receipt postdates a report that says a PR is open. It
+ranks above the freshest `[previous turn -K]` block and below the receipts
+layer. In the trim order it sits ABOVE previous-turn tool results on
+purpose: a tool dump is summarised by the receipts layer, and a relayed
+report is summarised nowhere.
+
+### The session-receipts layer grew until it owned the window
+
+The receipts layer is the BACKING layer. It is a one-line memory of every
+receipt-worthy fact the session has seen, and it exists precisely to carry
+facts from turns too far back for the previous-turn window. It had no
+ceiling and no share, so on a long session it simply kept growing, and on
+a sizeable share of the recorded cases it held roughly half the whole cap
+at every previous-turn depth — leaving the turns that carried the actual
+proof nothing to fit in.
+
+It now has a reserved share, `RECEIPTS_BUDGET_SHARE`. Over the share, a
+receipt is given up NEWEST-first, on the reasoning that an old receipt is
+the one the previous-turn layers cannot re-derive. The exception is
+relevance: receipts whose claim keys (`_fact_label_keys`, the same
+extraction families 8 to 10 use) appear in the draft are selected first
+regardless of age, because those are the ones the reply is actually about.
+Whatever survives is emitted in its original order, so the block still
+reads oldest-to-newest and `_section_recency_rank` keeps meaning what it
+meant.
+
+Raising the total cap was the alternative and it is the wrong trade: it
+buys the same crowding at a higher price per call. Capping the fattest
+layer is the fix.
+
+### Previous-turn depth counted turns, not evidence
+
+`SUPERJEV_PREV_TURNS` is documented as how far back the window reaches. It
+counted TURNS, full stop. So a lead whose last two turns were pure
+conversation — a question answered from context, a teammate report
+acknowledged — got a window with zero previous-turn bytes in it, with a
+tool-carrying turn sitting one or two hops further back. On the recorded
+benches that is exactly what happened to the cases whose proof was one
+`gh` call away.
+
+`_previous_turn_spans` now counts turns that CARRY TOOL RESULTS. It walks
+back past a tool-free turn without counting it, and stops once it has the
+number of tool-carrying turns asked for, or once
+`SUPERJEV_PREV_TURN_SCAN_LIMIT` turns have been walked, whichever comes
+first. The limit is what stops a long conversational stretch from walking
+the whole transcript on every Stop event, and it can never be lower than
+the number of turns being looked for.
+
+Tool-free turns walked over on the way are still RETURNED, in their real
+positions. They cost no tool bytes, and a turn whose only content is a
+relayed worker report is exactly the turn whose report the layer above
+needs to see. A trailing run of tool-free turns is dropped from the result,
+since that is walked-over scan rather than evidence, and counting it would
+pad `prev_turns_found` with turns the quota never asked for. Passing
+`scan_limit` equal to the number of turns restores the old behaviour
+exactly.
+
+### The cited-file read-back only ever read the tail
+
+When a draft names its own source, `build_cited_file_block` resolves it and
+carries the file's tail into the window. That assumes the thing being cited
+is the last thing written to the file. For an append-only running log —
+which is what a draft citing "the summary log" usually means — the entry
+being quoted is routinely in the middle of the file, and anything appended
+since has pushed it well out of the tail.
+
+`_read_file_tail` now takes the draft text and, when it has one, carries a
+small set of lines from EARLIER in the same file above the tail. Selection
+is `_cited_file_relevant_lines`, and it is literal integer and string work
+with no model call: a ratio the draft itself states appearing on the line
+scores highest, each of the draft's own integers scores next, and each
+shared stemmed label word scores least. A line has to carry either a stated
+ratio or at least two of the draft's own integers to be eligible at all, so
+prose that merely shares vocabulary is never pulled in. Ties break toward
+the LATER line, since a running log's later entries supersede its earlier
+ones. Picked lines are emitted in file order, each prefixed with its real
+line number, under a heading that says what they are, so a reader can tell
+picked-out lines from the contiguous tail below them. The tail itself is
+byte-for-byte unchanged, and with no draft text the function behaves
+exactly as before.
+
+### A session-wide merge total read as a contradiction
+
+Some claims are not window-shaped at all. A draft that says a number of
+PRs merged, or that every item on a list is merged, is making a claim whose
+SCOPE is the whole session. A window is one session's receipts under a byte
+cap, and when it saturates below the claimed number it cannot settle the
+claim either way. Saying nothing was the problem: the judge read the gap
+between the claimed total and the receipt count as a refutation and blocked
+a true reply.
+
+`_facts_merge_count_claims` (family 4b) now states the window's own
+merge-receipt count and says plainly that the session-wide total cannot be
+checked there. It fires only when the draft's total is past the window's
+count, or when the claim names no total at all — a total the window already
+matches is checkable, and family 4 has already checked it. The number
+quoted is always the count of receipts actually found in this window, taken
+straight from family 4's own receipt map, never from the draft.
+
+This mechanism deliberately does NOT try to make such a claim allowable. It
+makes it read as unverifiable rather than false, which is the honest state
+of it.
+
+### Two fixes that fell out of the same measurement
+
+`"every item is either merged or on PR #N"` was being read as a claim that
+PR #N was merged, and the absent receipt reported as a finding — the draft
+says the opposite about #N. A disjunction or a negation sitting between
+"merged" and the PR number now disqualifies the match, in
+`_fact_draft_merge_prs` and in the TypeScript `windowFacts` mirror alike.
+The shared `test/fixtures/gate-window-facts.json` pins both sides to the
+same sentences, so the two cannot drift.
+
+And both new shares are RESERVATIONS, not ceilings. A layer is guaranteed
+its share against the layers BELOW it, and gets back whatever the layers
+ABOVE it leave unspent. The first cut of this change used hard ceilings and
+it threw evidence away for free: in windows with most of the cap still
+unused, receipt lines and whole worker reports were dropped to respect a
+share nothing else wanted. A dropped receipt is a refutation the judge
+never sees, which is the same failure this change exists to fix, pointed
+the other way. Previous-turn tool results are the layer that pays for both
+reservations, since they are the most replaceable material in the window.
+
+### What `--explain` now shows
+
+The window report names the new accounting: how many previous turns were
+SCANNED to find the tool-carrying ones, the current-turn and earlier-turn
+report layers separately with their own kept counts and shares, and the
+receipts layer's share together with how many lines went over it.
+
+### How this was measured
+
+Offline, with no judge call and no network. Each recorded payload's window
+was rebuilt through the same chain the live hook uses —
+`_derive_evidence_text_from_transcript`, the cited-file append,
+`compose_window_with_facts`, then `trim_window_to_token_budget` — and the
+finished window text was searched for the specific figure or identifier the
+draft's claim rests on. The deterministic arms were then replayed over every
+recorded set, before and after, checking that no truth gains a
+deterministic block. `tests/replay_fact_block_sweep.py` also now WARNS
+(never fails the run) when a recorded case's window — truth or lie —
+carries fewer receipt-worthy lines (`_RECEIPT_WORTHY_RE`) than the
+baseline's window for the same case, printed for truths and lies
+separately. A dropped receipt is a refutation the judge might no longer
+see, even on a case where no deterministic arm's decision flips on it, so
+it is worth a human's eye without being treated as a hard failure on its
+own — and a truth's window is exactly where a dropped line costs the
+most, so the check is not restricted to lies. It now covers the blind set
+too, since this is the first change to touch how much of each layer
+survives the cap, and the arms have to be replayable over every recorded
+set rather than most of them.
 
 ## Judge-advisory mode
 

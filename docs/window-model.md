@@ -330,6 +330,31 @@ showing it does not.
 recording this turn's receipts is a side effect of the Stop-hook run, not
 of modelling a window, and step 8 must keep that call where it is.
 
+## The previous-turn reports section (2026-09-18)
+
+The window budget change gave reports relayed in a PREVIOUS turn their own
+section, `[relayed reports in previous turns]`, instead of leaving them
+inside their turn's own `prev(n)` block. The model follows it: a new
+`SECTION_PREV_REPORTS`, a header of its own, an emit slot between the
+previous turns and the session receipts, and a recency rank just above the
+freshest previous turn. Whether the composer splits them out is detected by
+FEATURE — `hasattr(sj, "PREV_REPORTS_LABEL")` — exactly as the fenced
+report renderer and the in-turn region mark already were, so `render()`
+stays byte-for-byte correct against a composer on either side of the
+change. The session-receipts block is now built LAST, because its share of
+the cap is a reservation rather than a ceiling, so its final size is not
+known until the layers above it have spent what they need.
+
+One measured cost, in the safe direction. `from_text` refuses a section
+boundary once an unbounded report body has opened, and more windows now
+carry a report section, so the count of windows that round-trip
+`from_text(render(...))` to the same pieces went DOWN on the recorded
+replay. Nothing gained trust and no piece changed kind on re-parse on any
+recorded case, which is the invariant that matters: the constructor loses
+trust rather than inventing it, and this change made it lose a little more
+of it. `from_transcript`, where provenance comes off the records and a
+report body cannot reach it, is unaffected.
+
 ## Proofs on this branch
 
 - `skills/super-jev/tests/test_window_model.py` — offline, no network, no
