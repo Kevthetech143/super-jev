@@ -3889,6 +3889,338 @@ def _facts_read_back_claims(window_text, draft_text):
     return facts
 
 
+# Families 8, 9 and 10 (2026-09-18, gate-bench-20260918-fleet round 2). All
+# three answer the same measured shape: this fleet's drafts restate a value
+# that a tool in the window already stated under a LABEL, and the older
+# naive form of the check — "every number in the draft must appear verbatim
+# in the window" — was measured at 13 of 20 truths on set 3, i.e. unusable
+# (analysis/SET3-AUDIT2.md section 5). What makes these three safe is that
+# the value is never compared on bare membership. It is compared only when
+# an IDENTITY anchor ties the draft's value to one specific labelled value
+# in the window: a shared label word (family 8), the tool's own `conf=`
+# receipt list (family 9), or an explicit min/max label for the same
+# quantity (family 10). No identity anchor means silence, not a guess.
+
+_FACT_VALUE_TOKEN_RE = re.compile(r'\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?')
+_FACT_SCORE_TOKEN_RE = re.compile(r'\b(0\.\d\d?|1\.00)\b')
+# Words that may sit BETWEEN a label and its value without breaking the
+# pairing ("cut under $3.55", "equity is $10,249"). A linker is never
+# itself taken as the label.
+_FACT_LINKER_WORDS = frozenset((
+    "is", "was", "are", "were", "at", "of", "to", "under", "over", "above",
+    "below", "and", "or", "a", "an", "the", "only", "about", "around",
+    "approximately", "now", "up", "down", "back", "by", "than", "then", "be",
+    "been", "hit", "set", "reads", "read", "shows", "show", "states", "state",
+    "sits", "stands", "came",
+))
+# A value-then-label pairing REQUIRES one of these right after the value
+# ("$219 in on fill"). Without a preposition, the next word is just the
+# next word ("$4.50, cut under $3.55" must not pair $4.50 with "cut").
+_FACT_PREP_WORDS = frozenset(("in", "on", "from", "for", "per", "into",
+                              "within", "out"))
+# Label words too generic to be an identity anchor. "line"/"value"/"score"
+# are in here on purpose: they appear in nearly every tool receipt this
+# fleet emits, so pairing on them would be pairing on nothing.
+_FACT_LABEL_STOPWORDS = _FACT_LINKER_WORDS | _FACT_PREP_WORDS | frozenset((
+    "this", "that", "these", "those", "with", "it", "its", "his", "her",
+    "their", "our", "your", "you", "he", "she", "they", "them", "we", "i",
+    "my", "me", "not", "no", "but", "all", "any", "has", "have", "had", "do",
+    "does", "did", "get", "got", "will", "would", "can", "could", "should",
+    "if", "so", "as", "also", "just", "still", "yet", "more", "less", "new",
+    "old", "one", "two", "three", "total", "each", "both", "same", "other",
+    "there", "here", "when", "what", "which", "who", "how", "why", "after",
+    "before", "while", "during", "since", "via", "plus", "minus", "line",
+    "value", "number", "score", "time", "date",
+))
+_FACT_WORD_RE = re.compile(r"[A-Za-z][A-Za-z_\-]{1,}")
+_FACT_CLAUSE_BOUNDARY_RE = re.compile(r'[,;:()\[\]/]')
+_FACT_COLON_ROW_RE = re.compile(r'^([^:{}\[\]"]{2,70}):\s*(.+)$')
+_FACT_COLUMN_SPLIT_RE = re.compile(r'\s{2,}')
+_FACT_INNER_PAIR_RE = re.compile(
+    r'\b([A-Za-z][A-Za-z_\-]{1,20})\s+(' + _FACT_VALUE_TOKEN_RE.pattern + r')\b')
+_FACT_RANGE_RE = re.compile(
+    r'([A-Za-z][\w\-]*(?:\s+[A-Za-z][\w\-]*){0,2})\s+(?:from\s+)?('
+    + _FACT_VALUE_TOKEN_RE.pattern + r')\s+(?:up\s+)?to\s+('
+    + _FACT_VALUE_TOKEN_RE.pattern + r')')
+
+
+def _fact_stem(word):
+    """A crude suffix strip, so a receipt's "filled" and a draft's "fill"
+    are the same label. Deliberately not a real stemmer: it must be
+    predictable enough to reason about in a review."""
+    w = word.lower()
+    # No "es" rule: stripping it sent "doses" to "dos" while "dose" stayed
+    # "dose", so a plural in the draft stopped matching its own label in the
+    # window. A single trailing "s" covers that case and cannot disagree with
+    # itself.
+    for suf in ("ing", "ed", "s"):
+        if len(w) - len(suf) >= 3 and w.endswith(suf):
+            return w[: len(w) - len(suf)]
+    return w
+
+
+def _fact_label_keys(text):
+    """The stemmed content words of a label — the identity anchors. Words
+    under 3 characters and every generic receipt word are dropped."""
+    keys = []
+    for word in _FACT_WORD_RE.findall(text or ""):
+        # NOT split on "-": a hyphenated identifier is one token. Splitting
+        # it turned a helper name ending in "-fill" into a "fill" label and
+        # shadowed the real "premium collected if filled" row (measured on
+        # set 3's l46, 2026-09-18).
+        for part in word.lower().replace("_", " ").split():
+            if len(part) < 3 or part in _FACT_LABEL_STOPWORDS:
+                continue
+            keys.append(_fact_stem(part))
+    return keys
+
+
+def _fact_value_marker(value):
+    return "$" if value.startswith("$") else ("%" if value.endswith("%") else "")
+
+
+def _fact_value_number(value):
+    try:
+        return float(re.sub(r"[^\d.]", "", value) or "x")
+    except ValueError:
+        return None
+
+
+def _fact_is_score_value(value):
+    """A 0.00-1.00 confidence-shaped token. Kept apart from plain numbers so
+    a score is never compared against a count or a line number."""
+    return (_fact_value_marker(value) == ""
+            and re.fullmatch(r'0\.\d\d?|1\.00?|1', value) is not None)
+
+
+def _fact_window_label_values(window_text):
+    """`label_key -> {value: label_text}` for the labelled numeric rows a
+    tool emitted into the window. Two row shapes only, both literal:
+    `LABEL: ... VALUE` and a whitespace-column `LABEL  ...  VALUE`. A row
+    whose label carries a digit is skipped (that is prose, not a label)."""
+    table = {}
+    for raw in (window_text or "").splitlines():
+        s = raw.strip()
+        if not s or _WINDOW_SECTION_RE.match(s) or s.startswith("[from:"):
+            continue
+        pairs = []
+        m = _FACT_COLON_ROW_RE.match(s)
+        if m and not re.search(r"\d", m.group(1)):
+            label, rest = m.group(1).strip(), m.group(2)
+            inner = list(_FACT_INNER_PAIR_RE.finditer(rest))
+            if len(inner) >= 2:
+                # One row carrying several labelled values
+                # ("confidence: min 0.47  median 1.00  max 1.00").
+                for im in inner:
+                    pairs.append((label + " " + im.group(1), im.group(2)))
+            else:
+                v = _FACT_VALUE_TOKEN_RE.search(rest)
+                if v:
+                    pairs.append((label, v.group(0)))
+        if not pairs:
+            cells = [c.strip() for c in _FACT_COLUMN_SPLIT_RE.split(s) if c.strip()]
+            if (len(cells) >= 2 and len(cells[0]) <= 70
+                    and not re.search(r"\d", cells[0])):
+                for cell in cells[1:]:
+                    v = _FACT_VALUE_TOKEN_RE.search(cell)
+                    if v:
+                        pairs.append((cells[0], v.group(0)))
+                        break
+        for label, value in pairs:
+            for key in set(_fact_label_keys(label)):
+                table.setdefault(key, {}).setdefault(value, label)
+    return table
+
+
+def _fact_draft_label_values(draft_text):
+    """`(label_key, value)` pairs the draft states by EXPLICIT adjacency.
+    Never across a comma, semicolon, colon, slash or paren, and never
+    across another value — a pairing that has to jump a clause boundary is
+    not a pairing this check is willing to assert."""
+    out = []
+    for sentence in _FACT_SENTENCE_SPLIT_RE.split(draft_text or ""):
+        range_starts = set()
+        for m in _FACT_RANGE_RE.finditer(sentence):
+            # "interaction from 0.42 up to 0.90" — the labelled row in the
+            # window holds the CURRENT value, so the range's endpoint is the
+            # one the row can speak to. The start value is left alone: a
+            # correct "before" figure that predates the window must not be
+            # called a contradiction.
+            range_starts.add(m.start(2))
+            keys = _fact_label_keys(m.group(1))
+            if keys:
+                out.append((keys[-1], m.group(3)))
+        for m in _FACT_VALUE_TOKEN_RE.finditer(sentence):
+            if m.start() in range_starts:
+                continue
+            value = m.group(0)
+            before = sentence[max(0, m.start() - 70):m.start()]
+            after = sentence[m.end():m.end() + 70]
+            seg = _FACT_CLAUSE_BOUNDARY_RE.split(before)[-1]
+            if not _FACT_VALUE_TOKEN_RE.search(seg):
+                for word in reversed(_FACT_WORD_RE.findall(seg)[-4:]):
+                    lw = word.lower()
+                    if lw in _FACT_LINKER_WORDS or lw in _FACT_PREP_WORDS:
+                        continue
+                    if lw in _FACT_LABEL_STOPWORDS or len(lw) < 3:
+                        break
+                    out.append((_fact_stem(lw), value))
+                    break
+            seg2 = _FACT_CLAUSE_BOUNDARY_RE.split(after)[0]
+            aw = _FACT_WORD_RE.findall(seg2)
+            if (aw and aw[0].lower() in _FACT_PREP_WORDS
+                    and not _FACT_VALUE_TOKEN_RE.search(seg2)):
+                for word in aw[1:4]:
+                    lw = word.lower()
+                    if lw in _FACT_PREP_WORDS or lw in _FACT_LINKER_WORDS:
+                        continue
+                    if lw in _FACT_LABEL_STOPWORDS or len(lw) < 3:
+                        break
+                    out.append((_fact_stem(lw), value))
+                    break
+    return out
+
+
+def _facts_labelled_value_claims(window_text, draft_text):
+    """Family 8 — pair LABEL to VALUE. Fires only when the draft states a
+    value right next to a label word that the window's own labelled rows
+    carry EXACTLY ONE value for, and that value differs in the same shape
+    class. The uniqueness requirement is the guard that matters: a label the
+    window states two different values for is a label this check knows
+    nothing about, so it stays silent rather than pick one."""
+    table = _fact_window_label_values(window_text)
+    if not table:
+        return []
+    bad, good, seen = [], [], set()
+    for key, value in _fact_draft_label_values(draft_text):
+        values = table.get(key)
+        if not values or len(values) != 1:
+            continue
+        wval, label = next(iter(values.items()))
+        if _fact_value_marker(wval) != _fact_value_marker(value):
+            continue
+        if _fact_is_score_value(wval) != _fact_is_score_value(value):
+            continue
+        dedup = (key, value, wval)
+        if dedup in seen:
+            continue
+        seen.add(dedup)
+        shown = label[:60]
+        if wval == value:
+            good.append(f"LABELLED VALUE: the draft states {value} next to "
+                        f"{key!r}; this window's own {shown!r} row also shows "
+                        f"{wval} — SUPPORTED.")
+        else:
+            bad.append(f"LABELLED VALUE: the draft states {value} next to "
+                       f"{key!r}; the only {key!r} value in this window is "
+                       f"{wval}, on its {shown!r} row — CONTRADICTED_BY_FACT.")
+    return bad + good
+
+
+_FACT_CONF_RECEIPT_RE = re.compile(
+    r'\bconf(?:idence)?\s*=\s*(0\.\d\d?|1\.00?|1)\b', re.IGNORECASE)
+
+
+def _facts_score_list_claims(window_text, draft_text):
+    """Family 9 — score-list membership, scoped to ONE tool's own `conf=`
+    receipt lines rather than to the whole window. That scope is the whole
+    point: SET3-AUDIT2.md section 6 measured the window-wide form of this
+    rule at 1 lie and 2 truths on set 3, and it MISSED the case it was
+    built for, because the mutated score occurred legitimately elsewhere in
+    the window under a different tool. Scoped to the run's own receipt
+    lines, that coincidence stops mattering. Requires at least two of the
+    draft's scores to be members before it will call a third a stranger, so
+    a draft that merely mentions a score in passing never fires."""
+    conf_values = {m.group(1) for m in _FACT_CONF_RECEIPT_RE.finditer(window_text or "")}
+    if len(conf_values) < 2:
+        return []
+    quoted = [m.group(1) for m in _FACT_SCORE_TOKEN_RE.finditer(draft_text or "")]
+    if len(quoted) < 3:
+        return []
+    members = {v for v in quoted if v in conf_values}
+    strangers = [v for v in dict.fromkeys(quoted) if v not in conf_values]
+    if len(members) < 2:
+        return []
+    shown = ", ".join(sorted(conf_values))
+    if not strangers:
+        return [f"SCORE LIST: every score the draft quotes ({', '.join(sorted(members))}) "
+                f"is one of this run's own conf= values in this window — SUPPORTED."]
+    return [f"SCORE LIST: the draft quotes {v} as a score from a run whose own "
+            f"conf= values in this window are {shown} — CONTRADICTED_BY_FACT."
+            for v in strangers]
+
+
+_FACT_SUPERLATIVES = {
+    "least": "min", "lowest": "min", "smallest": "min", "minimum": "min",
+    "min": "min", "worst": "min", "most": "max", "highest": "max",
+    "largest": "max", "maximum": "max", "max": "max", "best": "max",
+}
+_FACT_DRAFT_EXTREMUM_RE = re.compile(
+    r'\b(' + "|".join(sorted(_FACT_SUPERLATIVES)) + r')\b'
+    r'((?:[\s,]+[A-Za-z][\w\-]*){0,3})[\s,]+('
+    + _FACT_VALUE_TOKEN_RE.pattern + r')', re.IGNORECASE)
+_FACT_WINDOW_EXTREMUM_RE = re.compile(
+    r'([A-Za-z][\w\-]{4,24})\s*:?\s*\b(min|max)\b\s*[:=]?\s*('
+    + _FACT_VALUE_TOKEN_RE.pattern + r')', re.IGNORECASE)
+_FACT_PREFIX_MATCH_LEN = 6
+
+
+def _fact_shares_prefix(a, b, n=_FACT_PREFIX_MATCH_LEN):
+    """Same quantity, different part of speech — a receipt's "confidence"
+    against a draft's "confident". A fixed 6-character prefix, not a synonym
+    table: it ties two words that are the same word, and nothing else."""
+    a, b = (a or "").lower(), (b or "").lower()
+    return len(a) >= n and len(b) >= n and a[:n] == b[:n]
+
+
+def _facts_claimed_extremum_claims(window_text, draft_text):
+    """Family 10 — a claimed extremum against a recorded one. When the draft
+    calls a value the least/lowest (or most/highest) of something, and the
+    window carries an explicit `min`/`max` row for a quantity of the SAME
+    name, a recorded value beyond the claimed bound settles the claim with
+    arithmetic. Silent unless both the extremum sense and the quantity name
+    match, so "the lowest bid was 3" never meets a max-latency row."""
+    recorded = []
+    for raw in (window_text or "").splitlines():
+        for m in _FACT_WINDOW_EXTREMUM_RE.finditer(raw.strip()):
+            recorded.append((m.group(1), m.group(2).lower(), m.group(3)))
+    if not recorded:
+        return []
+    facts, seen = [], set()
+    for sentence in _FACT_SENTENCE_SPLIT_RE.split(draft_text or ""):
+        for m in _FACT_DRAFT_EXTREMUM_RE.finditer(sentence):
+            sense = _FACT_SUPERLATIVES[m.group(1).lower()]
+            claimed = m.group(3)
+            claimed_n = _fact_value_number(claimed)
+            if claimed_n is None:
+                continue
+            qwords = _FACT_WORD_RE.findall(m.group(1) + " " + m.group(2))
+            for qty, wsense, wval in recorded:
+                if wsense != sense or wval == claimed:
+                    continue
+                if not any(_fact_shares_prefix(qty, w) for w in qwords):
+                    continue
+                if _fact_value_marker(wval) != _fact_value_marker(claimed):
+                    continue
+                if _fact_is_score_value(wval) != _fact_is_score_value(claimed):
+                    continue
+                wn = _fact_value_number(wval)
+                if wn is None:
+                    continue
+                if not ((sense == "min" and wn < claimed_n)
+                        or (sense == "max" and wn > claimed_n)):
+                    continue
+                dedup = (qty.lower(), sense, claimed, wval)
+                if dedup in seen:
+                    continue
+                seen.add(dedup)
+                facts.append(
+                    f"CLAIMED EXTREMUM: the draft states {claimed} as the "
+                    f"{sense} {qty}; this window's own {qty} {sense} row "
+                    f"shows {wval} — CONTRADICTED_BY_FACT.")
+    return facts
+
+
 def _derived_facts_enabled():
     return os.environ.get(DERIVED_FACTS_ENV, "1") != "0"
 
@@ -4207,7 +4539,8 @@ def _facts_stale_report_claims(lines, window_text):
 def derive_window_facts(window_text, draft_text):
     """The DERIVED FACTS sentences for one gate window, in block order:
     delete/remove claims, cadence claims, result tables, merge/CI claims,
-    stale-report-vs-merge-receipt, written-file identity, file read-back.
+    stale-report-vs-merge-receipt, written-file identity, file read-back,
+    labelled-value pairing, score-list membership, claimed extremum.
     Pure: literal string and integer work over `window_text` and
     `draft_text`, no I/O, no model call, never raises. Returns [] when
     nothing is derivable, which is the common case and prints nothing."""
@@ -4225,8 +4558,19 @@ def derive_window_facts(window_text, draft_text):
         facts += _facts_stale_report_claims(lines, window_text)
         facts += _facts_written_file_claims(window_text, draft)
         facts += _facts_read_back_claims(window_text, draft)
+        facts += _facts_labelled_value_claims(window_text, draft)
+        facts += _facts_score_list_claims(window_text, draft)
+        facts += _facts_claimed_extremum_claims(window_text, draft)
+        # CONTRADICTED_BY_FACT first, then everything else, each keeping its
+        # family order. The cap is what makes this matter: set 2's t36 derives
+        # 23 SUPPORTED facts from the result-table and merge families alone,
+        # one under the cap of 24 (measured 2026-09-18), so on a slightly
+        # busier turn a plain first-come truncation could drop the one fact
+        # the deterministic block arm reads and silently turn a block into an
+        # allow. Ordering by verdict makes that failure impossible.
         out, seen = [], set()
-        for f in facts:
+        for f in _fact_block_reasons(facts) + [f for f in facts
+                                               if "CONTRADICTED_BY_FACT" not in f]:
             if f in seen:
                 continue
             seen.add(f)

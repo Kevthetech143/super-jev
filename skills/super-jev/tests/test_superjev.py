@@ -6153,3 +6153,207 @@ def test_the_scan_reads_a_bounded_tail_of_a_large_transcript(tmp_path, monkeypat
     monkeypatch.setenv(sj.STOP_SCAN_MAX_BYTES_ENV, "0")
     assert len(sj._read_transcript_records(path, max_bytes=sj._stop_scan_max_bytes())) \
         == len(records)
+
+
+# ---------------------------------------------------------------------------
+# Derived facts, families 8/9/10 — labelled-value pairing, score-list
+# membership, claimed extremum. Every window below is a SYNTHETIC fixture in
+# the shape the fleet bench measured; no recorded bench payload, no customer
+# or health content, appears in this file.
+# ---------------------------------------------------------------------------
+
+_LABELLED_VALUE_WINDOW = (
+    "[current turn]\n"
+    "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+    "Cut line (documented, daily close below): $4.12 — cushion $0.93 (18.5%)\n"
+    "premium collected if filled  ~ $119.00   ($0.17 x 100 x 7)\n"
+    "interaction          PROBLEM            0.60\n"
+    "dose_safe            SAFE               0.85\n"
+)
+
+
+def test_labelled_value_fact_contradicts_a_mutated_trigger_price():
+    draft = ("Three triggers: profit-take at $0.20, roll down under $4.50, "
+             "cut under $3.55 with bad news.")
+    facts = sj.derive_window_facts(_LABELLED_VALUE_WINDOW, draft)
+    assert facts == [
+        "LABELLED VALUE: the draft states $3.55 next to 'cut'; the only 'cut' "
+        "value in this window is $4.12, on its 'Cut line (documented, daily "
+        "close below)' row — CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_pairs_a_value_to_a_following_preposition_label():
+    # "$219 in on fill" — the value comes FIRST and the label follows behind a
+    # real preposition, which is the only shape that direction is allowed in.
+    draft = "$219 in on fill, $3,150 held, about $2,221 on margin."
+    facts = sj.derive_window_facts(_LABELLED_VALUE_WINDOW, draft)
+    assert facts == [
+        "LABELLED VALUE: the draft states $219 next to 'fill'; the only "
+        "'fill' value in this window is $119.00, on its 'premium collected if "
+        "filled' row — CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_checks_only_the_endpoint_of_a_from_to_range():
+    # "interaction from 0.42 up to 0.90": 0.90 is the value the window's own
+    # interaction row can speak to. 0.42 is a BEFORE figure that predates the
+    # window and must never be called a contradiction.
+    draft = "The drug interaction from 0.42 up to 0.90, doses 0.81 to 0.85."
+    facts = sj.derive_window_facts(_LABELLED_VALUE_WINDOW, draft)
+    assert any("0.90" in f and "CONTRADICTED_BY_FACT" in f for f in facts)
+    assert not any("0.42" in f for f in facts)
+    # The honest half of the same sentence reads as support, not silence.
+    assert any("0.85" in f and "SUPPORTED" in f for f in facts)
+
+
+def test_labelled_value_fact_states_support_when_the_value_matches():
+    draft = "Cut under $4.12 with bad news."
+    facts = sj.derive_window_facts(_LABELLED_VALUE_WINDOW, draft)
+    assert facts == [
+        "LABELLED VALUE: the draft states $4.12 next to 'cut'; this window's "
+        "own 'Cut line (documented, daily close below)' row also shows $4.12 "
+        "— SUPPORTED."
+    ]
+
+
+def test_labelled_value_fact_is_silent_when_no_clause_boundary_may_be_crossed():
+    # "roll down under $4.50, cut under ..." must not pair $4.50 with "cut"
+    # across the comma, and "$3,150 held" has no preposition after the value.
+    draft = "Roll down under $4.50, cut under $4.12. $3,150 held."
+    facts = sj.derive_window_facts(_LABELLED_VALUE_WINDOW, draft)
+    assert all("$4.50" not in f and "$3,150" not in f for f in facts)
+
+
+def test_labelled_value_fact_is_silent_when_the_window_states_two_values():
+    # Uniqueness is the guard: a label the window carries two values for is a
+    # label this check knows nothing about.
+    window = (
+        "[current turn]\n"
+        "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+        "Cut line: $4.12\n"
+        "Cut line: $3.90\n"
+    )
+    assert sj.derive_window_facts(window, "Cut under $3.55 with bad news.") == []
+
+
+def test_labelled_value_fact_is_silent_across_value_shapes():
+    # A price is never compared against a bare count or a percentage.
+    window = ("[current turn]\n"
+              "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+              "Cut line: 4\n")
+    assert sj.derive_window_facts(window, "Cut under $3.55 with bad news.") == []
+
+
+def test_labelled_value_fact_does_not_read_a_hyphenated_name_as_a_label():
+    # Regression: splitting "await-clov-call-fill" on the hyphen invented a
+    # "fill" label and shadowed the real "premium collected if filled" row.
+    window = (
+        "[current turn]\n"
+        "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+        "Helper 'await-clov-call-fill' fired: 6 checks\n"
+        "premium collected if filled  ~ $119.00\n"
+    )
+    facts = sj.derive_window_facts(window, "$219 in on fill.")
+    assert facts == [
+        "LABELLED VALUE: the draft states $219 next to 'fill'; the only "
+        "'fill' value in this window is $119.00, on its 'premium collected if "
+        "filled' row — CONTRADICTED_BY_FACT."
+    ]
+
+
+_SCORE_LIST_WINDOW = (
+    "[current turn]\n"
+    "[from: Bash python3 -m jev probe @ /Users/admin/x]\n"
+    '{"q1": {"choice": "YES", "confidence": 0.85}}\n'
+    "-> SUPPORTED       conf=0.93   (first probe)\n"
+    "-> SUPPORTED       conf=1.00   (second probe)\n"
+    "-> IMPLAUSIBLE     conf=0.98   (third probe)\n"
+    "-> IMPLAUSIBLE     conf=0.55   (fourth probe)\n"
+    "-> IMPLAUSIBLE     conf=0.97   (fifth probe)\n"
+)
+
+
+def test_score_list_fact_catches_a_stranger_score_present_elsewhere():
+    # The whole point of scoping to the run's own conf= lines: 0.85 IS in the
+    # window, under a different tool's JSON, which is exactly why the
+    # window-wide form of this rule missed this shape (SET3-AUDIT2 section 6).
+    draft = ("It flagged the first at 0.98 and the second at 0.97, and scored "
+             "the third at 0.85 — solidly caught.")
+    facts = sj.derive_window_facts(_SCORE_LIST_WINDOW, draft)
+    assert facts == [
+        "SCORE LIST: the draft quotes 0.85 as a score from a run whose own "
+        "conf= values in this window are 0.55, 0.93, 0.97, 0.98, 1.00 — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_score_list_fact_states_support_when_every_score_is_a_member():
+    draft = "It scored them 0.98, 0.97 and 0.55."
+    facts = sj.derive_window_facts(_SCORE_LIST_WINDOW, draft)
+    assert facts == [
+        "SCORE LIST: every score the draft quotes (0.55, 0.97, 0.98) is one "
+        "of this run's own conf= values in this window — SUPPORTED."
+    ]
+
+
+def test_score_list_fact_is_silent_below_two_matching_members():
+    # A draft that merely mentions a score in passing never fires: without
+    # two members there is no evidence the draft is quoting THIS list.
+    draft = "Confidence under 0.60 means look again, 0.80 is reliable, 0.85 fine."
+    assert sj.derive_window_facts(_SCORE_LIST_WINDOW, draft) == []
+
+
+_EXTREMUM_WINDOW = (
+    "[current turn]\n"
+    "[from: Bash python3 tools/score_run.py @ /Users/admin/x]\n"
+    "confidence: min 0.47  median 1.00  max 1.00\n"
+)
+
+
+def test_claimed_extremum_fact_contradicts_a_raised_minimum():
+    draft = ("The only wrong answer came back at 0.97, and the least "
+             "confident answer, 0.87, was correct.")
+    facts = sj.derive_window_facts(_EXTREMUM_WINDOW, draft)
+    assert facts == [
+        "CLAIMED EXTREMUM: the draft states 0.87 as the min confidence; this "
+        "window's own confidence min row shows 0.47 — CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_claimed_extremum_fact_is_silent_when_the_claim_holds():
+    draft = "The least confident answer, 0.47, was correct."
+    assert sj.derive_window_facts(_EXTREMUM_WINDOW, draft) == []
+
+
+def test_claimed_extremum_fact_is_silent_on_a_different_quantity():
+    # A max-latency row never settles a claim about the lowest confidence.
+    window = ("[current turn]\n"
+              "[from: Bash python3 tools/score_run.py @ /Users/admin/x]\n"
+              "latency: min 0.47  max 0.99\n")
+    assert sj.derive_window_facts(window, "The least confident answer, 0.87, "
+                                          "was correct.") == []
+
+
+def test_claimed_extremum_fact_is_silent_on_the_opposite_sense():
+    # A recorded min cannot contradict a claimed MAX.
+    draft = "The most confident answer, 0.87, was wrong."
+    assert sj.derive_window_facts(_EXTREMUM_WINDOW, draft) == []
+
+
+def test_derived_facts_put_contradictions_ahead_of_the_cap():
+    # The cap must never be able to drop the one fact the deterministic block
+    # arm reads. Build more SUPPORTED facts than the cap and check the
+    # contradiction still survives at the head.
+    names = [f"gauge{chr(ord('a') + i)}" for i in range(sj.DERIVED_FACTS_CAP + 6)]
+    rows = "\n".join(f"{n}: {i + 10}" for i, n in enumerate(names))
+    window = ("[current turn]\n"
+              "[from: Bash python3 tools/many.py @ /Users/admin/x]\n"
+              + rows + "\nCut line: $4.12\n")
+    draft = ("Cut under $3.55 with bad news. "
+             + " ".join(f"{n} is {i + 10}." for i, n in enumerate(names)))
+    facts = sj.derive_window_facts(window, draft)
+    assert len(facts) == sj.DERIVED_FACTS_CAP
+    assert "CONTRADICTED_BY_FACT" in facts[0]
+    assert "$3.55" in facts[0]
+    assert sj._fact_block_reasons(facts)
