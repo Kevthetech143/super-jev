@@ -1553,13 +1553,23 @@ def _section_bytes(block):
 def _fit_receipts(facts, budget, relevance_fn=None, draft_text=None):
     """(pieces, kept, dropped) for the session-receipts section inside
     `budget` bytes — the composer's `_build_receipts_block` rule in piece
-    terms: the whole block when it fits, else receipts whose claim keys
-    appear in the draft first (oldest-first among them), then the rest
-    oldest-first, the survivors emitted in their ORIGINAL order. A receipt
-    is given up NEWEST-first — an old receipt is the one the previous-turn
-    layers cannot re-derive (2026-09-18, review round 2: this used to fill
-    newest-first, which drops the OLDEST receipts first, the opposite of
-    the composer's own rationale)."""
+    terms: the whole block when it fits, else receipts the draft names by
+    a concrete IDENTIFIER first (oldest-first among them), then receipts
+    that merely share a stemmed content word with the draft (oldest-first),
+    then the rest oldest-first, the survivors emitted in their ORIGINAL
+    order. A receipt is given up NEWEST-first — an old receipt is the one
+    the previous-turn layers cannot re-derive (2026-09-18, review round 2:
+    this used to fill newest-first, which drops the OLDEST receipts
+    first, the opposite of the composer's own rationale).
+
+    `relevance_fn` is feature-detected (`sj._receipts_relevant_to_draft`)
+    and its RETURN SHAPE is too: a composer from round 3 onward returns
+    `(identifier_relevant, stem_relevant)`, a two-tier split (see
+    `superjev._receipts_relevant_to_draft`'s own docstring for why
+    identifier ranks above stem — "PR #9 merged" shares a generic stem
+    with every OTHER merge receipt too); an older composer returns one
+    flat set, read here as the stem tier alone so this still renders
+    byte-identically against either side."""
     if not facts:
         return [], 0, 0
     header = _header_piece(SECTION_RECEIPTS)
@@ -1568,11 +1578,17 @@ def _fit_receipts(facts, budget, relevance_fn=None, draft_text=None):
         return whole, len(facts), 0
     if budget <= 0:
         return [], 0, len(facts)
-    relevant = set()
+    id_relevant, stem_relevant = set(), set()
     if relevance_fn is not None:
         relevant = relevance_fn([p.text for p in facts], draft_text)
-    order = ([i for i in range(len(facts)) if i in relevant]
-             + [i for i in range(len(facts)) if i not in relevant])
+        if isinstance(relevant, tuple) and len(relevant) == 2:
+            id_relevant, stem_relevant = relevant
+        else:
+            stem_relevant = relevant or set()
+    order = ([i for i in range(len(facts)) if i in id_relevant]
+             + [i for i in range(len(facts)) if i in stem_relevant]
+             + [i for i in range(len(facts))
+                if i not in id_relevant and i not in stem_relevant])
     kept = set()
     used = len((header.text + HEADER_SEPARATOR).encode("utf-8"))
     for i in order:

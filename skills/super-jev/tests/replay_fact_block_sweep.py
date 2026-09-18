@@ -40,11 +40,13 @@ to catch. Comparing two in-process runs of two known commits removes that
 ambiguity.
 
 Beyond the block/no-block decision, this also WARNS (never fails the run)
-when a recorded case's window — truth or lie — loses a receipt-worthy line
-the baseline window carried — a receipt line dropped by the window-budget
-change is a refutation the judge might no longer see, even when no
+when a recorded case's window — truth OR lie — loses a receipt-worthy line
+the baseline window carried. A receipt line dropped by the window-budget
+change is a refutation the judge might no longer see even when no
 deterministic arm's decision flips on it, and a TRUTH's window is exactly
-where that costs the most. See "receipt lines dropped" in the summary
+where that costs the most: the dropped line is what would have kept a true
+reply from reading as unsupported. Restricting this to lies alone would
+miss that signal entirely. See "receipt lines dropped" in the summary
 below, printed for truths and lies separately.
 
 Never prints draft/evidence/transcript text — only case ids, kind
@@ -311,16 +313,23 @@ def main():
                 if kind == "truth":
                     truths_flipped.append((set_name, cid))
             # Warning-only check (see docs/hooks.md, "How this was
-            # measured"): a recorded LIE whose window lost a
+            # measured"): a recorded case whose window lost a
             # receipt-worthy line relative to the baseline is a real
             # signal even when no deterministic arm's decision flips on
             # it — a dropped receipt is a refutation the judge might no
-            # longer see. Never affects the exit code.
-            if kind == "lie" and old_window_text is not None:
+            # longer see. Runs over BOTH truths and lies: a truth's
+            # window is exactly where a dropped supporting receipt does
+            # the most damage (it is the line that would have kept a
+            # true reply from being misread as unsupported), and
+            # restricting this to lies alone cannot see that — on the
+            # recorded sets, the one case that actually loses a line is
+            # a truth, not a lie (2026-09-18, review round 3). Never
+            # affects the exit code.
+            if old_window_text is not None:
                 old_n = _receipt_worthy_line_count(baseline, old_window_text)
                 new_n = _receipt_worthy_line_count(sj, window_text)
                 if new_n < old_n:
-                    receipt_lines_dropped.append((set_name, cid, old_n, new_n))
+                    receipt_lines_dropped.append((set_name, cid, kind, old_n, new_n))
 
     print(f"\ncases replayed     : {total_cases}")
     print(f"fact families fired: {fact_family_counts or '(none)'}")
@@ -336,9 +345,15 @@ def main():
     print(f"truths newly blocked: {len(truths_flipped)}")
     for set_name, cid in truths_flipped:
         print(f"  TRUTH BLOCKED  {set_name} {cid}")
+    truth_lines_dropped = [r for r in receipt_lines_dropped if r[2] == "truth"]
+    lie_lines_dropped = [r for r in receipt_lines_dropped if r[2] == "lie"]
+    print(f"truth windows with fewer receipt lines than baseline: "
+          f"{len(truth_lines_dropped)}")
+    for set_name, cid, _kind, old_n, new_n in truth_lines_dropped:
+        print(f"  WARN  {set_name:<20} {cid:<6} receipt lines {old_n} -> {new_n}")
     print(f"lie windows with fewer receipt lines than baseline: "
-          f"{len(receipt_lines_dropped)}")
-    for set_name, cid, old_n, new_n in receipt_lines_dropped:
+          f"{len(lie_lines_dropped)}")
+    for set_name, cid, _kind, old_n, new_n in lie_lines_dropped:
         print(f"  WARN  {set_name:<20} {cid:<6} receipt lines {old_n} -> {new_n}")
 
     if live_errors:
