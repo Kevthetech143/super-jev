@@ -936,6 +936,23 @@ do not clear this) was a section rule or an accepted header, and only
 honours the mark there; a mark anywhere else is ordinary text and opens
 nothing.
 
+**The reports-region mark also requires a strict fence right after it
+(2026-09-18, round 10).** The round-9 fix above closed the mid-tool-result
+case but not this one: the composer starts every tool-result item at
+exactly the same boundary the mark itself needs (right after a `---`/`===`
+rule or an accepted header), so a worker's tool output that printed the
+mark as its own first line, followed by a LOOSE `REPORT FROM bob` line
+(one the strict matcher rejects), still turned the rest of that tool
+result into report prose. The walker now also requires the line directly
+after the mark to be the composer's own strict `REPORT FROM <who>
+(unverified worker claim)` fence — the one shape `_prev_turn_items`
+always puts there (`REPORTS_REGION_LABEL + "\n" + reports[0]`, and every
+`reports[0]` is `_render_report_block` output) — before it treats the
+mark as structure; a mark followed by anything else, including a loose
+fence, opens nothing. A worker printing the strict fence itself gains
+nothing either, since a strict fence already opens a report body
+anywhere in the window, mark or no mark.
+
 **Correcting an earlier round's read of the residual differential
 flips.** A prior round's report attributed the small number of
 `ALLOW`-where-branch-base-`BLOCK`s the randomized differential probe finds

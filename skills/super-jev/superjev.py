@@ -5068,6 +5068,21 @@ def _report_block_close(lines, open_at, who):
     return close
 
 
+def _next_nonblank_stripped(lines, after):
+    """The stripped text of the first non-blank line after index `after`,
+    or None when there isn't one. Used by `_iter_window_report_lines`'s
+    round-10 lookahead: `_prev_turn_items` always emits the
+    `[relayed reports in this turn]` mark immediately followed by the
+    composer's own strict `REPORT FROM ... (unverified worker claim)`
+    fence (`REPORTS_REGION_LABEL + "\\n" + reports[0]`, no blank line
+    between), so a genuine mark always has one to find here."""
+    for j in range(after + 1, len(lines)):
+        cand = lines[j].strip()
+        if cand:
+            return cand
+    return None
+
+
 def _iter_window_report_lines(text):
     """Walks the assembled window once, yielding
     `(pos, raw, stripped, label, rank, in_report)` for every content line —
@@ -5094,6 +5109,19 @@ def _iter_window_report_lines(text):
       `allow_loose`). Elsewhere it is ordinary text: the round-6
       unconditional version let a tool result that merely printed such a
       line turn its own later lines into report prose.
+    * The mark itself is only honoured when the very next content line is
+      the composer's own STRICT fence (round 10). `_prev_turn_items`
+      always emits the mark immediately followed by a strict
+      `REPORT FROM <who> (unverified worker claim)` line, so a genuine
+      mark always passes this. The round-9 `at_boundary` check alone was
+      not enough: the composer starts every tool-result item at exactly
+      such a boundary (right after a separator or header), so a worker
+      whose tool output printed the mark followed by a LOOSE
+      `REPORT FROM bob` line still turned the rest of that tool result
+      into report prose. A strict fence gains nothing from a worker
+      printing it either — a strict fence already opens a body anywhere,
+      mark or no mark — so gating the mark on one closes the hole without
+      reopening it.
     * A report body ends at its own closing fence (`_report_block_close`),
       at a section separator, or at end of text — and at nothing else. In
       particular a blank line no longer ends a body (a worker writing a
@@ -5162,12 +5190,16 @@ def _iter_window_report_lines(text):
                 # Composer structure (see REPORTS_REGION_LABEL) — but only
                 # when it sits where the composer actually puts it: right
                 # after a section separator or an accepted section header
-                # (`at_boundary`). A copy anywhere else — mid tool-result
+                # (`at_boundary`), AND immediately followed by the
+                # composer's own strict fence (round 10 — see the
+                # docstring). A copy anywhere else — mid tool-result
                 # text, inside a receipt, after a `##` sub-header a worker
-                # typed — is not ours and is left as ordinary text below,
-                # so it cannot enable the loose `REPORT FROM` opener and
-                # cannot mask a real receipt behind it.
-                if at_boundary:
+                # typed, or followed by anything but a strict fence — is
+                # not ours and is left as ordinary text below, so it
+                # cannot enable the loose `REPORT FROM` opener and cannot
+                # mask a real receipt behind it.
+                if at_boundary and _REPORT_MARKER_LINE_RE.match(
+                        _next_nonblank_stripped(lines, i) or ""):
                     in_reports_region = True
                     at_boundary = False
                     continue
