@@ -38,6 +38,35 @@ export const MAX_QUESTIONS_PER_CALL = 255;
 /** Default accept gate for a sweep. Stricter than the 0.75 organizer gate. */
 export const DEFAULT_SWEEP_GATE = 0.80;
 
+/**
+ * Default records per call for a sweep. Chosen from a hand ground-truth
+ * review (`sweep-big/GROUND-TRUTH.md`, 2026-09-17) that compared batches of
+ * ~20 against batches of ~85: big batches were safe (no drift toward accept,
+ * no late-position decay) and 3x faster for identical token cost, but cost a
+ * little sharpness on the `kind`-style classification question. 45 sits in
+ * the reviewer's recommended 40-to-50 middle ground. This is only the
+ * default: `--batch`, the `SWEEP_BATCH` env var, or `budget.maxRecordsPerCall`
+ * all override it, and batches up to the 255-question cap (`floor(255 /
+ * questions-per-record)`) are allowed and safe per that review.
+ */
+export const DEFAULT_SWEEP_BATCH = 45;
+
+/** The re-ask band, as a confidence half-open interval [lo, hi). */
+export type ReaskBand = { lo: number; hi: number };
+
+/**
+ * Default re-ask band. The same ground-truth review found that 29 of 31
+ * batch-size disagreements were records within 0.10 of the 0.80 gate: gate
+ * noise, not a judgement difference. Re-asking that band once and requiring
+ * both passes to agree converts that noise into a real signal instead of
+ * chasing it with batch size.
+ */
+export const DEFAULT_REASK_BAND: ReaskBand = { lo: 0.70, hi: 0.90 };
+
+/** A second pass never sends more than this many records in one call, even
+ * when the primary batch size is larger, so a re-ask stays cheap. */
+export const MAX_REASK_RECORDS_PER_CALL = 20;
+
 /** One question asked of every record. Choice questions only. */
 export type SweepQuestion = {
   /** Stable short name. Appears in the logical cell key and in every output. */
@@ -63,6 +92,14 @@ export type SweepConfig = {
   /** Per-call question cap. Default MAX_QUESTIONS_PER_CALL. */
   maxQuestionsPerCall?: number;
   timeoutMs?: number;
+  /**
+   * Re-ask band for a record's deciding (minimum) pass-1 confidence. Opt-in:
+   * a run that does not set this never sends a second pass. The `sweep`
+   * command line enables `DEFAULT_REASK_BAND`, [0.70, 0.90), by default; other
+   * callers of `runSweep`/`planSweep` (the `fetch` door, for one) are
+   * unaffected unless they set this themselves.
+   */
+  reaskBand?: ReaskBand | false;
 };
 
 /**
@@ -93,12 +130,24 @@ export type CellResult = {
   reason: string;
 };
 
+/** What a record's re-ask second pass found, kept alongside the pass-1 cells. */
+export type ReaskResult = {
+  pass1Kind: OutcomeKind;
+  pass1MinConfidence: number;
+  pass2Kind: OutcomeKind;
+  pass2MinConfidence?: number;
+  pass2Cells: CellResult[];
+};
+
 export type RecordResult = {
   id: string;
   meta?: unknown;
-  /** Record-level disposition, folded from the cells. */
+  /** Record-level disposition, folded from the cells (and, when re-asked, from both passes). */
   kind: OutcomeKind;
+  /** Pass-1 cells. Unchanged by a re-ask; see `reask` for the second pass. */
   cells: CellResult[];
+  /** Present only for a record whose pass-1 deciding score landed in the re-ask band. */
+  reask?: ReaskResult;
 };
 
 export type SweepPlan = {
@@ -228,7 +277,7 @@ export function planSweep(config: SweepConfig): SweepPlan {
   const capRecords = Math.floor(cap / perRecord);
   if (capRecords < 1) throw new Error(`${perRecord} questions per record exceeds the ${cap}-question cap for a single call; ask fewer questions per record`);
 
-  const requested = makeBudget(config.budget).maxRecordsPerCall;
+  const requested = makeBudget({ maxRecordsPerCall: DEFAULT_SWEEP_BATCH, ...config.budget }).maxRecordsPerCall;
   const effective = Math.min(requested, capRecords);
   const reason = effective === capRecords && capRecords < requested
     ? `the ${cap}-question cap allows ${capRecords} record(s) per call at ${perRecord} question(s) each, below the requested ${requested}`
@@ -293,6 +342,12 @@ export function foldRecordKind(kinds: OutcomeKind[]): OutcomeKind {
   if (!kinds.length) return 'unanswered';
   for (const kind of PRECEDENCE) if (kinds.includes(kind)) return kind;
   return 'review';
+}
+
+/** The lowest confidence among a record's answered cells: the score that decides its fate at the gate. Undefined when no cell carries a confidence. */
+function minConfidence(cells: CellResult[]): number | undefined {
+  const values = cells.map(c => c.confidence).filter((n): n is number => typeof n === 'number');
+  return values.length ? Math.min(...values) : undefined;
 }
 
 /**
@@ -399,6 +454,109 @@ export async function runSweep(config: SweepConfig, evaluator: Evaluator): Promi
     });
   }
 
+  // ---------------------------------------------------------- the re-ask band
+  //
+  // A record's pass-1 deciding score (the lowest confidence among its cells) is
+  // gate noise near the boundary: the ground-truth review that commissioned
+  // this found 29 of 31 batch-size disagreements sitting within 0.10 of the
+  // 0.80 gate, with both runs agreeing on the label and differing only in how
+  // sure they sounded. Re-asking those records once, in a second and smaller
+  // call, and requiring both passes to accept turns that noise into a real
+  // signal instead of chasing it with batch size.
+  const reaskBand: ReaskBand | false = config.reaskBand ?? false;
+  if (reaskBand) {
+    const outcomeById = new Map(outcomes.map(o => [o.id, o]));
+    // Band membership is read off pass 1 only, in the original record order,
+    // so which records get re-asked and in what order never depends on how
+    // pass 1 happened to batch them.
+    const bandIds = new Set(
+      results.filter(r => {
+        const mc = minConfidence(r.cells);
+        return mc !== undefined && mc >= reaskBand.lo && mc < reaskBand.hi;
+      }).map(r => r.id)
+    );
+    const bandRecords = records.filter(r => bandIds.has(r.id));
+
+    if (bandRecords.length) {
+      const reaskBudget: ContextBudget = { ...b, maxRecordsPerCall: Math.min(MAX_REASK_RECORDS_PER_CALL, b.maxRecordsPerCall) };
+      const reaskCost = questionCostFor(questions, refs, reaskBudget);
+      const reaskPlan = planBatches(bandRecords, reaskBudget, reaskCost);
+      const got2 = new Map<string, Map<string, Answer>>(bandRecords.map(r => [r.id, new Map()]));
+
+      for (const call of reaskPlan.calls) {
+        const callRefs = call.recordIds.map(id => refById.get(id)!);
+        const cells = cellsFor(callRefs, questions);
+        const request = buildSweepRequest(callRefs, questions, cells);
+        const estimate = { input: callInputTokens(callRefs, reaskBudget, reaskCost), output: cells.length * 30 };
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          if (attempt > 0) meter.retry();
+          const started = performance.now();
+          let evaluation: Evaluation | undefined;
+          try {
+            evaluation = await evaluator.evaluate(request, config.timeoutMs ? AbortSignal.timeout(config.timeoutMs) : new AbortController().signal);
+          } catch (error) {
+            errors.push(`reask call ${call.index} attempt ${attempt}: ${(error as Error).message}`);
+            meter.call(undefined, performance.now() - started, estimate);
+            continue;
+          }
+          meter.call(evaluation, performance.now() - started, estimate);
+          if (evaluation?.model) model ||= evaluation.model;
+          let validated: ReturnType<typeof validateCells>;
+          try { validated = validateCells(request, evaluation); }
+          catch (error) { errors.push(`reask call ${call.index} attempt ${attempt}: ${(error as Error).message}`); continue; }
+          for (const error of validated.errors) errors.push(`reask call ${call.index}: ${error}`);
+          for (const cell of cells) {
+            const answer = validated.answers.get(cell.wireKey);
+            if (answer) got2.get(cell.recordId)!.set(cell.questionName, answer);
+          }
+          if (validated.answers.size > 0) break;
+          errors.push(`reask call ${call.index} attempt ${attempt}: no answer in the response validated`);
+        }
+      }
+
+      for (const result of results) {
+        if (!bandIds.has(result.id)) continue;
+        const answers = got2.get(result.id)!;
+        const pass2Cells: CellResult[] = questions.map(q => {
+          const logicalKey = `q.${q.name}.${result.id}`;
+          const answer = answers.get(q.name);
+          const read = readAnswer(answer);
+          const optionIds = Object.keys(q.criteria);
+          const known = read.value !== undefined && optionIds.includes(read.value);
+          const pass: PassResult = answer === undefined
+            ? { pass: 1, answered: false }
+            : { pass: 1, answered: true, malformed: read.malformed || !known, value: read.value, confidence: read.confidence, peak: read.peak };
+          const outcome = decideOutcome(logicalKey, [pass], gate);
+          const probabilities = (answer as { probabilities?: Record<string, number> } | undefined)?.probabilities;
+          return {
+            questionName: q.name, logicalKey, kind: outcome.kind, reason: outcome.reason,
+            ...(read.value !== undefined && !read.malformed ? { choice: read.value } : {}),
+            ...(read.confidence !== undefined && !read.malformed ? { confidence: read.confidence } : {}),
+            ...(probabilities ? { probabilities } : {})
+          };
+        });
+        const pass1Kind = result.kind;
+        const pass1MinConfidence = minConfidence(result.cells)!;
+        const pass2Kind = foldRecordKind(pass2Cells.map(c => c.kind));
+        const pass2MinConfidence = minConfidence(pass2Cells);
+        // Both passes must independently clear the gate. A pass-1 accept that
+        // pass 2 cannot confirm is downgraded; a pass-1 review is never
+        // upgraded by a second pass, since it already failed the gate once.
+        const finalKind: OutcomeKind = (pass1Kind === 'accepted' && pass2Kind === 'accepted') ? 'accepted' : 'review';
+        result.kind = finalKind;
+        result.reask = { pass1Kind, pass1MinConfidence, pass2Kind, pass2MinConfidence, pass2Cells };
+
+        const outcome = outcomeById.get(result.id)!;
+        outcome.kind = finalKind;
+        outcome.reason = finalKind === 'accepted'
+          ? `all ${pass2Cells.length} question(s) cleared the ${sweepPlan.gate} gate on both the pass-1 and the re-ask pass`
+          : `re-asked in the ${reaskBand.lo}-${reaskBand.hi} band (pass 1: ${pass1Kind}, re-ask: ${pass2Kind}); agreement on accept was required, not reached`;
+        if (pass2MinConfidence !== undefined) outcome.confidence = Math.min(outcome.confidence ?? pass2MinConfidence, pass2MinConfidence);
+      }
+    }
+  }
+
   return { plan: sweepPlan, results, manifest: buildManifest(records.map(r => r.id), outcomes), cost: meter.snapshot(), errors, model: model || 'unknown' };
 }
 
@@ -451,6 +609,11 @@ export function formatSweepReport(run: SweepRun, options: { source?: string; mod
     ''
   ];
 
+  const reasked = run.results.filter(r => r.reask);
+  if (reasked.length) {
+    const confirmed = reasked.filter(r => r.kind === 'accepted').length;
+    lines.push(`Re-ask band: ${reasked.length} record(s) had a pass-1 deciding score in the band and were asked a second time. ${confirmed} confirmed accept on both passes; ${reasked.length - confirmed} did not agree and were sent to review.`, '');
+  }
   if (run.cost.estimated) lines.push('Token figures are ESTIMATED from the planner, not reported by the provider. Not a billing figure.', '');
   if (!run.manifest.complete) {
     lines.push('## Coverage problems', '');
