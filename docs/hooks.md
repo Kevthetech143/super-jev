@@ -466,6 +466,96 @@ bytes they took, and per unit label the draft's counts, the evidence
 counts they were paired with, what matched, and which counts were scoped
 out by command identity together with the run they came from.
 
+## Gate v3 — derived facts at the head of the window (2026-09-17)
+
+The gate used to hand the judge raw command output and ask it to infer
+state from a column dump. The 2026-09-17 gate analysis
+(`super-jev-experiments/gate-bench-20260917/analysis/LAST-MISSES.md`) found
+the remaining misses were all that one defect, and in every one of them the
+refuting string was **already in the window**:
+
+- a draft said it had deleted a card, while a post-write listing row in the
+  same window still showed that card, and the only `REMOVED:` receipt in the
+  window named a different one;
+- a draft said a card "rides every turn", while the window's own cadence
+  expression read `untagged -> role-default (... ~ every 152t)`;
+- a draft made a universal claim over a mismatch table whose rows were all
+  *stricter* than expected — which is what made the claim true rather than
+  false, except that nothing said so.
+
+A judge catches "evidence says X, draft says not-X". It is weak on reading a
+column dump as authoritative state, and on noticing that a receipt is
+**absent**. So the gate now states the answer as a sentence, in code, before
+the judge reads anything.
+
+The window is composed as:
+
+```
+DERIVED FACTS (computed in code from this window's own text plus the draft — ...)
+- agent_role::fable_operating_manual removed per [current turn].
+- agent_role::fable_awareness still present in [current turn] after the claimed removal.
+
+===
+
+BACKING (the raw evidence window, unchanged — every fact above was read out of it):
+[previous turn -1]
+...
+```
+
+Four families, all literal string and integer work over text already in the
+window plus the draft (`derive_window_facts`):
+
+1. **delete/remove claims.** Every removal receipt in the window is stated
+   (`X removed per <section>`), and any `::`-qualified identifier the draft
+   claims to have removed that instead appears on a listing row — the
+   identifier followed by two or more numeric columns — is stated as
+   `X still present in <section> after the claimed removal`. Restricted to
+   card-style qualified identifiers on purpose: "the file is still in a
+   listing" does not refute "I removed the debug block from that file".
+2. **cadence claims.** When the draft asserts an injection frequency, the
+   window's own cadence line for each card the draft names is quoted, and
+   `~ every Nt` is turned into the comparison the judge did not make.
+3. **result tables.** When the window holds a results table (an `N of M`
+   line, or `(case, expected, actual)` rows) and the draft makes a universal
+   claim — "every", "all", "each" — sharing a label with that table, the
+   counts are printed, including how many mismatch rows were stricter than
+   expected and how many were more permissive. A label with no known
+   strictness rank is counted but never read as either.
+4. **merge/CI claims.** Every merge receipt is named with its PR number, and
+   every PR the draft says was merged with no receipt anywhere in the window
+   is named as missing one.
+
+Three properties are deliberate:
+
+- **Facts first, cap after.** The evidence cap applies to facts plus raw
+  window, and a fact is never dropped to make room for raw text. If the
+  total is over, the raw window's *head* is trimmed, since its tail — the
+  current turn — is what the window builder already treats as highest
+  priority.
+- **Silence is the default.** With nothing derivable, the door receives the
+  window byte-for-byte unchanged. No fact is emitted unless a literal string
+  or integer match produced it, and a rule that cannot read a line cleanly
+  says nothing.
+- **No threshold or rule change.** Facts only add a declarative line. They
+  settle a contradiction before the judge rather than raising its suspicion
+  level.
+
+`--explain` prints the count and byte size of the facts block, each fact
+sentence, and how many bytes of raw window were trimmed to fit.
+`SUPERJEV_DERIVED_FACTS=0` turns the block off and restores the old window.
+
+The logic lives twice: `windowFacts` in `src/enhance/derive-facts.ts` (the
+canonical version, reachable from any caller through
+`node src/derive-facts-cli.ts` as `evidence.window`), and a pure-Python
+mirror in `skills/super-jev/superjev.py` (`derive_window_facts`). The hook
+uses the mirror: it runs on every turn, the bridge pays a whole node
+process's startup per call, and on a fleet install the skill sits at
+`~/.claude/skills/super-jev/` where this repo is not on disk at all, so the
+bridge is neither reliably present nor free on the one path that needs it.
+One shared JSON fixture — `test/fixtures/gate-window-facts.json`, every
+window line copied verbatim from the analysis — pins both sides to the same
+fact sentences, which is what keeps the mirror from drifting.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
