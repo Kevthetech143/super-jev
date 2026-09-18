@@ -1320,8 +1320,12 @@ def test_hook_gate_strips_board_tag_before_checking_draft(tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize("verdict", ["NOT_SUPPORTED", "CONTRADICTED"])
-def test_hook_gate_blocks_exactly_at_the_confidence_line(tmp_path, monkeypatch, capsys,
-                                                          verdict):
+def test_hook_gate_secondary_arm_at_the_confidence_line_is_advisory_not_a_block(
+        tmp_path, monkeypatch, capsys, verdict):
+    # 2026-09-18 (gate v4, SET2-AUDIT.md rec (a)): the secondary
+    # NOT_SUPPORTED/CONTRADICTED arm crossing its own line, with no
+    # OVERCLAIMS and no deterministic reason alongside it, is advisory
+    # only — it can never by itself block. It still shows up on stderr.
     stdout = f"  c1   {verdict:14s} 0.80  a claim right on the line\n"
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
     evidence = tmp_path / "notes.md"
@@ -1329,7 +1333,11 @@ def test_hook_gate_blocks_exactly_at_the_confidence_line(tmp_path, monkeypatch, 
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim right on the line",
                                         "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
-    assert code == 2
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "advisory" in out
+    assert "c1" in out and verdict in out and "0.80" in out
+    assert err == ""
 
 
 def test_hook_gate_overclaims_blocks_at_the_line_with_a_companion_claim(tmp_path, monkeypatch,
@@ -1400,19 +1408,26 @@ def test_hook_gate_self_contradictory_never_blocks_even_alongside_a_real_overcla
 
 
 def test_hook_gate_block_threshold_is_env_configurable(tmp_path, monkeypatch, capsys):
-    # A NOT_SUPPORTED at 0.35 does not block under the default 0.80 line...
+    # 2026-09-18 (gate v4): the secondary arm never blocks by itself
+    # regardless of the line, but SUPERJEV_BLOCK_CONF still governs when
+    # it crosses into "advisory, please look at this" territory.
     stdout = "  c1   NOT_SUPPORTED   0.35  a claim\n"
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
     evidence = tmp_path / "notes.md"
     evidence.write_text("some evidence", encoding="utf-8")
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim", "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
+    out, _err = capsys.readouterr()
     assert code == 0
-    # ...but does once the env var lowers the line below 0.35.
+    assert "c1" not in out  # under the default 0.80 line — not even a candidate
+    # ...it becomes an advisory candidate once the env var lowers the line
+    # below 0.35, but still never blocks.
     monkeypatch.setenv("SUPERJEV_BLOCK_CONF", "0.30")
     _hook_stdin(monkeypatch, json.dumps({"draft": "a claim", "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
-    assert code == 2
+    out, _err = capsys.readouterr()
+    assert code == 0
+    assert "advisory" in out and "c1" in out and "0.35" in out
 
 
 def test_hook_verify_read_with_strong_flags_blocks_like_gate(tmp_path, monkeypatch, capsys):
@@ -2797,16 +2812,17 @@ def test_the_live_false_block_becomes_advisory_once_evidence_is_measured():
 
 
 def test_the_same_flags_still_block_when_the_gather_was_healthy():
-    """The gate is conditional on the EVIDENCE, not a blanket weakening. Same
-    table, healthy gather -> c3 NOT_SUPPORTED 0.97 blocks on its own
-    confidence, and OVERCLAIMS 1.00 blocks alongside it (c3/c2 both clear
-    the 0.50 companion floor)."""
+    """The gate is conditional on the EVIDENCE, not a blanket weakening.
+    Same table, healthy gather -> OVERCLAIMS 1.00 still blocks on its own.
+    2026-09-18 (gate v4): c3 NOT_SUPPORTED 0.97 no longer blocks by
+    itself — the secondary arm is advisory-only — but it still rides
+    along as a note."""
     evidence = sj._evidence_inventory(test_cmd="python3 -m pytest tests/test_x.py -q",
                                       worktree="/tmp/wt", probe_stdout=HEALTHY_PROBE)
     rows = sj._parse_claim_rows(FALSE_BLOCK_STDOUT)
     reasons, notes = sj._hook_block_decision(LIVE_FALSE_BLOCK_FLAGS, rows, evidence)
-    assert reasons == ["c3 NOT_SUPPORTED 0.97", "overclaim OVERCLAIMS 1.00"]
-    assert notes == []
+    assert reasons == ["overclaim OVERCLAIMS 1.00"]
+    assert any("c3 NOT_SUPPORTED 0.97" in n and "advisory only" in n for n in notes)
 
 
 def test_overclaims_alone_is_advisory_when_every_claim_came_back_supported():
@@ -2851,12 +2867,15 @@ def test_current_turn_empty_alone_does_not_block_not_supported_under_v3():
     assert any("current turn ran no tools" in n for n in notes)
 
 
-def test_current_turn_empty_false_leaves_the_secondary_arm_unaffected():
+def test_current_turn_empty_false_leaves_the_secondary_arm_advisory_only():
+    # 2026-09-18 (gate v4): a non-empty current turn no longer means the
+    # secondary arm can block — it never blocks, empty turn or not. It
+    # still surfaces as an advisory note either way.
     evidence = {"current_turn_empty": False}
     flags = [{"key": "c1", "verdict": "NOT_SUPPORTED", "score": 0.90}]
     reasons, notes = sj._hook_block_decision_v3(flags, [], evidence)
-    assert reasons == ["c1 NOT_SUPPORTED 0.90"]
-    assert notes == []
+    assert reasons == []
+    assert any("c1 NOT_SUPPORTED 0.90" in n and "advisory only" in n for n in notes)
 
 
 def test_thin_evidence_suppresses_even_a_confident_contradiction():
@@ -2903,11 +2922,11 @@ def test_the_weak_flags_fixture_is_still_advisory():
 def test_hook_block_reasons_still_takes_one_argument():
     # Back-compat: every existing caller and test passes flags only. With
     # no claim_rows/evidence given at all, the gather defaults to healthy
-    # (nothing was measured to be thin) and the companion check treats
-    # "no rows" as unknown rather than "zero" — so both the confident
-    # NOT_SUPPORTED and the OVERCLAIMS block.
+    # (nothing was measured to be thin). 2026-09-18 (gate v4): the
+    # confident NOT_SUPPORTED no longer blocks by itself — only the
+    # OVERCLAIMS does.
     assert sj._hook_block_reasons(LIVE_FALSE_BLOCK_FLAGS) == \
-        ["c3 NOT_SUPPORTED 0.97", "overclaim OVERCLAIMS 1.00"]
+        ["overclaim OVERCLAIMS 1.00"]
 
 
 # ---- end to end, through `hook verify --from-file` -------------------------
@@ -4896,3 +4915,157 @@ def test_stop_hook_gate_leaves_an_ordinary_window_untouched(tmp_path, monkeypatc
     assert sj.main(["hook", "gate"]) == 0
     assert "DERIVED FACTS" not in captured["evidence_text"]
     assert captured["evidence_text"].startswith("[current turn]")
+
+
+# =============================================================== gate v4
+#
+# 2026-09-18, SET2-AUDIT.md (gate-bench-20260918/analysis/SET2-AUDIT.md):
+# (a) the secondary NOT_SUPPORTED/CONTRADICTED arm demoted to
+# advisory-only (covered above, "the block decision" and the hook-level
+# tests near test_hook_gate_secondary_arm_at_the_confidence_line_is_
+# advisory_not_a_block); (c) the '#' made optional in the merge-claim
+# regexes; (b) a cited file's tail folded into the window. This section
+# covers (c) and (b).
+
+# ---- (c): '#' optional in the merge-claim regexes -------------------------
+
+@pytest.mark.parametrize("phrasing", [
+    "PR 39 merged", "PR #39 merged", "merged PR 39", "merged PR #39",
+    "#39 merged", "#39 is merged",
+])
+def test_merge_claim_regexes_all_match_with_or_without_the_hash(phrasing):
+    # At least one of the draft-side merge-claim patterns must fire for
+    # every phrasing the audit named as a gap (l30: "PR 39 merged" slipped
+    # every pattern because all three required a literal '#').
+    matched = any(rx.search(phrasing) for rx in sj._FACT_DRAFT_MERGE_RES)
+    assert matched, f"no merge-claim pattern matched {phrasing!r}"
+
+
+def test_pr_merged_claim_re_matches_pr_number_merged_without_a_hash():
+    m = sj._PR_MERGED_CLAIM_RE.search("PR 39 merged into main")
+    assert m and m.group(1) == "39"
+
+
+def test_facts_merge_claims_still_needs_a_real_receipt_hash_optional_or_not():
+    # The identity guard: a claimed PR number with NO merge receipt in the
+    # window is still named as missing one — hash-optional matching only
+    # widens what counts as a CLAIM, never what counts as a RECEIPT.
+    lines = [("[current turn]", "merge receipt found for PR #38 in [current turn]."),
+             ("[current turn]", "gh pr merge 38")]
+    fact_lines = sj._fact_window_lines(
+        "[current turn]\ngh pr merge 38\n")
+    facts = sj._facts_merge_claims(fact_lines, "PR-state facts are now live (PR 39 merged).")
+    assert "merge receipt found for PR #38 in [current turn]." in facts
+    assert "no merge receipt for PR #39 in window." in facts
+
+
+def test_facts_merge_claims_no_false_positive_when_the_receipt_is_present():
+    fact_lines = sj._fact_window_lines("[current turn]\ngh pr merge 28\n")
+    facts = sj._facts_merge_claims(fact_lines, "PR 28 merged and live.")
+    assert "merge receipt found for PR #28 in [current turn]." in facts
+    assert not any("no merge receipt" in f for f in facts)
+
+
+# ---- (b): cited-file tail --------------------------------------------------
+
+def test_build_cited_file_block_resolves_an_absolute_path(tmp_path):
+    f = tmp_path / "SUMMARY.md"
+    f.write_text("\n".join(f"line {i}" for i in range(1, 51)), encoding="utf-8")
+    block = sj.build_cited_file_block(f"per {f}, lies 17/20, truths blocked")
+    assert block.startswith("[cited files]")
+    assert f"CITED FILE {f} (tail)" in block
+    assert "line 50" in block
+    assert "line 1\n" not in block  # only the tail (last 40 lines) is kept
+
+
+def test_build_cited_file_block_resolves_a_bare_basename_under_a_known_root(
+        tmp_path, monkeypatch):
+    sub = tmp_path / "results"
+    sub.mkdir()
+    f = sub / "SUMMARY.md"
+    f.write_text("lies 17/20\ntruths blocked\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    block = sj.build_cited_file_block("per SUMMARY.md, lies 17/20")
+    assert "CITED FILE" in block and "SUMMARY.md" in block
+    assert "lies 17/20" in block
+
+
+def test_build_cited_file_block_resolves_a_per_the_x_log_phrase(tmp_path, monkeypatch):
+    f = tmp_path / "summary.log"
+    f.write_text("9 of 10 lies, 1 truth blocked\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    block = sj.build_cited_file_block("per the summary log, 9 of 10 lies")
+    assert "CITED FILE" in block
+    assert "9 of 10 lies, 1 truth blocked" in block
+
+
+def test_build_cited_file_block_skips_silently_when_nothing_resolves(tmp_path, monkeypatch):
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    assert sj.build_cited_file_block("per nonexistent-file-xyz.md, some claim") == ""
+    assert sj.build_cited_file_block("no citation in this draft at all") == ""
+
+
+def test_build_cited_file_block_skips_a_blocklisted_path_silently(tmp_path, monkeypatch):
+    secret = tmp_path / "some-secret.md"
+    secret.write_text("shh, do not print me\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    assert sj.build_cited_file_block(f"per {secret}, some claim") == ""
+
+
+def test_build_cited_file_block_skips_an_ambiguous_basename_silently(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "SUMMARY.md").write_text("one\n", encoding="utf-8")
+    (tmp_path / "b" / "SUMMARY.md").write_text("two\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    assert sj.build_cited_file_block("per SUMMARY.md, some claim") == ""
+
+
+def test_build_cited_file_block_redacts_secrets_before_inclusion(tmp_path, monkeypatch):
+    f = tmp_path / "SUMMARY.md"
+    f.write_text("token: sk-abcdefghijklmnopqrstuvwx\nlies 17/20\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    block = sj.build_cited_file_block(f"per {f}, lies 17/20")
+    assert "sk-abcdefghijklmnopqrstuvwx" not in block
+    assert "[REDACTED:openai-key]" in block
+
+
+def test_build_cited_file_block_caps_at_max_files(tmp_path, monkeypatch):
+    for i in range(3):
+        (tmp_path / f"file{i}.md").write_text(f"content {i}\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    draft = "per file0.md, per file1.md, per file2.md — three claims"
+    block = sj.build_cited_file_block(draft)
+    assert block.count("CITED FILE") <= sj.CITED_FILE_MAX_FILES
+
+
+def test_stop_hook_gate_folds_a_cited_files_tail_into_the_window(tmp_path, monkeypatch):
+    """End-to-end: t38's shape — a draft that cites its source and a
+    window (transcript tool_results) that never read it. The gate must
+    still see the cited file's numbers."""
+    summary = tmp_path / "SUMMARY.md"
+    summary.write_text("GATE REPLAY AFTER PR #31: lies 17/20, truths blocked\n",
+                       encoding="utf-8")
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    monkeypatch.setattr(sj, "_cited_file_roots", lambda: [tmp_path])
+    transcript = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "editing settings.json"}},
+        _tool_result_record("$ cat settings.json\n{...}\n"),
+        _assistant_text_record(
+            "Per SUMMARY.md, lies 17/20 now, up from 14/20 at first live run."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message":
+            "Per SUMMARY.md, lies 17/20 now, up from 14/20 at first live run."}))
+    assert sj.main(["hook", "gate"]) == 0
+    assert "CITED FILE" in captured["evidence_text"]
+    assert "lies 17/20" in captured["evidence_text"]
