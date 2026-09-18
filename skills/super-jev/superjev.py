@@ -3468,6 +3468,17 @@ _FACT_DRAFT_MERGE_RES = (
     re.compile(r'#(\d+)\b[^.\n]{0,20}?\b(?:is\s+)?merged\b', re.IGNORECASE),
 )
 
+# Family 5 (2026-09-18, V4-RESIDUE.md change 2) — a REPORT FROM block
+# stating PR #N is not merged / open / pending, matched two ways so word
+# order does not matter ("PR #27 is not merged" / "not merged: PR #27").
+_FACT_REPORT_NOT_MERGED_RES = (
+    re.compile(r'\bPR\s*#?(\d+)\b[^.\n]{0,40}?\b(?:is\s+)?'
+              r'(?:not\s+merged|open|pending)\b', re.IGNORECASE),
+    re.compile(r'\b(?:not\s+merged|open|pending)\b[^.\n]{0,40}?'
+              r'\bPR\s*#?(\d+)\b', re.IGNORECASE),
+)
+_REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM .+ \(unverified worker claim\)\s*$')
+
 
 def _derived_facts_enabled():
     return os.environ.get(DERIVED_FACTS_ENV, "1") != "0"
@@ -3686,12 +3697,111 @@ def _facts_merge_claims(lines, draft_text):
     return facts
 
 
+def _section_recency_rank(label):
+    """A coarse, deterministic ordering of window sections from oldest to
+    newest, used only to decide whether a merge receipt found in one
+    section postdates a worker report found in another (see
+    `_facts_stale_report_claims`). Mirrors the section layering
+    `_derive_evidence_text_from_transcript` documents: previous turns
+    oldest-to-newest as -K grows smaller in magnitude (turn -1 is newer
+    than turn -2), then session receipts (refreshed every Stop event),
+    then this turn's relayed reports, then this turn's own tool results —
+    the highest-priority, most current material of all. An unrecognised
+    or missing label (flat text with no section headers, e.g. a unit
+    test's fixture) ranks lowest, so two unlabelled mentions can never
+    outrank each other."""
+    m = re.match(r'^\[previous turn -(\d+)\]$', label)
+    if m:
+        return -int(m.group(1))
+    return {"[session receipts]": 0, "[current turn reports]": 1,
+           "[current turn]": 2}.get(label, -1000)
+
+
+def _report_not_merged_claims(window_text):
+    """[(pr_num, section_label), ...] for every PR a REPORT FROM block
+    states is not merged / open / pending. Scans `window_text` directly
+    (not the already-filtered fact lines `_fact_window_lines` returns) so
+    a report's body is bounded by its own paragraph break or the section
+    separators the window assembly itself uses ('---', '===', a new
+    section header, or another report's own marker) — reading a claim
+    never bleeds past the report it came from into an unrelated
+    tool-result line elsewhere in the same section."""
+    out = []
+    label = "the evidence window"
+    in_report = False
+    for raw in (window_text or "").splitlines():
+        stripped = raw.strip()
+        if _WINDOW_SECTION_RE.match(stripped):
+            label = stripped
+            in_report = False
+            continue
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            in_report = True
+            continue
+        if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
+            in_report = False
+            continue
+        if not in_report:
+            continue
+        for rx in _FACT_REPORT_NOT_MERGED_RES:
+            for m in rx.finditer(raw):
+                out.append((int(m.group(1)), label))
+    return out
+
+
+def _facts_stale_report_claims(lines, window_text):
+    """Family 5 — when a REPORT FROM block claims PR #N is not merged /
+    open / pending, and a merge receipt for that same PR #N sits in a
+    section ranked more recent (see `_section_recency_rank`), the report
+    is stale: the receipt is the later fact and should win over it in the
+    judge's reading, not merely sit beside it unremarked (2026-09-18,
+    V4-RESIDUE.md change 2, t34). Never fires on the reverse order — a
+    receipt in an OLDER section than the report is left alone, since a
+    report can legitimately postdate an earlier merge receipt (e.g. a
+    revert). The identity guard is PR number: a receipt for #27 never
+    settles a report about #28."""
+    receipts = {}
+    for label, line in lines:
+        if not _FACT_MERGE_RECEIPT_RE.search(line):
+            continue
+        for rx in _FACT_PR_NUM_RES:
+            m = rx.search(line)
+            if not m:
+                continue
+            n = int(m.group(1))
+            rank = _section_recency_rank(label)
+            if n not in receipts or rank > receipts[n][0]:
+                receipts[n] = (rank, label)
+            break
+    if not receipts:
+        return []
+
+    reports_by_pr = {}
+    for n, label in _report_not_merged_claims(window_text):
+        rank = _section_recency_rank(label)
+        if n not in reports_by_pr or rank > reports_by_pr[n]:
+            reports_by_pr[n] = rank
+
+    facts = []
+    for n in sorted(reports_by_pr):
+        if n not in receipts:
+            continue
+        report_rank = reports_by_pr[n]
+        receipt_rank, receipt_label = receipts[n]
+        if receipt_rank > report_rank:
+            facts.append(f"PR #{n}: a merge receipt at {receipt_label} postdates "
+                        f"the worker report saying it was not merged; the "
+                        f"receipt wins.")
+    return facts
+
+
 def derive_window_facts(window_text, draft_text):
     """The DERIVED FACTS sentences for one gate window, in block order:
-    delete/remove claims, cadence claims, result tables, merge/CI claims.
-    Pure: literal string and integer work over `window_text` and
-    `draft_text`, no I/O, no model call, never raises. Returns [] when
-    nothing is derivable, which is the common case and prints nothing."""
+    delete/remove claims, cadence claims, result tables, merge/CI claims,
+    stale-report-vs-merge-receipt. Pure: literal string and integer work
+    over `window_text` and `draft_text`, no I/O, no model call, never
+    raises. Returns [] when nothing is derivable, which is the common case
+    and prints nothing."""
     try:
         lines = _fact_window_lines(window_text)
         if not lines:
@@ -3703,6 +3813,7 @@ def derive_window_facts(window_text, draft_text):
         facts += _facts_cadence_claims(lines, draft)
         facts += _facts_result_tables(lines, draft)
         facts += _facts_merge_claims(lines, draft)
+        facts += _facts_stale_report_claims(lines, window_text)
         out, seen = [], set()
         for f in facts:
             if f in seen:
@@ -3788,6 +3899,12 @@ _CITED_FILE_PATH_RE = re.compile(
 # keyword to look up against a known root's file names.
 _CITED_FILE_LOG_PHRASE_RE = re.compile(
     r'\bper\s+(?:the\s+)?([a-z][a-z0-9 \-]{2,40}?)\s+log\b', re.IGNORECASE)
+# "per the summary log" already yields keyword 'summary' above; "in the
+# summary" names the same file with no trailing "log" at all. Both map to
+# the same stem hint 'SUMMARY' (2026-09-18, V4-RESIDUE.md change 1) — a
+# dotless keyword still resolved by _resolve_cited_basename's
+# substring-of-stem match, same as any other keyword candidate.
+_CITED_FILE_STEM_HINT_RE = re.compile(r'\b(?:per|in)\s+the\s+(summary)\b', re.IGNORECASE)
 _CITED_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
 
 
@@ -3813,6 +3930,11 @@ def _cited_file_candidates(draft_text):
             continue
         seen.add(key)
         out.append(("keyword", kw))
+    if _CITED_FILE_STEM_HINT_RE.search(draft_text):
+        key = ("keyword", "summary")
+        if key not in seen:
+            seen.add(key)
+            out.append(("keyword", "SUMMARY"))
     return out
 
 
@@ -3860,16 +3982,86 @@ def _resolve_cited_path(value):
     return None
 
 
-def _resolve_cited_basename(basename, roots, max_scan=20000):
+def _cited_path_appears_in_text(path, text, roots):
+    """True when `path` (or its form relative to one of `roots`) appears
+    literally, as a substring, in `text` — the case where the draft's own
+    session already named or wrote this exact file (a bash command's
+    target, a tool-result line), so there is nothing to guess. Never
+    raises."""
+    if not text:
+        return False
+    s = str(path)
+    if s in text:
+        return True
+    for root in roots:
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if str(rel) in text:
+            return True
+    return False
+
+
+def _pick_cited_candidate(candidates, basename, roots, window_hint_text=None):
+    """One real path out of `candidates` (deduped, order preserved), or
+    None when the tie cannot be broken. Tie-break order, each step only
+    applied when the prior step still leaves more than one candidate
+    (2026-09-18, V4-RESIDUE.md change 1):
+
+      1. A candidate whose path (in full, or relative to a known root)
+         appears literally in `window_hint_text` — the file this session's
+         own window already shows was read or written (a bash command's
+         own target, e.g.), so no guess is needed.
+      2. A candidate whose stem is an EXACT case-insensitive match for
+         `basename` (stripped of its extension, when it has one) rather
+         than merely containing it as a substring.
+      3. A candidate with a preferred extension: .md, then .log, then
+         .txt, then .json.
+
+    Still ambiguous after all three steps returns None, same as before —
+    this narrows the tie, it never invents a match with no evidence."""
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    if window_hint_text:
+        literal = [c for c in candidates
+                  if _cited_path_appears_in_text(c, window_hint_text, roots)]
+        if literal:
+            candidates = literal
+            if len(candidates) == 1:
+                return candidates[0]
+
+    stem_target = (Path(basename).stem if "." in basename else basename).lower()
+    exact_stem = [c for c in candidates if c.stem.lower() == stem_target]
+    if exact_stem:
+        candidates = exact_stem
+        if len(candidates) == 1:
+            return candidates[0]
+
+    ext_priority = {".md": 0, ".log": 1, ".txt": 2, ".json": 3}
+    ranked = sorted(candidates, key=lambda c: ext_priority.get(c.suffix.lower(), 9))
+    best_rank = ext_priority.get(ranked[0].suffix.lower(), 9)
+    best = [c for c in ranked if ext_priority.get(c.suffix.lower(), 9) == best_rank]
+    if len(best) == 1:
+        return best[0]
+    return None  # still ambiguous — skip silently, same as before
+
+
+def _resolve_cited_basename(basename, roots, max_scan=20000, window_hint_text=None):
     """The one file under `roots` whose name matches `basename` — an exact
     case-insensitive filename match when `basename` looks like a real
     filename (has a dot), else a substring-of-stem match against
-    CITED_FILE_EXTS. Returns None on zero or ambiguous (>1 distinct real
-    path) matches, or once `max_scan` files have been walked, so a huge
-    tree cannot stall a hook. Never raises."""
+    CITED_FILE_EXTS. Returns None on zero or still-ambiguous (see
+    `_pick_cited_candidate`) matches, or once `max_scan` files have been
+    walked, so a huge tree cannot stall a hook. `.bak*` files are always
+    skipped. Never raises."""
     exact = "." in basename
     target = basename.lower()
-    found = None
+    candidates = []
     scanned = 0
     for root in roots:
         try:
@@ -3882,8 +4074,11 @@ def _resolve_cited_basename(basename, roots, max_scan=20000):
             for fn in filenames:
                 scanned += 1
                 if scanned > max_scan:
-                    return found
+                    return _pick_cited_candidate(candidates, basename, roots,
+                                                 window_hint_text)
                 low = fn.lower()
+                if ".bak" in low:
+                    continue
                 is_match = (low == target if exact else
                            (Path(low).suffix in CITED_FILE_EXTS and
                             target in Path(low).stem.lower()))
@@ -3896,10 +4091,9 @@ def _resolve_cited_basename(basename, roots, max_scan=20000):
                     real = full.resolve()
                 except OSError:
                     real = full
-                if found is not None and found != real:
-                    return None  # ambiguous — more than one real match
-                found = real
-    return found
+                if real not in candidates:
+                    candidates.append(real)
+    return _pick_cited_candidate(candidates, basename, roots, window_hint_text)
 
 
 def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_MAX_BYTES):
@@ -3918,17 +4112,25 @@ def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_M
     return tail
 
 
-def build_cited_file_block(draft_text):
+def build_cited_file_block(draft_text, window_text=None):
     """A "[cited files]" window section for every file the draft names by
-    path or by a recognisable "per <name> log" phrase that resolves to a
-    real, readable, non-blocklisted file — its tail, labelled `CITED FILE
-    <path> (tail)`, redacted the same as the rest of the window (see
-    EVIDENCE GUARD above). Skips a candidate silently (never a note, never
-    an error) when it does not resolve, is ambiguous, or is blocklisted.
-    Returns "" when nothing resolves. At most CITED_FILE_MAX_FILES files,
-    each capped at CITED_FILE_MAX_BYTES — the caller still folds the
-    result into the overall 24 KB window cap same as every other
-    section."""
+    path or by a recognisable "per <name> log" / "in the summary" phrase
+    that resolves to a real, readable, non-blocklisted file — its tail,
+    labelled `CITED FILE <path> (tail)`, redacted the same as the rest of
+    the window (see EVIDENCE GUARD above). Skips a candidate silently
+    (never a note, never an error) when it does not resolve, is still
+    ambiguous after the tie-break in `_pick_cited_candidate`, or is
+    blocklisted. Returns "" when nothing resolves. At most
+    CITED_FILE_MAX_FILES files, each capped at CITED_FILE_MAX_BYTES — the
+    caller still folds the result into the overall 24 KB window cap same
+    as every other section.
+
+    `window_text`, when given, is the evidence window already assembled
+    for this turn (tool results, receipts, reports) — passed through to
+    the ambiguity tie-break so a candidate this session's own commands
+    already read or wrote (its path appears literally in that text) wins
+    over a same-named file the session never touched (2026-09-18,
+    V4-RESIDUE.md change 1, t38)."""
     candidates = _cited_file_candidates(draft_text)
     if not candidates:
         return ""
@@ -3944,9 +4146,10 @@ def build_cited_file_block(draft_text):
             if path is None:
                 basename = os.path.basename(value)
                 if basename:
-                    path = _resolve_cited_basename(basename, roots)
+                    path = _resolve_cited_basename(basename, roots,
+                                                    window_hint_text=window_text)
         else:
-            path = _resolve_cited_basename(value, roots)
+            path = _resolve_cited_basename(value, roots, window_hint_text=window_text)
         if path is None:
             continue
         if is_blocked_path(path):
@@ -5328,7 +5531,7 @@ def cmd_hook(a):
                     # after the current turn, so compose_window_with_facts'
                     # head-first trim never drops it before the current
                     # turn's own material.
-                    cited_block = build_cited_file_block(text)
+                    cited_block = build_cited_file_block(text, window_text=derived)
                     if cited_block:
                         derived = (derived + "\n\n===\n\n" + cited_block
                                   if derived else cited_block)
