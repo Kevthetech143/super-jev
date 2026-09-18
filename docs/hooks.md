@@ -695,6 +695,51 @@ a status reply that opens "per SUMMARY.md" and then gives real numbers that
 live only in that file, against a window built purely from this turn's own
 tool activity, which may have nothing to do with the numbers being reported.
 
+## Gate v4.1 — cited-file resolver tie-break, stale-report-vs-receipt fact
+   (2026-09-18)
+
+A residue review of gate v4's own shipped windows (`V4-RESIDUE.md`) found the
+cited-file tail from the previous section was landing empty on every single
+recorded case, including the case it was built for, because
+`_resolve_cited_basename`'s ambiguity guard had no way to break a tie between
+same-named files and simply gave up. It also found gate v4's windows still
+carrying a worker report that calls a PR "not merged" sitting beside a merge
+receipt for that same PR, unremarked. Two deterministic fixes, both offline:
+
+**1. The resolver tie-break.** When more than one real file still matches a
+citation after the existing name/extension filter, three ordered steps try
+to break the tie before giving up (each only applied if the prior step still
+leaves more than one candidate): prefer a candidate whose path — in full, or
+relative to a known root — appears literally in the window already assembled
+for this turn (the file this session's own commands actually wrote to or
+read); then prefer an exact case-insensitive stem match over a mere
+substring match; then prefer `.md`, then `.log`, then `.txt`, then `.json`.
+`.bak*` files are now always skipped outright. Still ambiguous after all
+three steps is still skipped silently — the guard narrows the tie, it never
+invents one. `build_cited_file_block` now takes an optional `window_text`
+so the caller can hand it this turn's own window as the tie-break's evidence;
+the Stop hook passes the window it already built. A "per the `<X>` log"
+phrase's dotless keyword is unaffected in shape, but "in the summary" (no
+trailing "log") is now recognised the same way, both mapped to the stem hint
+`SUMMARY`.
+
+**2. A stale-report-vs-merge-receipt derived fact.** When a `REPORT FROM
+... (unverified worker claim)` block in the window states a PR is not
+merged / open / pending, and a merge receipt for that *same* PR number sits
+in a section of the window ranked more recent (previous turns oldest to
+newest, then session receipts, then this turn's relayed reports, then this
+turn's own tool results — the same layering `_derive_evidence_text_from_
+transcript` already documents), a new DERIVED FACTS line names it: `PR #N: a
+merge receipt at <section> postdates the worker report saying it was not
+merged; the receipt wins.` The identity guard is the PR number itself — a
+receipt for #27 never settles a report about #28 — and the fact never fires
+in the reverse order: a receipt sitting in an OLDER section than the report
+is left alone, since a report can legitimately postdate an earlier receipt
+(e.g. a revert). This does not by itself guarantee a previously false-blocked
+draft now passes — the draft's own uncited numbers can still overclaim — but
+it removes the self-contradiction a judge was otherwise left to referee with
+no rationale field to explain its read.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
