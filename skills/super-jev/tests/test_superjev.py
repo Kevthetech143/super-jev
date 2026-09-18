@@ -1919,6 +1919,41 @@ def test_empty_current_turn_with_prior_evidence_is_judged_not_unchecked(
     assert not rec.get("unchecked")
 
 
+def test_empty_current_turn_suppressed_secondary_arm_is_recorded_for_health(
+        tmp_path, monkeypatch, capsys):
+    # Same fixture as test_empty_current_turn_with_prior_evidence_is_judged_
+    # not_unchecked (a claim flagged NOT_SUPPORTED 0.82, at/above the 0.80
+    # block line, suppressed only because the current turn ran no tools of
+    # its own) — but this test checks the OTHER half of that path: the
+    # ledger line itself carries reason="flagged-suppressed-empty-turn"
+    # with the top label+score, and ledger_health counts it in the
+    # SUPPRESSED bucket without ever warning on it.
+    fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
+                              "and fully caught up.\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "what about now, any update?"}},
+        _assistant_text_record("The service is now stable and fully caught up."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "The service is now stable and fully caught up."}))
+    code = sj.main(["hook", "gate"])
+    capsys.readouterr()
+    assert code == 0
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec.get("reason") == "flagged-suppressed-empty-turn"
+    assert "c1 NOT_SUPPORTED 0.82" in rec.get("note", "")
+
+    health = sj.ledger_health(records=[rec])
+    assert health["overall"]["suppressed"] == 1
+    assert health["overall"]["lost"] == 0
+    assert sj._health_warnings(health) == []
+
+
 def test_empty_current_turn_with_prior_evidence_overclaims_still_blocks(
         tmp_path, monkeypatch, capsys):
     # The primary OVERCLAIMS arm is NOT suppressed by current_turn_empty —
@@ -4195,40 +4230,150 @@ def _hook_line(door="gate", verdict="allow", reason=None, note_extra=""):
            "exit_code": 0, "skipped": False, "unchecked": False}
 
 
+def test_skip_reason_bucket_table():
+    # The one-table mapping (SKIP_REASON_BUCKETS) is the whole
+    # classification — this pins its exact shape so a future edit to it
+    # is a deliberate, visible diff, not an accidental reshuffle.
+    assert sj._skip_reason_bucket("spawn-dict") == "deferred"
+    assert sj._skip_reason_bucket("no-teammate-messages") == "deferred"
+    assert sj._skip_reason_bucket("no-tool-evidence-silent") == "deferred"
+    assert sj._skip_reason_bucket("no-tool-evidence-checkable") == "thin"
+    assert sj._skip_reason_bucket("no-tool-evidence") == "thin"  # legacy tag
+    assert sj._skip_reason_bucket("bad-stdin") == "lost"
+    assert sj._skip_reason_bucket("unexpected-error") == "lost"
+    assert sj._skip_reason_bucket("stop-scan-timeout") == "lost"
+    # unknown reasons count as LOST, by design
+    assert sj._skip_reason_bucket("some-new-reason-nobody-named-yet") == "lost"
+    assert sj._skip_reason_bucket("not-agent-tool") == "lost"
+
+
+def test_door_health_bucket_bucket_counts_match_the_table_exactly():
+    entries = [
+        {"door": "hook", "note": "gate: unchecked — spawn-dict", "exit_code": 0,
+         "skipped": True, "unchecked": True, "reason": "spawn-dict"},
+        {"door": "hook", "note": "prompt-verify: unchecked", "exit_code": 0,
+         "skipped": True, "unchecked": True, "reason": "no-teammate-messages"},
+        {"door": "hook", "note": "gate: unchecked, silent", "exit_code": 0,
+         "skipped": False, "unchecked": True, "reason": "no-tool-evidence-silent"},
+        {"door": "hook", "note": "gate: unchecked, checkable", "exit_code": 0,
+         "skipped": False, "unchecked": True, "reason": "no-tool-evidence-checkable"},
+        {"door": "hook", "note": "hook: bad stdin", "exit_code": 0,
+         "skipped": True, "unchecked": True, "reason": "bad-stdin"},
+        {"door": "hook", "note": "gate: allow (exit 0)", "exit_code": 0,
+         "skipped": False, "unchecked": False},
+    ]
+    b = sj._door_health_bucket(entries)
+    assert b["runs"] == 6
+    assert b["unchecked"] == 5
+    assert b["deferred"] == 3   # spawn-dict, no-teammate-messages, no-tool-evidence-silent
+    assert b["thin"] == 1       # no-tool-evidence-checkable
+    assert b["lost"] == 1       # bad-stdin
+    assert b["deferred_share_pct"] == 50.0
+    assert round(b["thin_share_pct"], 1) == 16.7
+    assert round(b["lost_share_pct"], 1) == 16.7
+
+
+def test_door_health_bucket_unknown_reason_counts_as_lost():
+    entries = [{"door": "hook", "note": "verify: unchecked", "exit_code": 0,
+               "skipped": True, "unchecked": True, "reason": "brand-new-reason"}]
+    b = sj._door_health_bucket(entries)
+    assert b["deferred"] == 0
+    assert b["thin"] == 0
+    assert b["lost"] == 1
+
+
+def test_door_health_bucket_counts_suppressed_independent_of_verdict():
+    entries = [
+        {"door": "hook", "note": "gate: allow (exit 0) [suppressed: c1 NOT_SUPPORTED 0.82]",
+         "exit_code": 0, "skipped": False, "unchecked": False,
+         "reason": "flagged-suppressed-empty-turn"},
+        {"door": "hook", "note": "gate: allow (exit 0)", "exit_code": 0,
+         "skipped": False, "unchecked": False},
+    ]
+    b = sj._door_health_bucket(entries)
+    assert b["runs"] == 2
+    assert b["allow"] == 2       # both lines are still plain "allow" verdicts
+    assert b["suppressed"] == 1
+    assert b["unchecked"] == 0   # suppressed is not a skip/unchecked concept at all
+
+
 def test_ledger_health_below_threshold_has_no_warning(capsys):
     for _ in range(9):
         sj.ledger_append(_hook_line(verdict="allow"))
-    sj.ledger_append(_hook_line(verdict="unchecked"))  # 1/10 = 10%
+    sj.ledger_append(_hook_line(verdict="unchecked"))  # 1/10 = 10%, legacy tag -> thin
     code = sj.main(["ledger", "health"])
     out = capsys.readouterr().out
     assert code == 0
     assert "WARN" not in out
-    assert "10.0%" in out
+    assert "10.0%" in out  # informational total-unchecked line, unchanged
 
 
-def test_ledger_health_above_threshold_warns_with_top_skip_reason(capsys):
+def test_ledger_health_lost_record_warns_with_top_skip_reason(capsys):
     for _ in range(6):
         sj.ledger_append(_hook_line(verdict="allow"))
-    for _ in range(4):
-        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    for _ in range(3):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="bad-stdin"))  # the 1 LOST record
     code = sj.main(["ledger", "health"])
     out = capsys.readouterr().out
-    assert code == 4  # 4/10 = 40% > default 25%
+    assert code == 4  # 1 lost record >= default SUPERJEV_LOST_WARN of 1
     assert "WARN" in out
-    assert "no-tool-evidence" in out
-    assert "40.0%" in out
+    assert "bad-stdin" in out
+    assert "40.0%" in out  # total unchecked share still printed, informational only
 
 
-def test_ledger_health_threshold_is_env_configurable(monkeypatch, capsys):
-    monkeypatch.setenv("SUPERJEV_UNCHECKED_WARN", "50")
+def test_ledger_health_deferred_and_thin_volume_alone_never_warns(capsys):
+    # spawn-dict/no-teammate-messages/no-tool-evidence-checkable volume
+    # used to permanently trip the old 25%-of-unchecked WARN even with
+    # zero real misses (SKIPS-20260918.md) — the new WARN never fires off
+    # these buckets at all, no matter how large the share.
+    for _ in range(2):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="spawn-dict"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "WARN" not in out
+
+
+def test_ledger_health_thin_note_fires_below_warn_threshold(capsys):
     for _ in range(6):
         sj.ledger_append(_hook_line(verdict="allow"))
     for _ in range(4):
-        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
     code = sj.main(["ledger", "health"])
     out = capsys.readouterr().out
-    assert code == 0  # 40% no longer exceeds a 50% threshold
+    assert code == 0  # NOTE never trips the exit code, only WARN does
     assert "WARN" not in out
+    assert "NOTE" in out
+    assert "thin-evidence share" in out
+    assert "40.0%" in out  # 4/10 thin exceeds the default 25% NOTE dial
+
+
+def test_ledger_health_lost_warn_count_is_env_configurable(monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_LOST_WARN", "2")
+    for _ in range(9):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="bad-stdin"))  # only 1 lost
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0  # 1 lost record no longer meets a dial of 2
+    assert "WARN" not in out
+
+
+def test_ledger_health_thin_note_pct_is_env_configurable(monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_THIN_NOTE", "50")
+    for _ in range(6):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    for _ in range(4):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "NOTE" not in out  # 40% thin no longer exceeds a 50% dial
 
 
 def test_ledger_health_empty_ledger_does_not_crash(capsys):
@@ -4249,36 +4394,42 @@ def test_ledger_health_missing_file_does_not_crash(tmp_path, monkeypatch, capsys
 def test_ledger_health_json_shape_and_exit_code(capsys):
     for _ in range(6):
         sj.ledger_append(_hook_line(verdict="allow"))
-    for _ in range(4):
-        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    for _ in range(3):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="unexpected-error"))
     code = sj.main(["ledger", "health", "--json"])
     obj = json.loads(capsys.readouterr().out.strip())
     assert code == 4
     assert obj["warn"] is True
     assert obj["overall"]["runs"] == 10
     assert obj["overall"]["unchecked"] == 4
-    assert obj["doors"]["gate"]["top_skip_reason"] == "no-tool-evidence"
+    assert obj["overall"]["thin"] == 3
+    assert obj["overall"]["lost"] == 1
+    assert obj["doors"]["gate"]["top_skip_reason"] in ("no-tool-evidence-checkable",
+                                                        "unexpected-error")
 
 
 def test_ledger_health_per_door_breakdown(capsys):
     for _ in range(3):
         sj.ledger_append(_hook_line(door="gate", verdict="allow"))
     for _ in range(2):
-        sj.ledger_append(_hook_line(door="gate", verdict="unchecked"))
+        sj.ledger_append(_hook_line(door="gate", verdict="unchecked", reason="bad-stdin"))
     for _ in range(5):
         sj.ledger_append(_hook_line(door="verify", verdict="allow"))
     code = sj.main(["ledger", "health", "--json"])
     obj = json.loads(capsys.readouterr().out.strip())
-    assert code == 4  # gate alone: 2/5 = 40% exceeds the default 25% threshold
+    assert code == 4  # gate alone carries 2 lost records
     assert obj["doors"]["gate"]["runs"] == 5
     assert obj["doors"]["gate"]["unchecked"] == 2
+    assert obj["doors"]["gate"]["lost"] == 2
     assert obj["doors"]["verify"]["runs"] == 5
     assert obj["doors"]["verify"]["unchecked"] == 0
+    assert obj["doors"]["verify"]["lost"] == 0
 
 
 def test_ledger_health_window_limits_to_recent_runs(capsys):
     for _ in range(30):
-        sj.ledger_append(_hook_line(verdict="unchecked"))  # old, high unchecked
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="bad-stdin"))  # old, lost
     for _ in range(10):
         sj.ledger_append(_hook_line(verdict="allow"))  # recent, all healthy
     code = sj.main(["ledger", "health", "--window", "10"])
@@ -4288,28 +4439,56 @@ def test_ledger_health_window_limits_to_recent_runs(capsys):
     assert "WARN" not in out
 
 
-def test_ledger_health_a_bucket_with_too_few_runs_never_warns(capsys):
-    # a single unchecked run is a 100% share but not a sample worth
-    # trusting — MIN_RUNS_FOR_WARN guards exactly this.
-    sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+def test_ledger_health_a_single_lost_record_still_warns_with_few_runs(capsys):
+    # LOST has no MIN_RUNS_FOR_WARN guard, by design — a genuine lost
+    # check should be rare-to-never (SKIPS-20260918.md: 0/300), so even
+    # one in a small window is real signal, not noise. THIN's NOTE keeps
+    # the MIN_RUNS_FOR_WARN guard instead (see the next test).
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="bad-stdin"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 4
+    assert "WARN" in out
+
+
+def test_ledger_health_a_thin_bucket_with_too_few_runs_never_notes(capsys):
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "NOTE" not in out
+
+
+def test_ledger_health_suppressed_record_is_visible_and_never_warns(capsys):
+    for _ in range(9):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    suppressed = _hook_line(verdict="allow")
+    suppressed["reason"] = "flagged-suppressed-empty-turn"
+    suppressed["note"] += " [suppressed: c1 NOT_SUPPORTED 0.82]"
+    sj.ledger_append(suppressed)
     code = sj.main(["ledger", "health"])
     out = capsys.readouterr().out
     assert code == 0
     assert "WARN" not in out
+    assert "suppressed record" in out
+    obj_code = sj.main(["ledger", "health", "--json"])
+    obj = json.loads(capsys.readouterr().out.strip())
+    assert obj["overall"]["suppressed"] == 1
 
 
 def test_status_includes_ledger_health_block(repo, monkeypatch, capsys):
     monkeypatch.setattr(sj, "harness_commit", lambda r: "abc1234")
     for _ in range(6):
         sj.ledger_append(_hook_line(verdict="allow"))
-    for _ in range(4):
-        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence"))
+    for _ in range(3):
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="no-tool-evidence-checkable"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="unexpected-error"))
     code = sj.main(["status"])
     out = capsys.readouterr().out
     assert code == 0  # status itself never fails just because the ledger warns
     assert "ledger health" in out
     assert "WARN" in out
-    assert "no-tool-evidence" in out
+    assert "unexpected-error" in out
 
 
 def test_status_json_includes_ledger_health(repo, monkeypatch, capsys):
@@ -4317,23 +4496,27 @@ def test_status_json_includes_ledger_health(repo, monkeypatch, capsys):
     for _ in range(6):
         sj.ledger_append(_hook_line(verdict="allow"))
     for _ in range(4):
-        sj.ledger_append(_hook_line(verdict="unchecked"))
+        sj.ledger_append(_hook_line(verdict="unchecked", reason="bad-stdin"))
     code = sj.main(["status", "--json"])
     obj = json.loads(capsys.readouterr().out.strip())
     assert code == 0
     assert obj["details"]["ledger_health_warn"] is True
     assert obj["details"]["ledger_health"]["overall"]["runs"] == 10
+    assert obj["details"]["ledger_health"]["overall"]["lost"] == 4
 
 
-def test_stop_hook_gate_appends_notice_when_running_unchecked_share_is_high(
+def test_stop_hook_gate_appends_notice_when_a_lost_record_is_in_the_window(
         tmp_path, monkeypatch, capsys):
-    # 19 of the last 20 hook-door runs already unchecked, well above the
-    # default 25% threshold — the 2026-09-16 shape. The 20th run below
-    # (a normal allow) must still carry a visible notice in its own
-    # stdout, so the agent sees it THIS turn.
-    for _ in range(19):
+    # A real LOST record (bad-stdin) among the last 20 hook-door runs —
+    # the shape a genuine miss takes now, distinct from the healthy
+    # spawn-dict/no-teammate-messages/thin volume that used to trip the
+    # old share-based WARN on its own. The 20th run below (a normal
+    # allow) must still carry a visible notice in its own stdout, so the
+    # agent sees it THIS turn.
+    for _ in range(18):
         sj.ledger_append(_hook_line(door="gate", verdict="unchecked",
-                                    reason="no-tool-evidence"))
+                                    reason="no-tool-evidence-checkable"))
+    sj.ledger_append(_hook_line(door="gate", verdict="unchecked", reason="bad-stdin"))
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     evidence = tmp_path / "notes.md"
     evidence.write_text("the sky is blue", encoding="utf-8")
@@ -4343,8 +4526,29 @@ def test_stop_hook_gate_appends_notice_when_running_unchecked_share_is_high(
     out = capsys.readouterr().out
     assert code == 0
     assert "ledger health" in out
-    assert "unchecked share" in out
-    assert "no-tool-evidence" in out
+    assert "lost check" in out
+    assert "bad-stdin" in out
+
+
+def test_stop_hook_gate_stays_quiet_when_only_thin_and_deferred_volume_is_high(
+        tmp_path, monkeypatch, capsys):
+    # Same spawn-dict/checkable volume that used to trip the old 25%
+    # share WARN on its own — the running notice must now stay silent,
+    # since neither deferred nor thin drives it.
+    for _ in range(10):
+        sj.ledger_append(_hook_line(door="gate", verdict="unchecked", reason="spawn-dict"))
+    for _ in range(9):
+        sj.ledger_append(_hook_line(door="gate", verdict="unchecked",
+                                    reason="no-tool-evidence-checkable"))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "the sky is blue",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out == ""
 
 
 def test_stop_hook_gate_stays_quiet_when_running_unchecked_share_is_low(
