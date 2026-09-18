@@ -10,9 +10,13 @@ No version bump.
   same reason strings `--explain` prints, a redacted excerpt of the draft
   or report, window size, and two blank fields (`tag`, `note`) for a
   human. The excerpt is sliced to 4096 chars, then redacted for
-  secrets/credentials, emails, US phone numbers, SSN-shaped digit strings
-  and 13-19 digit card numbers (catch-ledger-only patterns, never applied
-  to the gate/verify evidence window itself), then sliced to 240 chars.
+  secrets/credentials, emails, US-shaped phone numbers (area code not
+  starting 0/1, never matched glued to another digit or a decimal
+  continuation), SSN-shaped digit strings and 13+ digit card numbers
+  (space, dash or dot separators; a bare 13-digit run shaped like a
+  plausible unix-ms timestamp is kept, not redacted — catch-ledger-only
+  patterns, never applied to the gate/verify evidence window itself), then
+  sliced to 240 chars.
   Every real decision now gets a record, including the previously-silent
   `hook verify --from-file`, per-teammate `hook prompt-verify` verdicts,
   and the two budget-exceeded paths (recorded as `unchecked`, reason
@@ -25,26 +29,42 @@ No version bump.
   `tag <id> fair|false|miss "note"`, and `report [--since 7d]`, which
   prints fair catches / false stops / misses / untagged plus a separate
   **blocks suppressed** count (`advisory-forced` records — a real block
-  demoted to advisory, never counted as a false stop or a miss). `tag`
-  refuses (exit 2) a tag that contradicts its record's own decision
-  (`false`/`fair` only fit `block`/`advisory-forced`; `miss` only fits
-  `allow`/`advisory`/`unchecked`). An unparseable `--since` refuses (exit
-  2) rather than silently showing all time; a record with no parseable
-  timestamp is excluded from a real `--since` window and counted on its
-  own `undated: N` line.
+  demoted to advisory). An `advisory-forced` record later tagged fair or
+  false counts on both lines — being suppressed and being judged right or
+  wrong are different questions — and `report` prints a one-line footnote
+  naming how many blocks-suppressed records are also tagged, whenever
+  that's nonzero. `tag` refuses, **exit 3**, a tag that contradicts its
+  record's own decision (`false`/`fair` only fit `block`/`advisory-forced`;
+  `miss` only fits `allow`/`advisory`/`unchecked`) — exit 3, not 2, so it
+  never collides with argparse's own usage-error exit 2 the way sharing
+  that code with a bad `--since` value would have. An unparseable
+  `--since` still refuses (exit 2) rather than silently showing all time;
+  a record with no parseable timestamp is excluded from a real `--since`
+  window and counted on its own `undated: N` line. Re-tagging the same id
+  is an upsert, not a second tag: at most one catch case exists per record
+  id, a re-tag between `false`/`miss` replaces it, and a later `fair`
+  withdraws it. The whole `catch tag` read-modify-write (ledger rewrite
+  and catch-cases upsert together) runs under one `flock`-held lock file
+  so parallel `catch tag` commands on different ids never lose a write.
 
-  Tagging a record `false` or `miss` appends one **catch case** —
-  `{id, ts, door, kind, draft, payload_path, reasons, note}` — to a single
-  JSON array file (`SUPERJEV_BENCH_OUT`, default `catch-cases.json` next
-  to the catch ledger). This is a new, catch-ledger-specific shape, not
-  the existing `gate-bench-*` case shape those replay scripts read — a
-  catch case has no transcript anchor to replay against. New
-  `skills/super-jev/tests/replay_catch_cases.py` reads it directly and,
-  for any case with a `payload_path` (opt-in `SUPERJEV_CATCH_KEEP_PAYLOAD=1`
-  saved a redacted hook-payload copy at decision time), re-runs the
-  original gate/verify decision offline through
-  `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD`. See `docs/hooks.md`, "The
-  catch ledger".
+  Tagging a record `false` or `miss` writes (or replaces) one **catch
+  case** — `{id, ts, door, kind, draft, payload_path, reasons, note}` — in
+  a single JSON array file (`SUPERJEV_CATCH_CASES`, default
+  `catch-cases.json` next to the catch ledger). This is a new,
+  catch-ledger-specific shape, not the existing `gate-bench-*` case shape
+  those replay scripts read — a catch case has no transcript anchor to
+  replay against. New `skills/super-jev/tests/replay_catch_cases.py` reads
+  it directly and, for any case with a `payload_path` (opt-in
+  `SUPERJEV_CATCH_KEEP_PAYLOAD=1` saved a redacted hook-payload copy at
+  decision time), re-runs the original gate/verify decision offline
+  through `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD`. The script refuses to
+  run at all, exit 2, unless every door a case needs has its env var set,
+  or `--live` is passed — it never falls back to the real fleet door on
+  its own, and never sets or reads `TYPESAFE_API_KEY`. A case that cannot
+  be replayed is reported with its own reason (no payload / payload
+  unreadable / payload shape unsupported for this door / door failed)
+  instead of one generic message. See `docs/hooks.md`, "The catch
+  ledger".
 
 - **Fetch none gate: floor + margin.** The none gate's confidence floor drops from 0.80 to a new default of **0.60**, and a new **margin** check joins it (`--margin N`, default **0.10**): the gate now also asks a clarifying question when the gap between the top pick's confidence and the runner-up's is below the margin, even when the top pick alone clears the floor. Rationale, in words: a confident-looking top-1 sitting in a crowded field — a runner-up almost as confident — is still a guess, just a confident-sounding one; the floor alone can't tell "clearly the best answer" apart from "the least-bad of two nearly-tied answers," and the margin is what catches the second case. An offline replay of saved live fetch rankings found the floor+margin pair served more correct top picks with fewer wrong serves than the old floor-only rule, described here in words rather than as benchmarked numbers. Both are overridable via `--floor`/`--margin` and the `SUPERJEV_FETCH_FLOOR`/`SUPERJEV_FETCH_MARGIN` env vars (a CLI flag always wins over its env var); the old floor-only behaviour is still reachable with `--floor 0.80 --margin 0`. `applyNoneGate` takes a third `margin` parameter; new `topMargin` export computes the gap (a lone top pick with no runner-up counts its own confidence as its margin). The `noMatch` decision (nothing beat "none of these") is unchanged and still takes precedence over both checks.
 
