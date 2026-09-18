@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +82,143 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # (that field describes the lead session, not necessarily the worker's
 # tree). This env var is the only non-payload source honoured.
 HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
+
+# ---------------------------------------------------------------- token accounting
+#
+# Every fleet door built on jev.py prints one header line per model call:
+#   "jev jev-1.13.0 · 1 chunk(s) · 2064 in_tok · 436ms"
+# (see ~/.claude/skills/jev-check/lib/jev.py's _print_reply/main, and
+# worker-verify's own report table, which prints the identical line because
+# it also calls jev.py under the hood). run_door() parses every such line
+# out of a door's CAPTURED stdout+stderr and folds the totals into that
+# call's ledger entry — nothing here makes a network call of its own.
+#
+# The $/Mtok rate is TypeSafe's own published number (see CAPABILITIES.md,
+# "OPERATIONS" section, checked against docs.typesafe.ai on 2026-09-16):
+# input $0.042 per million tokens, output not billed at all. It is a
+# DEFAULT, not a hardcoded constant — SUPERJEV_INPUT_USD_PER_MTOK overrides
+# it the day TypeSafe's preview pricing changes, with no code edit needed.
+INPUT_USD_PER_MTOK_ENV = "SUPERJEV_INPUT_USD_PER_MTOK"
+DEFAULT_INPUT_USD_PER_MTOK = 0.042
+
+# The measured Jev input ceiling is 32,768 tokens (CAPABILITIES.md, "HARD
+# INPUT CEILING"); this cap sits a hair under it so a door call still has
+# room for the question battery's own overhead. SUPERJEV_INPUT_CAP_TOK
+# overrides it.
+INPUT_CAP_TOK_ENV = "SUPERJEV_INPUT_CAP_TOK"
+DEFAULT_INPUT_CAP_TOK = 32_000
+
+_JEV_HEADER_RE = re.compile(
+    r"jev\s+(\S+)\s*\xb7\s*(\d+)\s*chunk\(s\)\s*\xb7\s*(\d+)\s*in_tok\s*\xb7\s*(\d+)ms")
+
+
+def _input_usd_per_mtok():
+    try:
+        return float(os.environ.get(INPUT_USD_PER_MTOK_ENV, DEFAULT_INPUT_USD_PER_MTOK))
+    except ValueError:
+        return DEFAULT_INPUT_USD_PER_MTOK
+
+
+def _input_cap_tok():
+    try:
+        n = int(os.environ.get(INPUT_CAP_TOK_ENV, DEFAULT_INPUT_CAP_TOK))
+        return n if n > 0 else DEFAULT_INPUT_CAP_TOK
+    except ValueError:
+        return DEFAULT_INPUT_CAP_TOK
+
+
+def _estimate_tokens(text):
+    """The same cheap chars/4 estimate used everywhere a real token count
+    is not available yet — good enough to decide whether to warn/truncate
+    BEFORE paying for a call; the real count comes back in the door's own
+    header line afterwards and is what the ledger records."""
+    return len(text or "") // 4
+
+
+def parse_jev_headers(text):
+    """Every 'jev <model> · N chunk(s) · N in_tok · Nms' header line found
+    in `text` (a door's captured stdout, or stdout+stderr joined). Returns
+    a list of {"model","chunks","in_tok","ms"} dicts, oldest match first;
+    [] if none are found. Pure string parsing, no side effects."""
+    out = []
+    for m in _JEV_HEADER_RE.finditer(text or ""):
+        out.append({"model": m.group(1), "chunks": int(m.group(2)),
+                    "in_tok": int(m.group(3)), "ms": int(m.group(4))})
+    return out
+
+
+def token_usage_from_output(stdout, stderr=""):
+    """Fold every jev header line in a door's captured output into one
+    usage dict, or None if the output carries no header at all (a door
+    that never called jev, or a refusal that never ran the child at all).
+
+    calls    — how many jev header lines were found (one door invocation
+               can chunk into several TypeSafe calls; each chunk prints
+               its own header).
+    in_tok   — summed input_tokens across all of them.
+    chunks   — summed chunk counts.
+    judge_ms — summed latency across all of them.
+    est_cost_usd — in_tok billed at INPUT_USD_PER_MTOK; output is free per
+               TypeSafe's own pricing, so nothing else is counted."""
+    headers = parse_jev_headers((stdout or "") + "\n" + (stderr or ""))
+    if not headers:
+        return None
+    in_tok = sum(h["in_tok"] for h in headers)
+    chunks = sum(h["chunks"] for h in headers)
+    judge_ms = sum(h["ms"] for h in headers)
+    calls = len(headers)
+    est_cost_usd = round(in_tok * _input_usd_per_mtok() / 1_000_000, 6)
+    return {"calls": calls, "in_tok": in_tok, "chunks": chunks,
+            "judge_ms": judge_ms, "est_cost_usd": est_cost_usd}
+
+
+def cap_check_and_truncate(evidence_items, draft_text, door):
+    """Before a gate/verify door is invoked: estimate the input size of
+    `evidence_items` (a list of (path, text) pairs, given OLDEST FIRST —
+    receipts/previous-turn ahead of current-turn, matching the order
+    _derive_evidence_text_from_transcript already builds) plus
+    `draft_text`, using the chars/4 estimate. If the total is at or under
+    SUPERJEV_INPUT_CAP_TOK, nothing changes.
+
+    If it is over, print ONE warning line to stderr and truncate the
+    OLDEST evidence first — dropping whole items from the front, then
+    trimming the remainder of the oldest surviving item down to what fits
+    — until evidence + draft fits the cap. The draft/report text itself is
+    NEVER touched; if the draft alone already exceeds the cap, every
+    evidence item is dropped (an empty list) rather than cutting the
+    draft.
+
+    Returns (kept_items, truncated: bool, est_tokens_before: int, cap: int).
+    kept_items preserves the original oldest-first order.
+    """
+    cap = _input_cap_tok()
+    draft_tok = _estimate_tokens(draft_text)
+    ev_tok = sum(_estimate_tokens(t) for _, t in evidence_items)
+    total = draft_tok + ev_tok
+    if total <= cap:
+        return list(evidence_items), False, total, cap
+
+    print(f"super-jev: estimated input ~{total} tok exceeds "
+          f"{INPUT_CAP_TOK_ENV}={cap} — truncating oldest evidence for {door}",
+          file=sys.stderr)
+
+    budget_chars = max(0, (cap - draft_tok) * 4)
+    kept_rev = []
+    running = 0
+    for path, text in reversed(evidence_items):     # newest first while trimming
+        remaining = budget_chars - running
+        if remaining <= 0:
+            continue                                 # drop this older item entirely
+        if len(text) <= remaining:
+            kept_rev.append((path, text))
+            running += len(text)
+        else:
+            # keep the TAIL (its most recent content) of this, the oldest
+            # item that still fits at all
+            kept_rev.append((path, text[-remaining:]))
+            running += remaining
+    kept_rev.reverse()                               # back to oldest-first
+    return kept_rev, True, total, cap
 
 # ---------------------------------------------------- claim pre-split (gate v2)
 #
@@ -851,7 +989,12 @@ def ledger_append(entry):
     """Append one JSONL line to the call ledger. Never raises — a ledger
     problem must never break a door — but an unwritable ledger is not
     swallowed in total silence: one line goes to stderr so a broken ledger
-    path is discoverable instead of invisibly dropping every record."""
+    path is discoverable instead of invisibly dropping every record.
+
+    Every entry gets a short unique `id` (if it does not already carry
+    one) — `feedback --ledger-id` and the calibration export both address
+    a ledger line by this."""
+    entry.setdefault("id", uuid.uuid4().hex[:12])
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -883,7 +1026,7 @@ def _ledger_count_today():
 
 
 def run_door(cmd, cwd=None, capture=False, door=None, json_mode=False, hook_mode=False,
-            timeout=None):
+            timeout=None, extra_ledger=None):
     """Run a wrapped door and give back its exit code.
 
     Without `capture`, output is not captured: the door's own table is the
@@ -901,7 +1044,13 @@ def run_door(cmd, cwd=None, capture=False, door=None, json_mode=False, hook_mode
     sees an ordinary exit code instead of an uncaught exception.
 
     Every call — captured, timed out, or not — is appended to the call
-    ledger.
+    ledger. When `capture=True` and the door's output carries a jev token
+    header ("jev <model> · N chunk(s) · N in_tok · Nms"), the parsed
+    totals (calls, in_tok, chunks, judge_ms, est_cost_usd — see
+    token_usage_from_output) are folded into that same ledger entry.
+    `extra_ledger`, if given, is a dict merged into the entry too (used by
+    cmd_gate/cmd_verify to record the pre-call cap estimate and whether
+    evidence was truncated).
     """
     if not capture:
         print("$ " + shlex.join(str(c) for c in cmd) + (f"   (in {cwd})" if cwd else ""))
@@ -934,6 +1083,12 @@ def run_door(cmd, cwd=None, capture=False, door=None, json_mode=False, hook_mode
     }
     if timed_out:
         entry["timeout"] = True
+    if capture:
+        usage = token_usage_from_output(out, err)
+        if usage:
+            entry.update(usage)
+    if extra_ledger:
+        entry.update(extra_ledger)
     ledger_append(entry)
     if capture:
         return returncode, out or "", err or ""
@@ -1050,7 +1205,40 @@ def cmd_gate(a):
     if not a.draft and not a.claim:
         return door_refuse(json_mode, "gate",
                            "gate needs --draft <file> or one or more --claim \"<text>\"")
-    cmd = [*door_cmd(GATE_CMD_ENV, FLEET_JEV_LIB), *a.evidence, "--kit", "reply"]
+
+    # Cap estimate + truncation, BEFORE any TypeSafe call. a.evidence is
+    # given oldest-first (receipts/previous-turn ahead of current-turn —
+    # see cap_check_and_truncate's docstring); the draft is never touched.
+    draft_text_for_cap = ""
+    if a.draft:
+        try:
+            draft_text_for_cap = Path(a.draft).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            draft_text_for_cap = ""
+    ev_items = []
+    for p in a.evidence:
+        try:
+            ev_items.append((p, Path(p).read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            ev_items.append((p, ""))
+    kept_ev, truncated, est_tok, cap_tok = cap_check_and_truncate(
+        ev_items, draft_text_for_cap, "gate")
+    evidence_tmp_paths = []
+    if truncated:
+        evidence_paths = []
+        for orig_path, text in kept_ev:
+            tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                                 encoding="utf-8")
+            tmp_ev.write(text)
+            tmp_ev.close()
+            evidence_tmp_paths.append(tmp_ev.name)
+            evidence_paths.append(tmp_ev.name)
+    else:
+        evidence_paths = list(a.evidence)
+    extra_ledger = {"truncated": truncated, "est_input_tok": est_tok,
+                    "input_cap_tok": cap_tok}
+
+    cmd = [*door_cmd(GATE_CMD_ENV, FLEET_JEV_LIB), *evidence_paths, "--kit", "reply"]
     claims_tmp_path = None
     if a.claim:
         for claim in a.claim:
@@ -1080,7 +1268,8 @@ def cmd_gate(a):
         # inherit straight from this process regardless of contextlib redirects.
         if json_mode:
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
-                                      hook_mode=hook_mode, timeout=timeout)
+                                      hook_mode=hook_mode, timeout=timeout,
+                                      extra_ledger=extra_ledger)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
                       {"stdout": out, "stderr": err}, cmd)
@@ -1094,15 +1283,22 @@ def cmd_gate(a):
             # allow" contract, so cmd_hook gets (code, out, err) back instead
             # of a bare code — the only caller of this branch.
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
-                                      hook_mode=True, timeout=timeout)
+                                      hook_mode=True, timeout=timeout,
+                                      extra_ledger=extra_ledger)
             return code, out, err
-        code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout)
+        code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout,
+                        extra_ledger=extra_ledger)
         print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
         return code
     finally:
         if claims_tmp_path:
             try:
                 os.unlink(claims_tmp_path)
+            except OSError:
+                pass
+        for p in evidence_tmp_paths:
+            try:
+                os.unlink(p)
             except OSError:
                 pass
 
@@ -1133,33 +1329,75 @@ def cmd_verify(a):
     bad = door_missing(VERIFY_CMD_ENV, FLEET_VERIFY_PY)
     if bad is not None:
         return door_refuse(json_mode, "verify", bad)
+    # Cap estimate + truncation, same rule as gate: a.report (the worker's
+    # report — verify's equivalent of the draft) is never touched; --paths
+    # (extra evidence files a caller named) is the only thing trimmed,
+    # oldest-first, when the estimate is over the cap.
+    report_text_for_cap = ""
+    try:
+        report_text_for_cap = Path(a.report).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        pass
+    path_items = []
+    for p in (a.paths or []):
+        try:
+            path_items.append((p, Path(p).read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            path_items.append((p, ""))
+    kept_paths, truncated, est_tok, cap_tok = cap_check_and_truncate(
+        path_items, report_text_for_cap, "verify")
+    extra_tmp_paths = []
+    if truncated:
+        paths_for_cmd = []
+        for orig_path, text in kept_paths:
+            tmp_p = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                                encoding="utf-8")
+            tmp_p.write(text)
+            tmp_p.close()
+            extra_tmp_paths.append(tmp_p.name)
+            paths_for_cmd.append(tmp_p.name)
+    else:
+        paths_for_cmd = list(a.paths or [])
+    extra_ledger = {"truncated": truncated, "est_input_tok": est_tok,
+                    "input_cap_tok": cap_tok}
+
     cmd = [*door_cmd(VERIFY_CMD_ENV, FLEET_VERIFY_PY), a.report]
     if a.worktree:
         cmd += ["--worktree", a.worktree]
     if a.test_cmd:
         cmd += ["--test-cmd", a.test_cmd]
-    if a.paths:
-        cmd += ["--paths", *a.paths]
+    if paths_for_cmd:
+        cmd += ["--paths", *paths_for_cmd]
     if a.dry_run:
         cmd += ["--dry-run"]
     timeout = _verify_timeout()
-    if json_mode:
-        code, out, err = run_door(cmd, capture=True, door="verify", json_mode=True,
-                                  hook_mode=hook_mode, timeout=timeout)
-        emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code,
-                  VERIFY_VERDICT.get(code, f"ERROR — worker-verify exited {code}"),
-                  {"stdout": out, "stderr": err}, cmd)
+    try:
+        if json_mode:
+            code, out, err = run_door(cmd, capture=True, door="verify", json_mode=True,
+                                      hook_mode=hook_mode, timeout=timeout,
+                                      extra_ledger=extra_ledger)
+            emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code,
+                      VERIFY_VERDICT.get(code, f"ERROR — worker-verify exited {code}"),
+                      {"stdout": out, "stderr": err}, cmd)
+            return code
+        if hook_mode:
+            # Same rationale as cmd_gate's hook_mode branch: captured, never
+            # printed, and returned as (code, out, err) so cmd_hook can run
+            # the same strong-flag scan over worker-verify's table.
+            code, out, err = run_door(cmd, capture=True, door="verify", json_mode=False,
+                                      hook_mode=True, timeout=timeout,
+                                      extra_ledger=extra_ledger)
+            return code, out, err
+        code = run_door(cmd, door="verify", hook_mode=hook_mode, timeout=timeout,
+                        extra_ledger=extra_ledger)
+        print(f"\nVERDICT: {VERIFY_VERDICT.get(code, f'ERROR — worker-verify exited {code}')}")
         return code
-    if hook_mode:
-        # Same rationale as cmd_gate's hook_mode branch: captured, never
-        # printed, and returned as (code, out, err) so cmd_hook can run
-        # the same strong-flag scan over worker-verify's table.
-        code, out, err = run_door(cmd, capture=True, door="verify", json_mode=False,
-                                  hook_mode=True, timeout=timeout)
-        return code, out, err
-    code = run_door(cmd, door="verify", hook_mode=hook_mode, timeout=timeout)
-    print(f"\nVERDICT: {VERIFY_VERDICT.get(code, f'ERROR — worker-verify exited {code}')}")
-    return code
+    finally:
+        for p in extra_tmp_paths:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------- sweep
@@ -2749,6 +2987,7 @@ def cmd_hook(a):
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+            _save_last_draft_evidence("gate", text, _read_evidence_text(evidence))
             # Deterministic count/PR cross-check — pure string work, no
             # model call, runs regardless of what the judge above said.
             # See deterministic_block_reasons's own docstring: fires only
@@ -2811,6 +3050,10 @@ def cmd_hook(a):
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+            # worker-verify's own captured table is the closest thing to
+            # "the evidence" verify judged this report against — it has no
+            # separate evidence FILE list of its own the way gate does.
+            _save_last_draft_evidence("verify", text, door_out)
 
         # Strong-flag override: a claim or draft-level flag red enough to
         # cross THIS hook's own block line (see _hook_block_reasons) turns
@@ -2892,6 +3135,53 @@ def cmd_hook(a):
 
 # ---------------------------------------------------------------- ledger
 
+def _token_totals(lines, today_only=False):
+    """{"overall": {...}, "by_door": {door: {...}}} — calls/in_tok/
+    est_cost_usd summed across every ledger line that carries token usage
+    (an "in_tok" key — see token_usage_from_output). `today_only` restricts
+    to lines whose ts starts with today's UTC date, same rule
+    _ledger_count_today uses. "session" totals (the ask() spec's other
+    axis) are simply this with today_only=False — the whole ledger file
+    IS this session's own call record, there being no separate session id
+    threaded through the call ledger."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    overall = {"calls": 0, "in_tok": 0, "est_cost_usd": 0.0}
+    by_door = {}
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if "in_tok" not in rec:
+            continue
+        if today_only and not str(rec.get("ts", "")).startswith(today):
+            continue
+        door = rec.get("door", "?")
+        d = by_door.setdefault(door, {"calls": 0, "in_tok": 0, "est_cost_usd": 0.0})
+        calls = rec.get("calls", 1)
+        in_tok = rec.get("in_tok", 0)
+        cost = rec.get("est_cost_usd", 0.0)
+        d["calls"] += calls
+        d["in_tok"] += in_tok
+        d["est_cost_usd"] += cost
+        overall["calls"] += calls
+        overall["in_tok"] += in_tok
+        overall["est_cost_usd"] += cost
+    for d in list(by_door.values()) + [overall]:
+        d["est_cost_usd"] = round(d["est_cost_usd"], 6)
+    return {"overall": overall, "by_door": by_door}
+
+
+def _print_token_totals(label, totals):
+    o = totals["overall"]
+    print(f"{label}: {o['calls']} call(s), {o['in_tok']} in_tok, "
+          f"est ${o['est_cost_usd']:.6f}")
+    for door in sorted(totals["by_door"]):
+        d = totals["by_door"][door]
+        print(f"  {door:<10} {d['calls']:>4} call(s)  {d['in_tok']:>8} in_tok  "
+              f"est ${d['est_cost_usd']:.6f}")
+
+
 def cmd_ledger(a):
     lines = _ledger_lines()
     if not lines:
@@ -2911,6 +3201,242 @@ def cmd_ledger(a):
     print("\nper-door counts:")
     for name in sorted(counts):
         print(f"  {name:<10} {counts[name]}")
+    print()
+    _print_token_totals("token totals, today", _token_totals(lines, today_only=True))
+    print()
+    _print_token_totals("token totals, session (whole ledger)",
+                        _token_totals(lines, today_only=False))
+    return 0
+
+
+# ---------------------------------------------------------------- feedback + calibration
+#
+# Kelvin's second ask: "every time I confirm a block was right or wrong,
+# that should go into the calibration set automatically." This is the
+# write side of the learning loop — `feedback` turns a human verdict on
+# the LAST gate/verify hook decision into one calibration/cases.jsonl
+# line; `calibration export` turns the running case log into the exact
+# drafts/ evidence/ cases.json layout gate-bench-20260917's own
+# run_bench.sh/summarize.py already consume, unchanged.
+
+_HOOK_NOTE_DOOR_RE = re.compile(r"^(gate|verify):\s*(\S[\w -]*)")
+
+
+def _parse_hook_note(note):
+    """(door, verdict) out of a _hook_log note like "gate: allow (exit 0)"
+    or "verify: block (exit 2) — strong flags: ...". verdict is the first
+    word after the door prefix, uppercased (ALLOW/BLOCK/ADVISORY/...).
+    (None, None) if `note` does not start with "gate:" or "verify:"."""
+    m = _HOOK_NOTE_DOOR_RE.match(note or "")
+    if not m:
+        return None, None
+    return m.group(1), m.group(2).strip().split()[0].upper()
+
+
+def _last_dir():
+    d = LEDGER_PATH.parent / "last"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_last_draft_evidence(door, draft_text, evidence_text):
+    """Overwrite <ledger dir>/last/<door>-draft.md and -evidence.md with
+    this hook run's draft/report and evidence — the pair `feedback` reads
+    when the human confirms the very next block/allow was right or wrong.
+    Never raises: a failure here must not break the hook it rides in."""
+    try:
+        d = _last_dir()
+        (d / f"{door}-draft.md").write_text(draft_text or "", encoding="utf-8")
+        (d / f"{door}-evidence.md").write_text(evidence_text or "", encoding="utf-8")
+    except OSError as exc:
+        print(f"super-jev: could not write last/{door}-* under {LEDGER_PATH.parent}: {exc}",
+              file=sys.stderr)
+
+
+def _calibration_dir():
+    d = LEDGER_PATH.parent / "calibration"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _last_hook_ledger_entry(ledger_id=None):
+    """The most recent ledger line that is a gate/verify hook decision
+    (door == "hook", note starting "gate:"/"verify:"), or — when
+    `ledger_id` is given — the ledger line with that exact id regardless
+    of shape. None if nothing matches."""
+    lines = _ledger_lines()
+    if ledger_id:
+        for line in reversed(lines):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("id") == ledger_id:
+                return rec
+        return None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("door") != "hook":
+            continue
+        door, verdict = _parse_hook_note(rec.get("note", ""))
+        if door is None:
+            continue
+        rec["_door"] = door
+        rec["_verdict"] = verdict
+        return rec
+    return None
+
+
+def cmd_feedback(a):
+    """`feedback <right|wrong> [--note ...] [--ledger-id ID]` — append one
+    calibration case built from the LAST gate/verify hook decision (or the
+    ledger line named by --ledger-id) plus the draft+evidence this repo
+    just saved for that door under last/. Exits REFUSED if there is no
+    matching ledger line or the last/ files are missing (never crashes on
+    a cold ledger — cases.jsonl just gets nothing appended)."""
+    entry = _last_hook_ledger_entry(ledger_id=getattr(a, "ledger_id", None))
+    if entry is None:
+        which = (f" for --ledger-id {a.ledger_id}" if getattr(a, "ledger_id", None) else "")
+        return refuse(f"feedback: no gate/verify hook ledger line found{which}")
+    door = entry.get("_door")
+    verdict = entry.get("_verdict")
+    if door is None:
+        door, verdict = _parse_hook_note(entry.get("note", ""))
+    if door is None:
+        return refuse(f"feedback: ledger line {entry.get('id')} is not a gate/verify "
+                      "hook decision — pass --ledger-id for one that is")
+
+    last_dir = _last_dir()
+    try:
+        draft_text = (last_dir / f"{door}-draft.md").read_text(encoding="utf-8")
+    except OSError:
+        draft_text = ""
+    try:
+        evidence_text = (last_dir / f"{door}-evidence.md").read_text(encoding="utf-8")
+    except OSError:
+        evidence_text = ""
+
+    case_id = entry.get("id") or uuid.uuid4().hex[:12]
+    cal_dir = _calibration_dir()
+    ev_dir = cal_dir / "evidence"
+    ev_dir.mkdir(parents=True, exist_ok=True)
+    ev_stable_path = ev_dir / f"{case_id}.md"
+    try:
+        ev_stable_path.write_text(evidence_text, encoding="utf-8")
+    except OSError:
+        pass
+
+    case = {
+        "id": case_id,
+        "ts": entry.get("ts"),
+        "door": door,
+        "verdict": verdict,
+        "exit_code": entry.get("exit_code"),
+        "flags": entry.get("flags", []),
+        "draft": draft_text,
+        "evidence_path": str(ev_stable_path),
+        "human": a.value,
+        "note": getattr(a, "note", "") or "",
+    }
+    try:
+        with open(cal_dir / "cases.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(case, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        return refuse(f"feedback: could not write calibration/cases.jsonl: {exc}")
+
+    print(f"feedback: recorded human={a.value} for {door} ledger id={case_id} "
+          f"(verdict {verdict}, exit {entry.get('exit_code')})")
+    return 0
+
+
+def _calibration_kind(verdict, human):
+    """"lie" if the block/allow verdict, cross-checked against the human's
+    right/wrong call, means the draft actually WAS a lie; "truth"
+    otherwise. Table: block+right -> lie (a lie correctly caught);
+    allow/advisory+wrong -> lie (a lie that slipped through); block+wrong
+    -> truth (a true claim wrongly blocked); allow/advisory+right ->
+    truth (a true claim correctly allowed)."""
+    is_block = verdict == "BLOCK"
+    return "lie" if is_block == (human == "right") else "truth"
+
+
+def cmd_calibration(a):
+    if a.action == "summary":
+        return cmd_calibration_summary(a)
+    if a.action == "export":
+        return cmd_calibration_export(a)
+    return refuse(f"calibration: unknown action {a.action!r} — use summary or export")
+
+
+def cmd_calibration_summary(a):
+    path = _calibration_dir() / "cases.jsonl"
+    try:
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except OSError:
+        lines = []
+    counts = {"right_block": 0, "wrong_block": 0, "right_allow": 0, "wrong_allow": 0}
+    for line in lines:
+        try:
+            case = json.loads(line)
+        except ValueError:
+            continue
+        is_block = case.get("verdict") == "BLOCK"
+        human = case.get("human")
+        key = ("right_block" if (is_block and human == "right") else
+               "wrong_block" if (is_block and human == "wrong") else
+               "right_allow" if (not is_block and human == "right") else
+               "wrong_allow")
+        counts[key] += 1
+    print(f"calibration summary: {len(lines)} case(s) at {path}\n")
+    print(f"  right block : {counts['right_block']}")
+    print(f"  wrong block : {counts['wrong_block']}")
+    print(f"  right allow : {counts['right_allow']}")
+    print(f"  wrong allow : {counts['wrong_allow']}")
+    return 0
+
+
+def cmd_calibration_export(a):
+    out_dir = Path(a.dir).expanduser()
+    (out_dir / "drafts").mkdir(parents=True, exist_ok=True)
+    (out_dir / "evidence").mkdir(parents=True, exist_ok=True)
+    src = _calibration_dir() / "cases.jsonl"
+    try:
+        lines = [l for l in src.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except OSError:
+        lines = []
+    cases_out = []
+    for line in lines:
+        try:
+            case = json.loads(line)
+        except ValueError:
+            continue
+        cid = case.get("id") or f"case{len(cases_out) + 1}"
+        verdict = case.get("verdict")
+        human = case.get("human")
+        kind = _calibration_kind(verdict, human)
+        draft_text = case.get("draft") or ""
+        ev_text = ""
+        ev_path = case.get("evidence_path")
+        if ev_path:
+            try:
+                ev_text = Path(ev_path).read_text(encoding="utf-8")
+            except OSError:
+                ev_text = ""
+        (out_dir / "drafts" / f"{cid}.md").write_text(draft_text, encoding="utf-8")
+        (out_dir / "evidence" / f"{cid}.md").write_text(ev_text, encoding="utf-8")
+        cases_out.append({
+            "id": cid,
+            "kind": kind,
+            "flavor": case.get("door"),
+            "draft": draft_text,
+            "evidence_note": case.get("note") or
+                            f"human={human}; door={case.get('door')}; verdict={verdict}",
+        })
+    (out_dir / "cases.json").write_text(json.dumps(cases_out, indent=2), encoding="utf-8")
+    print(f"calibration export: {len(cases_out)} case(s) -> {out_dir}")
     return 0
 
 
@@ -3068,6 +3594,7 @@ def cmd_status(a):
         ("status", "LIVE", "this"),
     ]
     ledger_today = _ledger_count_today()
+    today_totals = _token_totals(_ledger_lines(), today_only=True)
 
     if json_mode:
         emit_json("status", "OK", 0, "door states as read off disk", {
@@ -3077,6 +3604,7 @@ def cmd_status(a):
             "typesafe_key_present": bool(os.environ.get("TYPESAFE_API_KEY")),
             "ledger_path": str(LEDGER_PATH),
             "ledger_calls_today": ledger_today,
+            "token_totals_today": today_totals,
         }, [])
         return 0
 
@@ -3090,6 +3618,7 @@ def cmd_status(a):
     print(f"TYPESAFE_API_KEY in env: {'yes' if os.environ.get('TYPESAFE_API_KEY') else 'no'}"
           " (never printed)")
     print(f"ledger: {LEDGER_PATH} ({ledger_today} call(s) today)")
+    _print_token_totals("token totals, today", today_totals)
     return 0
 
 
@@ -3224,6 +3753,28 @@ def build_parser():
     st = subs.add_parser("status", help="which doors are live, which are not built")
     _add_json_flag(st)
     st.set_defaults(func=cmd_status)
+
+    fb = subs.add_parser("feedback",
+                         help="record whether the LAST gate/verify hook decision was "
+                              "right or wrong — feeds the calibration set")
+    fb.add_argument("value", choices=["right", "wrong"],
+                    help="was the block (or allow) the right call?")
+    fb.add_argument("--note", default="", help="why, in your own words")
+    fb.add_argument("--ledger-id", dest="ledger_id", default=None,
+                    help="give feedback on a specific ledger line's id instead of "
+                         "the most recent gate/verify hook decision")
+    fb.set_defaults(func=cmd_feedback)
+
+    cal = subs.add_parser("calibration", help="the calibration set built from `feedback`")
+    cal_subs = cal.add_subparsers(dest="action")
+    cal_sum = cal_subs.add_parser("summary",
+                                  help="counts of right/wrong blocks and right/wrong allows")
+    cal_sum.set_defaults(func=cmd_calibration, action="summary")
+    cal_exp = cal_subs.add_parser("export",
+                                  help="write drafts/ evidence/ cases.json for run_bench.sh")
+    cal_exp.add_argument("dir", help="output directory, created if missing")
+    cal_exp.set_defaults(func=cmd_calibration, action="export")
+    cal.set_defaults(func=cmd_calibration, action=None)
     return p
 
 
