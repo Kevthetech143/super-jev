@@ -163,9 +163,11 @@ block is a first-class window section, `window_model.SECTION_CONTRIBUTED`:
   the string, and `arms.CONTRIBUTED_HEADER` is an alias of it. The
   renderer that writes the line and the reader that recognises it cannot
   disagree about its bytes.
-- **its own emit slot, above every other section.** `emit_slot` ranks it
-  last, matching where `JudgeEvidence.render` writes it, so the `===`
-  before it is a boundary `from_text` accepts.
+- **its own emit slot, the highest of any section.** `emit_slot` ranks it
+  above every other section's slot, which means it renders LAST — after
+  `[current turn]`, not before it — matching where `JudgeEvidence.render`
+  actually writes it (appended once the rest of the window is already
+  rendered). The `===` before it is a boundary `from_text` accepts.
 - **its own piece origin, `check_arm`.** Not in
   `window_model.TRUSTED_ORIGINS`, so the single trust rule answers no for
   the ordinary reason rather than by a special case. `pr_state_signals_
@@ -191,10 +193,21 @@ that chunk was `[session receipts]`, every contributed line — and any
 receipt**. Arm text laundered into a receipt by nothing but its position.
 
 The invariant is a test: after `render()` and `from_text`, no contributed
-line has trust. And in the one case the boundary cannot be proved — a
-window carrying an unbounded report body makes every later `===`
-un-provable — the block is absorbed into that report's *claim*. Untrusted
-either way. There is no arrangement of these bytes that gains trust.
+line has trust. That is the renderer and the reader, and between the two
+of them the pair is airtight — but a window this big does not go to the
+judge as rendered; `superjev.trim_window_to_token_budget` cuts it to the
+gate's token budget first, and a trimmer that does not know the
+contributed header is a third way to lose the guarantee, not covered by
+either half above. `_WINDOW_PART_RE`/`_WINDOW_TRIM_ORDER` register the
+header as its own section, evicted FIRST and always WHOLE — header
+included, never partially shrunk — specifically because a partial cut
+that kept the block's tail but sliced its header off would hand
+`from_text` unlabelled bytes, which a downstream reader can fold into
+whatever trusted section sits above them. And in the one case the
+section boundary cannot be proved regardless — a window carrying an
+unbounded report body makes every later `===` un-provable — the block is
+absorbed into that report's *claim*. Untrusted either way. There is no
+arrangement of these bytes that gains trust.
 
 ## One judge call per run
 

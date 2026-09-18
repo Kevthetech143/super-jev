@@ -1188,11 +1188,36 @@ def _arm_run_ledger_fields(runs):
     return (consulted or None), (errors or None)
 
 
+#: Must match `arms.ARMS_SWITCH_ENV`. Duplicated on purpose: reading it has
+#: to be import-free, so `_arms_switch_on` below can answer "is the
+#: registry even wanted?" before anything pays for `import arms` (which
+#: drags in `window_model` too) on a call where the answer is no — the
+#: common case, since the switch defaults off.
+ARMS_SWITCH_ENV = "SUPERJEV_ARMS"
+
+
+def _arms_switch_on():
+    """Cheap, import-free mirror of `arms.arms_enabled()`.
+
+    Every gate event reaches `_pr_state_reason` below, so this has to be
+    answerable without loading the registry — otherwise the switch being
+    OFF (the default) would still cost every call an `import arms` (and,
+    through it, `window_model`) just to find that out.
+    """
+    return str(os.environ.get(ARMS_SWITCH_ENV, "")).strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def _arms_registry():
     """The arm registry module, or None if it cannot be imported.
 
     Never raises. The registry is an enhancement; a broken import must
     leave the gate on its legacy path, not take it down.
+
+    Callers on the deterministic gate path must check `_arms_switch_on()`
+    first and skip this entirely when it is off — this function is what
+    actually imports `arms` (and `window_model` with it), so calling it
+    unconditionally defeats the point of the cheap switch check.
     """
     try:
         # Appended, not inserted: the gate must not reorder the running
@@ -1211,10 +1236,14 @@ def _pr_state_reason(draft_text, evidence_text, run_sink=None):
     """The PR-state arm's reason line, or None.
 
     With `SUPERJEV_ARMS` off (the default) this is `_pr_mismatch_reason`
-    and nothing else runs. With it on, the registry runs the `pr_state`
-    arm over a window parsed out of the same evidence text, and the
-    legacy inline call is skipped rather than run alongside — running
-    both would hide exactly the difference the switch exists to expose.
+    and nothing else runs — and, on purpose, nothing imports `arms` or
+    `window_model` to find that out: `_arms_switch_on()` is checked
+    first, and the registry import (`_arms_registry()`) only happens once
+    the switch says it is wanted. With it on, the registry runs the
+    `pr_state` arm over a window parsed out of the same evidence text,
+    and the legacy inline call is skipped rather than run alongside —
+    running both would hide exactly the difference the switch exists to
+    expose.
 
     `run_sink`, if given, is a list this appends one `_ArmRunNote` to,
     recording which arms were consulted in which modes and which of them
@@ -1222,14 +1251,19 @@ def _pr_state_reason(draft_text, evidence_text, run_sink=None):
     and `arm_errors` fields are it. A raising blocking arm still fails
     open — but it is no longer invisible.
     """
-    arms = _arms_registry() if evidence_text else None
-    if arms is None or not arms.arms_enabled():
+    def _legacy():
         # The legacy inline twin is still an arm being consulted, so the
         # ledger says so rather than reading as "no arms ran".
         if run_sink is not None:
             run_sink.append(_ArmRunNote(consulted=[("pr_state", "legacy-inline")],
                                         errors=[]))
         return _pr_mismatch_reason(draft_text, evidence_text)
+
+    if not evidence_text or not _arms_switch_on():
+        return _legacy()
+    arms = _arms_registry()
+    if arms is None or not arms.arms_enabled():
+        return _legacy()
     from arms import pr_state as pr_state_arm              # noqa: PLC0415
     window = pr_state_arm.window_from_text(evidence_text)
     verdicts, run = arms.run_arms(window, draft_text, ctx={
@@ -1395,12 +1429,12 @@ _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 #   "0"/unset — off: every block reason (judge or deterministic) blocks
 #            exactly as it does today.
 #
-# Both levels are ONE rule, and it is the registry's own
-# (`arms.judge_only_blocks`) rather than a second copy living here: this
-# module only adapts today's reason lists into verdicts for it
-# (_gate_blocking_verdicts) and hands it the weak set as a filter, so the
-# rule covers the judge arms under v2 and v3 alike without naming any of
-# them.
+# Both levels are ONE rule (_judge_only_blocks_local, mirroring the
+# registry's arms.judge_only_blocks but callable without importing the
+# registry): this module only adapts today's reason lists into verdicts
+# for it (_gate_blocking_verdicts) and hands it the weak set as a filter,
+# so the rule covers the judge arms under v2 and v3 alike without naming
+# any of them.
 #
 # It never touches a block carrying even one deterministic reason (a count
 # mismatch, a PR mismatch, a CONTRADICTED_BY_FACT fact sentence): those still
@@ -1499,31 +1533,59 @@ def _gate_blocking_verdicts(det_block_reasons, block_reasons, code=None):
     return verdicts, kinds
 
 
+def _judge_only_blocks_local(verdicts, kinds, weak_verdicts=None):
+    """Local mirror of `arms.judge_only_blocks` — same rule, same shape,
+    but callable without ever importing the `arms` package.
+
+    `_gate_blocking_verdicts` below only ever produces the two fixed
+    origins `GATE_ARM_INLINE`/`GATE_ARM_JUDGE` (this gate's own reasons
+    have not moved into the registry; only `pr_state`, behind
+    `SUPERJEV_ARMS`, has) — so this rule never actually reads real
+    per-arm registry state, on this call path, with the switch on or
+    off. Keeping a private copy here means the judge-advisory failsafe
+    (checked on every gate block) does not have to import `arms` — and,
+    through it, `window_model` — just to answer a question its own
+    inputs already fully determine. Kept in lockstep with
+    `arms.judge_only_blocks`'s docstring; change one, change both.
+    """
+    blocking = [v for v in (verdicts or []) if v.is_block()]
+    if not blocking:
+        return False
+    for v in blocking:
+        if (kinds or {}).get(v.arm, "deterministic") != "judge":
+            return False
+        if weak_verdicts is not None and getattr(v, "verdict", None) not in weak_verdicts:
+            return False
+    return True
+
+
 def _judge_advisory_demotes(det_block_reasons, block_reasons, code=None):
     """Does the gate-level failsafe demote THIS block?
 
-    One rule, and it is the registry's: demote when there is at least one
-    blocking verdict and EVERY blocking verdict came from an arm whose
-    KIND is `judge` (`arms.judge_only_blocks`). Mode `weak` hands that
-    same rule a FILTER — `_JUDGE_ADVISORY_WEAK_VERDICTS` — so a judge
-    verdict outside the weak set (OVERCLAIMS, or a reason line naming no
-    verdict at all) keeps its block. Per-arm mode is a different object —
-    one arm's own standing, set once and read on every run. This is one
-    gate call's outcome, demoted after the fact.
+    One rule: demote when there is at least one blocking verdict and
+    EVERY blocking verdict came from an arm whose KIND is `judge`
+    (`_judge_only_blocks_local`, mirroring `arms.judge_only_blocks`).
+    Mode `weak` hands that same rule a FILTER —
+    `_JUDGE_ADVISORY_WEAK_VERDICTS` — so a judge verdict outside the weak
+    set (OVERCLAIMS, or a reason line naming no verdict at all) keeps
+    its block. Per-arm mode is a different object — one arm's own
+    standing, set once and read on every run. This is one gate call's
+    outcome, demoted after the fact.
 
-    With the registry unimportable this returns False: the block stands.
-    A failsafe that cannot read its own rule must not guess at it.
+    Answered entirely from this call's own arguments — no registry
+    import, `SUPERJEV_ARMS` on or off. `weak` mode used to route through
+    `_arms_registry()` even with arms disabled, which meant a gate that
+    never touched `SUPERJEV_ARMS` still paid to import `arms` (and
+    `window_model`) on every judge-advisory-weak block; that dependency
+    is gone.
     """
     mode = _judge_advisory_mode()
     if mode == "0":
         return False
-    arms = _arms_registry()
-    if arms is None:                                      # pragma: no cover
-        return False
     verdicts, kinds = _gate_blocking_verdicts(det_block_reasons, block_reasons,
                                               code=code)
     weak = _JUDGE_ADVISORY_WEAK_VERDICTS if mode == "weak" else None
-    return arms.judge_only_blocks(verdicts, kinds, weak_verdicts=weak)
+    return _judge_only_blocks_local(verdicts, kinds, weak_verdicts=weak)
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -6641,6 +6703,8 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_fac
 # call is actually priced and timed by. It trims whole sections by
 # priority, lowest first:
 #
+#   0. the `[contributed by check arms]` block, ALWAYS FIRST and ALWAYS
+#      WHOLE (never partially shrunk — see below)
 #   1. previous turns, OLDEST first (a fact two turns back is the most
 #      replaceable thing in the window)
 #   2. session receipts — the backing layer, and by far the fattest on the
@@ -6654,18 +6718,44 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_fac
 # guarantee the byte cap always carried — and the facts are kept whole,
 # because a fact is a sentence the judge cannot re-derive from a truncated
 # dump.
+#
+# The contributed block sits LAST in a rendered window — AFTER
+# `[current turn]`, not before it; see `window_model.emit_slot` and
+# `arms.JudgeEvidence.render`. Before `_WINDOW_PART_RE` knew its header,
+# this trimmer read it as unmarked trailing text and folded it into
+# whichever recognised section preceded it (usually `[current turn]`,
+# never dropped) rather than treating it as its own section: an arm's
+# contributed lines rode along inside an undroppable block while real
+# receipts got evicted to make room, and if the tail-keep at the bottom
+# of this function ever cut into that fused blob it could slice the
+# `[contributed by check arms]` header off entirely, leaving the arm's
+# lines to `from_text` as unlabelled remainder — which a downstream
+# reader can fold into the nearest TRUSTED section above it. Registering
+# the header here closes both holes at once: the block gets its own part
+# (so it can be dropped on its own), it is evicted FIRST (arm-contributed
+# lines are the most replaceable thing in the window — the judge already
+# has the real evidence they were derived from), and it is dropped WHOLE,
+# never shrunk (see the `kind == _WINDOW_KIND_CONTRIBUTED` guard in
+# `trim_window_to_token_budget`) — a partial cut is exactly the shape
+# that could strand a labelled contributed line without the header that
+# marks it untrusted.
+_WINDOW_KIND_CONTRIBUTED = "contributed by check arms"
+
 _WINDOW_PART_RE = re.compile(
     r'^\[(current turn reports|current turn|previous turn -(\d+)|session receipts'
-    r'|cited files)\]\s*$')
+    r'|cited files|contributed by check arms)\]\s*$')
 
-# Lowest priority first — the order sections are given up in. "other"
-# (anything not under a recognised section marker) is deliberately absent:
-# the byte-level tail cut upstream can slice a marker line off the head of
-# the window, and everything after that point would then look unlabelled.
-# Dropping it would risk dropping the current turn, so unlabelled content
-# is treated as undroppable and left to the tail-keep at the end.
-_WINDOW_TRIM_ORDER = ("previous turn", "session receipts", "cited files",
-                      "current turn reports")
+# Lowest priority first — the order sections are given up in. The
+# contributed block goes FIRST: it is arm-derived evidence, not a
+# receipt, and the judge already has whatever real evidence it was
+# derived from in the window proper. "other" (anything not under a
+# recognised section marker) is deliberately absent: the byte-level tail
+# cut upstream can slice a marker line off the head of the window, and
+# everything after that point would then look unlabelled. Dropping it
+# would risk dropping the current turn, so unlabelled content is treated
+# as undroppable and left to the tail-keep at the end.
+_WINDOW_TRIM_ORDER = (_WINDOW_KIND_CONTRIBUTED, "previous turn",
+                      "session receipts", "cited files", "current turn reports")
 
 _WINDOW_SHRINK_MARKER = "[...head of this section cut to fit the window budget...]"
 
@@ -6775,15 +6865,23 @@ def trim_window_to_token_budget(text, budget_tok=None):
                 break
             label = (f"previous turn -{victim['age']}" if victim["kind"] == "previous turn"
                     else victim["kind"])
-            # SHRINK before DROP. Giving up a whole 3,000-token receipts
-            # block to save 200 tokens throws away evidence the budget
-            # never asked for, and evidence missing from the window is how
-            # a true reply gets flagged NOT_SUPPORTED. So a section that
-            # can pay the overflow out of its own head does exactly that
-            # and the trimming stops there; only a section too small to
-            # cover it is dropped whole.
+            # SHRINK before DROP — EXCEPT the contributed block, which is
+            # always dropped whole and never partially cut. A partial
+            # shrink keeps the tail of the section and can slice its own
+            # `[contributed by check arms]` header off the front (the
+            # header sorts first in `victim["text"]`, same as every other
+            # section here), and a contributed block with no header is
+            # exactly the shape `from_text` cannot tell from unlabelled —
+            # and therefore trusted — content. Every other section: giving
+            # up a whole 3,000-token receipts block to save 200 tokens
+            # throws away evidence the budget never asked for, and
+            # evidence missing from the window is how a true reply gets
+            # flagged NOT_SUPPORTED. So a section that can pay the
+            # overflow out of its own head does exactly that and the
+            # trimming stops there; only a section too small to cover it
+            # is dropped whole.
             size = _estimate_tokens(victim["text"])
-            if size > over:
+            if victim["kind"] != _WINDOW_KIND_CONTRIBUTED and size > over:
                 victim["text"] = _shrink_window_part(victim["text"], size - over)
                 meta["shrunk"].append(label)
                 break
@@ -8937,9 +9035,10 @@ def cmd_hook(a):
         # deterministic (count mismatch, PR mismatch, CONTRADICTED_BY_FACT)
         # in the mix — is demoted to advisory. Mode "1" demotes any such
         # block; mode "weak" only one whose every judge verdict is in the
-        # weak set (never OVERCLAIMS). Both are the SAME rule, and it is the
-        # registry's (_judge_advisory_demotes -> arms.judge_only_blocks,
-        # handed the weak set as a filter) rather than a second copy here.
+        # weak set (never OVERCLAIMS). Both are the SAME rule, stated once
+        # (_judge_advisory_demotes -> _judge_only_blocks_local, handed the
+        # weak set as a filter) rather than a second copy here — and
+        # answered without importing the arms registry either way.
         # A block carrying even one deterministic reason is untouched: it
         # falls through to the "block" branch below exactly as it does
         # today, env or no env. Checked after stop_hook_active so a re-run
