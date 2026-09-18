@@ -192,10 +192,25 @@ section 0) that every door above now calls before a path is opened or text
 enters an evidence block sent to the judge — this is infrastructure, not a
 claim-type check, but it gates every row in this page.
 
+Also carries **declined-check-facts** (`PreRule.check`, `check_rules`,
+`render_declined_fact`): when a pre-rule's identity matches but the
+comparator finds no conflict — a tolerance clears a gap, a claimed count
+matches the counted one, a labelling check confirms what was claimed — the
+outcome now renders as its own DERIVED FACT sentence ("A declined check
+must still speak," see `playbook.md` §4) instead of being indistinguishable
+from a check that never ran at all. All four rules above carry it; door-level
+wiring (calling `check_rules` instead of `apply_rules` and threading the
+result through to the judge's evidence) is separate follow-up work, not
+done in this pass.
+
 **NOT COVERED YET:** anything beyond these four atom types — quotes,
 counts-with-units pairing, and message/config-specific checks all live in
 each area door's own file, not in the shared library yet, so a new area
-door has to re-derive them rather than reuse a shared implementation.
+door has to re-derive them rather than reuse a shared implementation. None
+of the area doors above (verify, research, config+messages, browser,
+skillpick, permits) call `check_rules` yet — their own tolerance/policy
+checks (an mtime gap, a repo count, an unverified label) are not yet wired
+to speak when declined.
 
 ## Cross-door NOT COVERED, at a glance
 
