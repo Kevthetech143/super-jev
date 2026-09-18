@@ -740,6 +740,115 @@ draft now passes — the draft's own uncited numbers can still overclaim — but
 it removes the self-contradiction a judge was otherwise left to referee with
 no rationale field to explain its read.
 
+## The latency budget — one call, one cap, one clock (2026-09-18)
+
+A Stop event used to have no bound on how long it could take, and on a heavy
+turn it kept the user waiting long enough to notice. Almost none of that wait
+was the gate's own verdict. It was the advisory teammate-report scan, which
+ran a live `verify` check for every new worker report it found, one after
+another, before the gate check ever started. Its own budget was checked only
+*before* each report and never during one, so a couple of slow checks went
+straight past it and the budget only refused whatever came after them.
+
+Three things changed.
+
+**One live call per Stop event.** `SUPERJEV_GATE_MAX_CALLS` (default 1) is
+the whole event's allowance and the gate's own verdict has first claim on it.
+The advisory scan may spend only what is left, which at the default is
+nothing, so its reports defer to the next Stop event exactly as they already
+did on a timeout. Nothing is dropped; the scan's state file only ever
+advances past reports it actually attempted. Raise the knob if you want the
+scan checking reports inline again.
+
+**One wall-clock budget.** `SUPERJEV_GATE_BUDGET_S` (default 15 seconds)
+bounds the event end to end, and every child check's own timeout is clamped
+to whatever is left of it, so no single check can outlive the event it
+belongs to. If the budget is gone before the gate can judge, the gate prints
+one line saying in plain words that the budget ran out and the reply was
+**not checked**, exits 3 (advisory — this path never blocks), and writes a
+ledger reason of `budget-exceeded`. That reason sits in the health monitor's
+**LOST** bucket, which warns on the first occurrence, because a reply that
+shipped unjudged is precisely the thing that must not pass quietly. An
+advisory that reads like an allow is the failure this whole page exists to
+prevent.
+
+The scan will also not *start* a live check it can see it would have to kill:
+`SUPERJEV_STOP_SCAN_MIN_S` (default 20 seconds) is the floor of remaining
+budget below which it defers instead, so a doomed check never costs a call.
+
+**One window cap, enforced once, immediately before the call.** The window
+used to be capped in three places that did not compose: the builder capped
+what it assembled, the caller then appended a cited-file block *after* that
+cap, and the facts step re-applied the cap only when it had at least one
+derived fact to put at the head — with no facts it returned the over-cap text
+untouched. `SUPERJEV_GATE_WINDOW_TOK` (default 8000 tokens) is now the single
+cap, applied to the finished text right before the call, in tokens rather
+than bytes because tokens are what the call is priced and timed by.
+
+It gives sections up in priority order, lowest first: previous turns oldest
+first, then the session-receipts backing layer, then the cited-file tail,
+then this turn's worker reports. **Derived facts and the current turn are
+never given up.** A section that can cover the overflow out of its own head
+does that and the trimming stops there — only a section too small to cover it
+is dropped whole, because surrendering a whole block of evidence to save a
+sliver of it is how a true reply gets flagged `NOT_SUPPORTED`. If the facts
+and the current turn alone still exceed the budget, the facts stay whole and
+the current turn keeps its tail, the same guarantee the old byte cap carried.
+
+Two honest limits. First, a pre-call size estimate cannot see a `verify`
+check's real input at all: super-jev estimates the files it hands the door,
+and worker-verify then gathers its own git, diff and pull-request evidence
+*inside* the check. So a size cap is not a latency control for verify —
+wall-clock is the only one, which is why the budget above is the real fix and
+the window cap is the smaller half of it. Second, the builder's own byte cap
+still runs upstream of the token cap, and when it has to cut it cuts bytes off
+the head, which can slice away the first section's marker line. The token
+trimmer then sees that leading text as unlabelled and treats it as
+undroppable rather than risking the current turn — safe, but it loses some
+priority precision in exactly the case where there was little left to
+prioritise.
+
+`hook gate --explain` prints the budget line: the cap, the size before and
+after, and which sections were dropped or shrunk.
+
+### Where the waiting actually was
+
+A later, much longer Stop hang on a live session sent us back to time every
+step rather than assume. Two things came out of it.
+
+**The gate path itself shells out to nothing but the judge.** Reading a
+multi-megabyte transcript, finding the turn boundary, backfilling receipts,
+assembling the window, deriving facts, capping it, and running the
+deterministic count and pull-request arms are all local string and file work
+that finish in well under a second even on the largest session transcripts on
+this machine. There is no lock, no network call and no `git` or `gh`
+invocation anywhere on that path, and a test now pins it: a Stop gate event
+makes exactly one subprocess call and it is the gate door.
+
+**Every long-timeout wait in this file is on a verify path, not the gate.**
+The `git` calls, the `gh pull-request` calls, the derive-facts bridge and —
+much the largest — the *derived test command* all belong to `verify` and its
+local fallback. A worker report that says it ran a test suite in a named
+worktree makes the Stop-hook scan hand that command to the verify door, which
+runs it, under a ceiling measured in minutes; and if a flag then crosses the
+block line, the dry-run evidence probe gathers again and runs it a second
+time. That is the shape of a Stop hook that keeps a user waiting for many
+minutes, and it is why the scan is the thing the budget had to reach.
+
+Both of those long waits are now inside the budget. The verify check's
+timeout, the probe's, and the `git remote` lookup that precedes them are each
+clamped to whatever is left of `SUPERJEV_GATE_BUDGET_S`, so none of them can
+outlive the event. At the shipped defaults the scan does not start any of them
+at all and defers instead.
+
+**The scan reads only the transcript's tail.** `SUPERJEV_STOP_SCAN_MAX_BYTES`
+(default 2 MB) bounds it, which is a large saving on a session transcript that
+has grown to many megabytes and costs nothing, since the scan only ever wants
+reports it has not seen yet. The gate *window builder* deliberately still
+reads the whole file: it resolves the current turn by walking back from the
+end, and a truncated view could hand it half a turn. Set the knob to `0` to
+read it all, the behaviour before the bound existed.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
