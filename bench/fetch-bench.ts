@@ -30,7 +30,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
-import { applyNoneGate, DEFAULT_FETCH_FLOOR, DEFAULT_PREFILTER, runFetch, type FetchCatalogEntry } from '../src/enhance/fetch.ts';
+import { applyNoneGate, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN, DEFAULT_PREFILTER, runFetch, type FetchCatalogEntry } from '../src/enhance/fetch.ts';
 import { choiceAnswer } from '../src/enhance/stub.ts';
 import type { Answer, Evaluation, Evaluator, Question, Request } from '../src/types.ts';
 
@@ -133,7 +133,7 @@ function number(raw: string | undefined, flag: string): number {
 async function main() {
   const args = process.argv.slice(2);
   let fixturePath = DEFAULT_FIXTURE_PATH;
-  let holdout = 0.3, seed = 42, minHit1 = 0.8, floor = DEFAULT_FETCH_FLOOR, prefilter = DEFAULT_PREFILTER;
+  let holdout = 0.3, seed = 42, minHit1 = 0.8, floor = DEFAULT_FETCH_FLOOR, margin = DEFAULT_FETCH_MARGIN, prefilter = DEFAULT_PREFILTER;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
     const next = () => { const v = args[++i]; if (v === undefined) throw new Error(`${flag} needs a value`); return v; };
@@ -141,6 +141,7 @@ async function main() {
     else if (flag === '--seed') seed = number(next(), '--seed');
     else if (flag === '--min-hit1') minHit1 = number(next(), '--min-hit1');
     else if (flag === '--floor') floor = number(next(), '--floor');
+    else if (flag === '--margin') margin = number(next(), '--margin');
     else if (flag === '--prefilter') prefilter = number(next(), '--prefilter');
     else if (!flag.startsWith('--')) fixturePath = resolve(flag);
     else throw new Error(`Unknown argument ${flag}`);
@@ -164,7 +165,7 @@ async function main() {
       transport: scriptedTransport(c.expected_id), k: K, prefilter, context: c.context
     });
     calls += run.calls;
-    const gate = applyNoneGate(run, floor);
+    const gate = applyNoneGate(run, floor, margin);
     const ids = run.ranked.map(r => r.id);
     const actualNoMatch = c.expected_id === null;
     const predictedNoMatch = gate.noMatch;
@@ -191,7 +192,7 @@ async function main() {
   const noMatchRecall = recallDenom ? tpNoMatch / recallDenom : 1;
   const callsPerRequest = holdoutCases.length ? calls / holdoutCases.length : 0;
 
-  console.log(`fetch admission bench: ${fixture.cases.length} case(s), ${fixture.catalog.length}-record catalog, seed=${seed}, holdout=${holdout} (${holdoutCases.length} held out, ${train.length} train), prefilter=${prefilter}, floor=${floor}, k=${K}`);
+  console.log(`fetch admission bench: ${fixture.cases.length} case(s), ${fixture.catalog.length}-record catalog, seed=${seed}, holdout=${holdout} (${holdoutCases.length} held out, ${train.length} train), prefilter=${prefilter}, floor=${floor}, margin=${margin}, k=${K}`);
   console.log(`  train-split utterances added: ${catalog.reduce((s, r, i) => s + ((r.utterances?.length ?? 0) - (fixture.catalog[i]?.utterances?.length ?? 0)), 0)} (holdout requests' own text is never one of them)`);
   console.log(`  hit@1 (holdout): ${hitAt1}/${holdoutMatch.length} = ${hit1.toFixed(2)}`);
   console.log(`  hit@${K} (holdout): ${hitAtK}/${holdoutMatch.length} = ${hitK.toFixed(2)}`);

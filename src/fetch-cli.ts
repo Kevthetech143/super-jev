@@ -13,7 +13,7 @@ import { join, resolve, dirname } from 'node:path';
 import { Jev } from './jev.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
 import {
-  DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR,
+  DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN,
   applyNoneGate, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry
 } from './enhance/fetch.ts';
 import { CatalogError, parseCatalogText } from './enhance/catalog.ts';
@@ -32,8 +32,12 @@ for a v2 catalog, utterances weighted higher, minus negatives, plus recent
 --context turns at a lower weight) trims the catalog to the top N first, so
 a typical run is ONE provider call. Every record is judged against a "none
 of these" option; a record only ranks when it beats it. The none gate then
-applies a confidence floor: below it, or when nothing beat none, the result
-is a clarifying question instead of a best guess.
+applies a confidence floor AND a margin (the gap between the top pick and
+the runner-up): below either, or when nothing beat none, the result is a
+clarifying question instead of a best guess. A confident top-1 sitting in a
+crowded field — a runner-up almost as confident — is still a guess, so the
+margin catches what the floor alone can't. Set --margin 0 to gate on the
+floor alone.
 
   --catalog FILE   JSON: an array of {"id","text",...} records (v1 {id,text}
                    or v2 with optional "utterances"/"negatives"/"tags"), or
@@ -50,7 +54,16 @@ is a clarifying question instead of a best guess.
                    provider call. Default ${DEFAULT_PREFILTER}; 0 disables.
   --floor   N      Confidence floor for the none gate, in [0,1]. Below it the
                    result asks a clarifying question instead of acting.
-                   Default ${DEFAULT_FETCH_FLOOR}.
+                   Default ${DEFAULT_FETCH_FLOOR}. Overridable via the
+                   SUPERJEV_FETCH_FLOOR env var; the flag wins over the env
+                   var. The old floor-only behaviour is --floor 0.80 --margin 0.
+  --margin  N      Minimum gap, in [0,1], between the top pick's confidence
+                   and the runner-up's. Below it the top pick is treated as
+                   too close to call and the none gate asks instead of
+                   acting, even if the top pick alone clears --floor.
+                   Default ${DEFAULT_FETCH_MARGIN}; 0 disables the margin
+                   check. Overridable via the SUPERJEV_FETCH_MARGIN env var;
+                   the flag wins over the env var.
   --record  ID     After scoring, log {request, context, ranked, chosen: ID,
                    ts} to --ledger, for the feedback loop ("npm run catalog
                    -- learn"). Does not change the printed result.
@@ -142,7 +155,7 @@ async function main(): Promise<number> {
 
   let catalogPath = '', request = '', outDir = '', contextPath = '', recordId = '', ledgerPath = '';
   let maxInputTokens: number | undefined, batch: number | undefined, k: number | undefined, prefilter: number | undefined;
-  let contextTurns: number | undefined, floor: number | undefined;
+  let contextTurns: number | undefined, floor: number | undefined, margin: number | undefined;
   let dryRun = false, stub = false, json = false;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
@@ -154,6 +167,7 @@ async function main(): Promise<number> {
     else if (flag === '--k') { if (k !== undefined) throw new CliError('Repeated --k'); k = number(next(), '--k'); }
     else if (flag === '--prefilter') { if (prefilter !== undefined) throw new CliError('Repeated --prefilter'); prefilter = number(next(), '--prefilter'); }
     else if (flag === '--floor') { if (floor !== undefined) throw new CliError('Repeated --floor'); floor = number(next(), '--floor'); }
+    else if (flag === '--margin') { if (margin !== undefined) throw new CliError('Repeated --margin'); margin = number(next(), '--margin'); }
     else if (flag === '--record') { if (recordId) throw new CliError('Repeated --record'); recordId = next(); }
     else if (flag === '--ledger') { if (ledgerPath) throw new CliError('Repeated --ledger'); ledgerPath = resolve(next()); }
     else if (flag === '--out') { if (outDir) throw new CliError('Repeated --out'); outDir = resolve(next()); }
@@ -171,15 +185,27 @@ async function main(): Promise<number> {
   if (prefilter !== undefined && (!Number.isInteger(prefilter) || prefilter < 0)) throw new CliError('--prefilter must be a non-negative integer (0 disables)');
   if (contextTurns !== undefined && (!Number.isInteger(contextTurns) || contextTurns < 0)) throw new CliError('--context-turns must be a non-negative integer');
   if (floor !== undefined && (!Number.isFinite(floor) || floor < 0 || floor > 1)) throw new CliError('--floor must be a number in [0,1]');
+  if (margin !== undefined && (!Number.isFinite(margin) || margin < 0 || margin > 1)) throw new CliError('--margin must be a number in [0,1]');
   if (ledgerPath && !recordId) throw new CliError('--ledger only applies with --record');
   // The key check happens before any file is read, so a run that cannot
   // possibly reach the provider fails immediately and cheaply.
   if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live fetch, or use --dry-run or --stub');
 
+  // Precedence: the CLI flag wins, then the env var, then the built-in
+  // default. Env values are validated the same as the flag so a bad env
+  // var fails loudly instead of silently falling back.
+  const envNumber = (raw: string | undefined, name: string): number | undefined => {
+    if (raw === undefined || raw === '') return undefined;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || value > 1) throw new CliError(`${name} must be a number in [0,1]`);
+    return value;
+  };
+  const floorN = floor ?? envNumber(process.env.SUPERJEV_FETCH_FLOOR, 'SUPERJEV_FETCH_FLOOR') ?? DEFAULT_FETCH_FLOOR;
+  const marginN = margin ?? envNumber(process.env.SUPERJEV_FETCH_MARGIN, 'SUPERJEV_FETCH_MARGIN') ?? DEFAULT_FETCH_MARGIN;
+
   const catalog = parseCatalog(await readSmallFile(catalogPath, MAX_CATALOG_BYTES, 'catalog'));
   const contextTurnsN = contextTurns ?? DEFAULT_CONTEXT_TURNS;
   const context = contextPath ? parseContext(await readSmallFile(contextPath, MAX_CONTEXT_BYTES, 'context')).slice(-contextTurnsN) : undefined;
-  const floorN = floor ?? DEFAULT_FETCH_FLOOR;
   const options = {
     k, prefilter, context,
     ...(maxInputTokens !== undefined || batch !== undefined ? { budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) } } : {})
@@ -227,7 +253,7 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const gate = applyNoneGate(run, floorN);
+  const gate = applyNoneGate(run, floorN, marginN);
 
   const resultJson = {
     mode: stub ? 'stub' : 'live',
@@ -237,6 +263,7 @@ async function main(): Promise<number> {
     catalogSize: run.plan.catalogSize,
     prefilter: run.plan.prefilter,
     floor: floorN,
+    margin: marginN,
     ranked: run.ranked,
     noMatch: run.noMatch,
     noMatchConfidence: run.noMatchConfidence,
@@ -282,7 +309,7 @@ async function main(): Promise<number> {
 
   if (run.noMatch) console.error(`No match: "none of these" won for every record judged (confidence ${run.noMatchConfidence.toFixed(2)}); nothing in the catalog serves this request.`);
   else console.error(`Top ${run.ranked.length} of ${run.plan.catalogSize}: ${run.ranked.map(r => `${r.id}=${r.score.toFixed(2)}`).join(', ') || '(none)'}`);
-  if (gate.noMatch) console.error(`Gate: below floor ${floorN.toFixed(2)} — ${gate.ask}`);
+  if (gate.noMatch) console.error(`Gate: below floor ${floorN.toFixed(2)} or margin ${marginN.toFixed(2)} — ${gate.ask}`);
   console.error(`calls: ${run.calls}${run.plan.prefilter.dropped ? ` (prefilter dropped ${run.plan.prefilter.dropped} of ${run.plan.catalogSize} locally)` : ''}`);
   if (outDir) console.error(`Wrote ranked.json, manifest.json and cost.json to ${outDir}`);
   if (run.errors.length) console.error(`${run.errors.length} validation or mapping problem(s) recorded`);

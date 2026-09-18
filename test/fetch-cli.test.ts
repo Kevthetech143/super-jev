@@ -263,11 +263,14 @@ test('--floor gates a low-confidence stub run into gated=true with candidates an
   });
 });
 
-test('--floor 0 never gates a run with at least one record beating "none of these"', async () => {
+test('--floor 0 --margin 0 never gates a run with at least one record beating "none of these"', async () => {
   await withTmp(async dir => {
     const catalogPath = join(dir, 'catalog.json');
     await writeFile(catalogPath, CATALOG, 'utf8');
-    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--floor', '0']);
+    // Both the floor and the margin have to be disabled here: the floor
+    // alone no longer guarantees a serve once the margin default (0.10) is
+    // in play, so this test isolates the floor by zeroing the margin too.
+    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--floor', '0', '--margin', '0']);
     assert.equal(result.code, 0, result.stderr);
     const parsed = JSON.parse(result.stdout);
     if (parsed.ranked.length > 0) assert.equal(parsed.gated, false);
@@ -281,6 +284,44 @@ test('--floor refuses a value outside [0,1]', async () => {
     const result = runCli(['--catalog', catalogPath, '--request', 'anything', '--dry-run', '--floor', '1.5']);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /--floor/);
+  });
+});
+
+test('--margin refuses a value outside [0,1]', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'anything', '--dry-run', '--margin', '1.5']);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /--margin/);
+  });
+});
+
+test('the resultJson echoes the floor and margin actually in effect', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.floor, 0.60);
+    assert.equal(parsed.margin, 0.10);
+  });
+});
+
+test('SUPERJEV_FETCH_FLOOR and SUPERJEV_FETCH_MARGIN env vars set the defaults, and the CLI flag overrides the env var', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const viaEnv = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json'], { SUPERJEV_FETCH_FLOOR: '0.9', SUPERJEV_FETCH_MARGIN: '0.5' });
+    assert.equal(viaEnv.code, 0, viaEnv.stderr);
+    assert.equal(JSON.parse(viaEnv.stdout).floor, 0.9);
+    assert.equal(JSON.parse(viaEnv.stdout).margin, 0.5);
+
+    const flagWins = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--floor', '0.2', '--margin', '0.05'], { SUPERJEV_FETCH_FLOOR: '0.9', SUPERJEV_FETCH_MARGIN: '0.5' });
+    assert.equal(flagWins.code, 0, flagWins.stderr);
+    assert.equal(JSON.parse(flagWins.stdout).floor, 0.2);
+    assert.equal(JSON.parse(flagWins.stdout).margin, 0.05);
   });
 });
 
