@@ -1881,15 +1881,23 @@ def _bot_id_from_transcript_path(transcript_path):
 
 
 def _current_bot_id():
-    """The bot id a ledger entry attributes itself to: CLAW4MAC_BOT_ID or
-    CLAUDE_BOT_ID from the environment if either is set, else derived from
-    the active hook payload's transcript_path (see
-    _bot_id_from_transcript_path), else "unknown"."""
-    env_bot = os.environ.get("CLAW4MAC_BOT_ID") or os.environ.get("CLAUDE_BOT_ID")
+    """The bot id a ledger entry attributes itself to: CLAW4MAC_SESSION_ID
+    (the env var the fleet actually sets on each seat, e.g. "primary"),
+    else CLAW4MAC_BOT_ID, else CLAUDE_BOT_ID from the environment if any of
+    the three is set, else derived from the active hook payload's
+    transcript_path (see _bot_id_from_transcript_path) with the
+    "claw4mac-" prefix stripped so a derived id lands in the same
+    vocabulary as the env vars (e.g. "primary", not "claw4mac-primary"),
+    else "unknown"."""
+    env_bot = (os.environ.get("CLAW4MAC_SESSION_ID")
+               or os.environ.get("CLAW4MAC_BOT_ID")
+               or os.environ.get("CLAUDE_BOT_ID"))
     if env_bot:
         return env_bot
     payload = _ACTIVE_HOOK_PAYLOAD or {}
     derived = _bot_id_from_transcript_path(payload.get("transcript_path"))
+    if derived and derived.startswith("claw4mac-"):
+        derived = derived[len("claw4mac-"):]
     return derived or "unknown"
 
 
@@ -2380,13 +2388,19 @@ def _cmd_catch_list(a):
     if not records:
         print("catch list: no records")
     else:
+        # Width sized to the longest bot id actually being printed this call
+        # (floored at len("unknown")) rather than a fixed pad — a fixed pad
+        # narrower than a real seat name (e.g. "contentcreator") let that
+        # row's bot field run into the reason column with no gap.
+        bot_width = max([len(str(rec.get("bot") or "unknown")) for rec in records]
+                        + [len("unknown")])
         for rec in records:
             reasons = rec.get("reasons") or []
             first_reason = reasons[0] if reasons else ""
             tag = rec.get("tag") or "-"
             bot = rec.get("bot") or "unknown"
             print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
-                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  bot={bot:14s}  {first_reason}")
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  bot={bot:<{bot_width}s}  {first_reason}")
     if since and undated:
         print(f"catch list: {undated} undated record(s) excluded from the --since window")
     return 0

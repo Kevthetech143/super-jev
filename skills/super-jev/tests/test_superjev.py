@@ -95,10 +95,11 @@ def ledger_bot_context_reset(monkeypatch):
     cmd_hook_prompt_verify and read back by _current_bot_id/_current_origin
     (see ledger_append/catch_ledger_append) — without a reset here, a
     payload left behind by one hook test would leak into the next test's
-    ledger/catch records. CLAW4MAC_BOT_ID/CLAUDE_BOT_ID/SUPERJEV_BENCH are
-    cleared too, so bot/origin default the same way in every test unless a
-    test opts in explicitly."""
+    ledger/catch records. CLAW4MAC_SESSION_ID/CLAW4MAC_BOT_ID/CLAUDE_BOT_ID/
+    SUPERJEV_BENCH are cleared too, so bot/origin default the same way in
+    every test unless a test opts in explicitly."""
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", None)
+    monkeypatch.delenv("CLAW4MAC_SESSION_ID", raising=False)
     monkeypatch.delenv("CLAW4MAC_BOT_ID", raising=False)
     monkeypatch.delenv("CLAUDE_BOT_ID", raising=False)
     monkeypatch.delenv("SUPERJEV_BENCH", raising=False)
@@ -7739,7 +7740,14 @@ def test_bot_id_from_transcript_path_none_on_non_string():
     assert sj._bot_id_from_transcript_path(123) is None
 
 
-def test_current_bot_id_prefers_claw4mac_bot_id_env(monkeypatch):
+def test_current_bot_id_prefers_claw4mac_session_id_env(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
+    monkeypatch.setenv("CLAW4MAC_BOT_ID", "should-not-win")
+    monkeypatch.setenv("CLAUDE_BOT_ID", "should-not-win-either")
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_falls_back_to_claw4mac_bot_id_env(monkeypatch):
     monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
     monkeypatch.setenv("CLAUDE_BOT_ID", "should-not-win")
     assert sj._current_bot_id() == "primary"
@@ -7754,11 +7762,27 @@ def test_current_bot_id_derives_from_active_hook_payload_when_no_env(monkeypatch
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
         "transcript_path": ("/Users/admin/.claude/projects/"
                             "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
-    assert sj._current_bot_id() == "claw4mac-b1"
+    assert sj._current_bot_id() == "b1"
+
+
+def test_current_bot_id_derives_and_strips_claw4mac_prefix_for_primary(monkeypatch):
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/"
+                            "s.jsonl")})
+    assert sj._current_bot_id() == "primary"
 
 
 def test_current_bot_id_env_wins_over_transcript_path(monkeypatch):
     monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
+    monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
+        "transcript_path": ("/Users/admin/.claude/projects/"
+                            "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
+    assert sj._current_bot_id() == "primary"
+
+
+def test_current_bot_id_session_id_env_wins_over_transcript_path(monkeypatch):
+    monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
         "transcript_path": ("/Users/admin/.claude/projects/"
                             "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
@@ -7829,10 +7853,10 @@ def test_hook_gate_ledger_and_catch_records_carry_bot_from_transcript_path(
     code = sj.main(["hook", "gate"])
     assert code == 0
     call_rec = json.loads(ledger_path.read_text(encoding="utf-8").splitlines()[-1])
-    assert call_rec["bot"] == "claw4mac-b1"
+    assert call_rec["bot"] == "b1"
     assert call_rec["origin"] == "live"
     catch_rec = _read_catch_records(catch_path)[0]
-    assert catch_rec["bot"] == "claw4mac-b1"
+    assert catch_rec["bot"] == "b1"
     assert catch_rec["origin"] == "live"
 
 
@@ -7898,6 +7922,49 @@ def test_catch_list_shows_unknown_for_records_without_a_bot_field(tmp_path, monk
     assert code == 0
     out = capsys.readouterr().out
     assert "bot=unknown" in out
+
+
+def test_catch_list_bot_primary_matches_record_derived_from_transcript_path(
+        tmp_path, monkeypatch, capsys):
+    """--bot primary must match a record whose `bot` field came from
+    _current_bot_id deriving off a real .../agent-cwd-claw4mac-primary/...
+    transcript_path (the seat vocabulary uses "primary", not
+    "claw4mac-primary" — see _current_bot_id's prefix strip)."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    project_dir = ("/Users/admin/.claude/projects/"
+                   "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "the sky is blue", "evidence": [str(evidence)],
+        "transcript_path": f"{project_dir}/s1.jsonl", "session_id": "s1"}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    catch_rec = _read_catch_records(catch_path)[0]
+    assert catch_rec["bot"] == "primary"
+    capsys.readouterr()  # discard hook gate's own stdout
+    code = sj.main(["catch", "list", "--bot", "primary"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=primary" in out
+
+
+def test_catch_list_bot_column_width_fits_a_long_bot_name(tmp_path, monkeypatch, capsys):
+    """A long seat name (e.g. "contentcreator") must not run its bot=
+    field into the reason column with no gap — the column widens to fit
+    the widest bot id actually printed rather than a narrower fixed pad."""
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "a1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": ["some reason"], "draft_excerpt": "",
+         "window_bytes": 1, "ms": 1, "tag": None, "note": None,
+         "bot": "contentcreator"},
+    ])
+    code = sj.main(["catch", "list"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bot=contentcreator  some reason" in out
 
 
 def test_catch_report_bot_filter_excludes_other_bots(tmp_path, monkeypatch, capsys):
