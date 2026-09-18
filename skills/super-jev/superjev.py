@@ -1197,20 +1197,68 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
-# Judge-advisory mode (2026-09-18). SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a
-# `hook gate` block to an advisory print + exit 0 when EVERY reason behind it
-# came from the judge (the OVERCLAIMS arm, or — under SUPERJEV_RULE=v2 — the
-# secondary NOT_SUPPORTED/CONTRADICTED arm). It never touches a block that
-# carries even one deterministic reason (a count mismatch, a PR mismatch, or
-# a CONTRADICTED_BY_FACT fact sentence) — those still block with the same
-# exit code as today, unconditionally. See cmd_hook's "block-judge-advisory"
-# branch, which checks this against `det_block_reasons` being empty rather
-# than special-casing which judge arm fired, so it covers v2 and v3 alike.
+# Judge-advisory mode (2026-09-18, granular 2026-09-18b). SUPERJEV_GATE_
+# JUDGE_ADVISORY demotes a `hook gate` block to an advisory print + exit 0
+# when EVERY reason behind it came from the judge. Two levels:
+#
+#   "1"    — every judge arm is advisory (the OVERCLAIMS arm, or — under
+#            SUPERJEV_RULE=v2 — the secondary NOT_SUPPORTED/CONTRADICTED
+#            arm). This is the original, unconditional behavior.
+#   "weak" — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
+#            secondary arm) and SELF_CONTRADICTORY are advisory; OVERCLAIMS
+#            still blocks. Added after the 2026-09-18 live adjudication
+#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS fair on
+#            19 of 24 live firings — the only judge arm worth trusting to
+#            block — while the per-claim arm was fair on only 2 of 7 and
+#            SELF_CONTRADICTORY never blocks at all (v3) or is 0 of 2 fair
+#            when it does (v2). Under the default v3 rule the secondary arm
+#            already never produces a block reason on its own, so "weak"
+#            is a real change only under SUPERJEV_RULE=v2.
+#   "0"/unset — unchanged: judge-advisory mode off, every block reason
+#            (judge or deterministic) blocks exactly as it does today.
+#
+# It never touches a block that carries even one deterministic reason (a
+# count mismatch, a PR mismatch, or a CONTRADICTED_BY_FACT fact sentence) —
+# those still block with the same exit code as today, unconditionally
+# regardless of mode. See cmd_hook's "block-judge-advisory" branch, which
+# checks this against `det_block_reasons` being empty rather than special-
+# casing which judge arm fired, so it covers v2 and v3 alike.
 JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
+# Verdicts a "weak" judge-advisory mode still demotes — never OVERCLAIMS.
+_JUDGE_ADVISORY_WEAK_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "SELF_CONTRADICTORY")
+_JUDGE_ADVISORY_REASON_VERDICT_RE = re.compile(r'^\S+\s+([A-Z_]+)\s+\d')
+
+
+def _judge_advisory_mode():
+    """"1" (all judge arms advisory), "weak" (only the per-claim NOT_
+    SUPPORTED/CONTRADICTED and SELF_CONTRADICTORY arms advisory — OVERCLAIMS
+    still blocks), or "0" (off, any other value or unset)."""
+    v = os.environ.get(JUDGE_ADVISORY_ENV, "0")
+    if v == "weak":
+        return "weak"
+    if v == "1":
+        return "1"
+    return "0"
 
 
 def _judge_advisory_enabled():
-    return os.environ.get(JUDGE_ADVISORY_ENV, "0") == "1"
+    return _judge_advisory_mode() != "0"
+
+
+def _judge_advisory_reasons_are_weak_only(block_reasons):
+    """True when every "key VERDICT score" string in `block_reasons` names
+    a verdict `_JUDGE_ADVISORY_WEAK_VERDICTS` covers (never OVERCLAIMS) —
+    what "weak" mode requires before it will demote a block. An empty or
+    unparsed list is NOT weak-only (nothing to safely demote), matching the
+    fail-closed direction every other block-suppression check in this file
+    takes."""
+    if not block_reasons:
+        return False
+    for r in block_reasons:
+        m = _JUDGE_ADVISORY_REASON_VERDICT_RE.match(r.strip())
+        if not m or m.group(1) not in _JUDGE_ADVISORY_WEAK_VERDICTS:
+            return False
+    return True
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -1680,6 +1728,131 @@ def _hook_block_reasons(flags, claim_rows=None, evidence=None):
     every caller and test already uses."""
     reasons, _notes = _hook_block_decision(flags, claim_rows, evidence)
     return reasons
+
+
+# --------------------------------------- gate-adjudication-20260918.md fixes
+#
+# Two of the OVERCLAIMS arm's three FALSE mechanisms found by the live
+# adjudication (see docs/hooks.md, "OVERCLAIMS arm — the two live false
+# mechanisms it still needed" for the write-up this section backs):
+#
+#   (b) zero-tool conversational turns — the current turn ran no tools and
+#       the draft is a plain answer/opinion/status with no receipt-shaped
+#       claim (rows 10, 15, 21, P1 of the adjudication: "the proof is what
+#       Jev alone could not have done today", a design answer split into
+#       13 claims, a plan sentence, an earlier-session provenance claim —
+#       none of them a claim any tool result could ever support or
+#       contradict). The judge is never called on these; see
+#       _draft_has_receipt_shaped_claim and its use in cmd_hook.
+#   (a) the receipt is one turn old — the current turn ran no tools but the
+#       draft correctly restates a result whose receipt sits in the
+#       previous-turn block, not this turn's own (rows 13, 14, 23, 24, 27,
+#       28, 30 in part: a merge, a spawn or a log read a turn or two
+#       earlier, still real evidence for a reply about it now). The most
+#       recent previous turn that ran tools is relabelled "[receipt turn
+#       -N]" and named in DERIVED FACTS; see _receipt_turn_index and
+#       _label_receipt_turn.
+
+# Numbers next to a result word, either order ("48 tests passed" / "passed
+# 48 tests" / "9 of 10" / "score 0.92"). Kept deliberately narrow — a bare
+# number with no result-shaped word nearby ("I'll check turn 3") does not
+# count, on purpose; see the module docstring above for why this list
+# stays this size rather than growing to catch every possible status word.
+_RECEIPT_RESULT_WORD_RE = (r'(passed|failed|pass(?:es|ing)?|fail(?:s|ing)?|tests?|files?|'
+                           r'lines?|score|checks?|errors?|commits?|of|items?|records?|'
+                           r'requests?|rows?|cases?)')
+_RECEIPT_NUMBER_WORD_RE = re.compile(
+    r'\b\d+(?:\.\d+)?%?\b[^.\n]{0,25}\b' + _RECEIPT_RESULT_WORD_RE + r'\b'
+    r'|\b' + _RECEIPT_RESULT_WORD_RE + r'\b[^.\n]{0,25}\b\d+(?:\.\d+)?%?\b',
+    re.IGNORECASE)
+# "PR #N" / "PR N" / "#N" — reuses the same "# optional" widening gate v4
+# already applied to the deterministic merge-claim regex (see
+# _PR_MERGED_CLAIM_RE) rather than requiring the literal '#'.
+_RECEIPT_PR_RE = re.compile(r'\bPR\s*#?\d+\b|#\d+\b', re.IGNORECASE)
+# "tests pass/passed/passing", "merged", "done", "written", "created",
+# "fixed" and close siblings — the "completion verb" style the brief names
+# explicitly. Deliberately does NOT include generic status adjectives
+# ("stable", "healthy", "degraded", "caught up") — those describe a state
+# without asserting a specific completed action a tool result would show,
+# and widening this list to catch them would also catch ordinary qualified
+# status answers this fix is not meant to touch.
+_RECEIPT_COMPLETION_VERB_RE = re.compile(
+    r'\b(tests?\s+pass(?:es|ed|ing)?|merged|done|written|created|fixed|pushed|committed|'
+    r'deployed|installed|confirmed|verified|built|resolved|closed|shipped)\b',
+    re.IGNORECASE)
+
+
+def _draft_has_receipt_shaped_claim(text):
+    """True when `text` contains a claim shaped like it cites a checkable
+    result: a number sitting near a result word, a file path, a PR/#N
+    reference, or a completion verb ("tests pass", "merged", "done",
+    "written", "created", "fixed", ...). Reuses presplit_claims's clause
+    splitter so a multi-clause draft is checked clause by clause, the same
+    granularity the judge itself reads at — one receipt-shaped clause is
+    enough, even inside an otherwise conversational reply. False for
+    empty/whitespace input. Never raises (falls back to a single-clause
+    scan of the whole text on any splitter surprise)."""
+    if not text or not text.strip():
+        return False
+    try:
+        clauses = presplit_claims(text) or [text]
+    except Exception:
+        clauses = [text]
+    for c in clauses:
+        if _RECEIPT_NUMBER_WORD_RE.search(c):
+            return True
+        if _CITED_FILE_PATH_RE.search(c) or _ABS_PATH_RE.search(c) or _PATH_RE.search(c):
+            return True
+        if _RECEIPT_PR_RE.search(c):
+            return True
+        if _RECEIPT_COMPLETION_VERB_RE.search(c):
+            return True
+    return False
+
+
+def _receipt_turn_index(window_meta):
+    """The most recent previous turn (lowest -N, i.e. turn -1 before turn
+    -2) that ran its own tools AND is still kept in the assembled window —
+    `window_meta["prev_turn_detail"]` from `_derive_evidence_text_from_
+    transcript`, ordered turn=1 (most recent) upward — or None when no
+    previous turn qualifies (nothing kept, or every kept turn ran no tools
+    of its own, receipts-only). This is "the receipt turn" mechanism (a)
+    targets: a current turn that ran no tools can still be a correct,
+    checkable restatement of a result from the turn right before it."""
+    for d in (window_meta or {}).get("prev_turn_detail") or []:
+        if d.get("kept") and (d.get("tool_results") or 0) > 0:
+            return d.get("turn")
+    return None
+
+
+def _label_receipt_turn(window_text, receipt_idx):
+    """Relabels the sole `[previous turn -<receipt_idx>]` section header in
+    `window_text` as `[receipt turn -<receipt_idx>]`, so a judge reading a
+    tool-free current turn sees that turn's own results are being counted
+    as this reply's receipt rather than out-of-window material it must
+    score as unsupported. Returns (text, True) on a real relabel, or
+    (window_text, False) unchanged when `receipt_idx` is None or its
+    header is not present in the text (already trimmed by the byte/token
+    cap, or the assembled window never carried it in the first place)."""
+    if not window_text or receipt_idx is None:
+        return window_text, False
+    target = f"[previous turn -{receipt_idx}]"
+    if target not in window_text:
+        return window_text, False
+    replacement = f"[receipt turn -{receipt_idx}]"
+    return window_text.replace(target, replacement, 1), True
+
+
+def _receipt_turn_extra_fact(receipt_idx):
+    """The DERIVED FACTS sentence naming the receipt turn, for
+    `compose_window_with_facts`'s `extra_facts` — see mechanism (a). None
+    when there is no receipt turn to name."""
+    if receipt_idx is None:
+        return None
+    return (f"RECEIPT TURN: the current turn ran no tools of its own; turn "
+           f"-{receipt_idx} (labelled [receipt turn -{receipt_idx}] below) is the "
+           "most recent turn that did, and counts as this reply's receipt, not "
+           "out-of-window material.")
 
 
 def _strip_patterns():
@@ -5282,7 +5455,7 @@ def derive_window_facts(window_text, draft_text):
         return []
 
 
-def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
+def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_facts=None):
     """`window_text` with a DERIVED FACTS block at its HEAD and the raw
     window below it as BACKING. The cap applies AFTER the facts: facts are
     never dropped, and if facts + raw window exceed the cap the raw
@@ -5295,6 +5468,16 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     redacted window is still returned (byte-for-byte unchanged only when
     nothing secret-shaped was in it).
 
+    `extra_facts` (optional): sentences the caller has already computed
+    from information `derive_window_facts` cannot see on its own — e.g.
+    the receipt-turn note from `_receipt_turn_extra_fact` (gate-
+    adjudication-20260918.md mechanism (a)), which depends on
+    `window_meta`'s `prev_turn_detail`, not just the window text. Appended
+    ahead of the cap, same guarantee as every other fact: never dropped,
+    deduped against what `derive_window_facts` already found. Included
+    regardless of `SUPERJEV_DERIVED_FACTS` — this is a correctness fix to
+    the window itself, not part of the optional derived-facts feature.
+
     Every window is redacted (evidence-guard's `redact`) before it is used
     for anything — deriving facts from it or handing it to the judge —
     which is the Stop-hook gate window's half of the blocklist+redactor
@@ -5304,6 +5487,10 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     window_text = guard.redact(window_text)
     meta_guard = guard.to_dict()
     facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
+    if extra_facts:
+        for f in extra_facts:
+            if f and f not in facts:
+                facts.append(f)
     meta = {"facts_count": len(facts), "facts": list(facts), "facts_bytes": 0,
             "window_trimmed_bytes": 0, "guard": meta_guard}
     if not facts:
@@ -7320,6 +7507,46 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
+                    # gate-adjudication-20260918.md's two OVERCLAIMS false
+                    # mechanisms, both scoped to a current turn that ran no
+                    # tools of its own (window_meta["current_turn_empty"]):
+                    receipt_extra_facts = None
+                    if window_meta is not None and window_meta.get("current_turn_empty"):
+                        if not _draft_has_receipt_shaped_claim(text):
+                            # Mechanism (b): a plain conversational answer/
+                            # opinion/status with no receipt-shaped claim —
+                            # no number next to a result word, no file
+                            # path, no PR/#N, no completion verb — is not
+                            # something any tool result could ever support
+                            # or contradict. Skip the judge outright rather
+                            # than risk scoring it OVERCLAIMS on prose with
+                            # no claim shape at all (rows 10, 15, 21, P1 of
+                            # the adjudication).
+                            msg = "super-jev gate: conversational turn, not judged"
+                            print(msg, file=sys.stderr)
+                            _hook_log("gate: conversational turn (current turn ran no "
+                                      "tools, draft carries no receipt-shaped claim) — "
+                                      "not judged, advisory only", exit_code=0,
+                                      unchecked=True, health="none",
+                                      reason="conversational")
+                            catch_log("gate", "unchecked", reasons=["conversational"],
+                                     draft_text=text, window_bytes=None,
+                                     start_time=_catch_t0, payload=payload)
+                            return 0
+                        # Mechanism (a): the draft DOES carry a receipt-
+                        # shaped claim on a tool-free current turn — find
+                        # the most recent previous turn that ran tools (if
+                        # any is still kept in the window) and relabel it
+                        # as the receipt turn, so a correct restatement of
+                        # a one-turn-old result is not scored as having no
+                        # in-window evidence (rows 13, 14, 23, 24, 27, 28,
+                        # 30 in part).
+                        receipt_idx = _receipt_turn_index(window_meta)
+                        derived, relabeled = _label_receipt_turn(derived, receipt_idx)
+                        window_meta["receipt_turn"] = receipt_idx if relabeled else None
+                        if relabeled:
+                            fact = _receipt_turn_extra_fact(receipt_idx)
+                            receipt_extra_facts = [fact] if fact else None
                     # Cited-file tail (see build_cited_file_block, 2026-09-18
                     # SET2-AUDIT.md recommendation (b)): when the draft names
                     # its own source ("per SUMMARY.md"), fold that file's
@@ -7346,7 +7573,7 @@ def cmd_hook(a):
                     # next line, which cuts whole labelled sections in
                     # priority order rather than slicing bytes off the head.
                     derived, _facts, _fmeta = compose_window_with_facts(
-                        derived, text, cap_bytes=0)
+                        derived, text, cap_bytes=0, extra_facts=receipt_extra_facts)
                     # THE cap — one budget, in tokens, enforced here and
                     # nowhere else, on the finished text right before the
                     # call. Everything above (the builder's byte cap, the
@@ -7566,18 +7793,22 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
-        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1): a block whose
-        # ONLY reasons came from the judge — det_block_reasons is empty, so
-        # nothing deterministic (count mismatch, PR mismatch,
-        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory. A
-        # block carrying even one deterministic reason is untouched: it
-        # falls through to the "block" branch below exactly as it does
-        # today, env or no env. Checked after stop_hook_active so a re-run
-        # keeps its own (already advisory) handling rather than being
-        # relabeled here.
-        elif (door == "gate" and action == "block" and _judge_advisory_enabled()
-              and not det_block_reasons):
-            action = "block-judge-advisory"
+        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1/weak): a block
+        # whose ONLY reasons came from the judge — det_block_reasons is
+        # empty, so nothing deterministic (count mismatch, PR mismatch,
+        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory,
+        # mode "1" unconditionally, mode "weak" only when every one of
+        # those judge reasons names a verdict "weak" covers (never
+        # OVERCLAIMS — see _judge_advisory_reasons_are_weak_only). A block
+        # carrying even one deterministic reason is untouched: it falls
+        # through to the "block" branch below exactly as it does today, env
+        # or no env. Checked after stop_hook_active so a re-run keeps its
+        # own (already advisory) handling rather than being relabeled here.
+        elif door == "gate" and action == "block" and not det_block_reasons:
+            _jam = _judge_advisory_mode()
+            if _jam == "1" or (_jam == "weak"
+                               and _judge_advisory_reasons_are_weak_only(block_reasons)):
+                action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
         # above the block line, but the empty-current-turn health gate
@@ -7645,11 +7876,18 @@ def cmd_hook(a):
                 advisory += " (advisory: " + "; ".join(block_notes) + ")"
             print(advisory, file=sys.stderr)
             _hook_log(f"gate: judge advisory, not blocked (exit {code}) — would have "
-                     f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
+                     f"blocked on: {reason_bits}{suppressed_note_tail} "
+                     f"[judge-advisory-mode:{_jam}]", exit_code=0,
                      flags=flags, reason=suppressed_reason)
-            catch_log(door, "advisory-judge", reasons=block_reasons, draft_text=text,
-                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
-                     payload=payload)
+            # The arm name (NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS) already
+            # rides inside each block_reasons string ("key VERDICT score");
+            # the mode tag is appended so the ledger also names WHICH
+            # judge-advisory mode demoted this block, without needing to
+            # re-derive it from the env at read time.
+            catch_log(door, "advisory-judge",
+                     reasons=block_reasons + [f"judge-advisory-mode:{_jam}"],
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
