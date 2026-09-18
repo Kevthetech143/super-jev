@@ -36,6 +36,8 @@ to a call ledger under this skill's own `ledger/` folder; see `ledger` and
 `status`.
 """
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -211,10 +213,59 @@ def redact(text, redact_emails=False):
 # above unchanged. The catch ledger is customer-facing text a human tags by
 # hand and reads later, so it gets the wider net: emails (redact() called
 # with redact_emails=True) plus US phone numbers, SSN-shaped 3-2-4 digit
-# strings, and 13-19 digit card numbers (spaces or dashes allowed).
+# strings, and 13+ digit card numbers (space, dash or dot separators).
+#
+# Card numbers are handled separately from the table below (see
+# _CARD_NUMBER_RX/_catch_redact_card_repl), not as a plain find-and-replace
+# pattern, for two reasons (see N1):
+#   - the old `\b(?:\d[ \-]?){13,19}\b` form silently missed any run of 20+
+#     digits: \b requires a transition into/out of a word character, and
+#     inside a longer all-digit run there is no such transition anywhere
+#     except at the run's own true start/end — capped at 19 reps, the
+#     regex could never land a cut point on a real \b, so it just never
+#     matched at all. Removing the upper bound (still one leading \d, then
+#     12+ more) fixes that: the match always grows to the run's real edges,
+#     where \b is genuinely satisfied.
+#   - a bare 13-digit run is often a plausible unix-millisecond timestamp
+#     (this repo's own ledger timestamps and payload fields are full of
+#     them), not a card number, and redacting those made ordinary catch
+#     records unreadable for no privacy benefit. Only a 13-digit run
+#     shaped like one (starts "1", second digit 5-9 — roughly the
+#     2015-2029 range any real timestamp here falls in) is left alone;
+#     13 digits in any other shape, and every run of 14+ digits, still
+#     redacts.
+# \b at both ends is kept for exactly the reason it always had one: a
+# digit run glued to a letter (e.g. inside a git id or other alphanumeric
+# token) is never a card number and is never matched, because \b treats
+# letters and digits as the same "word" character class.
+_CARD_NUMBER_RX = re.compile(r"\b\d(?:[ \-.]?\d){12,}\b")
+
+
+def _looks_like_unix_ms_timestamp(digits):
+    """True for a 13-digit run shaped like a plausible unix-millisecond
+    timestamp (starts "1", second digit 5-9) — see the module note above
+    _CARD_NUMBER_RX. Only ever checked against exactly 13 digits; anything
+    longer is never a timestamp candidate and always redacts."""
+    return len(digits) == 13 and digits[0] == "1" and digits[1] in "56789"
+
+
+def _catch_redact_card_repl(m):
+    digits = re.sub(r"[ \-.]", "", m.group(0))
+    if _looks_like_unix_ms_timestamp(digits):
+        return m.group(0)
+    return "[REDACTED:card-number]"
+
+
+# US-shaped phone numbers only (see N2): area code's first digit is 2-9
+# (0 and 1 are never a real US area code's first digit — simplest way to
+# stop matching a non-phone 3-3-4 digit shape like a numeric range,
+# "100-200-3000", without a lookup table). `(?<!\d)`/`(?!\d)` refuse a
+# match glued to another digit on either side (an ordinary phone number is
+# never itself part of a longer digit run), and `(?!\.\d)` refuses a match
+# immediately followed by a decimal continuation (part of a longer
+# dotted/decimal sequence — a coordinate, not a phone number).
 _CATCH_REDACT_PATTERNS = (
-    ("card-number", r"\b(?:\d[ \-]?){13,19}\b"),
-    ("phone", r"\b(?:\+?1[ \-.]?)?\(?\d{3}\)?[ \-.]\d{3}[ \-.]\d{4}\b"),
+    ("phone", r"(?<!\d)(?:\+?1[ \-.]?)?\(?[2-9]\d{2}\)?[ \-.]\d{3}[ \-.]\d{4}(?!\d)(?!\.\d)"),
     ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
 )
 _COMPILED_CATCH_REDACT = tuple((k, re.compile(p)) for k, p in _CATCH_REDACT_PATTERNS)
@@ -224,12 +275,14 @@ def _catch_redact(text):
     """The redaction used ONLY by the catch ledger (draft excerpt + saved
     payload) — never applied to the gate/verify evidence window. Runs the
     general redact() with redact_emails=True (secrets, credentials, plus
-    emails), then, catch-ledger-only, redacts US phone numbers, SSN-shaped
-    3-2-4 digit strings, and 13-19 digit card numbers (spaces/dashes
-    allowed). Never raises: an empty/None input returns ""."""
+    emails), then, catch-ledger-only, redacts card numbers (13+ digits,
+    unix-ms timestamps excepted — see _CARD_NUMBER_RX), US-shaped phone
+    numbers, and SSN-shaped 3-2-4 digit strings. Never raises: an
+    empty/None input returns ""."""
     if not text:
         return text or ""
     out = redact(str(text), redact_emails=True)
+    out = _CARD_NUMBER_RX.sub(_catch_redact_card_repl, out)
     for kind, rx in _COMPILED_CATCH_REDACT:
         out = rx.sub(f"[REDACTED:{kind}]", out)
     return out
@@ -1898,16 +1951,47 @@ def _catch_save_payload(catch_id, payload):
 
 
 def _catch_cases_path():
-    """SUPERJEV_BENCH_OUT, if set, else <catch ledger dir>/catch-cases.json
-    — ONE JSON array file that `catch tag false|miss` appends one "catch
-    case" to. NOT the old per-id bench-case-file shape (that never fit
-    this data — see _write_catch_case's docstring for why), and NOT the
-    old default directory name (bench-cases/); the default is now a single
-    file, catch-cases.json, next to the catch ledger."""
-    override = os.environ.get("SUPERJEV_BENCH_OUT")
+    """SUPERJEV_CATCH_CASES, if set, else <catch ledger dir>/catch-cases.json
+    — ONE JSON array file that `catch tag` keeps in sync with the catch
+    ledger's own tags (see _upsert_catch_case). NOT the old per-id
+    bench-case-file shape (that never fit this data — see
+    _build_catch_case's docstring for why), and NOT the old default
+    directory name (bench-cases/); the default is a single file,
+    catch-cases.json, next to the catch ledger."""
+    override = os.environ.get("SUPERJEV_CATCH_CASES")
     if override:
         return Path(override).expanduser()
     return CATCH_LEDGER_PATH.parent / "catch-cases.json"
+
+
+def _catch_lock_path():
+    return CATCH_LEDGER_PATH.parent / (CATCH_LEDGER_PATH.name + ".lock")
+
+
+@contextlib.contextmanager
+def _catch_lock():
+    """Exclusive lock held across ONE `catch tag` command's whole
+    read-modify-write — both the catch-ledger rewrite (_rewrite_catch_records)
+    and the catch-cases array upsert (_upsert_catch_case) — so two `catch
+    tag` commands racing on different ids never silently drop each other's
+    write (see B3). A sibling `.lock` file, never the ledger file itself,
+    so holding this open never interferes with the ledger's own
+    os.replace-based atomic rewrite. fcntl.flock blocks (waits) rather than
+    failing, so a second `catch tag` simply waits its turn instead of
+    losing its write; the lock is released (and the fd closed) even if the
+    body raises."""
+    lock_path = _catch_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(lock_path, "a+")
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        fd.close()
 
 
 def _catch_payload_path(rec_id):
@@ -1938,11 +2022,11 @@ def _load_full_payload_draft(rec_id):
     return None
 
 
-def _write_catch_case(record):
-    """Append ONE "catch case" to the catch-cases array file (see
-    _catch_cases_path) for a catch-ledger record just tagged "false" (a
-    block that was wrong — the draft was actually true) or "miss" (an
-    allow that let a lie through).
+def _build_catch_case(record):
+    """Build ONE "catch case" dict (not written anywhere yet — see
+    _upsert_catch_case) for a catch-ledger record tagged "false" (a block
+    that was wrong — the draft was actually true) or "miss" (an allow that
+    let a lie through).
 
     This is deliberately NOT a "bench case" in the gate-bench sense, and
     is never claimed to be one. A catch record has no transcript anchor —
@@ -1969,7 +2053,7 @@ def _write_catch_case(record):
     full_draft = _load_full_payload_draft(rec_id)
     draft = _catch_redact(full_draft) if full_draft is not None else record.get(
         "draft_excerpt", "")
-    case = {
+    return {
         "id": rec_id,
         "ts": record.get("ts"),
         "door": record.get("door"),
@@ -1979,24 +2063,46 @@ def _write_catch_case(record):
         "reasons": record.get("reasons") or [],
         "note": record.get("note"),
     }
+
+
+def _catch_cases_write(cases):
+    """Atomic overwrite of the whole catch-cases array file. Must be
+    called with the catch lock already held (see _catch_lock) whenever the
+    caller also touched the catch ledger in the same command, so the two
+    files never observe a partial update from a concurrent `catch tag`."""
     cases_path = _catch_cases_path()
     try:
         cases_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            existing = json.loads(cases_path.read_text(encoding="utf-8"))
-            if not isinstance(existing, list):
-                existing = []
-        except (OSError, ValueError):
-            existing = []
-        existing.append(case)
         tmp_path = cases_path.with_suffix(cases_path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
+        tmp_path.write_text(json.dumps(cases, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8")
         os.replace(tmp_path, cases_path)
         return str(cases_path)
     except OSError as exc:
-        print(f"super-jev: could not write catch case for {rec_id}: {exc}", file=sys.stderr)
+        print(f"super-jev: could not write catch cases at {cases_path}: {exc}",
+              file=sys.stderr)
         return None
+
+
+def _upsert_catch_case(rec_id, new_case):
+    """At most one catch case per record id (see B2): replaces any
+    existing case for `rec_id` with `new_case`, or — when `new_case` is
+    None — removes that id's case without adding one (a re-tag to "fair"
+    withdraws a false/miss case that had been written for the same id).
+    Reads the cases file fresh, so this must be called with the catch lock
+    already held: an unlocked read-modify-write here is exactly B3's
+    race."""
+    cases_path = _catch_cases_path()
+    try:
+        existing = json.loads(cases_path.read_text(encoding="utf-8"))
+        if not isinstance(existing, list):
+            existing = []
+    except (OSError, ValueError):
+        existing = []
+    existing = [c for c in existing if c.get("id") != rec_id]
+    if new_case is not None:
+        existing.append(new_case)
+    return _catch_cases_write(existing)
 
 
 def _catch_lines():
@@ -2098,12 +2204,28 @@ def cmd_catch(a):
 
 
 def _catch_refuse2(line):
-    """Same shape as refuse(), but exit 2 — used only by the two `catch`
-    validation refusals (--since, tag-vs-decision) that must be
-    distinguishable from the generic REFUSED (5) other `catch` errors
-    already use."""
+    """Same shape as refuse(), but exit 2 — used only by `catch list`'s and
+    `catch report`'s shared --since validation refusal, distinguishable
+    from the generic REFUSED (5) other `catch` errors use. NOT used for
+    `catch tag`'s tag-vs-decision contradiction refusal — see
+    _catch_refuse3 (N6) for why that one needs its own code."""
     print(f"super-jev: {line}", file=sys.stderr)
     return 2
+
+
+def _catch_refuse3(line):
+    """Same shape as refuse()/_catch_refuse2, but exit 3 — used only by
+    `catch tag`'s tag-vs-decision contradiction refusal (see N6). Exit 2
+    is argparse's own usage-error convention, and every other `catch`
+    exit code (0, 2 for --since, 5 for a generic refuse()) was already
+    spoken for — a tag that contradicts the record it names is not a
+    usage error at all (argparse already accepted the arguments fine), so
+    a caller branching on "was this a bad flag" vs "was this a real
+    refusal" could not tell the two exit-2 cases apart. `catch tag`
+    itself never returns 3 for any other reason, so a caller can treat 3
+    as this one refusal unambiguously."""
+    print(f"super-jev: {line}", file=sys.stderr)
+    return 3
 
 
 def _cmd_catch_list(a):
@@ -2148,27 +2270,41 @@ def _cmd_catch_tag(a):
     note = getattr(a, "note", "") or ""
     if value not in ("fair", "false", "miss"):
         return refuse(f"catch tag: {value!r} — use fair, false or miss")
-    records = _catch_records()
-    matched = None
-    for rec in records:
-        if rec.get("id") == catch_id:
-            matched = rec
-            break
-    if matched is None:
-        return refuse(f"catch tag: no catch-ledger record with id {catch_id!r}")
-    decision = matched.get("decision")
-    allowed = _TAG_ALLOWED_DECISIONS[value]
-    if decision not in allowed:
-        return _catch_refuse2(
-            f"catch tag: {value!r} does not fit a {decision!r} record ({catch_id}) — "
-            f"{value!r} only fits: {'/'.join(allowed)}")
-    matched["tag"] = value
-    matched["note"] = note
-    if not _rewrite_catch_records(records):
-        return refuse(f"catch tag: could not persist the tag for {catch_id!r}")
-    case_path = None
-    if value in ("false", "miss"):
-        case_path = _write_catch_case(matched)
+    # The whole read-modify-write — ledger AND catch-cases array — runs
+    # under one lock (see B3): records are re-read fresh here, inside the
+    # lock, not reused from some earlier read, so two `catch tag` commands
+    # racing on different ids never clobber each other's write.
+    with _catch_lock():
+        records = _catch_records()
+        matched = None
+        for rec in records:
+            if rec.get("id") == catch_id:
+                matched = rec
+                break
+        if matched is None:
+            return refuse(f"catch tag: no catch-ledger record with id {catch_id!r}")
+        decision = matched.get("decision")
+        allowed = _TAG_ALLOWED_DECISIONS[value]
+        if decision not in allowed:
+            return _catch_refuse3(
+                f"catch tag: {value!r} does not fit a {decision!r} record ({catch_id}) — "
+                f"{value!r} only fits: {'/'.join(allowed)}")
+        matched["tag"] = value
+        matched["note"] = note
+        if not _rewrite_catch_records(records):
+            return refuse(f"catch tag: could not persist the tag for {catch_id!r}")
+        case_path = None
+        if value in ("false", "miss"):
+            # At most one catch case per record id (B2): a re-tag from
+            # false to miss (or vice versa) replaces the earlier case for
+            # this id rather than appending a duplicate.
+            case_path = _upsert_catch_case(catch_id, _build_catch_case(matched))
+        else:
+            # Tagging fair withdraws any case an earlier false/miss tag on
+            # this same id had written (B2) — a case whose tag no longer
+            # says "wrong" or "missed" has no business staying in the
+            # catch-cases file.
+            _upsert_catch_case(catch_id, None)
     print(f"catch tag: {catch_id} -> {value}" +
           (f" (catch case: {case_path})" if case_path else ""))
     return 0
@@ -2188,15 +2324,28 @@ def _cmd_catch_report(a):
     untagged = sum(1 for r in records if r.get("tag") is None)
     # "advisory-forced" is a would-have-blocked stop_hook_active second pass
     # (see docs/hooks.md) — reported here as its own line, "blocks
-    # suppressed", never folded into "false stops" or "misses", because it
-    # is neither: nothing was judged wrong, a real block was just demoted
-    # to advisory by the retry itself.
+    # suppressed", never folded into "false stops" or "misses" by ITSELF,
+    # because being demoted to advisory is neither: nothing was judged
+    # right or wrong yet, a real block was just held back by the retry.
+    # Once a human tags that same record fair or false, though, it also
+    # lands on that tag's own line above (see N5) — the two lines are
+    # answering different questions ("was a block held back?" vs "was the
+    # underlying call right?") and a record can honestly answer both, so
+    # this is not double-counting a single question, but the raw sum of
+    # the lines above can still look larger than the record count without
+    # this footnote explaining why.
     suppressed = sum(1 for r in records if r.get("decision") == "advisory-forced")
+    suppressed_and_tagged = sum(1 for r in records if r.get("decision") == "advisory-forced"
+                                and r.get("tag") in ("fair", "false"))
     print(f"fair catches: {fair}")
     print(f"false stops: {false}")
     print(f"misses: {miss}")
     print(f"untagged: {untagged}")
     print(f"blocks suppressed: {suppressed}")
+    if suppressed_and_tagged:
+        print(f"  ({suppressed_and_tagged} of the above blocks-suppressed record(s) is "
+              "also tagged fair/false and counted on that line too — suppressed and "
+              "fair/false answer different questions, see docs/hooks.md)")
     if since:
         print(f"undated: {undated}")
     return 0

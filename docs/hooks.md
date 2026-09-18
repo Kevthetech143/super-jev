@@ -1130,7 +1130,28 @@ fair|false|miss "why"` records a human verdict on that one decision:
   Only fits `allow`, `advisory`, or `unchecked`.
 
 A tag that contradicts its record's own decision (e.g. `false` against an
-`allow`) is refused, exit 2, with a plain message — never silently accepted.
+`allow`) is refused, exit 3, with a plain message — never silently
+accepted. Exit 3, not 2: exit 2 is argparse's own usage-error convention
+(and `--since`'s own refusal below leans on that overlap on purpose, since
+a bad duration really is a usage error), while a tag/decision mismatch is
+a semantic refusal on arguments argparse already accepted fine, so it gets
+its own code rather than being indistinguishable from a typo in the flags.
+
+Re-tagging the same id is an upsert, not an append: `catch tag <id>
+false` then later `catch tag <id> miss` replaces the earlier tag and, if a
+catch case had been written for it, replaces that case too rather than
+leaving two. `catch tag <id> fair` after an earlier `false`/`miss`
+withdraws that id's catch case entirely — a case whose tag no longer says
+"wrong" or "missed" has no business staying in the catch-cases file. At
+most one catch case per record id, always.
+
+Two `catch tag` commands racing on different ids (e.g. a batch of parallel
+`catch tag` subprocesses) cannot lose each other's write: the whole
+read-modify-write — the ledger rewrite and the catch-cases upsert together
+— runs under one `flock`-held lock, a sibling `.lock` file next to the
+catch ledger, not the ledger file itself. A second `catch tag` simply
+waits its turn rather than reading stale data and clobbering the first
+one's write.
 
 **`--since`.** An unparseable `--since` value (anything that isn't
 `<N>m`/`<N>h`/`<N>d`) is refused, exit 2 — it never silently falls back to
@@ -1152,12 +1173,23 @@ gate is catching something real, how often it is wrongly getting in the
 way, and how often something false gets past it. **Blocks suppressed** is a
 different thing entirely — a count of `advisory-forced` records, a real
 block that the stop_hook_active second pass demoted to advisory-only rather
-than blocking twice. Nothing there was judged right or wrong; it is not
-folded into false stops or misses, because neither is what happened.
+than blocking twice. By itself, being suppressed is not folded into false
+stops or misses, because nothing has been judged right or wrong yet — the
+retry just held a block back.
+
+An `advisory-forced` record can still, separately, be tagged `fair` or
+`false` later (a human decides the retry's demotion was itself the right
+or wrong call) — when that happens the record counts on **both** the
+`blocks suppressed` line and its own `fair catches`/`false stops` line,
+because the two lines answer different questions ("was a block held
+back?" vs "was the underlying call right?") and a record can honestly
+answer both. `catch report` prints a one-line footnote naming how many
+`blocks suppressed` records are also tagged, whenever that count is
+nonzero, so the two lines never look like a silent double-count.
 
 **Catch cases (not bench cases).** Tagging a record `false` or `miss`
 appends one **catch case** to a single JSON array file,
-`SUPERJEV_BENCH_OUT` (default: `catch-cases.json` next to the catch
+`SUPERJEV_CATCH_CASES` (default: `catch-cases.json` next to the catch
 ledger) — `{id, ts, door, kind (truth|lie), draft, payload_path, reasons,
 note}`. This is deliberately **not** shaped like the existing
 `gate-bench-*` case files those scripts (`replay_gate_bench.py`,
@@ -1172,12 +1204,23 @@ catch-cases.json file directly and, for every case that carries a
 `payload_path` (`SUPERJEV_CATCH_KEEP_PAYLOAD=1` was set at decision time —
 see below), re-runs the same `hook gate`/`hook verify` decision offline
 through `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` — a fake/canned door for
-a dry run, never a live call from the script itself — and prints a
-per-case decision plus a lies-blocked/truths-blocked summary. A case with
-no `payload_path` is printed as "no payload — cannot replay" and left out
-of that summary: without the saved payload, a catch case is only ever good
-for a title, a decision, and a tag, never a full replay, because the catch
-ledger itself never keeps more than the 240-character excerpt.
+a dry run, or a door that replays a previously-recorded verdict. **This
+script refuses to run at all, exit 2, before touching any case, unless
+every door a case in the file needs has its env var set** — it never
+falls back to the real fleet gate/verify door the way `door_cmd()` does
+for every other caller in this repo. Pass `--live` to allow that fallback
+explicitly; the script itself never sets or reads `TYPESAFE_API_KEY`
+either way. It then prints a per-case decision plus a lies-blocked/
+truths-blocked summary. A case is excluded from that summary, and printed
+with its own one-line reason instead, when it cannot be replayed at all:
+no `payload_path` ("no payload — cannot replay, excerpt-only"), a payload
+that will not parse ("payload unreadable"), a payload that carries none
+of the fields this door can read text from ("payload shape unsupported
+for this door"), or a payload that ran through the door but produced no
+new catch-ledger decision ("door failed"). Without the saved payload, a
+catch case is only ever good for a title, a decision, and a tag, never a
+full replay, because the catch ledger itself never keeps more than the
+240-character excerpt.
 
 `SUPERJEV_CATCH_KEEP_PAYLOAD=1` opts in, at decision time, to also saving a
 redacted copy of the whole hook payload under `payloads/<id>.json` — off by

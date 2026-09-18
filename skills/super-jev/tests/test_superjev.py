@@ -6499,10 +6499,33 @@ def test_catch_tag_and_report_arithmetic(tmp_path, monkeypatch, capsys):
     assert "untagged: 0" in out
 
 
+def test_catch_report_footnotes_a_suppressed_record_also_tagged(tmp_path, monkeypatch, capsys):
+    # N5: an advisory-forced record tagged fair/false counts on BOTH the
+    # blocks-suppressed line and its own tag line — the report must say so.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "j1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "advisory-forced", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+        {"id": "j2", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "advisory-forced", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    assert sj.main(["catch", "tag", "j1", "false", "wrong retry"]) == 0
+    capsys.readouterr()
+    code = sj.main(["catch", "report"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "blocks suppressed: 2" in out
+    assert "false stops: 1" in out
+    # j1 counts on both lines — the footnote says exactly how many.
+    assert "1 of the above blocks-suppressed record(s)" in out
+
+
 def test_catch_tag_false_writes_catch_case_fair_does_not(tmp_path, monkeypatch):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     cases_file = tmp_path / "catch-cases-out.json"
-    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
+    monkeypatch.setenv("SUPERJEV_CATCH_CASES", str(cases_file))
     _write_catch_records(catch_path, [
         {"id": "c1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
          "decision": "block", "reasons": [], "draft_excerpt": "true draft",
@@ -6528,7 +6551,7 @@ def test_catch_tag_false_writes_catch_case_fair_does_not(tmp_path, monkeypatch):
 def test_catch_tag_miss_writes_lie_kind_catch_case(tmp_path, monkeypatch):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     cases_file = tmp_path / "catch-cases-out.json"
-    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
+    monkeypatch.setenv("SUPERJEV_CATCH_CASES", str(cases_file))
     _write_catch_records(catch_path, [
         {"id": "d1", "ts": "2026-09-18T00:00:00+00:00", "door": "verify",
          "decision": "allow", "reasons": [], "draft_excerpt": "a lie that got through",
@@ -6545,7 +6568,7 @@ def test_catch_tag_miss_writes_lie_kind_catch_case(tmp_path, monkeypatch):
 def test_catch_tag_appends_to_one_array_file_not_one_file_per_case(tmp_path, monkeypatch):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     cases_file = tmp_path / "catch-cases-out.json"
-    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
+    monkeypatch.setenv("SUPERJEV_CATCH_CASES", str(cases_file))
     _write_catch_records(catch_path, [
         {"id": "e1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
          "decision": "block", "reasons": [], "draft_excerpt": "one",
@@ -6560,10 +6583,112 @@ def test_catch_tag_appends_to_one_array_file_not_one_file_per_case(tmp_path, mon
     assert [c["id"] for c in cases] == ["e1", "e2"]
 
 
+# --------------------------------- catch ledger: B2 (re-tag dedup upsert)
+
+def test_catch_tag_retagging_false_twice_then_fair_leaves_zero_cases(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    cases_file = tmp_path / "catch-cases-out.json"
+    monkeypatch.setenv("SUPERJEV_CATCH_CASES", str(cases_file))
+    _write_catch_records(catch_path, [
+        {"id": "g1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "one",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    assert sj.main(["catch", "tag", "g1", "false", "first"]) == 0
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert len(cases) == 1
+    assert sj.main(["catch", "tag", "g1", "false", "second"]) == 0
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    # Same id retagged false again: still exactly one case, not two.
+    assert len(cases) == 1
+    assert sj.main(["catch", "tag", "g1", "fair", "actually right"]) == 0
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    # Retagged fair: the case is withdrawn entirely.
+    assert cases == []
+
+
+def test_catch_tag_false_then_miss_leaves_one_case_with_new_kind(tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    cases_file = tmp_path / "catch-cases-out.json"
+    monkeypatch.setenv("SUPERJEV_CATCH_CASES", str(cases_file))
+    _write_catch_records(catch_path, [
+        {"id": "h1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": "one",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    assert sj.main(["catch", "tag", "h1", "false", "wrong block"]) == 0
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert len(cases) == 1
+    assert cases[0]["kind"] == "truth"
+
+    # Simulate the same id's record later carrying a decision "miss" fits
+    # (e.g. a correction) and re-tag it — the earlier "false" case for
+    # this id must be replaced, not duplicated alongside a second one.
+    recs = _read_catch_records(catch_path)
+    recs[0]["decision"] = "allow"
+    recs[0]["tag"] = None
+    _write_catch_records(catch_path, recs)
+    assert sj.main(["catch", "tag", "h1", "miss", "actually a miss"]) == 0
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert len(cases) == 1
+    assert cases[0]["kind"] == "lie"
+
+
+def test_catch_tag_contradiction_refusal_exits_3(tmp_path, monkeypatch, capsys):
+    # N6: distinguishable from argparse's own exit-2 usage-error convention.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        {"id": "i1", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "allow", "reasons": [], "draft_excerpt": "",
+         "window_bytes": None, "ms": None, "tag": None, "note": None},
+    ])
+    code = sj.main(["catch", "tag", "i1", "false", "does not fit an allow"])
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "does not fit" in err
+
+
+def test_catch_tag_parallel_subprocesses_never_lose_a_write(tmp_path):
+    # B3: 24 parallel `catch tag` subprocesses on 24 distinct ids must all
+    # land — no unlocked read-modify-write silently drops one.
+    import subprocess as _sp
+    catch_path = tmp_path / "catches.jsonl"
+    cases_file = tmp_path / "catch-cases-out.json"
+    n = 24
+    records = [
+        {"id": f"p{i}", "ts": "2026-09-18T00:00:00+00:00", "door": "gate",
+         "decision": "block", "reasons": [], "draft_excerpt": f"case {i}",
+         "window_bytes": None, "ms": None, "tag": None, "note": None}
+        for i in range(n)
+    ]
+    _write_catch_records(catch_path, records)
+
+    env = dict(os.environ)
+    env["SUPERJEV_CATCH_LEDGER"] = str(catch_path)
+    env["SUPERJEV_CATCH_CASES"] = str(cases_file)
+    superjev_py = str(SKILL / "superjev.py")
+
+    procs = [
+        _sp.Popen([sys.executable, superjev_py, "catch", "tag", f"p{i}", "false", f"wrong {i}"],
+                 env=env, stdout=_sp.PIPE, stderr=_sp.PIPE)
+        for i in range(n)
+    ]
+    results = [p.wait() for p in procs]
+    assert all(rc == 0 for rc in results), results
+
+    tagged_records = _read_catch_records(catch_path)
+    assert len(tagged_records) == n
+    assert sum(1 for r in tagged_records if r.get("tag") == "false") == n
+
+    cases = json.loads(cases_file.read_text(encoding="utf-8"))
+    assert len(cases) == n
+    assert sorted(c["id"] for c in cases) == sorted(f"p{i}" for i in range(n))
+
+
 def test_catch_tag_uses_full_payload_draft_when_keep_payload_was_on(tmp_path, monkeypatch):
     ledger, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     cases_file = tmp_path / "catch-cases-out.json"
-    monkeypatch.setenv("SUPERJEV_BENCH_OUT", str(cases_file))
+    monkeypatch.setenv("SUPERJEV_CATCH_CASES", str(cases_file))
     payloads_dir = catch_path.parent / "payloads"
     payloads_dir.mkdir(parents=True)
     (payloads_dir / "f1.json").write_text(
@@ -6601,6 +6726,69 @@ def test_catch_excerpt_redacts_phone_ssn_and_card_numbers(tmp_path, monkeypatch)
     assert "REDACTED:phone" in excerpt
     assert "REDACTED:ssn" in excerpt
     assert "REDACTED:card-number" in excerpt
+
+
+def test_catch_redact_card_number_22_digit_run():
+    # N1: the old \b-anchored {13,19} pattern never matched a run of 20+
+    # digits at all, because no 13-19-digit cut inside a longer run ever
+    # landed on a real word boundary.
+    out = sj._catch_redact("account 1234567890123456789012 on file")
+    assert "1234567890123456789012" not in out
+    assert "REDACTED:card-number" in out
+
+
+def test_catch_redact_card_number_dotted_separators():
+    out = sj._catch_redact("card 4111.1111.1111.1111 charged")
+    assert "4111.1111.1111.1111" not in out
+    assert "REDACTED:card-number" in out
+
+
+def test_catch_redact_13_digit_unix_ms_timestamp_kept():
+    # N1: a bare 13-digit run shaped like a real unix-ms timestamp
+    # (starts 1, second digit 5-9) is left alone, not redacted as a card.
+    out = sj._catch_redact("event fired at 1758230400000 on the ledger")
+    assert "1758230400000" in out
+    assert "REDACTED:card-number" not in out
+
+
+def test_catch_redact_16_digit_card_redacted():
+    out = sj._catch_redact("card number 4111111111111111 on file")
+    assert "4111111111111111" not in out
+    assert "REDACTED:card-number" in out
+
+
+def test_catch_redact_13_digit_non_timestamp_shape_still_redacted():
+    # Only the specific 1[5-9]... shape is treated as a timestamp — any
+    # other 13-digit run still redacts.
+    out = sj._catch_redact("reference number 9876543210123 filed")
+    assert "9876543210123" not in out
+    assert "REDACTED:card-number" in out
+
+
+def test_catch_redact_phone_does_not_eat_numeric_range():
+    # N2: a 3-3-4 digit dash-separated numeric range is not a US phone
+    # shape (area code starting 1 is excluded).
+    out = sj._catch_redact("apply between rows 100-200-3000 inclusive")
+    assert "REDACTED:phone" not in out
+    assert "100-200-3000" in out
+
+
+def test_catch_redact_phone_does_not_eat_decimal_continuation():
+    # N2: not matched when immediately followed by a decimal continuation
+    # (part of a longer dotted/decimal sequence, not a phone number). Kept
+    # under 13 total digits so the separate card-number pattern (which
+    # legitimately treats a 13+ digit dotted run as card-shaped) never
+    # enters into it — this is purely the phone pattern's own lookahead.
+    out = sj._catch_redact("version reads 212.555.0123.4 in the log")
+    assert "REDACTED:phone" not in out
+    assert "REDACTED:card-number" not in out
+    assert "212.555.0123.4" in out
+
+
+def test_catch_redact_phone_still_redacts_real_us_number():
+    out = sj._catch_redact("reach us at 212-555-0123 anytime")
+    assert "212-555-0123" not in out
+    assert "REDACTED:phone" in out
 
 
 def test_catch_excerpt_redacts_emails_unlike_the_evidence_window(tmp_path, monkeypatch):
@@ -6781,7 +6969,10 @@ def test_catch_tag_refuses_a_tag_that_contradicts_the_decision(
     ])
     code = sj.main(["catch", "tag", "h1", value, "why"])
     err = capsys.readouterr().err
-    assert code == 2
+    # N6: exit 3, not 2 — distinguishable from argparse's own usage-error
+    # exit 2 (this is a semantic refusal on arguments argparse already
+    # accepted, not a bad flag).
+    assert code == 3
     assert "does not fit" in err
     rec = _read_catch_records(catch_path)[0]
     assert rec["tag"] is None  # never persisted
@@ -6899,34 +7090,41 @@ def test_unchecked_advisory_prints_even_if_reasons_computation_later_raises(
 
 # ---------------------------------------------------------- B1: replay script
 
-def test_replay_catch_cases_skips_cases_with_no_payload(tmp_path, monkeypatch, capsys):
+def _load_replay_module():
     import importlib.util as _ilu
     replay_path = SKILL / "tests" / "replay_catch_cases.py"
     spec = _ilu.spec_from_file_location("replay_catch_cases", replay_path)
     replay = _ilu.module_from_spec(spec)
     spec.loader.exec_module(replay)
+    return replay
+
+
+def test_replay_catch_cases_skips_cases_with_no_payload(tmp_path, monkeypatch, capsys):
+    replay = _load_replay_module()
 
     cases_file = tmp_path / "catch-cases.json"
     cases_file.write_text(json.dumps([
         {"id": "n1", "kind": "truth", "door": "gate", "payload_path": None},
     ]), encoding="utf-8")
+    # No SUPERJEV_GATE_CMD needed: a case with no payload never calls the
+    # door at all, so it does not trip the B1 live-door refusal.
     code = replay.main([str(cases_file)])
     out = capsys.readouterr().out
     assert code == 0
     assert "no payload — cannot replay" in out
-    assert "no payload (excerpt-only, not counted below): 1" in out
+    assert "not replayed (see per-case reason above, not counted below): 1" in out
 
 
 def test_replay_catch_cases_replays_a_case_with_a_saved_payload(tmp_path, monkeypatch, capsys):
-    import importlib.util as _ilu
-    replay_path = SKILL / "tests" / "replay_catch_cases.py"
-    spec = _ilu.spec_from_file_location("replay_catch_cases", replay_path)
-    replay = _ilu.module_from_spec(spec)
-    spec.loader.exec_module(replay)
+    replay = _load_replay_module()
 
     monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", tmp_path / "real-catches.jsonl")
     monkeypatch.setattr(replay.sj.subprocess, "run", FakeDoor(0))
     monkeypatch.setattr(replay.sj, "FLEET_JEV_LIB", FAKE_DOOR)
+    # B1: a case whose door needs a live call now refuses unless the door
+    # env var is set (or --live is passed) — a fake door here proves the
+    # normal replay path still runs.
+    monkeypatch.setenv(replay.sj.GATE_CMD_ENV, f"{sys.executable} {FAKE_DOOR}")
 
     payload_path = tmp_path / "n2-payload.json"
     evidence = tmp_path / "notes.md"
@@ -6946,3 +7144,87 @@ def test_replay_catch_cases_replays_a_case_with_a_saved_payload(tmp_path, monkey
     # The replay's own catch_log call must never land in the real ledger
     # this script's cases file was read from.
     assert not (tmp_path / "real-catches.jsonl").exists()
+
+
+def test_replay_catch_cases_refuses_live_door_by_default(tmp_path, monkeypatch, capsys):
+    # B1: with SUPERJEV_GATE_CMD unset and no --live, a case that carries
+    # a real payload must never be allowed through to the live fleet
+    # door — refuse, exit 2, before touching any case or writing a
+    # call-ledger record.
+    replay = _load_replay_module()
+    monkeypatch.delenv(replay.sj.GATE_CMD_ENV, raising=False)
+    monkeypatch.delenv(replay.sj.VERIFY_CMD_ENV, raising=False)
+    real_ledger = tmp_path / "real-catches.jsonl"
+    monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", real_ledger)
+
+    payload_path = tmp_path / "n3-payload.json"
+    payload_path.write_text(json.dumps({"draft": "the sky is blue"}), encoding="utf-8")
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n3", "kind": "lie", "door": "gate", "payload_path": str(payload_path)},
+    ]), encoding="utf-8")
+
+    code = replay.main([str(cases_file)])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "refusing to run" in err
+    assert not real_ledger.exists()
+
+
+def test_replay_catch_cases_live_flag_allows_the_fallback_door(tmp_path, monkeypatch, capsys):
+    # B1's counterpart: --live explicitly opts back into the fallback,
+    # even with no env var set, using a monkeypatched fleet path so this
+    # never actually shells out.
+    replay = _load_replay_module()
+    monkeypatch.delenv(replay.sj.GATE_CMD_ENV, raising=False)
+    monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", tmp_path / "real-catches.jsonl")
+    monkeypatch.setattr(replay.sj.subprocess, "run", FakeDoor(0))
+    monkeypatch.setattr(replay.sj, "FLEET_JEV_LIB", FAKE_DOOR)
+
+    payload_path = tmp_path / "n4-payload.json"
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("the sky is blue", encoding="utf-8")
+    payload_path.write_text(json.dumps({"draft": "the sky is blue",
+                                        "evidence": [str(evidence)]}), encoding="utf-8")
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n4", "kind": "lie", "door": "gate", "payload_path": str(payload_path)},
+    ]), encoding="utf-8")
+
+    code = replay.main([str(cases_file), "--live"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "new_decision=allow" in out
+
+
+def test_replay_catch_cases_unreadable_payload_gets_its_own_message(tmp_path, monkeypatch, capsys):
+    # N3: a corrupt payload file must be told apart from "no payload".
+    replay = _load_replay_module()
+    monkeypatch.setenv(replay.sj.GATE_CMD_ENV, f"{sys.executable} {FAKE_DOOR}")
+    payload_path = tmp_path / "n5-payload.json"
+    payload_path.write_text("{not json", encoding="utf-8")
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n5", "kind": "lie", "door": "gate", "payload_path": str(payload_path)},
+    ]), encoding="utf-8")
+    code = replay.main([str(cases_file)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "payload unreadable" in out
+
+
+def test_replay_catch_cases_unsupported_shape_gets_its_own_message(tmp_path, monkeypatch, capsys):
+    # N3: a payload with none of the fields cmd_hook can read text from
+    # must be told apart from "no payload" and "unreadable".
+    replay = _load_replay_module()
+    monkeypatch.setenv(replay.sj.GATE_CMD_ENV, f"{sys.executable} {FAKE_DOOR}")
+    payload_path = tmp_path / "n6-payload.json"
+    payload_path.write_text(json.dumps({"unrelated_field": "x"}), encoding="utf-8")
+    cases_file = tmp_path / "catch-cases.json"
+    cases_file.write_text(json.dumps([
+        {"id": "n6", "kind": "lie", "door": "gate", "payload_path": str(payload_path)},
+    ]), encoding="utf-8")
+    code = replay.main([str(cases_file)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "payload shape unsupported for this door" in out
