@@ -4,46 +4,63 @@
 
 No version bump.
 
-- **OVERCLAIMS arm — two live false mechanisms fixed.** A hand adjudication
-  of every live `hook gate` block on the primary's own seat
-  (`ops/gate-adjudication-20260918.md`) found the OVERCLAIMS arm's 5 false
-  blocks (of 24 firings) all traced to two mechanisms:
+- **OVERCLAIMS arm — two live false mechanisms fixed, then the first fix
+  re-adjudicated structural.** A hand adjudication of every live `hook
+  gate` block on the primary's own seat (`ops/gate-adjudication-20260918.md`)
+  found the OVERCLAIMS arm's false blocks all traced to two mechanisms,
+  both scoped to `window_meta["current_turn_empty"]` (a turn that ran its
+  own tools is untouched by either):
   1. **Zero-tool conversational turns.** The current turn ran no tools and
      the draft was a plain answer/opinion/status/plan with no claim any
      tool result could ever support or contradict ("the proof is what Jev
      alone could not have done today", a design answer, a plan sentence).
-     `hook gate` now checks the draft for a receipt-shaped claim (a number
-     next to a result word, a file path, a PR/#N reference, or a
-     completion verb — "tests pass", "merged", "done", "written",
-     "created", "fixed", and close siblings) before judging a tool-free
-     current turn at all; with none found, the judge is skipped outright
-     (exit 0, stderr `super-jev gate: conversational turn, not judged`,
-     catch-ledger decision `unchecked` reason `conversational`) rather
-     than risking an OVERCLAIMS score on prose with no claim shape. A
-     tool-free turn whose draft DOES carry a receipt-shaped claim is still
-     judged exactly as before (empty-current-turn health gate unchanged).
-     See `_draft_has_receipt_shaped_claim`.
+     The original fix checked the DRAFT for a receipt-shaped claim (a
+     number next to a result word, a file path, a PR/#N reference, or a
+     completion verb) before judging a tool-free turn at all. A same-day
+     re-adjudication found that scan could never be made complete: "The
+     bot is back up.", "Your rent is paid.", "I sent the email.", "The
+     tests are green.", "Nothing failed.", "Backup completed.", "All three
+     are live now." and "The service is now stable and fully caught up."
+     all carry contradicting evidence one turn back yet all passed the
+     judge unjudged. The rule is now **structural**: `hook gate` skips the
+     judge as "conversational" only when the current turn ran no tools of
+     its own AND the whole assembled WINDOW carries no tool receipt
+     anywhere — no previous-turn tool output, no session receipt, no
+     relayed worker report, no sticky `[from: ...]` identity line. If the
+     window carries a receipt anywhere, the judge always runs, regardless
+     of the draft's own wording. Skip is exit 0, stderr `super-jev gate:
+     conversational turn, not judged`, catch-ledger decision `unchecked`
+     reason `conversational`. See `_window_has_any_receipt`
+     (`_draft_has_receipt_shaped_claim` is removed).
   2. **The receipt is one turn old.** A correct restatement of a result
      whose receipt sits in the *previous* turn's block (a merge, a spawn,
      a log read a turn or two back) was read as having no in-window
      evidence. The most recent previous turn that ran its own tools is now
-     relabelled `[receipt turn -N]` (was `[previous turn -N]`) and named in
-     a new DERIVED FACTS sentence (`RECEIPT TURN: ...`) whenever the
-     current turn is tool-free but the draft carries a receipt-shaped
-     claim. See `_receipt_turn_index`/`_label_receipt_turn`/
-     `_receipt_turn_extra_fact`, and `compose_window_with_facts`'s new
-     `extra_facts` parameter.
-  Both fixes are scoped to `window_meta["current_turn_empty"]` only — a
-  turn that ran its own tools is untouched by either. See docs/hooks.md,
-  "OVERCLAIMS arm — the two live false mechanisms it still needed".
+     named in a new DERIVED FACTS sentence (`RECEIPT TURN: ...`) whenever
+     the current turn is tool-free but the window carries a receipt — its
+     `[previous turn -N]` section header is left exactly as-is, pointed at
+     from the DERIVED FACTS sentence rather than rewritten. (An earlier
+     draft of this fix DID rewrite the header to `[receipt turn -N]`, which
+     needed the window trimmer's and the fact-labeller's own section
+     regexes taught the new text — both slipped through unregistered, so a
+     relabelled receipt turn fell out of the trimmer's drop order and out
+     of fact-line labelling; see docs/hooks.md, "gate v4 — the receipt
+     turn header". Naming the turn in prose instead avoids the whole
+     class of bug.) See `_receipt_turn_index`/`_receipt_turn_extra_fact`,
+     and `compose_window_with_facts`'s `extra_facts` parameter.
+  Also: `"conversational"` is now in `SKIP_REASON_BUCKETS` (bucket
+  DEFERRED) — it was missing, which fell it to LOST by design and tripped
+  the ledger health monitor's lost-check WARN on any session that had an
+  ordinary conversational turn. See docs/hooks.md, "OVERCLAIMS arm — the
+  two live false mechanisms it still needed".
 
 - **Judge-advisory mode, granular.** `SUPERJEV_GATE_JUDGE_ADVISORY` now
   also accepts `weak`, alongside the existing `1`: `weak` demotes only the
   per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's secondary arm) and
   SELF_CONTRADICTORY to advisory — OVERCLAIMS still blocks, matching the
   adjudication's finding that OVERCLAIMS is the only judge arm with a
-  positive live record (19 of 24 fair) while the secondary arm (2 of 7)
-  and SELF_CONTRADICTORY (0 of 2) are not. `1` (all judge arms advisory)
+  positive live record while the secondary arm and SELF_CONTRADICTORY are
+  not. `1` (all judge arms advisory)
   and `0`/unset (off) are unchanged. The catch ledger's `advisory-judge`
   decision now carries a `judge-advisory-mode:1`/`judge-advisory-mode:weak`
   tag in its `reasons`, alongside the existing `key VERDICT score` strings

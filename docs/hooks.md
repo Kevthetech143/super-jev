@@ -893,37 +893,45 @@ reproduces this.
 block reachable in a real session transcript — not a bench, not a replay —
 matching each one against the actual draft and evidence the agent had at
 the time. The OVERCLAIMS arm came back the only judge arm with a positive
-live record (19 fair of 24 firings on the primary's own seat), but its 5
-false blocks all traced to two mechanisms, both scoped to a current turn
-that ran no tools of its own (`window_meta["current_turn_empty"]`):
+live record, but its false blocks all traced to two mechanisms, both
+scoped to a current turn that ran no tools of its own
+(`window_meta["current_turn_empty"]`):
 
 **1. Zero-tool conversational turns.** A plain answer, opinion, status
 line or plan sentence — "the proof is what Jev alone could not have done
 today", a design answer split across 13 claims, "when the runners land
 I'll fire the live passes back to back" — carries no claim any tool result
 could ever support or contradict, but the judge still scored some of these
-OVERCLAIMS. `hook gate` now checks the draft, before calling the judge at
-all, for a **receipt-shaped claim**: a number sitting next to a result word
-("48 tests passed", "9 of 10", "score 0.92"), a file path, a PR/#N
-reference, or a completion verb ("tests pass", "merged", "done", "written",
-"created", "fixed", and close siblings — `pushed`, `committed`, `deployed`,
-`installed`, `confirmed`, `verified`, `built`, `resolved`, `closed`,
-`shipped`). Deliberately narrow: a generic status adjective ("stable",
-"healthy", "caught up") does NOT by itself count, because a qualitative
-state claim can still genuinely contradict evidence (see the existing
-empty-current-turn secondary-arm tests in `test_superjev.py`, which this
-change leaves untouched) and widening the list to catch every status word
-would swallow that case along with the ones this fix targets.
+OVERCLAIMS. The first fix here checked the DRAFT, before calling the judge
+at all, for a "receipt-shaped claim": a number sitting next to a result
+word, a file path, a PR/#N reference, or a completion verb. A follow-up
+re-adjudication the same day found that a verb/number scan of the draft can
+never be made complete — "The bot is back up.", "Your rent is paid.", "I
+sent the email.", "The tests are green.", "Nothing failed.", "Backup
+completed.", "All three are live now." and "The service is now stable and
+fully caught up." all carry contradicting evidence one turn back and all
+passed the judge unjudged under the draft-shape version of this fix. The
+rule is now **structural** instead: it looks at what the WINDOW carries,
+not what words the draft happens to use. `hook gate` skips the judge as
+"conversational" only when the current turn ran no tools of its own AND
+the whole assembled window carries no tool receipt anywhere — no
+previous-turn tool output, no session receipt, no relayed worker report, no
+sticky `[from: ...]` identity line. If the window carries a receipt
+anywhere, the judge always runs, even against a plain-sounding draft,
+because a receipt existing in the window is exactly what makes a
+plain-sounding claim checkable. See `_window_has_any_receipt` in
+`superjev.py` (the draft-shape scan, `_draft_has_receipt_shaped_claim`, is
+gone).
 
-When the current turn ran no tools and the draft carries no receipt-shaped
-claim at all, the judge is skipped outright — no subprocess call, exit 0,
-one line on stderr (`super-jev gate: conversational turn, not judged`), and
-the catch ledger records decision `unchecked` reason `conversational`. When
-the current turn ran no tools but the draft DOES carry a receipt-shaped
-claim, judging proceeds exactly as it did before this change (the existing
-empty-current-turn health gate still suppresses only the secondary arm,
-never OVERCLAIMS — see "Gate v3 — empty current turn" above). See
-`_draft_has_receipt_shaped_claim` in `superjev.py`.
+When the judge is skipped this way: no subprocess call, exit 0, one line on
+stderr (`super-jev gate: conversational turn, not judged`), and the catch
+ledger records decision `unchecked` reason `conversational` — a reason that
+sits in the health monitor's **DEFERRED** bucket (see `SKIP_REASON_BUCKETS`)
+so an ordinary conversational turn never counts as a lost check. When the
+window carries a receipt, judging proceeds exactly as it did before this
+change (the existing empty-current-turn health gate still suppresses only
+the secondary arm, never OVERCLAIMS — see "Gate v3 — empty current turn"
+above).
 
 **2. The receipt is one turn old.** A tool ran, the lead replied, got a
 follow-up question, and answered from that same receipt — the follow-up
@@ -932,29 +940,48 @@ something the window's own previous-turn block already carries. The judge
 still scored some of these OVERCLAIMS because nothing in the window said
 "this previous-turn material is what the current turn's claim is *about*"
 — it just looked like unlabelled history. When the current turn is
-tool-free but the draft DOES carry a receipt-shaped claim, the most recent
-previous turn that ran its own tools (and is still kept in the assembled
-window; see `prev_turn_detail` from `_derive_evidence_text_from_transcript`)
-is relabelled `[receipt turn -N]` in place of `[previous turn -N]`, and a
-new DERIVED FACTS sentence names it: `RECEIPT TURN: the current turn ran no
-tools of its own; turn -N (labelled [receipt turn -N] below) is the most
+tool-free but the window does carry a receipt, the most recent previous
+turn that ran its own tools (and is still kept in the assembled window; see
+`prev_turn_detail` from `_derive_evidence_text_from_transcript`) is named
+in a new DERIVED FACTS sentence: `RECEIPT TURN: the current turn ran no
+tools of its own; turn -N (see [previous turn -N] below) is the most
 recent turn that did, and counts as this reply's receipt, not out-of-window
 material.` No previous turn ran tools (receipts-only, or nothing at all) —
-no relabel, no fact, window unchanged. See `_receipt_turn_index` and
-`_label_receipt_turn` in `superjev.py`, and `compose_window_with_facts`'s
-new `extra_facts` parameter, which lets a caller add a fact computed from
-`window_meta` (something `derive_window_facts` cannot see on its own, since
-it only ever reads the window text and the draft) ahead of the same no-drop
-guarantee every other derived fact gets.
+no fact, window unchanged. See `_receipt_turn_index` and
+`_receipt_turn_extra_fact` in `superjev.py`, and
+`compose_window_with_facts`'s `extra_facts` parameter, which lets a caller
+add a fact computed from `window_meta` (something `derive_window_facts`
+cannot see on its own, since it only ever reads the window text and the
+draft) ahead of the same no-drop guarantee every other derived fact gets.
+
+**Gate v4 — the receipt turn header.** An earlier draft of mechanism 2
+above named the receipt turn by RELABELLING its section header in the
+window text, from `[previous turn -N]` to `[receipt turn -N]`, so the judge
+would see it marked in place. That needed two more places in the window
+machinery taught the new header text — `_WINDOW_PART_RE` (the token-budget
+trimmer's section splitter) and `_WINDOW_SECTION_RE` (the fact-line
+labeller) — and both slipped through unregistered. The relabelled section
+fell out of the trimmer's drop order entirely (filed as the untouchable
+kind `"other"`, so at a tight budget the trimmer dropped the WHOLE session-
+receipts block instead of shrinking the relabelled section, and still fell
+back to a byte tail-cut on top), and out of fact-line labelling (falling
+back to the default "the evidence window" label at the wrong rank instead
+of `[previous turn -N]`'s own rank). The fix does not relabel the header at
+all — the receipt turn is named in prose in the DERIVED FACTS sentence
+only, pointing at its unmodified `[previous turn -N]` header — so every
+existing window regex stays correct with nothing new to keep in sync. See
+`skills/super-jev/tests/test_superjev.py`,
+`test_window_cap_trims_normally_when_a_previous_turn_is_the_receipt_turn`
+and `test_fact_window_lines_label_unchanged_by_receipt_turn_fix`.
 
 Both mechanisms are additive to the window/judge path only — neither
 touches the deterministic count/PR/`CONTRADICTED_BY_FACT` arms, and neither
 is gated behind `SUPERJEV_DERIVED_FACTS` (a correctness fix to what the
 judge sees, not part of the optional derived-facts feature). The
 adjudication's other two findings — the per-claim NOT_SUPPORTED/CONTRADICTED
-arm (2 fair of 7 live) and SELF_CONTRADICTORY (0 of 2) — are not fixed
-here; see "Judge-advisory mode" below for `weak` mode, the way to keep
-OVERCLAIMS blocking while demoting those two arms to advisory.
+arm and SELF_CONTRADICTORY — are not fixed here; see "Judge-advisory mode"
+below for `weak` mode, the way to keep OVERCLAIMS blocking while demoting
+those two arms to advisory.
 
 ## The latency budget — one call, one cap, one clock (2026-09-18)
 
@@ -1282,10 +1309,9 @@ the hand adjudication of every live gate block on the primary's own seat):
   original, unconditional behavior.
 - **`weak`** — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
   secondary arm) and SELF_CONTRADICTORY are advisory; **OVERCLAIMS still
-  blocks**. The adjudication found OVERCLAIMS fair on 19 of its 24 live
-  firings on the primary's seat — the only judge arm with a positive live
-  record — while the per-claim arm was fair on only 2 of 7 and
-  SELF_CONTRADICTORY on 0 of 2. `weak` is the setting for a session that
+  blocks**. The adjudication found OVERCLAIMS the only judge arm with a
+  positive live record on the primary's seat, while the per-claim arm and
+  SELF_CONTRADICTORY were not. `weak` is the setting for a session that
   wants the judge's high-confidence catches kept live while giving up on
   everything else it flags. Under the default v3 rule the secondary arm
   never produces a block reason on its own in the first place (gate v4
