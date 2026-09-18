@@ -3416,19 +3416,81 @@ def test_pr_state_prose_only_still_blocks():
     assert any("PR #52" in r and "open" in r for r in reasons)
 
 
-def test_pr_state_ambiguous_equal_rank_stays_silent_with_a_note():
-    # (d) Two conflicting RECEIPTS for the same PR, neither carrying any
-    # window section/turn marker — no ordering info exists to prefer
-    # either one, so the arm stays silent (no block) and records an
-    # --explain note rather than guessing.
+def test_pr_state_merge_cmd_then_view_open_blocks():
+    # (d, revised 2026-09-18 — PR-STATE-REVIEW.md finding 2) A bare
+    # `gh pr merge N` command-invocation line proves only that the
+    # command was typed, never the result, so it is not a receipt at
+    # all by itself; the `gh pr view --json` state field is the only
+    # real receipt here and it says OPEN. Must block, not read as
+    # ambiguous — a command line can never outrank, or even tie, a
+    # state-bearing receipt.
     draft = "PR #52 is merged, Sir."
-    evidence = 'gh pr merge 52\n{"number": 52, "state": "OPEN"}\n'
+    evidence = (
+        "$ gh pr merge 52 --squash\n"
+        "$ gh pr view 52 --json number,state\n"
+        '{"number": 52, "state": "OPEN"}\n'
+    )
     reason, note = sj._pr_mismatch_verdict(draft, evidence)
-    assert reason is None
+    assert reason is not None
+    assert "PR #52" in reason and "open" in reason
+    assert note is None
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
+
+
+def test_pr_state_ambiguous_same_strength_receipts_fails_closed_and_blocks():
+    # (d) Two conflicting state-bearing receipts (same strength) for the
+    # same PR, neither carrying any window section/turn marker — no
+    # ordering info exists to prefer either one. This is genuinely
+    # ambiguous, but ambiguity is not license to allow: the arm fails
+    # CLOSED, blocking on the not-merged signal in the tie, while still
+    # recording an --explain note naming the ambiguity.
+    draft = "PR #52 is merged, Sir."
+    evidence = 'MERGED PR #52\n{"number": 52, "state": "OPEN"}\n'
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None
+    assert "PR #52" in reason and "open" in reason
     assert note is not None
     assert "PR #52" in note and "ambiguous" in note.lower()
-    assert sj.deterministic_block_reasons(draft, evidence) == []
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
     assert sj._pr_mismatch_note(draft, evidence) == note
+
+
+def test_pr_state_report_from_quoting_merge_command_is_prose_and_blocks():
+    # (PR-STATE-REVIEW.md finding 1, case 1) A REPORT FROM block that
+    # quotes "gh pr merge 52" and states the PR is still open is prose,
+    # full stop — quoting a command is not receiving one. Must block.
+    draft = "PR #52 is merged, Sir."
+    evidence = (
+        "[current turn]\n"
+        "REPORT FROM Worker (unverified worker claim)\n"
+        "I ran gh pr merge 52 and it failed; PR #52 is still open.\n"
+    )
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None
+    assert "PR #52" in reason and "open" in reason
+    assert note is None
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
+
+
+def test_pr_state_report_from_citing_paren_pr_is_prose_and_blocks():
+    # (PR-STATE-REVIEW.md finding 1, case 2) A REPORT FROM block citing
+    # "(#52)" in prose is not a receipt either — a bare (#N) mention is
+    # never a receipt on its own, in or out of a report. Must block.
+    draft = "PR #52 is merged, Sir."
+    evidence = (
+        "[current turn]\n"
+        "REPORT FROM Worker (unverified worker claim)\n"
+        "The work is blocked by (#52), which is still open.\n"
+    )
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None
+    assert "PR #52" in reason and "open" in reason
+    assert note is None
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
 
 
 def test_hook_gate_blocks_on_deterministic_count_mismatch_via_fake_door(tmp_path, monkeypatch):

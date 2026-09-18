@@ -759,32 +759,56 @@ receipt and a `git log` line naming `(#52)` on main.
 every PR-state signal for the PR number the draft names
 (`_pr_state_signals`) and picks a winner by:
 
-1. **kind** — a tool receipt (a `gh pr view --json` state field, a
-   `gh pr merge N` command line, a `"mergedAt"` field, or a `(#N)` git log
-   line) always outranks prose in a teammate/user message or a `REPORT
-   FROM` block, since prose is a paraphrase that can go stale and a receipt
-   is what the command actually returned;
-2. among signals of the same kind, the one in the more recent window
+1. **strength** — a *state-bearing* receipt (a `gh pr view --json` state
+   field, a `"mergedAt"` field, or a literal `MERGED` state line) outranks a
+   *command-invocation* receipt (a bare `gh pr merge N` line, which only
+   proves the command was typed, not its result), which in turn outranks
+   prose in a teammate/user message or a `REPORT FROM` block, since prose
+   is a paraphrase that can go stale;
+2. among signals of the same strength, the one in the more recent window
    section (`_section_recency_rank` — the same previous-turns-oldest-to-
    newest, then receipts, then this-turn-reports, then this-turn-tools
    layering the stale-report fact already uses), or, when two signals of
-   the same kind share one section, whichever reads later in the text.
+   the same strength share one section, whichever reads later in the text.
+
+A line only ever counts as a receipt (state-bearing or command-invocation)
+when it sits *outside* a `REPORT FROM` block and either carries the tool-
+output `[from: ...]` receipt identity or is itself a raw state line/JSON
+field. Prose quoting a command or citing `(#N)`/`#N` inside a `REPORT FROM`
+block — "I ran gh pr merge 52 and it failed; PR #52 is still open." — is
+read as prose, full stop, never as a receipt just because it contains
+receipt-shaped text; a bare `(#N)`/`#N` citation is never a receipt on its
+own anywhere in the window, only a possible anchor for the prose check.
 
 Only the *winning* signal is compared against the draft's claim — a mismatch
 still fires when that signal disagrees, exactly as the single-signal arm
-always did, but a newer or higher-kind signal that agrees with the draft now
-settles the question silently rather than being outvoted by an older
-mention the arm used to read first. A signal with no window section/turn
-marker around it at all carries no ordering information — it is never
-allowed to win a same-kind tie by virtue of "reading later" in raw
-concatenated text, since that order is not known to reflect anything real.
-When two same-kind signals disagree and neither one carries any ordering
-information over the other, the arm stays silent (no block, same as an
-evidence gap) and records a `PR state ambiguous: PR #N has conflicting
-<kind> signals with no window section/turn marker to say which is newer`
-line for `hook gate --explain` rather than guessing which one to trust. Only
-this one arm changed; the count-mismatch arm and every derived-fact family
-are untouched.
+always did, but a newer or higher-strength signal that agrees with the
+draft now settles the question silently rather than being outvoted by an
+older mention the arm used to read first. A signal with no window
+section/turn marker around it at all carries no ordering information — it
+is never allowed to win a same-strength tie by virtue of "reading later" in
+raw concatenated text, since that order is not known to reflect anything
+real. When two same-strength signals disagree and neither carries any
+ordering information over the other, the arm fails CLOSED: it blocks on
+whichever tied signal says NOT_MERGED (the base, pre-recency behaviour)
+rather than allow, and still records a `PR state ambiguous: PR #N has
+conflicting same-strength signals with no window section/turn marker to say
+which is newer — failing closed on the not-merged signal` line for `hook
+gate --explain`, so a reason and a note from this one pair can be non-None
+together — the only deterministic pair where that happens. Only this one
+arm changed; the count-mismatch arm and every derived-fact family are
+untouched.
+
+**Accepted tradeoff.** Strength is compared before recency, so a receipt
+sitting in an *older* window section still outranks *current-turn* prose
+saying the PR was reverted or reopened — a worker who reverts or reopens a
+merged PR and only reports that in plain prose, with no fresh receipt of
+its own, will not override an earlier merge receipt already in the window.
+This is judged the safer default, since prose alone contradicting a
+receipted fact is exactly the shape a stale or mistaken claim takes, but it
+is a real gap: clearing a stale MERGED receipt after a genuine revert needs
+a fresh receipt of its own (a new `gh pr view --json` showing the reverted
+state), not just a sentence saying so.
 
 ## Gate v4.2 — written-file identity, file read-back facts (2026-09-18)
 
