@@ -384,6 +384,78 @@ def test_verify_uses_the_env_command_when_set(tmp_path, door, monkeypatch):
     assert argv[1] == "/elsewhere/verify.py"
 
 
+# --------------------------------------------- verify: derived-facts fallback
+#
+# These run against a REAL tiny git repo and REAL node — no subprocess.run
+# mock — because the whole point of the fallback is what it reads off actual
+# git/test output. Skipped when node is missing, since the fallback silently
+# declines in that case too (see _derived_facts_fallback).
+import shutil as _shutil  # local alias; the module-level `subprocess` import above stays untouched
+
+requires_node = pytest.mark.skipif(_shutil.which("node") is None, reason="node not on PATH")
+
+
+@pytest.fixture
+def bare_git_repo(tmp_path):
+    """A tiny real repo with one commit on a named branch, no upstream."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *args: subprocess.run(["git", *args], cwd=repo, check=True,
+                                       capture_output=True, text=True)
+    run("init", "-q", "-b", "work")
+    run("config", "user.email", "test@example.com")
+    run("config", "user.name", "Test")
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    run("add", "README.md")
+    run("commit", "-q", "-m", "init")
+    return repo
+
+
+@requires_node
+def test_verify_fallback_settles_a_fake_branch_as_a_rejection(tmp_path, bare_git_repo, monkeypatch, capsys):
+    """No door installed, but a worktree is given: the fallback runs, derives
+    a BRANCH fact, and settles the claim's own fake branch name as
+    CONTRADICTED_BY_FACT before any judge would have been asked."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    report = tmp_path / "r.md"
+    report.write_text("Pushed to fix/totally-made-up-branch and opened the PR.", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
+    assert code == 4  # REJECT
+    out = capsys.readouterr().out
+    assert "DERIVED FACTS" in out
+    assert "there is NO branch named fix/totally-made-up-branch" in out
+    assert "CONTRADICTED_BY_FACT 1.00" in out
+    assert "PRE-RULE VERDICTS" in out
+
+
+@requires_node
+def test_verify_fallback_never_claims_clean(tmp_path, bare_git_repo, monkeypatch, capsys):
+    """A report with nothing to contradict still comes back READ, never
+    CLEAN — this path has no judge, so nothing here is ever vouched for."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    report = tmp_path / "r.md"
+    report.write_text("The change is committed on branch work.", encoding="utf-8")
+    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
+    assert code == 3  # READ, never 0/CLEAN
+    out = capsys.readouterr().out
+    assert "DERIVED FACTS" in out
+    assert "No judge is reachable in this fallback" in out
+
+
+def test_verify_fallback_declines_with_no_worktree_and_no_test_cmd(tmp_path, monkeypatch, capsys):
+    """No door, no worktree, no test command: nothing to gather, so this
+    falls all the way back to the plain refusal — unchanged behaviour."""
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    report = tmp_path / "r.md"
+    report.write_text("done", encoding="utf-8")
+    code = sj.main(["verify", str(report)])
+    assert code == sj.REFUSED
+    assert "no door at" in capsys.readouterr().err
+
+
 # ------------------------------------------------------------ verify
 
 def test_verify_passes_every_flag_through(tmp_path, door):
