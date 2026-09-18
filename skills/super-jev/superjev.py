@@ -6901,6 +6901,33 @@ _RS_SEGMENT_BOUNDARY = re.compile(r'&&|\|\||\||;|\n')
 _RS_MSG_TOOL_HINT = re.compile(r'(?i)telegram|gmail|email|slack|discord|message')
 _RS_RECIPIENT_KEYS = ("to", "recipient", "chat_id", "channel", "email", "phone",
                       "thread_id")
+# The channel hint alone is not enough: a Gmail-shaped tool that only READS
+# or MUTATES (a draft, a label, a thread) is not a send, even when its input
+# happens to carry a recipient-looking field. `create_draft` is the worst
+# case — it names a real recipient and produces no delivery whatsoever, and
+# would otherwise read as support for "sent"/"replied"/"notified"/"told".
+# So a message-shaped tool needs BOTH a send verb in its own name AND no
+# read/mutate verb in it; matched on lower-cased CamelCase/snake_case WORD
+# tokens, never a substring, so "message" in `create_draft`'s docstring (it
+# has none) or a stray "post" inside a longer word could never sneak a match
+# in either direction.
+_RS_MSG_SEND_VERBS = frozenset(
+    ("send", "reply", "forward", "post", "notify", "message"))
+_RS_MSG_BLOCK_VERBS = frozenset((
+    "get", "list", "search", "create", "update", "label", "unlabel",
+    "trash", "untrash", "mark", "apply", "delete", "draft"))
+_RS_WORD_SPLIT = re.compile(r'[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])')
+
+
+def _rs_tool_words(tool):
+    """`tool`'s name as a set of lower-cased word tokens, splitting on both
+    `_` and CamelCase boundaries, so `mcp__claude_ai_Gmail__create_draft`
+    yields `{mcp, claude, ai, gmail, create, draft}` and `SendMessage`
+    yields `{send, message}`."""
+    words = set()
+    for part in re.split(r'_+', tool or ""):
+        words.update(w.lower() for w in _RS_WORD_SPLIT.findall(part))
+    return words
 # A scheduler INSTALL, matched only against a quote-masked, heredoc-stripped
 # command. Both halves are load-bearing: `echo "--- crontab ---"` matched an
 # earlier, looser form of this pattern and produced a phantom "scheduled"
@@ -7308,7 +7335,9 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                           for path, mode in _rs_bash_write_targets(command, cwd)]
             for path, verb in writes:
                 if _RS_OUTBOX.search(path):
-                    phrase = f"a message written to the Telegram outbox file {path}"
+                    phrase = (f"{verb} {path}, the late-Telegram outbox the "
+                              "claw4mac poller delivers to the configured "
+                              "owner's Telegram")
                     if phrase not in outbox:
                         outbox.append(phrase)
                 else:
@@ -7335,15 +7364,21 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                     and tool not in _RS_DISPATCH_TOOLS \
                     and _RS_MSG_TOOL_HINT.search(tool):
                 # A message-shaped tool (Telegram/email/chat) is a SEND only
-                # when its own input names a recipient. No recipient, no
-                # line — a fact that cannot name who it went to is not a
-                # fact worth handing the judge.
+                # when its own NAME carries a send verb (send/reply/forward/
+                # post/notify/message) and no read/mutate verb (get/list/
+                # search/create/update/label/unlabel/trash/untrash/mark/
+                # apply/delete/draft) — `create_draft` names a real
+                # recipient and sends nothing, and would otherwise read as
+                # support for "sent"/"replied"/"notified"/"told" — AND its
+                # own input names a recipient. No recipient, no line either.
+                words = _rs_tool_words(tool)
                 recipient = None
-                for key in _RS_RECIPIENT_KEYS:
-                    val = inp.get(key)
-                    if isinstance(val, str) and val.strip():
-                        recipient = val.strip()[:60]
-                        break
+                if (words & _RS_MSG_SEND_VERBS) and not (words & _RS_MSG_BLOCK_VERBS):
+                    for key in _RS_RECIPIENT_KEYS:
+                        val = inp.get(key)
+                        if isinstance(val, str) and val.strip():
+                            recipient = val.strip()[:60]
+                            break
                 if recipient:
                     phrase = f"a {tool} send naming {recipient}"
                     if phrase not in sends:
