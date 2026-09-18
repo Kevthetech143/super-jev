@@ -123,12 +123,30 @@ def _git(*args, cwd=None):
     """One real git call for a fixture building a real repo. Raises on
     failure, so a broken fixture fails loudly instead of silently
     producing a directory that is not a repo."""
-    p = _REAL_RUN(["git", *[str(a) for a in args]], cwd=str(cwd) if cwd else None,
+    # core.hooksPath rides as a `-c` FLAG, never as a `git config` line in the
+    # repo being built: the trust validator now refuses a worktree whose own
+    # config names a program git would run (core.hooksPath is one such key,
+    # see _worktree_config_execution), and a fixture must not write the very
+    # thing under test into the repo under judgement.
+    p = _REAL_RUN(["git", "-c", "core.hooksPath=/dev/null",
+                   *[str(a) for a in args]], cwd=str(cwd) if cwd else None,
                   capture_output=True, text=True)
     if p.returncode != 0:
         raise AssertionError(f"git {' '.join(str(a) for a in args)} failed: "
                              f"{p.stdout}{p.stderr}")
     return p.stdout
+
+
+def _write_package_json_pin(repo):
+    """Write `skills/super-jev/trusted-package-json.sha256` for whatever
+    package.json `repo` currently holds — what the LEAD does by hand with
+    `shasum -a 256 package.json` when package.json legitimately changes."""
+    import hashlib
+    pin = repo / sj.TRUSTED_PACKAGE_JSON_PIN
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256((repo / "package.json").read_bytes()).hexdigest()
+    pin.write_text(digest + "\n", encoding="utf-8")
+    return digest
 
 
 def _init_repo(path):
@@ -140,11 +158,14 @@ def _init_repo(path):
     _git("config", "user.email", "test@example.invalid", cwd=path)
     _git("config", "user.name", "Test", cwd=path)
     _git("config", "commit.gpgsign", "false", cwd=path)
-    _git("config", "core.hooksPath", "/dev/null", cwd=path)
     (path / "package.json").write_text(
         json.dumps({"name": "fixture", "scripts": {"test": "echo no-op"}},
                    indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     (path / "README.md").write_text("fixture\n", encoding="utf-8")
+    # The door-owned pin for package.json — without it the protected checkout
+    # vouches for nothing (reason "protected-package-json-unpinned"), which is
+    # the whole point of the pin, so every fixture repo carries a real one.
+    _write_package_json_pin(path)
     _git("add", "-A", cwd=path)
     _git("commit", "-qm", "fixture: first commit", cwd=path)
     return path
@@ -3011,7 +3032,7 @@ def test_derived_evidence_refuses_npm_when_package_json_is_modified(trusted):
     assert derived["worktree"] == os.path.realpath(str(wt))
     assert derived["test_cmd"] == ""
     assert "untrusted-test-cmd" in derived["refused"]
-    assert "untrusted-test-cmd:package.json-modified" in derived["refused"]
+    assert "untrusted-test-cmd:package.json-differs" in derived["refused"]
 
 
 def test_derived_evidence_refuses_npm_when_package_json_is_untracked(trusted):
@@ -10110,7 +10131,6 @@ def test_the_modules_own_git_calls_run_under_the_pins(trusted, monkeypatch):
     # directory named in untrusted report text before anything has vouched
     # for it.
     wt = trusted.worktree()
-    _git("config", "core.fsmonitor", str(trusted.root / "nope"), cwd=wt)
     seen = []
 
     def recording_run(cmd, **kw):
@@ -10118,6 +10138,10 @@ def test_the_modules_own_git_calls_run_under_the_pins(trusted, monkeypatch):
         return _REAL_RUN(cmd, **kw)
 
     monkeypatch.setattr(sj.subprocess, "run", recording_run)
+    # A CLEAN worktree, so this test is about the env on the calls and not
+    # about a refusal. The planted-fsmonitor case now refuses outright (see
+    # test_a_genuine_worktree_whose_shared_config_names_a_program_is_refused),
+    # which would end the run before most of the calls were made.
     assert sj._worktree_trust(str(wt))[1] is None
     assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo))[0] is True
     assert seen, "no git call was made"
@@ -10234,15 +10258,18 @@ def test_npm_runner_refuses_a_hostile_package_json_committed_on_the_worker_branc
                      capture_output=True, text=True).returncode == 0
     ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
     assert ok is False
-    assert why == "package-json-differs"
+    assert why == "package.json-differs"
 
 
 def test_npm_runner_refuses_an_uncommitted_edit_too(trusted):
+    # Committed or not makes no difference any more: the comparison is
+    # protected-checkout bytes against worktree bytes, so both shapes are the
+    # one reason "package.json-differs".
     wt = trusted.worktree()
     (wt / "package.json").write_text('{"scripts":{"test":"echo pwned"}}\n',
                                      encoding="utf-8")
     ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
-    assert (ok, why) == (False, "package.json-modified")
+    assert (ok, why) == (False, "package.json-differs")
 
 
 def test_npm_runner_refuses_when_the_protected_repo_cannot_be_read(trusted, tmp_path):
@@ -10252,9 +10279,20 @@ def test_npm_runner_refuses_when_the_protected_repo_cannot_be_read(trusted, tmp_
     empty.mkdir()
     ok, why = sj._npm_runner_is_trusted(str(wt), str(empty))
     assert ok is False
-    assert why == "protected-package-json-unreadable"
+    # a directory that is not a repo has no git common dir, so there is no
+    # main checkout to read the vouched-for bytes out of
+    assert why == "no-protected-checkout"
     ok, why = sj._npm_runner_is_trusted(str(wt), str(tmp_path / "does-not-exist"))
-    assert (ok, why) == (False, "no-protected-repo")
+    assert (ok, why) == (False, "no-protected-checkout")
+    # a real repo whose package.json is gone: still a refusal, never a pass
+    gone = trusted.repo / "package.json"
+    body = gone.read_bytes()
+    gone.unlink()
+    try:
+        assert sj._npm_runner_is_trusted(
+            str(wt), str(trusted.repo))[1] == "protected-package-json-unreadable"
+    finally:
+        gone.write_bytes(body)
 
 
 def test_npm_runner_reads_the_protected_repo_from_the_env_when_not_passed(trusted):
@@ -10263,7 +10301,7 @@ def test_npm_runner_reads_the_protected_repo_from_the_env_when_not_passed(truste
     wt = trusted.worktree()
     assert sj._npm_runner_is_trusted(str(wt)) == (True, None)
     _commit_package_json(wt, {"scripts": {"test": "echo 9999"}})
-    assert sj._npm_runner_is_trusted(str(wt)) == (False, "package-json-differs")
+    assert sj._npm_runner_is_trusted(str(wt)) == (False, "package.json-differs")
 
 
 def test_derived_evidence_refuses_a_committed_hostile_package_json(trusted):
@@ -10274,7 +10312,7 @@ def test_derived_evidence_refuses_a_committed_hostile_package_json(trusted):
     assert derived["worktree"] == os.path.realpath(str(wt))
     assert derived["test_cmd"] == "", "the hostile script must not become the test cmd"
     assert "untrusted-test-cmd" in derived["refused"]
-    assert "untrusted-test-cmd:package-json-differs" in derived["refused"]
+    assert "untrusted-test-cmd:package.json-differs" in derived["refused"]
 
 
 def test_check_test_cmd_for_fallback_refuses_a_committed_hostile_package_json(trusted):
@@ -10284,21 +10322,466 @@ def test_check_test_cmd_for_fallback_refuses_a_committed_hostile_package_json(tr
     _commit_package_json(wt, {"scripts": {"test": "echo pwned"}})
     bad = sj.check_test_cmd_for_fallback("npm test", str(wt))
     assert bad is not None
-    assert "untrusted-test-cmd:package-json-differs" in bad
+    assert "untrusted-test-cmd:package.json-differs" in bad
     assert sj.check_test_cmd_for_fallback("npm run test:skill", str(wt)) is not None
     # a non-npm command is unaffected by the package.json state
     assert sj.check_test_cmd_for_fallback(
         "python3 -m pytest tests/test_x.py", str(wt)) is None
 
 
-def test_protected_package_json_blob_prefers_the_remote_tracking_ref(trusted):
-    # origin/main first, because a worker cannot write a remote-tracking
-    # ref where a local `main` in a shared checkout can be moved.
-    assert sj.PROTECTED_DEFAULT_REFS[0] == "origin/main"
-    # the fixture has no origin, so the `main` fallback is what answers
-    sha, why = sj._protected_package_json_blob(str(trusted.repo))
+# ============================================================================
+# FINDING 6 — the shared .git/config is arbitrary code execution
+#
+# `git worktree add` gives every worktree the SAME `.git/config` as the
+# protected checkout. So a worker inside a GENUINE worktree — one that clears
+# every identity check — can write a key that names a program and have this
+# door run it. `status -sb`, `diff --stat`, `diff --quiet` and `ls-files -m`
+# all fire; `rev-parse`, `log`, `show`, `cat-file`, `branch`,
+# `remote get-url` and `config --list` do not, which is what lets the scan
+# ask git for the config it is judging.
+#
+# Every test below sets the value to a path that DOES NOT EXIST and asserts
+# the refusal lands before any firing verb, with subprocess.run monkeypatched
+# to explode on those verbs — so the test proves ORDER, not just outcome.
+
+# The verbs that execute a config-named program. `remote` is not one of them
+# for `get-url`, but the scan never needs it, so it stays on the list.
+_FIRING_VERBS = frozenset((
+    "status", "diff", "ls-files", "grep", "add", "commit", "checkout",
+    "stash", "merge", "rebase", "fetch", "pull", "push", "archive",
+    "blame", "clean", "reset", "apply", "am", "cherry-pick",
+))
+
+
+def _git_verb_of(argv):
+    """The VERB out of an argv this module built. Everything before `-C <p>`
+    is a global flag or a `-c key=value` value, which is why naive
+    dash-stripping reads `core.fsmonitor=false` as the verb."""
+    toks = [str(x) for x in argv]
+    if "-C" in toks:
+        i = toks.index("-C")
+        return toks[i + 2] if len(toks) > i + 2 else ""
+    return ""
+
+
+@pytest.fixture
+def no_firing_verb(monkeypatch):
+    """Explodes if any git verb that could execute a config-named program
+    runs while it is installed. Returns the list of verbs that DID run, so a
+    test can also assert the scan used only non-executing ones."""
+    ran = []
+
+    def guard(cmd, **kw):
+        if isinstance(cmd, (list, tuple)) and cmd and str(cmd[0]).endswith("git"):
+            verb = _git_verb_of(cmd)
+            assert verb not in _FIRING_VERBS, (
+                f"ran `git {verb}` against a worktree that had not been "
+                f"cleared: {list(cmd)}")
+            ran.append(verb)
+        return _REAL_RUN(cmd, **kw)
+
+    monkeypatch.setattr(sj.subprocess, "run", guard)
+    return ran
+
+
+# One (key, value) per family on the refusal list. The value is a path that
+# does not exist everywhere it is a program, so a fixture that accidentally
+# let git run it would fail loudly rather than silently succeed.
+_EXEC_CONFIG_KEYS = (
+    ("filter.p.clean", "/nonexistent/clean"),
+    ("filter.p.smudge", "/nonexistent/smudge"),
+    ("filter.p.process", "/nonexistent/process"),
+    ("filter.p.required", "true"),
+    ("diff.external", "/nonexistent/differ"),
+    ("diff.d.command", "/nonexistent/diffcmd"),
+    ("diff.d.textconv", "/nonexistent/textconv"),
+    ("diff.d.cachetextconv", "true"),
+    ("core.fsmonitor", "/nonexistent/fsmonitor"),
+    ("core.hooksPath", "/nonexistent/hooks"),
+    ("core.sshCommand", "/nonexistent/ssh"),
+    ("core.gitProxy", "/nonexistent/proxy"),
+    ("core.askPass", "/nonexistent/askpass"),
+    ("core.editor", "/nonexistent/editor"),
+    ("core.pager", "/nonexistent/pager"),
+    ("credential.helper", "/nonexistent/helper"),
+    ("credential.https://example.invalid.helper", "/nonexistent/helper"),
+    ("include.path", "/nonexistent/included"),
+    ("includeIf.gitdir:/x/.path", "/nonexistent/included"),
+    ("alias.st", "!/nonexistent/anything"),
+    ("merge.m.driver", "/nonexistent/driver %A %O %B"),
+    ("url.https://evil.invalid/.insteadOf", "https://github.com/"),
+    ("remote.origin.uploadpack", "/nonexistent/uploadpack"),
+    ("remote.origin.receivepack", "/nonexistent/receivepack"),
+    ("gpg.program", "/nonexistent/gpg"),
+    ("gpg.ssh.program", "/nonexistent/gpg"),
+    ("sendemail.smtpServer", "/nonexistent/sendmail"),
+    ("ssh.variant", "/nonexistent/variant"),
+    ("protocol.ext.allow", "always"),
+    ("uploadpack.packObjectsHook", "/nonexistent/hook"),
+    ("receive.fsckObjects", "false"),
+)
+
+
+@pytest.mark.parametrize("key,value", _EXEC_CONFIG_KEYS,
+                         ids=[k for k, _ in _EXEC_CONFIG_KEYS])
+def test_a_genuine_worktree_whose_shared_config_names_a_program_is_refused(
+        trusted, no_firing_verb, key, value):
+    wt = trusted.worktree()
+    _git("config", key, value, cwd=wt)
+    real, why = sj._worktree_trust(str(wt), str(trusted.repo))
+    assert real is None, f"{key} was accepted"
+    assert why == f"worktree-config-execution:{key.lower()}", why
+    # and the scan asked git only things that cannot fire what it looks for
+    assert set(no_firing_verb) <= {"", "rev-parse", "config", "cat-file"}, no_firing_verb
+
+
+def test_a_clean_genuine_worktree_is_still_accepted(trusted, no_firing_verb):
+    """The scan must not refuse everything: this is the happy path."""
+    wt = trusted.worktree()
+    real, why = sj._worktree_trust(str(wt), str(trusted.repo))
+    assert why is None, why
+    assert real == os.path.realpath(str(wt))
+    assert sj._trusted_worktree(str(wt), str(trusted.repo)) == real
+
+
+def test_core_pager_set_to_cat_is_not_a_refusal(trusted):
+    """core.pager is the one key judged on its VALUE — `cat` is what this
+    door's own pins set, so it can never be the thing that refuses."""
+    wt = trusted.worktree()
+    for ok_value in ("cat", "/bin/cat", "/usr/bin/cat"):
+        _git("config", "core.pager", ok_value, cwd=wt)
+        assert sj._worktree_trust(str(wt), str(trusted.repo))[1] is None, ok_value
+    _git("config", "core.pager", "less", cwd=wt)
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:core.pager")
+
+
+def test_an_ordinary_key_in_the_shared_config_is_not_a_refusal(trusted):
+    """A scan that refused on any key at all would be useless. These are the
+    keys a real repo carries, and none of them names a program."""
+    wt = trusted.worktree()
+    for key, value in (("core.filemode", "true"), ("core.ignorecase", "true"),
+                       ("diff.algorithm", "histogram"),
+                       ("remote.origin.url", "https://example.invalid/r.git"),
+                       ("branch.main.remote", "origin"),
+                       ("commit.gpgsign", "false"),
+                       ("filter.lfs.fooattribute", "x"),
+                       ("merge.conflictstyle", "diff3")):
+        _git("config", key, value, cwd=wt)
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] is None
+
+
+def test_system_and_global_config_are_not_grounds_for_refusal(trusted, monkeypatch):
+    """SCOPE. The scan refuses on keys a WORKER could have written, i.e. ones
+    whose origin file is inside the protected repo's common dir. A real
+    machine legitimately carries credential.helper and alias.* in system and
+    global config — refusing on those would refuse every worktree, and the
+    check would be switched off within a day."""
+    wt = trusted.worktree()
+    outside = trusted.root.parent / "outside.gitconfig"
+    outside.write_text("[credential]\n\thelper = /nonexistent/helper\n"
+                       "[alias]\n\tst = !/nonexistent/anything\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(outside))
+    # the keys really are visible to git from inside the worktree
+    listed = _REAL_RUN(["git", "-C", str(wt), "config", "--list", "--show-origin"],
+                       capture_output=True, text=True,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": str(outside)})
+    assert "credential.helper" in listed.stdout, listed.stdout
+    # and they are not what decides trust
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] is None
+    # the same key, written where a worker CAN write it, is a refusal
+    _git("config", "credential.helper", "/nonexistent/helper", cwd=wt)
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:credential.helper")
+
+
+def test_this_doors_own_env_pins_are_never_read_as_a_refusal(trusted):
+    """SAFE_GIT_CONFIG_PINS puts core.fsmonitor and core.hooksPath on every
+    child as GIT_CONFIG_* environment. Those come back from `config --list`
+    with a `command line:` origin, and reporting the defence as the problem
+    would refuse every worktree there is."""
+    wt = trusted.worktree()
+    assert "core.fsmonitor" in [k.lower() for k, _ in sj.SAFE_GIT_CONFIG_PINS]
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] is None
+    for origin in ("command line:", "standard input:", "blob:abc123", ""):
+        assert not sj._config_origin_is_worker_writable(
+            origin, str(trusted.repo / ".git")), origin
+
+
+def test_an_include_inside_the_common_dir_is_itself_the_refusal(trusted):
+    """The laundering route. git attributes an INCLUDED key to the included
+    FILE, so a worker could otherwise move a hostile key's origin outside the
+    common dir. It cannot get there without first naming the include, and the
+    include key is on the list."""
+    wt = trusted.worktree()
+    smuggled = trusted.root.parent / "smuggled.gitconfig"
+    smuggled.write_text("[filter \"p\"]\n\tclean = /nonexistent/clean\n",
+                        encoding="utf-8")
+    _git("config", "include.path", str(smuggled), cwd=wt)
+    # git really does hide the hostile key behind the included file's origin
+    listed = _REAL_RUN(["git", "-C", str(wt), "config", "--list", "--show-origin"],
+                       capture_output=True, text=True)
+    assert "filter.p.clean" in listed.stdout
+    assert str(smuggled) in listed.stdout
+    # and the include is what refuses
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:include.path")
+
+
+def test_parse_config_list_z_keeps_origin_and_value_apart():
+    """The parser on its own, on a payload whose VALUE contains both a newline
+    and a tab — the two characters the plain `--list --show-origin` form uses
+    as separators."""
+    payload = ("file:/a/.git/config\0custom.note\nok\n"
+               "file:/etc/gitconfig\tfilter.p.clean=forged\0"
+               "file:/a/.git/config\0filter.p.clean\n/real/clean\0")
+    rows = sj._parse_config_list_z(payload)
+    assert [(o, k) for o, k, _v in rows] == [
+        ("file:/a/.git/config", "custom.note"),
+        ("file:/a/.git/config", "filter.p.clean"),
+    ]
+    assert rows[1][2] == "/real/clean"
+    # the forged text stayed inside the first VALUE, where it is inert
+    assert "filter.p.clean=forged" in rows[0][2]
+
+
+def test_a_relative_origin_path_still_counts_as_worker_writable(trusted):
+    """git prints the LOCAL config's origin as `file:.git/config`, relative to
+    the repo the call ran in. Resolved against this process's cwd instead it
+    would land outside the common dir, and every refusal would be missed
+    while the worktree tests still passed."""
+    common = os.path.realpath(str(trusted.repo / ".git"))
+    assert sj._config_origin_is_worker_writable(
+        "file:.git/config", common, str(trusted.repo))
+    assert sj._config_origin_is_worker_writable(
+        "file:config", common, common)
+    # resolved against the wrong directory it is not worker-writable, which
+    # is the bug this guards
+    assert not sj._config_origin_is_worker_writable(
+        "file:.git/config", common, str(trusted.root))
+    # and the absolute form works with or without a cwd
+    assert sj._config_origin_is_worker_writable(
+        f"file:{common}/config", common, None)
+
+
+def test_a_config_that_cannot_be_listed_is_a_refusal(trusted, monkeypatch):
+    """"Could not read the config" is never "the config is fine"."""
+    wt = trusted.worktree()
+    real_run = sj.subprocess.run
+
+    def broken(cmd, **kw):
+        if (isinstance(cmd, (list, tuple)) and "config" in [str(c) for c in cmd]
+                and "--list" in [str(c) for c in cmd]):
+            return subprocess.CompletedProcess(list(cmd), 1, stdout="", stderr="boom")
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(sj.subprocess, "run", broken)
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:config-unreadable")
+
+
+def test_a_value_containing_a_newline_cannot_forge_a_safe_origin(trusted):
+    """Why the scan parses the -z form. In the plain form each record ends in
+    a newline and is `origin<TAB>key=value`, and a VALUE may contain
+    newlines — so a crafted value can print lines that look like records from
+    another origin."""
+    wt = trusted.worktree()
+    # a FREE-FORM key, so the newline lands in a value git still parses: a
+    # newline inside core.filemode makes git fatal out on every command, which
+    # would prove nothing about the parser
+    _git("config", "custom.note",
+         "ok\nfile:/etc/gitconfig\tfilter.p.clean=/nonexistent/forged",
+         cwd=wt)
+    _git("config", "filter.p.clean", "/nonexistent/clean", cwd=wt)
+    rows = sj._parse_config_list_z(
+        sj._git_rc(["config", "--list", "--show-origin", "-z"], str(wt))[1])
+    hostile = [(o, k) for o, k, _v in rows if k == "filter.p.clean"]
+    assert len(hostile) == 1, rows
+    # git prints the LOCAL config's origin relative to the repo the call ran
+    # in, so the comparison is on the resolved path, not on the printed text
+    assert sj._config_origin_is_worker_writable(
+        hostile[0][0], os.path.realpath(str(trusted.repo / ".git")), str(wt))
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:filter.p.clean")
+
+
+# ---- .gitattributes: defence in depth, one layer out from the config scan
+
+def test_a_committed_gitattributes_naming_a_driver_is_refused(trusted, no_firing_verb):
+    """Read through `git show HEAD:.gitattributes`, which does not run
+    filters. An attribute is inert without a config entry defining the
+    driver, so this refuses a worktree that has staged only half the attack."""
+    wt = trusted.worktree()
+    (wt / ".gitattributes").write_text("*.json filter=p\n", encoding="utf-8")
+    _git("add", ".gitattributes", cwd=wt)
+    _git("-c", "user.email=t@e.invalid", "-c", "user.name=T",
+         "commit", "-qm", "worker: attributes", cwd=wt)
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-attributes-driver:filter=p")
+    assert set(no_firing_verb) <= {"", "rev-parse", "config", "cat-file"}, no_firing_verb
+
+
+def test_an_uncommitted_gitattributes_naming_a_driver_is_refused_too(trusted):
+    """git reads the file on DISK, committed or not, so the scan reads it in
+    Python rather than only asking about HEAD."""
+    wt = trusted.worktree()
+    (wt / ".gitattributes").write_text("*.json diff=d\n", encoding="utf-8")
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-attributes-driver:diff=d")
+
+
+def test_info_attributes_in_the_shared_common_dir_is_refused(trusted):
+    """`info/attributes` lives in the SHARED common dir, so it is worker
+    writable and applies to the protected checkout as well."""
+    wt = trusted.worktree()
+    info = trusted.repo / ".git" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "attributes").write_text("* filter=p\n", encoding="utf-8")
+    try:
+        assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+            "worktree-attributes-driver:filter=p")
+    finally:
+        (info / "attributes").unlink()
+
+
+def test_attributes_that_name_no_driver_are_not_a_refusal(trusted):
+    """A bare `diff`, a `-filter`, an unrelated attribute: none names a
+    program, and refusing them would refuse ordinary repos."""
+    wt = trusted.worktree()
+    (wt / ".gitattributes").write_text(
+        "# a comment with filter=p in it\n"
+        "*.png binary\n"
+        "*.md text eol=lf\n"
+        "*.bin -diff -filter\n"
+        "*.lock linguist-generated=true\n", encoding="utf-8")
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] is None
+
+
+# ---- superjev doctor: the same scan, pointed at the protected repo
+
+def test_doctor_is_clean_on_a_clean_protected_repo(trusted, monkeypatch, capsys):
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(trusted.repo))
+    assert sj.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "VERDICT: CLEAN" in out, out
+    assert str(trusted.repo) in out
+
+
+def test_doctor_exits_non_zero_on_a_worker_written_executing_key(
+        trusted, monkeypatch, capsys):
+    """What the LEAD runs. The door refuses the WORKTREE; the lead's own git
+    commands in the main checkout read the same shared config, and this is
+    the command that says so."""
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(trusted.repo))
+    wt = trusted.worktree()
+    _git("config", "filter.p.clean", "/nonexistent/clean", cwd=wt)
+    code = sj.main(["doctor"])
+    assert code == sj.REFUSED
+    out = capsys.readouterr().out
+    assert "filter.p.clean" in out
+    assert "WORKER-WRITABLE" in out
+    assert "VERDICT: REFUSED" in out
+
+
+def test_doctor_reports_a_package_json_that_no_longer_matches_its_pin(
+        trusted, monkeypatch, capsys):
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(trusted.repo))
+    (trusted.repo / "package.json").write_text('{"name":"drifted"}\n',
+                                               encoding="utf-8")
+    assert sj.main(["doctor"]) == sj.REFUSED
+    out = capsys.readouterr().out
+    assert sj.TRUSTED_PACKAGE_JSON_PIN in out
+    assert "NO" in out
+
+
+def test_doctor_json_names_the_key_and_whether_a_worker_could_write_it(
+        trusted, monkeypatch, capsys):
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(trusted.repo))
+    wt = trusted.worktree()
+    _git("config", "core.sshCommand", "/nonexistent/ssh", cwd=wt)
+    assert sj.main(["doctor", "--json"]) == sj.REFUSED
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["door"] == "doctor"
+    assert payload["verdict"] == "REFUSED"
+    keys = {h["key"]: h for h in payload["details"]["hits"]}
+    assert keys["core.sshcommand"]["worker_writable"] is True
+
+
+def test_doctor_refuses_when_there_is_no_protected_checkout(monkeypatch, tmp_path):
+    monkeypatch.setenv(sj.PROTECTED_REPO_ENV, str(tmp_path / "nowhere"))
+    assert sj.main(["doctor"]) == sj.REFUSED
+
+
+def test_protected_package_json_ids_come_from_the_checkouts_own_bytes(trusted):
+    """No ref is consulted: the answer is the hash of the bytes on disk in the
+    protected checkout, which a worker in a worktree cannot write."""
+    ids, why = sj._protected_package_json_ids(str(trusted.repo))
     assert why is None
-    assert sha == _git("rev-parse", "main:package.json", cwd=trusted.repo).strip()
+    assert ids == sj._blob_ids_of_file(str(trusted.repo / "package.json"))
+    # and the module no longer has a ref-based path at all
+    assert not hasattr(sj, "PROTECTED_DEFAULT_REFS")
+    assert not hasattr(sj, "_protected_package_json_blob")
+
+
+def test_moving_origin_main_does_not_vouch_for_a_hostile_package_json(trusted):
+    """FINDING 5. Remote-tracking refs live in the SHARED common dir, so a
+    worker inside a GENUINE worktree can point origin/main at its own commit.
+    When the vouched-for blob was read through that ref, this made a hostile
+    committed package.json pass."""
+    wt = trusted.worktree()
+    assert sj.check_test_cmd_for_fallback("npm test", str(wt)) is None
+    _commit_package_json(wt, {"scripts": {"test": "echo pwned"}})
+    head = _git("rev-parse", "HEAD", cwd=wt).strip()
+    # the move a worker can really make, from its own worktree
+    _git("update-ref", "refs/remotes/origin/main", head, cwd=wt)
+    assert _git("rev-parse", "origin/main", cwd=wt).strip() == head
+    assert (_git("rev-parse", "origin/main:package.json", cwd=wt).strip()
+            == _git("rev-parse", "HEAD:package.json", cwd=wt).strip())
+    # and it buys nothing: the comparison never asks git
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert not ok
+    assert why == "package.json-differs", why
+    assert "untrusted-test-cmd" in (
+        sj.check_test_cmd_for_fallback("npm test", str(wt)) or "")
+
+
+def test_protected_checkout_that_does_not_match_its_pin_vouches_for_nothing(trusted):
+    """The protected checkout is still a WORKING tree: it can be dirty or
+    stale. Unpinned, it would vouch for whatever it happens to hold."""
+    wt = trusted.worktree()
+    assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo))[0]
+    (trusted.repo / "package.json").write_text(
+        json.dumps({"name": "fixture", "scripts": {"test": "echo drifted"}},
+                   indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert not ok
+    assert why == "protected-package-json-unpinned", why
+    # a missing pin file is the same refusal, never a pass
+    (trusted.repo / sj.TRUSTED_PACKAGE_JSON_PIN).unlink()
+    assert sj._npm_runner_is_trusted(
+        str(wt), str(trusted.repo))[1] == "protected-package-json-unpinned"
+
+
+def test_pin_that_is_not_a_single_digest_is_not_read_as_a_pass(trusted):
+    pin = trusted.repo / sj.TRUSTED_PACKAGE_JSON_PIN
+    for text in ("", "# only a comment\n", "not-a-hash\n", "abc123\n"):
+        pin.write_text(text, encoding="utf-8")
+        assert sj._pinned_package_json_sha256(str(trusted.repo)) is None, text
+    # the `shasum -a 256 <file>` form, digest then filename, IS read
+    digest = _write_package_json_pin(trusted.repo)
+    pin.write_text(f"{digest}  package.json\n", encoding="utf-8")
+    assert sj._pinned_package_json_sha256(str(trusted.repo)) == digest
+
+
+def test_protected_checkout_is_the_main_checkout_never_the_running_worktree(trusted):
+    """superjev.py RUNS from a worker's worktree. If the protected checkout
+    were derived from this module's own location or from
+    `rev-parse --show-toplevel`, it would name that worktree and the check
+    would compare the worker's package.json against itself."""
+    wt = trusted.worktree()
+    assert sj._protected_repo_checkout(str(wt)) == os.path.realpath(str(trusted.repo))
+    assert sj._protected_repo_checkout(str(trusted.repo)) == os.path.realpath(
+        str(trusted.repo))
 
 
 # ============================================================================
@@ -10328,10 +10811,10 @@ def test_git_argv_injects_the_diff_safety_flags():
 
 
 def test_npm_gate_reads_a_modified_package_json_through_a_planted_diff_external(trusted):
-    # The planted external differ is a path that does not exist, so if git
-    # ever invoked it the diff would die and the gate would report
-    # "diff-unreadable" instead of the truth. That the gate says
-    # "package.json-modified" is the proof no external ran.
+    # The planted external differ is a path that does not exist, so if the
+    # gate ever invoked git's diff the call would die and the gate could only
+    # report that it could not tell. It reports the TRUTH, because it asks git
+    # nothing: both sides are hashed in Python.
     wt = trusted.worktree()
     ghost = str(trusted.root / "no-such-external-differ")
     _git("config", "diff.external", ghost, cwd=wt)
@@ -10353,12 +10836,18 @@ def test_npm_gate_reads_a_modified_package_json_through_a_planted_diff_external(
         f"fixture is wrong: no external differ was invoked: {bare!r}")
 
     ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
-    assert (ok, why) == (False, "package.json-modified"), (ok, why)
+    assert (ok, why) == (False, "package.json-differs"), (ok, why)
 
-    # and an unmodified working copy still reads as clean, i.e. the flags
-    # did not simply break the diff
+    # and an unmodified working copy still reads as clean, i.e. the hash
+    # check did not simply refuse everything
     _git("checkout", "--", "package.json", cwd=wt)
     assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo)) == (True, None)
+
+    # the worktree ITSELF is refused one layer up, because its config names
+    # two programs — the gate above is the layer that holds even when that
+    # refusal is somehow bypassed
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:diff.external")
 
 
 # ============================================================================
@@ -10450,9 +10939,12 @@ def test_npm_gate_catches_a_hostile_package_json_hidden_by_a_clean_filter(truste
 
     # The gate is not fooled, because it hashes the bytes instead.
     ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
-    assert (ok, why) == (False, "package.json-modified"), (ok, why)
-    assert "untrusted-test-cmd:package.json-modified" in (
+    assert (ok, why) == (False, "package.json-differs"), (ok, why)
+    assert "untrusted-test-cmd:package.json-differs" in (
         sj.check_test_cmd_for_fallback("npm test", str(wt)) or "")
+    # and the worktree that carries the clean filter is refused outright
+    assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
+        "worktree-config-execution:filter.f.clean")
 
     # and a clean worktree under the same filter still reads as trusted,
     # i.e. the hash check did not simply refuse everything

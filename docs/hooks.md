@@ -799,6 +799,134 @@ normalisation on the file being checked, where the committed blob is not
 the raw bytes. That is the safe direction, and it does not arise for
 `package.json` here.
 
+Round 3 removed the `git diff --quiet` leg entirely. It was additive, so
+it could only refuse; but it was also the last place a planted filter got
+a vote, and a check nobody can reason about is worse than no check. The
+Python hash is now the whole answer. And a worktree whose shared config
+names a filter at all is refused outright one layer up, before any of this
+is reached.
+
+### The shared `.git/config` is a list of programs
+
+`git worktree add` does not give a worktree its own configuration. It
+gives it the SAME `.git/config` and the SAME refs directory as the
+protected checkout. Both are therefore writable by any worker that holds a
+genuine worktree, and both are read by git when this door — and the lead —
+run commands in the main checkout.
+
+That is one finding with two halves, and the identity checks above catch
+neither, because the worktree is real and does belong to the right
+repository.
+
+**The refs half.** Remote-tracking refs live in the shared common dir. A
+worker in a genuine worktree can run
+
+    git update-ref refs/remotes/origin/main $(git rev-parse HEAD)
+
+and `origin/main:package.json` then resolves to the worker's own committed
+`package.json`. Reading the vouched-for blob through that ref was reading
+the attacker's answer.
+
+**The config half.** Config keys name programs git runs on the caller's
+behalf, and the set is open-ended, so there is nothing finite to pin off
+with `-c` flags. `filter.<driver>.clean`, selected per path by a committed
+`.gitattributes`, is the clearest case: with it set, `status -sb`,
+`diff --stat`, `diff --quiet` and `ls-files -m` all execute the named
+program. `rev-parse`, `log`, `show`, `cat-file`, `branch`,
+`remote get-url` and `config --list` do not, which is what lets the
+validator ask git about the very config it is judging.
+
+So the validator gained a tenth and eleventh step, run LAST, after every
+identity check has passed. It lists the config with
+`git config --list --show-origin -z` and refuses the worktree when any key
+matches a family that names a program: `filter.*.clean|smudge|process|
+required`, `diff.*.command|textconv|cachetextconv`, `diff.external`,
+`core.fsmonitor|hooksPath|sshCommand|gitProxy|askPass|editor`,
+`core.pager` when it is not `cat`, `credential.helper`, `include.path`,
+`includeIf.*`, `alias.*`, `merge.*.driver`, `url.*.insteadOf`,
+`remote.*.uploadpack|receivepack`, `gpg.program`, `sendemail.*`,
+`ssh.variant`, `protocol.*.allow`, `uploadpack.*` and `receive.*`. The
+token is `worktree-config-execution:<key>`. A `.gitattributes` that names
+any filter or diff driver is its own refusal,
+`worktree-attributes-driver:<attr>`, read via `cat-file blob` and from
+disk.
+
+Two details carry the check.
+
+The scan refuses only on keys a WORKER could have written, meaning keys
+whose `--show-origin` file resolves inside the protected repo's git common
+dir. System and global config are deliberately out of scope: they are not
+worker-writable, and an ordinary developer machine legitimately carries
+`credential.helper`, `core.pager` and `alias.*` there. A scan that refused
+on those would refuse every worktree on the machine and would be switched
+off within a day. `include.path` and `includeIf.*` close the laundering
+route, because git attributes an included key to the included FILE — a
+worker cannot move a hostile key's origin outside the common dir without
+first writing an include key INSIDE it, and that key is itself on the
+list.
+
+And git prints the local config's origin RELATIVE to the directory the
+call ran in, as `file:.git/config`. Resolved against the process's own
+working directory instead, it lands outside the common dir and every
+refusal is silently missed while the tests still pass. The resolution is
+done against the git call's `cwd`, and there is a test for exactly that.
+
+The `-z` form is not cosmetic either. The plain `--list --show-origin`
+output separates origin from key with a tab and ends each record with a
+newline, and a config VALUE may contain both. The `-z` form emits origin
+and `key`+newline+`value` as separate NUL-terminated fields, so a crafted
+value can never be read as another record's origin.
+
+**The refs half, fixed.** Nothing asks git what the vouched-for
+`package.json` is any more. Two things a worker cannot write answer
+instead: the PROTECTED checkout's own working tree, read as raw bytes and
+hashed in Python, and a door-owned pin committed in the repo at
+`skills/super-jev/trusted-package-json.sha256`. The protected checkout is
+still a working tree — it can be dirty or stale — so unpinned it would
+vouch for whatever it happens to hold. A mismatch between the checkout's
+bytes and the pin is its own refusal, `protected-package-json-unpinned`.
+The lead refreshes the pin when `package.json` legitimately changes:
+
+    shasum -a 256 package.json | cut -d' ' -f1 \
+      > skills/super-jev/trusted-package-json.sha256
+
+The protected checkout is derived from the git common dir
+(`.../<repo>/.git` gives `.../<repo>`), never from this module's own
+location and never from `rev-parse --show-toplevel`. Both of those name
+the WORKTREE, because `superjev.py` itself runs out of one — and the
+comparison would then be the worker's `package.json` against itself.
+
+### What this leaves for the lead
+
+The door can refuse a worktree. It cannot un-write the config that
+worktree shares with the protected repo. A worker that planted
+`filter.p.clean` in `.git/config` is still a problem for the lead's own
+`git status` in the main checkout, long after the door has refused the
+worktree.
+
+Two things follow.
+
+Worker worktrees should in future be created from a SEPARATE CLONE rather
+than with `git worktree add` on the protected repo. A clone shares no
+config and no refs, which removes this whole class of finding rather than
+scanning for it. The scan stays either way, as defence in depth.
+
+And after any suspicious worker run, the lead should scan the protected
+repo:
+
+    superjev doctor
+
+which runs the same config-execution scan against the protected repo
+itself, reports the pin state of `package.json`, marks each hit as
+worker-writable or not, and exits non-zero on a worker-writable hit. It is
+deliberately wider than the worktree scan: it also lists hits from system
+and global config, which the worktree scan ignores, because a human
+reading a report can tell the difference and wants to see them. The
+hand-rolled equivalent is:
+
+    git -C /Users/admin/super-jev config --list --show-origin \
+      | grep -E 'filter|diff\.|fsmonitor|hooksPath'
+
 **A report-derived `npm test` does not vouch for itself.** `npm test`
 names no program. `package.json`'s `scripts` does, and a worker can write
 `package.json`. Left alone, a worker could claim a pass count, have this
@@ -814,25 +942,23 @@ by simply COMMITTING its hostile `package.json` on its task branch. Its
 `HEAD` was then its own commit, so the working copy agreed with it and the
 file was tracked. Both conditions passed and the script ran.
 
-So the blob is compared against a ref the worker cannot write. An
-`npm`-family command derived from report text runs only when all three
-hold: `package.json` is tracked in the worktree; the worktree's COMMITTED
-blob (`HEAD:package.json`) equals the protected repo's default-branch blob
-(`origin/main:package.json`, falling back to `main:package.json` — the
-remote-tracking ref first, because a local `main` in a shared checkout can
-be moved); and the worktree's WORKING COPY equals that same committed
-blob, so an uncommitted edit is caught too. Either lookup failing to
-answer is a refusal rather than a pass — "could not read the vouched-for
-version" is never grounds for running a script.
+So the comparison is against something the worker cannot write, and it is
+not a ref. An `npm`-family command derived from report text runs only when
+all three hold: `package.json` is tracked in the worktree; the PROTECTED
+checkout's on-disk `package.json` matches the door-owned pin; and the
+worktree's on-disk `package.json` has the same raw bytes as the protected
+checkout's, so a committed hostile copy and an uncommitted edit are one
+and the same refusal. Either side failing to answer is a refusal rather
+than a pass — "could not read the vouched-for version" is never grounds
+for running a script.
 
 Otherwise the run records `untrusted-test-cmd` plus
 `untrusted-test-cmd:<why>` and gathers no test evidence at all, which is
 the honest outcome: with a `package.json` the repo does not vouch for, the
 test count was never provable from here. The `<why>` tokens are
-`package-json-differs` (the committed blob is not the vouched-for one),
-`package.json-modified`, `package.json-not-tracked`,
-`package.json-head-blob-unreadable`, `package.json-diff-unreadable`,
-`protected-package-json-unreadable`, `no-protected-repo` and
+`package.json-differs` (the worktree's bytes are not the vouched-for
+ones), `package.json-not-tracked`, `protected-package-json-unpinned`,
+`protected-package-json-unreadable`, `no-protected-checkout` and
 `no-worktree`. This is enforced where the command is derived and again at
 `check_test_cmd_for_fallback`, the point where it would execute, so a
 caller that arrives by some other route is covered too.
@@ -847,7 +973,10 @@ and the Stop-scan line, so a reviewer counting worktree sources finds no
 hole. The `<why>` tokens are stable strings: `blocked-path`,
 `not-a-directory`, `main-checkout`, `outside-allowlist-root`,
 `not-a-worktree`, `foreign-repo`, `gitdir-outside-protected-repo`,
-`no-protected-repo`, `no-allowlist-root`.
+`no-protected-repo`, `no-allowlist-root`,
+`worktree-config-execution:<key>` (including
+`worktree-config-execution:config-unreadable`) and
+`worktree-attributes-driver:<attr>`.
 
 **What this does NOT do.** It does not make a trusted worktree's contents
 trustworthy — a worktree of the protected repo can still hold a worker's
