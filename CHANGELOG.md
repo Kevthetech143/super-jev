@@ -35,12 +35,16 @@ No version bump.
   naming how many blocks-suppressed records are also tagged, whenever
   that's nonzero. `tag` refuses, **exit 3**, a tag that contradicts its
   record's own decision (`false`/`fair` only fit `block`/`advisory-forced`;
-  `miss` only fits `allow`/`advisory`/`unchecked`) — exit 3, not 2, so it
-  never collides with argparse's own usage-error exit 2 the way sharing
-  that code with a bad `--since` value would have. An unparseable
-  `--since` still refuses (exit 2) rather than silently showing all time;
-  a record with no parseable timestamp is excluded from a real `--since`
-  window and counted on its own `undated: N` line. Re-tagging the same id
+  `miss` only fits `allow`/`advisory`/`unchecked`). An unparseable
+  `--since` value also refuses with **exit 3** — the same code as the tag
+  contradiction, since neither is an argparse usage error (argparse
+  already accepted the flags fine in both cases) and neither is the
+  generic "missing input/door" refusal (exit 5); usage errors (a bad
+  flag argparse itself rejects) stay on argparse's own exit 2, so a
+  caller can still tell "bad flag" apart from "refused for a domain
+  reason" by exit code alone. A record with no parseable timestamp is
+  excluded from a real `--since` window and counted on its own
+  `undated: N` line. Re-tagging the same id
   is an upsert, not a second tag: at most one catch case exists per record
   id, a re-tag between `false`/`miss` replaces it, and a later `fair`
   withdraws it. The whole `catch tag` read-modify-write (ledger rewrite

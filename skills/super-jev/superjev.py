@@ -1917,11 +1917,13 @@ def _catch_excerpt(text):
     """The catch ledger's excerpt: the input is first sliced to 4096 chars
     (bounding how much text _catch_redact ever has to scan), THEN redacted
     through _catch_redact — secrets/credentials, emails, US phone numbers,
-    SSN-shaped digit strings and 13-19 digit card numbers — and finally
-    sliced to the 240 chars actually kept. No secret, credential, email,
-    phone number, SSN-shaped string or card number ever lands in the catch
-    ledger, because this excerpt is the only piece of the original text the
-    ledger keeps at all."""
+    SSN-shaped digit strings, and card numbers (an ungrouped 13+ digit run,
+    or a grouped 4-4-4-4/4-6-5 run using one consistent separator, each
+    with its own narrow exception — see _catch_redact and docs/hooks.md) —
+    and finally sliced to the 240 chars actually kept. No secret,
+    credential, email, phone number, SSN-shaped string or card number ever
+    lands in the catch ledger, because this excerpt is the only piece of
+    the original text the ledger keeps at all."""
     if not text:
         return ""
     return _catch_redact(str(text)[:4096])[:240]
@@ -2005,6 +2007,13 @@ def _catch_lock_path():
     return CATCH_LEDGER_PATH.parent / (CATCH_LEDGER_PATH.name + ".lock")
 
 
+class _CatchLockRefused(Exception):
+    """Internal signal only: _catch_lock could not even open its lock file
+    (see below). Caught by _cmd_catch_tag and turned into a normal
+    `return REFUSED`, same as every other catch-tag refusal — never lets
+    an OSError (or this exception) reach the caller as a traceback."""
+
+
 @contextlib.contextmanager
 def _catch_lock():
     """Exclusive lock held across ONE `catch tag` command's whole
@@ -2016,10 +2025,22 @@ def _catch_lock():
     os.replace-based atomic rewrite. fcntl.flock blocks (waits) rather than
     failing, so a second `catch tag` simply waits its turn instead of
     losing its write; the lock is released (and the fd closed) even if the
-    body raises."""
+    body raises.
+
+    mkdir/open here can raise OSError — a read-only or missing catch-ledger
+    directory, most commonly — and that must be a clean one-line refusal,
+    not a traceback. Caught and printed here, then re-raised as
+    _CatchLockRefused so _cmd_catch_tag can turn it into an ordinary
+    `return REFUSED` (exit 5), the same shape every other catch-tag
+    refusal already uses."""
     lock_path = _catch_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open(lock_path, "a+")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(lock_path, "a+")
+    except OSError as exc:
+        print(f"super-jev: catch tag: could not open lock file {lock_path}: {exc}",
+              file=sys.stderr)
+        raise _CatchLockRefused() from exc
     try:
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
         yield
@@ -2314,6 +2335,13 @@ def _cmd_catch_tag(a):
     # under one lock (see B3): records are re-read fresh here, inside the
     # lock, not reused from some earlier read, so two `catch tag` commands
     # racing on different ids never clobber each other's write.
+    try:
+        return _cmd_catch_tag_locked(catch_id, value, note)
+    except _CatchLockRefused:
+        return REFUSED
+
+
+def _cmd_catch_tag_locked(catch_id, value, note):
     with _catch_lock():
         records = _catch_records()
         matched = None
