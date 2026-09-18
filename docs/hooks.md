@@ -740,6 +740,52 @@ draft now passes — the draft's own uncited numbers can still overclaim — but
 it removes the self-contradiction a judge was otherwise left to referee with
 no rationale field to explain its read.
 
+## The deterministic PR-state arm is now recency-aware (2026-09-18)
+
+The stale-report-vs-receipt fact above (gate v4.1, point 2) only ever adds a
+DERIVED FACTS *sentence* — advisory text a judge can read. It never touched
+the separate, older deterministic block arm (`_pr_mismatch_reason`, gate v2)
+that fires `PR mismatch: draft says PR #N merged, evidence shows <state>`
+before the judge ever runs. That arm read the whole evidence window as one
+flat string and fired on the *first* non-merged mention of PR #N it found,
+with no notion of which turn it came from or whether it was a `gh`/`git`
+tool receipt or prose in a teammate/user message. In production this blocked
+a true "PR #52 merged" report because the window also carried an *older*
+teammate message saying "PR #52 ... not merged / open" from an earlier turn,
+even though the same window's *current turn* carried a real `gh pr merge`
+receipt and a `git log` line naming `(#52)` on main.
+
+`_pr_mismatch_reason` now goes through `_pr_mismatch_verdict`, which collects
+every PR-state signal for the PR number the draft names
+(`_pr_state_signals`) and picks a winner by:
+
+1. **kind** — a tool receipt (a `gh pr view --json` state field, a
+   `gh pr merge N` command line, a `"mergedAt"` field, or a `(#N)` git log
+   line) always outranks prose in a teammate/user message or a `REPORT
+   FROM` block, since prose is a paraphrase that can go stale and a receipt
+   is what the command actually returned;
+2. among signals of the same kind, the one in the more recent window
+   section (`_section_recency_rank` — the same previous-turns-oldest-to-
+   newest, then receipts, then this-turn-reports, then this-turn-tools
+   layering the stale-report fact already uses), or, when two signals of
+   the same kind share one section, whichever reads later in the text.
+
+Only the *winning* signal is compared against the draft's claim — a mismatch
+still fires when that signal disagrees, exactly as the single-signal arm
+always did, but a newer or higher-kind signal that agrees with the draft now
+settles the question silently rather than being outvoted by an older
+mention the arm used to read first. A signal with no window section/turn
+marker around it at all carries no ordering information — it is never
+allowed to win a same-kind tie by virtue of "reading later" in raw
+concatenated text, since that order is not known to reflect anything real.
+When two same-kind signals disagree and neither one carries any ordering
+information over the other, the arm stays silent (no block, same as an
+evidence gap) and records a `PR state ambiguous: PR #N has conflicting
+<kind> signals with no window section/turn marker to say which is newer`
+line for `hook gate --explain` rather than guessing which one to trust. Only
+this one arm changed; the count-mismatch arm and every derived-fact family
+are untouched.
+
 ## Gate v4.2 — written-file identity, file read-back facts (2026-09-18)
 
 `SET3-AUDIT2.md` measured the fleet's other bots (businessfi, health-fitness)

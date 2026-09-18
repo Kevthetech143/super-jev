@@ -3362,6 +3362,75 @@ def test_deterministic_pr_no_mismatch_when_evidence_agrees():
     assert sj.deterministic_block_reasons(draft, evidence) == []
 
 
+# --- PR-state recency (2026-09-18) --------------------------------------
+#
+# The four cases the fix brief called for, using synthetic PR numbers/text
+# only (no recorded payload content). See `_pr_mismatch_verdict`'s own
+# docstring for the kind/recency rule these exercise.
+
+def test_pr_state_newer_merge_receipt_beats_stale_open_prose():
+    # (a) An older-section REPORT FROM block calling PR #52 "not merged" /
+    # "open" sits beside a newer, current-turn merge receipt. The receipt
+    # is later AND a tool receipt beats prose either way — no block.
+    draft = "PR #52 is merged, Sir, and the branch is live."
+    evidence = (
+        "[previous turn -2]\n"
+        "REPORT FROM Worker (unverified worker claim)\n"
+        "PR #52 is not merged, still open.\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 52\n"
+        "MERGED PR #52\n"
+    )
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is None
+    assert note is None
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_pr_state_newer_open_receipt_still_blocks():
+    # (b) A single, current-turn `gh pr view --json` receipt says OPEN;
+    # the draft says merged. No competing signal — blocks exactly as the
+    # single-signal arm always has.
+    draft = "PR #52 is merged, Sir."
+    evidence = '[current turn]\n{"number": 52, "state": "OPEN"}\n'
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None
+    assert "PR #52" in reason and "open" in reason
+    assert note is None
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
+
+
+def test_pr_state_prose_only_still_blocks():
+    # (c) Only prose evidence ("PR #52 is open...") with no receipt at
+    # all and no section markers — current behavior kept, since a lone
+    # signal never needs an ordering decision.
+    draft = "PR #52 is merged, Sir."
+    evidence = "PR #52 is open and awaiting review.\n"
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None
+    assert "PR #52" in reason and "open" in reason
+    assert note is None
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
+
+
+def test_pr_state_ambiguous_equal_rank_stays_silent_with_a_note():
+    # (d) Two conflicting RECEIPTS for the same PR, neither carrying any
+    # window section/turn marker — no ordering info exists to prefer
+    # either one, so the arm stays silent (no block) and records an
+    # --explain note rather than guessing.
+    draft = "PR #52 is merged, Sir."
+    evidence = 'gh pr merge 52\n{"number": 52, "state": "OPEN"}\n'
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is None
+    assert note is not None
+    assert "PR #52" in note and "ambiguous" in note.lower()
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+    assert sj._pr_mismatch_note(draft, evidence) == note
+
+
 def test_hook_gate_blocks_on_deterministic_count_mismatch_via_fake_door(tmp_path, monkeypatch):
     # Full hook path: the judge itself comes back CLEAN (fake door prints a
     # SUPPORTED table), but the deterministic count cross-check still

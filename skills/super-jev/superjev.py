@@ -901,30 +901,128 @@ def _count_pairing(draft_text, evidence_text):
     return reason, detail
 
 
+def _pr_state_signals(pr_num, evidence_text):
+    """[(rank, pos, kind, norm_state, raw_state), ...] — every PR-state
+    signal about `pr_num` found in `evidence_text`, oldest scan order
+    first. `kind` is 'receipt' (a `gh pr view --json` state field, a
+    `gh pr merge N` command line, a `"mergedAt"` field, or a `(#N)` git
+    log line — all machine output) or 'prose' (a sentence naming the PR
+    as open/not merged/draft, the shape a teammate/user message or a
+    REPORT FROM block uses). `rank` is the enclosing window section's
+    recency rank (`_section_recency_rank`) when the text carries the
+    window's own `[current turn]`/`[previous turn -K]`/... section
+    headers, or None when it does not — None means "no ordering info",
+    not "oldest"; see `_pr_mismatch_verdict`. `pos` is the 1-based line
+    number, used to order signals that share one section. `raw_state` is
+    the literal lowercase word/label to reuse verbatim in a block
+    reason, so the reason text is unchanged from before this function
+    existed."""
+    signals = []
+    label = None
+    pr_str = str(pr_num)
+    merge_tag_re = re.compile(r'\(#' + re.escape(pr_str) + r'\)')
+    for pos, raw in enumerate((evidence_text or "").splitlines(), start=1):
+        stripped = raw.strip()
+        if _WINDOW_SECTION_RE.match(stripped):
+            label = stripped
+            continue
+        rank = _section_recency_rank(label) if label is not None else None
+        for jm in _PR_STATE_JSON_RE.finditer(raw):
+            if jm.group(1) != pr_str:
+                continue
+            raw_state = jm.group(2).lower()
+            norm = "MERGED" if raw_state == "merged" else "NOT_MERGED"
+            signals.append((rank, pos, "receipt", norm, raw_state))
+        if _FACT_MERGE_RECEIPT_RE.search(raw) or merge_tag_re.search(raw):
+            for rx in _FACT_PR_NUM_RES:
+                mm = rx.search(raw)
+                if mm and mm.group(1) == pr_str:
+                    signals.append((rank, pos, "receipt", "MERGED", "merged"))
+                    break
+        om = re.search(r'#' + re.escape(pr_str) + r'\b[^.\n]{0,40}?\b(open|not merged|draft)\b',
+                       raw, re.IGNORECASE)
+        if om:
+            signals.append((rank, pos, "prose", "NOT_MERGED", om.group(1).lower()))
+    return signals
+
+
+def _pr_mismatch_verdict(draft_text, evidence_text):
+    """(reason_or_None, note_or_None) for the draft's PR-merge claim
+    against every PR-state signal `_pr_state_signals` finds for that PR
+    number.
+
+    When more than one signal names the same PR, the winner is picked by
+    (1) kind — a tool receipt always outranks prose in a teammate/user
+    message, since a receipt is what the command actually returned and
+    prose is a paraphrase that can go stale; (2) among signals of the
+    same kind, the one in the more recent window section (see
+    `_section_recency_rank`), or — when both are in the same section —
+    the one that reads later in the text. `reason` is only ever set when
+    the winning signal itself contradicts the draft's "PR #N merged"
+    claim, exactly as the single-signal check this replaces did.
+
+    A signal with no section markers around it (`rank is None`) carries
+    no ordering information at all — the window it came from did not
+    record which turn it belongs to — so it can never win a tie against
+    an opposing signal of the same kind by virtue of "being later" in
+    raw text order; two such signals disagreeing on the same PR's state
+    is genuinely ambiguous, not resolvable, and is reported as a `note`
+    for `--explain` rather than guessed at as a block."""
+    if not draft_text or not evidence_text:
+        return None, None
+    m = _PR_MERGED_CLAIM_RE.search(draft_text)
+    if not m:
+        return None, None
+    pr_num = m.group(1)
+    signals = _pr_state_signals(pr_num, evidence_text)
+    if not signals:
+        return None, None
+
+    def sort_key(sig):
+        rank, pos, kind, _norm, _raw = sig
+        return (1 if kind == "receipt" else 0,
+                rank if rank is not None else float("-inf"), pos)
+
+    best = max(signals, key=sort_key)
+    best_kind_rank, best_rank, _pos = sort_key(best)[:3]
+    ambiguous = any(
+        s is not best and s[3] != best[3]
+        and (1 if s[2] == "receipt" else 0) == best_kind_rank
+        and (s[0] if s[0] is not None else float("-inf")) == best_rank
+        and s[0] is None and best[0] is None
+        for s in signals
+    )
+    if ambiguous:
+        return None, (f"PR state ambiguous: PR #{pr_num} has conflicting {best[2]} "
+                      "signals with no window section/turn marker to say which is "
+                      "newer — not blocked")
+    if best[3] == "MERGED":
+        return None, None
+    return (f"PR mismatch: draft says PR #{pr_num} merged, evidence shows "
+           f"{best[4]}"), None
+
+
 def _pr_mismatch_reason(draft_text, evidence_text):
     """None, or 'PR mismatch: draft says PR #N merged, evidence shows
     <state>' when the draft claims a specific PR is merged and the
-    evidence's own `gh pr view --json state,...` (or similar) output names
-    that PR with a state other than MERGED. Only looks at PRs the draft
-    itself names — never invents a mismatch from a PR the draft never
-    mentions."""
-    if not draft_text or not evidence_text:
-        return None
-    m = _PR_MERGED_CLAIM_RE.search(draft_text)
-    if not m:
-        return None
-    pr_num = m.group(1)
-    for jm in _PR_STATE_JSON_RE.finditer(evidence_text):
-        if jm.group(1) != pr_num:
-            continue
-        state = jm.group(2).upper()
-        if state != "MERGED":
-            return f"PR mismatch: draft says PR #{pr_num} merged, evidence shows {state.lower()}"
-    om = re.search(r'#' + re.escape(pr_num) + r'\b[^.\n]{0,40}?\b(open|not merged|draft)\b',
-                   evidence_text, re.IGNORECASE)
-    if om:
-        return f"PR mismatch: draft says PR #{pr_num} merged, evidence shows {om.group(1).lower()}"
-    return None
+    winning PR-state signal in the evidence (see `_pr_mismatch_verdict`)
+    names that PR with a state other than MERGED. Only looks at PRs the
+    draft itself names — never invents a mismatch from a PR the draft
+    never mentions. When the window holds more than one PR-state signal
+    for that PR, a newer receipt or a receipt over stale prose can settle
+    it silently (no block) even when an older signal in the window
+    disagreed — see `_pr_mismatch_verdict` for the recency/kind rule and
+    `_pr_mismatch_note` for the ambiguous case this can also produce."""
+    return _pr_mismatch_verdict(draft_text, evidence_text)[0]
+
+
+def _pr_mismatch_note(draft_text, evidence_text):
+    """None, or a plain-English `--explain` note ('PR state ambiguous: ...')
+    when `_pr_mismatch_verdict` found two conflicting same-kind PR-state
+    signals with no ordering between them and stayed silent rather than
+    block. Never overlaps with `_pr_mismatch_reason`: a verdict is either
+    a reason, a note, or neither, never a reason and a note together."""
+    return _pr_mismatch_verdict(draft_text, evidence_text)[1]
 
 
 def _fact_block_reasons(facts):
@@ -6691,11 +6789,12 @@ def cmd_hook(a):
             # See deterministic_block_reasons's own docstring: fires only
             # on a real contradiction (a drafted count/PR state the
             # evidence itself disagrees with), never on an evidence gap.
-            det_reason, count_pairing = _count_pairing(
-                text, _read_evidence_text(evidence))
+            _det_evidence_text = _read_evidence_text(evidence)
+            det_reason, count_pairing = _count_pairing(text, _det_evidence_text)
+            det_pr_note = _pr_mismatch_note(text, _det_evidence_text)
             det_block_reasons = [r for r in
                                  (det_reason,
-                                  _pr_mismatch_reason(text, _read_evidence_text(evidence)))
+                                  _pr_mismatch_reason(text, _det_evidence_text))
                                  if r]
             # A derived fact the window already carries (any family —
             # written-file identity, removal, missing path, diffstat,
@@ -6710,6 +6809,7 @@ def cmd_hook(a):
         else:
             det_block_reasons = []
             count_pairing = []
+            det_pr_note = None
             tool_name = payload.get("tool_name")
             if tool_name is not None and tool_name != "Agent":
                 _hook_log(f"verify: tool_name={tool_name!r} is not 'Agent' — this "
@@ -6798,6 +6898,8 @@ def cmd_hook(a):
                              "reasons": ["the current turn ran no tools of its own; this "
                                         "window is previous-turn/receipts evidence only"]}
         block_reasons, block_notes = _hook_block_decision(flags, claim_rows, gather_health)
+        if det_pr_note:
+            block_notes = list(block_notes) + [det_pr_note]
         # Deterministic reasons are never suppressed by the gather-health
         # check the judge-driven flags above go through — arithmetic on
         # text that WAS in the evidence window carries no "the gather was
