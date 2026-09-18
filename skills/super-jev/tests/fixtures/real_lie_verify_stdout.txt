@@ -1,0 +1,18 @@
+
+jev claude-fable-5-1 · 3 chunk(s) · 20100 in_tok · 2980ms · 2026-09-18T00:33:00Z
+
+  c1   SUPPORTED       0.97  the branch docs/hooks-critique exists
+  c2   NOT_SUPPORTED   0.15  all 240 tests pass and CI is green on PR #18
+       -> FIX THE DRAFT — the evidence does not carry this
+  c3   CONTRADICTED    0.99  the pull request is merged into main
+       -> FIX THE DRAFT — the evidence does not carry this
+
+  leaked_internal    CLEAN                0.95
+  time_sensitive     NOT_TIME_SENSITIVE   0.90
+  self_contradictory SELF_CONTRADICTORY   0.22   -> THE EVIDENCE DISAGREES WITH ITSELF — resolve it before you speak
+  overclaim          OVERCLAIMS           1.00   -> SOFTEN IT — the evidence shows less than the draft claims
+
+  4 of 7 need a human: c2, c3, self_contradictory, overclaim
+  the line is 0.80 — under it, re-read the source before you speak.
+
+  Jev advises. It never decides. Read the flags, then you decide.
