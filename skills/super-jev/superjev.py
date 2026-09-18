@@ -7629,13 +7629,14 @@ def _receipt_shape_acts(records, scope_slices):
 
 def _rs_named(items, cap=RECEIPT_SHAPE_TARGETS):
     """`items` as a plain phrase naming at most `cap` of them. When the
-    list runs past `cap` the phrase ends in an open ellipsis rather than a
-    closed count, so it never reads as a total inventory of the turn's
-    acts — a judge should not treat the named items as the whole list."""
+    list runs past `cap` the phrase ends with an uncounted "and others"
+    rather than a closed count, so it never reads as a total inventory of
+    the turn's acts — a judge should not treat the named items as the
+    whole list."""
     shown = items[:cap]
     tail = len(items) - len(shown)
     phrase = ", ".join(shown)
-    return phrase + (", ..." if tail > 0 else "")
+    return phrase + (" and others" if tail > 0 else "")
 
 
 def _rs_iter_segments(masked, raw):
@@ -7807,7 +7808,7 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                     if isinstance(val, str) and val.strip():
                         who = val.strip()[:60]
                         break
-                phrase = f"a {tool} dispatch" + (f" of {who}" if who else "")
+                phrase = f"one {tool} dispatch" + (f" of {who}" if who else "")
                 if phrase not in handed:
                     handed.append(phrase)
         # Relay sends lead the SENT line: when the cap on named targets bites,

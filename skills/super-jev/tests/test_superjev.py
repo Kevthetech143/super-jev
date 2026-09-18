@@ -11537,7 +11537,7 @@ def test_receipt_shapes_dispatch_names_the_skill():
                       _rs_result("a", "skill loaded")])
     assert len(facts) == 1
     assert facts[0].startswith("RECEIPT SHAPE (handed off):")
-    assert "a Skill dispatch of downside-monitor" in facts[0]
+    assert "one Skill dispatch of downside-monitor" in facts[0]
     assert "supports the draft saying" in facts[0]
     assert "nothing else" not in facts[0]
 
@@ -11630,8 +11630,8 @@ def test_receipt_shapes_dedupes_by_verb_class_and_caps_the_family():
     assert [f.split(":")[0] for f in facts] == [
         "RECEIPT SHAPE (saved)", "RECEIPT SHAPE (sent)",
         "RECEIPT SHAPE (scheduled)", "RECEIPT SHAPE (handed off)"]
-    # The overflow ends in an open ellipsis, never a closed count.
-    assert ", ..." in facts[0]
+    # The overflow ends with an uncounted "and others", never a closed count.
+    assert "and others" in facts[0]
 
 
 def test_receipt_shapes_land_after_every_contradicted_by_fact_line():
