@@ -39,6 +39,14 @@ codes as the "old" action silently hid exactly the flip this sweep exists
 to catch. Comparing two in-process runs of two known commits removes that
 ambiguity.
 
+Beyond the block/no-block decision, this also WARNS (never fails the run)
+when a recorded case's window — truth or lie — loses a receipt-worthy line
+the baseline window carried — a receipt line dropped by the window-budget
+change is a refutation the judge might no longer see, even when no
+deterministic arm's decision flips on it, and a TRUTH's window is exactly
+where that costs the most. See "receipt lines dropped" in the summary
+below, printed for truths and lies separately.
+
 Never prints draft/evidence/transcript text — only case ids, kind
 (truth/lie), the fact FAMILY that fired (from the fixed marker set, not
 free text) and whether the decision flips. Safe to run and to share output
@@ -67,6 +75,11 @@ SETS = [
      "cases2.json", "payloads-v3-2"),
     ("set3-20260918-fleet", "/Users/admin/super-jev-experiments/gate-bench-20260918-fleet",
      "cases3.json", "payloads-v3-3"),
+    # Set 4, the blind set (2026-09-18): recorded cases whose drafts were
+    # never read while the window code was being written.
+    # Added 2026-09-18 with the window-budget change, which is the first
+    # change to touch how much of each LAYER survives the cap — the arms
+    # have to be replayable over every recorded set, not three of four.
     ("set4-20260918-blind", "/Users/admin/super-jev-experiments/gate-bench-20260918-blind",
      "cases4.json", "payloads-v3-4"),
 ]

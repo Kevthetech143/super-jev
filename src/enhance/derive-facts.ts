@@ -532,6 +532,27 @@ const DRAFT_MERGE: RegExp[] = [
   /\bmerged\b[^.\n]{0,40}?\bPR\s*#(\d+)/gi,
   /#(\d+)\b[^.\n]{0,20}?\bis\s+merged\b/gi
 ];
+/** Words that make a draft's "... merged ... PR #N" a DISJUNCTION or a
+ * NEGATION rather than a claim that PR #N is merged. "either merged or on
+ * PR #3" says the opposite about #3, and the family read it as a claim
+ * that #3 was merged and then reported the absent receipt as a finding
+ * (measured on the gate bench's t20, 2026-09-18). */
+const MERGE_CLAIM_BREAK =
+  /\b(?:or|nor|not|unmerged|open|pending|awaiting|instead|except|besides|rather\s+than|other\s+than)\b/i;
+/** A draft clause claiming an AGGREGATE number of merges ("19 PRs merged",
+ * "three pull requests merged"), or asserting one over a whole set without
+ * naming any PR. Neither shape can be settled by a window — see
+ * `mergeCountFacts`. */
+const DRAFT_MERGE_TOTAL: RegExp[] = [
+  /\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:PRs?|pull\s+requests?)\b[^.\n]{0,40}?\bmerged\b/gi,
+  /\bmerged\b[^.\n]{0,40}?\b(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:PRs?|pull\s+requests?)\b/gi
+];
+const DRAFT_MERGE_UNIVERSAL =
+  /\b(?:every|all|each|both)\b[^.\n]{0,70}?\bmerged\b|\bmerged\b[^.\n]{0,40}?\b(?:everything|all of (?:it|them))\b/i;
+const WORD_NUMBERS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+  seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12
+};
 /** How strict an outcome label is, for reading a mismatch row as stricter or
  * more permissive than expected. An unknown label ranks `null` and is not
  * read — a row we cannot rank is left out rather than guessed at. */
@@ -757,12 +778,56 @@ function mergeClaimFacts(lines: WindowLine[], draft: string): WindowFact[] {
     sentence: `merge receipt found for PR #${n} in ${found.get(n)}.`
   }));
   const claimed = new Set<number>();
-  for (const rx of DRAFT_MERGE) for (const m of (draft || '').matchAll(rx)) claimed.add(parseInt(m[1], 10));
+  for (const rx of DRAFT_MERGE) {
+    for (const m of (draft || '').matchAll(rx)) {
+      // A match whose own gap between "merged" and the PR number carries a
+      // disjunction or a negation is not a claim that the PR is merged.
+      if (MERGE_CLAIM_BREAK.test(m[0].replace(m[1], ' '))) continue;
+      claimed.add(parseInt(m[1], 10));
+    }
+  }
   for (const n of [...claimed].sort((a, b) => a - b)) {
     if (found.has(n)) continue;
     facts.push({ kind: 'window', family: 'merge-claim', sentence: `no merge receipt for PR #${n} in window.` });
   }
+  facts.push(...mergeCountFacts(found, draft));
   return facts;
+}
+
+/**
+ * Family 4b — a draft claim about the SESSION'S merge total, stated as a
+ * count the window cannot hold.
+ *
+ * A gate window is one session's worth of receipts under a byte cap. A
+ * draft that says "19 PRs merged" or "every item is merged" is making a
+ * claim whose scope is the whole session, and a window that saturates well
+ * below that number cannot settle it either way. Left unsaid, the judge
+ * reads the gap between the claimed total and the receipt count as a
+ * contradiction and blocks a true reply. So the count is stated together
+ * with what it does and does not settle: this is an UNVERIFIABLE-here
+ * claim, not a false one.
+ *
+ * Fires only when the draft's own total exceeds the window's receipt count,
+ * or when the claim names no total at all — a total the window already
+ * matches is checkable, and family 4 has already checked it.
+ */
+function mergeCountFacts(found: Map<number, string>, draft: string): WindowFact[] {
+  let claimedTotal: number | null = null;
+  for (const rx of DRAFT_MERGE_TOTAL) {
+    for (const m of (draft || '').matchAll(rx)) {
+      const tok = (m[1] || '').toLowerCase();
+      const val = WORD_NUMBERS[tok] ?? (/^\d+$/.test(tok) ? parseInt(tok, 10) : null);
+      if (val === null) continue;
+      if (claimedTotal === null || val > claimedTotal) claimedTotal = val;
+    }
+  }
+  const universal = DRAFT_MERGE_UNIVERSAL.test(draft || '');
+  if (claimedTotal === null && !universal) return [];
+  if (claimedTotal !== null && claimedTotal <= found.size) return [];
+  return [{
+    kind: 'window', family: 'merge-claim',
+    sentence: `merge receipts in window: ${found.size}; the draft's session-wide total cannot be checked here.`
+  }];
 }
 
 /**

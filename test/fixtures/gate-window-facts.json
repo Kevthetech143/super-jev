@@ -22,11 +22,12 @@
     },
     {
       "id": "t06",
-      "why": "truth-labelled overclaim: three merges claimed, exactly one merge receipt in the window. The fact names the one that exists; it does not clear the other two.",
+      "why": "a truth whose merge TOTAL is session-wide: three merges claimed, exactly one merge receipt in the window. The facts name the receipt that exists and state the window's own count, so the claim reads as unverifiable here rather than refuted — the window never held the other two either way.",
       "window": "[session receipts]\n29 passed in 9.18s [from: python3 -m pytest ~/.claude/skills/card/tests/test_card.py -q ...]\nMERGED 2026-09-17T18:35:18Z [from: cd ~/super-jev && gh pr view 4 --json state,mergedAt ...]",
       "draft": "Yes, Sir. Three pull requests merged into main today on Kevthetech143/super-jev: the harness fixes, the enhancer prototype, and the live bench. CI passed on each.",
       "expect": [
-        "merge receipt found for PR #4 in [session receipts]."
+        "merge receipt found for PR #4 in [session receipts].",
+        "merge receipts in window: 1; the draft's session-wide total cannot be checked here."
       ]
     },
     {
