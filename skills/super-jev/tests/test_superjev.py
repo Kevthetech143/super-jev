@@ -7501,3 +7501,210 @@ def test_replay_catch_cases_unsupported_shape_gets_its_own_message(tmp_path, mon
     out = capsys.readouterr().out
     assert code == 0
     assert "payload shape unsupported for this door" in out
+
+
+# ------------------------------------------------------------ catch signal
+
+def _false_block_record(rec_id, ts, reason, draft="a draft excerpt"):
+    return {"id": rec_id, "ts": ts, "door": "gate", "decision": "block",
+            "reasons": [reason], "draft_excerpt": draft, "window_bytes": None,
+            "ms": None, "tag": "false", "note": "wrong block"}
+
+
+@pytest.mark.parametrize("reason,family", [
+    ("count mismatch (tests): draft 0/61 vs evidence 53", "count mismatch (tests)"),
+    ("count mismatch (tests): draft 2/9 vs evidence 4", "count mismatch (tests)"),
+    ("overclaim OVERCLAIMS 0.94", "overclaim OVERCLAIMS"),
+    ("c3 OVERCLAIMS 0.94 (overclaim==1.00 arm)", "c3 OVERCLAIMS"),
+    ("LABELLED VALUE: the draft states 12 next to a plain number",
+     "LABELLED VALUE"),
+    ("PR mismatch: draft says PR #9 merged, evidence shows open", "PR mismatch"),
+    ("", ""),
+    (None, ""),
+])
+def test_catch_reason_family_strips_numbers_and_values(reason, family):
+    assert sj._catch_reason_family(reason) == family
+
+
+def test_catch_signal_groups_by_family_not_raw_reason():
+    records = [
+        _false_block_record("f1", "2026-09-01T00:00:00+00:00",
+                            "count mismatch (tests): draft 0/61 vs evidence 53"),
+        _false_block_record("f2", "2026-09-02T00:00:00+00:00",
+                            "count mismatch (tests): draft 2/9 vs evidence 4"),
+        _false_block_record("f3", "2026-09-03T00:00:00+00:00",
+                            "count mismatch (tests): draft 1/3 vs evidence 2"),
+    ]
+    groups = sj._catch_signal_groups(records)
+    assert list(groups.keys()) == [("false", "count mismatch (tests)")]
+    assert [r["id"] for r in groups[("false", "count mismatch (tests)")]] == \
+        ["f1", "f2", "f3"]
+
+
+def test_catch_signal_threshold_below_min_produces_no_signal(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("t1", "2026-09-01T00:00:00+00:00", "PR mismatch: x"),
+        _false_block_record("t2", "2026-09-02T00:00:00+00:00", "PR mismatch: y"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "no reason family has reached --min 3" in out
+
+
+def test_catch_signal_at_threshold_exits_zero_and_prints_signal(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("s1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("s2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("s3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "false block: PR mismatch (x3)" in out
+    assert "family: PR mismatch" in out
+    assert "count: 3" in out
+
+
+def test_catch_signal_examples_capped_at_three(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record(f"e{i}", f"2026-09-0{i}T00:00:00+00:00",
+                            "PR mismatch: x", draft=f"draft number {i}")
+        for i in range(1, 6)
+    ])
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out.count("draft:") == 3
+
+
+def test_catch_signal_miss_family_gets_its_own_title(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    records = []
+    for i in range(3):
+        rec = _false_block_record(f"m{i}", f"2026-09-0{i+1}T00:00:00+00:00",
+                                  "PR mismatch: x")
+        rec["decision"] = "allow"
+        rec["tag"] = "miss"
+        records.append(rec)
+    _write_catch_records(catch_path, records)
+    code = sj.main(["catch", "signal", "--min", "3"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "missed lie: PR mismatch (x3)" in out
+
+
+def test_catch_signal_dry_run_never_calls_gh(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("d1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("d2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("d3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    called = {"n": 0}
+
+    def fake_run(*a, **kw):
+        called["n"] += 1
+        raise AssertionError("gh must never be invoked under --dry-run")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert called["n"] == 0
+    assert "issue body" in out
+    assert "Reason family: `PR mismatch`" in out
+
+
+def test_catch_signal_open_without_repo_refused(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("r1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("r2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("r3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked without --repo")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open"])
+    assert code == sj.REFUSED
+
+
+def test_catch_signal_open_calls_gh_and_writes_sidecar(tmp_path, monkeypatch, capsys):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("o1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("o2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("o3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    fake = FakeDoor(0, stdout="https://github.com/acme/repo/issues/42\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "filed: https://github.com/acme/repo/issues/42" in out
+    assert len(fake.calls) == 1
+    argv = fake.calls[0]["cmd"]
+    assert argv[:3] == ["gh", "issue", "create"]
+    assert "--repo" in argv and "acme/repo" in argv
+    assert "--label" in argv and "harness-signal" in argv
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert sidecar.exists()
+    lines = [json.loads(l) for l in sidecar.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["issue_url"] == "https://github.com/acme/repo/issues/42"
+    assert lines[0]["family"] == "PR mismatch"
+
+    # A second run must not file the same family twice.
+    fake2 = FakeDoor(0, stdout="https://github.com/acme/repo/issues/99\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake2)
+    code2 = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    out2 = capsys.readouterr().out
+    assert code2 == 0
+    assert "already filed: https://github.com/acme/repo/issues/42" in out2
+    assert len(fake2.calls) == 0
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("nothing sensitive here", False),
+    ("", False),
+    (None, False),
+    ("call me at 212-555-0100 about this", True),
+    ("reach me at someone@example.com", True),
+    ("ssn on file: 123-45-6789", True),
+])
+def test_catch_signal_has_pii(text, expected):
+    assert sj._catch_signal_has_pii(text) is expected
+
+
+def test_catch_signal_refuses_to_open_when_body_still_carries_pii(
+        tmp_path, monkeypatch, capsys):
+    # Examples are already redacted by _catch_signal_examples before they
+    # ever reach the body, so this test forces the guard itself to fire
+    # (a belt-and-suspenders check, not something the normal ledger path
+    # is expected to hit) by monkeypatching _catch_signal_has_pii to True,
+    # and asserts the command wiring honours that guard: gh is never
+    # called and nothing is written to the sidecar.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    _write_catch_records(catch_path, [
+        _false_block_record("p1", "2026-09-01T00:00:00+00:00", "PR mismatch: a"),
+        _false_block_record("p2", "2026-09-02T00:00:00+00:00", "PR mismatch: b"),
+        _false_block_record("p3", "2026-09-03T00:00:00+00:00", "PR mismatch: c"),
+    ])
+    monkeypatch.setattr(sj, "_catch_signal_has_pii", lambda body: True)
+
+    def fake_run(*a, **kw):
+        raise AssertionError("gh must never be invoked when the guard trips")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    code = sj.main(["catch", "signal", "--min", "3", "--open", "--repo", "acme/repo"])
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "refusing to open an issue" in err
+    sidecar = catch_path.parent / "signals.jsonl"
+    assert not sidecar.exists()

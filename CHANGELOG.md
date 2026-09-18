@@ -4,6 +4,22 @@
 
 No version bump.
 
+- **`catch signal`.** The first step of the compounding loop the catch
+  ledger exists to feed: harness catches -> tags -> issue -> fix PR ->
+  bench robot. `superjev.py catch signal [--min 3] [--since 24h] [--open
+  --repo owner/name] [--dry-run]` groups catch-ledger records tagged
+  `false`/`miss` by **reason family** (the reason string with its
+  numbers/values stripped, so two count mismatches with different draft
+  and evidence numbers still collapse into one family) and, once a family
+  reaches `--min`, prints a signal block with up to three redacted
+  examples. Exit 0 with signals, exit 1 with none. `--open` files a
+  GitHub issue via `gh issue create --label harness-signal` and records
+  the family in a `signals.jsonl` sidecar so the same family is never
+  filed twice; `--dry-run` prints the issue body and never calls `gh`. A
+  final email/phone/SSN check on the assembled body runs right before any
+  real `gh` call, on top of the per-example redaction. See docs/hooks.md,
+  "Turning a repeat pattern into a fix PR."
+
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
   reason behind it came from the judge (the OVERCLAIMS arm, or under
