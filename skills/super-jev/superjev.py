@@ -7029,6 +7029,8 @@ def _stop_scan_verify_one(r, budget=None):
         _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
                  f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
                  hook_mode=True, source="stop-transcript",
+                 unchecked=(label == "UNCHECKED"),
+                 health=("none" if label == "UNCHECKED" else health),
                  reason=("no-evidence" if label == "UNCHECKED" else None))
         if label == "UNCHECKED":
             catch_log("verify", "unchecked", reasons=["no-evidence"] + (notes or []),
@@ -7853,6 +7855,12 @@ SKIP_REASON_BUCKETS = {
     "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
+    # The stop-scan's UNCHECKED verdict (worker-verify's own exit code
+    # said REJECT/CLEAN, but the gather had nothing usable, so the label
+    # was downgraded to UNCHECKED — see cmd_hook_prompt_verify's
+    # stop-scan branch) is judged against thin evidence, same as the
+    # sibling no-tool-evidence-checkable path above, not a lost check.
+    "no-evidence": SKIP_BUCKET_THIN,
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
     # The advisory teammate-report scan running out of its own time or its
