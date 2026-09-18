@@ -1297,6 +1297,14 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
                 "not a block; run with --explain for the full gather")
             continue
         if is_secondary and empty_current_turn:
+            # 2026-09-18 (SKIPS-20260918.md, l22/l24): the judge flagged
+            # this claim at or above the block line and the empty-current-
+            # turn health gate suppressed it — checked, flagged, and let
+            # through, not a silent miss. Marked with a distinct note
+            # shape ("current turn ran no tools of its own") so cmd_hook
+            # can pull the (key, verdict, score) back out and record it
+            # under ledger_health's SUPPRESSED bucket (see
+            # _suppressed_empty_turn_from_notes / SKIP_REASON_BUCKETS).
             notes.append(
                 f"{k} {v} {s:.2f} crossed the {line:.2f} line but the current "
                 "turn ran no tools of its own (evidence is previous-turn/"
@@ -1394,6 +1402,32 @@ def _hook_block_decision_v2(flags, claim_rows=None, evidence=None):
                 f"the {OVERCLAIM_COMPANION_MIN:.2f} companion line — "
                 "advisory, not a block")
     return reasons, notes
+
+
+_SUPPRESSED_EMPTY_TURN_NOTE_RE = re.compile(
+    r'^(?P<key>\S+) (?P<verdict>[A-Z_]+) (?P<score>\d+\.\d+) crossed .* current '
+    r'turn ran no tools of its own')
+
+
+def _suppressed_empty_turn_from_notes(notes):
+    """The top (key, verdict, score) triple for the highest-scoring flag
+    in `notes` (a hook run's block_notes) that the empty-current-turn
+    health gate suppressed from blocking — see the
+    "is_secondary and empty_current_turn" branch of
+    _hook_block_decision_v3 — or None if no note carries that shape.
+    "Top" = highest score, since more than one claim can be suppressed
+    the same turn. Used to populate the ledger's
+    reason="flagged-suppressed-empty-turn" record (cmd_hook) that feeds
+    ledger_health's SUPPRESSED bucket."""
+    best = None
+    for n in notes or []:
+        m = _SUPPRESSED_EMPTY_TURN_NOTE_RE.match(n)
+        if not m:
+            continue
+        score = float(m.group("score"))
+        if best is None or score > best[2]:
+            best = (m.group("key"), m.group("verdict"), score)
+    return best
 
 
 def _hook_block_reasons(flags, claim_rows=None, evidence=None):
@@ -5241,11 +5275,13 @@ def cmd_hook(a):
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
                       f"({tp!r}); gate ran against {source}, checkable claim reported "
                       f"(exit {code}), advisory printed", exit_code=0,
-                      flags=_parse_strong_flags(door_out), unchecked=True, health="none")
+                      flags=_parse_strong_flags(door_out), unchecked=True, health="none",
+                      reason="no-tool-evidence-checkable")
         else:
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
                       f"({tp!r}); gate ran against {source}, no checkable claim "
-                      f"(exit {code}), silent", exit_code=0, unchecked=True, health="none")
+                      f"(exit {code}), silent", exit_code=0, unchecked=True, health="none",
+                      reason="no-tool-evidence-silent")
         # This IS the 2026-09-16 bug's own shape (no tool evidence
         # derivable, silently routed unchecked) — so this path in
         # particular always checks the running share, and prints the
@@ -5489,6 +5525,22 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
+
+        # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
+        # above the block line, but the empty-current-turn health gate
+        # suppressed it from blocking — checked and flagged, not a silent
+        # miss, but distinct from both a real block and a plain advisory.
+        # Recorded on the ledger line whenever this run's own outcome
+        # isn't already a hard block (a hard block from some OTHER flag
+        # already carries this claim in its own block_notes/stderr).
+        suppressed = _suppressed_empty_turn_from_notes(block_notes)
+        suppressed_reason = None
+        suppressed_note_tail = ""
+        if suppressed:
+            sk, sv, sscore = suppressed
+            suppressed_reason = "flagged-suppressed-empty-turn"
+            suppressed_note_tail = f" [suppressed: {sk} {sv} {sscore:.2f}]"
+
         def _print_ledger_notice_if_gate():
             # So an in-session bug shaped like the 2026-09-16 one (a hook
             # silently routing replies down the unchecked path) shows up
@@ -5502,7 +5554,8 @@ def cmd_hook(a):
                 print(notice)
 
         if action == "allow":
-            _hook_log(f"{door}: allow (exit {code})", exit_code=0, flags=flags)
+            _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
+                     flags=flags, reason=suppressed_reason)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block-forced-advisory":
@@ -5510,7 +5563,8 @@ def cmd_hook(a):
             advisory = f"super-jev gate: second pass (stop_hook_active) — advisory only, would have blocked on: {reason_bits}"
             print(advisory)
             _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
-                     f"blocked on: {reason_bits}", exit_code=0, flags=flags)
+                     f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
+                     flags=flags, reason=suppressed_reason)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -5533,7 +5587,8 @@ def cmd_hook(a):
         note_tail = (" — " + "; ".join(block_notes)) if block_notes else ""
         advisory = f"super-jev {door} advisory (exit {code}){note_tail}"
         print(advisory)
-        _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags)
+        _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags,
+                 reason=suppressed_reason)
         _print_ledger_notice_if_gate()
         return 0
     except Exception as exc:  # fail-open: never wedge the session
@@ -5616,12 +5671,63 @@ UNCHECKED_WARN_ENV = "SUPERJEV_UNCHECKED_WARN"
 # at least this many runs in a bucket before its share can trip a WARN.
 MIN_RUNS_FOR_WARN = 5
 
+# 2026-09-18 (SKIPS-20260918.md): the single "unchecked" bucket above
+# conflated three very different things — spawn-dict/no-teammate-messages
+# (66+42 of 300 in the sample window) are not misses at all, they're the
+# wrong hook event for a reply that gets checked elsewhere; no-tool-
+# evidence-checkable (19/300) IS judged, just against thin evidence; and
+# a true lost check (a reply existed and nothing ever judged it) was 0/300
+# — rare enough that its WARN should trip on ANY occurrence, not a share.
+# Splitting the reason table lets ledger_health warn on the bucket that
+# actually means something broke, instead of a number permanently pinned
+# above 25% by healthy spawn-dict/no-teammate-messages volume alone.
+#
+#   DEFERRED — nothing user-facing to check yet, or the wrong axis
+#     entirely (this hook event isn't about the current turn's own reply).
+#   THIN     — a judgment DID run and DID surface to the user, just
+#     against thin evidence (the last prompt, not this turn's own tool
+#     output) rather than being silently dropped.
+#   LOST     — evidence or a checkable reply existed and nothing judged
+#     it. Any reason not named in this table also lands here BY DESIGN —
+#     see SKIPS-20260918.md recommendation #3: a genuine lost check
+#     should be rare-to-never, so an unrecognized reason is treated as
+#     one rather than silently folded into "nothing to see here."
+SKIP_BUCKET_DEFERRED = "deferred"
+SKIP_BUCKET_THIN = "thin"
+SKIP_BUCKET_LOST = "lost"
+
+SKIP_REASON_BUCKETS = {
+    "spawn-dict": SKIP_BUCKET_DEFERRED,
+    "no-teammate-messages": SKIP_BUCKET_DEFERRED,
+    "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
+    "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
+    "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
+    "bad-stdin": SKIP_BUCKET_LOST,
+    "unexpected-error": SKIP_BUCKET_LOST,
+    "stop-scan-timeout": SKIP_BUCKET_LOST,
+}
+
+DEFAULT_LOST_WARN_COUNT = 1
+LOST_WARN_ENV = "SUPERJEV_LOST_WARN"
+DEFAULT_THIN_NOTE_PCT = 25.0
+THIN_NOTE_ENV = "SUPERJEV_THIN_NOTE"
+
 _NOTE_DOOR_RE = re.compile(r'^([a-z][a-z-]*):\s')
+
+
+def _skip_reason_bucket(reason):
+    """deferred | thin | lost for one skip-reason tag (see
+    SKIP_REASON_BUCKETS above). Anything not in the table is LOST, by
+    design — a reason superjev doesn't recognize is exactly the shape of
+    thing that should be visible, not silently swallowed."""
+    return SKIP_REASON_BUCKETS.get(reason, SKIP_BUCKET_LOST)
 
 
 def _unchecked_warn_pct():
     """SUPERJEV_UNCHECKED_WARN, parsed as a float percent (e.g. "25" for
-    25%); DEFAULT_UNCHECKED_WARN_PCT if unset or unparsable."""
+    25%); DEFAULT_UNCHECKED_WARN_PCT if unset or unparsable. Kept only for
+    the informational total-unchecked-share line — it no longer drives any
+    WARN (see _lost_warn_count / _thin_note_pct)."""
     raw = os.environ.get(UNCHECKED_WARN_ENV)
     if raw:
         try:
@@ -5629,6 +5735,36 @@ def _unchecked_warn_pct():
         except ValueError:
             pass
     return DEFAULT_UNCHECKED_WARN_PCT
+
+
+def _lost_warn_count():
+    """SUPERJEV_LOST_WARN, parsed as an int count (e.g. "1" — warn once a
+    single LOST record shows up in the window); DEFAULT_LOST_WARN_COUNT
+    if unset or unparsable. A count, not a percent — SKIPS-20260918.md's
+    finding was 0 true lost checks in 300 records, so even one is signal,
+    no MIN_RUNS_FOR_WARN gate applies to this dial."""
+    raw = os.environ.get(LOST_WARN_ENV)
+    if raw:
+        try:
+            return int(float(raw))
+        except ValueError:
+            pass
+    return DEFAULT_LOST_WARN_COUNT
+
+
+def _thin_note_pct():
+    """SUPERJEV_THIN_NOTE, parsed as a float percent; DEFAULT_THIN_NOTE_PCT
+    if unset or unparsable. THIN is real signal about gate coverage
+    quality (judged, but on thin evidence) — worth a softer NOTE, never a
+    WARN, when its share climbs, same MIN_RUNS_FOR_WARN noise guard as the
+    old unchecked-share WARN used."""
+    raw = os.environ.get(THIN_NOTE_ENV)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return DEFAULT_THIN_NOTE_PCT
 
 
 def _ledger_records(lines=None):
@@ -5680,15 +5816,22 @@ def _ledger_line_verdict(entry):
 def _ledger_skip_reason(entry):
     """A short, machine-matchable tag for why an unchecked/skipped line
     was unchecked/skipped — entry['reason'] when a call site set one
-    (most skip paths do), else a tag squeezed out of the free-text note
-    (the no-tool-evidence "unchecked" path — the exact shape of the
-    2026-09-16 bug — never sets reason=, so it needs this), else
-    "other"."""
+    (every skip path does now, including no-tool-evidence-checkable/
+    -silent), else a tag squeezed out of the free-text note (for ledger
+    lines written before this call site set reason= — old lines carry
+    only the note text), else "other"."""
     reason = entry.get("reason")
     if reason:
         return reason
     note = (entry.get("note") or "").lower()
     if "no tool evidence derivable" in note:
+        # Legacy (pre-reason=) lines only: distinguish checkable (THIN)
+        # from silent (DEFERRED) off the same note-text markers the two
+        # _hook_log call sites already write — see _hook_unchecked.
+        if "checkable claim reported" in note:
+            return "no-tool-evidence-checkable"
+        if "silent" in note:
+            return "no-tool-evidence-silent"
         return "no-tool-evidence"
     if "stdin" in note:
         return "bad-stdin"
@@ -5703,23 +5846,61 @@ def _ledger_skip_reason(entry):
     return "other"
 
 
+def _ledger_line_is_suppressed(entry):
+    """True for a ledger line recording the empty-current-turn health
+    gate suppressing a claim the judge flagged at or above the block line
+    (reason="flagged-suppressed-empty-turn" — see cmd_hook /
+    _suppressed_empty_turn_from_notes). Read straight off `reason`,
+    independent of verdict — this can ride an allow, advisory, or
+    block-forced-advisory line, never an `unchecked` one."""
+    return entry.get("reason") == "flagged-suppressed-empty-turn"
+
+
 def _door_health_bucket(entries):
     """{"runs","blocked","advisory","unchecked","allow",
-    "unchecked_share_pct","top_skip_reason"} for one list of hook-run
-    ledger entries (either one door's slice or the whole window)."""
+    "unchecked_share_pct","top_skip_reason","deferred","thin","lost",
+    "suppressed","deferred_share_pct","thin_share_pct","lost_share_pct",
+    "suppressed_share_pct"} for one list of hook-run ledger entries
+    (either one door's slice or the whole window).
+
+    unchecked/unchecked_share_pct/top_skip_reason are the old single-
+    bucket numbers, kept as an informational total (see the module note
+    above SKIP_REASON_BUCKETS) — nothing warns off them anymore.
+    deferred/thin/lost split that same unchecked count three ways via
+    SKIP_REASON_BUCKETS; suppressed is a separate, fourth count that has
+    nothing to do with unchecked/skipped at all (see
+    _ledger_line_is_suppressed)."""
     bucket = {"runs": len(entries), "blocked": 0, "advisory": 0,
-             "unchecked": 0, "allow": 0}
+             "unchecked": 0, "allow": 0,
+             "deferred": 0, "thin": 0, "lost": 0, "suppressed": 0}
     verdict_to_key = {"block": "blocked", "advisory": "advisory",
                       "unchecked": "unchecked", "allow": "allow"}
     skip_reasons = {}
+    lost_reasons = {}
     for e in entries:
         v = _ledger_line_verdict(e)
         bucket[verdict_to_key[v]] += 1
         if v == "unchecked":
             r = _ledger_skip_reason(e)
             skip_reasons[r] = skip_reasons.get(r, 0) + 1
-    bucket["unchecked_share_pct"] = (round(100.0 * bucket["unchecked"] / bucket["runs"], 1)
-                                     if bucket["runs"] else 0.0)
+            b = _skip_reason_bucket(r)
+            bucket[b] += 1
+            if b == SKIP_BUCKET_LOST:
+                lost_reasons[r] = lost_reasons.get(r, 0) + 1
+        if _ledger_line_is_suppressed(e):
+            bucket["suppressed"] += 1
+    runs = bucket["runs"]
+    bucket["unchecked_share_pct"] = round(100.0 * bucket["unchecked"] / runs, 1) if runs else 0.0
+    bucket["deferred_share_pct"] = round(100.0 * bucket["deferred"] / runs, 1) if runs else 0.0
+    bucket["thin_share_pct"] = round(100.0 * bucket["thin"] / runs, 1) if runs else 0.0
+    bucket["lost_share_pct"] = round(100.0 * bucket["lost"] / runs, 1) if runs else 0.0
+    bucket["suppressed_share_pct"] = round(100.0 * bucket["suppressed"] / runs, 1) if runs else 0.0
+    # The WARN line names the top reason WITHIN the lost bucket specifically
+    # — top_skip_reason (below) is the old, overall-unchecked number, which
+    # a large healthy deferred/thin volume can dominate even when the lost
+    # bucket itself is a single distinct reason.
+    bucket["top_lost_reason"] = (max(lost_reasons, key=lost_reasons.get)
+                                 if lost_reasons else None)
     bucket["top_skip_reason"] = (max(skip_reasons, key=skip_reasons.get)
                                  if skip_reasons else None)
     return bucket
@@ -5734,8 +5915,10 @@ def ledger_health(window=DEFAULT_LEDGER_WINDOW, records=None):
     CLI calls to gate/verify/sweep/... carry no skipped/unchecked
     concept and would only dilute the unchecked share.
 
-    Returns {"window", "threshold_pct", "overall": bucket,
-    "doors": {door: bucket}}, each bucket shaped by _door_health_bucket.
+    Returns {"window", "threshold_pct", "lost_warn_count",
+    "thin_note_pct", "overall": bucket, "doors": {door: bucket}}, each
+    bucket shaped by _door_health_bucket. `threshold_pct` is the legacy
+    total-unchecked dial, kept for the informational line only.
     `records`, if given, is a pre-parsed list of ledger dicts (tests pass
     a synthetic ledger this way instead of touching LEDGER_PATH)."""
     if records is None:
@@ -5748,6 +5931,8 @@ def ledger_health(window=DEFAULT_LEDGER_WINDOW, records=None):
     return {
         "window": window,
         "threshold_pct": _unchecked_warn_pct(),
+        "lost_warn_count": _lost_warn_count(),
+        "thin_note_pct": _thin_note_pct(),
         "overall": _door_health_bucket(windowed),
         "doors": {name: _door_health_bucket(es) for name, es in by_door.items()},
     }
@@ -5755,17 +5940,38 @@ def ledger_health(window=DEFAULT_LEDGER_WINDOW, records=None):
 
 def _health_warnings(health):
     """[(label, bucket), ...] for every bucket (overall plus each door)
-    whose unchecked share is at or above threshold_pct AND has at least
-    MIN_RUNS_FOR_WARN runs (a 1-run 100% share is noise, not signal) —
-    the empty-ledger / all-healthy / too-few-runs case gives back []."""
+    whose LOST count is at or above lost_warn_count (default 1 — see
+    SKIPS-20260918.md recommendation #3: a genuine lost check should be
+    rare-to-never, so a count threshold catches it long before a
+    percentage would, and no MIN_RUNS_FOR_WARN noise-guard applies — one
+    real lost check in one run is still a real lost check). The
+    empty-ledger / all-healthy case gives back []."""
     out = []
-    threshold = health["threshold_pct"]
-    if (health["overall"]["runs"] >= MIN_RUNS_FOR_WARN
-            and health["overall"]["unchecked_share_pct"] >= threshold):
+    threshold = health["lost_warn_count"]
+    if health["overall"]["lost"] >= threshold:
         out.append(("overall", health["overall"]))
     for name in sorted(health["doors"]):
         b = health["doors"][name]
-        if b["runs"] >= MIN_RUNS_FOR_WARN and b["unchecked_share_pct"] >= threshold:
+        if b["lost"] >= threshold:
+            out.append((name, b))
+    return out
+
+
+def _health_notes(health):
+    """[(label, bucket), ...] for every bucket (overall plus each door)
+    whose THIN share is at or above thin_note_pct (default 25%) AND has
+    at least MIN_RUNS_FOR_WARN runs — same noise guard the old unchecked-
+    share WARN used, kept here since THIN is a share, not a count. A
+    softer signal than _health_warnings: judged-on-thin-evidence volume
+    worth watching, never a reason to fail a script."""
+    out = []
+    threshold = health["thin_note_pct"]
+    if (health["overall"]["runs"] >= MIN_RUNS_FOR_WARN
+            and health["overall"]["thin_share_pct"] >= threshold):
+        out.append(("overall", health["overall"]))
+    for name in sorted(health["doors"]):
+        b = health["doors"][name]
+        if b["runs"] >= MIN_RUNS_FOR_WARN and b["thin_share_pct"] >= threshold:
             out.append((name, b))
     return out
 
@@ -5773,23 +5979,36 @@ def _health_warnings(health):
 def _print_ledger_health(health, heading="ledger health"):
     o = health["overall"]
     print(f"{heading} (last {health['window']} hook run(s), warn at "
-          f"{health['threshold_pct']:g}% unchecked)")
+          f"{health['lost_warn_count']} lost record(s), note at "
+          f"{health['thin_note_pct']:g}% thin)")
     if not o["runs"]:
         print("  no hook runs recorded yet")
         return
     print(f"  {'door':<14} {'runs':>5} {'blocked':>8} {'advisory':>9} "
-          f"{'unchecked':>10} {'unchecked%':>11}")
+          f"{'deferred':>9} {'thin':>6} {'lost':>6} {'suppressed':>11} "
+          f"{'unchecked%':>11}")
     print(f"  {'overall':<14} {o['runs']:>5} {o['blocked']:>8} {o['advisory']:>9} "
-          f"{o['unchecked']:>10} {o['unchecked_share_pct']:>10.1f}%")
+          f"{o['deferred']:>9} {o['thin']:>6} {o['lost']:>6} {o['suppressed']:>11} "
+          f"{o['unchecked_share_pct']:>10.1f}%")
     for name in sorted(health["doors"]):
         d = health["doors"][name]
         print(f"  {name:<14} {d['runs']:>5} {d['blocked']:>8} {d['advisory']:>9} "
-              f"{d['unchecked']:>10} {d['unchecked_share_pct']:>10.1f}%")
+              f"{d['deferred']:>9} {d['thin']:>6} {d['lost']:>6} {d['suppressed']:>11} "
+              f"{d['unchecked_share_pct']:>10.1f}%")
     for label, bucket in _health_warnings(health):
-        print(f"  WARN: {label} unchecked share {bucket['unchecked_share_pct']:.1f}% "
-              f"({bucket['unchecked']}/{bucket['runs']}) exceeds "
-              f"{health['threshold_pct']:g}% — most common skip reason: "
-              f"{bucket['top_skip_reason'] or 'n/a'}")
+        print(f"  WARN: {label} lost check(s) {bucket['lost']}/{bucket['runs']} "
+              f"(>= {health['lost_warn_count']}) — a checkable reply existed and "
+              f"nothing judged it; most common lost reason: "
+              f"{bucket['top_lost_reason'] or 'n/a'}")
+    for label, bucket in _health_notes(health):
+        print(f"  NOTE: {label} thin-evidence share {bucket['thin_share_pct']:.1f}% "
+              f"({bucket['thin']}/{bucket['runs']}) exceeds "
+              f"{health['thin_note_pct']:g}% — judged, but against the last prompt "
+              f"rather than this turn's own tool output")
+    if o["suppressed"]:
+        print(f"  NOTE: {o['suppressed']} suppressed record(s) this window — a claim "
+              f"the judge flagged at or above the block line, let through because "
+              f"the current turn ran no tools of its own")
 
 
 def cmd_ledger_health(a):
@@ -5805,19 +6024,20 @@ def cmd_ledger_health(a):
 
 def _running_unchecked_notice(window=DEFAULT_STOP_NOTICE_WINDOW):
     """One line, or None, for the Stop hook to print alongside its own
-    verdict when the running unchecked share over the last `window` hook
-    runs is at/over threshold — so an in-session bug like 2026-09-16's
-    shows up the same turn instead of waiting for someone to read the
-    ledger later. Scoped to hook-run lines only, same as ledger_health."""
+    verdict when a LOST check shows up in the last `window` hook runs —
+    so an in-session bug like 2026-09-16's shows up the same turn instead
+    of waiting for someone to read the ledger later. Scoped to hook-run
+    lines only, same as ledger_health; driven by _health_warnings (LOST
+    count), not the old total-unchecked share."""
     health = ledger_health(window=window)
     warnings = _health_warnings(health)
     if not warnings:
         return None
     label, bucket = warnings[0]
-    return (f"[super-jev] ledger health: {label} unchecked share "
-           f"{bucket['unchecked_share_pct']:.1f}% ({bucket['unchecked']}/{bucket['runs']} "
-           f"of last {window}) — most common skip reason: "
-           f"{bucket['top_skip_reason'] or 'n/a'}. Run `superjev.py ledger health` to see more.")
+    return (f"[super-jev] ledger health: {label} lost check(s) "
+           f"{bucket['lost']}/{bucket['runs']} of last {window} — a checkable reply "
+           f"existed and nothing judged it; most common lost reason: "
+           f"{bucket['top_lost_reason'] or 'n/a'}. Run `superjev.py ledger health` to see more.")
 
 
 def cmd_ledger(a):
