@@ -14,6 +14,7 @@ import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
 import { decidePermit, permitRequest, PERMIT_CONFIDENCE_THRESHOLD, type PermitSnapshot } from './enhance/permit.ts';
 import { decide as decidePreRules, formatPermitPreRuleFacts, DEFAULT_MONEY_THRESHOLD, type PermitPreRuleResult } from './enhance/permit-prerules.ts';
 import type { Evaluator } from './types.ts';
+import { GuardTally } from './enhance/evidence-guard.ts';
 
 class CliError extends Error {}
 
@@ -81,7 +82,18 @@ async function readSmallFile(path: string, limit: number, what: string): Promise
   catch { throw new CliError(`Cannot read the ${what} file`); }
 }
 
-export function parseSnapshot(text: string): PermitSnapshot {
+/**
+ * `guard`, if passed, redacts the free-text fields that carry no structure
+ * a pre-rule parses (`reversibilityNotes`, `policyLines`) before the
+ * snapshot is sent to the judge. `action`/`target` are deliberately left
+ * alone here — permit-prerules.ts parses a verb + acted-upon object out of
+ * them, and redacting a span inside that text could hide the very thing a
+ * hard rule (money amount, destructive verb) needs to match; the CLI's
+ * `--explain` prints a reminder that those two fields are not redacted, so
+ * a caller storing a live secret directly in an action string is not
+ * silently trusting this door for that.
+ */
+export function parseSnapshot(text: string, guard?: GuardTally): PermitSnapshot {
   let parsed: unknown;
   try { parsed = JSON.parse(text); }
   catch { throw new CliError('The snapshot file is not valid JSON'); }
@@ -92,12 +104,14 @@ export function parseSnapshot(text: string): PermitSnapshot {
   if (s.reversible !== undefined && typeof s.reversible !== 'boolean') throw new CliError('snapshot.reversible must be a boolean');
   if (s.reversibilityNotes !== undefined && typeof s.reversibilityNotes !== 'string') throw new CliError('snapshot.reversibilityNotes must be a string');
   if (s.policyLines !== undefined && (!Array.isArray(s.policyLines) || s.policyLines.some(l => typeof l !== 'string'))) throw new CliError('snapshot.policyLines must be an array of strings');
+  const notes = s.reversibilityNotes as string | undefined;
+  const policyLines = s.policyLines as string[] | undefined;
   return {
     action: s.action as string | undefined,
     target: s.target as string | undefined,
     reversible: s.reversible as boolean | undefined,
-    reversibilityNotes: s.reversibilityNotes as string | undefined,
-    policyLines: s.policyLines as string[] | undefined
+    reversibilityNotes: guard && notes !== undefined ? guard.redact(notes) : notes,
+    policyLines: guard && policyLines !== undefined ? policyLines.map(l => guard.redact(l)) : policyLines
   };
 }
 
@@ -150,7 +164,8 @@ try {
   if (moneyThreshold !== undefined && !(moneyThreshold >= 0)) throw new CliError('--money-threshold must be a non-negative number');
   if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run live, or use --dry-run or --stub');
 
-  const snapshot = parseSnapshot(await readSmallFile(snapshotPath, MAX_SNAPSHOT_BYTES, 'snapshot'));
+  const guard = new GuardTally();
+  const snapshot = parseSnapshot(await readSmallFile(snapshotPath, MAX_SNAPSHOT_BYTES, 'snapshot'), guard);
   const action = actionFlag ?? snapshot.action;
   if (!action || !action.trim()) throw new CliError('No action: set "action" in the snapshot or pass --action "TEXT"');
   const fullSnapshot = { ...snapshot, action };
@@ -159,11 +174,12 @@ try {
   const preRules: PermitPreRuleResult | null = noPrerules ? null : decidePreRules(action, fullSnapshot.target, {
     cwd: cwdFlag, worktree: worktreeFlag, newPayee, moneyThreshold: moneyThreshold ?? DEFAULT_MONEY_THRESHOLD, extraText
   });
-  const explainLine = () => noPrerules
+  const explainLine = () => (noPrerules
     ? '(pre-rules disabled with --no-prerules)'
     : preRules && preRules.settledBy
       ? `pre-rule fired: ${preRules.settledBy} -- ${preRules.reason}`
-      : 'no pre-rule fired; deferred to the judge';
+      : 'no pre-rule fired; deferred to the judge')
+    + ` | ${guard.summary()} over reversibilityNotes/policyLines (action/target are not redacted)`;
 
   if (dryRun) {
     const request = permitRequest(id, fullSnapshot);

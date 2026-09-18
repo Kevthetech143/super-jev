@@ -944,9 +944,22 @@ def test_bare_invocation_prints_help(capsys):
 
 
 def test_no_secret_file_is_read_by_this_wrapper():
+    """The wrapper must never hardcode a literal path to a real secret file
+    that it would then open. The one deliberate exception is the EVIDENCE
+    GUARD section (added 2026-09-18): it names these same strings, but only
+    as BLOCKLIST patterns that make is_blocked_path() refuse to open them —
+    the opposite of reading them — so that section is excluded from the scan
+    and separately asserted to actually be the blocklist below."""
     source = (SKILL / "superjev.py").read_text(encoding="utf-8")
+    guard_start = source.index("# ================================================ EVIDENCE GUARD")
+    guard_end = source.index("GATE_CMD_ENV = ")
+    guard_section = source[guard_start:guard_end]
+    rest = source[:guard_start] + source[guard_end:]
     for banned in ("logins.md", "-secret.md", '".env"', "'.env'", "profile/", "documents/"):
-        assert banned not in source
+        assert banned not in rest
+    # The guard section itself must be blocklist PATTERNS, not a read.
+    assert "BLOCKED_PATH_PATTERNS" in guard_section
+    assert "open(" not in guard_section and "read_text(" not in guard_section
 
 
 # ------------------------------------------------------------ --json shape
@@ -4761,8 +4774,12 @@ def test_compose_window_with_facts_is_a_byte_for_byte_noop_when_nothing_is_deriv
         window, "Listed the directory, Sir.", cap_bytes=24576)
     assert text == window
     assert facts == []
+    # "noop" means nothing secret-shaped was in it, so the evidence guard's
+    # own redaction count is 0 — see the guard tests in test_evidence_guard.py
+    # for the case where it is not a noop.
     assert meta == {"facts_count": 0, "facts": [], "facts_bytes": 0,
-                    "window_trimmed_bytes": 0}
+                    "window_trimmed_bytes": 0,
+                    "guard": {"paths_skipped": 0, "redactions": 0, "by_kind": {}}}
 
 
 def test_the_cap_applies_after_the_facts_and_never_drops_one():

@@ -455,6 +455,22 @@ the measurement is how you find out whether it's good enough for your use.
   the API key is passed through the environment to the child process only,
   never printed, never logged. `status` reports whether a key is present as
   `yes`/`no` and nothing more.
+- **What never reaches the judge.** Before any evidence — a gate window, a
+  verify fallback's gathered files and test output, or a raw request/record
+  handed to `superjev.py guard` directly — is packed for the judge, it goes
+  through one guard, in plain words: a path is never opened at all if it
+  names the fleet login vault, a `*-secret.md` file, an `.env` file, anything
+  under a `profile/` or `documents/` folder, a browser or playwright session
+  file, a private key or `id_rsa`, or anything naming a token or credential —
+  it is reported as skipped instead, and that silence is treated as
+  "unprovable", never read as "the claim about it must be false". Separately,
+  whatever text *does* get packed has anything that looks like a live secret
+  masked out first — an API key, a GitHub or Slack token, an AWS key id, a
+  bearer token or an `Authorization:` header — while a git commit hash or a
+  file checksum is left alone, because that is evidence, not a secret. `guard`
+  and `verify --explain` report how many paths were skipped and how many
+  redactions were made on any given call, so this is checkable, not just
+  claimed.
 - **The ledger is local, plaintext, and gitignored.** It fills up with real
   use and is not meant to be committed; it exists so a person (or the next
   agent) can find out what actually ran, distinct from what a summary claims

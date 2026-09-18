@@ -11,7 +11,7 @@ failing silently.
     python3 skills/super-jev/superjev.py <sub> ...
 
 Subcommands: gate · verify · sweep · fetch · bench · hook · ledger · permit ·
-chain · ask · status
+chain · guard · ask · status
 
 Exit codes: whatever the wrapped door returned. Plus 5 for a refusal by this
 wrapper (missing input, missing door, unroutable ask) and 6 for NOT BUILT.
@@ -63,6 +63,176 @@ FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 # through its own tiny CLI so a Python process can call it without an FFI.
 # Only used by `verify`'s door-absent fallback — see _derived_facts_fallback.
 DERIVE_FACTS_CLI = REPO_ROOT / "src" / "derive-facts-cli.ts"
+
+# ================================================ EVIDENCE GUARD (blocklist + redactor)
+# The ONE place this file asks "may I open this path?" and "is this text safe
+# to ship?" before it opens a path or lets text into an evidence pack that
+# reaches the judge. Pure-Python MIRROR of
+# /Users/admin/super-jev-experiments/areas-20260918/atoms/atoms.py (section 0)
+# and of src/enhance/evidence-guard.ts, deliberately duplicated rather than
+# bridged for the same reason as DERIVED_FACTS above: the Stop hook runs on
+# every turn and a node process's startup per call is too slow for it, and
+# REPO_ROOT does not resolve to this repo on a fleet install. Added
+# 2026-09-18 for AUDIT.md findings S1-S7 (most verification doors had no read
+# blocklist and the one that did was name-only).
+# test/enhance/fixtures/evidence-guard-cases.json is the one fixture both
+# languages run (test/enhance/evidence-guard.test.ts here,
+# skills/super-jev/tests/test_evidence_guard.py there), so the two sides
+# cannot silently drift apart.
+BLOCKED_PATH_PATTERNS = (
+    r"(^|/)logins\.md$",                     # the fleet login vault
+    r"(^|/)[^/]*-secret\.md(/|$)",           # ~/agents/global/tools/*-secret.md
+    r"(^|/)[^/]*secret[^/]*(/|$)",           # any path segment naming a secret
+    r"(^|/)\.env(/|$)",                      # .env
+    r"(^|/)\.env\.[^/]*(/|$)",               # .env.local, .env.production
+    r"(^|/)profile(/|$)",                    # ~/agents/global/profile/
+    r"(^|/)documents(/|$)",                  # ~/agents/global/documents/
+    r"(^|/)\.config/pw-[^/]*",               # playwright session profiles
+    r"(^|/)[^/]*cookies[^/]*(/|$)",          # cookies.sqlite, Cookies
+    r"(^|/)[^/]*\.pem(/|$)",
+    r"(^|/)[^/]*\.key(/|$)",
+    r"(^|/)id_rsa[^/]*(/|$)",
+    r"(^|/)[^/]*tokens?[^/]*(/|$)",          # token / tokens / *token*.json
+    r"(^|/)[^/]*credentials?[^/]*(/|$)",     # ~/.aws/credentials, credentials.json
+)
+_BLOCKED_RX = re.compile("|".join(BLOCKED_PATH_PATTERNS), re.I)
+SKIPPED_FACT = "skipped: blocked path"
+
+
+def is_blocked_path(p, allow=()):
+    """True when `p` must never be opened, read, grepped or listed. See
+    atoms.py's function of the same name for the full contract."""
+    if not p:
+        return False
+    full = os.path.expanduser(str(p))
+    for a in allow or ():
+        a = os.path.expanduser(str(a))
+        if full == a or full.startswith(a.rstrip("/") + "/"):
+            return False
+    return bool(_BLOCKED_RX.search(full))
+
+
+def blocked_path_fact(path, source="path"):
+    """The fact a gatherer returns INSTEAD of reading a blocked path."""
+    return {"ok": False, "value": None, "source": source, "blocked": True,
+            "cmd": f"({SKIPPED_FACT}: {path})", "exists": None, "path": path,
+            "full": None, "lines": None, "state": "blocked"}
+
+
+_REDACT_PATTERNS = (
+    ("openai-key", r"\bsk-[A-Za-z0-9_\-]{12,}"),
+    ("github-token", r"\bgh[pousr]_[A-Za-z0-9]{12,}"),
+    ("slack-token", r"\bxox[baprs]-[A-Za-z0-9\-]{8,}"),
+    ("aws-key-id", r"\bAKIA[0-9A-Z]{12,}"),
+    ("bearer-token", r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"),
+    ("authorization", r"(?i)\bauthorization\s*:\s*\S+"),
+    ("long-hex", r"\b[0-9a-fA-F]{65,}\b"),
+    ("api-key", r"\b[A-Za-z0-9_\-]{30,}\b"),
+)
+_EMAIL_PATTERN = ("email", r"\b[\w.+\-]+@[\w\-]+\.[\w.\-]{2,}\b")
+_HEX_ONLY_RX = re.compile(r"^[0-9a-fA-F]+$")
+
+
+def _looks_like_digest(s):
+    return bool(_HEX_ONLY_RX.match(s)) and len(s) <= 64
+
+
+def _looks_like_identifier(s):
+    parts = re.split(r"[-_]", s)
+    if len(parts) < 2:
+        return False
+    if any(len(p) > 12 for p in parts):
+        return False
+    for p in parts:
+        if any(c.isupper() for c in p) and any(c.isdigit() for c in p):
+            return False
+    return True
+
+
+def _is_secret_blob(s):
+    if len(s) < 30:
+        return False
+    if _looks_like_digest(s):
+        return False
+    if not (any(c.isalpha() for c in s) and any(c.isdigit() for c in s)):
+        return False
+    if _looks_like_identifier(s):
+        return False
+    return True
+
+
+def _path_segment(text, start, end):
+    before = text[start - 1] if start > 0 else ""
+    after = text[end] if end < len(text) else ""
+    return before == "/" and after in ("/", "")
+
+
+_COMPILED_REDACT = tuple((k, re.compile(p)) for k, p in _REDACT_PATTERNS)
+_COMPILED_EMAIL = (_EMAIL_PATTERN[0], re.compile(_EMAIL_PATTERN[1]))
+
+
+def redact_counted(text, redact_emails=False):
+    """Return (redacted_text, count, by_kind) — the Python mirror of
+    evidence-guard.ts's `redactCounted`. Never raises."""
+    if not text:
+        return (text or ""), 0, {}
+    out = str(text)
+    by_kind = {}
+    for kind, rx in _COMPILED_REDACT:
+        def repl(m, kind=kind):
+            span = m.group(0)
+            if kind == "api-key" and _path_segment(out, m.start(), m.end()):
+                return span
+            if kind == "api-key" and not _is_secret_blob(span):
+                return span
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+            return f"[REDACTED:{kind}]"
+        out = rx.sub(repl, out)
+    if redact_emails:
+        kind, rx = _COMPILED_EMAIL
+        def repl_email(m, kind=kind):
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+            return f"[REDACTED:{kind}]"
+        out = rx.sub(repl_email, out)
+    count = sum(by_kind.values())
+    return out, count, by_kind
+
+
+def redact(text, redact_emails=False):
+    """Convenience form that drops the count (atoms.py's `redact` signature)."""
+    return redact_counted(text, redact_emails)[0]
+
+
+class GuardTally:
+    """Running counters accumulated across one door call: how many paths
+    were skipped and how many redactions were made, for the `guard`
+    subcommand / `--explain` and the ledger."""
+
+    def __init__(self):
+        self.paths_skipped = 0
+        self.redactions = 0
+        self.by_kind = {}
+
+    def check_path(self, p, allow=()):
+        blocked = is_blocked_path(p, allow)
+        if blocked:
+            self.paths_skipped += 1
+        return blocked
+
+    def redact(self, text, redact_emails=False):
+        out, count, by_kind = redact_counted(text, redact_emails)
+        self.redactions += count
+        for k, v in by_kind.items():
+            self.by_kind[k] = self.by_kind.get(k, 0) + v
+        return out
+
+    def summary(self):
+        return f"guard: {self.paths_skipped} path(s) skipped, {self.redactions} redaction(s)"
+
+    def to_dict(self):
+        return {"paths_skipped": self.paths_skipped, "redactions": self.redactions,
+                "by_kind": dict(self.by_kind)}
+
 
 GATE_CMD_ENV = "SUPERJEV_GATE_CMD"
 VERIFY_CMD_ENV = "SUPERJEV_VERIFY_CMD"
@@ -1872,14 +2042,21 @@ def _gh_pr_evidence(report_text, worktree, commands_log):
     return entry
 
 
-def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None):
+def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, guard=None):
     """Best-effort git/test/PR evidence, gathered read-only, in the shape
     src/enhance/derive-facts.ts's `Evidence` type expects. Never raises;
     a block this cannot gather is simply left out, same contract as
     worker-verify's own "not gathered" blocks. `commands_log`, if passed,
     collects every `gh` command this run attempted (see _gh_pr_evidence),
-    for `--explain`."""
+    for `--explain`. `guard`, if passed, is a GuardTally: every path this
+    gatherer would open is checked against is_blocked_path first (a
+    blocked path is never opened; it gets blocked_path_fact instead, so
+    it reads UNPROVABLE, never FALSE), and the test command's captured
+    output is redacted before it enters the evidence pack — this is the
+    evidence-guard.ts / atoms.py blocklist+redactor's Python mirror, wired
+    into the one gatherer worker-verify's door-absent fallback uses."""
     evidence = {}
+    guard = guard if guard is not None else GuardTally()
     paths, hashes, branches = _light_atoms(report_text)
 
     if worktree:
@@ -1907,6 +2084,9 @@ def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None):
             for p in paths:
                 full = p if os.path.isabs(p) else (wt / p)
                 full = Path(full)
+                if guard.check_path(str(full)) or guard.check_path(p):
+                    lengths.append(blocked_path_fact(p))
+                    continue
                 exists = full.exists() and full.is_file()
                 ok_tr, _ = _git_out(["ls-files", "--error-unmatch", p], wt)
                 tracked.append({"path": p, "existsOnDisk": full.exists(), "tracked": ok_tr})
@@ -1957,7 +2137,7 @@ def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None):
                 out = (p.stdout or "") + (p.stderr or "")
             except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 out = f"TEST COMMAND FAILED TO RUN: {exc}"
-            evidence["tests"] = {"command": test_cmd, "output": out}
+            evidence["tests"] = {"command": test_cmd, "output": guard.redact(out)}
         else:
             evidence["tests"] = {"command": test_cmd, "output": f"REFUSED: {bad}"}
 
@@ -2012,7 +2192,8 @@ def _derived_facts_fallback(report_text, worktree, test_cmd, explain=False):
     if not worktree and not test_cmd:
         return None
     gh_commands = []
-    evidence = _gather_local_evidence(report_text, worktree, test_cmd, commands_log=gh_commands)
+    guard = GuardTally()
+    evidence = _gather_local_evidence(report_text, worktree, test_cmd, commands_log=gh_commands, guard=guard)
     if not evidence:
         return None
     claims = presplit_claims(report_text) or [report_text.strip()]
@@ -2048,13 +2229,14 @@ def _derived_facts_fallback(report_text, worktree, test_cmd, explain=False):
         else:
             lines.append("--explain: no gh commands run (no PR named in the report, "
                          "or gh is not on PATH).")
+        lines.append(f"--explain: {guard.summary()} (evidence-guard blocklist+redactor).")
     lines.append("")
     lines.append("No judge is reachable in this fallback (worker-verify is not installed "
                 "and SUPERJEV_VERIFY_CMD is not set), so nothing here can be called CLEAN. "
                 "Any claim not listed above as CONTRADICTED_BY_FACT is UNVERIFIED — read it "
                 "yourself.")
     code = 4 if verdicts else 3
-    return "\n".join(lines), verdicts, code
+    return "\n".join(lines), verdicts, code, guard
 
 
 def cmd_verify(a):
@@ -2078,8 +2260,14 @@ def cmd_verify(a):
                                            explain=explain) if report_text else None
         if fallback is None:
             return door_refuse(json_mode, "verify", bad)
-        block, verdicts, code = fallback
+        block, verdicts, code, guard = fallback
         summary = VERIFY_VERDICT.get(code, f"exit {code}")
+        ledger_append({
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "door": "verify", "argv": ["<fallback:derive-facts>"],
+            "exit_code": code, "ms": 0, "json_mode": json_mode, "hook_mode": hook_mode,
+            "fallback": "derive-facts", "guard": guard.to_dict(),
+        })
         if json_mode:
             emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code, summary,
                       {"stdout": block, "stderr": "", "fallback": "derive-facts"}, [])
@@ -2280,6 +2468,59 @@ def cmd_permit(a):
                   f"permit exited {code}", details, cmd)
         return code
     return run_door(cmd, cwd=repo, door="permit")
+
+
+# ---------------------------------------------------------------- guard
+
+def cmd_guard(a):
+    """`super-jev guard` — run the evidence-guard blocklist+redactor over
+    --paths (checked and, if readable, redacted) and/or --text (redacted),
+    entirely locally, no model call, no ledger call other than its own
+    counts. Exit 0 always: this door only reports, it never blocks by
+    itself — the callers wired into it (verify's fallback gatherer, the
+    Stop-hook gate window builder) are what actually skip a path or refuse
+    to send text."""
+    json_mode = getattr(a, "json", False)
+    guard = GuardTally()
+    path_reports = []
+    for p in (a.paths or []):
+        blocked = guard.check_path(p, allow=a.allow_path or [])
+        entry = {"path": p, "blocked": blocked}
+        if blocked:
+            entry["fact"] = blocked_path_fact(p)
+        else:
+            try:
+                raw = Path(p).read_text(encoding="utf-8", errors="replace")
+                entry["redacted"] = guard.redact(raw, redact_emails=a.redact_emails)
+            except OSError as exc:
+                entry["error"] = str(exc)
+        path_reports.append(entry)
+    text_result = None
+    if a.text is not None:
+        text_result = guard.redact(a.text, redact_emails=a.redact_emails)
+    summary = guard.summary()
+    ledger_append({
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "door": "guard", "argv": ["guard"] + list(a.paths or []),
+        "exit_code": 0, "ms": 0, "json_mode": json_mode, "hook_mode": False,
+        "guard": guard.to_dict(),
+    })
+    if json_mode:
+        emit_json("guard", "RAN", 0, summary,
+                  {"paths": path_reports, "text": text_result, "guard": guard.to_dict()}, [])
+        return 0
+    print(summary)
+    for entry in path_reports:
+        if entry["blocked"]:
+            print(f"  BLOCKED  {entry['path']}  ({SKIPPED_FACT})")
+        elif "error" in entry:
+            print(f"  ERROR    {entry['path']}  ({entry['error']})")
+        else:
+            print(f"  OK       {entry['path']}")
+    if text_result is not None:
+        print("\n--- redacted text ---")
+        print(text_result)
+    return 0
 
 
 # ---------------------------------------------------------------- chain
@@ -3418,11 +3659,21 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     window's HEAD is trimmed (its tail — the current turn — is the part the
     window builder already treats as highest priority). Returns
     (text, facts, meta) where meta carries facts_count/facts/facts_bytes/
-    window_trimmed_bytes for `--explain`. With no derivable fact the window
-    is returned byte-for-byte unchanged."""
+    window_trimmed_bytes/guard for `--explain`. With no derivable fact the
+    redacted window is still returned (byte-for-byte unchanged only when
+    nothing secret-shaped was in it).
+
+    Every window is redacted (evidence-guard's `redact`) before it is used
+    for anything — deriving facts from it or handing it to the judge —
+    which is the Stop-hook gate window's half of the blocklist+redactor
+    guard (see the EVIDENCE GUARD section above); `meta["guard"]` carries
+    the redaction count for `--explain`."""
+    guard = GuardTally()
+    window_text = guard.redact(window_text)
+    meta_guard = guard.to_dict()
     facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
     meta = {"facts_count": len(facts), "facts": list(facts), "facts_bytes": 0,
-            "window_trimmed_bytes": 0}
+            "window_trimmed_bytes": 0, "guard": meta_guard}
     if not facts:
         return window_text, facts, meta
     cap = cap_bytes if cap_bytes is not None else _hook_evidence_cap_bytes()
@@ -3952,6 +4203,9 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                  if m.get('window_trimmed_bytes') else ""))
         for f in m.get("facts") or []:
             print(f"    fact            : {f}")
+        g = m.get("guard") or {}
+        print(f"  evidence guard    : {g.get('paths_skipped', 0)} path(s) skipped, "
+              f"{g.get('redactions', 0)} redaction(s) made over this window")
         print(f"  total             : {m.get('total_bytes', 0)} bytes")
         print(f"  current turn empty: {'YES — secondary NS/CONTRADICTED arm suppressed, '
               'primary OVERCLAIMS arm unaffected' if m.get('current_turn_empty') else 'no'}")
@@ -5862,6 +6116,18 @@ def build_parser():
     pm.add_argument("--stub", action="store_true", help="offline stub, no key, no network")
     _add_json_flag(pm)
     pm.set_defaults(func=cmd_permit)
+
+    gd = subs.add_parser("guard", help="the blocklist+redactor: which paths would be "
+                                       "skipped, what would be redacted")
+    gd.add_argument("--paths", nargs="*", default=[],
+                    help="paths to check; a blocked one is reported, never opened")
+    gd.add_argument("--allow-path", nargs="*", default=[], dest="allow_path",
+                    help="explicit prefix override, unblocks a path under it")
+    gd.add_argument("--text", default=None, help="text to redact directly (not a file)")
+    gd.add_argument("--redact-emails", action="store_true", dest="redact_emails",
+                    help="also redact email addresses (off by default)")
+    _add_json_flag(gd)
+    gd.set_defaults(func=cmd_guard)
 
     ch = subs.add_parser("chain", help="evidence completeness before the final question")
     ch.add_argument("--spec", required=True, help="role spec, JSON")
