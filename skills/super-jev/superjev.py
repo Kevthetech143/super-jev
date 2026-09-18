@@ -6169,6 +6169,61 @@ def _is_launch_ack(text):
     return False, ""
 
 
+# Words that, immediately before an absolute path, mark that path as the
+# report's OWN naming of its worktree rather than some other path the
+# report happens to mention (an evidence file, a log path, etc.) — see
+# _worktree_from_report.
+_WORKTREE_HINT_RE = re.compile(
+    r'(?:\bworktree\b\s*[:=]?\s*|\bWorktree:\s*|\bin\s+)$', re.IGNORECASE)
+
+
+def _worktree_from_report(text):
+    """The worker's own worktree, derived from the free text of its report
+    (a PostToolUse tool_response, or a <teammate-message> body) — the
+    fallback used when neither the hook payload nor SUPERJEV_HOOK_WORKTREE
+    names one. Scans every absolute path the report mentions
+    (`/Users/<user>/...`-shaped, no spaces) and accepts a candidate only
+    when it (a) exists on disk, (b) is a directory, and (c) contains a
+    `.git` entry (file or directory) — i.e. it really is a git worktree or
+    repo, not just any directory the worker happened to type. A candidate
+    that matches the module's own EVIDENCE GUARD blocklist (see
+    is_blocked_path / BLOCKED_PATH_PATTERNS, above — the fleet's own
+    credential-adjacent path patterns) is never accepted, no matter how it
+    looks otherwise — the existence/`.git` checks guard against a
+    FABRICATED repo, not against a report naming a real, sensitive path on
+    this machine.
+
+    Among qualifying candidates, one introduced by the words "worktree",
+    "Worktree:", or "in /..." immediately before it wins over the rest;
+    failing that, the first qualifying candidate in reading order wins.
+    Returns None if the report mentions no qualifying path."""
+    if not text:
+        return None
+    first_ok = None
+    hinted = None
+    for m in re.finditer(r'/Users/[^/\s\'"]+/[^\s\'"\)]+', text):
+        candidate = m.group(0).rstrip("/.,;:)")
+        if not candidate:
+            continue
+        if is_blocked_path(candidate):
+            continue
+        try:
+            p = Path(candidate)
+            if not p.is_dir():
+                continue
+            if not (p / ".git").exists():
+                continue
+        except OSError:
+            continue
+        if first_ok is None:
+            first_ok = candidate
+        if hinted is None:
+            prefix = text[max(0, m.start() - 12):m.start()]
+            if _WORKTREE_HINT_RE.search(prefix):
+                hinted = candidate
+    return hinted or first_ok
+
+
 def _hook_evidence_paths(payload):
     """payload['evidence'], a list of path strings, if present, else [].
     This is the back-compat path for a caller that builds its own smaller
@@ -6182,7 +6237,7 @@ def _hook_evidence_paths(payload):
 
 
 def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, reason=None,
-              hook_mode=True, source=None, health=None):
+              hook_mode=True, source=None, health=None, worktree_source=None):
     """One ledger line for a hook decision. `exit_code` is the real code
     this hook invocation is about to return (never hard-coded to 0) —
     2 for a block, 0 for everything else, including a fail-open skip.
@@ -6201,7 +6256,12 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
     come from a real Claude Code hook firing. `health`, if given, records
     the evidence-gather health this run judged itself against — "none" for
     the no-tool-evidence unchecked path (see _hook_unchecked), else
-    whatever _evidence_inventory/_gather_healthy found."""
+    whatever _evidence_inventory/_gather_healthy found. `worktree_source`,
+    if given, is the verify door's own record of where its worktree came
+    from — "payload" | "env" | "report" | "none" (see
+    _worktree_from_report) — so a reviewer reading the ledger can see
+    whether the door trusted a path the WORKER itself named in its report
+    text, distinct from one the hook payload or the environment carried."""
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "door": "hook",
@@ -6223,6 +6283,8 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
         entry["reason"] = reason
     if source is not None:
         entry["source"] = source
+    if worktree_source is not None:
+        entry["worktree_source"] = worktree_source
     ledger_append(entry)
 
 
@@ -7204,9 +7266,15 @@ def cmd_hook(a):
         else "report" | "text" | "message" (string) — back-compat.
         else the transcript_path fallback, same as gate.
         "worktree" (string), if present in the payload, else
-          SUPERJEV_HOOK_WORKTREE from the environment, else none — this is
-          deliberately never derived from the payload's own "cwd" (that
-          describes the lead session, not necessarily the worker's tree).
+          SUPERJEV_HOOK_WORKTREE from the environment, else a worktree
+          derived from the report text itself (see
+          _worktree_from_report — an absolute path the report names that
+          exists on disk, is a directory, and contains a `.git` entry),
+          else none — this is deliberately never derived from the
+          payload's own "cwd" (that describes the lead session, not
+          necessarily the worker's tree). Which of these three sources
+          actually won is recorded on the ledger line as
+          "worktree_source".
     """
     door = getattr(a, "door", "?")
     _catch_t0 = time.monotonic()
@@ -7307,6 +7375,9 @@ def cmd_hook(a):
         return 0
 
     budget = StopBudget()
+    worktree_source = None  # set for real inside the verify branch below;
+                             # stays None for door=="gate", which never
+                             # resolves a worktree at all
     try:
         # The teammate-report scan runs off transcript_path/session_id
         # alone, independent of whatever this Stop event's own gate
@@ -7508,7 +7579,22 @@ def cmd_hook(a):
                          draft_text=text, start_time=_catch_t0, payload=payload)
                 return 0
 
-            worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
+            # Precedence: payload's own "worktree" key, then the env var,
+            # then the report's own text (see _worktree_from_report) — a
+            # real PostToolUse(Agent) payload carries neither of the first
+            # two, so without this third source _evidence_inventory below
+            # always sees a thin gather and the door is advisory-only.
+            # worktree_source records which one actually won, for the
+            # ledger (see _hook_log's own docstring).
+            if payload.get("worktree"):
+                worktree = payload.get("worktree")
+                worktree_source = "payload"
+            elif os.environ.get(HOOK_WORKTREE_ENV):
+                worktree = os.environ.get(HOOK_WORKTREE_ENV)
+                worktree_source = "env"
+            else:
+                worktree = _worktree_from_report(text)
+                worktree_source = "report" if worktree else "none"
 
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
@@ -7674,7 +7760,8 @@ def cmd_hook(a):
             print(advisory)
             _hook_log(f"verify: unchecked — no evidence gathered (exit {code} "
                      f"suppressed — {reason_bits}) — advisory, not judged", exit_code=0,
-                     flags=flags, unchecked=True, health="none", reason="no-evidence")
+                     flags=flags, unchecked=True, health="none", reason="no-evidence",
+                     worktree_source=worktree_source)
             catch_log(door, "unchecked", reasons=["no-evidence"] + block_notes,
                      draft_text=text, window_bytes=_catch_window_bytes,
                      start_time=_catch_t0, payload=payload)
@@ -7682,7 +7769,7 @@ def cmd_hook(a):
             return 0
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
-                     flags=flags, reason=suppressed_reason)
+                     flags=flags, reason=suppressed_reason, worktree_source=worktree_source)
             catch_log(door, "allow", reasons=block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
@@ -7728,7 +7815,7 @@ def cmd_hook(a):
             _hook_log(f"{door}: block (exit {code})" +
                      (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
                      (f" — advisory: {'; '.join(block_notes)}" if block_notes else ""),
-                     exit_code=2, flags=flags)
+                     exit_code=2, flags=flags, worktree_source=worktree_source)
             catch_log(door, "block", reasons=block_reasons + block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
@@ -7738,7 +7825,7 @@ def cmd_hook(a):
         advisory = f"super-jev {door} advisory (exit {code}){note_tail}"
         print(advisory)
         _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags,
-                 reason=suppressed_reason)
+                 reason=suppressed_reason, worktree_source=worktree_source)
         catch_log(door, "advisory", reasons=block_notes, draft_text=text,
                  window_bytes=_catch_window_bytes, start_time=_catch_t0,
                  payload=payload)
