@@ -68,6 +68,10 @@
 #     the gate can judge, this script prints "budget exceeded, not judged"
 #     and exits 3 — advisory, never a block — and the ledger records
 #     reason "budget-exceeded" in the health monitor's LOST bucket.
+#     That reason is for an UNJUDGED REPLY only. The advisory scan
+#     deferring its worker-report checks logs "stop-scan-deferred"
+#     instead, which is a DEFERRED record: the reply was still judged
+#     by the gate, and the deferred reports are retried next Stop.
 #     SUPERJEV_GATE_WINDOW_TOK (default 8000) is the one hard cap on the
 #     evidence window, applied once right before the call, giving up
 #     previous turns, then receipts, then the cited-file tail, then worker

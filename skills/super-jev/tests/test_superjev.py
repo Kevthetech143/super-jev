@@ -4252,7 +4252,14 @@ def test_skip_reason_bucket_table():
     assert sj._skip_reason_bucket("no-tool-evidence") == "thin"  # legacy tag
     assert sj._skip_reason_bucket("bad-stdin") == "lost"
     assert sj._skip_reason_bucket("unexpected-error") == "lost"
-    assert sj._skip_reason_bucket("stop-scan-timeout") == "lost"
+    # Deliberate move, 2026-09-18: both of the advisory scan's own
+    # refusals are DEFERRED, not LOST. The scan running out of time or of
+    # its call allowance does not mean a reply went unjudged — the gate
+    # judges the reply on that same event, and the scan's state file only
+    # advances past reports it actually attempted, so the rest come back
+    # on the next Stop event.
+    assert sj._skip_reason_bucket("stop-scan-timeout") == "deferred"
+    assert sj._skip_reason_bucket("stop-scan-deferred") == "deferred"
     # unknown reasons count as LOST, by design
     assert sj._skip_reason_bucket("some-new-reason-nobody-named-yet") == "lost"
     assert sj._skip_reason_bucket("not-agent-tool") == "lost"
@@ -5636,10 +5643,14 @@ def test_stop_scan_defers_when_the_event_budget_is_spent(tmp_path, monkeypatch, 
     assert _run_stop_scan(tmp_path, monkeypatch, records) == 0
     assert [c for c in calls if "--kit" not in c] == []
     rows = [json.loads(l) for l in sj._ledger_lines()]
-    budget_rows = [r for r in rows if r.get("reason") == "budget-exceeded"]
+    # The scan deferring is NOT the gate failing to judge. It gets its own
+    # reason, and that reason must never be the unjudged-reply one.
+    assert [r for r in rows if r.get("reason") == "budget-exceeded"] == []
+    budget_rows = [r for r in rows if r.get("reason") == sj.SCAN_DEFERRED_REASON]
     assert budget_rows, "the deferral must be on the ledger"
     assert budget_rows[-1]["source"] == "stop-transcript"
-    assert "deferred to the next Stop event" in budget_rows[-1]["note"]
+    assert "retried on the next Stop event" in budget_rows[-1]["note"]
+    assert "not judged" not in budget_rows[-1]["note"]
 
 
 def test_gate_budget_exceeded_is_advisory_exit_3_and_says_it_did_not_judge(
@@ -5682,6 +5693,65 @@ def test_budget_exceeded_is_a_lost_check_not_a_deferral():
     # The health monitor warns on the first LOST occurrence. A reply that
     # shipped unjudged belongs there, not in the quiet "deferred" bucket.
     assert sj._skip_reason_bucket("budget-exceeded") == sj.SKIP_BUCKET_LOST
+
+
+def test_the_scans_own_deferrals_are_deferred_not_lost():
+    # Regression, 2026-09-18: the advisory teammate-report scan logged the
+    # gate's "budget-exceeded" reason when it ran short of budget or of its
+    # call allowance. The reply was judged on that same event and the
+    # deferred reports are retried on the next one, so counting these as
+    # LOST pinned a permanent false "lost check(s) N/20" warning on any
+    # session that spawned workers.
+    assert sj.SCAN_DEFERRED_REASON != sj.BUDGET_EXCEEDED_REASON
+    assert sj._skip_reason_bucket(sj.SCAN_DEFERRED_REASON) == sj.SKIP_BUCKET_DEFERRED
+    assert sj._skip_reason_bucket("stop-scan-timeout") == sj.SKIP_BUCKET_DEFERRED
+
+
+def test_a_judged_stop_event_never_writes_budget_exceeded(tmp_path, monkeypatch):
+    # The whole point of the fix: an event whose reply WAS judged must not
+    # leave a budget-exceeded record behind, and must not raise a LOST
+    # count, even when a new worker report makes the advisory scan defer.
+    # Shipped defaults: one call, 15s, and the scan's 20s minimum.
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+    wt = tmp_path / "wt_judged"
+    wt.mkdir()
+    seed = [_teammate_user_record("warming up", "seed", teammate_id="Nobody")]
+    path = _write_transcript(tmp_path, seed)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 0          # first Stop: state only
+    records = seed + [
+        {"message": {"role": "user", "content": "go do the thing"}},
+        _tool_result_record("ran the suite, 9 passed"),
+        _teammate_user_record(
+            f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed.",
+            "u1", teammate_id="Alice"),
+    ]
+    path = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
+    assert sj.main(["hook", "gate"]) == 0          # judged: advisory/clean
+
+    rows = [json.loads(l) for l in sj._ledger_lines()]
+    assert [r for r in rows if r.get("reason") == "budget-exceeded"] == [], \
+        "a judged reply must never be recorded as unjudged"
+    # and the health monitor must not call any of it a lost check
+    health = sj.ledger_health(window=20)
+    assert health["overall"]["lost"] == 0
+    assert sj._health_warnings(health) == []
+    assert sj._running_unchecked_notice() is None
+
+
+def test_bad_stdin_artifacts_fall_out_of_the_lost_window(tmp_path, monkeypatch):
+    # bad-stdin IS a real lost check and must warn while it is in the
+    # window — but the window is a rolling last-N of hook runs, so a test
+    # artifact ages out rather than warning forever.
+    for _ in range(2):
+        sj._hook_log("bad stdin", skipped=True, reason="bad-stdin")
+    assert sj.ledger_health(window=20)["overall"]["lost"] == 2
+    for _ in range(20):
+        sj._hook_log("gate: advisory (exit 1)", exit_code=0, skipped=False)
+    health = sj.ledger_health(window=20)
+    assert health["overall"]["lost"] == 0, "artifacts must age out of the window"
+    assert sj._health_warnings(health) == []
 
 
 def test_stop_budget_clamps_a_child_call_timeout():
