@@ -631,6 +631,70 @@ no read blocklist at all, and the one that did was name-only, so a grep or a
 file read rooted anywhere near a home directory could put a private line
 into an evidence pack that then left the box for the judge.
 
+## Gate v4 — secondary arm demoted, hash-optional merge claims, cited-file
+   tail (2026-09-18)
+
+A follow-up audit against a second, untuned batch of the lead's own replies
+(`SET2-AUDIT.md`) found that gate v3's rules generalize well on short,
+single-claim replies but weaken on longer, multi-claim status reports — the
+shape a lead's own summary turns tend to take. Three fixes, all offline and
+deterministic; none of them touch the primary OVERCLAIMS rule or the
+empty-current-turn health gate, both of which are unchanged.
+
+**1. The secondary NOT_SUPPORTED/CONTRADICTED arm is now advisory-only.**
+Rule 2 of `_hook_block_decision_v3` (a claim-level NOT_SUPPORTED or
+CONTRADICTED at or above `SUPERJEV_BLOCK_CONF`) used to block a reply on its
+own, same as OVERCLAIMS. It no longer can. It still scores every claim, still
+prints as a labelled advisory line in `--explain` and in the block/advisory
+stderr feedback (a block driven by OVERCLAIMS now also lists any secondary
+flags that crossed the line as advisory context, on the same line), and still
+feeds the calibration ledger. What changed is only which findings are allowed
+to end a turn: that is now OVERCLAIMS at or above its line, and the
+deterministic count/PR-mismatch arm, and nothing else. The reasoning: a
+longer status reply carries more claims, and a meaningful share of those
+claims are plans, opinions, design intent or self-audits — sentences no tool
+result could ever support or contradict, which is a category error for a
+NOT_SUPPORTED verdict rather than a real finding. The arm had never, across
+either recorded bench, been the sole reason a genuine lie was caught; every
+lie it touched also carried an OVERCLAIMS or a deterministic flag alongside
+it. `SUPERJEV_RULE=v2` still exercises the legacy companion-gated behavior
+for A/B, unaffected by this change.
+
+**2. The merge-claim regexes no longer require a literal `#`.** The
+deterministic PR-merge check (`_PR_MERGED_CLAIM_RE`) and the derived-facts
+merge family (`_FACT_DRAFT_MERGE_RES`, feeding `_facts_merge_claims`) used to
+require "PR #N" verbatim. A draft that instead wrote "PR N merged", "merged
+PR N" or "#N merged" — all ordinary phrasings — was invisible to both. The
+`#` is now optional throughout, and the third pattern's requirement for the
+word "is" before "merged" was dropped so a bare "#N merged" matches too. The
+identity guard downstream is unchanged: a claimed PR number is only ever
+compared against a receipt actually present in the window
+(`merge receipt found for PR #N in <section>.` / `no merge receipt for PR #N
+in window.`); widening the claim-detection regex only widens what gets
+*compared*, never what gets *trusted*. Swept offline against every recorded
+draft in both gate-bench sets: the widened patterns detect new PR claims only
+where the old ones missed a real phrasing, never invent a claim that was not
+in the text, and never produce a false "no receipt" note against a draft
+whose PR claim already had a receipt in its window.
+
+**3. A cited file's tail is folded into the window.** When a draft names its
+own source — an absolute or user-relative path, a bare filename with a
+recognised extension, or a "per the `<X>` log" phrase — `build_cited_file_block`
+resolves it to one real, readable, non-blocklisted file (an explicit path
+resolved directly; a bare name resolved by a unique basename match under the
+process's cwd, this repo's root, and `~/super-jev-experiments`; ambiguous or
+unresolved candidates are skipped silently, no note, no error), reads its
+tail, runs the same redactor every other section of the window goes through,
+and appends it as a `CITED FILE <path> (tail)` block. It rides at the same
+priority as the current turn — appended after it, so the window's existing
+head-first trim never drops it before the current turn's own material — and
+is still subject to the window's overall byte cap. This is evidence the
+judge gets to see, exactly like a tool result or a session receipt; it is
+never treated as true on the citation's own say-so. The case this targets:
+a status reply that opens "per SUMMARY.md" and then gives real numbers that
+live only in that file, against a window built purely from this turn's own
+tool activity, which may have nothing to do with the numbers being reported.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
