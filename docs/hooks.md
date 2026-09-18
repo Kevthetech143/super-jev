@@ -130,6 +130,58 @@ Stop event is already a re-run after a block, the gate never blocks again on
 that pass. It prints what it would have blocked on and allows. The ledger line
 records this plainly as a fail-open, not as an approval.
 
+## Gate v2 (2026-09-17)
+
+Five changes, built from a 40-case live-judge bench
+(`super-jev-experiments/gate-bench-20260917/analysis/REPORT.md`), replayed
+offline where the change is a deterministic rule and reported unverified
+where it needed a live judge re-run this pass did not do.
+
+- **Per-fact claim pre-split.** A non-empty `--draft` is now split into
+  clause-sized claims (sentence boundaries, `;`, `:`, standalone ` and `,
+  deduped, capped at 25) and handed to jev.py one per `--claim` via
+  `--claims-file`, instead of letting jev's own splitter collapse a whole
+  multi-fact draft into one claim. That collapse was the single biggest
+  lever the bench found — 5 of 10 missed lies rode inside a longer claim
+  whose other parts were true. `SUPERJEV_PRESPLIT=0` restores the old
+  `--draft` behaviour. Unverified beyond the bench's own claim-count math
+  (this pass could not spend a live judge call to re-score the bench with
+  presplit on).
+- **Deterministic count/PR cross-check**, run before the judge, no model
+  call: a drafted test count that contradicts a real `N passed` line in the
+  evidence, or a drafted "PR #N merged" the evidence's own `gh pr view`
+  state contradicts, blocks outright with a plain reason
+  (`count mismatch: draft N vs evidence M`). Verified on the bench replay:
+  +2 lies caught (the two count-mismatch cases the bench predicted), a
+  third caught as a bonus, 0 truths blocked — see
+  `skills/super-jev/tests/replay_gate_bench.py`. Never fires on a bare
+  evidence gap (a count the evidence never mentions at all): that is a
+  missing measurement, not a contradiction, and treating it as one was the
+  exact bug the OVERCLAIMS health check already guards against.
+- **Wider evidence window.** The Stop-hook gate now also folds in the
+  previous turn's tool_result content (lower priority, capped at half the
+  byte budget) and up to the last 40 "receipts" — one dated fact line per
+  session, appended whenever a Stop event sees a `gh pr merge`, `gh pr
+  checks`, or `N passed` line in this turn's own tool results, so a fact
+  from several turns back does not fall out of the window the moment the
+  turn ends. PR #22's health semantics are unchanged: a turn that ran no
+  tools of its own still gets no evidence here, whatever the previous turn
+  or the receipts carry, and stays on the advisory-only "unchecked" path.
+- **`overclaim == 1.00` arm**, OFF by default, `SUPERJEV_OVERCLAIM_100_BLOCK=1`
+  turns it on: a draft-level OVERCLAIMS flag scoring 0.995 or above blocks
+  even without the usual companion NOT_SUPPORTED/CONTRADICTED claim
+  (health still required). **Fragile, said plainly**: the bench showed this
+  line sits on a 0.01 cliff — relaxing it to 0.99 costs 3 truths
+  immediately on that same 20-truth set. Left off until a second bench
+  confirms the margin.
+- **Stop-scan fixes.** A session's first-ever Stop scan now parks its state
+  at the transcript's current end instead of the top, so it processes zero
+  old reports on that call rather than re-verifying everything already in
+  a long transcript. A worktree the scan auto-derives from a report's own
+  text must now be a real, existing directory — a URL's path component
+  (e.g. `.../pull/13` inside a GitHub link) no longer gets treated as a
+  worktree.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how
