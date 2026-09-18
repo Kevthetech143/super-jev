@@ -5521,6 +5521,16 @@ _FACT_RANGE_RE = re.compile(
     r'([A-Za-z][\w\-]*(?:\s+[A-Za-z][\w\-]*){0,2})\s+(?:from\s+)?('
     + _FACT_VALUE_TOKEN_RE.pattern + r')\s+(?:up\s+)?to\s+('
     + _FACT_VALUE_TOKEN_RE.pattern + r')')
+# "9 of 10", "26/30" — a ratio, never a single label's value. A label word
+# sitting right before the first number of a ratio ("door: 9 of 10 lies")
+# is naming the SENTENCE's subject, not handing this one number a value —
+# the window's own "N of M" facts (see `_FACT_N_OF_M_RE`) are how that
+# shape gets read. Both numbers in the ratio are skipped so neither end
+# can be mistaken for a labelled value, by explicit "label:" syntax or by
+# plain adjacency.
+_FACT_RATIO_RE = re.compile(
+    r'\b(' + _FACT_VALUE_TOKEN_RE.pattern + r')\s*(?:/|\bof\b)\s*('
+    + _FACT_VALUE_TOKEN_RE.pattern + r')\b', re.IGNORECASE)
 
 
 def _fact_stem(word):
@@ -5671,8 +5681,14 @@ def _fact_draft_label_values(draft_text):
             keys = _fact_label_keys(m.group(1))
             if keys:
                 out.append((keys[-1], m.group(3), True, None))
+        ratio_spans = [m.span() for m in _FACT_RATIO_RE.finditer(sentence)]
         for m in _FACT_VALUE_TOKEN_RE.finditer(sentence):
             if m.start() in range_starts:
+                continue
+            if any(start <= m.start() < end for start, end in ratio_spans):
+                # Either half of an "N of M" / "N/M" ratio — never a single
+                # label's value, whatever word sits next to it (see
+                # `_FACT_RATIO_RE`).
                 continue
             if m.end() < len(sentence) and sentence[m.end()].isalpha():
                 # See `_FACT_MIXED_ID_TAIL_RE`: only skip when the tail
