@@ -875,16 +875,26 @@ whole-window safety cut) now shrinks its slice until the *repaired* tail fits
 the budget (`_fence_safe_tail`), since the repair adds bytes and a block that
 overshot was being sliced a second time with its opener cut off.
 
-**A command invocation is not an outcome (2026-09-18, round 7).** A
-state-bearing line that an in-body rule demotes to prose keeps a separate
-"state-bearing" marker, because the demotion says how far the line may be
-trusted and not whether it speaks to the outcome at all; so when the
-strongest MERGED signal carries no state value of its own — a bare
-`gh pr merge N` invocation receipt — and any state-bearing not-merged
-signal exists at any strength, the pair is treated as unordered, which is
-a tie, and the arm fails closed on the not-merged signal with its own
-note. An invocation-only receipt can never be the sole basis for allowing
-a merge claim.
+**A command invocation is not an outcome (2026-09-18, round 7; widened
+round 8).** A state-bearing line that an in-body rule demotes to prose
+keeps a separate "state-bearing" marker, because the demotion says how
+far the line may be trusted and not whether it speaks to the outcome at
+all; so when the strongest MERGED signal carries no state value of its
+own — a bare `gh pr merge N` invocation receipt — and ANY not-merged
+signal exists at any strength, state-bearing or plain prose, the pair is
+treated as unordered, which is a tie, and the arm fails closed on the
+not-merged signal with its own note. Round 7 only caught this when the
+not-merged signal itself carried a state value; round 8 found that too
+narrow — a not-merged signal that was plain prose to begin with (never
+demoted from a state line, just a teammate saying "PR #52 is open still")
+lost outright to the invocation line on strength, so the tie rule never
+fired and the draft was wrongly allowed. An invocation-only receipt can
+never be the sole basis for allowing a merge claim against ANY not-merged
+signal — a command-invocation receipt proves only that a command was
+typed, so it carries no more weight than the prose it is being weighed
+against. Only a receipt that actually carries a state value (strength 2)
+still outranks prose; that pairing is the documented accepted tradeoff
+below and is unchanged by this widening.
 
 **The receipt floor at a tail-keep (2026-09-18, round 7).** At tiny
 budgets the fence repair's own two lines can eat most of what there is,

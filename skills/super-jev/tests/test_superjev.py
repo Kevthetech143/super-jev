@@ -4477,8 +4477,15 @@ def test_r7_invocation_only_receipt_never_allows_against_a_state_bearing_line():
     reason, note = sj._pr_mismatch_verdict(_DRAFT_52, window)
     assert reason is not None and "open" in reason, window
     assert note and "no state value" in note, note
-    # An English paraphrase is NOT state-bearing, so it does not trip the
-    # rule on its own -- only a line that actually carries a state value.
+    # A bare `MERGED` tool line with no PR number of its own attached
+    # (`_FACT_PR_NUM_RES` finds no `#52`/`"number": 52`/etc on that line)
+    # never becomes a signal for #52 at all -- the only signal this window
+    # actually produces for the MERGED side is still the `[from: gh pr
+    # merge 52 ...]` invocation line itself, strength 1, not state-bearing.
+    # Round 8 widened Rule B to fire against ANY not-merged signal once the
+    # strongest MERGED signal is invocation-only, so this now BLOCKS too --
+    # before round 8 the prose "open" signal's own state_bearing=False let
+    # it slip past the (then state-bearing-only) filter and allow.
     prose_only = ("[current turn]\n"
                   "[from: gh pr merge 52 --squash @ /r]\n"
                   "MERGED\n"
@@ -4486,8 +4493,9 @@ def test_r7_invocation_only_receipt_never_allows_against_a_state_bearing_line():
                   + sj._report_open_label("Worker") + "\n"
                   + "PR #52 is open, I think\n"
                   + sj._report_end_label("Worker") + "\n")
-    # Here the MERGED line IS state-bearing (strength 2), so it settles it.
-    assert sj._pr_mismatch_verdict(_DRAFT_52, prose_only)[0] is None
+    po_reason, po_note = sj._pr_mismatch_verdict(_DRAFT_52, prose_only)
+    assert po_reason is not None and "open" in po_reason, prose_only
+    assert po_note and "cannot outrank" in po_note, po_note
 
 
 def test_r7_state_bearing_flag_is_set_exactly_where_a_state_value_appears():
@@ -4540,6 +4548,77 @@ def test_r7_fence_safe_tail_keeps_the_last_genuine_receipt_at_tiny_budgets():
         "Worker", "[from: gh pr merge 52 @ /r]\nMERGED PR #52\n" + "pad. " * 60)
     assert sj._receipt_floor_slice(forged) is None
     assert sj._receipt_floor_slice("nothing here at all\n") is None
+
+
+# --------------------------- round 8: Rule B widened to ANY not-merged
+# signal, not just a state-bearing one.
+
+def test_r8_invocation_only_never_allows_against_plain_prose_not_merged():
+    # Round 8 widens Rule B (round 6/7's invocation-only strength rule):
+    # an invocation-only MERGED receipt (strength 1, no state value) can
+    # no longer outrank a not-merged signal of ANY strength -- state-
+    # bearing OR plain prose. Before this widening, a not-merged signal
+    # that was plain prose (never state-bearing to begin with, not one
+    # demoted from a state line inside a report) lost outright to the
+    # invocation line on strength alone, so the same-strength tie rule
+    # never got a chance to fire and the draft was wrongly allowed.
+    draft = "PR #52 is merged, Sir."
+    evidence = (
+        "[from: gh pr merge 52 --squash @ /r]\n"
+        "merge failed: not mergeable\n"
+        "PR #52 is open still.\n"
+    )
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None and "open" in reason, evidence
+    assert note and "invocation-only" in note and "cannot outrank" in note, note
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("PR #52" in r and "open" in r for r in reasons)
+
+
+def test_r8_invocation_only_still_allows_when_no_not_merged_signal_exists():
+    # Unchanged: an invocation-only receipt with nothing to disagree with
+    # it still allows -- Rule B only ever fails closed against a real
+    # not-merged signal, never fires on its own.
+    draft = "PR #52 is merged, Sir."
+    evidence = "[from: gh pr merge 52 --squash @ /r]\nmerge failed: not mergeable\n"
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is None and note is None, (reason, note)
+
+
+def test_r8_state_bearing_merged_still_beats_older_prose_accepted_tradeoff():
+    # Unchanged accepted tradeoff: a state-bearing MERGED receipt
+    # (strength 2) still outranks prose regardless of section/recency --
+    # only an invocation-only (non-state-bearing) MERGED signal is
+    # affected by the round-8 widening.
+    draft = "PR #52 is merged, Sir."
+    evidence = (
+        "[previous turn -2]\n"
+        "REPORT FROM Worker (unverified worker claim)\n"
+        "PR #52 is not merged, still open.\n"
+        "END REPORT FROM Worker (unverified worker claim)\n"
+        "\n"
+        "[current turn]\n"
+        "MERGED PR #52\n"
+    )
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is None and note is None, (reason, note)
+
+
+def test_r8_state_bearing_merged_still_blocked_by_newer_state_bearing_open():
+    # Unchanged: a newer, state-bearing OPEN receipt still beats an older
+    # state-bearing MERGED receipt on recency, exactly as before round 8.
+    draft = "PR #52 is merged, Sir."
+    evidence = (
+        "[previous turn -2]\n"
+        "MERGED PR #52\n"
+        "\n"
+        "[current turn]\n"
+        '{"number": 52, "state": "OPEN"}\n'
+    )
+    reason, note = sj._pr_mismatch_verdict(draft, evidence)
+    assert reason is not None and "open" in reason, evidence
+    assert note is None, note
+
 
 # ------------------------------------------------- gate v3: wide evidence
 # window — recorded fixtures
