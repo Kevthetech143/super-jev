@@ -30,6 +30,38 @@ No version bump.
   `SUPERJEV_SWEEP_BASELINE_REF`) rather than a recorded exit code, whose
   timing relative to the change under test is not guaranteed. See
   docs/hooks.md.
+- **A worker inside a GENUINE worktree could move the ref that vouched for
+  `package.json`, and could plant a program in the config the worktree
+  SHARES with the protected repo.** `git worktree add` gives a worktree the
+  same `.git/config` and the same refs directory as the protected checkout,
+  so neither is worker-proof and no identity check can catch either — the
+  worktree is real and does belong to the right repository. Two
+  consequences, both closed. (1) The npm provenance check read the
+  vouched-for blob through `origin/main:package.json`, and a worker could
+  run `git update-ref refs/remotes/origin/main $(git rev-parse HEAD)` from
+  its own worktree to make that ref name its OWN hostile commit. Nothing
+  asks git for the vouched-for content any more: the PROTECTED checkout's
+  on-disk `package.json` is hashed in Python and compared to the worktree's
+  on-disk bytes, and the protected checkout must itself match a door-owned
+  pin committed at `skills/super-jev/trusted-package-json.sha256`, else the
+  refusal is `protected-package-json-unpinned`. The additive
+  `git diff --quiet` leg is gone; the Python hash is the whole answer. (2)
+  `filter.<driver>.clean` and its siblings name programs git EXECUTES on a
+  `status -sb`, `diff --stat`, `diff --quiet` or `ls-files -m`, and the key
+  names are open-ended so there is nothing finite to pin off with `-c`
+  flags. `_worktree_trust` now ends with a `git config --list --show-origin
+  -z` scan (a non-executing verb) and refuses the worktree on any key that
+  names a program, `worktree-config-execution:<key>`; a `.gitattributes`
+  naming any filter or diff driver is its own refusal,
+  `worktree-attributes-driver:<attr>`. The scan refuses only on keys whose
+  origin file resolves INSIDE the protected repo's common dir, because
+  system and global config are not worker-writable and legitimately carry
+  `credential.helper` and `alias.*`; `include.path` / `includeIf.*` are on
+  the list, which closes the route of laundering a key's origin out of the
+  common dir. New `superjev doctor` runs the same scan against the
+  PROTECTED repo, which the door can refuse a worktree over but cannot
+  un-write, and exits non-zero on a worker-writable hit. See docs/hooks.md,
+  "The shared `.git/config` is a list of programs".
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
   and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt

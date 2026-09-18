@@ -3888,6 +3888,20 @@ def _git_out(args, cwd, timeout=20):
     return rc == 0, out
 
 
+def _git_stdout(args, cwd, timeout=20):
+    """(ok, STDOUT only) for one read-only git call — the form used where the
+    output is PARSED rather than shown. _git_rc and _git_out concatenate
+    stderr onto stdout, which is right for a block a human reads and wrong
+    for a NUL-delimited record stream: a warning on stderr would become an
+    extra field. Returns (False, "") when git could not be run."""
+    try:
+        p = subprocess.run(git_argv(cwd, args), capture_output=True,
+                           text=True, timeout=timeout, env=safe_git_env())
+        return p.returncode == 0, (p.stdout or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+
+
 # A PR number named in the report, the fallback's only cue that there is any
 # PR evidence worth gathering at all — "PR #N" or a `/pull/N` URL segment
 # (see _PR_NUM_RE further down for the sibling used by the hook's --pr /
@@ -4122,10 +4136,11 @@ def check_test_cmd_for_fallback(cmd, worktree, protected_repo=None):
        and its report could otherwise have this door run its script and
        accept the pass count that script printed as independent evidence of
        its own claim. So npm runs only when the worktree's package.json
-       blob matches the one the PROTECTED repo's default branch committed,
-       committed copy and working copy alike — see _npm_runner_is_trusted,
-       which explains why "unmodified against the worker's own HEAD" was
-       not enough. This is the last line; the derive paths refuse the same
+       has the same raw bytes as the PROTECTED checkout's own, and that
+       checkout matches the pin committed in the repo — see
+       _npm_runner_is_trusted, which explains why "unmodified against the
+       worker's own HEAD" and "equal to origin/main:package.json" were both
+       the attacker's own answer. This is the last line; the derive paths refuse the same
        command earlier (recording "untrusted-test-cmd:<why>"), and this
        catches every other caller.
     """
@@ -4140,10 +4155,10 @@ def check_test_cmd_for_fallback(cmd, worktree, protected_repo=None):
         if not ok:
             return (f"untrusted-test-cmd:{why} — `npm` runs whatever "
                     "package.json's scripts name, and this worktree's "
-                    "package.json is not the one the protected repo's "
-                    "default branch committed, so this command's own "
-                    "output cannot stand as evidence for the report that "
-                    "named it. Name the underlying test command directly.")
+                    "package.json is not the one the PROTECTED checkout "
+                    "holds, so this command's own output cannot stand as "
+                    "evidence for the report that named it. Name the "
+                    "underlying test command directly.")
         return None
     is_pytest = toks[0] == "pytest" or ("pytest" in toks and toks[0] in ("python", "python3"))
     if not is_pytest:
@@ -7559,6 +7574,213 @@ def _protected_repo_base(protected_repo=None):
         return None
 
 
+# TRUST BOUNDARY, second half — git's config is not just DATA git reads, it
+# is a list of PROGRAMS git runs. GIT_SAFE_FLAGS above pins the two knobs we
+# knew about; the full set is much larger, and `git worktree add` shares ONE
+# `.git/config` between the protected checkout and every worktree of it. So a
+# worker inside a GENUINE worktree — one that clears every identity check in
+# `_worktree_trust` — can write an executing key into the shared config and
+# have this door run it. Verified, not theorised:
+#
+#     git config filter.p.clean 'sh -c "..."'   # + a committed .gitattributes
+#
+# and then `status -sb`, `diff --stat`, `diff --quiet` and `ls-files -m` all
+# EXECUTE it. `rev-parse`, `log`, `show`, `cat-file`, `branch`,
+# `remote get-url` and `config --list` do not, which is why the scan below can
+# safely ask git for the config it is judging.
+#
+# There is no flag-pinning defence here: the key names are open-ended
+# (`filter.<anything>.clean`), so there is nothing finite to pin off. The
+# defence is to REFUSE the worktree.
+#
+# SCOPE — this refuses on keys a WORKER could have written, i.e. keys whose
+# `--show-origin` file lives inside the protected repo's git common dir
+# (`.git/config`, `.git/config.worktree`, `.git/worktrees/<n>/config.worktree`).
+# System and global config are deliberately NOT grounds for refusal: they are
+# not worker-writable, and on a normal developer machine they legitimately
+# carry `credential.helper`, `core.pager` and `alias.*` — refusing on those
+# would refuse every worktree on the machine and the check would be turned
+# off within a day. `include.path` / `includeIf.*` close the laundering route:
+# a worker cannot move a hostile key's origin out of the common dir without
+# first naming an include INSIDE it, and the include key is itself a refusal.
+# `command line:` origins are this door's own env pins (see
+# SAFE_GIT_CONFIG_PINS) and are never a hit. The lead's own exposure to
+# system/global keys is what `superjev doctor` reports.
+_CONFIG_EXEC_KEY_RES = tuple(re.compile(pat) for pat in (
+    # a program git runs over file CONTENT, selected per-path by .gitattributes
+    r'^filter\.(?:.*\.)?(?:clean|smudge|process|required)$',
+    # a program git runs instead of, or before, its own diff
+    r'^diff\.external$',
+    r'^diff\..*\.(?:command|textconv|cachetextconv)$',
+    # programs git runs around the working tree and the wire
+    r'^core\.(?:fsmonitor|hookspath|sshcommand|gitproxy|askpass|editor)$',
+    r'^credential(?:\..*)?\.helper$',
+    # config that pulls in MORE config, including from outside the common dir
+    r'^include\.path$',
+    r'^includeif\..*$',
+    # a name that rewrites the argv of a later git call
+    r'^alias\..*$',
+    r'^merge\..*\.driver$',
+    r'^url\..*\.(?:insteadof|pushinsteadof)$',
+    r'^remote\..*\.(?:uploadpack|receivepack)$',
+    r'^gpg\.(?:program|.*\.program)$',
+    r'^sendemail\..*$',
+    r'^ssh\.variant$',
+    r'^protocol(?:\..*)?\.allow$',
+    r'^uploadpack\..*$',
+    r'^receive\..*$',
+))
+
+# `core.pager` is the one key on the list whose VALUE decides it: `cat` is
+# what this door's own pins set, and a pager is only a program when it is not
+# that. Everything else is a refusal on the key alone.
+_SAFE_PAGER_VALUES = frozenset(("", "cat", "/bin/cat", "/usr/bin/cat"))
+
+
+def _config_key_is_execution(key, value):
+    """True when this one `git config --list` pair names something git will
+    EXECUTE, or names config that can pull in something that will."""
+    k = (key or "").strip().lower()
+    if not k:
+        return False
+    if k == "core.pager":
+        return (value or "").strip() not in _SAFE_PAGER_VALUES
+    return any(rx.match(k) for rx in _CONFIG_EXEC_KEY_RES)
+
+
+def _config_origin_is_worker_writable(origin, common_dir, cwd=None):
+    """True when a `--show-origin` prefix names a FILE inside the protected
+    repo's git common dir — the only config a worker in a worktree can
+    write. `command line:` (this door's own pins), `standard input:` and
+    `blob:` are never that. An origin that will not resolve is treated as
+    worker-writable: "I could not clear it" is not "it is fine".
+
+    `cwd` is the directory the `git config` call ran in, and it matters:
+    git prints the LOCAL config's origin as a path relative to the repo it
+    ran in (`file:.git/config`), not as an absolute one. Resolving that
+    against this process's own cwd instead would put it outside the common
+    dir and the refusal would be silently missed — which is precisely the
+    shape of bug that leaves a security check switched off while its tests
+    still pass."""
+    o = (origin or "").strip()
+    if not o.startswith("file:"):
+        return False
+    raw = o[len("file:"):]
+    if not raw or not common_dir:
+        return False
+    raw = os.path.expanduser(raw)
+    if not os.path.isabs(raw) and cwd:
+        raw = os.path.join(str(cwd), raw)
+    try:
+        real = os.path.realpath(raw)
+    except (OSError, ValueError):
+        return True
+    return _under_root(real, common_dir) or real == common_dir
+
+
+def _parse_config_list_z(out):
+    """[(origin, key, value)] out of `git config --list --show-origin -z`.
+
+    The -z form emits ORIGIN and `key\\nvalue` as separate NUL-terminated
+    fields, so origin and key can never be confused for one another. The
+    non-z form separates them with a TAB and ends each record with a
+    newline, which a VALUE is free to contain — parsing that would let a
+    crafted value forge an extra line. Hence -z."""
+    fields = out.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    rows = []
+    for i in range(0, len(fields) - 1, 2):
+        origin = fields[i]
+        key, _, value = fields[i + 1].partition("\n")
+        rows.append((origin, key, value))
+    return rows
+
+
+def _worktree_config_execution(path, common_dir):
+    """(key, origin) for the first worker-writable config key reachable from
+    `path` that git would EXECUTE, else (None, None). `("config-unreadable",
+    None)` when git cannot list the config at all — a repository whose own
+    config cannot be read is not one to run `status` in.
+
+    `config --list` does not itself fire any of the keys it reports, so this
+    is safe to run on a path that has cleared the identity checks but not
+    yet this one. It carries the same env pins as every other git call here.
+    """
+    ok, out = _git_stdout(["config", "--list", "--show-origin", "-z"], path)
+    if not ok:
+        return "config-unreadable", None
+    for origin, key, value in _parse_config_list_z(out):
+        if not _config_key_is_execution(key, value):
+            continue
+        if not _config_origin_is_worker_writable(origin, common_dir, path):
+            continue
+        return key.strip().lower(), origin
+    return None, None
+
+
+# An ATTRIBUTE names a driver; the CONFIG defines what that driver runs. So a
+# `.gitattributes` alone executes nothing — `filter=p` with no
+# `filter.p.clean` in config is inert, and the scan above already refuses the
+# definition. This is defence in depth, one layer out: it refuses the
+# ATTRIBUTE too, so a worktree that has staged half the attack is refused
+# before the other half can be added. Which also means a driver named in a
+# NESTED `.gitattributes` needs no scan of its own — it is harmless without a
+# definition the config scan would refuse.
+_ATTR_DRIVER_RE = re.compile(r'(?<![\w.\-])(filter|diff)=([^\s]+)')
+_ATTR_MAX_BYTES = 256 * 1024
+
+
+def _attributes_driver_in(text):
+    """The first `filter=<driver>` / `diff=<driver>` attribute in one
+    attributes file's text, as "filter=p", else None. A bare `diff` or
+    `-filter` names no driver and is ignored; a `[attr]` macro line is read
+    like any other, because a macro naming a driver still names one."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _ATTR_DRIVER_RE.search(line)
+        if m:
+            return f"{m.group(1)}={m.group(2)}"
+    return None
+
+
+def _read_text_capped(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(_ATTR_MAX_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _worktree_attributes_driver(path, common_dir=None):
+    """(attribute, source) for the first filter/diff DRIVER named by an
+    attributes file this worktree's git would consult, else (None, None).
+
+    Three sources, none of which executes anything: the COMMITTED
+    `.gitattributes` (`git show HEAD:.gitattributes` — `show` does not run
+    filters), the one on DISK (read in Python, so an uncommitted plant is
+    caught too), and `info/attributes` in the git common dir."""
+    ok, out = _git_out(["cat-file", "blob", "HEAD:.gitattributes"], path)
+    if ok:
+        hit = _attributes_driver_in(out)
+        if hit:
+            return hit, "HEAD:.gitattributes"
+    candidates = [(os.path.join(str(path), ".gitattributes"), ".gitattributes")]
+    if common_dir:
+        candidates.append((os.path.join(common_dir, "info", "attributes"),
+                           "info/attributes"))
+    for full, label in candidates:
+        text = _read_text_capped(full)
+        if text is None:
+            continue
+        hit = _attributes_driver_in(text)
+        if hit:
+            return hit, label
+    return None, None
+
+
 def _worktree_trust(path, protected_repo=None):
     """(trusted_realpath, refusal_why) — exactly one is None.
 
@@ -7578,7 +7800,20 @@ def _worktree_trust(path, protected_repo=None):
          repo's own common dir — i.e. it is a real `git worktree` of the
          repo this door protects, not a foreign or planted repository;
       8. when `.git` is a FILE (the worktree shape), the gitdir it points
-         at lives inside that same common dir.
+         at lives inside that same common dir;
+      9. no config key a WORKER could have written names a program git would
+         EXECUTE (see _worktree_config_execution) — "worktree-config-
+         execution:<key>". This is the one check that is not about identity:
+         `git worktree add` shares ONE `.git/config` with the protected
+         checkout, so a worker in a worktree that passes 1-8 can still write
+         `filter.<d>.clean` into it and have `git status` run it here;
+     10. no attributes file names a filter/diff DRIVER — "worktree-
+         attributes-driver:<attr>" (defence in depth; see
+         _worktree_attributes_driver).
+
+    Checks 9 and 10 go LAST on purpose: they are the only two that need git
+    to answer a question about the candidate, and they use only `config
+    --list` and `show`, neither of which fires what they are looking for.
 
     `why` is a short stable token, recorded in the ledger as
     "worktree-untrusted:<why>"."""
@@ -7636,6 +7871,19 @@ def _worktree_trust(path, protected_repo=None):
             return None, "gitdir-unreadable"
         if not _under_root(gitdir, common):
             return None, "gitdir-outside-protected-repo"
+    # (10) LAST, and after every identity check, because it is the only one
+    # that is about a GENUINE worktree. Everything above answers "is this
+    # really a worktree of the repo I protect"; this answers "does the config
+    # that worktree shares with the protected repo name a program". It runs
+    # here, at the end of the ONE validator, so that no caller can reach a
+    # firing verb without it: `config --list` and `show` do not execute a
+    # filter, `status`/`diff`/`ls-files` do.
+    key, _origin = _worktree_config_execution(real, common)
+    if key:
+        return None, f"worktree-config-execution:{key}"
+    attr, _src = _worktree_attributes_driver(real, common)
+    if attr:
+        return None, f"worktree-attributes-driver:{attr}"
     return real, None
 
 
@@ -8196,27 +8444,6 @@ _TEST_PHRASE_RE = re.compile(
     r'|python3?\s+-m\s+pytest[\w:.\-]*)', re.IGNORECASE)
 
 
-# The default-branch refs a protected repo's vouched-for package.json is
-# read from, in order. The remote-tracking ref first: it is the one a worker
-# cannot write, where a local `main` in a shared checkout can be moved.
-PROTECTED_DEFAULT_REFS = ("origin/main", "main")
-_BLOB_SHA_RE = re.compile(r'^[0-9a-f]{7,64}$')
-
-
-def _blob_sha(args, cwd):
-    """(sha, None) or (None, reason) for one `git rev-parse <ref>:<path>`
-    lookup — a real object id or nothing. A rev-parse that "succeeds" but
-    prints something that is not a hex object id (git echoes an unresolved
-    argument back on some paths) counts as a failure, so a garbled answer
-    can never be compared as if it were a blob."""
-    rc, out = _git_rc(args, cwd)
-    line = (out or "").strip().splitlines()
-    sha = line[0].strip() if line else ""
-    if rc != 0 or not _BLOB_SHA_RE.match(sha):
-        return None, "unreadable"
-    return sha, None
-
-
 def _blob_ids_of_file(path):
     """Every git object id the bytes on disk could legitimately have, as a
     set — sha1 and sha256, since the object format is a repository
@@ -8246,18 +8473,106 @@ def _blob_ids_of_file(path):
             hashlib.sha256(header + data).hexdigest()}
 
 
-def _protected_package_json_blob(protected_repo=None):
-    """(blob_sha, None) or (None, reason) — the package.json blob the
-    PROTECTED repo's default branch committed. Tried against
-    PROTECTED_DEFAULT_REFS in order; the first that resolves wins."""
-    base = _protected_repo_base(protected_repo)
-    if base is None:
-        return None, "no-protected-repo"
-    for ref in PROTECTED_DEFAULT_REFS:
-        sha, _why = _blob_sha(["rev-parse", f"{ref}:package.json"], base)
-        if sha:
-            return sha, None
-    return None, "protected-package-json-unreadable"
+# A REMOTE-TRACKING REF IS NOT A VOUCHER. `refs/remotes/origin/main` lives in
+# the SHARED git common dir that `git worktree add` gives every worktree, so a
+# worker inside a genuine worktree can run
+#
+#     git update-ref refs/remotes/origin/main $(git rev-parse HEAD)
+#
+# and `origin/main:package.json` then resolves to the worker's OWN committed
+# package.json. Asking git which blob the default branch vouches for was
+# therefore asking the attacker. So nothing below asks git anything about the
+# vouched-for content. Two things a worker cannot write are used instead:
+#
+#   1. the PROTECTED checkout's working tree. `/Users/admin/super-jev`'s own
+#      `package.json` on disk — a worker gets a worktree, never the main
+#      checkout, and `_worktree_trust` refuses the main checkout outright.
+#      Its raw bytes are hashed in Python (see _blob_ids_of_file), so no
+#      clean filter and no ref can bend the answer.
+#   2. a DOOR-OWNED pin committed in the repo, TRUSTED_PACKAGE_JSON_PIN. The
+#      protected checkout is still a working tree; it can be dirty, and a
+#      stale or edited one would otherwise vouch for whatever it happens to
+#      hold. The pin is the expected sha256 of package.json's raw bytes. The
+#      LEAD updates it when package.json legitimately changes:
+#
+#          shasum -a 256 package.json | cut -d' ' -f1 \
+#            > skills/super-jev/trusted-package-json.sha256
+#
+#      A protected checkout that does not match its own pin vouches for
+#      nothing: "protected-package-json-unpinned".
+TRUSTED_PACKAGE_JSON_PIN = os.path.join("skills", "super-jev",
+                                        "trusted-package-json.sha256")
+_SHA256_HEX_RE = re.compile(r'^[0-9a-f]{64}$')
+
+
+def _protected_repo_checkout(protected_repo=None):
+    """The MAIN checkout's working directory of the protected repo — the one
+    working tree a worker in a worktree cannot write — or None.
+
+    Derived from the git COMMON dir (`.../<repo>/.git` -> `.../<repo>`), NOT
+    from `rev-parse --show-toplevel` and NOT from this module's own location.
+    superjev.py itself runs out of a worker's worktree, so both of those name
+    the WORKTREE, which would have this compare the worker's package.json
+    against itself. A bare protected repo has no working tree at all and is
+    its own refusal."""
+    common = _protected_repo_common_dir(protected_repo)
+    if not common or os.path.basename(common) != ".git":
+        return None
+    try:
+        top = os.path.realpath(os.path.dirname(common))
+    except (OSError, ValueError):
+        return None
+    try:
+        return top if os.path.isdir(top) else None
+    except OSError:
+        return None
+
+
+def _sha256_of_file(path):
+    """The sha256 of a file's raw bytes as hex, or None when unreadable.
+    Plain sha256, not a git object id, so that the pin a human writes with
+    `shasum -a 256` is the value this compares."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _pinned_package_json_sha256(checkout):
+    """The sha256 TRUSTED_PACKAGE_JSON_PIN pins for package.json, or None
+    when the pin file is missing, empty or not a single 64-hex digest. Blank
+    lines and `#` comments are skipped; the first real line must be the
+    digest (optionally followed by a filename, as `shasum` prints it), so a
+    pin file that has been turned into something else is not silently read
+    as a pass."""
+    text = _read_text_capped(os.path.join(str(checkout), TRUSTED_PACKAGE_JSON_PIN))
+    if text is None:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        tok = line.split()[0].strip().lower()
+        return tok if _SHA256_HEX_RE.match(tok) else None
+    return None
+
+
+def _protected_package_json_ids(protected_repo=None):
+    """(blob_id_set, None) or (None, reason) — every git object id the
+    PROTECTED checkout's on-disk package.json could have, once that file has
+    been checked against the repo's own pin."""
+    checkout = _protected_repo_checkout(protected_repo)
+    if checkout is None:
+        return None, "no-protected-checkout"
+    pkg = os.path.join(checkout, "package.json")
+    ids = _blob_ids_of_file(pkg)
+    if not ids:
+        return None, "protected-package-json-unreadable"
+    pin = _pinned_package_json_sha256(checkout)
+    got = _sha256_of_file(pkg)
+    if pin is None or got is None or pin != got:
+        return None, "protected-package-json-unpinned"
+    return ids, None
 
 
 def _npm_runner_is_trusted(worktree, protected_repo=None):
@@ -8278,22 +8593,24 @@ def _npm_runner_is_trusted(worktree, protected_repo=None):
     would then run that script and read its printed pass count as
     independent evidence for the report that named it.
 
-    So the blob is compared against the protected repo's default branch,
-    which the worker cannot write:
+    The next version compared against `origin/main:package.json` in the
+    protected repo, which was still the attacker's answer: remote-tracking
+    refs live in the SHARED common dir, so a worker can move origin/main
+    onto its own commit. See _protected_package_json_ids — nothing here
+    asks git what the vouched-for content is. The steps are:
 
       1. `package.json` is tracked in the worktree at all;
-      2. the worktree's COMMITTED blob (`HEAD:package.json`) equals the
-         protected repo's default-branch blob (see
-         PROTECTED_DEFAULT_REFS) — a hostile package.json committed on the
-         worker's branch fails here, reason "package-json-differs";
-      3. the worktree's WORKING COPY hashes to that same blob id, so an
-         uncommitted edit is caught too. The hash is taken in Python off
-         the raw bytes, NOT read out of `git diff` — a
-         `filter.<driver>.clean` in the repo's config makes git report a
-         modified file as clean, and this is the decision such a filter
-         would be planted to flip. See _blob_ids_of_file. git's own
-         `diff --quiet` is consulted as well, but only to refuse; it can
-         never turn a hash mismatch into a pass.
+      2. the PROTECTED checkout's on-disk package.json matches the
+         door-owned pin committed at TRUSTED_PACKAGE_JSON_PIN, else
+         "protected-package-json-unpinned";
+      3. the worktree's on-disk package.json has the same raw bytes as the
+         protected checkout's, else "package.json-differs". Both sides are
+         hashed in PYTHON, never diffed by git: a `filter.<driver>.clean`
+         makes `git diff` report a modified file as clean, and this is the
+         exact decision such a filter would be planted to flip. (A worktree
+         carrying such a filter is refused outright one layer up, by
+         _worktree_config_execution; this is the layer that does not need
+         that to be true.)
 
     Either lookup failing to answer is a refusal, not a pass: "could not
     read the vouched-for version" is never grounds for running a script.
@@ -8304,31 +8621,16 @@ def _npm_runner_is_trusted(worktree, protected_repo=None):
     ok, _out = _git_out(["ls-files", "--error-unmatch", "--", "package.json"], worktree)
     if not ok:
         return False, "package.json-not-tracked"
-    head_blob, _why = _blob_sha(["rev-parse", "HEAD:package.json"], worktree)
-    if not head_blob:
-        return False, "package.json-head-blob-unreadable"
-    base_blob, why = _protected_package_json_blob(protected_repo)
-    if not base_blob:
+    base_ids, why = _protected_package_json_ids(protected_repo)
+    if not base_ids:
         return False, why
-    if base_blob != head_blob:
-        return False, "package-json-differs"
-    # The WORKING COPY, hashed here rather than diffed by git. A clean
-    # filter in the repo's own config can make `git diff` report a
-    # modified file as unmodified (see _blob_ids_of_file), and this is the
-    # exact decision such a filter would be planted to flip, so the
-    # authoritative answer is the hash of the bytes on disk.
-    if base_blob not in _blob_ids_of_file(os.path.join(worktree, "package.json")):
-        return False, "package.json-modified"
-    # git's own view as well, purely additive: if the two ever disagree the
-    # answer is the refusal, never the pass. 0 identical, 1 differs,
-    # anything else (including -1, git not runnable) is the command itself
-    # failing, which is its own refusal.
-    rc, _out = _git_rc(["diff", *GIT_DIFF_SAFE_FLAGS, "--quiet", "HEAD",
-                        "--", "package.json"], worktree)
-    if rc == 1:
-        return False, "package.json-modified"
-    if rc != 0:
-        return False, "package.json-diff-unreadable"
+    # Both sides are the BYTES ON DISK, hashed in Python. The worktree's copy
+    # is what npm will actually read, so it is the copy that has to match; and
+    # neither hash can be bent by a ref a worker can move or a filter a worker
+    # can define. A non-empty intersection means identical bytes: the two sets
+    # are {sha1 blob id, sha256 blob id} of the same content.
+    if not (base_ids & _blob_ids_of_file(os.path.join(worktree, "package.json"))):
+        return False, "package.json-differs"
     return True, None
 
 
@@ -10432,6 +10734,91 @@ def cmd_ask(a):
 
 # ---------------------------------------------------------------- status
 
+def cmd_doctor(a):
+    """`doctor`: run the config-execution scan against the PROTECTED repo
+    itself, and exit non-zero on a hit.
+
+    `_worktree_trust` refuses a WORKTREE whose shared config names a program.
+    That protects this door. It does not protect the LEAD, who runs ordinary
+    git commands in the main checkout and reads the SAME `.git/config` every
+    worktree shares — so a worker that wrote an executing key there is a
+    problem for the lead's own `git status` even after the door has refused
+    the worktree. This is the one command that looks at that.
+
+    It is deliberately WIDER than the worktree scan: it reports a hit from
+    system and global config too. The worktree scan ignores those because
+    they are not worker-writable and a normal machine legitimately carries
+    `credential.helper` and `alias.*` there; a human reading a doctor report
+    can tell the difference, and wants to see them.
+
+    Exit 0 when nothing is named, REFUSED when something is."""
+    json_mode = getattr(a, "json", False)
+    checkout = _protected_repo_checkout()
+    common = _protected_repo_common_dir()
+    if checkout is None or common is None:
+        summary = ("no protected repo to scan: could not resolve its main "
+                   f"checkout (${PROTECTED_REPO_ENV} is "
+                   f"{os.environ.get(PROTECTED_REPO_ENV) or 'unset'})")
+        return door_refuse(json_mode, "doctor", summary)
+
+    ok, out = _git_stdout(["config", "--list", "--show-origin", "-z"], checkout)
+    if not ok:
+        return door_refuse(json_mode, "doctor",
+                           f"could not list the git config of {checkout}")
+    hits = []
+    for origin, key, value in _parse_config_list_z(out):
+        if not _config_key_is_execution(key, value):
+            continue
+        # This process's OWN env pins (SAFE_GIT_CONFIG_PINS) come back with a
+        # `command line:` origin. Reporting them would be reporting the
+        # defence as the problem, so they are dropped from the listing.
+        if not (origin or "").strip().startswith("file:"):
+            continue
+        hits.append({
+            "key": key.strip().lower(),
+            "value": value,
+            "origin": (origin or "").strip(),
+            "worker_writable": _config_origin_is_worker_writable(origin, common,
+                                                                  checkout),
+        })
+    attr, attr_src = _worktree_attributes_driver(checkout, common)
+
+    pin = _pinned_package_json_sha256(checkout)
+    got = _sha256_of_file(os.path.join(checkout, "package.json"))
+    pin_ok = bool(pin) and bool(got) and pin == got
+
+    bad = [h for h in hits if h["worker_writable"]]
+    code = REFUSED if (bad or attr or not pin_ok) else 0
+    if json_mode:
+        emit_json("doctor", "REFUSED" if code else "CLEAN", code,
+                  f"{len(bad)} worker-writable executing config "
+                  f"key(s) in {checkout}",
+                  {"checkout": checkout, "common_dir": common, "hits": hits,
+                   "attributes_driver": attr, "attributes_source": attr_src,
+                   "package_json_pinned": pin_ok}, [])
+        return code
+
+    print(f"protected repo: {checkout}")
+    print(f"git common dir: {common}")
+    print(f"package.json matches {TRUSTED_PACKAGE_JSON_PIN}: "
+          f"{'yes' if pin_ok else 'NO'}")
+    if attr:
+        print(f"ATTRIBUTES DRIVER: {attr}  (from {attr_src})")
+    if not hits:
+        print("no config key names a program git would execute.")
+    for h in hits:
+        where = "WORKER-WRITABLE" if h["worker_writable"] else "outside the repo"
+        print(f"  [{where}] {h['key']} = {h['value']}\n      origin: {h['origin']}")
+    if code:
+        print("\nVERDICT: REFUSED — something in this repo's own config or "
+              "attributes names a program git would run, or package.json no "
+              "longer matches its pin. Read the lines above before running "
+              "any git verb here.")
+    else:
+        print("\nVERDICT: CLEAN")
+    return code
+
+
 def cmd_status(a):
     json_mode = getattr(a, "json", False)
     repo = repo_path()
@@ -10707,6 +11094,12 @@ def build_parser():
     ak = subs.add_parser("ask", help="one plain sentence; it picks the door")
     ak.add_argument("sentence", help="one plain sentence")
     ak.set_defaults(func=cmd_ask)
+
+    dr = subs.add_parser("doctor",
+                         help="scan the PROTECTED repo's own git config for keys "
+                              "that name a program git would execute")
+    _add_json_flag(dr)
+    dr.set_defaults(func=cmd_doctor)
 
     st = subs.add_parser("status", help="which doors are live, which are not built")
     st.add_argument("--window", type=int, default=DEFAULT_LEDGER_WINDOW,
