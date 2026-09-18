@@ -109,6 +109,16 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# `window_model` is a bare module in the skill directory, not a package, so
+# there is no relative import that reaches it. Appending rather than
+# inserting is deliberate: the registry must not reorder the importing
+# process's own search path. Cheap: window_model's own top-level imports
+# are stdlib only, and it reaches `superjev` lazily.
+_SKILL_DIR = str(Path(__file__).resolve().parent.parent)
+if _SKILL_DIR not in sys.path:
+    sys.path.append(_SKILL_DIR)
+import window_model as _wm                               # noqa: E402
+
 __all__ = [
     "Verdict", "ArmSpec", "ArmRun", "JudgeEvidence", "MODES", "DEFAULT_MODE",
     "ARM_MODE_ENV_PREFIX", "ARMS_CONFIG_ENV", "ARMS_SWITCH_ENV",
@@ -144,8 +154,14 @@ ARMS_SWITCH_ENV = "SUPERJEV_ARMS"
 ARMS_EXTRA_DIR_ENV = "SUPERJEV_ARMS_EXTRA_DIR"
 
 #: The header the contributed-evidence block is written under, when an
-#: arm's `contribute` put lines in front of the judge.
-CONTRIBUTED_HEADER = "[contributed by check arms]"
+#: arm's `contribute` put lines in front of the judge. An ALIAS of
+#: `window_model.HEADER_CONTRIBUTED`, imported rather than re-typed: the
+#: renderer that writes this line and the reader that recognises it must
+#: never be able to disagree about its bytes. They used to — the header
+#: was not a header the reader knew, so the whole block was folded into
+#: the section above it, and a block landing under `[session receipts]`
+#: had every one of its lines re-parse as a TRUSTED receipt.
+CONTRIBUTED_HEADER = _wm.HEADER_CONTRIBUTED
 
 _PKG_DIR = Path(__file__).resolve().parent
 
@@ -235,14 +251,44 @@ class JudgeEvidence:
         self.header = header
 
     def render(self):
+        """The window plus this run's contributed block, as bytes.
+
+        The block is a FIRST-CLASS window section
+        (`window_model.SECTION_CONTRIBUTED`), not a note appended after
+        one, and the difference is the whole security of it. Written under
+        a header the reader does not recognise, the `===` before it was
+        not a section boundary, so `window_model._section_chunks` folded
+        the block into the chunk above — and a block landing under
+        `[session receipts]` had every line, plus any forged
+        `[from: ...]` tail, re-parse as a TRUSTED session receipt. Arm
+        text laundered into a receipt by nothing but its position.
+
+        Three things keep that shut, and they are independent:
+
+        * the header is `window_model.HEADER_CONTRIBUTED`, which
+          `section_for_header` knows, so the `===` IS a boundary;
+        * its `emit_slot` is the highest, so the boundary is one the
+          reader will accept after every other section;
+        * every line goes through
+          `window_model.neutralise_contributed_line`, which strips any
+          `[from: ...]` identity tail and quotes the line, so no single
+          line passes for a receipt row on its own shape either.
+
+        Should the fold ever happen anyway — a window carrying an
+        unbounded report body makes every later `===` un-provable — the
+        block is absorbed into that report's CLAIM. Untrusted either way:
+        there is no arrangement of these bytes that gains trust.
+        """
         base = ""
         if self.window is not None:
             render = getattr(self.window, "render", None)
             base = render() if callable(render) else str(self.window)
         if not self.lines:
             return base
-        block = "\n".join([self.header, *self.lines])
-        return f"{base}\n\n===\n\n{block}\n" if base else block + "\n"
+        safe = [_wm.neutralise_contributed_line(ln) for ln in self.lines]
+        block = "\n".join([self.header, *safe])
+        return (f"{base}{_wm.SECTION_SEPARATOR}{block}\n" if base
+                else block + "\n")
 
     def __getattr__(self, item):
         # Every Window query an arm might make still works through here,
@@ -507,7 +553,7 @@ def make_judge_accessor(window, draft, judge=None):
     return accessor
 
 
-def judge_only_blocks(verdicts, kinds):
+def judge_only_blocks(verdicts, kinds, weak_verdicts=None):
     """The gate's judge-advisory failsafe rule, in registry terms.
 
     True when there IS at least one blocking verdict and EVERY blocking
@@ -519,12 +565,27 @@ def judge_only_blocks(verdicts, kinds):
     `kinds` is `{arm name: KIND}` — `ArmRun.kinds` for a registry run.
     An unknown arm name is treated as deterministic, so an arm the map
     forgot fails CLOSED (its block is never demoted).
+
+    `weak_verdicts` is the GRANULAR level of the same rule, not a second
+    rule: pass a collection of verdict names and a blocking judge verdict
+    counts as demotable only when its own `verdict` attribute is in that
+    collection. Everything else keeps its block — a judge verdict outside
+    the set (OVERCLAIMS), and a verdict carrying no `verdict` attribute at
+    all. That second case is the fail-CLOSED direction on purpose: a
+    finding that cannot say which verdict it is must not be demoted by a
+    filter that selects on verdicts. With `weak_verdicts` None (the
+    default) no filter applies and the rule is the unconditional one
+    above.
     """
     blocking = [v for v in (verdicts or []) if v.is_block()]
     if not blocking:
         return False
-    return all(kinds.get(v.arm, KIND_DETERMINISTIC) == KIND_JUDGE
-               for v in blocking)
+    for v in blocking:
+        if (kinds or {}).get(v.arm, KIND_DETERMINISTIC) != KIND_JUDGE:
+            return False
+        if weak_verdicts is not None and getattr(v, "verdict", None) not in weak_verdicts:
+            return False
+    return True
 
 
 # ------------------------------------------------------------------- run

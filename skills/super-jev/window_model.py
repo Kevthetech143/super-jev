@@ -99,8 +99,11 @@ __all__ = [
     "Piece", "Window", "Truncation", "PrStateSignal",
     "PIECE_KINDS", "PIECE_ORIGINS", "TRUSTED_ORIGINS", "is_trusted",
     "SECTION_CURRENT", "SECTION_RECEIPTS", "SECTION_REPORTS",
-    "SECTION_UNKNOWN", "prev_section", "prev_index", "recency_rank",
+    "SECTION_CONTRIBUTED", "SECTION_UNKNOWN",
+    "prev_section", "prev_index", "recency_rank",
     "header_for_section", "section_for_header", "emit_slot",
+    "HEADER_CONTRIBUTED", "CONTRIBUTED_QUOTE_PREFIX",
+    "neutralise_contributed_line",
     "from_transcript", "from_text",
     "pr_state_signals_from_window", "pr_state_verdict_from_window",
 ]
@@ -129,6 +132,9 @@ PIECE_ORIGINS = (
     "teammate",         # a <teammate-message> / <task-notification> block
     "assistant",        # assistant-authored text
     "composer",         # the composer's own structure lines
+    "check_arm",        # a line a check arm CONTRIBUTED for this run (see
+                        # SECTION_CONTRIBUTED). Arm-authored, not received
+                        # from anywhere, so it is never trusted
     "truncated_mixed",  # a legacy byte tail-keep that fused tool-result
                         # text and report text into one blob; provenance
                         # is no longer separable, so it fails closed
@@ -171,6 +177,17 @@ def is_trusted(origin):
 SECTION_CURRENT = "current"
 SECTION_RECEIPTS = "receipts"
 SECTION_REPORTS = "reports"
+#: The block a check arm's `contribute` phase put in front of the judge
+#: for THIS run (`arms.JudgeEvidence`). A first-class section, with its own
+#: header and its own emit slot, for one reason: before it was one, its
+#: header was not a header the reader recognised, so `_section_chunks`
+#: folded the whole block into whatever chunk preceded it — and when that
+#: chunk was `[session receipts]`, every contributed line re-parsed as a
+#: TRUSTED session receipt. Arm-authored text laundered into a receipt by
+#: nothing more than where it sat. Its pieces carry the `check_arm` origin,
+#: so they are untrusted by the one trust rule rather than by a special
+#: case, and its lines are prose-strength to every deterministic reader.
+SECTION_CONTRIBUTED = "contributed"
 #: Flat text with no recognisable composer header — a unit-test fixture, a
 #: hand-written bench evidence file. No ordering information at all.
 SECTION_UNKNOWN = "unknown"
@@ -203,6 +220,11 @@ def recency_rank(section):
     n = prev_index(section)
     if n is not None:
         return -n
+    # SECTION_CONTRIBUTED is deliberately absent, so it answers None like
+    # SECTION_UNKNOWN. A contributed block is not a TURN — it is one run's
+    # own working note — so it has no recency to compare against a receipt,
+    # and None ("unknown turn", not "oldest") is what keeps a reader from
+    # ordering it against one.
     return {SECTION_RECEIPTS: 0, SECTION_REPORTS: 1,
             SECTION_CURRENT: 2}.get(section)
 
@@ -215,6 +237,17 @@ HEADER_CURRENT = "[current turn]"
 HEADER_RECEIPTS = "[session receipts]"
 HEADER_REPORTS = "[current turn reports]"
 HEADER_PREV = "[previous turn -{n}]"
+#: The header the contributed-evidence block is written under. One
+#: definition, here, and `arms.CONTRIBUTED_HEADER` is an alias of it: the
+#: renderer that writes this line and the reader that recognises it must
+#: never be able to disagree about its bytes, which is exactly how the
+#: laundering hole opened.
+HEADER_CONTRIBUTED = "[contributed by check arms]"
+#: What every contributed line is prefixed with when it is written out.
+#: A quoted line cannot be read back as a bare receipt row by a reader
+#: that keys on the row's own shape, so neutralising at the renderer is a
+#: second, independent guard behind the section boundary.
+CONTRIBUTED_QUOTE_PREFIX = "> "
 #: PR #53 adds this mark inside a previous-turn block, ahead of that turn's
 #: relayed reports. `main` does not emit it. Parsed here anyway so a
 #: recorded window from either branch reads the same.
@@ -263,7 +296,8 @@ def header_for_section(section):
     if n is not None:
         return HEADER_PREV.format(n=n)
     return {SECTION_CURRENT: HEADER_CURRENT, SECTION_RECEIPTS: HEADER_RECEIPTS,
-            SECTION_REPORTS: HEADER_REPORTS}.get(section)
+            SECTION_REPORTS: HEADER_REPORTS,
+            SECTION_CONTRIBUTED: HEADER_CONTRIBUTED}.get(section)
 
 
 def section_for_header(line):
@@ -274,7 +308,8 @@ def section_for_header(line):
     if m:
         return prev_section(int(m.group(1)))
     return {HEADER_CURRENT: SECTION_CURRENT, HEADER_RECEIPTS: SECTION_RECEIPTS,
-            HEADER_REPORTS: SECTION_REPORTS}.get(s)
+            HEADER_REPORTS: SECTION_REPORTS,
+            HEADER_CONTRIBUTED: SECTION_CONTRIBUTED}.get(s)
 
 
 def emit_slot(section):
@@ -290,6 +325,12 @@ def emit_slot(section):
     other way along the previous turns — turn -1 is NEWER than turn -2 —
     so the two orders disagree on that run and must stay separate keys.
 
+    `SECTION_CONTRIBUTED` sits LAST, above `[current turn]`, because that
+    is where `arms.JudgeEvidence` writes it: after the whole window. Being
+    the highest slot is what makes the block a boundary the reader will
+    accept rather than a chunk folded into the section above it, and being
+    AFTER the receipts is what stops it being read as part of them.
+
     A real window's headers therefore step STRICTLY upward in this key,
     each appearing at most once. A header that would step backward or
     repeat is one the composer could not have written there, which is what
@@ -300,7 +341,7 @@ def emit_slot(section):
     if n is not None:
         return (0, n)
     return {SECTION_RECEIPTS: (1, 0), SECTION_REPORTS: (2, 0),
-            SECTION_CURRENT: (3, 0)}.get(section)
+            SECTION_CURRENT: (3, 0), SECTION_CONTRIBUTED: (4, 0)}.get(section)
 
 
 def _parse_identity(line):
@@ -317,6 +358,32 @@ def _parse_identity(line):
     if cmd and cwd:
         return f"{cmd} @ {cwd}"
     return cmd or cwd or None
+
+
+def neutralise_contributed_line(line):
+    """One contributed line, in the form it is safe to WRITE into a window.
+
+    Two changes, both about what the line can be read back as:
+
+    * any `[from: cmd @ cwd]` identity tail is STRIPPED. That tail is how
+      a receipt names the run that produced it, and a check arm's own line
+      never came out of a run. Left on, a forged tail let a contributed
+      line re-parse as an identified receipt.
+    * the line is prefixed with `CONTRIBUTED_QUOTE_PREFIX`, so a reader
+      keying on a row's own shape (a `LABEL: VALUE` row, a `gh pr merge N`
+      receipt) sees a quotation rather than the row.
+
+    Belt and braces behind `SECTION_CONTRIBUTED`: the section boundary is
+    what makes the block untrusted, and this is what keeps an individual
+    line from passing for something else even if a future reader forgets
+    to ask which section it sits in. Idempotent, so rendering a window
+    parsed out of already-neutralised bytes does not double the prefix.
+    """
+    text = (line or "").rstrip("\n")
+    text = _IDENTITY_TAIL_RE.sub("", text)
+    if text.startswith(CONTRIBUTED_QUOTE_PREFIX):
+        return text
+    return CONTRIBUTED_QUOTE_PREFIX + text
 
 
 def _parse_report_who(first_line):
@@ -531,7 +598,7 @@ class Window:
                 return HEADER_SEPARATOR
             if nxt.kind == "header":          # the relayed-reports mark
                 return ITEM_SEPARATOR
-            if nxt.section == SECTION_RECEIPTS:
+            if nxt.section in (SECTION_RECEIPTS, SECTION_CONTRIBUTED):
                 return RECEIPT_SEPARATOR
             if nxt.section == SECTION_REPORTS:
                 return REPORT_SEPARATOR
@@ -1071,6 +1138,17 @@ def _parse_section(raw_section, bodies_fenced=False):
     if first == SECTION_REPORTS:
         return ([_header_piece(SECTION_REPORTS)]
                 + _parse_claims("\n".join(lines[1:]), SECTION_REPORTS))
+    if first == SECTION_CONTRIBUTED:
+        # One piece per line, `check_arm` origin, so `is_trusted` says no
+        # for the ordinary reason rather than by a special case here. Kind
+        # is `claim`: a check arm's contributed line is an assertion about
+        # this run, never a receipt of one. No item splitting — the block
+        # is line-oriented (`arms.JudgeEvidence` joins with a newline), and
+        # splitting it on `---` would only invent structure a contributor
+        # could then forge.
+        return [_header_piece(SECTION_CONTRIBUTED)] + [
+            _piece("claim", SECTION_CONTRIBUTED, ln, "check_arm")
+            for ln in lines[1:]]
     # No composer header at all: flat text. One unknown section, parsed
     # with the same fail-closed item rules and no ordering information.
     return _parse_items(raw_section, SECTION_UNKNOWN)
