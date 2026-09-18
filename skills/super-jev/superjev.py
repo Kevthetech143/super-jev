@@ -475,7 +475,12 @@ def presplit_claims(draft_text, cap=CLAIM_PRESPLIT_CAP):
 # line the evidence does carry (fired on). Same shape for a "PR #N merged"
 # claim against `gh pr view` state in the evidence.
 _INT_RE = re.compile(r'\b(\d+)\b')
-_PR_MERGED_CLAIM_RE = re.compile(r'PR\s*#(\d+)\b[^.\n]{0,30}?\bmerged\b', re.IGNORECASE)
+# 2026-09-18: '#' made optional (PR\s*#?(\d+)) so "PR 39 merged" and
+# "merged PR 39" match, not just "PR #39 merged" — see SET2-AUDIT.md's l30:
+# the identity guard downstream (the number must match a receipt in the
+# evidence, see _pr_mismatch_reason/_facts_merge_claims) is unchanged, so
+# this only widens which claims get COMPARED, never which ones get trusted.
+_PR_MERGED_CLAIM_RE = re.compile(r'PR\s*#?(\d+)\b[^.\n]{0,30}?\bmerged\b', re.IGNORECASE)
 _PR_STATE_JSON_RE = re.compile(
     r'"number"\s*:\s*(\d+)[^{}]{0,300}?"state"\s*:\s*"(\w+)"', re.DOTALL)
 
@@ -1235,16 +1240,23 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
          2026-09-17 thin-evidence false block (see PR #18); those are two
          different failure modes and only the first one is what changed.
       2. A claim-level NOT_SUPPORTED/CONTRADICTED at or above
-         SUPERJEV_BLOCK_CONF (default 0.80) is a SECONDARY trigger, and
-         only fires when the evidence gather was healthy (same
-         `_gather_healthy` check v2 uses) AND the current turn itself
-         contributed evidence (`evidence["current_turn_empty"]` is not
-         True — 2026-09-17, see docs/hooks.md, "gate v3 — empty current
-         turn") — a confident red verdict against evidence too thin to
-         judge, or against a window this turn added nothing to, is still
-         a statement about the gather, not the worker.
+         SUPERJEV_BLOCK_CONF (default 0.80) is a SECONDARY trigger —
+         2026-09-18, demoted from blocking to ADVISORY-ONLY (see
+         docs/hooks.md, "gate v4 — secondary arm demoted"): across both
+         gate-bench sets (70 cases) this arm never once was the sole
+         reason a real lie got caught, and on the untuned set-2 replies it
+         was the sole reason 5 true replies got blocked (longer,
+         multi-claim status reports carry plan/opinion/self-audit
+         sentences no tool result could ever support, which this arm
+         cannot tell apart from a real unsupported claim). It still runs,
+         still scores, and still prints as an advisory line in
+         `--explain` and stderr feedback for every case that crosses the
+         line — it is useful signal about which sentences a reader should
+         check — but it can never by itself produce a block. Blocking
+         stays with rule 1 (OVERCLAIMS) and the deterministic count/PR
+         arm the caller merges in.
       3. SELF_CONTRADICTORY is never a block reason, alone or in company,
-         same as v2 — it still prints as an advisory.
+         same as v2/v3 — it still prints as an advisory.
       4. The OVERCLAIM_100_BLOCK fragile arm (SUPERJEV_OVERCLAIM_100_BLOCK)
          still applies underneath rule 1; with the line already at 0.90 it
          is a near no-op, kept only so the old 0.995-floor A/B is still
@@ -1255,7 +1267,10 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
     no tools, as long as the gather is otherwise healthy. A reply is not
     made safe by the fact that this turn ran no tools; suppressing the
     primary arm on an empty current turn was worth three caught lies
-    against zero blocked truths on the 40-case bench (docs/hooks.md).
+    against zero blocked truths on the 40-case bench (docs/hooks.md). The
+    empty-current-turn health gate itself is otherwise unchanged by the
+    2026-09-18 demotion — it still governs whether the secondary arm's
+    advisory calls out the empty-turn caveat, same wording as before.
 
     Deterministic count/PR mismatches are computed and merged in by the
     caller (cmd_hook), same as v2 — this function never sees them."""
@@ -1287,6 +1302,14 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
                 "turn ran no tools of its own (evidence is previous-turn/"
                 "receipts material only) — advisory, not a block; the primary "
                 "OVERCLAIMS arm is unaffected")
+            continue
+        if is_secondary:
+            # 2026-09-18: demoted to advisory-only, unconditionally — see
+            # rule 2 above. Still surfaced, never used to block.
+            notes.append(
+                f"{k} {v} {s:.2f} crossed the {line:.2f} line — advisory "
+                "only, the secondary NOT_SUPPORTED/CONTRADICTED arm never "
+                "blocks on its own (gate v4)")
             continue
         reasons.append(f"{k} {v} {s:.2f}")
     return reasons, notes
@@ -3398,10 +3421,17 @@ _FACT_PR_NUM_RES = (
     re.compile(r'#(\d+)\b'),
     re.compile(r'"number"\s*:\s*(\d+)'),
 )
+# 2026-09-18: '#' made optional in all three, and the third pattern's
+# "is merged" requirement loosened to a bare "merged" so "#39 merged"
+# matches the same as "#39 is merged" — see SET2-AUDIT.md's l30: "PR 39
+# merged" / "merged PR 39" / "#39 merged" now each match one of the three.
+# The identity guard is untouched: `_facts_merge_claims` (below) still only
+# ever compares a claimed PR number against a receipt actually found in the
+# window, never trusts a claim on its own.
 _FACT_DRAFT_MERGE_RES = (
-    re.compile(r'\bPR\s*#(\d+)\b[^.\n]{0,40}?\bmerged\b', re.IGNORECASE),
-    re.compile(r'\bmerged\b[^.\n]{0,40}?\bPR\s*#(\d+)', re.IGNORECASE),
-    re.compile(r'#(\d+)\b[^.\n]{0,20}?\bis\s+merged\b', re.IGNORECASE),
+    re.compile(r'\bPR\s*#?(\d+)\b[^.\n]{0,40}?\bmerged\b', re.IGNORECASE),
+    re.compile(r'\bmerged\b[^.\n]{0,40}?\bPR\s*#?(\d+)', re.IGNORECASE),
+    re.compile(r'#(\d+)\b[^.\n]{0,20}?\b(?:is\s+)?merged\b', re.IGNORECASE),
 )
 
 
@@ -3691,6 +3721,217 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
         meta["window_trimmed_bytes"] = len(raw) - budget
         body = raw[-budget:].decode("utf-8", errors="ignore")
     return head + body, facts, meta
+
+
+# ------------------------------------------------------------- cited-file tail
+#
+# 2026-09-18, SET2-AUDIT.md recommendation (b): when the current-turn draft
+# names its own source ("per SUMMARY.md", "per the summary log", "in
+# stress-20260917/results/SUMMARY.md"), the window built from transcript
+# tool_results may never have read that file at all — t38's window carried
+# 0 bytes about the draft's four numbers while the cited SUMMARY.md carried
+# all of them. This resolves a citation to a real file — an absolute/
+# user-relative path if the draft names one, else a unique basename match
+# under a small set of known roots — reads its tail, redacts it the same
+# as the rest of the window, and hands back a labelled block for the
+# caller to fold into the window before the 24 KB cap is applied. This is
+# evidence the judge gets to see, same as any other evidence line — it
+# never asserts the citation's contents as true on the draft's say-so.
+# Skips a candidate silently (no note, no error) when it does not resolve,
+# is ambiguous, or is blocklisted; a missing citation is not itself a
+# finding.
+CITED_FILE_MAX_LINES = 40
+CITED_FILE_MAX_BYTES = 3072          # 3 KB cap per cited file
+CITED_FILE_MAX_FILES = 2             # at most this many citations resolved per draft
+CITED_FILE_EXTS = (".md", ".txt", ".log", ".json")
+
+# An explicit path or bare filename with a recognised extension —
+# "stress-20260917/results/SUMMARY.md", "~/notes/log.txt", "SUMMARY.md".
+_CITED_FILE_PATH_RE = re.compile(
+    r'(?:^|[\s(`"\'])((?:~|\.{1,2})?/[\w./\-]+\.(?:md|txt|log|json)'
+    r'|[\w][\w.\-]*\.(?:md|txt|log|json))\b', re.IGNORECASE)
+# "per the summary log" / "per the report log" — no filename, just a
+# keyword to look up against a known root's file names.
+_CITED_FILE_LOG_PHRASE_RE = re.compile(
+    r'\bper\s+(?:the\s+)?([a-z][a-z0-9 \-]{2,40}?)\s+log\b', re.IGNORECASE)
+_CITED_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+
+
+def _cited_file_candidates(draft_text):
+    """Ordered, deduped list of (kind, value) citation candidates in
+    `draft_text` — ('path', 'stress-20260917/results/SUMMARY.md') for an
+    explicit path/filename, ('keyword', 'summary') for a "per the X log"
+    phrase with no filename. Never raises."""
+    if not draft_text:
+        return []
+    out, seen = [], set()
+    for m in _CITED_FILE_PATH_RE.finditer(draft_text):
+        val = m.group(1)
+        key = ("path", val.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(("path", val))
+    for m in _CITED_FILE_LOG_PHRASE_RE.finditer(draft_text):
+        kw = " ".join(m.group(1).split()).lower()
+        key = ("keyword", kw)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(("keyword", kw))
+    return out
+
+
+def _cited_file_roots():
+    """Known roots to search for a cited file's unique basename match: the
+    process cwd, this repo's root, and ~/super-jev-experiments (where the
+    fleet's gate-bench and stress logs live) — never the whole
+    filesystem."""
+    roots = []
+    try:
+        roots.append(Path(os.getcwd()))
+    except OSError:
+        pass
+    roots.append(REPO_ROOT)
+    roots.append(HOME / "super-jev-experiments")
+    out, seen = [], set()
+    for r in roots:
+        try:
+            rp = r.resolve()
+        except OSError:
+            continue
+        if rp in seen or not rp.is_dir():
+            continue
+        seen.add(rp)
+        out.append(rp)
+    return out
+
+
+def _resolve_cited_path(value):
+    """An absolute/user-relative path candidate resolved to a real,
+    readable, non-blocklisted file, or None. Never a directory, never a
+    bare relative filename (those go through `_resolve_cited_basename`
+    instead, since a relative path is meaningless without a cwd the
+    citation itself does not name)."""
+    p = Path(os.path.expanduser(value))
+    if not p.is_absolute():
+        return None
+    if is_blocked_path(p):
+        return None
+    try:
+        if p.is_file():
+            return p
+    except OSError:
+        pass
+    return None
+
+
+def _resolve_cited_basename(basename, roots, max_scan=20000):
+    """The one file under `roots` whose name matches `basename` — an exact
+    case-insensitive filename match when `basename` looks like a real
+    filename (has a dot), else a substring-of-stem match against
+    CITED_FILE_EXTS. Returns None on zero or ambiguous (>1 distinct real
+    path) matches, or once `max_scan` files have been walked, so a huge
+    tree cannot stall a hook. Never raises."""
+    exact = "." in basename
+    target = basename.lower()
+    found = None
+    scanned = 0
+    for root in roots:
+        try:
+            walker = os.walk(root)
+        except OSError:
+            continue
+        for dirpath, dirnames, filenames in walker:
+            dirnames[:] = [d for d in dirnames if d not in _CITED_SKIP_DIRS
+                          and not d.startswith(".")]
+            for fn in filenames:
+                scanned += 1
+                if scanned > max_scan:
+                    return found
+                low = fn.lower()
+                is_match = (low == target if exact else
+                           (Path(low).suffix in CITED_FILE_EXTS and
+                            target in Path(low).stem.lower()))
+                if not is_match:
+                    continue
+                full = Path(dirpath) / fn
+                if is_blocked_path(full):
+                    continue
+                try:
+                    real = full.resolve()
+                except OSError:
+                    real = full
+                if found is not None and found != real:
+                    return None  # ambiguous — more than one real match
+                found = real
+    return found
+
+
+def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_MAX_BYTES):
+    """The last `max_lines` lines of `path`, capped at `max_bytes` (the
+    tail is kept if still over budget). None on any read problem."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return None
+    lines = text.splitlines()
+    tail = "\n".join(lines[-max_lines:])
+    raw = tail.encode("utf-8")
+    if len(raw) > max_bytes:
+        raw = raw[-max_bytes:]
+        tail = raw.decode("utf-8", errors="ignore")
+    return tail
+
+
+def build_cited_file_block(draft_text):
+    """A "[cited files]" window section for every file the draft names by
+    path or by a recognisable "per <name> log" phrase that resolves to a
+    real, readable, non-blocklisted file — its tail, labelled `CITED FILE
+    <path> (tail)`, redacted the same as the rest of the window (see
+    EVIDENCE GUARD above). Skips a candidate silently (never a note, never
+    an error) when it does not resolve, is ambiguous, or is blocklisted.
+    Returns "" when nothing resolves. At most CITED_FILE_MAX_FILES files,
+    each capped at CITED_FILE_MAX_BYTES — the caller still folds the
+    result into the overall 24 KB window cap same as every other
+    section."""
+    candidates = _cited_file_candidates(draft_text)
+    if not candidates:
+        return ""
+    roots = _cited_file_roots()
+    blocks = []
+    seen_paths = set()
+    for kind, value in candidates:
+        if len(blocks) >= CITED_FILE_MAX_FILES:
+            break
+        path = None
+        if kind == "path":
+            path = _resolve_cited_path(value)
+            if path is None:
+                basename = os.path.basename(value)
+                if basename:
+                    path = _resolve_cited_basename(basename, roots)
+        else:
+            path = _resolve_cited_basename(value, roots)
+        if path is None:
+            continue
+        if is_blocked_path(path):
+            continue
+        try:
+            real = path.resolve()
+        except OSError:
+            real = path
+        if real in seen_paths:
+            continue
+        tail = _read_file_tail(path)
+        if not tail or not tail.strip():
+            continue
+        seen_paths.add(real)
+        tail = redact(tail)
+        blocks.append(f"CITED FILE {path} (tail)\n{tail}")
+    if not blocks:
+        return ""
+    return "[cited files]\n" + "\n\n---\n\n".join(blocks)
 
 
 def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None,
@@ -4407,9 +4648,12 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
         reason = f"super-jev verify blocked this (exit {code})"
         if block_reasons:
             reason += ": " + "; ".join(block_reasons)
+        if notes:
+            reason += " (advisory: " + "; ".join(notes) + ")"
         print(reason, file=sys.stderr)
         _hook_log(f"verify: block (exit {code}) [from-file {path!r}]" +
-                 (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
+                 (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
+                 (f" — advisory: {'; '.join(notes)}" if notes else ""),
                  exit_code=2, flags=flags, hook_mode=False, source="manual")
         return 2
     advisory = f"super-jev verify advisory (exit {code}){note_tail}"
@@ -5041,6 +5285,20 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
+                    # Cited-file tail (see build_cited_file_block, 2026-09-18
+                    # SET2-AUDIT.md recommendation (b)): when the draft names
+                    # its own source ("per SUMMARY.md"), fold that file's
+                    # tail into the window at highest priority — appended
+                    # after the current turn, so compose_window_with_facts'
+                    # head-first trim never drops it before the current
+                    # turn's own material.
+                    cited_block = build_cited_file_block(text)
+                    if cited_block:
+                        derived = (derived + "\n\n===\n\n" + cited_block
+                                  if derived else cited_block)
+                        if window_meta is not None:
+                            window_meta["cited_file_bytes"] = len(
+                                cited_block.encode("utf-8"))
                     # DERIVED FACTS at the head of the window (see
                     # derive_window_facts): the refuting string was already
                     # in the window on every one of the 2026-09-17 bench's
@@ -5259,9 +5517,16 @@ def cmd_hook(a):
             reason = f"super-jev {door} blocked this (exit {code})"
             if block_reasons:
                 reason += ": " + "; ".join(block_reasons)
+            # 2026-09-18: advisory-only findings (e.g. the demoted secondary
+            # NOT_SUPPORTED/CONTRADICTED arm) still ride alongside a real
+            # block, printed to stderr same as --explain, never as a second
+            # block reason.
+            if block_notes:
+                reason += " (advisory: " + "; ".join(block_notes) + ")"
             print(reason, file=sys.stderr)
             _hook_log(f"{door}: block (exit {code})" +
-                     (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
+                     (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
+                     (f" — advisory: {'; '.join(block_notes)}" if block_notes else ""),
                      exit_code=2, flags=flags)
             _print_ledger_notice_if_gate()
             return 2
