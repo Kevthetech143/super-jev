@@ -204,22 +204,74 @@ No version bump.
   See docs/hooks.md, "verify: spawn acks and gather health".
 
 - **Verify hook: a worktree is now derived from the worker's own report
-  text when the payload and the environment give it none.** Closes the
-  gap the entry above left open — a real PostToolUse(Agent) payload never
-  carries a `worktree` key, so `_evidence_inventory` in the live verify
-  path always saw a thin gather and the door stayed advisory-only. New
-  `_worktree_from_report(text)` scans the report for an absolute
-  `/Users/<user>/...` path and accepts a candidate only when it exists on
-  disk, is a directory, and contains a `.git` entry — a real worktree or
-  repo, not merely a string the worker typed — and never accepts a path
-  matching the module's own evidence-guard blocklist regardless. Source
+  text when the payload and the environment give it none — behind a trust
+  boundary.** Closes the gap the entry above left open: a real
+  PostToolUse(Agent) payload never carries a `worktree` key, so
+  `_evidence_inventory` in the live verify path always saw a thin gather
+  and the door stayed advisory-only. `_worktree_from_report(text)` scans
+  the report for any absolute, no-spaces path it mentions. Source
   precedence: the payload's own `worktree` key, then
-  `SUPERJEV_HOOK_WORKTREE`, then this report-derived path. Every live
-  `hook verify` run now logs which source won as `worktree_source`
-  (`"payload"` | `"env"` | `"report"` | `"none"`) in the call ledger, so a
-  reviewer can see when the door trusted a path the worker itself named
-  rather than one supplied upstream. See docs/hooks.md, "Correction,
-  2026-09-18 (2)".
+  `SUPERJEV_HOOK_WORKTREE`, then this report-derived path. Every
+  `hook verify` run logs which source won as `worktree_source` in the call
+  ledger, so a reviewer can see when the door used a path the worker
+  itself named rather than one supplied upstream.
+
+- **Security: one validator stands between report text and every
+  subprocess.** A directory named in a worker's report is untrusted input,
+  and it is not inert input to git: a repository's own `.git/config` can
+  set `core.fsmonitor` or `core.hooksPath`, and `git status` inside it runs
+  what those name. Deriving a worktree from report text on the strength of
+  "it exists and has a `.git`" was therefore an arbitrary-code-execution
+  path, and the same shape already existed on the Stop-scan and
+  `hook prompt-verify` paths, which derived a worktree AND a test command
+  from report text with no check at all. New `_trusted_worktree(path,
+  protected_repo)` is the single gate both paths now go through. It
+  resolves the realpath first, refuses anything the evidence-guard
+  blocklist covers (so a harmless-looking symlink cannot launder a
+  credential-adjacent target), refuses the protected repo's own main
+  checkout, requires the realpath to sit under an allowlist root
+  (`SUPERJEV_WORKTREE_ROOTS`, `os.pathsep`-separated, defaulting to the
+  fleet's own worktree root), and then requires
+  `git rev-parse --git-common-dir` there to resolve to the protected
+  repo's own common dir — so a foreign or planted repository is refused
+  even when it is a perfectly real repo in the right place. A `.git` FILE
+  worktree whose gitdir points outside that common dir is refused too. The
+  protected repo is `SUPERJEV_PROTECTED_REPO`, else the checkout
+  `superjev.py` itself lives in; when neither answers, nothing is trusted.
+  Every check that could execute repository config runs only AFTER the
+  cheap filesystem gates, and the validator itself uses only `rev-parse`,
+  which does not trigger `core.fsmonitor`. Refusals are recorded in the
+  ledger as `worktree_refused: ["worktree-untrusted:<why>"]`, and
+  `worktree_source` carries `"report-refused:<why>"` so a thin gather is
+  never mistaken for a report that named nothing.
+
+- **Security: every `git` call the door makes disables fsmonitor and
+  hooks.** All of them now build their argv through one helper,
+  `git_argv`, which prepends `-c core.fsmonitor=false -c
+  core.hooksPath=/dev/null` ahead of `-C`. This is defence in depth behind
+  `_trusted_worktree`, not a substitute for it.
+
+- **Security: a report-derived `npm test` no longer vouches for itself.**
+  `npm test` names no program — `package.json`'s `scripts` does, and a
+  worker can write that file. A worker could therefore report a pass count,
+  have this door run its own script, and have that script's output accepted
+  as independent evidence for the report. An `npm`-family command derived
+  from report text now runs only when `package.json` is tracked in the
+  protected repo and unmodified against `HEAD`; otherwise the run records
+  `untrusted-test-cmd` and gathers no test evidence. Enforced both where
+  the command is derived and at `check_test_cmd_for_fallback`, the point
+  where it would execute.
+
+- **Fix: a path containing the word "pytest" is no longer read as a test
+  command.** `_TEST_PHRASE_RE` matched `pytest` inside a longer path (a
+  `/tmp/pytest-of-<user>/...` scratch directory, say) and its greedy tail
+  swallowed the rest of that path into the capture — so a report that
+  merely mentioned such a directory produced a "test command" whose
+  `argv[0]` came straight out of report text and was then executed. A
+  derived command must now be a runner the report actually named, and a
+  match can no longer grow across a `/`, a quote or a shell
+  metacharacter. See docs/hooks.md, "The trust boundary for worker-named
+  paths".
 
 - **Two more deterministic-arm false-block sources closed.** The count
   arm's draft-side tokenizer no longer splits a mixed alnum run (a git

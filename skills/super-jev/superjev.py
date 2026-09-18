@@ -3713,10 +3713,29 @@ def _light_atoms(text):
     return paths[:20], hashes[:20], branches[:20]
 
 
-def _git_out(args, cwd):
+# TRUST BOUNDARY — git's own config is executable input. A repository carries
+# hooks and `core.fsmonitor` in its OWN `.git/config`, and git runs both on
+# the caller's behalf: `git status` inside a directory whose config sets
+# `core.fsmonitor = <command>` EXECUTES that command. Every path this module
+# hands to `git -C` can originate in a worker's report text, i.e. in
+# untrusted input, so every git invocation here pins those two knobs off.
+# This is defence in depth, not the primary control. The primary control is
+# _trusted_worktree, which must refuse an untrusted path BEFORE any
+# status/diff/ls-files runs against it — `rev-parse` and `config --get` do
+# not trigger fsmonitor, `status` does, so validation uses only the former.
+GIT_SAFE_FLAGS = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+
+
+def git_argv(cwd, args):
+    """The argv for one read-only git call against `cwd`, with fsmonitor and
+    hooks disabled. Every `git -C` this module runs is built here."""
+    return ["git", *GIT_SAFE_FLAGS, "-C", str(cwd), *[str(a) for a in args]]
+
+
+def _git_out(args, cwd, timeout=20):
     try:
-        p = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
-                           text=True, timeout=20)
+        p = subprocess.run(git_argv(cwd, args), capture_output=True,
+                           text=True, timeout=timeout)
         return p.returncode == 0, (p.stdout or "") + (p.stderr or "")
     except (OSError, subprocess.TimeoutExpired):
         return False, ""
@@ -3930,16 +3949,42 @@ def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, g
 
 
 def check_test_cmd_for_fallback(cmd, worktree):
-    """The same directory-level-pytest refusal worker-verify enforces
-    (see verify.py's check_test_cmd), kept small here because this fallback
-    has no import of verify.py to reuse — the whole point of this path is
-    that verify.py is ABSENT. Returns a refusal string, or None if fine."""
+    """The guardrail on the one command this fallback EXECUTES. Returns a
+    refusal string, or None if the command may run.
+
+    Two refusals:
+
+    1. A directory-level pytest, the same refusal worker-verify enforces
+       (see verify.py's check_test_cmd) — kept small here because this
+       fallback has no import of verify.py to reuse, the whole point of
+       this path being that verify.py is ABSENT.
+
+    2. An `npm`-family command whose package.json the protected repo does
+       not vouch for. `npm test` names no program; package.json's
+       "scripts" does, and on this path the command can be DERIVED FROM A
+       WORKER'S OWN REPORT TEXT. A worker that writes both its package.json
+       and its report could otherwise have this door run its script and
+       accept the pass count that script printed as independent evidence of
+       its own claim. So npm runs only from a package.json that is tracked
+       in the protected repo and unmodified against HEAD — see
+       _npm_runner_is_trusted. This is the last line; the derive paths
+       refuse the same command earlier (recording "untrusted-test-cmd"),
+       and this catches every other caller.
+    """
     try:
         toks = shlex.split(cmd)
     except ValueError:
         return f"not parseable as a shell command: {cmd}"
     if not toks:
         return "empty test command"
+    if _test_cmd_is_npm(cmd):
+        ok, why = _npm_runner_is_trusted(worktree)
+        if not ok:
+            return ("untrusted-test-cmd: `npm` runs whatever package.json's "
+                    f"scripts name, and here {why} — so this command's own "
+                    "output cannot stand as evidence for the report that "
+                    "named it. Name the underlying test command directly.")
+        return None
     is_pytest = toks[0] == "pytest" or ("pytest" in toks and toks[0] in ("python", "python3"))
     if not is_pytest:
         return None
@@ -7219,6 +7264,168 @@ def _is_launch_ack(text):
     return False, ""
 
 
+# --------------------------------------------- trusted worktree validator
+#
+# THE TRUST BOUNDARY FOR WORKER-NAMED PATHS.
+#
+# A worker's report is untrusted text. Two paths in this module take a
+# directory out of that text and hand it to a subprocess: the verify hook's
+# `_worktree_from_report` and the Stop-scan / prompt-verify
+# `_derive_evidence_from_report_text`. A directory is not inert input to
+# git: a repository's own `.git/config` can set `core.fsmonitor` or
+# `core.hooksPath`, and `git status` inside it EXECUTES what those name. So
+# "the path exists and has a `.git`" is not a safety check — a worker can
+# create such a directory. `_trusted_worktree` is the check: a path from
+# report text reaches no subprocess until it passes, and it must pass
+# BEFORE any status/diff/ls-files call, since those are what fire
+# fsmonitor (`rev-parse` and `config --get` do not, which is why the
+# validator itself may use them).
+WORKTREE_ROOTS_ENV = "SUPERJEV_WORKTREE_ROOTS"
+PROTECTED_REPO_ENV = "SUPERJEV_PROTECTED_REPO"
+# The fleet's own worker convention: one `git worktree add` folder per task
+# under this root. Configurable, because a hook shim or a CI runner has a
+# different layout; os.pathsep-separated, like PATH.
+DEFAULT_WORKTREE_ROOTS = ("/Users/admin/super-jev-wt/",)
+
+
+def _worktree_roots():
+    """The allowlist roots a report-named worktree must live under, as
+    realpaths. SUPERJEV_WORKTREE_ROOTS (os.pathsep-separated) when set and
+    non-empty, else DEFAULT_WORKTREE_ROOTS."""
+    raw = os.environ.get(WORKTREE_ROOTS_ENV) or ""
+    parts = [r.strip() for r in raw.split(os.pathsep) if r.strip()]
+    if not parts:
+        parts = list(DEFAULT_WORKTREE_ROOTS)
+    roots = []
+    for r in parts:
+        try:
+            roots.append(os.path.realpath(os.path.expanduser(r)))
+        except OSError:
+            continue
+    return roots
+
+
+def _under_root(real, root):
+    return real == root or real.startswith(root.rstrip("/") + "/")
+
+
+def _git_common_dir(path, timeout=10):
+    """`git rev-parse --git-common-dir` for `path`, as an absolute realpath,
+    or None. Uses GIT_SAFE_FLAGS and only `rev-parse`, which does not
+    trigger core.fsmonitor — so this is safe to run against a directory
+    that has NOT yet been trusted."""
+    ok, out = _git_out(["rev-parse", "--git-common-dir"], path, timeout=timeout)
+    if not ok:
+        return None
+    line = (out.strip().splitlines() or [""])[0].strip()
+    if not line:
+        return None
+    if not os.path.isabs(line):
+        line = os.path.join(str(path), line)
+    try:
+        return os.path.realpath(line)
+    except OSError:
+        return None
+
+
+def _protected_repo_common_dir(protected_repo=None):
+    """The `.git` common dir of the repo this door protects — the repo whose
+    worktrees are the only ones a report may name. Resolution order:
+    the `protected_repo` argument, then SUPERJEV_PROTECTED_REPO, then this
+    module's own checkout. Returns a realpath, or None when git cannot
+    answer (no checkout at all), in which case nothing is trusted."""
+    base = protected_repo or os.environ.get(PROTECTED_REPO_ENV) or os.path.dirname(
+        os.path.abspath(__file__))
+    try:
+        if not os.path.isdir(base):
+            return None
+    except OSError:
+        return None
+    return _git_common_dir(base)
+
+
+def _worktree_trust(path, protected_repo=None):
+    """(trusted_realpath, refusal_why) — exactly one is None.
+
+    `path` is trusted only when ALL of these hold, checked in this order so
+    that no git command runs against a directory that has not already
+    cleared the cheap, filesystem-only gates:
+
+      1. it resolves (realpath, so a symlink cannot launder its identity);
+      2. its REALPATH is not blocked by the module's evidence guard
+         (is_blocked_path / BLOCKED_PATH_PATTERNS) — a symlink named
+         innocuously that points at ~/agents/global/profile is refused;
+      3. it is a directory;
+      4. it is not the protected repo's own main checkout;
+      5. its realpath sits under one of `_worktree_roots()`;
+      6. it has a `.git` entry;
+      7. `git rev-parse --git-common-dir` there resolves to the PROTECTED
+         repo's own common dir — i.e. it is a real `git worktree` of the
+         repo this door protects, not a foreign or planted repository;
+      8. when `.git` is a FILE (the worktree shape), the gitdir it points
+         at lives inside that same common dir.
+
+    `why` is a short stable token, recorded in the ledger as
+    "worktree-untrusted:<why>"."""
+    if not path:
+        return None, "empty"
+    try:
+        real = os.path.realpath(os.path.expanduser(str(path)))
+    except (OSError, ValueError):
+        return None, "unresolvable"
+    # (2) the realpath, not the name the report used — a symlink is a rename.
+    if is_blocked_path(real):
+        return None, "blocked-path"
+    try:
+        if not os.path.isdir(real):
+            return None, "not-a-directory"
+    except OSError:
+        return None, "unresolvable"
+    common = _protected_repo_common_dir(protected_repo)
+    if not common:
+        return None, "no-protected-repo"
+    # (4) The main checkout is where `.git/` itself lives. Refused outright:
+    # the door verifies worker worktrees, never the shared checkout, and a
+    # test command run there is a command run against the protected repo.
+    if os.path.basename(common) == ".git":
+        try:
+            if os.path.realpath(os.path.dirname(common)) == real:
+                return None, "main-checkout"
+        except OSError:
+            pass
+    roots = _worktree_roots()
+    if not any(_under_root(real, r) for r in roots):
+        return None, "outside-allowlist-root"
+    dotgit = os.path.join(real, ".git")
+    if not os.path.exists(dotgit):
+        return None, "not-a-worktree"
+    got = _git_common_dir(real)
+    if got is None:
+        return None, "git-common-dir-unreadable"
+    if got != common:
+        return None, "foreign-repo"
+    if os.path.isfile(dotgit):
+        ok, out = _git_out(["rev-parse", "--absolute-git-dir"], real)
+        line = (out.strip().splitlines() or [""])[0].strip() if ok else ""
+        if not line:
+            return None, "gitdir-unreadable"
+        try:
+            gitdir = os.path.realpath(line)
+        except OSError:
+            return None, "gitdir-unreadable"
+        if not _under_root(gitdir, common):
+            return None, "gitdir-outside-protected-repo"
+    return real, None
+
+
+def _trusted_worktree(path, protected_repo=None):
+    """The realpath of `path` when it is a worktree this door may run
+    subprocesses in, else None. The ONE validator both report-text paths
+    use; see _worktree_trust for the full contract and the refusal tokens."""
+    real, _why = _worktree_trust(path, protected_repo)
+    return real
+
+
 # Words that, immediately before an absolute path, mark that path as the
 # report's OWN naming of its worktree rather than some other path the
 # report happens to mention (an evidence file, a log path, etc.) — see
@@ -7227,53 +7434,71 @@ _WORKTREE_HINT_RE = re.compile(
     r'(?:\bworktree\b\s*[:=]?\s*|\bWorktree:\s*|\bin\s+)$', re.IGNORECASE)
 
 
-def _worktree_from_report(text):
-    """The worker's own worktree, derived from the free text of its report
-    (a PostToolUse tool_response, or a <teammate-message> body) — the
-    fallback used when neither the hook payload nor SUPERJEV_HOOK_WORKTREE
-    names one. Scans every absolute, no-spaces path the report mentions
-    (the fleet's own worker convention is `/Users/<user>/...`, but this
-    matches any absolute path shape — `/home/<user>/...` included — since
-    the safety net here is the existence/`.git`/blocklist checks below,
-    not the shape of the path itself) and accepts a candidate only when it
-    (a) exists on disk, (b) is a directory, and (c) contains a `.git`
-    entry (file or directory) — i.e. it really is a git worktree or repo,
-    not just any directory the worker happened to type. A candidate that
-    matches the module's own EVIDENCE GUARD blocklist (see is_blocked_path
-    / BLOCKED_PATH_PATTERNS, above — the fleet's own credential-adjacent
-    path patterns) is never accepted, no matter how it looks otherwise —
-    the existence/`.git` checks guard against a FABRICATED repo, not
-    against a report naming a real, sensitive path on this machine.
+def _worktree_from_report_detail(text, protected_repo=None):
+    """(worktree, refusal_why) — the worker's own worktree, derived from the
+    free text of its report (a PostToolUse tool_response, or a
+    <teammate-message> body), and the reason the best candidate was refused
+    when none survived.
+
+    This is the fallback used when neither the hook payload nor
+    SUPERJEV_HOOK_WORKTREE names a worktree. It scans every absolute,
+    no-spaces path the report mentions and accepts a candidate only when
+    `_trusted_worktree` clears it — see that function for the whole
+    contract. Report text is UNTRUSTED input, and the accepted path goes
+    on to `git -C` and, on the Stop-scan path, to a test command, so
+    "exists on disk and has a `.git`" is explicitly NOT sufficient: a
+    worker can create such a directory and plant `core.fsmonitor` in its
+    config. The value returned is the candidate's REALPATH, so what the
+    caller runs against is what the validator judged.
 
     Among qualifying candidates, one introduced by the words "worktree",
     "Worktree:", or "in /..." immediately before it wins over the rest;
     failing that, the first qualifying candidate in reading order wins.
-    Returns None if the report mentions no qualifying path."""
+    The same precedence applies to refusal reasons, so a report that names
+    its worktree and gets refused reports THAT path's reason.
+
+    `worktree` is None when the report named no qualifying path. `why` is
+    None when no candidate was even a directory on disk (nothing was
+    refused — there was simply nothing to judge); otherwise it is the short
+    token the ledger records as "worktree-untrusted:<why>"."""
     if not text:
-        return None
+        return None, None
     first_ok = None
     hinted = None
+    first_why = None
+    hinted_why = None
     for m in re.finditer(r'/[^/\s\'"]+(?:/[^\s\'"\)]+)+', text):
         candidate = m.group(0).rstrip("/.,;:)")
         if not candidate:
             continue
-        if is_blocked_path(candidate):
-            continue
-        try:
-            p = Path(candidate)
-            if not p.is_dir():
+        prefix = text[max(0, m.start() - 12):m.start()]
+        is_hinted = bool(_WORKTREE_HINT_RE.search(prefix))
+        real, why = _worktree_trust(candidate, protected_repo)
+        if real is None:
+            # Only a path that IS a directory here was plausibly meant as a
+            # worktree; a log path or a URL fragment that simply does not
+            # exist is not a refusal worth reporting.
+            if why in ("empty", "unresolvable", "not-a-directory"):
                 continue
-            if not (p / ".git").exists():
-                continue
-        except OSError:
+            if first_why is None:
+                first_why = why
+            if is_hinted and hinted_why is None:
+                hinted_why = why
             continue
         if first_ok is None:
-            first_ok = candidate
-        if hinted is None:
-            prefix = text[max(0, m.start() - 12):m.start()]
-            if _WORKTREE_HINT_RE.search(prefix):
-                hinted = candidate
-    return hinted or first_ok
+            first_ok = real
+        if is_hinted and hinted is None:
+            hinted = real
+    got = hinted or first_ok
+    if got:
+        return got, None
+    return None, (hinted_why or first_why)
+
+
+def _worktree_from_report(text, protected_repo=None):
+    """The trusted worktree a report names, or None. Thin wrapper over
+    _worktree_from_report_detail for callers that do not need the reason."""
+    return _worktree_from_report_detail(text, protected_repo)[0]
 
 
 def _hook_evidence_paths(payload):
@@ -7289,7 +7514,8 @@ def _hook_evidence_paths(payload):
 
 
 def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, reason=None,
-              hook_mode=True, source=None, health=None, worktree_source=None):
+              hook_mode=True, source=None, health=None, worktree_source=None,
+              worktree_refused=None):
     """One ledger line for a hook decision. `exit_code` is the real code
     this hook invocation is about to return (never hard-coded to 0) —
     2 for a block, 0 for everything else, including a fail-open skip.
@@ -7337,6 +7563,12 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
         entry["source"] = source
     if worktree_source is not None:
         entry["worktree_source"] = worktree_source
+    # Every path a report NAMED and _trusted_worktree refused, as
+    # "worktree-untrusted:<why>" / "untrusted-test-cmd" tokens. Present and
+    # empty when nothing was refused, so a reader can tell "nothing was
+    # refused" from "this line predates the field".
+    if worktree_refused is not None:
+        entry["worktree_refused"] = list(worktree_refused)
     ledger_append(entry)
 
 
@@ -7355,7 +7587,7 @@ def _pr_url_from_worktree(worktree, pr_num, timeout=None):
     # before the verify check on the Stop-scan path.
     git_timeout = 10 if timeout is None else max(min(10, timeout), 0.0)
     try:
-        proc = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
+        proc = subprocess.run(git_argv(worktree, ["remote", "get-url", "origin"]),
                               capture_output=True, text=True, timeout=git_timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -7725,52 +7957,112 @@ _REPORT_TRIGGER_RE = re.compile(
     r'\d+\s*(?:tests?|test\s+cases?|passed|failed)', re.IGNORECASE)
 _ABS_PATH_RE = re.compile(r'(/(?:[\w.\-]+/)+[\w.\-]*)')
 _PR_NUM_RE = re.compile(r'PR\s*#(\d+)|\bpull/(\d+)\b', re.IGNORECASE)
+# The test command a report names, for the derive-from-report-text paths.
+# Two deliberate restrictions, both of them safety and not tidiness:
+#   * the lookbehind refuses a match that is glued to a path, a word or a
+#     flag. `\bpytest\S*` used to match inside `/tmp/pytest-of-admin/...`
+#     and, because of the greedy `\S*`, carry the WHOLE remaining path into
+#     the capture — so a report that merely mentioned such a directory
+#     produced a "test command" whose argv[0] came straight out of report
+#     text and was then executed. A derived command must be a runner the
+#     report actually named, never a fragment of some path.
+#   * the tail is `[\w:.\-]*`, not `\S*`, so a match can never grow across
+#     a `/`, a quote or a shell metacharacter.
 _TEST_PHRASE_RE = re.compile(
-    r'\b(npm(?:\s+run)?\s+test\S*|pytest\S*|python3?\s+-m\s+pytest\S*)', re.IGNORECASE)
+    r'(?<![\w/\-.])(npm(?:\s+run)?\s+test[\w:.\-]*'
+    r'|pytest[\w:.\-]*'
+    r'|python3?\s+-m\s+pytest[\w:.\-]*)', re.IGNORECASE)
 
 
-def _derive_evidence_from_report_text(text):
-    """{"worktree", "pr", "test_cmd"} auto-derived from a report's own
-    text: any absolute path mentioned that is ALSO an existing directory on
-    this machine (-> worktree — the first such match, good enough for the
-    fleet's one-worktree-per-task convention), any "PR #N" / "pull/N"
-    mention (-> pr, an int), and — ONLY when a worktree was found, per the
-    brief — any npm test/pytest phrase (-> test_cmd). Any of the three can
-    come back None/""/empty; that is not an error, it just means this
-    report's text did not mention that kind of evidence.
+def _npm_runner_is_trusted(worktree):
+    """(ok, why) — whether an `npm test` / `npm run <script>` derived from
+    report text may actually be RUN in `worktree`.
 
-    A worktree candidate is skipped, never accepted blind, when: it is not
-    a real directory on disk (--worktree is handed straight to
-    worker-verify's `git -C <worktree> ...` calls, so a bad path there is
-    worse than none), or the absolute-looking path is actually the path
-    component of a URL (e.g. `.../pull/13` inside
-    `https://github.com/org/repo/pull/13`) — those matched `_ABS_PATH_RE`
-    too and were never a worktree."""
-    worktree = None
-    for m in _ABS_PATH_RE.finditer(text):
-        candidate = m.group(1).rstrip("/.,;:)")
-        if not candidate:
-            continue
-        prefix = text[max(0, m.start() - 3):m.start()]
-        if prefix.endswith("://"):
-            continue  # the path component of a URL, not a real worktree
-        try:
-            is_dir = Path(candidate).is_dir()
-        except OSError:
-            is_dir = False
-        if is_dir:
-            worktree = candidate
-            break
+    `npm test` does not name what it runs; `package.json`'s "scripts" does,
+    and a worker can edit that file. So the command is only as trustworthy
+    as the file behind it: the script must be the one the PROTECTED repo
+    committed. Allowed only when `package.json` is tracked in that repo
+    (`git ls-files --error-unmatch`) AND unmodified against HEAD
+    (`git diff HEAD --` is empty). A worker-modified or untracked
+    package.json means no npm fallback, and the run records the reason
+    "untrusted-test-cmd". `worktree` must ALREADY have passed
+    _trusted_worktree; this function does not re-derive that."""
+    if not worktree:
+        return False, "no-worktree"
+    ok, _out = _git_out(["ls-files", "--error-unmatch", "--", "package.json"], worktree)
+    if not ok:
+        return False, "package.json-not-tracked"
+    ok_d, diff = _git_out(["diff", "HEAD", "--", "package.json"], worktree)
+    if not ok_d:
+        return False, "package.json-diff-unreadable"
+    if diff.strip():
+        return False, "package.json-modified"
+    return True, None
+
+
+_NPM_RUNNER_RE = re.compile(r'^\s*(?:npx\s+)?npm\b', re.IGNORECASE)
+
+
+def _test_cmd_is_npm(cmd):
+    """True when `cmd` hands the choice of what to execute to package.json."""
+    return bool(cmd) and bool(_NPM_RUNNER_RE.match(str(cmd)))
+
+
+def _derive_evidence_from_report_text(text, protected_repo=None):
+    """{"worktree", "pr", "test_cmd", "worktree_source", "refused"}
+    auto-derived from a report's own text, for the Stop-scan and
+    `hook prompt-verify` paths.
+
+    Report text is UNTRUSTED. Both of the values this returns are fed to a
+    subprocess — `worktree` becomes worker-verify's `git -C <worktree>`,
+    and `test_cmd` is EXECUTED in it — so neither is taken on the report's
+    word:
+
+      * `worktree` is whatever absolute path the report mentions that
+        `_trusted_worktree` clears, as a realpath. It used to be the first
+        path that merely `is_dir()`, which let a report name any directory
+        on the machine, including one the worker had just created with a
+        planted `core.fsmonitor` in its `.git/config`.
+      * `test_cmd` is derived ONLY when a trusted worktree was found; with
+        no trusted worktree there is nowhere safe to run it, so it stays
+        empty. An `npm test`/`npm run` phrase additionally needs
+        `_npm_runner_is_trusted` (a committed, unmodified package.json),
+        because `npm test` names no program — package.json does, and the
+        worker can write package.json.
+      * `pr` is a number parsed out of the text and never a path, so it
+        needs no trust check.
+
+    `refused` is the list of short reason tokens this derivation recorded
+    ("worktree-untrusted:<why>", "untrusted-test-cmd"), for the ledger.
+    `worktree_source` is "report" when a trusted worktree was derived and
+    "none" otherwise. Any of the three evidence values can come back
+    None/""/empty; that is not an error, it just means this report's text
+    named no evidence of that kind — or named none that could be trusted."""
+    refused = []
+    worktree, why = _worktree_from_report_detail(text, protected_repo)
+    if worktree is None and why:
+        refused.append(f"worktree-untrusted:{why}")
     pr = None
-    m = _PR_NUM_RE.search(text)
+    m = _PR_NUM_RE.search(text or "")
     if m:
         pr = int(m.group(1) or m.group(2))
     test_cmd = ""
     if worktree:
-        m = _TEST_PHRASE_RE.search(text)
+        m = _TEST_PHRASE_RE.search(text or "")
         if m:
-            test_cmd = m.group(1)
-    return {"worktree": worktree, "pr": pr, "test_cmd": test_cmd}
+            candidate = m.group(1)
+            if _test_cmd_is_npm(candidate):
+                ok, npm_why = _npm_runner_is_trusted(worktree)
+                if ok:
+                    test_cmd = candidate
+                else:
+                    refused.append("untrusted-test-cmd")
+                    refused.append(f"npm-runner:{npm_why}")
+            else:
+                test_cmd = candidate
+    return {"worktree": worktree, "pr": pr, "test_cmd": test_cmd,
+            "worktree_source": "report" if worktree else "none",
+            "refused": refused}
 
 
 def cmd_hook_prompt_verify(a):
@@ -7871,27 +8163,36 @@ def cmd_hook_prompt_verify(a):
                              (("worktree", derived["worktree"]),
                               ("test-cmd", derived["test_cmd"]),
                               ("pr", derived["pr"])) if v) or "no evidence derived"
+            _refused = derived.get("refused") or []
+            _wt_source = derived.get("worktree_source") or "none"
+            if _refused and not derived.get("worktree"):
+                _wt_source = f"report-refused:{_refused[0].split(':', 1)[-1]}"
+                used += (" (report named a worktree this door does not trust: "
+                        + "; ".join(_refused) + ")")
             print(f"super-jev verify {teammate_id}: {label} — {flag_str} ({used})")
             _hook_log(f"prompt-verify: {teammate_id} — {label} (exit {code}) [{used}]",
                      exit_code=0, skipped=False, flags=flags, hook_mode=True,
-                     source="teammate-message")
+                     source="teammate-message", worktree_source=_wt_source,
+                     worktree_refused=_refused)
             # One catch-ledger record per teammate verdict — CLEAN/READ/REJECT
             # map onto the same allow/advisory/block vocabulary every other
             # door's catch record uses.
             _catch_decision = {"CLEAN": "allow", "READ": "advisory",
                                "REJECT": "block"}.get(label, "advisory")
-            catch_log("prompt-verify", _catch_decision, reasons=block_reasons,
+            catch_log("prompt-verify", _catch_decision,
+                     reasons=block_reasons + _refused,
                      draft_text=report_text, start_time=_catch_t0,
                      payload={"door": "prompt-verify", "teammate_id": teammate_id,
                               "report": report_text})
             any_checked = True
         if not any_checked:
             _hook_log("prompt-verify: no teammate-message block carried a report marker",
-                     skipped=True, reason="no-checkable-reports")
+                     skipped=True, reason="no-checkable-reports",
+                     worktree_source="none", worktree_refused=[])
         return 0
     except Exception as exc:  # advisory-only contract: never raise, never block
         _hook_log(f"prompt-verify: unexpected error ({exc.__class__.__name__}) — fail-open",
-                 skipped=True)
+                 skipped=True, worktree_source="none", worktree_refused=[])
         return 0
 
 
@@ -8140,22 +8441,36 @@ def _stop_scan_verify_one(r, budget=None):
                          (("worktree", derived["worktree"]),
                           ("test-cmd", derived["test_cmd"]),
                           ("pr", derived["pr"])) if v) or "no evidence derived"
+        if (derived.get("refused") or []) and not derived.get("worktree"):
+            used += " (report named a worktree this door does not trust: " \
+                    + "; ".join(derived["refused"]) + ")"
         print(f"super-jev verify {teammate_id}: {label} — {flag_str} — {used} — health {health}")
         note_tail = (" — " + "; ".join(notes)) if notes else ""
+        refused = derived.get("refused") or []
+        wt_source = derived.get("worktree_source") or "none"
+        if refused and not derived.get("worktree"):
+            # Name the refusal in worktree_source itself, so a thin
+            # stop-scan gather is never mistaken for a report that simply
+            # mentioned no worktree.
+            wt_source = f"report-refused:{refused[0].split(':', 1)[-1]}"
         _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
                  f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
                  hook_mode=True, source="stop-transcript",
                  unchecked=(label == "UNCHECKED"),
                  health=("none" if label == "UNCHECKED" else health),
-                 reason=("no-evidence" if label == "UNCHECKED" else None))
+                 reason=(refused[0] if refused and label == "UNCHECKED"
+                         else ("no-evidence" if label == "UNCHECKED" else None)),
+                 worktree_source=wt_source, worktree_refused=refused)
         if label == "UNCHECKED":
-            catch_log("verify", "unchecked", reasons=["no-evidence"] + (notes or []),
+            catch_log("verify", "unchecked",
+                     reasons=["no-evidence"] + refused + (notes or []),
                      draft_text=report_text, payload=None)
     except Exception as exc:
         print(f"super-jev verify {teammate_id}: ERROR — {exc.__class__.__name__} (advisory)")
         _hook_log(f"stop-scan: {teammate_id} — error ({exc.__class__.__name__}), "
                  "advisory-only", skipped=True, reason="stop-scan-error",
-                 source="stop-transcript")
+                 source="stop-transcript", worktree_source="none",
+                 worktree_refused=[])
 
 
 def _hook_stop_scan_teammate_reports(payload, budget=None):
@@ -8432,6 +8747,7 @@ def cmd_hook(a):
         return 0
 
     budget = StopBudget()
+    worktree_refusals = []  # "worktree-untrusted:<why>" tokens, for the ledger
     worktree_source = None  # set for real inside the verify branch below;
                              # stays None for door=="gate", which never
                              # resolves a worktree at all
@@ -8667,8 +8983,15 @@ def cmd_hook(a):
                 worktree = os.environ.get(HOOK_WORKTREE_ENV)
                 worktree_source = "env"
             else:
-                worktree = _worktree_from_report(text)
+                # Report text is untrusted; _worktree_from_report only
+                # returns a path _trusted_worktree cleared. A refusal is
+                # recorded so the ledger says WHY the gather stayed thin
+                # rather than looking like the report named nothing.
+                worktree, wt_why = _worktree_from_report_detail(text)
                 worktree_source = "report" if worktree else "none"
+                if worktree is None and wt_why:
+                    worktree_source = f"report-refused:{wt_why}"
+                    worktree_refusals.append(f"worktree-untrusted:{wt_why}")
 
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
@@ -8839,15 +9162,19 @@ def cmd_hook(a):
             _hook_log(f"verify: unchecked — no evidence gathered (exit {code} "
                      f"suppressed — {reason_bits}) — advisory, not judged", exit_code=0,
                      flags=flags, unchecked=True, health="none", reason="no-evidence",
-                     worktree_source=worktree_source)
-            catch_log(door, "unchecked", reasons=["no-evidence"] + block_notes,
+                     worktree_source=worktree_source,
+                     worktree_refused=worktree_refusals)
+            catch_log(door, "unchecked",
+                     reasons=["no-evidence"] + worktree_refusals + block_notes,
                      draft_text=text, window_bytes=_catch_window_bytes,
                      start_time=_catch_t0, payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
-                     flags=flags, reason=suppressed_reason, worktree_source=worktree_source)
+                     flags=flags, reason=suppressed_reason,
+                     worktree_source=worktree_source,
+                     worktree_refused=worktree_refusals)
             catch_log(door, "allow", reasons=block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
@@ -8859,7 +9186,9 @@ def cmd_hook(a):
             print(advisory)
             _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
                      f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
-                     flags=flags, reason=suppressed_reason)
+                     flags=flags, reason=suppressed_reason,
+                     worktree_source=worktree_source,
+                     worktree_refused=worktree_refusals)
             catch_log(door, "advisory-forced", reasons=block_reasons, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
@@ -8874,7 +9203,9 @@ def cmd_hook(a):
             _hook_log(f"gate: judge advisory, not blocked (exit {code}) — would have "
                      f"blocked on: {reason_bits}{suppressed_note_tail} "
                      f"[judge-advisory-mode:{_jam}]", exit_code=0,
-                     flags=flags, reason=suppressed_reason)
+                     flags=flags, reason=suppressed_reason,
+                     worktree_source=worktree_source,
+                     worktree_refused=worktree_refusals)
             # The arm name (NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS) already
             # rides inside each block_reasons string ("key VERDICT score");
             # the mode tag is appended so the ledger also names WHICH
@@ -8900,7 +9231,8 @@ def cmd_hook(a):
             _hook_log(f"{door}: block (exit {code})" +
                      (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
                      (f" — advisory: {'; '.join(block_notes)}" if block_notes else ""),
-                     exit_code=2, flags=flags, worktree_source=worktree_source)
+                     exit_code=2, flags=flags, worktree_source=worktree_source,
+                     worktree_refused=worktree_refusals)
             catch_log(door, "block", reasons=block_reasons + block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
@@ -8910,15 +9242,21 @@ def cmd_hook(a):
         advisory = f"super-jev {door} advisory (exit {code}){note_tail}"
         print(advisory)
         _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags,
-                 reason=suppressed_reason, worktree_source=worktree_source)
+                 reason=suppressed_reason, worktree_source=worktree_source,
+                 worktree_refused=worktree_refusals)
         catch_log(door, "advisory", reasons=block_notes, draft_text=text,
                  window_bytes=_catch_window_bytes, start_time=_catch_t0,
                  payload=payload)
         _print_ledger_notice_if_gate()
         return 0
     except Exception as exc:  # fail-open: never wedge the session
+        # worktree_source/worktree_refusals are initialised before the try,
+        # so this line carries them even when the exception fired before a
+        # worktree was ever resolved ("None" / empty, which is itself the
+        # fact a reviewer needs).
         _hook_log(f"{door}: unexpected error ({exc.__class__.__name__}) — fail-open",
-                 skipped=True)
+                 skipped=True, worktree_source=(worktree_source or "none"),
+                 worktree_refused=worktree_refusals)
         return 0
     finally:
         if evidence_tmp_path:
@@ -9834,7 +10172,7 @@ def harness_commit(repo):
     if not (repo / ".git").exists() and not repo.is_dir():
         return f"unknown — no checkout at {repo}"
     try:
-        proc = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+        proc = subprocess.run(git_argv(repo, ["rev-parse", "--short", "HEAD"]),
                               capture_output=True, text=True, env=child_env())
     except OSError:
         return "unknown — git is not runnable here"
