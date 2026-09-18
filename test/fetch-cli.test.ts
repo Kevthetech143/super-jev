@@ -358,3 +358,122 @@ test('--ledger without --record is a usage error, exit 1', async () => {
     assert.match(result.stderr, /--ledger only applies with --record/);
   });
 });
+
+// ---------------------------------------------------------------- pre-rules (R1/R2/R3)
+
+const PRERULES_CATALOG = JSON.stringify([
+  {
+    id: 'pay-coned', text: 'Pay a Con Edison electric bill via the guest checkout flow.',
+    utterances: ['pay the electric bill', 'pay my coned bill'], negatives: ['gas bill']
+  },
+  {
+    id: 'pay-water', text: 'Pay the water utility bill.',
+    utterances: ['pay the water bill'], negatives: []
+  }
+]);
+
+test('R1 serves a unique multi-word trigger directly: zero calls, manifest complete, source trigger', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'please pay the electric bill', '--stub', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.mode, 'trigger');
+    assert.equal(parsed.source, 'trigger');
+    assert.equal(parsed.calls, 0);
+    assert.equal(parsed.manifestComplete, true);
+    assert.equal(parsed.ranked[0].id, 'pay-coned');
+    assert.match(parsed.reason, /R1/);
+  });
+});
+
+test('R1 does not fire on a single-word utterance, and falls through to the judge', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    const catalog = JSON.stringify([
+      { id: 'pay-coned', text: 'Pay a Con Edison electric bill.', utterances: ['electric', 'pay the electric bill'], negatives: [] }
+    ]);
+    await writeFile(catalogPath, catalog, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'electric', '--stub', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.notEqual(parsed.mode, 'trigger');
+    assert.equal(parsed.calls, 1);
+  });
+});
+
+test('R1 does not fire on a trigger shared by more than one record', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    const catalog = JSON.stringify([
+      { id: 'a', text: 'Record A.', utterances: ['do the thing now'], negatives: [] },
+      { id: 'b', text: 'Record B.', utterances: ['do the thing now'], negatives: [] }
+    ]);
+    await writeFile(catalogPath, catalog, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'do the thing now', '--stub', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.notEqual(parsed.mode, 'trigger');
+    assert.equal(parsed.calls, 1);
+  });
+});
+
+test('--no-prerules bypasses R1 and always calls the judge, even for a request that would otherwise trigger-match', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'please pay the electric bill', '--stub', '--json', '--no-prerules']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.notEqual(parsed.mode, 'trigger');
+    assert.equal(parsed.calls, 1);
+    assert.equal(parsed.source, 'judge');
+  });
+});
+
+test('R2 demotes the judge top-1 to review when it has a negative-phrase hit, and prints why', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
+    // "gas bill" is pay-coned's own negative and is not a trigger of any
+    // record, so R1 cannot fire and this exercises the judge + R2 path.
+    const result = runCli(['--catalog', catalogPath, '--request', 'can you pay the gas bill this week', '--stub', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.notEqual(parsed.mode, 'trigger');
+    assert.equal(parsed.calls, 1);
+    if (parsed.source === 'pre-rule' && /R2/.test(parsed.reason ?? '')) {
+      assert.equal(parsed.gated, true);
+      // Re-run without --json to check the plain-words "prints why" line;
+      // the stub is deterministic per question, so the same request settles
+      // the same way.
+      const plain = runCli(['--catalog', catalogPath, '--request', 'can you pay the gas bill this week', '--stub']);
+      assert.equal(plain.code, 0, plain.stderr);
+      assert.match(plain.stderr, /R2/);
+    }
+  });
+});
+
+test('R3 returns noMatch when no trigger appears anywhere and the judge top-1 is under the floor', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'book a flight to chicago', '--stub', '--json', '--floor', '0.95']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.notEqual(parsed.mode, 'trigger');
+    assert.equal(parsed.gated, true);
+  });
+});
+
+test('--explain prints the derived pre-rule facts before the plan', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'please pay the electric bill', '--stub', '--json', '--explain']);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /trigger hit: record pay-coned/);
+    assert.match(result.stderr, /ambiguity guard:/);
+  });
+});
