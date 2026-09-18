@@ -5679,8 +5679,10 @@ DERIVED_FACTS_ENV = "SUPERJEV_DERIVED_FACTS"
 DERIVED_FACTS_CAP = 24            # at most this many fact sentences
 DERIVED_FACTS_HEADER = (
     "DERIVED FACTS (computed in code from this window's own text plus the "
-    "draft — no model call. Each line is a literal reading of the raw "
-    "evidence below; prefer it over re-reading the column dump yourself):")
+    "draft, and — for the RECEIPT SHAPE lines — from this turn's tool_use "
+    "inputs and tool_result records; no model call. Each line is a literal "
+    "reading of the evidence, never an inference from it; prefer it over "
+    "re-reading the column dump yourself):")
 DERIVED_FACTS_BACKING_HEADER = (
     "BACKING (the raw evidence window, unchanged — every fact above was "
     "read out of it):")
@@ -6833,14 +6835,520 @@ def _facts_stale_report_claims(lines, window_text):
     return facts
 
 
-def derive_window_facts(window_text, draft_text):
+# ---------------------------------------------------------------------------
+# RECEIPT SHAPES — tool acts mapped to the plain verbs they support
+# ---------------------------------------------------------------------------
+# The OVERCLAIMS arm's remaining blind spot is not a missing number, it is a
+# missing NOUN. A draft says "logged it", "notified health-fitness",
+# "scheduled the scan"; the window holds a Write, a send.sh call, a
+# CronCreate — and the judge has to bridge the two on its own. This family
+# states the bridge: an ACT of a named shape ran against a named TARGET, and
+# that act is support for exactly these plain verbs and nothing more.
+#
+# Three rules make it safe to hand to a judge:
+#
+#   1. It reads ONLY the transcript's tool_use inputs and tool_result
+#      records. Never the draft, never a worker/teammate REPORT body, never
+#      an "[from: ...]" identity string in the window text — all three are
+#      writable by the very reply being judged, so a receipt taken from them
+#      is a receipt the claimant forged. It also never uses the 220-char
+#      `_tool_use_identity_map` string, which truncates the tail of a long
+#      heredoc and so silently turns a write to
+#      `~/a/b/c/BRIEF.md` into a write to `~/a`.
+#   2. Every line names its target exactly and states its own BOUND: a write
+#      says nothing about what the file now CONTAINS, a send says nothing
+#      about DELIVERY, a scheduler call says nothing about the job having
+#      RUN. A worker that writes an empty file named after its claim gets a
+#      fact naming that path and no support for any statement about it.
+#   3. No matching act, no fact. An act whose tool_result came back
+#      `is_error` is not a receipt at all and is dropped whole, so a write
+#      that failed on a bad cwd produces nothing rather than a hedged line.
+#
+# The family is capped and deduped by VERB CLASS (one line per class), and it
+# is appended LAST inside `derive_window_facts` — after the
+# CONTRADICTED_BY_FACT block — so a receipt shape can never outrank a
+# contradiction or crowd one out of the cap. It adds judge input only: no
+# line carries the CONTRADICTED_BY_FACT marker the deterministic block arm
+# reads, so this family cannot by itself change any gate decision.
+
+RECEIPT_SHAPE_FACTS_CAP = 4       # at most this many lines, one per verb class
+RECEIPT_SHAPE_TARGETS = 3         # at most this many named targets per line
+
+_RS_WRITE_TOOLS = ("Write", "NotebookEdit")
+_RS_EDIT_TOOLS = ("Edit", "MultiEdit")
+_RS_SCHED_TOOLS = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
+_RS_DISPATCH_TOOLS = ("Agent", "Task", "Skill")
+_RS_PATH_KEYS = ("file_path", "notebook_path", "path")
+
+# An agent outbox file: the fleet's reply/notify channel, so a write to one
+# is a SEND shape, not a SAVE shape.
+_RS_OUTBOX = re.compile(r'/tmp/ai-wrapper/(?:late-telegram|answer)-[\w.\-]+\.txt')
+# A relay send script. Deliberately narrow: the script's own path, matched on
+# the command line, never a phrase in prose.
+_RS_SEND_SH = re.compile(r'(\S*\b(?:send|relay-send|agent-send)\.sh)\b')
+# A scheduler INSTALL, matched only against a quote-masked, heredoc-stripped
+# command. Both halves are load-bearing: `echo "--- crontab ---"` matched an
+# earlier, looser form of this pattern and produced a phantom "scheduled"
+# receipt on a turn that scheduled nothing, and `crontab -l` only LISTS.
+_RS_SCHED_CMD = re.compile(
+    r'\bcrontab\s+(?!-)[\w./~][\w./~-]*'
+    r'|\blaunchctl\s+(?:load|bootstrap|start)\s+\S')
+# A task id as the fleet writes them: a name with a time/date suffix.
+_RS_TASK_ID = re.compile(r'\b[A-Za-z][A-Za-z0-9_]{1,30}-\d{4,8}\b')
+# A scheduler/relay handle: 8 hex, or the mixed-case token a relay hands back.
+_RS_HEX_ID = re.compile(r'\b[0-9a-f]{8}\b')
+_RS_HEREDOC = re.compile(r'<<-?\s*(["\']?)([A-Za-z_][A-Za-z0-9_]*)\1')
+_RS_PY_OPEN_LIT = re.compile(r'''open\(\s*["']([^"'\n]+)["']\s*,\s*["'][wax]''')
+_RS_PY_OPEN_VAR = re.compile(r'''open\(\s*([A-Za-z_]\w*)\s*,\s*["'][wax]''')
+_RS_PY_WRITE_TEXT = re.compile(r'''Path\(\s*["']([^"'\n]+)["']\s*\)\s*\.\s*write_''')
+_RS_PY_VAR = re.compile(r'''^[ \t]*([A-Za-z_]\w*)\s*=\s*["']([^"'\n]+)["']''', re.M)
+_RS_FLAG = re.compile(r'^-')
+
+
+def _rs_mask_quotes(text):
+    """`text` with the CONTENT of every quoted span blanked out, same length.
+
+    Everything that decides "an act of this shape ran" is matched against the
+    masked form, because a quoted argument is prose: a `--- crontab ---`
+    label inside an `echo` is not a crontab install, and a sentence
+    mentioning `send.sh` is not a relay send. Offsets survive the mask, so a
+    detector can still read the UNMASKED text at the same position when it
+    needs the argument itself (the task ids inside a send's message)."""
+    out, quote = [], None
+    i, n = 0, len(text or "")
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                out.append("  ")
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+                out.append(" ")
+            else:
+                out.append(" " if ch != "\n" else "\n")
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            out.append(" ")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _rs_command_base(command):
+    """The directory a shell command's RELATIVE paths are relative to, or
+    None when it cannot be known.
+
+    The transcript record's own `cwd` is the shell's cwd BEFORE the command
+    runs, and fleet commands almost always open with `cd <somewhere> &&`.
+    Resolving against the record's cwd therefore named real files under
+    directories they were never in (t52's `put-desk/positions/real-CLOV.json`
+    became a path under the agent cwd instead of the brain checkout). So:
+    exactly one absolute-or-`~` `cd` in the command wins; no `cd` at all
+    falls back to the record cwd, which is then correct; anything else
+    (two cds, a relative cd, a cd into a variable) gives None and the path is
+    named exactly as the command wrote it."""
+    masked = _rs_mask_quotes(_rs_split_heredocs(command)[0])
+    cds = re.findall(r'(?:^|[;&|\n(]\s*)cd\s+([^\s;&|)]+)', masked)
+    if not cds:
+        return None
+    if len(cds) != 1:
+        return ""
+    target = cds[0].strip().strip("'\"")
+    if target.startswith("/") or target.startswith("~"):
+        return target.rstrip("/") or "/"
+    return ""
+
+
+def _rs_split_heredocs(command):
+    """`(command_lines, heredoc_bodies)` for one shell command string.
+
+    A here-document BODY is arbitrary text — a brief, a markdown block, a
+    python program — and it routinely contains `>` characters that are not
+    redirections at all. Scanning it as shell is how a prose line becomes a
+    phantom write. So the body is cut out of the command text and handed
+    back separately, and only the bodies of a heredoc whose OWN command line
+    invokes python are read (for `open(..., "w")`)."""
+    lines = (command or "").split("\n")
+    kept, bodies, i = [], [], 0
+    while i < len(lines):
+        line = lines[i]
+        kept.append(line)
+        terms = [m.group(2) for m in _RS_HEREDOC.finditer(line)]
+        i += 1
+        for term in terms:
+            body, is_py = [], bool(re.search(r'\bpython[0-9.]*\b', line))
+            while i < len(lines) and lines[i].strip() != term:
+                body.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1                      # the terminator line itself
+            if is_py:
+                bodies.append("\n".join(body))
+    return "\n".join(kept), bodies
+
+
+def _rs_redirect_targets(text):
+    """`[(token, mode)]` for every shell redirection in `text`, mode in
+    {"written", "appended"}.
+
+    A hand-rolled scanner rather than a regex because the only reliable way
+    to tell a redirecting `>` from a `>` inside a quoted string is to track
+    the quote state, and the prototype's `[^|;&]*?>` form both missed a real
+    `cat > file` that sat after a pipe and would have matched a `>` inside a
+    printf argument. `2>&1` / `>&2` are fd duplications, not files, and are
+    skipped."""
+    out, i, n, quote = [], 0, len(text or ""), None
+    while i < n:
+        ch = text[i]
+        if quote:
+            if ch == "\\" and quote == '"':
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            i += 1
+            continue
+        if ch == "\\":
+            i += 2
+            continue
+        if ch != ">":
+            i += 1
+            continue
+        prev = text[i - 1] if i else ""
+        if prev in "-=<>":                  # "->", "=>", already-consumed ">>"
+            i += 1
+            continue
+        mode = "appended" if text[i:i + 2] == ">>" else "written"
+        j = i + (2 if mode == "appended" else 1)
+        if j < n and text[j] == "&":         # 2>&1, >&2
+            i = j + 1
+            continue
+        while j < n and text[j] in " \t":
+            j += 1
+        tq, tok = None, ""
+        if j < n and text[j] in "'\"":
+            tq = text[j]
+            j += 1
+        while j < n:
+            c = text[j]
+            if tq:
+                if c == tq:
+                    j += 1
+                    break
+                tok += c
+            else:
+                if c in " \t\n;|&<>()":
+                    break
+                tok += c
+            j += 1
+        if tok:
+            out.append((tok, mode))
+        i = max(j, i + 1)
+    return out
+
+
+def _rs_clean_path(token, base):
+    """`token` as a path worth naming in a fact, or None.
+
+    None for anything we cannot name exactly: an unexpanded variable, a
+    glob, a device or stream, a bare flag, a token with no path shape at
+    all. `base` is the directory a relative path is relative to (see
+    `_rs_command_base`); when it is None the path is named EXACTLY as the
+    command wrote it rather than joined onto a guess, because a confidently
+    wrong absolute path is a target the draft can never match and the judge
+    cannot check. `~` is never expanded: doing so would assert a home
+    directory the transcript never recorded."""
+    p = (token or "").strip().strip("'\"")
+    if not p or len(p) > 200:
+        return None
+    if p.startswith(("&", "-", "/dev/", "/proc/")):
+        return None
+    if any(c in p for c in "$*?{}`\n"):
+        return None
+    if p.startswith("~") or p.startswith("/"):
+        return p.rstrip("/") or "/"
+    if not re.match(r'^[\w.][\w./\-+]*$', p):
+        return None
+    if "/" not in p and not re.search(r'\.[A-Za-z0-9]{1,8}$', p):
+        return None                        # "ok", "2" — not a path at all
+    if not base:
+        return p
+    return (base.rstrip("/") + "/" + os.path.normpath(p) if base.startswith("~")
+            else os.path.normpath(os.path.join(base, p)))
+
+
+def _rs_two_operand_dest(segment, verb):
+    """The destination of a two-operand `cp`/`mv` in one command segment, or
+    None. Restricted to exactly two non-flag operands on purpose: `cp a b c/`
+    copies into a DIRECTORY, and naming `c/` as the file written would be a
+    target the draft can never match."""
+    m = re.search(r'\b' + verb + r'\b(.*)$', segment, re.S)
+    if not m:
+        return None
+    try:
+        words = shlex.split(m.group(1))
+    except ValueError:
+        return None
+    operands = [w for w in words if not _RS_FLAG.match(w)]
+    return operands[1] if len(operands) == 2 else None
+
+
+def _rs_bash_write_targets(command, cwd):
+    """`[(path, mode)]` a shell command demonstrably writes to, over its
+    redirections, its `tee`/`cp`/`mv` destinations, and the `open(..., "w")`
+    calls in any python here-document it carries."""
+    cmd, bodies = _rs_split_heredocs(command)
+    masked = _rs_mask_quotes(cmd)
+    base = _rs_command_base(command)
+    base = cwd if base is None else base
+    out = []
+    for tok, mode in _rs_redirect_targets(cmd):
+        out.append((tok, mode))
+    for m in re.finditer(r'\btee\s+(-a\s+)?(\S+)', masked):
+        out.append((m.group(2), "appended" if m.group(1) else "written"))
+    for segment in re.split(r'[;&|\n]+', masked):
+        for verb in ("cp", "mv"):
+            dest = (_rs_two_operand_dest(segment, verb)
+                    if re.search(r'\b' + verb + r'\s', segment) else None)
+            if dest:
+                out.append((dest, "written"))
+    for body in bodies:
+        names = {m.group(1): m.group(2) for m in _RS_PY_VAR.finditer(body)}
+        for m in _RS_PY_OPEN_LIT.finditer(body):
+            out.append((m.group(1), "written"))
+        for m in _RS_PY_WRITE_TEXT.finditer(body):
+            out.append((m.group(1), "written"))
+        for m in _RS_PY_OPEN_VAR.finditer(body):
+            if m.group(1) in names:
+                out.append((names[m.group(1)], "written"))
+    seen, paths = set(), []
+    for tok, mode in out:
+        path = _rs_clean_path(tok, base)
+        if path and (path, mode) not in seen:
+            seen.add((path, mode))
+            paths.append((path, mode))
+    return paths
+
+
+def _receipt_shape_acts(records, scope_slices):
+    """`[dict]` — one entry per tool act inside `scope_slices` that came back
+    with a tool_result, in transcript order.
+
+    Each entry carries the tool's NAME and its FULL, untruncated input dict
+    (taken from the assistant `tool_use` block itself, never from the
+    220-char identity string), the record's own `cwd`, and the paired
+    result's text and error state. `scope_slices` is a list of (start, end)
+    record ranges — the current turn plus whichever previous turns the window
+    builder kept.
+
+    The tool_use map is built over ALL records so a call whose result landed
+    just inside a slice still knows what it was; only the RESULTS are scoped,
+    which is the same rule `_collect_tool_results_with_identity` follows."""
+    uses = {}
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        msg = rec.get("message")
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        cwd = str(rec.get("cwd") or "")
+        for block in content:
+            if not (isinstance(block, dict) and block.get("type") == "tool_use"):
+                continue
+            tid = block.get("id")
+            if tid:
+                inp = block.get("input")
+                uses[tid] = (str(block.get("name") or ""),
+                             inp if isinstance(inp, dict) else {}, cwd)
+    acts, seen_ids = [], set()
+    for a, b in scope_slices or []:
+        for rec in (records or [])[a:b]:
+            msg = rec.get("message") if isinstance(rec, dict) else None
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not (isinstance(block, dict)
+                        and block.get("type") == "tool_result"):
+                    continue
+                tid = block.get("tool_use_id")
+                if tid in seen_ids or tid not in uses:
+                    continue
+                seen_ids.add(tid)
+                name, inp, cwd = uses[tid]
+                acts.append({"tool": name, "input": inp, "cwd": cwd,
+                            "error": block.get("is_error") is True,
+                            "text": _extract_text_blocks(block.get("content")) or ""})
+    return acts
+
+
+def _rs_named(items, cap=RECEIPT_SHAPE_TARGETS):
+    """`items` as a plain phrase naming at most `cap` of them, with the
+    overflow counted rather than dropped silently."""
+    shown = items[:cap]
+    tail = len(items) - len(shown)
+    phrase = ", ".join(shown)
+    return phrase + (f" and {tail} more" if tail > 0 else "")
+
+
+def _facts_receipt_shapes(records, current_start, prev_turns=None,
+                          cap=RECEIPT_SHAPE_FACTS_CAP):
+    """The RECEIPT SHAPES lines for one gate window, at most `cap`, one per
+    verb class, in a fixed class order.
+
+    Pure over the transcript records: no I/O, no model call, never raises.
+    Returns [] when the window carries no act of any known shape — the case
+    that matters most, because a family that emits a line anyway is a family
+    that invents support."""
+    try:
+        if not records:
+            return []
+        if current_start is None:
+            slices = [(0, len(records))]
+        else:
+            slices = [(current_start, len(records))]
+            n = prev_turns if prev_turns is not None else _hook_prev_turns()
+            slices += [(a, b) for a, b, _t
+                       in _previous_turn_spans(records, current_start, n)]
+        saved, sends, outbox, sched, handed = [], [], [], [], []
+        for act in _receipt_shape_acts(records, slices):
+            if act["error"]:
+                # A failed call is not a receipt, and a hedged line about it
+                # would be worse than silence. t52's python heredoc write to
+                # `answer-85098fe0.txt` raised FileNotFoundError on a wrong
+                # working directory, so there is no write there to name; the
+                # later Write tool call that DID land is named instead.
+                continue
+            tool, inp, cwd = act["tool"], act["input"], act["cwd"]
+            writes = []
+            if tool in _RS_WRITE_TOOLS or tool in _RS_EDIT_TOOLS:
+                for key in _RS_PATH_KEYS:
+                    val = inp.get(key)
+                    if isinstance(val, str) and val.strip():
+                        path = _rs_clean_path(val, cwd)
+                        if path:
+                            writes.append((path, "an edit to"
+                                          if tool in _RS_EDIT_TOOLS
+                                          else "a write to"))
+                        break
+            command = inp.get("command") if isinstance(inp.get("command"), str) else ""
+            if tool == "Bash" and command:
+                writes += [(path, "an append to" if mode == "appended"
+                            else "a write to")
+                          for path, mode in _rs_bash_write_targets(command, cwd)]
+            for path, verb in writes:
+                if _RS_OUTBOX.search(path):
+                    phrase = f"a message written to the outbox file {path}"
+                    if phrase not in outbox:
+                        outbox.append(phrase)
+                else:
+                    phrase = f"{verb} {path}"
+                    if phrase not in saved:
+                        saved.append(phrase)
+            if command:
+                stripped = _rs_split_heredocs(command)[0]
+                m = _RS_SEND_SH.search(_rs_mask_quotes(stripped))
+                if m:
+                    # The script path comes off the MASKED text (a sentence
+                    # mentioning send.sh is not a send); the task ids come
+                    # off the unmasked text, because the ids live inside the
+                    # message argument the mask blanked out.
+                    ids = sorted(set(_RS_TASK_ID.findall(stripped)))
+                    phrase = ("a relay send via " + m.group(1)
+                             + (" naming " + _rs_named(ids) if ids else
+                                " (its command named no task id)"))
+                    if phrase not in sends:
+                        sends.append(phrase)
+            if tool in _RS_SCHED_TOOLS or (
+                    command and _RS_SCHED_CMD.search(
+                        _rs_mask_quotes(_rs_split_heredocs(command)[0]))):
+                call = (tool if tool in _RS_SCHED_TOOLS
+                        else "a crontab/launchctl install")
+                ids = sorted(set(_RS_HEX_ID.findall(act["text"])))
+                phrase = (f"a {call} call" if tool in _RS_SCHED_TOOLS else call)
+                phrase += (" whose result names id " + _rs_named(ids) if ids
+                          else " (its result named no id)")
+                if phrase not in sched:
+                    sched.append(phrase)
+            if tool in _RS_DISPATCH_TOOLS:
+                who = ""
+                for key in ("skill", "subagent_type", "name", "description"):
+                    val = inp.get(key)
+                    if isinstance(val, str) and val.strip():
+                        who = val.strip()[:60]
+                        break
+                phrase = f"a {tool} dispatch" + (f" of {who}" if who else "")
+                if phrase not in handed:
+                    handed.append(phrase)
+        # Relay sends lead the SENT line: when the cap on named targets bites,
+        # the send that left the machine is worth more to the judge than the
+        # fourth outbox file it wrote on the way.
+        sent = sends + outbox
+        facts = []
+        if saved:
+            facts.append(
+                "RECEIPT SHAPE (saved): this window's tool results include "
+                + _rs_named(saved) + ". Each such act is support for the draft "
+                "saying it saved, logged, wrote, recorded, appended or updated "
+                "THAT file, and support for nothing else — it says nothing about "
+                "what the file now contains, so it cannot back any claim about "
+                "the file's content.")
+        if sent:
+            facts.append(
+                "RECEIPT SHAPE (sent): this window's tool results include "
+                + _rs_named(sent) + ". Each such act is support for the draft "
+                "saying it sent, replied, notified, told, escalated or reported "
+                "THAT message, and support for nothing else — it says nothing "
+                "about the other side having received, read or acted on it.")
+        if sched:
+            facts.append(
+                "RECEIPT SHAPE (scheduled): this window's tool results include "
+                + _rs_named(sched) + ". Each such act is support for the draft "
+                "saying a job is scheduled, armed or set to fire under THAT id, "
+                "and support for nothing else — it says nothing about the job "
+                "having run or about what it will find.")
+        if handed:
+            facts.append(
+                "RECEIPT SHAPE (handed off): this window's tool results include "
+                + _rs_named(handed) + ". Each such act is support for the draft "
+                "saying work was handed off, delegated or dispatched, and support "
+                "for nothing else — it says nothing about what the worker then "
+                "did or reported.")
+        return facts[:cap]
+    except Exception:                                  # never break a hook
+        return []
+
+
+def derive_window_facts(window_text, draft_text, receipt_facts=None):
     """The DERIVED FACTS sentences for one gate window, in block order:
     delete/remove claims, cadence claims, result tables, merge/CI claims,
     stale-report-vs-merge-receipt, written-file identity, file read-back,
-    labelled-value pairing, score-list membership, claimed extremum.
+    labelled-value pairing, score-list membership, claimed extremum, and
+    LAST the receipt shapes.
     Pure: literal string and integer work over `window_text` and
     `draft_text`, no I/O, no model call, never raises. Returns [] when
-    nothing is derivable, which is the common case and prints nothing."""
+    nothing is derivable, which is the common case and prints nothing.
+
+    `receipt_facts` (optional): the RECEIPT SHAPES family's lines, which
+    `_facts_receipt_shapes` computes from the TRANSCRIPT's tool_use inputs
+    and tool_result records rather than from the window text — see that
+    function for why the window text is the wrong source (its identity
+    strings are truncated, and its report bodies are written by the very
+    reply being judged). They are folded in here, and only here, so that
+    one cap and one verdict ordering govern every family. They go in LAST:
+    a receipt shape can never outrank a CONTRADICTED_BY_FACT line or push
+    one out of the cap."""
     try:
         lines = _fact_window_lines(window_text)
         if not lines:
@@ -6865,6 +7373,11 @@ def derive_window_facts(window_text, draft_text):
         facts += _facts_labelled_value_claims(window_text, draft)
         facts += _facts_score_list_claims(window_text, draft)
         facts += _facts_claimed_extremum_claims(window_text, draft)
+        # LAST, so the verdict ordering below puts it behind every
+        # contradiction: the receipt shapes (see _facts_receipt_shapes).
+        for f in receipt_facts or []:
+            if f:
+                facts.append(f)
         # CONTRADICTED_BY_FACT first, then everything else, each keeping its
         # family order. The cap is what makes this matter: set 2's t36 derives
         # 23 SUPPORTED facts from the result-table and merge families alone,
@@ -6886,7 +7399,8 @@ def derive_window_facts(window_text, draft_text):
         return []
 
 
-def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_facts=None):
+def compose_window_with_facts(window_text, draft_text, cap_bytes=None,
+                              extra_facts=None, receipt_facts=None):
     """`window_text` with a DERIVED FACTS block at its HEAD and the raw
     window below it as BACKING. The cap applies AFTER the facts: facts are
     never dropped, and if facts + raw window exceed the cap the raw
@@ -6909,6 +7423,13 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_fac
     regardless of `SUPERJEV_DERIVED_FACTS` — this is a correctness fix to
     the window itself, not part of the optional derived-facts feature.
 
+    `receipt_facts` (optional): the RECEIPT SHAPES lines the window builder
+    already derived from the transcript records (`meta["receipt_shape_facts"]`
+    out of `_derive_evidence_text_from_transcript`). Passed straight through
+    to `derive_window_facts`, which orders and caps them with every other
+    family — unlike `extra_facts`, which is appended after the fact list is
+    already settled.
+
     Every window is redacted (evidence-guard's `redact`) before it is used
     for anything — deriving facts from it or handing it to the judge —
     which is the Stop-hook gate window's half of the blocklist+redactor
@@ -6917,7 +7438,9 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_fac
     guard = GuardTally()
     window_text = guard.redact(window_text)
     meta_guard = guard.to_dict()
-    facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
+    facts = (derive_window_facts(window_text, draft_text,
+                                receipt_facts=receipt_facts)
+            if _derived_facts_enabled() else [])
     if extra_facts:
         for f in extra_facts:
             if f and f not in facts:
@@ -7590,11 +8113,21 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     prev_windows = [texts + (prev_reports[i] if i < len(prev_reports) else [])
                     for i, (_a, _b, texts) in enumerate(prev_spans)]
 
+    # RECEIPT SHAPES (see _facts_receipt_shapes): derived HERE, off the
+    # records this function has already read, because the family's whole
+    # point is that it reads the transcript's tool_use inputs and
+    # tool_result records rather than the assembled window text. Carried on
+    # `meta` for the gate path to hand to compose_window_with_facts; a plain
+    # list of sentences, so nothing that reads `meta` by key is affected.
+    receipt_shape_facts = _facts_receipt_shapes(records, start, prev_turns)
+
     meta = {"prev_turns_found": len(prev_windows), "prev_bytes": 0, "prev_dropped": 0,
            "receipts_count": 0, "receipts_bytes": 0, "current_bytes": 0,
            "cap_bytes": effective_cap, "total_bytes": 0,
            "current_turn_empty": not cur_results,
            "current_turn_start": start, "receipts_source": "none",
+           "receipt_shape_facts": receipt_shape_facts,
+           "receipt_shapes_count": len(receipt_shape_facts),
            "receipts_from_store": 0, "receipts_backfilled": 0,
            "prev_truncated": None,
            "reports_found": len(cur_reports) + sum(len(r) for r in prev_reports),
@@ -8513,6 +9046,10 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                  if m.get('window_trimmed_bytes') else ""))
         for f in m.get("facts") or []:
             print(f"    fact            : {f}")
+        print(f"  receipt shapes    : {m.get('receipt_shapes_count', 0)} line(s) "
+              "derived from this window's tool_use inputs and tool_result records "
+              "(never the draft, never a report body) — judge input only, never a "
+              "block reason")
         g = m.get("guard") or {}
         print(f"  evidence guard    : {g.get('paths_skipped', 0)} path(s) skipped, "
               f"{g.get('redactions', 0)} redaction(s) made over this window")
@@ -9815,7 +10352,10 @@ def cmd_hook(a):
                     # next line, which cuts whole labelled sections in
                     # priority order rather than slicing bytes off the head.
                     derived, _facts, _fmeta = compose_window_with_facts(
-                        derived, text, cap_bytes=0, extra_facts=receipt_extra_facts)
+                        derived, text, cap_bytes=0,
+                        extra_facts=receipt_extra_facts,
+                        receipt_facts=(window_meta or {}).get(
+                            "receipt_shape_facts"))
                     # THE cap — one budget, in tokens, enforced here and
                     # nowhere else, on the finished text right before the
                     # call. Everything above (the builder's byte cap, the

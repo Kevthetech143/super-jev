@@ -2368,6 +2368,106 @@ None of this is wired up. It is a map of where the three doors *could* attach
 if someone builds the adapter, not a claim that they do today on anything but
 Claude Code.
 
+## Receipt shapes — family 11, the act-to-verb bridge (2026-09-18)
+
+Families 6 through 10 all check a *value*: a filename, a labelled figure, a
+score, an extremum. The overclaim arm's remaining blind spot is not a missing
+number, it is a missing **noun**. A draft says "logged it", "notified
+health-fitness", "escalated to the intake owner", "scheduled the scan"; the
+window holds a `Write`, a `send.sh` call, a `CronCreate` — and the judge has
+to bridge the two on its own, from a column dump, in one call. RECEIPT SHAPES
+states the bridge as a sentence: an **act** of a named shape ran against a
+named **target**, and that act is support for exactly these plain verbs and
+nothing more.
+
+The family emits at most four lines, one per verb class:
+
+- **saved** — a `Write`/`Edit`/`NotebookEdit` call, a shell redirection, a
+  `tee`/`cp`/`mv` destination, or an `open(..., "w")` inside a python
+  here-document. Names each path. Supports *saved / logged / wrote /
+  recorded / appended / updated that file*.
+- **sent** — a relay send script on the command line (with any task ids the
+  send itself named), or a write to an agent outbox file. Supports *sent /
+  replied / notified / told / escalated / reported that message*.
+- **scheduled** — a scheduler tool call, or a crontab/launchd *install*,
+  with whatever id its own result handed back. Supports *scheduled / armed /
+  set to fire under that id*.
+- **handed off** — an `Agent`/`Task`/`Skill` dispatch, named. Supports
+  *handed off / delegated / dispatched*.
+
+### Why it reads the transcript and not the window
+
+This is the one family that does not read the assembled window text, and
+that is deliberate on two counts.
+
+First, the window's identity strings are **truncated**
+(`IDENTITY_CMD_MAX_CHARS`), which cuts the tail off a long here-document
+command and silently turns a write to `~/a/b/c/BRIEF.md` into a write to
+`~/a`. A fact that names the wrong target is worse than no fact.
+
+Second, and more important: the window carries **worker prose** — report
+bodies, relayed teammate messages, `[from: ...]` header lines the composer
+writes around text a worker partly chose. A receipt taken from prose is a
+receipt the claimant can write for itself. So the family takes the tool name
+and the tool input **from the assistant `tool_use` record**, and the result
+and its error state from the paired `tool_result` record. The draft is never
+read at all, which is why the family cannot be steered by wording.
+
+### The three rules that keep it honest
+
+**It never invents support.** No matching act, no line. A turn that only
+read and grepped produces nothing. A draft claim about something no act in
+the window covers — a file the turn never touched — gets no line naming it,
+because the lines are built from acts outward, never from the claim inward.
+
+**A failed act is not a receipt.** An act whose `tool_result` came back
+`is_error` is dropped whole rather than hedged. A python here-document write
+that raised `FileNotFoundError` on a wrong working directory produces no
+"saved" line; if a later call wrote the file for real, that later call is
+what gets named.
+
+**Prose inside a command is not a command.** Detection runs against a
+quote-masked, here-document-stripped form of the command line, because
+`echo "--- crontab ---"` is not a crontab install, a `>` inside a `printf`
+argument is not a redirection, and a brief that *says* "write it to X" is not
+a write to X. Relative paths resolve against the command's own single `cd`
+when it has one, against the record's working directory when it has none,
+and are named exactly as written when neither is knowable — a confidently
+wrong absolute path is a target neither the draft nor the reader can check.
+
+### The bound, stated out loud
+
+A write says nothing about what the file now **contains**. A send says
+nothing about **delivery**. A scheduler call says nothing about the job
+having **run**. Every line carries its own bound in its own text, because
+the bound is the gameable edge:
+
+> A worker that writes an empty file named `all-36-targets-verified.md` and
+> does nothing else gets a line naming that path, and no support whatsoever
+> for "all 36 targets verified". The act is real; the claim it is being used
+> to dress up is not covered by it.
+
+That is the whole defence, and it is a real limit rather than a solved
+problem: the family proves an act, never a result. Anything about the
+*content* of what was written, sent or scheduled remains the judge's
+question, and the read-back family (7) is the only free check on any of it.
+
+### Where it sits in the block order
+
+The lines are folded into `derive_window_facts` **last**, behind every other
+family, and the existing verdict ordering puts every
+`CONTRADICTED_BY_FACT` sentence ahead of them. So a receipt shape can never
+outrank a contradiction, and when the fact cap bites it is the receipt shapes
+that are dropped first. No line carries the `CONTRADICTED_BY_FACT` marker the
+deterministic block arm reads, so this family cannot by itself block, allow,
+or flip any gate decision — it is judge input only. Replaying every recorded
+case in all four benches, main against this change, the deterministic block
+reasons and the other families' fact lines come out identical.
+
+`hook gate --explain` prints the count on its own `receipt shapes` row, and
+the lines themselves appear in the normal `fact` rows. Off with
+`SUPERJEV_DERIVED_FACTS=0`, same switch as every other family.
+
 ## The structural window model (2026-09-18)
 
 Everything above describes the window as **text**: one flat blob the

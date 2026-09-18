@@ -1531,6 +1531,13 @@ def _compose_meta(sj, records, start, cur_receipts, cur_claims, prev_spans,
     without also rewriting `hook gate --explain`."""
     prev_reports = [[p for p in items if p.kind == "claim"]
                     for items in prev_turn_pieces]
+    # getattr, not a direct call: the byte-identity tests load THIS module
+    # against an OLDER composer module to prove the render has not drifted,
+    # and that older `sj` has no receipt-shape family at all. There the keys
+    # are left OUT entirely rather than emitted empty, so `meta` still
+    # matches that composer's `meta` field for field. The family adds meta
+    # keys, never bytes.
+    _shapes = getattr(sj, "_facts_receipt_shapes", None)
     meta = {
         "prev_turns_found": len(prev_turn_pieces),
         "prev_bytes": 0,
@@ -1564,6 +1571,15 @@ def _compose_meta(sj, records, start, cur_receipts, cur_claims, prev_spans,
              "kept": None}
             for i, (a, b, _t) in enumerate(prev_spans, start=1)],
     }
+    if _shapes:
+        # RECEIPT SHAPES (see _facts_receipt_shapes): derived from the
+        # transcript records, not from the rendered window, so the model
+        # computes them exactly as the composer does rather than off its own
+        # pieces. Same keys, same values, so `hook gate --explain` and the
+        # gate's compose call read the same thing either way.
+        facts = _shapes(records, start)
+        meta["receipt_shape_facts"] = facts
+        meta["receipt_shapes_count"] = len(facts)
     return meta
 
 
