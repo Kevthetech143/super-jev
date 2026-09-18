@@ -927,6 +927,21 @@ def _pr_mismatch_reason(draft_text, evidence_text):
     return None
 
 
+def _fact_block_reasons(facts):
+    """The `CONTRADICTED_BY_FACT` sentences out of `facts` (a list of the
+    plain-English strings `derive_window_facts` produces), in order, each
+    already carrying its own family label (WRITTEN FILE, REMOVED, missing
+    path, diffstat, count, PR-state, stale-report, ...) and identity
+    detail — literal string work over text that WAS in the window, so it
+    is added to `det_block_reasons` the same way `_count_pairing` and
+    `_pr_mismatch_reason` already are: no model call, no health gate.
+
+    `SUPPORTED` (and any other non-CONTRADICTED_BY_FACT verdict — CHECKED,
+    RESIDUE, advisory-only lines) never appears here and so never blocks
+    and never vetoes another arm; see docs/hooks.md."""
+    return [f for f in (facts or []) if "CONTRADICTED_BY_FACT" in f]
+
+
 def deterministic_block_reasons(draft_text, evidence_text):
     """The full list of deterministic (no-model-call) block reasons for one
     draft/evidence pair: a test-count mismatch and/or a PR-merge mismatch.
@@ -6338,6 +6353,16 @@ def cmd_hook(a):
                                  (det_reason,
                                   _pr_mismatch_reason(text, _read_evidence_text(evidence)))
                                  if r]
+            # A derived fact the window already carries (any family —
+            # written-file identity, removal, missing path, diffstat,
+            # count, PR-state, stale-report, ...) that came back
+            # CONTRADICTED_BY_FACT joins the same deterministic list, for
+            # the same reason the two above do: it is literal string/int
+            # work over text that WAS in the window, so it needs no judge
+            # and no health gate. SUPPORTED/CHECKED/RESIDUE/advisory facts
+            # are filtered out by _fact_block_reasons and never block or
+            # veto another arm. See SET3-LIVE-GAP.md.
+            det_block_reasons += _fact_block_reasons((window_meta or {}).get("facts"))
         else:
             det_block_reasons = []
             count_pairing = []
