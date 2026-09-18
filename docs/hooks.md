@@ -137,27 +137,26 @@ Five changes, built from a 40-case live-judge bench
 offline where the change is a deterministic rule and reported unverified
 where it needed a live judge re-run this pass did not do.
 
-- **Per-fact claim pre-split.** A non-empty `--draft` is now split into
-  clause-sized claims (sentence boundaries, `;`, `:`, standalone ` and `,
-  deduped, capped at 25) and handed to jev.py one per `--claim` via
-  `--claims-file`, instead of letting jev's own splitter collapse a whole
-  multi-fact draft into one claim. That collapse was the single biggest
-  lever the bench found — 5 of 10 missed lies rode inside a longer claim
-  whose other parts were true. `SUPERJEV_PRESPLIT=0` restores the old
-  `--draft` behaviour. Unverified beyond the bench's own claim-count math
-  (this pass could not spend a live judge call to re-score the bench with
-  presplit on).
-- **Deterministic count/PR cross-check**, run before the judge, no model
-  call: a drafted test count that contradicts a real `N passed` line in the
-  evidence, or a drafted "PR #N merged" the evidence's own `gh pr view`
-  state contradicts, blocks outright with a plain reason
-  (`count mismatch: draft N vs evidence M`). Verified on the bench replay:
-  +2 lies caught (the two count-mismatch cases the bench predicted), a
-  third caught as a bonus, 0 truths blocked — see
-  `skills/super-jev/tests/replay_gate_bench.py`. Never fires on a bare
-  evidence gap (a count the evidence never mentions at all): that is a
-  missing measurement, not a contradiction, and treating it as one was the
-  exact bug the OVERCLAIMS health check already guards against.
+- **Per-fact claim pre-split — opt-in, default OFF.** A non-empty `--draft`
+  can be split into clause-sized claims (sentence boundaries, `;`, `:`,
+  standalone ` and `, deduped, capped at 25) and handed to jev.py one per
+  `--claim` via `--claims-file`, instead of letting jev's own splitter
+  collapse a whole multi-fact draft into one claim. The 40-case bench
+  suggested this could catch lies that ride inside a longer claim whose
+  other parts were true, but a live bench run afterward showed pre-split
+  adding a false block with no matching catch, so the default was flipped
+  off. Set `SUPERJEV_PRESPLIT=1` to opt back in; leave it unset (or `0`)
+  for the old `--draft` behaviour, which is now the default.
+- **Deterministic count/PR cross-check — on by default**, run before the
+  judge, no model call: a drafted test count that contradicts a real
+  `N passed` line in the evidence, or a drafted "PR #N merged" the
+  evidence's own `gh pr view` state contradicts, blocks outright with a
+  plain reason (`count mismatch: draft N vs evidence M`). Verified on the
+  bench replay to catch real count-mismatch cases without blocking a true
+  claim — see `skills/super-jev/tests/replay_gate_bench.py`. Never fires
+  on a bare evidence gap (a count the evidence never mentions at all): that
+  is a missing measurement, not a contradiction, and treating it as one was
+  the exact bug the OVERCLAIMS health check already guards against.
 - **Wider evidence window.** The Stop-hook gate now also folds in the
   previous turn's tool_result content (lower priority, capped at half the
   byte budget) and up to the last 40 "receipts" — one dated fact line per

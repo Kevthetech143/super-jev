@@ -169,7 +169,10 @@ def test_ask_says_what_is_missing_when_the_files_are_not_named(capsys):
     assert "missing:" in out
 
 
-def test_ask_runs_gate_when_two_real_paths_are_in_the_sentence(tmp_path, door, capsys):
+def test_ask_runs_gate_when_two_real_paths_are_in_the_sentence(tmp_path, door, capsys, monkeypatch):
+    # gate v2: pre-split is opt-in (default OFF, see CLAIM_PRESPLIT_ENV) —
+    # enable it explicitly here since this test asserts on --claims-file.
+    monkeypatch.setenv("SUPERJEV_PRESPLIT", "1")
     evidence = tmp_path / "notes.md"
     draft = tmp_path / "draft.md"
     evidence.write_text("the migration moved 40 rows\n", encoding="utf-8")
@@ -186,6 +189,21 @@ def test_ask_runs_gate_when_two_real_paths_are_in_the_sentence(tmp_path, door, c
     # checks the flag made it onto argv.
     assert "--claims-file" in door.argv
     assert "VERDICT: CLEAN" in out
+
+
+def test_ask_gate_defaults_to_draft_when_presplit_not_enabled(tmp_path, door, capsys, monkeypatch):
+    # gate v2: proves the default (no env var set) is OFF — pre-split must
+    # be explicitly opted into via SUPERJEV_PRESPLIT=1.
+    monkeypatch.delenv("SUPERJEV_PRESPLIT", raising=False)
+    evidence = tmp_path / "notes.md"
+    draft = tmp_path / "draft.md"
+    evidence.write_text("the migration moved 40 rows\n", encoding="utf-8")
+    draft.write_text("All 40 rows moved and no rollback was needed.\n", encoding="utf-8")
+    code = sj.main(["ask", f"does my draft {evidence} {draft} hold up"])
+    capsys.readouterr()
+    assert code == 0
+    assert "--claims-file" not in door.argv
+    assert "--draft" in door.argv
 
 
 def test_ask_runs_verify_on_a_named_report(tmp_path, door, capsys):
