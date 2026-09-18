@@ -4539,6 +4539,52 @@ def test_evidence_labelling_ignores_bare_and_n_of_m_numbers():
         "the run had 40 cases\n") == {}
 
 
+# ---- (b2) a mixed-alnum run (a git short SHA) must not split into digits --
+#
+# Bench case bt01 (blind set, 2026-09-18): the draft is TRUE and said
+# "Part 2 landed (HEAD 0dca183, 61 tests per Muse)". The old tokenizer
+# matched `[A-Za-z#/]+` and `\d+` as SEPARATE alternatives, so the git short
+# SHA "0dca183" (no separator between digits and letters) split into three
+# tokens — "0", "dca", "183" — and both "0" and "183" landed inside the
+# 4-token window of "tests", alongside the real "61". The arm reported
+# "count mismatch (tests): draft 0/61/183 vs evidence 53" and blocked a
+# true report.
+
+def test_draft_labelling_does_not_split_a_commit_hash_into_bogus_digit_tokens():
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {61}}
+
+
+def test_draft_labelling_still_ignores_a_pure_hex_looking_word_with_no_digits_split_off():
+    # A hash that happens to be pure digits ("183a83f") never contributes
+    # ANY count — mixed alnum is excluded outright, not partially trusted.
+    draft = "Fixed at 183a83f, 5 tests pass."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {5}}
+
+
+def test_evidence_count_arm_recognises_a_bold_markdown_passed_receipt():
+    # The real receipt for bt01's "61 tests" claim was a grep excerpt of a
+    # worker's own report, "`test_v2_details` -> **61 passed**.", which
+    # carries no "in Ns" duration and matched none of the runner shapes —
+    # it sat unmatched while an unrelated, in-scope "53 passed in 77.52s"
+    # (a different task's earlier baseline run) paired instead.
+    evidence = "grep -n passed report.md:\n67:`test_v2_details` -> **61 passed**.\n"
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {61}
+
+
+def test_count_mismatch_arm_is_silent_for_the_bt01_shape_end_to_end():
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    evidence = (
+        "[current turn]\n"
+        "[from: Bash grep -n passed report.md @ /Users/admin/x]\n"
+        "67:`test_v2_details` -> **61 passed**.\n"
+    )
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
 # ---- (c) --explain names the turns it chose and what was cut --------------
 
 def test_explain_names_which_previous_turns_were_chosen(tmp_path, monkeypatch, capsys):
@@ -5663,6 +5709,56 @@ def test_facts_merge_claims_no_false_positive_when_the_receipt_is_present():
     assert not any("no merge receipt" in f for f in facts)
 
 
+# ---- families 4/5 must not read a REPORT FROM fence as a receipt (2026-09-18) --
+#
+# _fact_window_lines fed the SAME lines to every family, including a worker's
+# own unverified claim text inside a REPORT FROM block — so a report that
+# merely SAYS "gh pr merge 39 ran clean, PR 39 merged" (not an actual `gh`
+# receipt) was read by family 4 as a real merge receipt. Both families now
+# read `_fact_window_lines_excluding_reports` for the RECEIPT half only;
+# family 5's own "not merged" half (`_report_not_merged_claims`) still reads
+# a report's body on purpose, since that check is about what the report says.
+
+def test_facts_merge_claims_ignores_a_receipt_shaped_line_inside_a_report_fence():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "Status: done. gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "Nothing else to note.\n"
+    )
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "no merge receipt for PR #39 in window." in facts
+    assert not any("merge receipt found for PR #39" in f for f in facts)
+
+
+def test_facts_merge_claims_still_reads_a_real_receipt_outside_any_report_fence():
+    window = "[current turn]\ngh pr merge 39\nMerged pull request #39\n"
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "merge receipt found for PR #39 in [current turn]." in facts
+    assert not any("no merge receipt" in f for f in facts)
+
+
+def test_iter_window_report_lines_and_excluding_reports_partition_the_window():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    report_lines = sj._iter_window_report_lines(window)
+    other_lines = sj._fact_window_lines_excluding_reports(window)
+    assert [ln for _lab, ln in report_lines] == ["gh pr merge 39"]
+    assert [ln for _lab, ln in other_lines] == ["gh pr merge 40"]
+
+
 # ---- (b): cited-file tail --------------------------------------------------
 
 def test_build_cited_file_block_resolves_an_absolute_path(tmp_path):
@@ -6643,6 +6739,86 @@ def test_labelled_value_fact_does_not_read_a_hyphenated_name_as_a_label():
         "'fill' value in this window is $119.00, on its 'premium collected if "
         "filled' row — CONTRADICTED_BY_FACT."
     ]
+
+
+# ---- common-noun / number-list guard (2026-09-18, live false block) -------
+#
+# The draft "items 2 and 3" (English noun "items" followed by a plain
+# enumerated number list) was matched against an evidence row labelled
+# "feat items" — a table column that happens to carry the same common
+# word — and blocked. "items" here is ordinary prose counting things, not
+# a reference to that column.
+
+_COUNT_NOUN_TABLE_WINDOW = (
+    "[current turn]\n"
+    "[from: Bash cat table.md @ /Users/admin/x]\n"
+    "feat items          7\n"
+)
+
+
+def test_labelled_value_fact_does_not_pair_an_english_noun_number_list_with_a_longer_label():
+    facts = sj.derive_window_facts(
+        _COUNT_NOUN_TABLE_WINDOW, "Fixed items 2 and 3 from the review list.")
+    assert facts == []
+
+
+def test_labelled_value_fact_number_list_guard_covers_the_other_listed_nouns_too():
+    for noun in ("step", "steps", "point", "points", "option", "options",
+                 "part", "parts"):
+        window = (
+            "[current turn]\n"
+            f"[from: Bash cat table.md @ /Users/admin/x]\n"
+            f"feat {noun}          9\n"
+        )
+        facts = sj.derive_window_facts(window, f"Covered {noun} 2 and 3 today.")
+        assert facts == [], (noun, facts)
+
+
+def test_labelled_value_fact_still_fires_when_the_draft_uses_explicit_label_syntax():
+    # "items: 2" — the draft itself marks "items" as a label with a colon,
+    # which is trusted outright and bypasses the common-noun guard.
+    facts = sj.derive_window_facts(_COUNT_NOUN_TABLE_WINDOW, "items: 2 done.")
+    assert facts == [
+        "LABELLED VALUE: the draft states 2 next to 'item'; the only "
+        "'item' value in this window is 7, on its 'feat items' row — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_still_fires_when_the_evidence_label_is_verbatim_in_the_draft():
+    # The guard's own escape hatch: the draft actually wrote the window's
+    # exact (multi-word) label phrase right before the number list, so the
+    # pairing is trusted anyway even though "items" is a guarded noun.
+    facts = sj.derive_window_facts(
+        _COUNT_NOUN_TABLE_WINDOW, "feat items 2 and 3 landed, not 7.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_noun_guard_does_not_touch_a_real_non_list_adjacency():
+    # No enumerated number list nearby — this is the ordinary "label value"
+    # shape the guard must never suppress.
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat table.md @ /Users/admin/x]\n"
+        "Cut line: $4.12\n"
+    )
+    facts = sj.derive_window_facts(window, "Cut under $3.55 with bad news.")
+    assert facts == [
+        "LABELLED VALUE: the draft states $3.55 next to 'cut'; the only "
+        "'cut' value in this window is $4.12, on its 'Cut line' row — "
+        "CONTRADICTED_BY_FACT."
+    ]
+
+
+def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_value():
+    # "HEAD 0dca183" must not read as the labelled value 0 for 'head'.
+    window = (
+        "[current turn]\n"
+        "[from: Bash git log @ /Users/admin/x]\n"
+        "head                2\n"
+    )
+    facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
+    assert facts == []
 
 
 _SCORE_LIST_WINDOW = (

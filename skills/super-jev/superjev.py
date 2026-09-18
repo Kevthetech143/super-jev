@@ -759,6 +759,18 @@ _EVIDENCE_COUNT_RES = {
                    r'(?:pass|tests)[ \t]+(\d+)\b', re.IGNORECASE),
         # mocha: "164 passing (2s)"
         re.compile(r'\b(\d+)\s+passing\b', re.IGNORECASE),
+        # A worker's own bold-markdown summary of a run, "**61 passed**" —
+        # bench case bt01: the real receipt for the draft's true "61 tests
+        # per Muse" claim was a grep excerpt of Muse's own report,
+        # "`test_v2_details` → **61 passed**.", which carries no "in Ns"
+        # duration and so matched none of the shapes above. It stayed
+        # unmatched while an unrelated, EARLIER "53 passed in 77.52s"
+        # receipt (a different task's baseline run, still in scope by the
+        # shared muse-link tool path) paired instead and blocked a true
+        # report. The bold emphasis is what a worker uses to state a
+        # definitive run result in prose, so it is trusted the same way
+        # the glyph-prefixed node:test line above is.
+        re.compile(r'\*\*(\d+)\s+passed\*\*', re.IGNORECASE),
     ),
 }
 
@@ -782,12 +794,25 @@ def _extract_labelled_draft_counts(text):
     integer is only attached to a label when a keyword for that label sits
     within `_COUNT_LABEL_TOKEN_WINDOW` word-tokens of it, inside the same
     clause. An integer with no unit word near it ("PR #7", a version, a
-    duration) is attached to nothing and can never be paired."""
+    duration) is attached to nothing and can never be paired.
+
+    2026-09-18: the old tokenizer matched `[A-Za-z#/]+` and `\\d+` as
+    SEPARATE alternatives, so a run that mixes letters and digits with no
+    separator — a git short SHA like "0dca183" — split into a digit run
+    and a letter run that were no longer glued together: "0dca183" became
+    the three tokens "0", "dca", "183". Bench case bt01's draft said
+    "HEAD 0dca183, 61 tests per Muse"; both "0" and "183" landed within the
+    token window of "tests" and were read as claimed test counts alongside
+    the real "61", producing "count mismatch (tests): draft 0/61/183 vs
+    evidence 53" on a true report. One combined character class keeps a
+    mixed alnum run as ONE token; `tok.isdigit()` below already excludes
+    anything that is not a pure digit run, so a hash like "0dca183" is now
+    excluded outright instead of being read as two counts."""
     out = {}
     if not text:
         return out
     for clause in re.split(r'[.\n;]', text):
-        tokens = re.findall(r"[A-Za-z#/]+|\d+", clause)
+        tokens = re.findall(r"[A-Za-z0-9#/]+", clause)
         labels = [(i, _label_for_word(t)) for i, t in enumerate(tokens)]
         labels = [(i, lab) for i, lab in labels if lab]
         if not labels:
@@ -4632,6 +4657,26 @@ _FACT_LABEL_STOPWORDS = _FACT_LINKER_WORDS | _FACT_PREP_WORDS | frozenset((
     "before", "while", "during", "since", "via", "plus", "minus", "line",
     "value", "number", "score", "time", "date",
 ))
+# 2026-09-18: a plain English noun phrase in the draft ("items 2 and 3")
+# was being read as a reference to an evidence LABEL just because a table
+# column happened to be named the same common word ("feat items"). Bench
+# regression: the draft's "items" is the noun in "items 2 and 3", not a
+# label — the value is really the first of a small enumerated number list,
+# and the evidence label ("feat items") is a longer, unrelated token.
+# `_FACT_COUNT_NOUN_STEMS` are common count nouns that, when they sit
+# right before a bare number LIST, are never trusted as a label word
+# unless the draft used real label punctuation (":" / "=" / backticks —
+# see `_fact_explicit_label_word`) or the evidence's own label is the
+# exact (multi-word) phrase the draft used.
+_FACT_COUNT_NOUN_STEMS = frozenset(("step", "item", "point", "option", "part"))
+_FACT_NUM_LIST_RE = re.compile(r'\d+(?:\s*,\s*\d+)*\s*(?:and|&)\s*\d+', re.IGNORECASE)
+# "items: 2", "items = 2", "`items` 2" — punctuation the draft itself uses
+# to mark a word as a label, immediately before the value. This is the one
+# case allowed to cross the clause-boundary rule below, on purpose: the
+# draft is not just placing a number near a word, it is explicitly naming
+# the word as this value's label.
+_FACT_EXPLICIT_LABEL_RE = re.compile(r'([A-Za-z][A-Za-z_\-]{1,20})\s*[:=]\s*$')
+_FACT_EXPLICIT_BACKTICK_LABEL_RE = re.compile(r'`([A-Za-z][A-Za-z_\-]{1,20})`\s*$')
 _FACT_WORD_RE = re.compile(r"[A-Za-z][A-Za-z_\-]{1,}")
 _FACT_CLAUSE_BOUNDARY_RE = re.compile(r'[,;:()\[\]/]')
 _FACT_COLON_ROW_RE = re.compile(r'^([^:{}\[\]"]{2,70}):\s*(.+)$')
@@ -4732,11 +4777,53 @@ def _fact_window_label_values(window_text):
     return table
 
 
+def _fact_explicit_label_word(sentence, value_start):
+    """The label word right before `value_start` when the draft marks it as
+    a label with real punctuation — "items: 2", "items = 2", "`items` 2" —
+    else None. This is the one shape allowed to cross the clause-boundary
+    rule in `_fact_draft_label_values`: the draft is not just placing a
+    number near a word, it is explicitly naming that word as this value's
+    label, so it is trusted even when the word is an otherwise-generic
+    count noun (see `_FACT_COUNT_NOUN_STEMS`)."""
+    before = sentence[max(0, value_start - 40):value_start]
+    m = _FACT_EXPLICIT_LABEL_RE.search(before)
+    if m:
+        return m.group(1)
+    m = _FACT_EXPLICIT_BACKTICK_LABEL_RE.search(before)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _fact_in_number_list_context(sentence, start, end):
+    """True when the value at `sentence[start:end]` sits inside an
+    enumerated number list — "2 and 3", "1, 2 and 3" — read from a small
+    window either side. That shape is ordinary prose counting things
+    ("items 2 and 3"), never a label/value pairing, and is what
+    `_FACT_COUNT_NOUN_STEMS` guards against in `_fact_draft_label_values`."""
+    ctx = sentence[max(0, start - 20):end + 20]
+    return bool(_FACT_NUM_LIST_RE.search(ctx))
+
+
 def _fact_draft_label_values(draft_text):
-    """`(label_key, value)` pairs the draft states by EXPLICIT adjacency.
-    Never across a comma, semicolon, colon, slash or paren, and never
-    across another value — a pairing that has to jump a clause boundary is
-    not a pairing this check is willing to assert."""
+    """`(label_key, value, explicit, guard_word)` tuples the draft states by
+    EXPLICIT adjacency. Never across a comma, semicolon, colon, slash or
+    paren, and never across another value — a pairing that has to jump a
+    clause boundary is not a pairing this check is willing to assert,
+    UNLESS the draft marks the word as a label with real punctuation (see
+    `_fact_explicit_label_word`), in which case `explicit` is True and the
+    pairing is trusted outright.
+
+    `guard_word` is the original (unstemmed) word text when the pairing
+    came from a plain adjacency match where the word is a common count
+    noun ("step"/"item"/"point"/"option"/"part") sitting next to an
+    enumerated number list ("items 2 and 3") — see
+    `_fact_in_number_list_context`. The caller (`_facts_labelled_value_claims`)
+    only trusts a `guard_word` pairing when the evidence's own label is no
+    longer than the matched word, or is the exact phrase the draft used;
+    a plain English noun phrase in the draft must not be read as a
+    reference to an unrelated, longer evidence label just because they
+    share one common word."""
     out = []
     for sentence in _FACT_SENTENCE_SPLIT_RE.split(draft_text or ""):
         range_starts = set()
@@ -4749,11 +4836,24 @@ def _fact_draft_label_values(draft_text):
             range_starts.add(m.start(2))
             keys = _fact_label_keys(m.group(1))
             if keys:
-                out.append((keys[-1], m.group(3)))
+                out.append((keys[-1], m.group(3), True, None))
         for m in _FACT_VALUE_TOKEN_RE.finditer(sentence):
             if m.start() in range_starts:
                 continue
+            if m.end() < len(sentence) and sentence[m.end()].isalpha():
+                # A digit run immediately followed by a letter is not a
+                # standalone value — it's the leading digits of a mixed
+                # alnum token, e.g. a git short SHA. "HEAD 0dca183" must
+                # not read as the value 0; matches BUG B's identical guard
+                # in `_extract_labelled_draft_counts` for the count arm.
+                continue
             value = m.group(0)
+            explicit_word = _fact_explicit_label_word(sentence, m.start())
+            if explicit_word:
+                keys = _fact_label_keys(explicit_word)
+                if keys:
+                    out.append((keys[-1], value, True, None))
+                    continue
             before = sentence[max(0, m.start() - 70):m.start()]
             after = sentence[m.end():m.end() + 70]
             seg = _FACT_CLAUSE_BOUNDARY_RE.split(before)[-1]
@@ -4764,7 +4864,12 @@ def _fact_draft_label_values(draft_text):
                         continue
                     if lw in _FACT_LABEL_STOPWORDS or len(lw) < 3:
                         break
-                    out.append((_fact_stem(lw), value))
+                    guard_word = None
+                    if (_fact_stem(lw) in _FACT_COUNT_NOUN_STEMS
+                            and _fact_in_number_list_context(
+                                sentence, m.start(), m.end())):
+                        guard_word = word
+                    out.append((_fact_stem(lw), value, False, guard_word))
                     break
             seg2 = _FACT_CLAUSE_BOUNDARY_RE.split(after)[0]
             aw = _FACT_WORD_RE.findall(seg2)
@@ -4776,7 +4881,12 @@ def _fact_draft_label_values(draft_text):
                         continue
                     if lw in _FACT_LABEL_STOPWORDS or len(lw) < 3:
                         break
-                    out.append((_fact_stem(lw), value))
+                    guard_word = None
+                    if (_fact_stem(lw) in _FACT_COUNT_NOUN_STEMS
+                            and _fact_in_number_list_context(
+                                sentence, m.start(), m.end())):
+                        guard_word = word
+                    out.append((_fact_stem(lw), value, False, guard_word))
                     break
     return out
 
@@ -4791,12 +4901,23 @@ def _facts_labelled_value_claims(window_text, draft_text):
     table = _fact_window_label_values(window_text)
     if not table:
         return []
+    draft_low = (draft_text or "").lower()
     bad, good, seen = [], [], set()
-    for key, value in _fact_draft_label_values(draft_text):
+    for key, value, explicit, guard_word in _fact_draft_label_values(draft_text):
         values = table.get(key)
         if not values or len(values) != 1:
             continue
         wval, label = next(iter(values.items()))
+        if guard_word and not explicit:
+            # "items 2 and 3" is ordinary prose counting things, not a
+            # reference to this window's "feat items" column. Trust the
+            # pairing anyway only when the evidence label is no longer
+            # than the word the draft actually used, or is the exact
+            # (multi-word) phrase the draft itself wrote.
+            label_stripped = label.strip()
+            if (len(label_stripped) > len(guard_word)
+                    and label_stripped.lower() not in draft_low):
+                continue
         if _fact_value_marker(wval) != _fact_value_marker(value):
             continue
         if _fact_is_score_value(wval) != _fact_is_score_value(value):
@@ -4939,6 +5060,67 @@ def _fact_window_lines(window_text):
             label = line.strip()
             continue
         if not line.strip() or _SECTION_SEPARATOR_RE.match(line):
+            continue
+        out.append((label, line))
+    return out
+
+
+def _iter_window_report_lines(window_text):
+    """`_fact_window_lines` scoped to only the lines that sit INSIDE a
+    `REPORT FROM ... (unverified worker claim)` fence (see
+    `_REPORT_MARKER_LINE_RE`) — the same in_report tracking
+    `_report_not_merged_claims` already uses to bound one report's body to
+    its own paragraph break or section boundary, factored out so any
+    family can either scan a report's own words (this function) or, via
+    `_fact_window_lines_excluding_reports`, read everything EXCEPT them."""
+    label = "the evidence window"
+    in_report = False
+    out = []
+    for raw in (window_text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if _WINDOW_SECTION_RE.match(stripped):
+            label = stripped
+            in_report = False
+            continue
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            in_report = True
+            continue
+        if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
+            in_report = False
+            continue
+        if in_report:
+            out.append((label, line))
+    return out
+
+
+def _fact_window_lines_excluding_reports(window_text):
+    """`_fact_window_lines`, minus every line inside a `REPORT FROM ...`
+    fence. An unverified worker's own prose must not be read as an actual
+    tool-result RECEIPT by families that look for one — merge/CI claims
+    (family 4) and the receipt half of the stale-report check (family 5)
+    were reading report bodies straight through `_fact_window_lines`, so a
+    worker's own claim inside its report ("PR #12 merged") could be misread
+    as a real `gh`-shaped merge receipt rather than the unverified claim it
+    is. Same fence tracking as `_iter_window_report_lines`, inverted, in
+    one pass so the two can never disagree about what a report's body is."""
+    label = "the evidence window"
+    in_report = False
+    out = []
+    for raw in (window_text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if _WINDOW_SECTION_RE.match(stripped):
+            label = stripped
+            in_report = False
+            continue
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            in_report = True
+            continue
+        if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
+            in_report = False
+            continue
+        if in_report:
             continue
         out.append((label, line))
     return out
@@ -5250,12 +5432,19 @@ def derive_window_facts(window_text, draft_text):
             return []
         draft = draft_text or ""
         clauses = presplit_claims(draft) or ([draft.strip()] if draft.strip() else [])
+        # Families 4 and 5's RECEIPT half read report bodies straight
+        # through `lines` — an unverified worker's own claim inside a
+        # REPORT FROM fence could be misread as a real merge receipt.
+        # `_report_not_merged_claims` (family 5's own not-merged half)
+        # still reads `window_text` directly on purpose: that one IS
+        # about what a report says.
+        receipt_lines = _fact_window_lines_excluding_reports(window_text)
         facts = []
         facts += _facts_delete_claims(lines, clauses)
         facts += _facts_cadence_claims(lines, draft)
         facts += _facts_result_tables(lines, draft)
-        facts += _facts_merge_claims(lines, draft)
-        facts += _facts_stale_report_claims(lines, window_text)
+        facts += _facts_merge_claims(receipt_lines, draft)
+        facts += _facts_stale_report_claims(receipt_lines, window_text)
         facts += _facts_written_file_claims(window_text, draft)
         facts += _facts_read_back_claims(window_text, draft)
         facts += _facts_labelled_value_claims(window_text, draft)

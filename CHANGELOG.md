@@ -33,6 +33,20 @@ No version bump.
   `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
   today. See docs/hooks.md, "verify: spawn acks and gather health".
 
+- **Two more deterministic-arm false-block sources closed.** The count
+  arm's draft-side tokenizer no longer splits a mixed alnum run (a git
+  short SHA like `0dca183`) into bogus digit tokens, and its evidence-side
+  recogniser now also trusts a worker's own bold-markdown run summary
+  (`**N passed**`). Family 8 (labelled-value pairing) gained a
+  common-noun/number-list guard so a plain English noun phrase in the
+  draft ("items 2 and 3") is no longer read as a reference to an
+  unrelated, longer evidence label ("feat items") sharing one common
+  word, with an explicit-label-syntax escape hatch (`items: 2`,
+  `items = 2`, `` `items` 2 ``) and a verbatim-label escape hatch. Families
+  4 and 5's receipt scan no longer reads a worker's own claim text inside
+  a `REPORT FROM ...` fence as a real merge receipt. See docs/hooks.md,
+  "Two more false-block sources closed".
+
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
   reason behind it came from the judge (the OVERCLAIMS arm, or under
