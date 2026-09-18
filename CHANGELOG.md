@@ -212,6 +212,65 @@ No version bump.
   nothing to say anything had gone wrong. The live side now mirrors the
   baseline treatment: every exception is counted and printed under its
   own "LIVE ERROR" line, and the sweep exits non-zero if any occurred.
+- **The window budget: a receipt that supports a true reply was being
+  dropped before the judge ever saw it.** Five separate gathering faults,
+  all in the Stop-hook gate's wide evidence window, each one capable of
+  hiding the very line that made a reply true. See docs/hooks.md, "The
+  window budget — reservations, not ceilings".
+
+  1. *A worker's report went out of the window with its turn.* A report
+     relayed in an earlier turn was concatenated onto that turn's tool
+     results and rode inside its `[previous turn -N]` block, so it was
+     dropped whenever the turn was — and the previous-turn block is the
+     first thing the trimmer gives up. Relayed reports from earlier turns
+     now have their own budget and their own marker,
+     `[relayed reports in previous turns]`, kept newest-first through the
+     same report fence renderer, so each one still reads as an unverified
+     relayed claim rather than a receipt. A receipt-bearing report a turn
+     or two back now survives whether or not its turn's tool output does.
+
+  2. *The session-receipts layer grew until it owned the window.* It is
+     the backing layer — a one-line memory of facts from turns too far
+     back to carry whole — and it had no share of its own, so on a long
+     session it crowded out the turns that held the actual proof. It now
+     has a reserved share of the cap. Over the share, receipts are given
+     up newest-first, except that receipts whose claim keys appear in the
+     draft are kept first regardless of age.
+
+  3. *Previous-turn depth counted turns, not evidence.* `SUPERJEV_PREV_TURNS`
+     counted turns of wall clock, so a lead whose last two turns were pure
+     conversation got a window with no previous-turn material at all, even
+     with a tool-carrying turn one hop further back. The setting now counts
+     turns that CARRY TOOL RESULTS, walking over tool-free turns up to
+     `SUPERJEV_PREV_TURN_SCAN_LIMIT`. Tool-free turns on the way are still
+     read for the reports they carry.
+
+  4. *The cited-file read-back only ever read the tail.* When a draft names
+     its own source and that source is an append-only log, the entry the
+     draft is quoting is routinely nowhere near the end of the file. The
+     block now carries, above the tail, the lines from earlier in the same
+     file that overlap the draft's own figures — a ratio the draft states,
+     its own integers, its own label words, scored literally in code, each
+     line prefixed with its real line number. The tail itself is unchanged.
+
+  5. *A session-wide merge total read as a contradiction.* A draft that
+     says a number of PRs merged, or that a whole set is merged, is making
+     a claim whose scope is the session; a window that saturates below that
+     number cannot settle it either way, and silence left the judge reading
+     the gap as a refutation. A new derived fact now states the window's own
+     merge-receipt count and says plainly that the session-wide total cannot
+     be checked there. It fires only when the claimed total is past the
+     window's count, or when the claim names no total at all.
+
+  Two supporting fixes came out of the same measurement. `"either merged or
+  on PR #N"` was being read as a claim that PR #N was merged, and the absent
+  receipt reported as a finding; a disjunction or negation between "merged"
+  and the PR number now disqualifies the match, in the Python gate and in
+  the TypeScript `windowFacts` mirror alike. And both new shares are
+  RESERVATIONS rather than ceilings: a layer is guaranteed its share against
+  the layers below it, and gets back whatever the layers above it leave
+  unspent, because a hard ceiling threw evidence away in windows with room
+  to spare.
 
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
