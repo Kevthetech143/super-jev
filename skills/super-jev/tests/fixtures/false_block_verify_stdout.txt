@@ -1,0 +1,24 @@
+
+jev claude-fable-5-1 · 3 chunk(s) · 18400 in_tok · 2514ms · 2026-09-18T00:22:15Z
+
+  claims were SPLIT AUTOMATICALLY from the draft (4 of them).
+  Machine tags and fragments under four words were dropped.
+  Pass --claim or --claims-file if the split reads wrong.
+
+  c1   SUPPORTED       0.99  the worktree is at /Users/admin/super-jev-wt/hookdocs on docs/hooks
+  c2   NOT_SUPPORTED   0.68  both checks pass on the pull request
+       -> READ THE SOURCE — under the line, act on neither answer
+  c3   NOT_SUPPORTED   0.97  npm run test:skill reports 187 passed
+       -> FIX THE DRAFT — the evidence does not carry this
+  c4   CONTRADICTED    0.72  the verify hook now exits 0 or skips on a spawn dict
+       -> READ THE SOURCE — under the line, act on neither answer
+
+  leaked_internal    CLEAN                0.95
+  time_sensitive     NOT_TIME_SENSITIVE   0.91
+  self_contradictory CONSISTENT           0.88
+  overclaim          OVERCLAIMS           1.00   -> SOFTEN IT — the evidence shows less than the draft claims
+
+  4 of 8 need a human: c2, c3, c4, overclaim
+  the line is 0.80 — under it, re-read the source before you speak.
+
+  Jev advises. It never decides. Read the flags, then you decide.
