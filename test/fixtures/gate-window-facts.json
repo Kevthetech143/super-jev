@@ -75,6 +75,15 @@
         "merge receipt found for PR #4 in [session receipts].",
         "no merge receipt for PR #7 in window."
       ]
+    },
+    {
+      "id": "merge-claim-zero-receipts",
+      "why": "a session-wide merge total claimed against a window with ZERO merge receipts must say plainly the window carries none, not read as amnesty for the claim.",
+      "window": "[current turn]\nno merges here\n",
+      "draft": "Three pull requests merged into main today, Sir.",
+      "expect": [
+        "merge receipts in window: 0; the draft claims 3 merged; the window carries no merge receipt at all, so this claim is unsupported here."
+      ]
     }
   ]
 }

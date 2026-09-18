@@ -5557,43 +5557,94 @@ PREV_REPORTS_BUDGET_SHARE = 0.25
 # 2026-09-18. The receipts layer is the BACKING layer — a one-line memory
 # of facts from turns too far back for the previous-turn window — and it
 # had no ceiling of its own, so on a long session it simply grew until it
-# owned the window: on two recorded bench cases it held roughly half the
-# whole cap at every previous-turn depth, which left the turns that
-# actually carried the proof nothing to fit in. Raising the total cap
-# would buy the same crowding at a higher price; capping the fattest layer
-# is the fix. Receipts are given up NEWEST-first inside the share (an old
-# receipt is the one the previous-turn layers cannot re-derive), except
-# that receipts whose claim keys appear in the draft are kept first
-# regardless of age — those are the ones the reply is actually about.
+# owned the window: on a sizeable share of the recorded cases it held
+# roughly half the whole cap at every previous-turn depth, which left the
+# turns that actually carried the proof nothing to fit in. Raising the
+# total cap would buy the same crowding at a higher price; capping the
+# fattest layer is the fix. Receipts are given up NEWEST-first inside the
+# share (an old receipt is the one the previous-turn layers cannot
+# re-derive), except that receipts whose claim keys appear in the draft
+# are kept first regardless of age — those are the ones the reply is
+# actually about.
 RECEIPTS_BUDGET_SHARE = 0.35
 
 
+# Identifier extraction shared by `_receipts_relevant_to_draft`: a PR
+# number, a cited file path/basename, or a plain-text "task <id>" mention
+# — concrete identifiers the draft can NAME, as opposed to the generic
+# stemmed words `_fact_label_keys` reads. 2026-09-18, review round 3: a
+# draft like "PR #9 merged" shares the generic stem "merg" with every
+# OTHER merge receipt in the window too (they all say "MERGED"), so stem
+# overlap alone marked all ten receipts equally relevant and left age
+# alone to decide which few survive — dropping the #9 receipt the draft
+# actually names. An identifier match is a stronger, narrower signal: the
+# draft named THIS PR/file/task specifically, so a receipt carrying the
+# same identifier now ranks above one that only shares a generic word.
+_FACT_TASK_ID_RE = re.compile(r'\btask\s+([A-Za-z0-9][\w-]{2,})\b', re.IGNORECASE)
+
+
+def _receipt_identifier_keys(text):
+    """Identifier keys out of `text` — `pr:<n>` for each PR number
+    (`_FACT_PR_NUM_RES`), `path:<lowercased path>` for each cited file
+    path/basename (`_CITED_FILE_PATH_RE`), `task:<id>` for each plain-text
+    "task <id>" mention (`_FACT_TASK_ID_RE`). Never raises; an empty set
+    for text with no identifier shape at all."""
+    text = text or ""
+    keys = set()
+    for rx in _FACT_PR_NUM_RES:
+        for m in rx.finditer(text):
+            keys.add(f"pr:{m.group(1)}")
+    for m in _CITED_FILE_PATH_RE.finditer(text):
+        keys.add(f"path:{m.group(1).lower()}")
+    for m in _FACT_TASK_ID_RE.finditer(text):
+        keys.add(f"task:{m.group(1).lower()}")
+    return keys
+
+
 def _receipts_relevant_to_draft(receipts, draft_text):
-    """The subset of `receipts` whose label keys overlap the draft's (see
-    `_fact_label_keys`) — the receipts this reply is plausibly ABOUT, as
-    opposed to the rest of the session's memory. Pure string work; an
-    empty or key-less draft makes everything equally relevant, which the
-    caller reads as "no preference" and falls back to age alone."""
-    keys = set(_fact_label_keys(draft_text or ""))
-    if not keys:
-        return set()
-    out = set()
+    """(identifier_relevant, stem_relevant) — two subsets of `receipts`'
+    indices the draft is plausibly ABOUT, as opposed to the rest of the
+    session's memory. `identifier_relevant` is the stronger signal: a
+    receipt sharing a concrete identifier the draft names (a PR number, a
+    cited file, a task id — see `_receipt_identifier_keys`) is a receipt
+    about the SAME thing, not merely the same topic. `stem_relevant` is
+    the older, weaker signal — overlap on stemmed content words (see
+    `_fact_label_keys`) — and never includes an index already in
+    `identifier_relevant`, so a caller ordering identifier-first then
+    stem-first never repeats one. Pure string work; an empty or key-less
+    draft returns two empty sets, which the caller reads as "no
+    preference" and falls back to age alone."""
+    id_keys = _receipt_identifier_keys(draft_text or "")
+    stem_keys = set(_fact_label_keys(draft_text or ""))
+    if not id_keys and not stem_keys:
+        return set(), set()
+    id_relevant, stem_relevant = set(), set()
     for i, line in enumerate(receipts):
-        if keys & set(_fact_label_keys(line)):
-            out.add(i)
-    return out
+        if id_keys and id_keys & _receipt_identifier_keys(line):
+            id_relevant.add(i)
+        elif stem_keys and stem_keys & set(_fact_label_keys(line)):
+            stem_relevant.add(i)
+    return id_relevant, stem_relevant
 
 
 def _build_receipts_block(receipts, budget, draft_text=None):
     """(block_text, kept_count, dropped_count) for the `[session receipts]`
     section held inside `budget` bytes.
 
-    Selection order, when the whole block does not fit: receipts whose
-    claim keys appear in the draft first (oldest-first among them), then
-    everything else oldest-first, filling the budget line by line — so a
-    receipt is given up NEWEST-first, on the reasoning that an old receipt
-    is the one the previous-turn layers cannot re-derive (a recent turn's
-    own material is still sitting right there in the previous-turn blocks).
+    Selection order, when the whole block does not fit: receipts the draft
+    names by a concrete IDENTIFIER (a PR number, a cited file, a task id —
+    see `_receipt_identifier_keys`) first, oldest-first among them; then
+    receipts that merely share a stemmed content word with the draft (see
+    `_fact_label_keys`), oldest-first; then everything else, oldest-first,
+    filling the budget line by line — so a receipt is given up
+    NEWEST-first, on the reasoning that an old receipt is the one the
+    previous-turn layers cannot re-derive (a recent turn's own material is
+    still sitting right there in the previous-turn blocks). Identifier
+    ranks above stem because stem overlap alone is a weak signal on a
+    window full of same-shaped receipts — "PR #9 merged" shares the
+    generic stem "merg" with every OTHER merge receipt too, so without the
+    identifier tier the #9 receipt the draft actually names had no better
+    a claim to survival than #1 through #8 (2026-09-18, review round 3).
     The lines that survive are then emitted in their ORIGINAL order, so the
     block still reads oldest-to-newest and `_section_recency_rank` keeps
     meaning what it meant. Returns ("", 0, len(receipts)) when there is
@@ -5611,9 +5662,11 @@ def _build_receipts_block(receipts, budget, draft_text=None):
     if budget <= 0:
         return "", 0, len(receipts)
 
-    relevant = _receipts_relevant_to_draft(receipts, draft_text)
-    order = ([i for i in range(len(receipts)) if i in relevant]
-             + [i for i in range(len(receipts)) if i not in relevant])
+    id_relevant, stem_relevant = _receipts_relevant_to_draft(receipts, draft_text)
+    order = ([i for i in range(len(receipts)) if i in id_relevant]
+             + [i for i in range(len(receipts)) if i in stem_relevant]
+             + [i for i in range(len(receipts))
+                if i not in id_relevant and i not in stem_relevant])
     kept = set()
     used = len(header.encode("utf-8"))
     for i in order:

@@ -11811,6 +11811,30 @@ def test_receipts_block_with_no_budget_keeps_nothing(tmp_path):
     assert (block, kept, dropped) == ("", 0, 1)
 
 
+def test_receipts_relevance_identifier_match_beats_generic_stem_match(tmp_path):
+    # Ten PR merge receipts, room for three. Every one shares the generic
+    # stem "merg" with the draft ("PR #9 merged"), so stem overlap alone
+    # marks all ten equally relevant and leaves age to decide — dropping
+    # the #9 receipt the draft actually names. The identifier tier (a
+    # concrete PR number, here) must rank above the stem tier so #9
+    # survives regardless of its position among the other nine.
+    receipts = [f"gh pr merge {n} --squash: merged [from: gh pr merge {n}]"
+               for n in range(1, 11)]
+    block, kept, dropped = sj._build_receipts_block(
+        receipts, 220, "PR #9 merged, Sir.")
+    assert dropped > 0
+    assert "gh pr merge 9 " in block
+
+
+def test_receipts_relevance_returns_identifier_and_stem_tiers_separately():
+    receipts = ["gh pr merge 9 --squash: merged [from: gh pr merge 9]",
+               "zebrafish audit: 41 passed"]
+    id_relevant, stem_relevant = sj._receipts_relevant_to_draft(
+        receipts, "PR #9 merged, and the zebrafish run came back clean, Sir.")
+    assert id_relevant == {0}
+    assert stem_relevant == {1}
+
+
 # --- mechanism 3: previous-turn depth counts turns that carry tool results
 
 def test_prev_turn_depth_skips_tool_free_turns(tmp_path):
