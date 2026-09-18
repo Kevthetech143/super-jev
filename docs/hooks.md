@@ -2386,9 +2386,15 @@ The family emits at most four lines, one per verb class:
   `tee`/`cp`/`mv` destination, or an `open(..., "w")` inside a python
   here-document. Names each path. Supports *saved / logged / wrote /
   recorded / appended / updated that file*.
-- **sent** — a relay send script on the command line (with any task ids the
-  send itself named), or a write to an agent outbox file. Supports *sent /
-  replied / notified / told / escalated / reported that message*.
+- **sent** — a relay send script matched in command position on the command
+  line (never a bare mention like `cat send.sh`), with any task ids that
+  send's own argument named; a write to the Telegram outbox file; or a
+  message-shaped tool call (Telegram/email/chat) whose own input names a
+  recipient. Every case NAMES the recipient or task id — a write to the
+  harness's internal `answer-<hex>.txt` answer-delivery file is deliberately
+  excluded, since that file names no recipient at all and is the draft's own
+  delivery act, not evidence of one. Supports *sent / replied / notified /
+  told / escalated / reported that message*.
 - **scheduled** — a scheduler tool call, or a crontab/launchd *install*,
   with whatever id its own result handed back. Supports *scheduled / armed /
   set to fire under that id*.
@@ -2434,6 +2440,12 @@ a write to X. Relative paths resolve against the command's own single `cd`
 when it has one, against the record's working directory when it has none,
 and are named exactly as written when neither is knowable — a confidently
 wrong absolute path is a target neither the draft nor the reader can check.
+
+Scheduler detection has a known scope gap, in the safe direction: it covers
+a `crontab <file>` install and a `launchctl load/bootstrap/start` install,
+but not a `crontab -` STDIN install. A missed install means no "scheduled"
+line at all rather than a wrong one — the family only ever adds judge
+input, so undercounting here costs nothing a block decision depends on.
 
 ### The bound, stated out loud
 

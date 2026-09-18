@@ -3,10 +3,11 @@
 block change (see gate-bench-20260918-fleet/analysis/SET3-LIVE-GAP.md and
 _fact_block_reasons in superjev.py).
 
-For every case in the three recorded benches (gate-bench-20260917 = 40,
-gate-bench-20260918 = 29, gate-bench-20260918-fleet = 30; 99 total), this
-rebuilds the SAME wide evidence window the live Stop-hook gate builds —
-`_derive_evidence_text_from_transcript`, then (2026-09-18, post-#64 fix)
+For every case in the four recorded benches (gate-bench-20260917 = 40,
+gate-bench-20260918 = 29, gate-bench-20260918-fleet = 30,
+gate-bench-20260918-blind = 40; 139 total), this rebuilds the SAME wide
+evidence window the live Stop-hook gate builds — `_derive_evidence_text_
+from_transcript` (receipt shapes included), then (2026-09-18, post-#64 fix)
 the receipt-turn extra fact AND the `[cited files]` tail
 (`build_cited_file_block`), exactly as `cmd_hook`'s own "hook gate" branch
 assembles them, THEN `compose_window_with_facts` — straight from the
@@ -16,7 +17,12 @@ this sweep blind to any case whose draft names its own source ("per the
 summary log"): t38 (set 2) blocked live on a fact that lived only in a
 cited file's tail, and the old sweep, never having read that tail, could
 not see the fact at all — not "predicted no block", genuinely couldn't
-reproduce the window. See docs/hooks.md.
+reproduce the window. See docs/hooks.md. It also used to build the receipt
+shapes family's facts but never actually pass them into
+`compose_window_with_facts`, so that family was never exercised by this
+replay at all (2026-09-18, PR #68 round 2) — `_window_fact_reasons` now
+passes `receipt_facts=wmeta.get("receipt_shape_facts")` through, on both
+the live and the baseline side.
 
 "New" is decided against a REAL pre-change baseline, not a recorded exit
 file: this script also imports `superjev.py` AS OF `BASELINE_REF` (default
@@ -36,11 +42,12 @@ ambiguity.
 Never prints draft/evidence/transcript text — only case ids, kind
 (truth/lie), the fact FAMILY that fired (from the fixed marker set, not
 free text) and whether the decision flips. Safe to run and to share output
-from; no set-3 payload content is ever quoted.
+from; no bench payload content is ever quoted.
 
 Exits 0 iff zero TRUTHS flip to a new block. Exits 1 otherwise.
 """
 import importlib.util
+import inspect
 import json
 import os
 import subprocess
@@ -154,7 +161,19 @@ def _window_fact_reasons(mod, transcript_path, draft):
     same way `cmd_hook`'s "hook gate" branch does: transcript derivation,
     then the receipt-turn extra fact, then the cited-file tail, then
     compose_window_with_facts. Raises on a bad transcript; the caller
-    decides what to do with that."""
+    decides what to do with that.
+
+    `receipt_facts` is only ever passed to `mod.compose_window_with_facts`
+    when THAT module's own signature accepts it — the baseline module is a
+    real historical `superjev.py` (as of `_resolve_baseline_ref()`), which
+    on this branch predates the parameter entirely. Passing it
+    unconditionally raised a bare `TypeError` on every single baseline
+    call, which this sweep's own "assume not blocked" fallback silently
+    swallowed — a baseline call failing on ALL 139 cases is what "assume
+    not blocked" exists to survive, but a family that never actually RAN
+    on the baseline side made every one of its real, pre-existing fact
+    families (WRITTEN FILE, LABELLED VALUE, ...) look unresolved too, and
+    produced flips that were never about receipt shapes at all."""
     derived, wmeta = mod._derive_evidence_text_from_transcript(
         str(transcript_path), return_meta=True)
     receipt_extra_facts = None
@@ -166,8 +185,10 @@ def _window_fact_reasons(mod, transcript_path, draft):
     cited_block = mod.build_cited_file_block(draft, window_text=derived)
     if cited_block:
         derived = (derived + "\n\n===\n\n" + cited_block) if derived else cited_block
-    derived, facts, _fmeta = mod.compose_window_with_facts(
-        derived or "", draft, cap_bytes=0, extra_facts=receipt_extra_facts)
+    kwargs = {"cap_bytes": 0, "extra_facts": receipt_extra_facts}
+    if "receipt_facts" in inspect.signature(mod.compose_window_with_facts).parameters:
+        kwargs["receipt_facts"] = (wmeta or {}).get("receipt_shape_facts")
+    derived, facts, _fmeta = mod.compose_window_with_facts(derived or "", draft, **kwargs)
     return mod._fact_block_reasons(facts)
 
 

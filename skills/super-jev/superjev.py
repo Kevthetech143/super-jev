@@ -6880,16 +6880,37 @@ _RS_SCHED_TOOLS = ("CronCreate", "CronDelete", "CronList", "ScheduleWakeup")
 _RS_DISPATCH_TOOLS = ("Agent", "Task", "Skill")
 _RS_PATH_KEYS = ("file_path", "notebook_path", "path")
 
-# An agent outbox file: the fleet's reply/notify channel, so a write to one
-# is a SEND shape, not a SAVE shape.
-_RS_OUTBOX = re.compile(r'/tmp/ai-wrapper/(?:late-telegram|answer)-[\w.\-]+\.txt')
-# A relay send script. Deliberately narrow: the script's own path, matched on
-# the command line, never a phrase in prose.
-_RS_SEND_SH = re.compile(r'(\S*\b(?:send|relay-send|agent-send)\.sh)\b')
+# An agent outbox file: the Telegram delivery channel, so a write to one is
+# a SEND shape, not a SAVE shape, naming Telegram as the recipient channel.
+# `answer-<hex>.txt` is deliberately EXCLUDED: that file is the harness's own
+# answer-delivery mechanism, not a channel with a knowable recipient, and a
+# match there gave "sent"/"notified"/"escalated"/"reported" blanket support
+# on any window whose act was simply the draft's own delivery — including
+# six recorded lies whose false claim was exactly that verb.
+_RS_OUTBOX = re.compile(r'/tmp/ai-wrapper/late-telegram-[\w.\-]+\.txt')
+# A relay send script. Deliberately narrow: the script's own path, matched
+# at the START of a command segment (the segment start, or right after
+# `bash`/`sh`/`source`) — never anywhere on the line, so `cat send.sh`,
+# `grep task send.sh` and `chmod +x send.sh` cannot match.
+_RS_SEND_SH = re.compile(
+    r'^(?:(?:bash|sh|source)\s+)?(\S*\b(?:send|relay-send|agent-send)\.sh)\b')
+_RS_SEGMENT_BOUNDARY = re.compile(r'&&|\|\||\||;|\n')
+# A message-shaped tool call (Telegram/email/chat) whose recipient the tool
+# input itself names. No recipient field, no line — a "sent" fact is only
+# ever as good as the recipient it names.
+_RS_MSG_TOOL_HINT = re.compile(r'(?i)telegram|gmail|email|slack|discord|message')
+_RS_RECIPIENT_KEYS = ("to", "recipient", "chat_id", "channel", "email", "phone",
+                      "thread_id")
 # A scheduler INSTALL, matched only against a quote-masked, heredoc-stripped
 # command. Both halves are load-bearing: `echo "--- crontab ---"` matched an
 # earlier, looser form of this pattern and produced a phantom "scheduled"
 # receipt on a turn that scheduled nothing, and `crontab -l` only LISTS.
+# Scope, stated so it is not mistaken for a bug: this covers a `crontab
+# <file>` install and a `launchctl load/bootstrap/start` install, but NOT a
+# `crontab -` STDIN install (`crontab - <<EOF ... EOF` or `... | crontab -`)
+# — a real install that this pattern still misses. That is the SAFE
+# direction: a missed act means no "scheduled" line at all rather than a
+# wrong one, and this family only ever adds judge input, never blocks.
 _RS_SCHED_CMD = re.compile(
     r'\bcrontab\s+(?!-)[\w./~][\w./~-]*'
     r'|\blaunchctl\s+(?:load|bootstrap|start)\s+\S')
@@ -7202,6 +7223,44 @@ def _rs_named(items, cap=RECEIPT_SHAPE_TARGETS):
     return phrase + (f" and {tail} more" if tail > 0 else "")
 
 
+def _rs_iter_segments(masked, raw):
+    """`(masked_segment, raw_segment)` pairs split on UNQUOTED command
+    boundaries (`;`, `&&`, `||`, `|`, newline).
+
+    The split runs on the quote-masked text so a boundary character sitting
+    inside a quoted argument is never treated as a real command separator;
+    the same positions are then sliced out of the raw text, so a detector
+    that needs the unmasked argument (a send's own task ids) reads exactly
+    the segment its script path matched in, never a sibling segment joined
+    on with `&&`."""
+    pos = 0
+    for m in _RS_SEGMENT_BOUNDARY.finditer(masked):
+        yield masked[pos:m.start()], raw[pos:m.start()]
+        pos = m.end()
+    yield masked[pos:], raw[pos:]
+
+
+def _rs_send_sh_matches(masked, raw):
+    """`[(script_path, args_text)]` for every relay-send call in one command,
+    command-position only.
+
+    Each segment is checked against `_RS_SEND_SH` at ITS OWN start (after
+    stripping only leading whitespace), so `cat send.sh`, `grep task
+    send.sh` and `chmod +x send.sh` never match — the script has to be what
+    the segment actually runs, not a word anywhere on the line. `args_text`
+    is the unmasked remainder of that SAME segment, so a task id from a
+    later `&&`-joined segment can never be scraped into this send."""
+    out = []
+    for masked_seg, raw_seg in _rs_iter_segments(masked, raw):
+        lstripped = masked_seg.lstrip()
+        pad = len(masked_seg) - len(lstripped)
+        m = _RS_SEND_SH.match(lstripped)
+        if not m:
+            continue
+        out.append((m.group(1), raw_seg[pad + m.end():]))
+    return out
+
+
 def _facts_receipt_shapes(records, current_start, prev_turns=None,
                           cap=RECEIPT_SHAPE_FACTS_CAP):
     """The RECEIPT SHAPES lines for one gate window, at most `cap`, one per
@@ -7249,7 +7308,7 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                           for path, mode in _rs_bash_write_targets(command, cwd)]
             for path, verb in writes:
                 if _RS_OUTBOX.search(path):
-                    phrase = f"a message written to the outbox file {path}"
+                    phrase = f"a message written to the Telegram outbox file {path}"
                     if phrase not in outbox:
                         outbox.append(phrase)
                 else:
@@ -7258,16 +7317,35 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                         saved.append(phrase)
             if command:
                 stripped = _rs_split_heredocs(command)[0]
-                m = _RS_SEND_SH.search(_rs_mask_quotes(stripped))
-                if m:
+                masked = _rs_mask_quotes(stripped)
+                for script, args_text in _rs_send_sh_matches(masked, stripped):
                     # The script path comes off the MASKED text (a sentence
                     # mentioning send.sh is not a send); the task ids come
-                    # off the unmasked text, because the ids live inside the
-                    # message argument the mask blanked out.
-                    ids = sorted(set(_RS_TASK_ID.findall(stripped)))
-                    phrase = ("a relay send via " + m.group(1)
+                    # off the unmasked text of the SAME command segment the
+                    # script matched in, because the ids live inside that
+                    # send's own argument, never a sibling `&&`-joined one.
+                    ids = sorted(set(_RS_TASK_ID.findall(args_text)))
+                    phrase = ("a relay send via " + script
                              + (" naming " + _rs_named(ids) if ids else
                                 " (its command named no task id)"))
+                    if phrase not in sends:
+                        sends.append(phrase)
+            if tool not in _RS_WRITE_TOOLS and tool not in _RS_EDIT_TOOLS \
+                    and tool != "Bash" and tool not in _RS_SCHED_TOOLS \
+                    and tool not in _RS_DISPATCH_TOOLS \
+                    and _RS_MSG_TOOL_HINT.search(tool):
+                # A message-shaped tool (Telegram/email/chat) is a SEND only
+                # when its own input names a recipient. No recipient, no
+                # line — a fact that cannot name who it went to is not a
+                # fact worth handing the judge.
+                recipient = None
+                for key in _RS_RECIPIENT_KEYS:
+                    val = inp.get(key)
+                    if isinstance(val, str) and val.strip():
+                        recipient = val.strip()[:60]
+                        break
+                if recipient:
+                    phrase = f"a {tool} send naming {recipient}"
                     if phrase not in sends:
                         sends.append(phrase)
             if tool in _RS_SCHED_TOOLS or (
