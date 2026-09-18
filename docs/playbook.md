@@ -582,3 +582,8 @@ ever has to do the judging.
   toward, and the honest status of each one today.
 - [`docs/lessons.md`](lessons.md) — what live use on real drafts and real hook
   payloads has taught us: feed rules, hook lessons, and the calibration loop.
+- [`docs/coverage.md`](coverage.md) — the claim-type → evidence-type table
+  for every door (gate, verify, research, config+messages, browser,
+  skillpick, permits, the shared atoms library): what free check answers
+  each claim type, the derived-fact sentence shape, and an explicit
+  NOT COVERED YET list per door.
