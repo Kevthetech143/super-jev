@@ -34,6 +34,19 @@ No version bump.
   decision now carries a `judge-advisory-mode:1`/`judge-advisory-mode:weak`
   tag in its `reasons`, alongside the existing `key VERDICT score` strings
   that already name the arm. See docs/hooks.md, "Judge-advisory mode".
+- **`bot`/`origin` on every ledger record.** Both the call ledger
+  (`calls.jsonl`) and the catch ledger (`catches.jsonl`) now tag every
+  record with `bot` (`CLAW4MAC_BOT_ID` or `CLAUDE_BOT_ID` from the
+  environment if set, else the claw4mac project-dir segment out of the
+  hook payload's `transcript_path` — the part after `agent-cwd-` up to the
+  next path separator — else `"unknown"`) and `origin` (`"bench"` when
+  `SUPERJEV_BENCH=1` or the hook payload's `session_id` starts with
+  `bench-`, else `"live"`). Neither field changes a hook's decision — both
+  are best-effort, never-raise defaults applied at the same point `id`
+  already was. `superjev.py catch list`/`catch report` gain `--bot <id>`,
+  `catch list` shows a `bot=` column, and `catch report` prints a `by
+  bot:` breakdown when `--bot` is not given. See docs/hooks.md, "The
+  ledger" and "The catch ledger".
 
 - **Verify hook: spawn acks and unchecked no-evidence runs now show up in
   the catch ledger.** Two fixes off `gate-adjudication-20260918.md`'s
