@@ -1618,9 +1618,15 @@ def test_hook_gate_block_threshold_is_env_configurable(tmp_path, monkeypatch, ca
 def test_hook_verify_read_with_strong_flags_blocks_like_gate(tmp_path, monkeypatch, capsys):
     # Same parser, same block line, wired to worker-verify's REJECT-shaped
     # table instead of jev.py's — worker-verify prints the identical row
-    # format, so the fix covers both doors with one parser.
+    # format, so the fix covers both doors with one parser. A worktree is
+    # passed so the gather-health check (2026-09-18, see
+    # test_hook_verify_no_worktree_downgrades_a_bare_reject_to_unchecked)
+    # reads this run as healthy — the point here is the parser/block-line
+    # mapping, not the gather-health gate.
+    wt = tmp_path / "wt"
+    wt.mkdir()
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=HIGH_CONF_LIE_STDOUT))
-    _hook_stdin(monkeypatch, json.dumps({"tool_name": "Agent",
+    _hook_stdin(monkeypatch, json.dumps({"tool_name": "Agent", "worktree": str(wt),
                                         "tool_response": "COMPLETE: the worker is done, "
                                                           "all tests pass"}))
     code = sj.main(["hook", "verify"])
@@ -1670,8 +1676,15 @@ def test_hook_gate_fabricated_quote_still_blocks_with_no_flags_parsed(tmp_path, 
 @pytest.mark.parametrize("code,expect", [(0, 0), (3, 0), (4, 2), (2, 0), (5, 0)])
 def test_hook_verify_maps_every_exit_code_and_never_returns_3_4_5(tmp_path, monkeypatch,
                                                                    capsys, code, expect):
+    # A worktree is passed so this exit-code -> action mapping is tested
+    # independently of the gather-health check (2026-09-18): exit 4 with
+    # NO evidence source is covered on its own by
+    # test_hook_verify_no_worktree_downgrades_a_bare_reject_to_unchecked.
+    wt = tmp_path / "wt"
+    wt.mkdir()
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(code))
-    _hook_stdin(monkeypatch, json.dumps({"report": "COMPLETE: the worker is done"}))
+    _hook_stdin(monkeypatch, json.dumps({"report": "COMPLETE: the worker is done",
+                                        "worktree": str(wt)}))
     got = sj.main(["hook", "verify"])
     assert got == expect
     assert got not in (3, 4, 5)
@@ -2504,6 +2517,120 @@ def test_hook_verify_ack_patterns_are_env_overridable(monkeypatch, door):
     assert not door.calls
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec["reason"] == "launch-ack"
+
+
+# ------------------------------------------ verify: spawn ack -> catch ledger
+#
+# gate-adjudication-20260918.md, verify door: 5 of 7 live verify blocks
+# were a spawn/launch ack judged as if it were the worker's finished
+# report. The skip paths above already existed and already never call the
+# wrapped verify door — these tests close the remaining gap: the catch
+# ledger (the one a human reads to see what was actually judged) never
+# recorded that anything happened here at all, so a spawn ack and a real
+# unchecked report looked identical in catches.jsonl.
+
+def test_hook_verify_spawn_dict_skip_prints_stderr_and_logs_catch_unchecked(
+        monkeypatch, door, capsys):
+    payload = {
+        "tool_name": "Agent",
+        "tool_response": {"status": "teammate_spawned",
+                          "prompt": "WORKER CARD v7 — the whole worker brief"},
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert not door.calls  # the wrapped verify (judge) door was never invoked
+    assert "super-jev verify: spawn ack, nothing to judge" in err
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] == "unchecked"
+    assert catch["reasons"] == ["spawn-ack"]
+
+
+def test_hook_verify_launch_ack_text_skip_logs_catch_unchecked(monkeypatch, door, capsys):
+    ack = "Spawned successfully. The worker has been dispatched."
+    payload = {"tool_name": "Agent", "tool_response": ack}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert not door.calls
+    assert "super-jev verify: spawn ack, nothing to judge" in err
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] == "unchecked"
+    assert catch["reasons"] == ["spawn-ack"]
+
+
+def test_hook_verify_a_real_report_still_lands_a_normal_catch_record(monkeypatch, door):
+    # Not a spawn ack, so the ordinary allow/advisory/block catch record is
+    # written exactly as before — the new classification never touches
+    # this path.
+    real_report = "COMPLETE: 14 tests passed, 0 failed. Committed as a1b2c3d."
+    payload = {"tool_name": "Agent", "tool_response": real_report}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert door.calls
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] != "unchecked"
+
+
+# --------------------------------------------- verify: live-hook gather health
+#
+# gate-adjudication-20260918.md, verify door, rows 00:39:08 and 01:03:59:
+# the SAME true report blocked live, then came back READ once re-run with
+# --worktree/--test-cmd/--pr. Root cause: `hook verify --from-file` (and
+# the Stop-scan) already compute `_evidence_inventory` and feed it in as
+# gather_health so a thin gather suppresses a block into an advisory note
+# — the live PostToolUse hook never did, so it treated "nothing was
+# gathered" as healthy and let worker-verify's own exit code alone stand
+# in for a real judgement.
+
+def test_hook_verify_no_worktree_downgrades_a_bare_reject_to_unchecked(monkeypatch, capsys):
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    stdout = (FIXTURES / "false_block_verify_stdout.txt").read_text(encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4, stdout=stdout))
+    real_report = ("COMPLETE: both checks pass on the pull request, "
+                   "npm run test:skill reports 187 passed.")
+    payload = {"tool_name": "Agent", "tool_response": real_report}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert err == ""  # never a block reason on stderr
+    assert "no evidence gathered; not judged" in out
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["door"] == "verify"
+    assert catch["decision"] == "unchecked"
+    assert "no-evidence" in catch["reasons"]
+
+
+def test_hook_verify_with_a_real_worktree_still_blocks_on_the_same_fixture(
+        monkeypatch, capsys):
+    # Same report, same door output — but a worktree IS present this time,
+    # so the gather is no longer thin and the block must survive exactly
+    # as it did before this fix.
+    stdout = (FIXTURES / "false_block_verify_stdout.txt").read_text(encoding="utf-8")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4, stdout=stdout))
+    real_report = ("COMPLETE: both checks pass on the pull request, "
+                   "npm run test:skill reports 187 passed.")
+    payload = {"tool_name": "Agent", "tool_response": real_report,
+              "worktree": "/Users/admin/super-jev-wt/hookdocs"}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "super-jev verify blocked this" in err
+    catch = json.loads(
+        sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert catch["decision"] == "block"
 
 
 def test_hook_verify_min_chars_is_env_overridable(monkeypatch, door):
@@ -3447,6 +3574,44 @@ def test_stop_scan_prints_reject_line_advisory_only(tmp_path, monkeypatch, capsy
     assert code == 0
     assert "super-jev verify Alice: REJECT" in out
     assert "health" in out
+
+
+def test_stop_scan_bare_reject_with_no_evidence_is_labelled_unchecked(
+        tmp_path, monkeypatch, capsys):
+    # Same hole as the live PostToolUse hook (gate-adjudication-20260918.md
+    # says 45 of 59 Stop-scan REJECT labels ran without healthy evidence):
+    # worker-verify's own exit code alone said REJECT, nothing this run
+    # parsed crossed the block line, and the report named no worktree/
+    # test-cmd/PR for the scan to gather against. The rule now applied
+    # here matches the live hook's: a bare exit code over evidence that
+    # was never gathered is UNCHECKED, never REJECT.
+    class RejectNoEvidenceDoor:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            self.calls.append([str(c) for c in cmd])
+            if "--kit" not in cmd:
+                stdout = (FIXTURES / "false_block_verify_stdout.txt").read_text(
+                    encoding="utf-8")
+                return subprocess.CompletedProcess(cmd, 4, stdout=stdout, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", RejectNoEvidenceDoor())
+    records = [_teammate_user_record(
+        "COMPLETE: both checks pass on the pull request, "
+        "npm run test:skill reports 187 passed.", "u1", teammate_id="Bob")]
+    code = _run_stop_scan(tmp_path, monkeypatch, records)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "super-jev verify Bob: UNCHECKED" in out
+    assert "health thin" in out
+    catch_lines = [json.loads(l) for l in
+                   sj.CATCH_LEDGER_PATH.read_text(encoding="utf-8").strip().splitlines()]
+    unchecked = [c for c in catch_lines if c["door"] == "verify"
+                and c["decision"] == "unchecked"]
+    assert unchecked
+    assert "no-evidence" in unchecked[-1]["reasons"]
 
 
 def test_stop_scan_no_session_id_is_a_silent_noop(tmp_path, monkeypatch, door):
@@ -4437,6 +4602,10 @@ def test_skip_reason_bucket_table():
     assert sj._skip_reason_bucket("no-tool-evidence") == "thin"  # legacy tag
     assert sj._skip_reason_bucket("bad-stdin") == "lost"
     assert sj._skip_reason_bucket("unexpected-error") == "lost"
+    # The stop-scan's UNCHECKED verdict (worker-verify's exit code
+    # downgraded because the gather had nothing usable) is thin, same as
+    # the sibling no-tool-evidence-checkable path — not a lost check.
+    assert sj._skip_reason_bucket("no-evidence") == "thin"
     # Deliberate move, 2026-09-18: both of the advisory scan's own
     # refusals are DEFERRED, not LOST. The scan running out of time or of
     # its call allowance does not mean a reply went unjudged — the gate
@@ -4448,6 +4617,21 @@ def test_skip_reason_bucket_table():
     # unknown reasons count as LOST, by design
     assert sj._skip_reason_bucket("some-new-reason-nobody-named-yet") == "lost"
     assert sj._skip_reason_bucket("not-agent-tool") == "lost"
+
+
+def test_ledger_line_verdict_stop_scan_unchecked_is_not_allow():
+    # The Stop-scan's UNCHECKED verdict line (see the stop-scan branch of
+    # cmd_hook_prompt_verify) must carry unchecked=True so
+    # _ledger_line_verdict tallies it as "unchecked", never "allow" — a
+    # skipped=False, no unchecked flag line used to fall through to the
+    # bare "allow" default even though worker-verify never actually
+    # judged the report.
+    entry = {"door": "hook", "note": "stop-scan: alice — UNCHECKED (exit 4) "
+             "[no evidence derived] health=none", "exit_code": 0,
+             "skipped": False, "unchecked": True, "health": "none",
+             "reason": "no-evidence"}
+    assert sj._ledger_line_verdict(entry) != "allow"
+    assert sj._ledger_line_verdict(entry) == "unchecked"
 
 
 def test_door_health_bucket_bucket_counts_match_the_table_exactly():
@@ -4523,6 +4707,20 @@ def test_ledger_health_lost_record_warns_with_top_skip_reason(capsys):
     assert "WARN" in out
     assert "bad-stdin" in out
     assert "40.0%" in out  # total unchecked share still printed, informational only
+
+
+def test_ledger_health_no_evidence_reason_buckets_thin_not_lost(capsys):
+    # A stop-scan UNCHECKED line (reason="no-evidence", unchecked=True,
+    # health="none") is a real judgment against thin evidence, not a lost
+    # check — it must not trip the LOST warn on its first occurrence the
+    # way an unrecognized reason would.
+    for _ in range(9):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="no-evidence"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "WARN" not in out
 
 
 def test_ledger_health_deferred_and_thin_volume_alone_never_warns(capsys):
