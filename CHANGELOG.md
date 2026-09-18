@@ -300,14 +300,16 @@ No version bump.
   docs/hooks.md claimed the sweep checked and what it actually ran — see
   "Window-budget round 3" below for how this check widened again shortly
   after landing. (4) docs/hooks.md's wording matched to the source
-  comment it was paraphrasing loosely — see round 3 below for a further
-  correction to that same wording. (5) The merge-count derived fact now
-  quotes the draft's own claimed total alongside the window's receipt
-  count, and states plainly when the window carries no merge receipt at
-  all, rather than reading as amnesty for an unsupported claim. (6) The
-  cited-file relevant-line block is relabelled to say it is a number
-  match, not confirmation that a picked line says what the draft says,
-  and the picked lines now sit below the tail rather than above it.
+  comment it was paraphrasing loosely — both now say "a sizeable share of
+  the recorded cases" (round 3 corrected this same wording again, after
+  the round-2 fix here first landed on a fixed count). (5) The
+  merge-count derived fact now quotes the draft's own claimed total
+  alongside the window's receipt count, and states plainly when the
+  window carries no merge receipt at all, rather than reading as amnesty
+  for an unsupported claim. (6) The cited-file relevant-line block is
+  relabelled to say it is a number match, not confirmation that a picked
+  line says what the draft says, and the picked lines now sit below the
+  tail rather than above it.
 
 - **Window-budget round 3.** The receipt-line warning above now covers
   truths as well as lies, printed separately — restricting it to lies
