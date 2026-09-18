@@ -941,6 +941,46 @@ def _extract_text_blocks(value):
     return None
 
 
+# A background Agent/Task spawn's PostToolUse tool_response is a DICT, not a
+# string or a content-block list — {"status": "teammate_spawned", "prompt":
+# "<the whole worker brief>", ...}. The 2026-09-17 live finding this fixes:
+# the shim used to stringify that whole dict, and jev's OVERCLAIMS scoring
+# judged the worker's own BRIEF (sitting under "prompt") as if it were the
+# worker's finished report. It never is — the real report arrives later,
+# inside a USER turn, as a `<teammate-message>` block in the Claude Code
+# teammate mailbox (see `hook prompt-verify`), which PostToolUse never sees
+# at all. So a dict tool_response is read narrowly: only result/report/
+# content/text ever count as report text; "prompt" is never read as one.
+SPAWN_DICT_STATUSES = frozenset({
+    "teammate_spawned", "launched", "running", "spawned",
+})
+_DICT_REPORT_KEYS = ("result", "report", "content", "text")
+
+
+def _report_from_dict_tool_response(d):
+    """(text, is_spawn_dict) for a dict-shaped tool_response.
+
+    `text` is the value of the first of result/report/content/text that
+    carries usable text (each resolved with _extract_text_blocks, so a
+    nested list-of-blocks or dict under one of those keys still works),
+    else None. `is_spawn_dict` is True only when `text` is None AND
+    either "status" names a known spawn/launch state (SPAWN_DICT_STATUSES,
+    case-insensitive) or none of the four report keys were present at all
+    — the shape a background spawn's launch acknowledgement actually has.
+    A dict that names none of those keys AND carries no recognised status
+    is still treated as a spawn dict (conservative: there is nothing here
+    that looks like a report, so there is nothing safe to check)."""
+    for k in _DICT_REPORT_KEYS:
+        if k in d:
+            got = _extract_text_blocks(d.get(k))
+            if got:
+                return got, False
+    status = d.get("status")
+    known_status = isinstance(status, str) and status.strip().lower() in SPAWN_DICT_STATUSES
+    has_any_key = any(k in d for k in _DICT_REPORT_KEYS)
+    return None, (known_status or not has_any_key)
+
+
 def _hook_report_text(payload):
     """The PostToolUse verify text: the direct 'report'/'text'/'message'
     string fields (for a caller building its own smaller payload), else
@@ -1193,7 +1233,34 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
     ledger_append(entry)
 
 
-def _hook_verify_from_file(door, path):
+def _pr_url_from_worktree(worktree, pr_num):
+    """https://github.com/<org>/<repo>/pull/<pr_num>, built from `git -C
+    worktree remote get-url origin`, or None if there is no worktree, no
+    PR number, no origin remote, or the remote is not a recognisable
+    GitHub URL. worker-verify's own atom extraction only turns a FULL
+    GitHub pull URL into a `gh pr view` evidence block (verify.py's
+    _PR_URL regex; a bare PR number in the text is not enough) — this is
+    the only thing that makes a --pr number produce real PR evidence."""
+    if not worktree or not pr_num:
+        return None
+    try:
+        proc = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
+                              capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    m = re.search(r'github\.com[:/]+([\w.\-]+)/([\w.\-]+?)(?:\.git)?/?$', proc.stdout.strip())
+    if not m:
+        return None
+    return f"https://github.com/{m.group(1)}/{m.group(2)}/pull/{pr_num}"
+
+
+NO_EVIDENCE_ADVISORY = ("super-jev hook verify --from-file: no evidence source given; "
+                        "run with --worktree/--test-cmd/--pr")
+
+
+def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None):
     """`hook verify --from-file <report.txt>`: run the exact same verify
     check `hook verify` runs off a real PostToolUse payload, but against a
     report file that arrived out of band — a worker's final report message
@@ -1202,7 +1269,23 @@ def _hook_verify_from_file(door, path):
     of ledger line, except hook_mode=False and source="manual" so it is
     distinguishable from a real hook invocation. Never runs the launch-ack
     pre-check — a caller passing --from-file has already decided this file
-    is a report worth checking."""
+    is a report worth checking.
+
+    `worktree`/`test_cmd`/`pr` let this manual door gather its OWN
+    evidence, the same way a real PostToolUse hook derives it from the
+    payload — passed straight through to worker-verify's own --worktree/
+    --test-cmd flags (verify.py's real argparse; see FLEET_VERIFY_PY).
+    `pr`, a PR number, has no equivalent verify.py flag — instead it is
+    turned into a full GitHub pull URL via `_pr_url_from_worktree` (which
+    needs `worktree` to resolve the origin remote) and appended to the
+    report text, so worker-verify's own atom extraction picks it up and
+    runs `gh pr view` on it exactly as if the report had named the URL
+    itself. `worktree` falls back to SUPERJEV_HOOK_WORKTREE when not
+    passed explicitly. If, after that fallback, NONE of worktree/test_cmd/
+    pr resolve to anything, there is no evidence source at all — this
+    prints an advisory and returns 0 WITHOUT ever calling the verify door,
+    rather than running it blind and letting an unrelated old default
+    verdict stand in for "nothing was checked"."""
     if door != "verify":
         msg = "super-jev hook: --from-file is only supported for `hook verify`"
         print(msg, file=sys.stderr)
@@ -1222,13 +1305,28 @@ def _hook_verify_from_file(door, path):
                  skipped=True, reason="from-file-empty", hook_mode=False, source="manual")
         return 0
 
+    resolved_worktree = worktree or os.environ.get(HOOK_WORKTREE_ENV)
+    if not resolved_worktree and not test_cmd and not pr:
+        print(NO_EVIDENCE_ADVISORY)
+        _hook_log(f"verify: --from-file {path!r} — no evidence source given (no "
+                 "--worktree/--test-cmd/--pr, and SUPERJEV_HOOK_WORKTREE is not set) — "
+                 "advisory, door not run", exit_code=0, skipped=True,
+                 reason="from-file-no-evidence", hook_mode=False, source="manual")
+        return 0
+
+    pr_url = _pr_url_from_worktree(resolved_worktree, pr) if pr else None
+    if pr_url:
+        text += f"\n\nRelated pull request: {pr_url}"
+    elif pr:
+        text += f"\n\nRelated pull request: PR #{pr}"
+
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, encoding="utf-8")
     tmp_path = tmp.name
     try:
         tmp.write(text)
         tmp.close()
-        ns = argparse.Namespace(report=tmp_path, worktree=os.environ.get(HOOK_WORKTREE_ENV),
-                                test_cmd="", paths=[], dry_run=False, json=False,
+        ns = argparse.Namespace(report=tmp_path, worktree=resolved_worktree,
+                                test_cmd=test_cmd or "", paths=[], dry_run=False, json=False,
                                 hook_mode=True)
         code, door_out, door_err = cmd_verify(ns)
     finally:
@@ -1260,6 +1358,165 @@ def _hook_verify_from_file(door, path):
     _hook_log(f"verify: advisory (exit {code}) [from-file {path!r}]", exit_code=0,
              flags=flags, hook_mode=False, source="manual")
     return 0
+
+
+# ---------------------------------------------------------- prompt-verify
+#
+# A background Agent/Task spawn's PostToolUse event never carries the
+# worker's real report — see _report_from_dict_tool_response above. The
+# worker's actual final report lands LATER, inside the USER turn, as a
+# `<teammate-message teammate_id="X" ...>...</teammate-message>` block —
+# Claude Code's own teammate mailbox rendering. `hook prompt-verify` is the
+# door that actually sees that: wired to UserPromptSubmit, it reads every
+# teammate-message block out of the next user turn and verifies each one
+# that looks like a real report.
+_TEAMMATE_MSG_RE = re.compile(r'<teammate-message\b([^>]*)>(.*?)</teammate-message>',
+                              re.DOTALL)
+_TEAMMATE_ID_RE = re.compile(r'teammate_id="([^"]*)"')
+# What makes a teammate-message block worth checking: a COMPLETE/INCOMPLETE
+# word, a "PR #N"/"pull/N" mention, or a test count ("6 tests", "4 passed").
+_REPORT_TRIGGER_RE = re.compile(
+    r'\b(?:COMPLETE|INCOMPLETE)\b|PR\s*#?\d+|\bpull/\d+\b|'
+    r'\d+\s*(?:tests?|test\s+cases?|passed|failed)', re.IGNORECASE)
+_ABS_PATH_RE = re.compile(r'(/(?:[\w.\-]+/)+[\w.\-]*)')
+_PR_NUM_RE = re.compile(r'PR\s*#(\d+)|\bpull/(\d+)\b', re.IGNORECASE)
+_TEST_PHRASE_RE = re.compile(
+    r'\b(npm(?:\s+run)?\s+test\S*|pytest\S*|python3?\s+-m\s+pytest\S*)', re.IGNORECASE)
+
+
+def _derive_evidence_from_report_text(text):
+    """{"worktree", "pr", "test_cmd"} auto-derived from a report's own
+    text: any absolute path mentioned (-> worktree — the first one found,
+    good enough for the fleet's one-worktree-per-task convention), any
+    "PR #N" / "pull/N" mention (-> pr, an int), and — ONLY when a worktree
+    was found, per the brief — any npm test/pytest phrase (-> test_cmd).
+    Any of the three can come back None/""/empty; that is not an error,
+    it just means this report's text did not mention that kind of
+    evidence."""
+    worktree = None
+    m = _ABS_PATH_RE.search(text)
+    if m:
+        worktree = m.group(1).rstrip("/.,;:)")
+    pr = None
+    m = _PR_NUM_RE.search(text)
+    if m:
+        pr = int(m.group(1) or m.group(2))
+    test_cmd = ""
+    if worktree:
+        m = _TEST_PHRASE_RE.search(text)
+        if m:
+            test_cmd = m.group(1)
+    return {"worktree": worktree, "pr": pr, "test_cmd": test_cmd}
+
+
+def cmd_hook_prompt_verify(a):
+    """`hook prompt-verify`: reads a UserPromptSubmit payload on stdin,
+    finds every `<teammate-message ...>...</teammate-message>` block in
+    payload["prompt"], and for each one that carries a report marker
+    (COMPLETE/INCOMPLETE/PR/test-count — see _REPORT_TRIGGER_RE) runs
+    `verify` against it with evidence auto-derived from the report's own
+    text (see _derive_evidence_from_report_text). A `pr` number is turned
+    into a real `gh pr view` evidence block the same way --from-file does
+    it: via _pr_url_from_worktree, appended to the report text before
+    worker-verify's own atom extraction ever sees it.
+
+    ALWAYS exits 0 — advisory only. A UserPromptSubmit hook that blocks
+    eats the user's own next message along with it, not just a check
+    result, so this must never return a non-zero exit under any
+    circumstance, including an unexpected exception.
+
+    Prints one line per report checked, to stdout:
+        "super-jev verify <teammate_id>: CLEAN|READ|REJECT — <flags>"
+    and writes one ledger line per report, source="teammate-message". A
+    payload with no "prompt" text, unparseable JSON, or a prompt with no
+    teammate-message blocks (or none carrying a report marker) prints
+    nothing and logs one skipped ledger line instead."""
+    try:
+        try:
+            raw = sys.stdin.read()
+        except Exception:
+            _hook_log("prompt-verify: could not read stdin — fail-open", skipped=True)
+            return 0
+        if not raw or not raw.strip():
+            _hook_log("prompt-verify: empty stdin — fail-open", skipped=True)
+            return 0
+        try:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError("payload is not a JSON object")
+        except (ValueError, TypeError):
+            _hook_log("prompt-verify: non-JSON stdin — fail-open", skipped=True)
+            return 0
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            _hook_log("prompt-verify: no usable 'prompt' field — fail-open", skipped=True)
+            return 0
+        blocks = _TEAMMATE_MSG_RE.findall(prompt)
+        if not blocks:
+            _hook_log("prompt-verify: no <teammate-message> blocks in prompt — "
+                     "nothing to check", skipped=True, reason="no-teammate-messages")
+            return 0
+
+        any_checked = False
+        for attrs, body in blocks:
+            idm = _TEAMMATE_ID_RE.search(attrs)
+            teammate_id = idm.group(1) if idm else "unknown"
+            body = body.strip()
+            if not body or not _REPORT_TRIGGER_RE.search(body):
+                _hook_log(f"prompt-verify: {teammate_id} — no report marker "
+                         "(COMPLETE/INCOMPLETE/PR/test-count) in block, skipped",
+                         skipped=True, reason="no-report-marker", source="teammate-message")
+                continue
+
+            derived = _derive_evidence_from_report_text(body)
+            report_text = body
+            pr_url = (_pr_url_from_worktree(derived["worktree"], derived["pr"])
+                     if derived["pr"] else None)
+            if pr_url:
+                report_text += f"\n\nRelated pull request: {pr_url}"
+            elif derived["pr"]:
+                report_text += f"\n\nRelated pull request: PR #{derived['pr']}"
+
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
+                                              encoding="utf-8")
+            tmp_path = tmp.name
+            try:
+                tmp.write(report_text)
+                tmp.close()
+                ns = argparse.Namespace(report=tmp_path, worktree=derived["worktree"],
+                                        test_cmd=derived["test_cmd"] or "", paths=[],
+                                        dry_run=False, json=False, hook_mode=True)
+                code, door_out, door_err = cmd_verify(ns)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+
+            flags = _parse_strong_flags(door_out)
+            block_reasons = _hook_block_reasons(flags)
+            label = {0: "CLEAN", 3: "READ", 4: "REJECT"}.get(code, "READ")
+            if block_reasons and label != "REJECT":
+                label = "REJECT"
+            flag_str = ("; ".join(f"{f['key']} {f['verdict']} {f['score']:.2f}"
+                                  for f in flags) or "no flags")
+            used = ", ".join(f"--{k} {v}" for k, v in
+                             (("worktree", derived["worktree"]),
+                              ("test-cmd", derived["test_cmd"]),
+                              ("pr", derived["pr"])) if v) or "no evidence derived"
+            print(f"super-jev verify {teammate_id}: {label} — {flag_str} ({used})")
+            _hook_log(f"prompt-verify: {teammate_id} — {label} (exit {code}) [{used}]",
+                     exit_code=0, skipped=False, flags=flags, hook_mode=True,
+                     source="teammate-message")
+            any_checked = True
+        if not any_checked:
+            _hook_log("prompt-verify: no teammate-message block carried a report marker",
+                     skipped=True, reason="no-checkable-reports")
+        return 0
+    except Exception as exc:  # advisory-only contract: never raise, never block
+        _hook_log(f"prompt-verify: unexpected error ({exc.__class__.__name__}) — fail-open",
+                 skipped=True)
+        return 0
 
 
 def cmd_hook(a):
@@ -1324,9 +1581,13 @@ def cmd_hook(a):
           describes the lead session, not necessarily the worker's tree).
     """
     door = getattr(a, "door", "?")
+    if door == "prompt-verify":
+        return cmd_hook_prompt_verify(a)
     from_file = getattr(a, "from_file", None)
     if from_file:
-        return _hook_verify_from_file(door, from_file)
+        return _hook_verify_from_file(door, from_file, worktree=getattr(a, "worktree", None),
+                                      test_cmd=getattr(a, "test_cmd", "") or "",
+                                      pr=getattr(a, "pr", None))
     try:
         raw = sys.stdin.read()
     except Exception:
@@ -1450,7 +1711,24 @@ def cmd_hook(a):
                          skipped=True)
                 return 0
 
-            text = _hook_report_text(payload)
+            tool_response = payload.get("tool_response")
+            if isinstance(tool_response, dict):
+                dict_text, is_spawn = _report_from_dict_tool_response(tool_response)
+                if dict_text is not None:
+                    text = dict_text
+                elif is_spawn:
+                    status = tool_response.get("status")
+                    _hook_log(
+                        "verify: skipped — tool_response is a spawn/launch dict"
+                        + (f" (status={status!r})" if status else "") +
+                        "; the worker's own report is not here yet, it arrives later "
+                        "in a <teammate-message> block (see `hook prompt-verify`)",
+                        exit_code=0, skipped=True, reason="spawn-dict")
+                    return 0
+                else:
+                    text = _hook_report_text(payload)
+            else:
+                text = _hook_report_text(payload)
             if text is None:
                 _hook_log("verify: no usable report text (tool_response/report/text/"
                          "message/transcript) — fail-open", skipped=True)
@@ -1808,11 +2086,23 @@ def build_parser():
     hk = subs.add_parser("hook",
                          help="Claude Code hook shim: read a hook payload on stdin, map "
                               "the verdict onto the hook's own exit convention")
-    hk.add_argument("door", choices=["gate", "verify"],
-                    help="which check to run against the hook payload")
+    hk.add_argument("door", choices=["gate", "verify", "prompt-verify"],
+                    help="which check to run against the hook payload; prompt-verify "
+                         "reads a UserPromptSubmit payload and checks every "
+                         "<teammate-message> block in it")
     hk.add_argument("--from-file", dest="from_file", default=None,
                     help="verify only: run the same check against a report file that "
                          "arrived out of band, instead of a hook payload on stdin")
+    hk.add_argument("--worktree", default=None,
+                    help="verify --from-file only: the repo the work happened in, "
+                         "passed straight to worker-verify's own --worktree")
+    hk.add_argument("--test-cmd", dest="test_cmd", default="",
+                    help="verify --from-file only: the test command, passed straight "
+                         "to worker-verify's own --test-cmd")
+    hk.add_argument("--pr", type=int, default=None,
+                    help="verify --from-file only: a PR number, turned into a full "
+                         "GitHub pull URL (via --worktree's origin remote) and "
+                         "appended to the report so worker-verify runs `gh pr view` on it")
     hk.set_defaults(func=cmd_hook)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")

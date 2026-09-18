@@ -1773,6 +1773,90 @@ def test_hook_verify_a_real_long_report_still_runs_and_is_verified(monkeypatch, 
     assert rec["skipped"] is False
 
 
+# ------------------------------------------ verify: dict / list tool_response
+
+def test_hook_verify_skips_a_background_spawn_dict(monkeypatch, door):
+    # The exact captured 2026-09-17 payload shape from
+    # /Users/admin/super-jev-experiments/ledger/last-verify-payload.json:
+    # tool_response is a dict, {"status": "teammate_spawned", "prompt":
+    # "<the whole worker brief>", ...}. The brief must NEVER be judged as
+    # a report — the door must not even run.
+    payload = {
+        "tool_name": "Agent",
+        "tool_response": {
+            "status": "teammate_spawned",
+            "prompt": "WORKER CARD v6 — TASK: verify-background-reports. COMPLETE when done.",
+            "teammate_id": "BgVerify@session-1",
+            "agent_type": "general-purpose",
+        },
+    }
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+    assert rec["reason"] == "spawn-dict"
+
+
+@pytest.mark.parametrize("status", ["launched", "running", "spawned", "TEAMMATE_SPAWNED"])
+def test_hook_verify_skips_every_known_spawn_status(monkeypatch, door, status):
+    payload = {"tool_name": "Agent",
+              "tool_response": {"status": status, "prompt": "some brief text"}}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["reason"] == "spawn-dict"
+
+
+def test_hook_verify_skips_a_dict_with_no_recognised_fields_at_all(monkeypatch, door):
+    # No status, no result/report/content/text — nothing here looks like a
+    # report, so this is treated as a spawn dict too (conservative default).
+    payload = {"tool_name": "Agent", "tool_response": {"agent_id": "x", "color": "green"}}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["reason"] == "spawn-dict"
+
+
+def test_hook_verify_dict_with_result_field_runs_as_a_real_report(monkeypatch, door):
+    payload = {"tool_name": "Agent",
+              "tool_response": {"status": "completed",
+                                 "result": "COMPLETE: 9 tests passed, pushed to branch x"}}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is False
+
+
+def test_hook_verify_dict_report_field_beats_a_spawn_status(monkeypatch, door):
+    # Even if "status" happens to collide with a spawn word, a real report
+    # field present alongside it always wins.
+    payload = {"tool_name": "Agent",
+              "tool_response": {"status": "running",
+                                 "report": "COMPLETE: 3 tests passed"}}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert door.calls
+
+
+def test_hook_verify_tool_response_list_of_content_blocks_is_joined(monkeypatch, door):
+    payload = {"tool_name": "Agent",
+              "tool_response": [
+                  {"type": "text", "text": "COMPLETE: worker finished. "},
+                  {"type": "text", "text": "6 tests passed, 0 failed."},
+              ]}
+    _hook_stdin(monkeypatch, json.dumps(payload))
+    code = sj.main(["hook", "verify"])
+    assert door.calls
+    assert "COMPLETE" in "".join(str(c) for c in door.argv) or door.calls  # ran at all
+
+
 def test_hook_verify_ack_patterns_are_env_overridable(monkeypatch, door):
     monkeypatch.setenv(sj.HOOK_ACK_PATTERNS_ENV, "custom marker phrase")
     payload = {"tool_name": "Agent",
@@ -1801,7 +1885,8 @@ def test_hook_verify_from_file_runs_the_same_check_and_prints_the_same_verdict(
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     report_file = tmp_path / "report.txt"
     report_file.write_text("COMPLETE: worker finished, 6 tests passed", encoding="utf-8")
-    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    code = sj.main(["hook", "verify", "--from-file", str(report_file),
+                    "--worktree", str(tmp_path)])
     out, err = capsys.readouterr()
     assert code == 0
 
@@ -1811,7 +1896,8 @@ def test_hook_verify_from_file_blocks_on_reject(tmp_path, monkeypatch, capsys):
     report_file = tmp_path / "report.txt"
     report_file.write_text("COMPLETE: worker finished, evidence disproves a claim",
                            encoding="utf-8")
-    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    code = sj.main(["hook", "verify", "--from-file", str(report_file),
+                    "--worktree", str(tmp_path)])
     err = capsys.readouterr().err
     assert code == 2
     assert "blocked" in err
@@ -1823,7 +1909,7 @@ def test_hook_verify_from_file_ledger_marks_manual_source(tmp_path, monkeypatch)
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     report_file = tmp_path / "report.txt"
     report_file.write_text("COMPLETE: worker finished cleanly", encoding="utf-8")
-    sj.main(["hook", "verify", "--from-file", str(report_file)])
+    sj.main(["hook", "verify", "--from-file", str(report_file), "--worktree", str(tmp_path)])
     rec = json.loads(ledger.read_text(encoding="utf-8").splitlines()[-1])
     assert rec["hook_mode"] is False
     assert rec["source"] == "manual"
@@ -1835,7 +1921,8 @@ def test_hook_verify_from_file_does_not_read_stdin(tmp_path, monkeypatch):
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     report_file = tmp_path / "report.txt"
     report_file.write_text("COMPLETE: fine", encoding="utf-8")
-    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    code = sj.main(["hook", "verify", "--from-file", str(report_file),
+                    "--test-cmd", "npm test"])
     assert code == 0
 
 
@@ -1845,6 +1932,41 @@ def test_hook_verify_from_file_missing_file_fails_open(tmp_path, monkeypatch):
     rec = json.loads(sj._ledger_lines()[-1])
     assert rec["skipped"] is True
     assert rec["reason"] == "from-file-unreadable"
+
+
+def test_hook_verify_from_file_no_evidence_prints_advisory_and_does_not_run_door(
+        tmp_path, monkeypatch, capsys):
+    # Item 2's own rule: none of --worktree/--test-cmd/--pr (and no
+    # SUPERJEV_HOOK_WORKTREE) means there is nothing to gather evidence
+    # from — advisory, exit 0, and the wrapped door is never called.
+    monkeypatch.delenv(sj.HOOK_WORKTREE_ENV, raising=False)
+    called = FakeDoor(4)  # would block, if it ran
+    monkeypatch.setattr(sj.subprocess, "run", called)
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("COMPLETE: worker finished, evidence disproves a claim",
+                           encoding="utf-8")
+    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "no evidence source given" in out
+    assert "--worktree/--test-cmd/--pr" in out
+    assert not called.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+    assert rec["reason"] == "from-file-no-evidence"
+
+
+def test_hook_verify_from_file_env_worktree_counts_as_evidence(tmp_path, monkeypatch):
+    # SUPERJEV_HOOK_WORKTREE alone (no --worktree/--test-cmd/--pr flag) is
+    # still a real evidence source — the advisory must not fire.
+    monkeypatch.setenv(sj.HOOK_WORKTREE_ENV, str(tmp_path))
+    fake = FakeDoor(0)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    report_file = tmp_path / "report.txt"
+    report_file.write_text("COMPLETE: fine", encoding="utf-8")
+    code = sj.main(["hook", "verify", "--from-file", str(report_file)])
+    assert code == 0
+    assert fake.calls
 
 
 def test_run_door_timeout_returns_124_and_logs_ledger(monkeypatch):
@@ -1985,6 +2107,94 @@ def test_hook_gate_real_subprocess_the_exact_lie_fixture_blocks(tmp_path):
     last = json.loads(ledger_lines[-1])
     assert last["exit_code"] == 2
     assert any(f["verdict"] == "NOT_SUPPORTED" for f in last["flags"])
+
+
+# ------------------------------------------------ hook prompt-verify
+
+def test_prompt_verify_parses_two_teammate_message_blocks_and_derives_flags(
+        tmp_path, monkeypatch, capsys):
+    fake = FakeDoor(0)
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    wt1 = tmp_path / "wt1"
+    wt1.mkdir()
+    prompt = (
+        "some lead narration before the mailbox\n"
+        f'<teammate-message teammate_id="WorkerA" summary="done">\n'
+        f"COMPLETE: fixed the bug in {wt1}, ran npm test, 6 tests passed. "
+        f"Opened PR #42.\n"
+        f"</teammate-message>\n"
+        "more narration\n"
+        '<teammate-message teammate_id="WorkerB" summary="also done">\n'
+        "INCOMPLETE: could not reproduce, 2 tests failed.\n"
+        "</teammate-message>\n"
+    )
+    _hook_stdin(monkeypatch, json.dumps({"prompt": prompt}))
+    code = sj.main(["hook", "prompt-verify"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "super-jev verify WorkerA:" in out
+    assert "super-jev verify WorkerB:" in out
+    # two reports checked -> the wrapped verify door ran twice (a third
+    # call, `git remote get-url origin` for the --pr -> PR-URL lookup,
+    # also goes through the same monkeypatched subprocess.run)
+    verify_calls = [c for c in fake.calls if c["cmd"][:1] != ["git"]]
+    assert len(verify_calls) == 2
+    # WorkerA's block named an absolute path and an npm test phrase -> both
+    # were derived and passed straight to worker-verify's own flags
+    a_call = verify_calls[0]["cmd"]
+    assert "--worktree" in a_call
+    assert str(wt1) in a_call
+    assert "--test-cmd" in a_call
+    ledger_lines = [json.loads(l) for l in sj._ledger_lines()]
+    sources = [l.get("source") for l in ledger_lines if l.get("door") == "hook"]
+    assert sources.count("teammate-message") == 2
+
+
+def test_prompt_verify_always_exits_0_even_on_reject(monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(4))  # REJECT
+    prompt = ('<teammate-message teammate_id="WorkerC">\n'
+             "COMPLETE: done, evidence disproves a claim\n"
+             "</teammate-message>")
+    _hook_stdin(monkeypatch, json.dumps({"prompt": prompt}))
+    code = sj.main(["hook", "prompt-verify"])
+    out = capsys.readouterr().out
+    assert code == 0  # advisory only, never blocks
+    assert "super-jev verify WorkerC: REJECT" in out
+
+
+def test_prompt_verify_skips_block_with_no_report_marker(monkeypatch, door):
+    prompt = ('<teammate-message teammate_id="WorkerD">\n'
+             "just chatting, nothing to report yet\n"
+             "</teammate-message>")
+    _hook_stdin(monkeypatch, json.dumps({"prompt": prompt}))
+    code = sj.main(["hook", "prompt-verify"])
+    assert code == 0
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["skipped"] is True
+
+
+def test_prompt_verify_no_teammate_message_blocks_is_silent(monkeypatch, door, capsys):
+    _hook_stdin(monkeypatch, json.dumps({"prompt": "just a plain message, no mailbox blocks"}))
+    code = sj.main(["hook", "prompt-verify"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert out == ""
+    assert not door.calls
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["reason"] == "no-teammate-messages"
+
+
+def test_prompt_verify_empty_stdin_fails_open(monkeypatch):
+    _hook_stdin(monkeypatch, "")
+    code = sj.main(["hook", "prompt-verify"])
+    assert code == 0
+
+
+def test_prompt_verify_non_json_stdin_fails_open(monkeypatch):
+    _hook_stdin(monkeypatch, "not json at all {")
+    code = sj.main(["hook", "prompt-verify"])
+    assert code == 0
 
 
 if __name__ == "__main__":
