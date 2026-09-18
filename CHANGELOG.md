@@ -4,6 +4,73 @@
 
 No version bump.
 
+- **Plug-in check arms and a swappable judge.** Two new packages give the
+  gate a clean plug-in seam. `skills/super-jev/arms/` is a registry: an
+  arm is one module exposing `NAME`, `KIND`, `DEFAULT_MODE` and
+  `check(window, draft, ctx) -> Verdict | None`, and the registry
+  discovers arms by listing the package directory, so dropping a file in
+  registers it and there is no hard-coded list anywhere. Per-arm mode
+  (`block`/`advisory`/`off`) comes from `SUPERJEV_ARM_<NAME>`, else a JSON
+  file named by `SUPERJEV_ARMS_CONFIG`, else the arm's own default; an
+  unrecognised value falls back to the default and prints one stderr
+  line. `skills/super-jev/judges/` puts the model call behind one
+  interface — `get_judge().classify(draft, window) -> JudgeResult` — with
+  a `typesafe` backend that wraps today's `cmd_gate` call unchanged and a
+  `fake` backend that runs `SUPERJEV_GATE_CMD` directly for offline
+  tests, selected with `SUPERJEV_JUDGE`. The PR-state arm is migrated
+  end-to-end as the template (`arms/pr_state.py`, asking the window
+  model's `pr_state_verdict_from_window` instead of scanning raw evidence
+  text); `superjev.py`'s legacy `_pr_mismatch_reason` stays callable and
+  stays the default, and `SUPERJEV_ARMS=1` is the switch that runs the
+  arm through the registry instead. Both offline replays print the same
+  decisions with the switch off and on, which is why one arm was migrated
+  first rather than all of them: the switch is the proof harness. See
+  docs/plugins.md.
+
+  The arm contract carries four more things. **One judge call per run:**
+  `ctx["judge"]()` is a memoised accessor that performs the single
+  TypeSafe classify on first use and hands every later caller the same
+  `JudgeResult`, so zero `KIND = "judge"` arms cost zero calls and N of
+  them cost exactly one, each interpreting the shared result in its own
+  `check`. **An evidence hook:** an arm may also expose
+  `contribute(window, draft, ctx) -> list[str]`, and those lines are
+  appended to the evidence — as a FIRST-CLASS window section,
+  `[contributed by check arms]`, wrapping rather than mutating the
+  `Window` — before any judge call happens, which is what a derived-fact
+  family needs to put something in front of the judge rather than only
+  ruling on what is already there. A section and not a note after one,
+  because a note after one laundered trust: the header was not a header
+  the window reader recognised, so the `===` before it was not a section
+  boundary and the whole block folded into the chunk above, and a block
+  landing under `[session receipts]` had every line — plus any forged
+  `[from: ...]` tail — re-parse as a TRUSTED session receipt. It is now
+  `window_model.SECTION_CONTRIBUTED`: its own header (one string, shared
+  by the renderer and the reader), its own emit slot above every other
+  section, a `check_arm` piece origin that the single trust rule answers
+  no to, and prose-strength to every deterministic reader (counts,
+  labelled values, merge receipts, the PR-state signals). Each line is
+  also neutralised on the way out — identity tail stripped, line quoted —
+  so no single line passes for a receipt row on its own shape either. The
+  invariant is a test: after render and re-parse, no contributed line has
+  trust.
+  **`ctx` is a named contract:** every key is documented in one table in
+  docs/plugins.md, every key is optional, and adding one means adding the
+  row in the same change. **Discovery is one keyspace:** an arm whose
+  `NAME` is not its own file stem is rejected with one stderr line and
+  skipped, and a search path (`SUPERJEV_ARMS_EXTRA_DIR`, or `extra=`)
+  means a test double is never written into the shipped package
+  directory.
+
+- **The gate records which arms it consulted.** The catch-ledger row for a
+  gate decision now carries `arms` (every arm consulted with the mode it
+  ran in, `["pr_state:block", ...]`, or `pr_state:legacy-inline` while
+  `SUPERJEV_ARMS` is off) and, separately, `arm_errors` (every arm that
+  raised, with its exception class). `run_arms` returned that information
+  and the gate threw it away. Two fields rather than one because "we asked
+  this arm" and "this arm broke" are different facts: a raising blocking
+  arm still fails open, but it is no longer invisible. Both are `null` on
+  a row that consulted no arms, which is not `[]`.
+
 - **Family 8's explicit-label colon syntax ("items: 2") could pair a
   sentence-subject colon with the numerator of an "N of M" ratio.** The
   #64 escape hatch that lets a draft mark a word as a label with real
@@ -403,8 +470,19 @@ No version bump.
 
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
-  reason behind it came from the judge (the OVERCLAIMS arm, or under
-  `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm) — the
+  blocking verdict behind it came from an arm whose `KIND` is `judge`.
+  That rule is the registry's own (`arms.judge_only_blocks`); the gate
+  adapts this call's reason lists into verdicts for it rather than keeping
+  a second copy, so it covers the OVERCLAIMS arm and, under
+  `SUPERJEV_RULE=v2`, the secondary NOT_SUPPORTED/CONTRADICTED arm without
+  naming either. The granular `=weak` level is the SAME registry rule with
+  a filter: the gate hands `judge_only_blocks` the weak verdict set, and a
+  blocking judge verdict outside it — OVERCLAIMS, or a reason line naming
+  no verdict at all — keeps its block. So there is still one rule and one
+  copy of it, at both levels.
+  This failsafe is a different object from a per-arm mode: a mode is one
+  arm's standing on every run, this is one gate call's outcome demoted
+  after the fact. The
   judge's confidence score is a guess, and a wrong guess should not stop a
   true turn. A block carrying even one deterministic reason (count
   mismatch, PR mismatch, `CONTRADICTED_BY_FACT`) still blocks exactly as

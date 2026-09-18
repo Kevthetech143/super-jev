@@ -52,6 +52,7 @@ import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 HOME = Path(os.path.expanduser("~"))
 SKILL_DIR = Path(__file__).resolve().parent
@@ -880,8 +881,19 @@ def _extract_labelled_evidence_counts_scoped(evidence_text):
         return out
     sticky = None
     in_report = False
+    in_contributed = False
     for line in evidence_text.splitlines():
         stripped = line.strip()
+        # Checked BEFORE the section-header branch, which would otherwise
+        # clear the fence this header sets. A check arm's contributed
+        # lines are prose: a `**61 passed**` an arm wrote into its own
+        # note is not a receipt that printed one.
+        if _CONTRIBUTED_HEADER_RE.match(stripped):
+            in_contributed = True
+            sticky = None
+            continue
+        if in_contributed:
+            continue
         if _WINDOW_SECTION_RE.match(line) or _SECTION_SEPARATOR_RE.match(line):
             sticky = None          # a new section speaks for a new run
             in_report = False
@@ -1139,7 +1151,133 @@ def _fact_block_reasons(facts):
     return [f for f in (facts or []) if "CONTRADICTED_BY_FACT" in f]
 
 
-def deterministic_block_reasons(draft_text, evidence_text):
+# The PR-state check exists twice on purpose, for exactly as long as the
+# migration takes.
+#
+#   * `_pr_mismatch_reason` above is the legacy inline arm. It is the
+#     default and it stays callable: nothing about it changes.
+#   * `skills/super-jev/arms/pr_state.py` is the same check as a plug-in,
+#     asking the window model the question instead of scanning raw
+#     evidence text.
+#
+# `SUPERJEV_ARMS=1` picks the second. The two are meant to decide every
+# recorded bench case identically, which is the whole point of migrating
+# one arm first rather than all of them: the switch is the proof harness.
+# See docs/plugins.md.
+
+class _ArmRunNote(NamedTuple):
+    """One registry (or legacy-inline) arm run, as the ledger records it.
+
+    `consulted` is `(arm name, mode)`; `errors` is `(arm name, exception
+    class name)`. Two separate lists on purpose: "we asked this arm" and
+    "this arm broke" are different facts, and a row that merged them
+    could not tell a quiet arm from a crashed one.
+    """
+    consulted: list
+    errors: list
+
+
+def _arm_run_ledger_fields(runs):
+    """`(arms, arm_errors)` for the catch-ledger row, over every arm run
+    this gate call made — `["pr_state:block", ...]` and
+    `["pr_state:RuntimeError", ...]`. Empty lists become None so a row
+    that consulted nothing does not claim an empty consultation."""
+    consulted, errors = [], []
+    for run in runs or []:
+        consulted.extend(f"{n}:{m}" for n, m in run.consulted)
+        errors.extend(f"{n}:{e}" for n, e in run.errors)
+    return (consulted or None), (errors or None)
+
+
+#: Must match `arms.ARMS_SWITCH_ENV`. Duplicated on purpose: reading it has
+#: to be import-free, so `_arms_switch_on` below can answer "is the
+#: registry even wanted?" before anything pays for `import arms` (which
+#: drags in `window_model` too) on a call where the answer is no — the
+#: common case, since the switch defaults off.
+ARMS_SWITCH_ENV = "SUPERJEV_ARMS"
+
+
+def _arms_switch_on():
+    """Cheap, import-free mirror of `arms.arms_enabled()`.
+
+    Every gate event reaches `_pr_state_reason` below, so this has to be
+    answerable without loading the registry — otherwise the switch being
+    OFF (the default) would still cost every call an `import arms` (and,
+    through it, `window_model`) just to find that out.
+    """
+    return str(os.environ.get(ARMS_SWITCH_ENV, "")).strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _arms_registry():
+    """The arm registry module, or None if it cannot be imported.
+
+    Never raises. The registry is an enhancement; a broken import must
+    leave the gate on its legacy path, not take it down.
+
+    Callers on the deterministic gate path must check `_arms_switch_on()`
+    first and skip this entirely when it is off — this function is what
+    actually imports `arms` (and `window_model` with it), so calling it
+    unconditionally defeats the point of the cheap switch check.
+    """
+    try:
+        # Appended, not inserted: the gate must not reorder the running
+        # process's own module search path to find its own packages.
+        if str(SKILL_DIR) not in sys.path:
+            sys.path.append(str(SKILL_DIR))
+        import arms                                        # noqa: PLC0415
+        return arms
+    except Exception as e:                                  # pragma: no cover
+        print(f"superjev: cannot load the arm registry ({e!r}) — staying on "
+              "the legacy inline arms", file=sys.stderr)
+        return None
+
+
+def _pr_state_reason(draft_text, evidence_text, run_sink=None):
+    """The PR-state arm's reason line, or None.
+
+    With `SUPERJEV_ARMS` off (the default) this is `_pr_mismatch_reason`
+    and nothing else runs — and, on purpose, nothing imports `arms` or
+    `window_model` to find that out: `_arms_switch_on()` is checked
+    first, and the registry import (`_arms_registry()`) only happens once
+    the switch says it is wanted. With it on, the registry runs the
+    `pr_state` arm over a window parsed out of the same evidence text,
+    and the legacy inline call is skipped rather than run alongside —
+    running both would hide exactly the difference the switch exists to
+    expose.
+
+    `run_sink`, if given, is a list this appends one `_ArmRunNote` to,
+    recording which arms were consulted in which modes and which of them
+    raised. The gate used to throw that away; the catch ledger's `arms`
+    and `arm_errors` fields are it. A raising blocking arm still fails
+    open — but it is no longer invisible.
+    """
+    def _legacy():
+        # The legacy inline twin is still an arm being consulted, so the
+        # ledger says so rather than reading as "no arms ran".
+        if run_sink is not None:
+            run_sink.append(_ArmRunNote(consulted=[("pr_state", "legacy-inline")],
+                                        errors=[]))
+        return _pr_mismatch_reason(draft_text, evidence_text)
+
+    if not evidence_text or not _arms_switch_on():
+        return _legacy()
+    arms = _arms_registry()
+    if arms is None or not arms.arms_enabled():
+        return _legacy()
+    from arms import pr_state as pr_state_arm              # noqa: PLC0415
+    window = pr_state_arm.window_from_text(evidence_text)
+    verdicts, run = arms.run_arms(window, draft_text, ctx={
+        "evidence_text": evidence_text, "caller": "deterministic"},
+        names=["pr_state"])
+    if run_sink is not None:
+        run_sink.append(_ArmRunNote(consulted=list(run.consulted),
+                                    errors=list(run.errors)))
+    reasons = [v.reason for v in verdicts if v.is_block()]
+    return reasons[0] if reasons else None
+
+
+def deterministic_block_reasons(draft_text, evidence_text, run_sink=None):
     """The full list of deterministic (no-model-call) block reasons for one
     draft/evidence pair: a test-count mismatch and/or a PR-merge mismatch.
     Runs independently of, and before, the judge; the judge still runs for
@@ -1148,7 +1286,7 @@ def deterministic_block_reasons(draft_text, evidence_text):
     r = _count_mismatch_reason(draft_text, evidence_text)
     if r:
         reasons.append(r)
-    r = _pr_mismatch_reason(draft_text, evidence_text)
+    r = _pr_state_reason(draft_text, evidence_text, run_sink=run_sink)
     if r:
         reasons.append(r)
     return reasons
@@ -1272,33 +1410,46 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
-# Judge-advisory mode (2026-09-18, granular 2026-09-18b). SUPERJEV_GATE_
-# JUDGE_ADVISORY demotes a `hook gate` block to an advisory print + exit 0
-# when EVERY reason behind it came from the judge. Two levels:
+# Judge-advisory mode (2026-09-18, granular 2026-09-18b) — the GATE-LEVEL
+# failsafe. SUPERJEV_GATE_JUDGE_ADVISORY demotes a `hook gate` block to an
+# advisory print + exit 0 when EVERY blocking verdict behind it came from an
+# arm whose KIND is `judge`. Two levels:
 #
 #   "1"    — every judge arm is advisory (the OVERCLAIMS arm, or — under
 #            SUPERJEV_RULE=v2 — the secondary NOT_SUPPORTED/CONTRADICTED
-#            arm). This is the original, unconditional behavior.
-#   "weak" — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
-#            secondary arm) and SELF_CONTRADICTORY are advisory; OVERCLAIMS
-#            still blocks. Added after the 2026-09-18 live adjudication
-#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS the only
-#            judge arm worth trusting to block, while the per-claim arm and
-#            SELF_CONTRADICTORY were not. Under the default v3 rule the
-#            secondary arm already never produces a block reason on its
-#            own, so "weak" is a real change only under SUPERJEV_RULE=v2.
-#   "0"/unset — unchanged: judge-advisory mode off, every block reason
-#            (judge or deterministic) blocks exactly as it does today.
+#            arm). The original, unconditional behavior.
+#   "weak" — only the WEAK judge verdicts are advisory: the per-claim
+#            NOT_SUPPORTED/CONTRADICTED arm (v2's secondary arm) and
+#            SELF_CONTRADICTORY. OVERCLAIMS still blocks. Added after the
+#            2026-09-18 live adjudication (ops/gate-adjudication-20260918.md)
+#            found OVERCLAIMS the only judge arm worth trusting to block,
+#            while the per-claim arm and SELF_CONTRADICTORY were not. Under
+#            the default v3 rule the secondary arm already never produces a
+#            block reason on its own, so "weak" is a real change only under
+#            SUPERJEV_RULE=v2.
+#   "0"/unset — off: every block reason (judge or deterministic) blocks
+#            exactly as it does today.
 #
-# It never touches a block that carries even one deterministic reason (a
-# count mismatch, a PR mismatch, or a CONTRADICTED_BY_FACT fact sentence) —
-# those still block with the same exit code as today, unconditionally
-# regardless of mode. See cmd_hook's "block-judge-advisory" branch, which
-# checks this against `det_block_reasons` being empty rather than special-
-# casing which judge arm fired, so it covers v2 and v3 alike.
+# Both levels are ONE rule (_judge_only_blocks_local, mirroring the
+# registry's arms.judge_only_blocks but callable without importing the
+# registry): this module only adapts today's reason lists into verdicts
+# for it (_gate_blocking_verdicts) and hands it the weak set as a filter,
+# so the rule covers the judge arms under v2 and v3 alike without naming
+# any of them.
+#
+# It never touches a block carrying even one deterministic reason (a count
+# mismatch, a PR mismatch, a CONTRADICTED_BY_FACT fact sentence): those still
+# block with the same exit code as today, unconditionally regardless of mode.
+#
+# This is NOT per-arm mode (SUPERJEV_ARM_<NAME>=block|advisory|off). The two
+# are different objects. A mode is one arm's own standing, set once and read
+# on every run, and an `advisory` arm never blocks in the first place. The
+# failsafe is one gate call's OUTCOME, demoted after the fact, over whatever
+# mix of arms happened to fire. See docs/plugins.md.
 JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
-# Verdicts a "weak" judge-advisory mode still demotes — never OVERCLAIMS.
+#: Verdicts a "weak" judge-advisory mode still demotes — never OVERCLAIMS.
 _JUDGE_ADVISORY_WEAK_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "SELF_CONTRADICTORY")
+#: Pulls the VERDICT word out of a "key VERDICT score" block-reason line.
 _JUDGE_ADVISORY_REASON_VERDICT_RE = re.compile(r'^\S+\s+([A-Z_]+)\s+\d')
 
 
@@ -1318,20 +1469,124 @@ def _judge_advisory_enabled():
     return _judge_advisory_mode() != "0"
 
 
-def _judge_advisory_reasons_are_weak_only(block_reasons):
-    """True when every "key VERDICT score" string in `block_reasons` names
-    a verdict `_JUDGE_ADVISORY_WEAK_VERDICTS` covers (never OVERCLAIMS) —
-    what "weak" mode requires before it will demote a block. An empty or
-    unparsed list is NOT weak-only (nothing to safely demote), matching the
-    fail-closed direction every other block-suppression check in this file
-    takes."""
-    if not block_reasons:
+def _judge_advisory_reason_verdict(reason):
+    """The VERDICT word a "key VERDICT score" block-reason line names, or
+    None when the line does not parse that way.
+
+    None is the fail-CLOSED answer: `judge_only_blocks` under a weak
+    filter counts an unparsed reason as not-demotable, so a reason shape
+    this regex does not know keeps its block rather than losing it.
+    """
+    m = _JUDGE_ADVISORY_REASON_VERDICT_RE.match((reason or "").strip())
+    return m.group(1) if m else None
+
+
+class _GateVerdict(NamedTuple):
+    """A `Verdict`-shaped view of one blocking reason THIS gate call has.
+
+    The gate's own reasons do not come from the registry yet (only the
+    `pr_state` arm has moved, and only behind `SUPERJEV_ARMS`), so this is
+    the adapter that lets the failsafe rule be stated once, in registry
+    terms, over both. `arm` names the ORIGIN of the reason, not a registry
+    key; `kind` is the thing the rule actually reads, and `verdict` is the
+    thing a WEAK filter reads (None when the reason does not name one).
+    """
+    arm: str
+    kind: str
+    reason: str
+    verdict: str = None
+
+    def is_block(self):
+        return True
+
+
+#: The two arm names the adapter above uses for a reason that did not
+#: come through the registry.
+GATE_ARM_INLINE = "deterministic-inline"
+GATE_ARM_JUDGE = "judge"
+
+
+def _gate_blocking_verdicts(det_block_reasons, block_reasons, code=None):
+    """This gate call's blocking reasons as `(verdicts, kinds)`.
+
+    Deterministic reasons (a count mismatch, a PR-state mismatch, a
+    CONTRADICTED_BY_FACT fact sentence) are `deterministic`. Everything
+    else in `block_reasons` came from the judge's own flags, so it is
+    `judge`, and carries the VERDICT its reason line names so a weak
+    filter has something to read. A block with no reason line at all came
+    from the judge's exit code, which is a judge finding too — without
+    that case an exit-code block would look like it came from nobody. Its
+    verdict is None, so `weak` will not demote it: an exit-code block
+    names no verdict, and the weak level demotes named weak verdicts only.
+    """
+    verdicts, kinds = [], {GATE_ARM_INLINE: "deterministic",
+                           GATE_ARM_JUDGE: "judge"}
+    det = list(det_block_reasons or [])
+    for r in det:
+        verdicts.append(_GateVerdict(GATE_ARM_INLINE, "deterministic", r))
+    judge_reasons = [r for r in (block_reasons or []) if r not in det]
+    for r in judge_reasons:
+        verdicts.append(_GateVerdict(GATE_ARM_JUDGE, "judge", r,
+                                     _judge_advisory_reason_verdict(r)))
+    if not verdicts:
+        verdicts.append(_GateVerdict(GATE_ARM_JUDGE, "judge",
+                                     f"exit {code}" if code is not None else "exit code"))
+    return verdicts, kinds
+
+
+def _judge_only_blocks_local(verdicts, kinds, weak_verdicts=None):
+    """Local mirror of `arms.judge_only_blocks` — same rule, same shape,
+    but callable without ever importing the `arms` package.
+
+    `_gate_blocking_verdicts` below only ever produces the two fixed
+    origins `GATE_ARM_INLINE`/`GATE_ARM_JUDGE` (this gate's own reasons
+    have not moved into the registry; only `pr_state`, behind
+    `SUPERJEV_ARMS`, has) — so this rule never actually reads real
+    per-arm registry state, on this call path, with the switch on or
+    off. Keeping a private copy here means the judge-advisory failsafe
+    (checked on every gate block) does not have to import `arms` — and,
+    through it, `window_model` — just to answer a question its own
+    inputs already fully determine. Kept in lockstep with
+    `arms.judge_only_blocks`'s docstring; change one, change both.
+    """
+    blocking = [v for v in (verdicts or []) if v.is_block()]
+    if not blocking:
         return False
-    for r in block_reasons:
-        m = _JUDGE_ADVISORY_REASON_VERDICT_RE.match(r.strip())
-        if not m or m.group(1) not in _JUDGE_ADVISORY_WEAK_VERDICTS:
+    for v in blocking:
+        if (kinds or {}).get(v.arm, "deterministic") != "judge":
+            return False
+        if weak_verdicts is not None and getattr(v, "verdict", None) not in weak_verdicts:
             return False
     return True
+
+
+def _judge_advisory_demotes(det_block_reasons, block_reasons, code=None):
+    """Does the gate-level failsafe demote THIS block?
+
+    One rule: demote when there is at least one blocking verdict and
+    EVERY blocking verdict came from an arm whose KIND is `judge`
+    (`_judge_only_blocks_local`, mirroring `arms.judge_only_blocks`).
+    Mode `weak` hands that same rule a FILTER —
+    `_JUDGE_ADVISORY_WEAK_VERDICTS` — so a judge verdict outside the weak
+    set (OVERCLAIMS, or a reason line naming no verdict at all) keeps
+    its block. Per-arm mode is a different object — one arm's own
+    standing, set once and read on every run. This is one gate call's
+    outcome, demoted after the fact.
+
+    Answered entirely from this call's own arguments — no registry
+    import, `SUPERJEV_ARMS` on or off. `weak` mode used to route through
+    `_arms_registry()` even with arms disabled, which meant a gate that
+    never touched `SUPERJEV_ARMS` still paid to import `arms` (and
+    `window_model`) on every judge-advisory-weak block; that dependency
+    is gone.
+    """
+    mode = _judge_advisory_mode()
+    if mode == "0":
+        return False
+    verdicts, kinds = _gate_blocking_verdicts(det_block_reasons, block_reasons,
+                                              code=code)
+    weak = _JUDGE_ADVISORY_WEAK_VERDICTS if mode == "weak" else None
+    return _judge_only_blocks_local(verdicts, kinds, weak_verdicts=weak)
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -2282,7 +2537,7 @@ def _catch_excerpt(text):
 
 
 def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
-              start_time=None, payload=None):
+              start_time=None, payload=None, arms=None, arm_errors=None):
     """One record for the catch ledger — called once per gate/verify hook
     decision. `decision` is one of "block", "allow", "advisory", "unchecked",
     "advisory-forced" (the stop_hook_active re-run failsafe), or
@@ -2296,7 +2551,16 @@ def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
     site here runs strictly after that value is already decided.
     `payload`, if given and SUPERJEV_CATCH_KEEP_PAYLOAD=1, is saved
     (redacted) alongside this record's id for later bench-case export —
-    see _catch_save_payload."""
+    see _catch_save_payload.
+
+    `arms` and `arm_errors` are this call's arm ledger, two separate
+    fields on purpose (see _arm_run_ledger_fields): `arms` is every arm
+    consulted with the mode it ran in, `["pr_state:block", ...]`, and
+    `arm_errors` is every arm that raised with the exception class,
+    `["pr_state:RuntimeError", ...]`. An arm that raises still fails open
+    — the point of the second field is that it stops being invisible when
+    it does. Both are None on a row that consulted no arms (the verify
+    door, an unchecked gate row), which is not the same as `[]`."""
     try:
         ms = None
         if start_time is not None:
@@ -2309,6 +2573,8 @@ def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
             "draft_excerpt": _catch_excerpt(draft_text),
             "window_bytes": window_bytes,
             "ms": ms,
+            "arms": list(arms) if arms else None,
+            "arm_errors": list(arm_errors) if arm_errors else None,
             "tag": None,
             "note": None,
         }
@@ -5212,8 +5478,23 @@ _RECEIPT_IDENTITY_RE = re.compile(r'\s*\[from:\s*(.*?)(?:\s+@\s+([^\]]*))?\]\s*$
 # The assembled window's own section headers and separators — where a
 # sticky `[from: ...]` identity stops applying.
 _WINDOW_SECTION_RE = re.compile(
-    r'^\[(?:current turn|current turn reports|previous turn -\d+|session receipts)\]\s*$')
+    r'^\[(?:current turn|current turn reports|previous turn -\d+|session receipts'
+    r'|contributed by check arms)\]\s*$')
 _SECTION_SEPARATOR_RE = re.compile(r'^\s*(?:={3,}|-{3,})\s*$')
+
+# The header a check arm's contributed block is written under
+# (`window_model.HEADER_CONTRIBUTED`, `arms.CONTRIBUTED_HEADER`). Every
+# deterministic reader below treats what follows it as PROSE, to the end of
+# the window: a check arm's own working note is an assertion about this run,
+# never a receipt of one, and the block is always written last.
+#
+# Why "to the end" and not "until the next header": there is no next
+# header. The block is the last section `arms.JudgeEvidence.render` emits,
+# so a line appearing after this header inside the window text either
+# belongs to the block or was forged to look like it does. Both are prose.
+# Sticky and never reset is therefore the fail-CLOSED reading as well as
+# the accurate one.
+_CONTRIBUTED_HEADER_RE = re.compile(r'^\[contributed by check arms\]\s*$')
 
 
 def _render_receipt_identity(cmd, cwd):
@@ -5838,8 +6119,17 @@ def _fact_window_label_values(window_text):
     `LABEL: ... VALUE` and a whitespace-column `LABEL  ...  VALUE`. A row
     whose label carries a digit is skipped (that is prose, not a label)."""
     table = {}
+    in_contributed = False
     for raw in (window_text or "").splitlines():
         s = raw.strip()
+        if _CONTRIBUTED_HEADER_RE.match(s):
+            # An arm's contributed note must not supply this window's only
+            # value for a label — that would let a check arm's own line
+            # CONTRADICT the draft as if a tool had printed it.
+            in_contributed = True
+            continue
+        if in_contributed:
+            continue
         if not s or _WINDOW_SECTION_RE.match(s) or s.startswith("[from:"):
             continue
         pairs = []
@@ -6155,7 +6445,14 @@ def _fact_window_lines(window_text):
     the label is the `[current turn]` / `[session receipts]` /
     `[previous turn -N]` header the line sits under (see
     _WINDOW_SECTION_RE). The label is what a fact cites as its source, so a
-    human reading a fact can find the line it came from."""
+    human reading a fact can find the line it came from.
+
+    A `[contributed by check arms]` line is KEPT here and labelled with
+    that header. This is the general reader — receipt strength is what
+    `_fact_window_lines_excluding_reports` is for, and that one drops the
+    block. The label is enough on its own for the one place ordering
+    matters: `_section_recency_rank` does not know it, so it ranks lowest
+    and a contributed line can never postdate a real receipt."""
     label = "the evidence window"
     out = []
     for raw in (window_text or "").splitlines():
@@ -6198,10 +6495,20 @@ def _fact_window_lines_excluding_reports(window_text):
     report's own prose."""
     label = "the evidence window"
     in_report = False
+    in_contributed = False
     out = []
     for raw in (window_text or "").splitlines():
         line = raw.rstrip()
         stripped = line.strip()
+        # A contributed block is arm-authored prose, so it is excluded here
+        # for exactly the reason a report body is: the families reading
+        # these lines (merge/CI claims, the receipt half of the stale-report
+        # check) are asking what a RECEIPT says.
+        if _CONTRIBUTED_HEADER_RE.match(stripped):
+            in_contributed = True
+            continue
+        if in_contributed:
+            continue
         if _WINDOW_SECTION_RE.match(stripped):
             label = stripped
             in_report = False
@@ -6429,7 +6736,10 @@ def _section_recency_rank(label):
     the highest-priority, most current material of all. An unrecognised
     or missing label (flat text with no section headers, e.g. a unit
     test's fixture) ranks lowest, so two unlabelled mentions can never
-    outrank each other."""
+    outrank each other. `[contributed by check arms]` is deliberately
+    among the unrecognised: a check arm's own note is not a turn, so it
+    has no recency, and ranking lowest is what keeps it from outranking
+    anything."""
     m = re.match(r'^\[previous turn -(\d+)\]$', label)
     if m:
         return -int(m.group(1))
@@ -6449,8 +6759,16 @@ def _report_not_merged_claims(window_text):
     out = []
     label = "the evidence window"
     in_report = False
+    in_contributed = False
     for raw in (window_text or "").splitlines():
         stripped = raw.strip()
+        # A contributed block is not a worker report, so a `REPORT FROM`
+        # line forged inside one does not open a claim this check counts.
+        if _CONTRIBUTED_HEADER_RE.match(stripped):
+            in_contributed = True
+            continue
+        if in_contributed:
+            continue
         if _WINDOW_SECTION_RE.match(stripped):
             label = stripped
             in_report = False
@@ -6651,6 +6969,8 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_fac
 # call is actually priced and timed by. It trims whole sections by
 # priority, lowest first:
 #
+#   0. the `[contributed by check arms]` block, ALWAYS FIRST and ALWAYS
+#      WHOLE (never partially shrunk — see below)
 #   1. previous turns, OLDEST first (a fact two turns back is the most
 #      replaceable thing in the window)
 #   2. session receipts — the backing layer, and by far the fattest on the
@@ -6664,18 +6984,44 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_fac
 # guarantee the byte cap always carried — and the facts are kept whole,
 # because a fact is a sentence the judge cannot re-derive from a truncated
 # dump.
+#
+# The contributed block sits LAST in a rendered window — AFTER
+# `[current turn]`, not before it; see `window_model.emit_slot` and
+# `arms.JudgeEvidence.render`. Before `_WINDOW_PART_RE` knew its header,
+# this trimmer read it as unmarked trailing text and folded it into
+# whichever recognised section preceded it (usually `[current turn]`,
+# never dropped) rather than treating it as its own section: an arm's
+# contributed lines rode along inside an undroppable block while real
+# receipts got evicted to make room, and if the tail-keep at the bottom
+# of this function ever cut into that fused blob it could slice the
+# `[contributed by check arms]` header off entirely, leaving the arm's
+# lines to `from_text` as unlabelled remainder — which a downstream
+# reader can fold into the nearest TRUSTED section above it. Registering
+# the header here closes both holes at once: the block gets its own part
+# (so it can be dropped on its own), it is evicted FIRST (arm-contributed
+# lines are the most replaceable thing in the window — the judge already
+# has the real evidence they were derived from), and it is dropped WHOLE,
+# never shrunk (see the `kind == _WINDOW_KIND_CONTRIBUTED` guard in
+# `trim_window_to_token_budget`) — a partial cut is exactly the shape
+# that could strand a labelled contributed line without the header that
+# marks it untrusted.
+_WINDOW_KIND_CONTRIBUTED = "contributed by check arms"
+
 _WINDOW_PART_RE = re.compile(
     r'^\[(current turn reports|current turn|previous turn -(\d+)|session receipts'
-    r'|cited files)\]\s*$')
+    r'|cited files|contributed by check arms)\]\s*$')
 
-# Lowest priority first — the order sections are given up in. "other"
-# (anything not under a recognised section marker) is deliberately absent:
-# the byte-level tail cut upstream can slice a marker line off the head of
-# the window, and everything after that point would then look unlabelled.
-# Dropping it would risk dropping the current turn, so unlabelled content
-# is treated as undroppable and left to the tail-keep at the end.
-_WINDOW_TRIM_ORDER = ("previous turn", "session receipts", "cited files",
-                      "current turn reports")
+# Lowest priority first — the order sections are given up in. The
+# contributed block goes FIRST: it is arm-derived evidence, not a
+# receipt, and the judge already has whatever real evidence it was
+# derived from in the window proper. "other" (anything not under a
+# recognised section marker) is deliberately absent: the byte-level tail
+# cut upstream can slice a marker line off the head of the window, and
+# everything after that point would then look unlabelled. Dropping it
+# would risk dropping the current turn, so unlabelled content is treated
+# as undroppable and left to the tail-keep at the end.
+_WINDOW_TRIM_ORDER = (_WINDOW_KIND_CONTRIBUTED, "previous turn",
+                      "session receipts", "cited files", "current turn reports")
 
 _WINDOW_SHRINK_MARKER = "[...head of this section cut to fit the window budget...]"
 
@@ -6785,15 +7131,23 @@ def trim_window_to_token_budget(text, budget_tok=None):
                 break
             label = (f"previous turn -{victim['age']}" if victim["kind"] == "previous turn"
                     else victim["kind"])
-            # SHRINK before DROP. Giving up a whole 3,000-token receipts
-            # block to save 200 tokens throws away evidence the budget
-            # never asked for, and evidence missing from the window is how
-            # a true reply gets flagged NOT_SUPPORTED. So a section that
-            # can pay the overflow out of its own head does exactly that
-            # and the trimming stops there; only a section too small to
-            # cover it is dropped whole.
+            # SHRINK before DROP — EXCEPT the contributed block, which is
+            # always dropped whole and never partially cut. A partial
+            # shrink keeps the tail of the section and can slice its own
+            # `[contributed by check arms]` header off the front (the
+            # header sorts first in `victim["text"]`, same as every other
+            # section here), and a contributed block with no header is
+            # exactly the shape `from_text` cannot tell from unlabelled —
+            # and therefore trusted — content. Every other section: giving
+            # up a whole 3,000-token receipts block to save 200 tokens
+            # throws away evidence the budget never asked for, and
+            # evidence missing from the window is how a true reply gets
+            # flagged NOT_SUPPORTED. So a section that can pay the
+            # overflow out of its own head does exactly that and the
+            # trimming stops there; only a section too small to cover it
+            # is dropped whole.
             size = _estimate_tokens(victim["text"])
-            if size > over:
+            if victim["kind"] != _WINDOW_KIND_CONTRIBUTED and size > over:
                 victim["text"] = _shrink_window_part(victim["text"], size - over)
                 meta["shrunk"].append(label)
                 break
@@ -9281,6 +9635,10 @@ def cmd_hook(a):
     """
     door = getattr(a, "door", "?")
     _catch_t0 = time.monotonic()
+    # Every arm run THIS hook event makes, appended to as the checks run
+    # (see _pr_state_reason's run_sink) and read once, below, for the
+    # catch-ledger row's `arms`/`arm_errors` fields.
+    _arm_runs = []
     if door == "prompt-verify":
         return cmd_hook_prompt_verify(a)
     from_file = getattr(a, "from_file", None)
@@ -9546,7 +9904,8 @@ def cmd_hook(a):
                 text, _read_evidence_text(evidence))
             det_block_reasons = [r for r in
                                  (det_reason,
-                                  _pr_mismatch_reason(text, _read_evidence_text(evidence)))
+                                  _pr_state_reason(text, _read_evidence_text(evidence),
+                                                   run_sink=_arm_runs))
                                  if r]
             # A derived fact the window already carries (any family —
             # written-file identity, removal, missing path, diffstat,
@@ -9733,21 +10092,23 @@ def cmd_hook(a):
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
         # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1/weak): a block
-        # whose ONLY reasons came from the judge — det_block_reasons is
-        # empty, so nothing deterministic (count mismatch, PR mismatch,
-        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory,
-        # mode "1" unconditionally, mode "weak" only when every one of
-        # those judge reasons names a verdict "weak" covers (never
-        # OVERCLAIMS — see _judge_advisory_reasons_are_weak_only). A block
-        # carrying even one deterministic reason is untouched: it falls
-        # through to the "block" branch below exactly as it does today, env
-        # or no env. Checked after stop_hook_active so a re-run keeps its
-        # own (already advisory) handling rather than being relabeled here.
-        elif door == "gate" and action == "block" and not det_block_reasons:
-            _jam = _judge_advisory_mode()
-            if _jam == "1" or (_jam == "weak"
-                               and _judge_advisory_reasons_are_weak_only(block_reasons)):
-                action = "block-judge-advisory"
+        # whose every blocking verdict came from a judge-kind arm — nothing
+        # deterministic (count mismatch, PR mismatch, CONTRADICTED_BY_FACT)
+        # in the mix — is demoted to advisory. Mode "1" demotes any such
+        # block; mode "weak" only one whose every judge verdict is in the
+        # weak set (never OVERCLAIMS). Both are the SAME rule, stated once
+        # (_judge_advisory_demotes -> _judge_only_blocks_local, handed the
+        # weak set as a filter) rather than a second copy here — and
+        # answered without importing the arms registry either way.
+        # A block carrying even one deterministic reason is untouched: it
+        # falls through to the "block" branch below exactly as it does
+        # today, env or no env. Checked after stop_hook_active so a re-run
+        # keeps its own (already advisory) handling rather than being
+        # relabeled here.
+        elif (door == "gate" and action == "block"
+              and _judge_advisory_demotes(det_block_reasons, block_reasons,
+                                          code=code)):
+            action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
         # above the block line, but the empty-current-turn health gate
@@ -9767,6 +10128,16 @@ def cmd_hook(a):
         # The catch ledger's own window_bytes — best-effort, gate only (the
         # transcript-derived window is the thing worth sizing; verify has
         # no equivalent window, so this stays None there).
+        # What the arms said they did, for the ledger row. Computed here,
+        # once, so every decision branch below writes the same two fields.
+        _catch_arms, _catch_arm_errors = _arm_run_ledger_fields(_arm_runs)
+        # The judge-advisory mode this run is under, read ONCE and bound
+        # unconditionally. The "block-judge-advisory" branch below names it
+        # in its log line and on its catch-ledger row, and it must not be
+        # that branch's own local: cmd_hook fails OPEN on an exception, so
+        # an unbound name there would read as a clean allow and hide the
+        # bug rather than raise it.
+        _jam = _judge_advisory_mode()
         _catch_window_bytes = None
         if door == "gate":
             _catch_window_bytes = (window_meta or {}).get("total_bytes")
@@ -9811,6 +10182,7 @@ def cmd_hook(a):
                      worktree_refused=worktree_refusals)
             catch_log(door, "allow", reasons=block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 0
@@ -9825,6 +10197,7 @@ def cmd_hook(a):
                      worktree_refused=worktree_refusals)
             catch_log(door, "advisory-forced", reasons=block_reasons, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 0
@@ -9848,7 +10221,8 @@ def cmd_hook(a):
             catch_log(door, "advisory-judge",
                      reasons=block_reasons + [f"judge-advisory-mode:{_jam}"],
                      draft_text=text, window_bytes=_catch_window_bytes,
-                     start_time=_catch_t0, payload=payload)
+                     start_time=_catch_t0, arms=_catch_arms,
+                     arm_errors=_catch_arm_errors, payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -9869,6 +10243,7 @@ def cmd_hook(a):
                      worktree_refused=worktree_refusals)
             catch_log(door, "block", reasons=block_reasons + block_notes, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     arms=_catch_arms, arm_errors=_catch_arm_errors,
                      payload=payload)
             _print_ledger_notice_if_gate()
             return 2
@@ -9880,6 +10255,7 @@ def cmd_hook(a):
                  worktree_refused=worktree_refusals)
         catch_log(door, "advisory", reasons=block_notes, draft_text=text,
                  window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                 arms=_catch_arms, arm_errors=_catch_arm_errors,
                  payload=payload)
         _print_ledger_notice_if_gate()
         return 0
