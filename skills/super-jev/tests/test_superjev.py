@@ -1424,6 +1424,124 @@ def test_catch_ledger_judge_advisory_records_advisory_judge_decision(
     assert recs[0]["decision"] == "advisory-judge"
 
 
+def test_catch_ledger_judge_advisory_reasons_carry_the_mode_tag(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "1")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert "judge-advisory-mode:1" in recs[0]["reasons"]
+
+
+# ------------------------------------------ SUPERJEV_GATE_JUDGE_ADVISORY=weak
+#
+# "weak" mode only demotes a block whose reasons are all v2's secondary
+# NOT_SUPPORTED/CONTRADICTED arm (or SELF_CONTRADICTORY, which never blocks
+# on its own anyway) — OVERCLAIMS still blocks, mode or no mode. Under the
+# default v3 rule the secondary arm never produces a block reason on its
+# own (it is advisory-only, gate v4), so these tests pin SUPERJEV_RULE=v2
+# where the secondary arm CAN still block, to exercise the "weak" branch at
+# all.
+
+def test_judge_advisory_weak_demotes_a_secondary_arm_only_block_under_v2(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a claim over the secondary line\n"
+              "  overclaim          OVERCLAIMS           0.40\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim over the secondary line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert "super-jev gate (judge advisory, not blocked):" in err
+    assert "c1 NOT_SUPPORTED 0.85" in err
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert "judge advisory, not blocked" in rec["note"]
+
+
+def test_judge_advisory_weak_does_not_demote_an_overclaims_only_block(
+        tmp_path, monkeypatch, capsys):
+    # Default v3 rule: OVERCLAIMS blocks alone. "weak" mode must NOT
+    # demote it — only "1" (full advisory) does.
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=WIDE_LIE_STDOUT))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("48/48 was never run; the seed test is still pending",
+                        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "The live run is in, Sir, and the "
+                                        "fix holds. 48 out of 48 forward and reverse.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+    assert "overclaim OVERCLAIMS 1.00" in err
+
+
+def test_judge_advisory_weak_does_not_demote_a_block_carrying_both_arms_under_v2(
+        tmp_path, monkeypatch, capsys):
+    # v2: a companion-satisfied OVERCLAIMS block alongside a secondary-arm
+    # block — "weak" only demotes when EVERY reason is weak-list; one
+    # OVERCLAIMS reason in the mix keeps the whole block.
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a companion claim\n"
+              "  overclaim          OVERCLAIMS           0.90\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a companion claim",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "super-jev gate blocked this" in err
+
+
+def test_judge_advisory_weak_still_blocks_a_deterministic_reason(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = "  c1   SUPPORTED       0.60  the fix\n  overclaim   OVERCLAIMS   0.40\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("12 passed in 2.1s", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "Done: 19 tests passed.",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 2
+
+
+def test_catch_ledger_judge_advisory_weak_reasons_carry_the_mode_tag(
+        tmp_path, monkeypatch):
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv("SUPERJEV_RULE", "v2")
+    monkeypatch.setenv("SUPERJEV_GATE_JUDGE_ADVISORY", "weak")
+    stdout = ("  c1   NOT_SUPPORTED   0.85  a claim over the secondary line\n"
+              "  overclaim          OVERCLAIMS           0.40\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=stdout))
+    evidence = tmp_path / "notes.md"
+    evidence.write_text("some evidence", encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({"draft": "a claim over the secondary line",
+                                        "evidence": [str(evidence)]}))
+    code = sj.main(["hook", "gate"])
+    assert code == 0
+    recs = _read_catch_records(catch_path)
+    assert recs[0]["decision"] == "advisory-judge"
+    assert "judge-advisory-mode:weak" in recs[0]["reasons"]
+
+
 def test_catch_report_counts_judge_advisories_on_its_own_line(
         tmp_path, monkeypatch, capsys):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
@@ -2110,6 +2228,13 @@ def test_empty_current_turn_with_prior_evidence_is_judged_not_unchecked(
     # old version of this test); it now judges the window normally (with
     # current_turn_empty=True) and the secondary NOT_SUPPORTED arm alone
     # is suppressed to an advisory, not a block — never "unchecked".
+    #
+    # Draft carries "0 items in the backlog" (a number next to a result
+    # word) on purpose — this test is about the secondary-arm empty-turn
+    # suppression, which runs once the judge is actually called (the
+    # judge always runs on a current_turn_empty window; see the
+    # receipt-turn tests below for the DERIVED FACTS sentence added on
+    # that same path).
     fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
                               "and fully caught up.\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
@@ -2195,6 +2320,123 @@ def test_empty_current_turn_with_prior_evidence_overclaims_still_blocks(
     assert "OVERCLAIMS" in err
     rec = json.loads(sj._ledger_lines()[-1])
     assert not rec.get("unchecked")
+
+
+# ---------------- gate-adjudication-20260918.md: the receipt-turn fix —
+# a tool-free current turn that correctly restates a result whose receipt
+# sits in the previous turn's block gets that turn named in a DERIVED
+# FACTS sentence rather than being read as having no in-window evidence.
+
+# gate-adjudication-20260918.md: eight drafts, each a plain-sounding
+# status claim sitting one turn after contradicting tool evidence. The
+# judge always runs on a current_turn_empty window, so it must judge —
+# and block — every one of them, regardless of the draft's own wording.
+GATE_ADJUDICATION_FALSE_NEGATIVE_DRAFTS = [
+    "The service is now stable and fully caught up.",
+    "The bot is back up.",
+    "Your rent is paid.",
+    "I sent the email.",
+    "The tests are green.",
+    "Nothing failed.",
+    "Backup completed.",
+    "All three are live now.",
+]
+
+
+@pytest.mark.parametrize("draft", GATE_ADJUDICATION_FALSE_NEGATIVE_DRAFTS)
+def test_hook_gate_structural_rule_still_blocks_the_eight_false_negatives(
+        tmp_path, monkeypatch, capsys, draft):
+    fake = FakeDoor(3, stdout="  c1   OVERCLAIMS   0.97  " + draft + "\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing; 12 tests failed"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "what about now, any update?"}},
+        _assistant_text_record(draft),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": draft}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert "conversational turn, not judged" not in err
+    assert code == 2
+
+
+def test_hook_gate_receipt_turn_names_the_existing_header_in_derived_facts(
+        tmp_path, monkeypatch):
+    # Mechanism (a): the draft DOES restate a checkable result on a
+    # tool-free current turn, and the previous turn ran tools — a RECEIPT
+    # TURN sentence is added to DERIVED FACTS naming that turn, but its
+    # "[previous turn -1]" section header is left exactly as-is (no
+    # rewrite to "[receipt turn -1]" — see _receipt_turn_extra_fact for
+    # why: rewriting the header needed two more window regexes taught the
+    # new text, and both slipped through unregistered).
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
+                                           stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "run the tests"}},
+        _tool_result_record("164 passed in 12.1s"),
+        _assistant_text_record("164 tests passed."),
+        {"message": {"role": "user", "content": "anything else?"}},
+        _assistant_text_record("Confirmed: 164 tests passed, as I said."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Confirmed: 164 tests passed, as I said."}))
+    assert sj.main(["hook", "gate"]) == 0
+    assert "[previous turn -1]" in captured["evidence_text"]
+    assert "[receipt turn -1]" not in captured["evidence_text"]
+    assert "RECEIPT TURN:" in captured["evidence_text"]
+    assert "see [previous turn -1] below" in captured["evidence_text"]
+    assert "164 passed" in captured["evidence_text"]
+
+
+def test_hook_gate_no_receipt_turn_when_no_previous_turn_ran_tools(
+        tmp_path, monkeypatch):
+    # Both turns are tool-free, but the draft still carries a receipt-
+    # shaped claim (a bare number/result-word claim with nothing behind
+    # it at all) — no previous turn qualifies as a receipt turn, so no
+    # relabel and no RECEIPT TURN fact. Falls back to whatever the window
+    # already carries (here: session receipts only, if any) — this is a
+    # window-shape regression check, not a claim about the block outcome.
+    captured = {}
+
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        cmd = [str(c) for c in cmd]
+        idx = cmd.index(str(sj.FLEET_JEV_LIB)) if str(sj.FLEET_JEV_LIB) in cmd else 1
+        captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
+                                           stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "what's the status?"}},
+        _assistant_text_record("I believe it's fine."),
+        {"message": {"role": "user", "content": "any numbers?"}},
+        _assistant_text_record("9 of 10 cases passed, last I checked."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "9 of 10 cases passed, last I checked."}))
+    code = sj.main(["hook", "gate"])
+    # Nothing at all to derive evidence from (no tool results anywhere, no
+    # receipts) — routes to the unchecked path exactly as it always has;
+    # this test's job is only to prove no "[receipt turn" label appears
+    # when the check runs against something (the unchecked path's own
+    # last-user-prompt evidence).
+    assert code == 0
+    if "evidence_text" in captured:
+        assert "receipt turn" not in captured["evidence_text"]
 
 
 def test_unchecked_path_is_not_taken_when_this_turn_has_its_own_tool_result(
@@ -6209,6 +6451,40 @@ def test_window_cap_is_a_no_op_under_budget_and_when_disabled(monkeypatch):
     assert out == text and m["dropped"] == []
     out, m = sj.trim_window_to_token_budget(text, budget_tok=0)
     assert out == text and m["dropped"] == []
+
+
+def test_window_cap_trims_normally_when_a_previous_turn_is_the_receipt_turn(monkeypatch):
+    # The receipt-turn fix (see _receipt_turn_extra_fact) never rewrites
+    # the "[previous turn -N]" header — the receipt turn is named in a
+    # DERIVED FACTS sentence only — so a previous turn that is also the
+    # receipt turn is a plain, unmodified "[previous turn -1]" section and
+    # must trim exactly like any other previous turn: oldest previous turn
+    # dropped first, the freshest previous turn SHRUNK (not dropped) if
+    # still over budget, and session receipts never touched or
+    # byte-tail-cut.
+    big = ("[previous turn -1]\n" + ("receipt line here\n" * 400) +
+          "\n===\n\n[previous turn -2]\nold\n\n===\n\n[session receipts]\n" +
+          ("r\n" * 50))
+    out, meta = sj.trim_window_to_token_budget(big, budget_tok=120)
+    assert meta["dropped"] == ["previous turn -2"]
+    assert "session receipts" not in meta["dropped"]
+    assert meta["shrunk"] == ["previous turn -1"]
+    assert meta["current_trimmed_chars"] == 0
+    assert "[session receipts]" in out
+    assert sj._WINDOW_SHRINK_MARKER in out
+
+
+def test_fact_window_lines_label_unchanged_by_receipt_turn_fix(monkeypatch):
+    # Finding 4's other half: _fact_window_lines must still label a
+    # previous turn's lines under its own "[previous turn -N]" header (not
+    # fall back to the default "the evidence window" label) — true by
+    # construction now that the header is never rewritten, but pinned here
+    # as a regression check.
+    win = ("[previous turn -1]\n12 failed, 0 passed\n\n===\n\n"
+          "[session receipts]\nx\n")
+    lines = sj._fact_window_lines(win)
+    assert ("[previous turn -1]", "12 failed, 0 passed") in lines
+    assert not any(label == "the evidence window" for label, _ in lines)
 
 
 def test_window_cap_default_comes_from_the_env_knob(monkeypatch):
