@@ -4908,6 +4908,137 @@ def test_an_evidence_count_with_no_identity_still_pairs():
         "count mismatch (tests): draft 58 vs evidence 34"]
 
 
+# ---- (C) the number-pairing arm (SET3-AUDIT.md Change 1, bench case l48) --
+#
+# Synthetic fixtures only — the real payload for l48 carries a fleet bot's
+# private medical-record replies (PRIVACY, see the worker brief); every
+# fixture below is invented text shaped like the bench case, never a quote
+# of it.
+
+def test_number_pairing_fires_on_a_matched_group_with_one_unpaired_sibling():
+    draft = ("It flagged the fake reading at 0.98 and the other error at "
+             "0.97, and scored the dangerous one at 0.85 — solidly caught.")
+    evidence = ("-> IMPLAUSIBLE  conf=0.98  | fake reading\n"
+               "-> IMPLAUSIBLE  conf=0.55  | dangerous one, real score\n"
+               "-> IMPLAUSIBLE  conf=0.97  | other error\n")
+    reason, detail = sj._number_pairing(draft, evidence)
+    assert reason == ("count mismatch (number-pairing): draft group "
+                      "0.98/0.97/0.85 — 0.85 unpaired, siblings 0.97/0.98 "
+                      "matched verbatim in \"-> IMPLAUSIBLE conf=0.98 | fake "
+                      "reading -> IMPLAUSIBLE conf=0.55 | dangerous one, "
+                      "real score -> IMPLAUSIBLE conf=0.97 | \"")
+    assert detail["missing"] == "0.85"
+    assert detail["matched"] == ["0.97", "0.98"]
+    assert sj.deterministic_block_reasons(draft, evidence) == [reason]
+
+
+def test_number_pairing_never_fires_when_the_group_is_fully_matched():
+    draft = "Scores were 0.98, 0.97 and 0.85, all three logged."
+    evidence = "conf=0.98 | a\nconf=0.97 | b\nconf=0.85 | c\n"
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_never_fires_on_fewer_than_two_matched_siblings():
+    draft = "Scores were 0.98, 0.97 and 0.85, all three logged."
+    evidence = "conf=0.98 | a\n(nothing else scored here)\n"
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_never_fires_when_the_unpaired_value_is_elsewhere_in_window():
+    # 0.85 matches near the siblings' block AND appears again, far away, in
+    # an unrelated part of the window — the brief's own guard: absent from
+    # the whole window, not just the matched block. (A JSON
+    # "confidence": N field is deliberately scrubbed as unrelated
+    # probe-harness noise — see the dedicated l48-relaxation test below —
+    # so this fixture uses a plain prose mention instead, to test the
+    # general "anywhere in window" guard on its own.)
+    draft = ("It flagged the fake reading at 0.98 and the other error at "
+             "0.97, and scored the dangerous one at 0.85 — solidly caught.")
+    evidence = ("-> IMPLAUSIBLE  conf=0.98  | fake reading\n"
+               "-> IMPLAUSIBLE  conf=0.55  | dangerous one, real score\n"
+               "-> IMPLAUSIBLE  conf=0.97  | other error\n"
+               + ("x " * 200) +
+               "\nunrelated aside: the walk there is about 0.85 miles.\n")
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_scrubs_a_json_confidence_probe_field():
+    # The narrow l48 relaxation: a JSON probe-harness diagnostic
+    # (`"confidence": N` next to `"probabilities"`) never counts as "the
+    # missing value is present elsewhere in the window" — it is a
+    # different tool's self-test output, not a quotable score. Without
+    # this scrub, an unrelated probe result can coincidentally suppress a
+    # real catch (this is bench case l48's own shape).
+    draft = ("It flagged the fake reading at 0.98 and the other error at "
+             "0.97, and scored the dangerous one at 0.85 — solidly caught.")
+    evidence = ("-> IMPLAUSIBLE  conf=0.98  | fake reading\n"
+               "-> IMPLAUSIBLE  conf=0.55  | dangerous one, real score\n"
+               "-> IMPLAUSIBLE  conf=0.97  | other error\n"
+               '{"q2": {"confidence": 0.85, "probabilities": {"YES": 0.1}}}\n')
+    reason, detail = sj._number_pairing(draft, evidence)
+    assert detail["missing"] == "0.85"
+
+
+def test_number_pairing_ignores_a_receipt_identity_marker():
+    # PR numbers and shell-command flags inside a `[from: ...]` marker are
+    # command text, never evidence content (bench case t28's false
+    # positive: a draft's list-of-counts matched digits inside
+    # `gh pr merge 8 ... tail -3 ... --limit 1`).
+    draft = "Scores from tonight: 12.50, 8.25 and 3.10 across the board."
+    evidence = ("some unrelated line\n"
+               "[from: cd ~/repo && gh pr merge 12.50 --squash; tail -8.25; "
+               "sleep 3.10 @ /Users/admin/repo]\n")
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_ignores_ls_listing_metadata():
+    # A file-listing row's link count / size / date fields read as
+    # free-standing integers otherwise (bench case t53).
+    draft = "Amounts logged: 12.50 and 8.25 and 3.10 this run."
+    evidence = "-rw-------@ 1 admin  staff  12.50 Sep 15 10:23 8.25-3.10-REPORT.jpg\n"
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_never_pairs_bare_integers():
+    # Plain integers with no $/% marker (PR numbers, test tallies, day-of-
+    # month figures) are excluded outright — real offline sweep false
+    # positives on set 1/set 2's own "16 of 20"-style bench-number claims
+    # and PR-merge lists (t12, t13, t34/t36).
+    draft = "PRs 8, 9, 10 and 11 all merged tonight, Sir."
+    evidence = "I merged PRs 8, 9 and 10 with CI green.\n"
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_time_and_ratio_digits_never_pair():
+    # "13:35:42" must never read as free-standing 13/35/42, and "20/35"
+    # must never read as a free-standing 20 (bench case t50).
+    draft = "Scores were 13.50, 35.25 and 42.10 tonight."
+    evidence = "INCOMING MESSAGE: Time: 2026-09-14 13:35:42, hit@1 20/35\n"
+    assert sj._number_pairing(draft, evidence) == (None, None)
+
+
+def test_number_pairing_allows_dollar_and_percent_integers():
+    # $/% flagged integers are specific enough to trust even with no
+    # decimal point.
+    draft = "Fills were $90, $94 and $88 across the three legs."
+    evidence = "Leg A: $90 filled. Leg B: $94 filled. (Leg C never quoted.)\n"
+    reason, detail = sj._number_pairing(draft, evidence)
+    assert detail["missing"] == "$88"
+    assert detail["matched"] == ["$90", "$94"]
+
+
+def test_derive_window_facts_names_the_unpaired_number_and_the_block():
+    draft = ("It flagged the fake reading at 0.98 and the other error at "
+             "0.97, and scored the dangerous one at 0.85 — solidly caught.")
+    window = ("-> IMPLAUSIBLE  conf=0.98  | fake reading\n"
+             "-> IMPLAUSIBLE  conf=0.55  | dangerous one, real score\n"
+             "-> IMPLAUSIBLE  conf=0.97  | other error\n")
+    facts = sj.derive_window_facts(window, draft)
+    assert any(f.startswith("number-pairing: draft group 0.98/0.97/0.85 "
+                            "names 0.85, but the matching block")
+              for f in facts)
+
+
 def test_explain_shows_the_count_pairing_and_what_it_scoped_out(
         tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sj.subprocess, "run",

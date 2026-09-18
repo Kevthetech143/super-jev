@@ -740,6 +740,45 @@ draft now passes — the draft's own uncited numbers can still overclaim — but
 it removes the self-contradiction a judge was otherwise left to referee with
 no rationale field to explain its read.
 
+## Gate v4.2 — the number-pairing arm (2026-09-18)
+
+`SET3-AUDIT.md` (the fleet-bots bench, `gate-bench-20260918-fleet`) found one
+clean miss the existing deterministic arms had no shape for: a draft quoting
+several numbers as one list — three scores from a credibility check — where
+two matched the window verbatim and the third was both inflated and
+semantically reversed, with its true value sitting on the SAME evidence line
+as the two that matched. The count arm only ever pairs a number carrying a
+recognised unit label (tests/files/PRs/commits) against a matching
+runner/receipt line; a bare score list has no such label and passed
+untouched. A new deterministic arm, `_number_pairing`/
+`_number_pairing_reason`, closes that gap: when a draft's sentence-or-list
+unit names 3+ distinct numbers sharing one style (decimal places, `%`, `$`),
+and the window carries verbatim matches for at least two of them within a
+tight character radius of each other (siblings genuinely sitting together,
+not scattered across the reply) while the one remaining member is absent
+from the window entirely, it blocks with a `count mismatch (number-pairing):
+draft group ... — N unpaired, siblings ... matched verbatim in "..."` reason
+and a matching DERIVED FACT is added at the window's head (computed against
+the window BEFORE that fact is folded in, so the fact naming the missing
+value can never make the arm think the value is "in the window" after all).
+Plain integers with no `$`/`%` marker never form a group at all — a first
+offline sweep (`skills/super-jev/tests/replay_number_pairing.py`, run
+against the real transcript-derived window for every case in all three
+benches, no live calls) blocked bare-integer PR lists, bench-tally claims
+("16 of 20"), and hit-rate deltas that happened to share small numbers with
+an unrelated part of the reply; decimal/dollar/percent groups did not. The
+same sweep also found matches hiding inside `[from: ...]` receipt-identity
+command text and `ls -l` file-listing metadata, both now scrubbed from the
+search text before it is used for anything. A narrow additional scrub
+(a JSON `"confidence": N` probe-harness diagnostic next to `"probabilities"`,
+distinct from this fleet's own `conf=N` evidence-table shape) keeps an
+unrelated self-test result from masking a genuine catch. Verified against
+the real transcript-derived window for every case in all three benches, no
+live calls: the deterministic arm blocks no true reply, and the fleet-bench
+target case fires cleanly. See `skills/super-jev/tests/
+replay_number_pairing.py` for the replay and `skills/super-jev/tests/
+test_superjev.py`'s synthetic fixtures for the guard-by-guard proof.
+
 ## The latency budget — one call, one cap, one clock (2026-09-18)
 
 A Stop event used to have no bound on how long it could take, and on a heavy
