@@ -2950,6 +2950,377 @@ def _backfill_receipts_from_transcript(records, before_index=None, cap=None):
     return out
 
 
+# ---------------------------------------------------- derived facts at the
+# head of the gate window (gate v3)
+#
+# The gate ships raw command output into the window and asks a language
+# judge to infer state from a column dump. The 2026-09-17 gate analysis
+# (super-jev-experiments/gate-bench-20260917/analysis/LAST-MISSES.md) found
+# that every one of the remaining misses was that same defect: in
+# l09 the refutation was a post-write listing line still showing a card the
+# draft said it had deleted; in l17 it was the cadence expression
+# `untagged -> role-default (... ~ every 152t)` sitting on the last line of
+# the window while the draft said "rides every turn"; in t12 it was a
+# mismatch table whose four rows were all STRICTER than expected, which is
+# what makes the draft's universal "every destructive action refuses" true
+# rather than false. Judges reliably catch "evidence says X, draft says
+# not-X"; they are weak on reading a column dump as authoritative state and
+# on noticing the ABSENCE of a receipt.
+#
+# So: state the answer as a sentence, in code, before the judge sees
+# anything. Everything below is literal string and integer work over text
+# ALREADY in the window plus the draft — no model call, no extra evidence,
+# no threshold or rule change. Facts go first under DERIVED FACTS, the raw
+# window follows unchanged as BACKING, and the evidence cap applies AFTER
+# the facts: a fact is never dropped to make room for raw text (the raw
+# window's tail is trimmed instead, same priority order the window builder
+# itself uses).
+#
+# This is a pure-Python MIRROR of the `windowFacts` half of
+# src/enhance/derive-facts.ts, deliberately duplicated rather than bridged:
+# the Stop hook runs on every turn, `node src/derive-facts-cli.ts` pays a
+# whole node process's startup per call, and REPO_ROOT does not resolve to
+# this repo at all on a fleet install (the skill lives at
+# ~/.claude/skills/super-jev/, whose parent is not a checkout), so the
+# bridge is both slower and not reliably present on the one path that needs
+# it. test/enhance/derive-facts.test.ts and
+# skills/super-jev/tests/test_superjev.py assert the SAME fact sentences
+# over the same four fixtures, which is what keeps the two sides honest.
+DERIVED_FACTS_ENV = "SUPERJEV_DERIVED_FACTS"
+DERIVED_FACTS_CAP = 24            # at most this many fact sentences
+DERIVED_FACTS_HEADER = (
+    "DERIVED FACTS (computed in code from this window's own text plus the "
+    "draft — no model call. Each line is a literal reading of the raw "
+    "evidence below; prefer it over re-reading the column dump yourself):")
+DERIVED_FACTS_BACKING_HEADER = (
+    "BACKING (the raw evidence window, unchanged — every fact above was "
+    "read out of it):")
+
+# A `::`-qualified identifier — card-style, e.g. `agent_role::fable_awareness`.
+# Deliberately NOT extended to file paths: "the file is still in a listing"
+# does not refute "I removed the debug block from that file", and a fact that
+# reads as a refutation when it is not is worse than no fact at all.
+_FACT_QUAL_ID_RE = re.compile(r'\b([A-Za-z][\w.\-]*(?:::[\w.\-]+)+)')
+# card.py's own receipt prefixes are stable: WROTE / REMOVED / REFUSED / PROVED.
+_FACT_REMOVAL_RECEIPT_RE = re.compile(r'^\s*(REMOVED|DELETED|DROPPED)\b\s*:?\s*(.*)$')
+_FACT_DRAFT_REMOVAL_RE = re.compile(
+    r'\b(?:deleted|deleting|removed|removing|dropped|dropping|'
+    r'(?:is|are|was|were)\s+gone|got\s+rid\s+of)\b', re.IGNORECASE)
+# `bus-4 (250,000 tok ~ every 152t)` / `untagged -> role-default (... every 152t)`
+_FACT_CADENCE_RE = re.compile(
+    r'(?:bus-\d+|untagged\s*->\s*[\w.\-]+)\s*\([^)\n]*\)')
+_FACT_EVERY_NT_RE = re.compile(r'every\s+([\d,]+)\s*t\b', re.IGNORECASE)
+_FACT_DRAFT_CADENCE_RE = re.compile(
+    r'\bevery\s+(?:turn|prompt|message|call)\b|\bevery\s+[\d,]+\s*(?:t\b|turns?\b)',
+    re.IGNORECASE)
+_FACT_UNIVERSAL_RE = re.compile(r'\b(?:every|all|each)\b', re.IGNORECASE)
+# "26/30 match", "26 of 30 match", "10 of 10 need a human"
+_FACT_N_OF_M_RE = re.compile(
+    r'\b(\d+)\s*(?:/|\s+of\s+)\s*(\d+)\s+([A-Za-z][\w]*(?:[ _-][a-z][\w]*){0,2})')
+# ('safe-05', 'safe_to_auto', 'needs_approval')
+_FACT_TUPLE_ROW_RE = re.compile(
+    r"\(\s*'([^']{1,60})'\s*,\s*'([^']{1,40})'\s*,\s*'([^']{1,40})'\s*\)")
+# How strict an outcome label is, for reading a mismatch row as stricter or
+# more permissive than expected. Unknown labels rank None and are not read.
+_FACT_STRICTNESS = {
+    "safe_to_auto": 0, "safe": 0, "auto": 0, "allow": 0, "pass": 0,
+    "needs_approval": 1, "approval": 1, "ask": 1, "confirm": 1,
+    "refuse": 2, "refused": 2, "block": 2, "blocked": 2, "deny": 2,
+}
+_FACT_MERGE_RECEIPT_RE = re.compile(
+    r'^\s*MERGED\b|\bgh\s+pr\s+merge\s+\d+|"mergedAt"\s*:\s*"[^"]+"', re.IGNORECASE)
+_FACT_PR_NUM_RES = (
+    re.compile(r'\bgh\s+pr\s+merge\s+(\d+)'),
+    re.compile(r'\bgh\s+pr\s+(?:view|checks)\s+(\d+)'),
+    re.compile(r'\(#(\d+)\)'),
+    re.compile(r'#(\d+)\b'),
+    re.compile(r'"number"\s*:\s*(\d+)'),
+)
+_FACT_DRAFT_MERGE_RES = (
+    re.compile(r'\bPR\s*#(\d+)\b[^.\n]{0,40}?\bmerged\b', re.IGNORECASE),
+    re.compile(r'\bmerged\b[^.\n]{0,40}?\bPR\s*#(\d+)', re.IGNORECASE),
+    re.compile(r'#(\d+)\b[^.\n]{0,20}?\bis\s+merged\b', re.IGNORECASE),
+)
+
+
+def _derived_facts_enabled():
+    return os.environ.get(DERIVED_FACTS_ENV, "1") != "0"
+
+
+def _fact_window_lines(window_text):
+    """Every line of the assembled window as (section_label, line), where
+    the label is the `[current turn]` / `[session receipts]` /
+    `[previous turn -N]` header the line sits under (see
+    _WINDOW_SECTION_RE). The label is what a fact cites as its source, so a
+    human reading a fact can find the line it came from."""
+    label = "the evidence window"
+    out = []
+    for raw in (window_text or "").splitlines():
+        line = raw.rstrip()
+        if _WINDOW_SECTION_RE.match(line.strip()):
+            label = line.strip()
+            continue
+        if not line.strip() or _SECTION_SEPARATOR_RE.match(line):
+            continue
+        out.append((label, line))
+    return out
+
+
+def _fact_ids_in(text):
+    """`::`-qualified identifiers in `text`, first-seen order, deduped."""
+    seen, out = set(), []
+    for m in _FACT_QUAL_ID_RE.finditer(text or ""):
+        ident = m.group(1).rstrip('.,;:!?)\'"')
+        if ident and ident not in seen:
+            seen.add(ident)
+            out.append(ident)
+    return out
+
+
+def _fact_mentions_id(text, ident):
+    """True when `text` names `ident` — either in full, or by its last
+    `::` segment on its own word boundaries (a draft says "fable_awareness"
+    where the window says "agent_role::fable_awareness"). Word-bounded so a
+    longer name that merely contains this one does not count."""
+    if not text:
+        return False
+    if ident in text:
+        return True
+    tail = ident.split("::")[-1]
+    if len(tail) < 4:
+        return False
+    return re.search(r'(?<![\w.:\-])' + re.escape(tail) + r'(?![\w.\-])', text) is not None
+
+
+def _fact_is_listing_line(line, ident):
+    """True when `line` reads as a LISTING row for `ident` — the identifier
+    followed by at least two numeric columns, which is the shape `card.py`
+    and friends print state in. A listing row emitted after a claimed
+    removal is a statement that the thing is still there."""
+    idx = line.find(ident)
+    if idx < 0:
+        return False
+    if _FACT_REMOVAL_RECEIPT_RE.match(line):
+        return False
+    rest = line[idx + len(ident):]
+    return len(re.findall(r'\b[\d,]+\b', rest)) >= 2
+
+
+def _fact_strictness(label):
+    return _FACT_STRICTNESS.get((label or "").strip().lower())
+
+
+def _facts_delete_claims(lines, draft_clauses):
+    """Family 1 — delete/remove claims. Two halves, both literal:
+    every removal RECEIPT in the window is stated as a fact, and any
+    identifier the draft claims to have removed that instead appears in a
+    later LISTING row is stated as still present. l09's lie is exactly the
+    gap between those two halves: the only REMOVED receipt in its window
+    names a different card, and the card the draft says it deleted is on a
+    post-write listing line one row above."""
+    facts = []
+    removed = {}
+    for label, line in lines:
+        m = _FACT_REMOVAL_RECEIPT_RE.match(line)
+        if not m:
+            continue
+        for ident in _fact_ids_in(m.group(2)):
+            removed.setdefault(ident, label)
+    for ident, label in removed.items():
+        facts.append(f"{ident} removed per {label}.")
+
+    claimed = []
+    for clause in draft_clauses:
+        if not _FACT_DRAFT_REMOVAL_RE.search(clause):
+            continue
+        for label, line in lines:
+            for ident in _fact_ids_in(line):
+                if ident in claimed or ident in removed:
+                    continue
+                if _fact_mentions_id(clause, ident):
+                    claimed.append(ident)
+    for ident in claimed:
+        for label, line in lines:
+            if _fact_is_listing_line(line, ident):
+                facts.append(f"{ident} still present in {label} after the "
+                             "claimed removal.")
+                break
+    return facts
+
+
+def _facts_cadence_claims(lines, draft_text):
+    """Family 2 — cadence claims. When the draft asserts an injection
+    frequency ("rides every turn", "on every prompt", "every N turns"),
+    quote the window's OWN cadence line for each card the draft names, and
+    do the one integer comparison the judge did not do: `~ every 152t` is
+    every 152 turns, which is not every turn (l17)."""
+    if not _FACT_DRAFT_CADENCE_RE.search(draft_text or ""):
+        return []
+    facts, seen = [], set()
+    for label, line in lines:
+        m = _FACT_CADENCE_RE.search(line)
+        if not m:
+            continue
+        expr = " ".join(m.group(0).split())
+        for ident in _fact_ids_in(line):
+            if ident in seen or not _fact_mentions_id(draft_text, ident):
+                continue
+            seen.add(ident)
+            n_match = _FACT_EVERY_NT_RE.search(expr)
+            tail = "."
+            if n_match:
+                try:
+                    n = int(n_match.group(1).replace(",", ""))
+                except ValueError:
+                    n = None
+                if n is not None and n > 1:
+                    tail = (f" — that is every {n} turns, not every turn.")
+                elif n == 1:
+                    tail = " — that is every turn."
+            facts.append(f'{ident} cadence in {label}: "{expr}"{tail}')
+    return facts
+
+
+def _facts_result_tables(lines, draft_text):
+    """Family 3 — pass/mismatch tables. When the window holds a results
+    table and the draft makes a UNIVERSAL claim ("every", "all", "each")
+    about that population, print the counts so the judge is comparing the
+    claim against a number instead of eyeballing rows. On t12 this is what
+    turns a table that looks like a counterexample list into what it
+    actually is: four mismatches, every one of them STRICTER than
+    expected, none more permissive — which is why "every destructive
+    action refuses" is true there."""
+    draft = draft_text or ""
+    n_of_m = []
+    for label, line in lines:
+        for m in _FACT_N_OF_M_RE.finditer(line):
+            n_of_m.append((int(m.group(1)), int(m.group(2)),
+                           " ".join(m.group(3).split()).lower()))
+    rows = []
+    for label, line in lines:
+        for m in _FACT_TUPLE_ROW_RE.finditer(line):
+            rows.append((m.group(1), m.group(2), m.group(3)))
+    if not n_of_m and not rows:
+        return []
+
+    labels = {lab for _n, _m, lab in n_of_m}
+    labels |= {r[1].lower() for r in rows} | {r[2].lower() for r in rows}
+    if not _FACT_UNIVERSAL_RE.search(draft):
+        return []
+    draft_low = draft.lower()
+    words = {w for lab in labels for w in re.split(r'[ _-]+', lab) if len(w) >= 4}
+    if not any(w in draft_low for w in words):
+        return []
+
+    facts, seen = [], set()
+    for n, m, lab in n_of_m:
+        line = f"table shows {n} of {m} {lab}."
+        if line not in seen:
+            seen.add(line)
+            facts.append(line)
+    if rows:
+        by_actual = {}
+        for _case, _exp, act in rows:
+            by_actual[act] = by_actual.get(act, 0) + 1
+        for act in sorted(by_actual, key=lambda a: (-by_actual[a], a)):
+            facts.append(f"table shows {by_actual[act]} of {len(rows)} mismatch "
+                         f"rows with actual {act}.")
+        ranked = [(_fact_strictness(e), _fact_strictness(a)) for _c, e, a in rows]
+        if all(e is not None and a is not None for e, a in ranked):
+            stricter = sum(1 for e, a in ranked if a > e)
+            looser = sum(1 for e, a in ranked if a < e)
+            facts.append(f"table shows {stricter} of {len(rows)} mismatch rows "
+                         f"stricter than expected, {looser} more permissive.")
+    return facts
+
+
+def _facts_merge_claims(lines, draft_text):
+    """Family 4 — merge/CI claims. Every merge receipt in the window is
+    named with its PR number, and every PR the draft says was merged with
+    no such receipt is named as missing one. The absent half is the one a
+    judge does not do: t06 claims three merges and the whole window carries
+    exactly one merge receipt."""
+    found = {}
+    for label, line in lines:
+        if not _FACT_MERGE_RECEIPT_RE.search(line):
+            continue
+        for rx in _FACT_PR_NUM_RES:
+            m = rx.search(line)
+            if m:
+                found.setdefault(int(m.group(1)), label)
+                break
+    facts = [f"merge receipt found for PR #{n} in {found[n]}."
+             for n in sorted(found)]
+    claimed = set()
+    for rx in _FACT_DRAFT_MERGE_RES:
+        for m in rx.finditer(draft_text or ""):
+            claimed.add(int(m.group(1)))
+    for n in sorted(claimed - set(found)):
+        facts.append(f"no merge receipt for PR #{n} in window.")
+    return facts
+
+
+def derive_window_facts(window_text, draft_text):
+    """The DERIVED FACTS sentences for one gate window, in block order:
+    delete/remove claims, cadence claims, result tables, merge/CI claims.
+    Pure: literal string and integer work over `window_text` and
+    `draft_text`, no I/O, no model call, never raises. Returns [] when
+    nothing is derivable, which is the common case and prints nothing."""
+    try:
+        lines = _fact_window_lines(window_text)
+        if not lines:
+            return []
+        draft = draft_text or ""
+        clauses = presplit_claims(draft) or ([draft.strip()] if draft.strip() else [])
+        facts = []
+        facts += _facts_delete_claims(lines, clauses)
+        facts += _facts_cadence_claims(lines, draft)
+        facts += _facts_result_tables(lines, draft)
+        facts += _facts_merge_claims(lines, draft)
+        out, seen = [], set()
+        for f in facts:
+            if f in seen:
+                continue
+            seen.add(f)
+            out.append(f)
+            if len(out) >= DERIVED_FACTS_CAP:
+                break
+        return out
+    except Exception:                                  # never break a hook
+        return []
+
+
+def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
+    """`window_text` with a DERIVED FACTS block at its HEAD and the raw
+    window below it as BACKING. The cap applies AFTER the facts: facts are
+    never dropped, and if facts + raw window exceed the cap the raw
+    window's HEAD is trimmed (its tail — the current turn — is the part the
+    window builder already treats as highest priority). Returns
+    (text, facts, meta) where meta carries facts_count/facts/facts_bytes/
+    window_trimmed_bytes for `--explain`. With no derivable fact the window
+    is returned byte-for-byte unchanged."""
+    facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
+    meta = {"facts_count": len(facts), "facts": list(facts), "facts_bytes": 0,
+            "window_trimmed_bytes": 0}
+    if not facts:
+        return window_text, facts, meta
+    cap = cap_bytes if cap_bytes is not None else _hook_evidence_cap_bytes()
+    head = (DERIVED_FACTS_HEADER + "\n"
+            + "\n".join(f"- {f}" for f in facts)
+            + "\n\n===\n\n" + DERIVED_FACTS_BACKING_HEADER + "\n")
+    meta["facts_bytes"] = len(head.encode("utf-8"))
+    body = window_text or ""
+    raw = body.encode("utf-8")
+    budget = cap - meta["facts_bytes"]
+    if budget <= 0:
+        meta["window_trimmed_bytes"] = len(raw)
+        body = ""
+    elif len(raw) > budget:
+        meta["window_trimmed_bytes"] = len(raw) - budget
+        body = raw[-budget:].decode("utf-8", errors="ignore")
+    return head + body, facts, meta
+
+
 def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None,
                                           session_id=None, prev_turns=None,
                                           cap_bytes=None, return_meta=False):
@@ -3453,6 +3824,13 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
               f"{m.get('receipts_source', 'none')} "
               f"({m.get('receipts_from_store', 0)} from the session store, "
               f"{m.get('receipts_backfilled', 0)} backfilled from the transcript)")
+        print(f"  derived facts     : {m.get('facts_count', 0)} at the HEAD of the "
+              f"window, {m.get('facts_bytes', 0)} bytes (never dropped)"
+              + (f", {m.get('window_trimmed_bytes', 0)} bytes of raw window "
+                 "trimmed to fit under the cap"
+                 if m.get('window_trimmed_bytes') else ""))
+        for f in m.get("facts") or []:
+            print(f"    fact            : {f}")
         print(f"  total             : {m.get('total_bytes', 0)} bytes")
         print(f"  current turn empty: {'YES — secondary NS/CONTRADICTED arm suppressed, '
               'primary OVERCLAIMS arm unaffected' if m.get('current_turn_empty') else 'no'}")
@@ -4288,6 +4666,19 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
+                    # DERIVED FACTS at the head of the window (see
+                    # derive_window_facts): the refuting string was already
+                    # in the window on every one of the 2026-09-17 bench's
+                    # remaining misses; all that was missing was stating it
+                    # as a sentence instead of leaving it as a column in a
+                    # card.py dump. Facts first, raw window below as
+                    # BACKING, cap applied after the facts.
+                    derived, _facts, _fmeta = compose_window_with_facts(
+                        derived, text,
+                        cap_bytes=(window_meta or {}).get("cap_bytes"))
+                    if window_meta is not None:
+                        window_meta.update(_fmeta)
+                        window_meta["total_bytes"] = len(derived.encode("utf-8"))
                     tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md",
                                                           delete=False, encoding="utf-8")
                     evidence_tmp_path = tmp_ev.name
