@@ -6,6 +6,14 @@
  * "claims": string[]}`. Prints one JSON object to stdout:
  * `{"facts": DerivedFact[], "formatted": string, "verdicts": PreRuleVerdict[]}`.
  *
+ * `evidence.window` is the entry point for the gate-window families: pass
+ * `{"evidence": {"window": {"text": "<the assembled evidence window>",
+ * "draft": "<the reply being judged>"}}}` and the window facts come back at
+ * the head of `facts`/`formatted`, ready to print above the raw window. The
+ * Stop hook does not use this bridge for them — it carries a pure-Python
+ * mirror instead, for the reasons in `skills/super-jev/superjev.py`'s
+ * derived-facts section — but any other caller can.
+ *
  * Pure and offline: this never calls TypeSafe, git, gh, or anything else.
  * Whatever evidence the caller already gathered goes in as JSON; the facts
  * and pre-rule verdicts come out as JSON. This is the bridge
