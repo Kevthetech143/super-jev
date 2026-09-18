@@ -109,6 +109,40 @@ particular run never reached CLEAN/READ/REJECT — pass `--test-cmd` and drop
 and grep results in `details.stdout` before trusting a claim about a file
 that "MISSING" flags.
 
+#### Frame evidence as derived facts first
+
+The reason `verify` trusts "the report matches the machine" is that it never
+hands a judge raw command output and asks it to read. **Every claim is
+answered by exactly one kind of evidence, and the answer is computed in code
+before any judge sees it:**
+
+| the claim is about | what answers it |
+|---|---|
+| a test count | the test run's own summary lines, not a commit subject or a changelog line elsewhere in the evidence |
+| a path's existence or length | a directory listing and a line count on that exact path |
+| being tracked / checked in / committed | the git index (`git ls-files`), never just "the file is on disk" |
+| a commit | whether that hash is an object in the repository |
+| a branch | whether a branch of that name exists, local or remote-tracking |
+| a push | the real ahead/behind count against the upstream, not the word "pushed" |
+| a diff size | `git diff --shortstat` against the stated base |
+| a pull request's state or checks | `gh pr view` / `gh pr checks`, which are two different questions |
+| a live external validation | nothing in this pattern can ever answer yes — every source here is a local read-only command |
+
+Once every atom above is turned into one plain sentence — a **derived
+fact** — a claim that a fact flatly contradicts is settled right there, at
+confidence 1.00, and never sent anywhere. Only what is left over needs a
+judge at all. `verify`'s own worker-verify door does this internally (see
+`~/.claude/skills/worker-verify/SKILL.md`, "HOW EVIDENCE IS FRAMED"); this
+repository carries the same pair of pure functions, `deriveFacts` and
+`preRules`, in `src/enhance/derive-facts.ts`, so any harness — not just
+worker-verify — can read evidence the same way. `verify`'s door-absent
+fallback (no `worker-verify` installed and `SUPERJEV_VERIFY_CMD` unset) uses
+exactly this: it gathers a small git/test evidence set itself and runs it
+through `src/derive-facts-cli.ts` before it will settle anything, printing
+the DERIVED FACTS block first, then the pre-rule verdicts. It never calls a
+judge, so it can say `CONTRADICTED_BY_FACT`, but it can never say CLEAN — an
+unsettled claim there stays READ, unverified, not vouched for.
+
 ### permit
 
 Snapshot `action.json`:
