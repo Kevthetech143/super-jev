@@ -4602,6 +4602,10 @@ def test_skip_reason_bucket_table():
     assert sj._skip_reason_bucket("no-tool-evidence") == "thin"  # legacy tag
     assert sj._skip_reason_bucket("bad-stdin") == "lost"
     assert sj._skip_reason_bucket("unexpected-error") == "lost"
+    # The stop-scan's UNCHECKED verdict (worker-verify's exit code
+    # downgraded because the gather had nothing usable) is thin, same as
+    # the sibling no-tool-evidence-checkable path — not a lost check.
+    assert sj._skip_reason_bucket("no-evidence") == "thin"
     # Deliberate move, 2026-09-18: both of the advisory scan's own
     # refusals are DEFERRED, not LOST. The scan running out of time or of
     # its call allowance does not mean a reply went unjudged — the gate
@@ -4613,6 +4617,21 @@ def test_skip_reason_bucket_table():
     # unknown reasons count as LOST, by design
     assert sj._skip_reason_bucket("some-new-reason-nobody-named-yet") == "lost"
     assert sj._skip_reason_bucket("not-agent-tool") == "lost"
+
+
+def test_ledger_line_verdict_stop_scan_unchecked_is_not_allow():
+    # The Stop-scan's UNCHECKED verdict line (see the stop-scan branch of
+    # cmd_hook_prompt_verify) must carry unchecked=True so
+    # _ledger_line_verdict tallies it as "unchecked", never "allow" — a
+    # skipped=False, no unchecked flag line used to fall through to the
+    # bare "allow" default even though worker-verify never actually
+    # judged the report.
+    entry = {"door": "hook", "note": "stop-scan: alice — UNCHECKED (exit 4) "
+             "[no evidence derived] health=none", "exit_code": 0,
+             "skipped": False, "unchecked": True, "health": "none",
+             "reason": "no-evidence"}
+    assert sj._ledger_line_verdict(entry) != "allow"
+    assert sj._ledger_line_verdict(entry) == "unchecked"
 
 
 def test_door_health_bucket_bucket_counts_match_the_table_exactly():
@@ -4688,6 +4707,20 @@ def test_ledger_health_lost_record_warns_with_top_skip_reason(capsys):
     assert "WARN" in out
     assert "bad-stdin" in out
     assert "40.0%" in out  # total unchecked share still printed, informational only
+
+
+def test_ledger_health_no_evidence_reason_buckets_thin_not_lost(capsys):
+    # A stop-scan UNCHECKED line (reason="no-evidence", unchecked=True,
+    # health="none") is a real judgment against thin evidence, not a lost
+    # check — it must not trip the LOST warn on its first occurrence the
+    # way an unrecognized reason would.
+    for _ in range(9):
+        sj.ledger_append(_hook_line(verdict="allow"))
+    sj.ledger_append(_hook_line(verdict="unchecked", reason="no-evidence"))
+    code = sj.main(["ledger", "health"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "WARN" not in out
 
 
 def test_ledger_health_deferred_and_thin_volume_alone_never_warns(capsys):

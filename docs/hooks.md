@@ -32,7 +32,8 @@ is a category error that produced false blocks.
 
 **verify: spawn acks and gather health (2026-09-18).** Two fixes off
 `gate-adjudication-20260918.md`'s hand-adjudicated read of the verify door's
-live traffic (7 blocks, 0 fair). First, the spawn-ack/launch-dict skip above
+live traffic — every adjudicated live verify block was false. First, the
+spawn-ack/launch-dict skip above
 already ran before this change — it just left no trace: the catch ledger
 carried nothing for those runs, so a spawn ack and an actual unchecked report
 looked identical in `catches.jsonl`. It now prints `super-jev verify: spawn
@@ -84,7 +85,7 @@ line and logs a ledger row with `source="stop-transcript"`.
 **Correction, 2026-09-18: a bare REJECT with `health thin` is now
 UNCHECKED, not REJECT.** The same hole the live `hook verify` gather-health
 fix above closes existed here too — `gate-adjudication-20260918.md` found
-45 of the 59 scanned REJECT labels ran at `health=thin`: worker-verify's
+that most of the scanned REJECT labels ran at `health=thin`: worker-verify's
 own exit code said REJECT, but every flag this scan actually parsed had
 already been suppressed into an advisory note because the gather itself had
 nothing usable to judge against. A bare exit code over evidence that was
@@ -94,6 +95,15 @@ failed," so this scan no longer labels that shape REJECT — it prints
 evidence", ...]` catch record `hook verify` writes for the identical case.
 A REJECT label still requires at least one flag that actually crossed the
 block line against a healthy gather.
+
+**In practice, the live verify door is advisory-only until a worktree is
+supplied.** A real PostToolUse payload carries no `worktree` key, and
+nothing in the live hook path exports `SUPERJEV_HOOK_WORKTREE`, so the
+gather-health check above finds nothing to gather on every live call today
+and every report is judged `health=thin`, never blocked outright. This is
+by design — the alternative was blocking on a bare exit code with no
+evidence behind it — but it means the live door will not actually stop a
+false report until something upstream starts passing a worktree.
 
 `hook prompt-verify` and its
 UserPromptSubmit wiring are left in place (harmless, and correct if Claude

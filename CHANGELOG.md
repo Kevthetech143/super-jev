@@ -6,7 +6,8 @@ No version bump.
 
 - **Verify hook: spawn acks and unchecked no-evidence runs now show up in
   the catch ledger.** Two fixes off `gate-adjudication-20260918.md`'s
-  verify-door findings (7 live blocks, 0 fair). First, the live
+  verify-door findings — every adjudicated live verify block was false.
+  First, the live
   `hook verify` (PostToolUse) already skipped a spawn/launch dict or a
   launch-ack text without calling the judge — it just never told anyone:
   the catch ledger carried nothing for those runs, so a spawn ack and a
@@ -23,11 +24,14 @@ No version bump.
   ran; when the gather is thin, a would-be block is downgraded to one
   advisory line (`no evidence gathered; not judged`, exit 0) and logged
   as `decision="unchecked"`, `reasons=["no-evidence", ...]` instead of
-  blocking. The Stop-scan's REJECT label had the identical hole (45 of 59
-  REJECT labels in the same adjudication ran at `health=thin`) — a bare
+  blocking. The Stop-scan's REJECT label had the identical hole — most
+  REJECT labels in the same adjudication ran at `health=thin` — a bare
   exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
-  same catch-ledger shape. See docs/hooks.md, "verify: spawn acks and
-  gather health".
+  same catch-ledger shape. In practice this makes the live verify door
+  advisory-only for every report until a worktree is supplied: a real
+  PostToolUse payload carries no `worktree` key and nothing exports
+  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
+  today. See docs/hooks.md, "verify: spawn acks and gather health".
 
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
