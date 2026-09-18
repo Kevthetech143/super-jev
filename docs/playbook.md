@@ -170,6 +170,23 @@ Drop `--dry-run` (with `TYPESAFE_API_KEY` set) for a real answer. Next step:
 `refuse` — stop. `needs_approval` — hold for a human. `safe_to_auto` — proceed,
 but see §4 on how far to trust this split today.
 
+Underneath this, `npm run permit` (the CLI this skill subcommand wraps) now
+runs a second, code-only pre-rule layer before the judge is ever asked —
+default on, `--no-prerules` turns it off. It parses the verb and the
+concrete thing being acted on (`rm -rf PATH`, a force-push branch, `drop
+table`, a disk/volume target for `format`, a dollar amount + payee), and
+with `--cwd`/`--worktree` reads live facts about it (does it exist, is it
+tracked and committed in git, is it inside the task's own worktree). Two
+things settle with zero model calls: money over `--money-threshold` (default
+$200) or a new payee (`--new-payee`) always needs approval, and a
+destructive verb refuses outright unless the target is a tracked,
+committed file inside the given worktree — recoverable from git's own
+index, so that one case is passed to the judge with that fact attached
+instead of refused sight unseen. It can never settle a verdict to
+`safe_to_auto`, only make it more cautious or leave it for the judge.
+`--explain` names which rule fired, if one did. See the "Pre-rules" section
+of the main README for the full rule list.
+
 ### chain
 
 Spec `spec.json` (a ticket linking to an order linking to a policy):
