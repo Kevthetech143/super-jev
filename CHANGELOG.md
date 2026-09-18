@@ -129,6 +129,90 @@ No version bump.
   PROTECTED repo, which the door can refuse a worktree over but cannot
   un-write, and exits non-zero on a worker-writable hit. See docs/hooks.md,
   "The shared `.git/config` is a list of programs".
+- **RECEIPT SHAPES: a new derived-facts family that maps a tool act to the
+  plain verbs it supports.** Families 6 through 10 all check a value — a
+  filename, a labelled figure, a score, an extremum. The gap they left is a
+  missing noun, not a missing number: a draft says "logged it", "notified
+  health-fitness", "escalated it", "scheduled the scan", and the judge had to
+  bridge that to a `Write`, a relay `send.sh` call or a `CronCreate` on its
+  own, out of a column dump, in one call. `_facts_receipt_shapes` now states
+  the bridge as a sentence — an ACT of a named shape ran against a named
+  TARGET, and that act is support for exactly these verbs and nothing more —
+  in at most four lines, one per verb class (saved, sent, scheduled, handed
+  off). It is the one family that reads the TRANSCRIPT rather than the
+  assembled window, on purpose: the window's identity strings are truncated
+  (a long here-document's write to `~/a/b/c/BRIEF.md` read back as a write to
+  `~/a`), and the window also carries worker prose, so a receipt taken from
+  it is a receipt the claimant can write for itself. Tool name and tool input
+  come from the assistant `tool_use` record, the result and its error state
+  from the paired `tool_result`; the draft is never read. No matching act
+  means no line, an act whose result came back `is_error` is dropped whole
+  rather than hedged, and detection runs on a quote-masked, here-document-
+  stripped command so an `echo "--- crontab ---"` label is not a crontab
+  install and a `>` inside a `printf` argument is not a redirection. Every
+  line carries its own bound in its own text: a write says nothing about what
+  the file now contains, a send nothing about delivery, a scheduler call
+  nothing about the job having run — so a worker that writes an empty file
+  named after its claim gets the path named and no support for the claim. The
+  lines are folded in last, behind every `CONTRADICTED_BY_FACT` sentence, and
+  carry no `CONTRADICTED_BY_FACT` marker themselves, so the family is judge
+  input only and cannot block, allow or flip a decision; replaying every
+  recorded case in all four benches, main against this change, the
+  deterministic block reasons and the other families' fact lines are
+  identical. `hook gate --explain` gained a `receipt shapes` row. Off with
+  `SUPERJEV_DERIVED_FACTS=0`, same switch as every other family. See
+  docs/hooks.md, "Receipt shapes — family 11, the act-to-verb bridge".
+- **RECEIPT SHAPES round 2: the "sent" class's outbox pattern matched the
+  harness's own `answer-<hex>.txt` answer-delivery file, handing the judge
+  blanket sent/notified/escalated/reported support on almost any window.**
+  `answer-<hex>.txt` is dropped from the outbox pattern (a write there now
+  falls through to the ordinary "saved" shape); a "sent" line now only comes
+  from a channel with a knowable, named recipient — a relay send (naming the
+  task id its own command segment carried), a write to the Telegram outbox
+  file, or a message-shaped tool call (Telegram/email/chat) whose own input
+  names a recipient. The relay-send match is now anchored to the start of a
+  command segment, so `cat send.sh` / `grep task send.sh` / `chmod +x
+  send.sh` no longer fire, and a send's task-id scrape is scoped to that
+  send's own command segment so a sibling `&&`-joined command's id is never
+  attributed to it. See docs/hooks.md.
+- **RECEIPT SHAPES round 3: the message-tool "sent" subclass was verb-blind
+  — it fired on a channel word in the tool name plus any recipient-ish
+  key, with no check that the tool actually SENDS.** A Gmail-shaped
+  `create_draft` call names a real recipient and delivers nothing at all,
+  and read as support for "sent"/"replied"/"notified"/"told"; `get_thread`,
+  `search_threads`, `trash_thread`, `label_thread`, `mark_thread_spam` and
+  `apply_sensitive_thread_label` all fired the same way. A message-shaped
+  tool call is now a "sent" line only when its own name carries a send verb
+  (send/reply/forward/post/notify/message) AND no read/mutate verb
+  (get/list/search/create/update/label/unlabel/trash/untrash/mark/apply/
+  delete/draft), matched on lower-cased word tokens split on `_` and
+  CamelCase boundaries, never a substring. The late-Telegram outbox line
+  now names what it actually delivers — the configured owner's Telegram,
+  via the claw4mac poller — rather than just the file's name. See
+  docs/hooks.md.
+- **RECEIPT SHAPES round 4: real Gmail sends produced NO receipt at all.**
+  The live Gmail MCP schema passes `to`/`cc`/`bcc` as ARRAYS of address
+  strings, not a single string, and `reply`/`forward` can carry only
+  `messageId` (their one required field) with no `to` at all when the
+  reply keeps the thread's existing recipients — a genuine send that
+  still names no recipient. List-valued recipients are now accepted
+  (joined verbatim, comma-separated); the camelCase schema keys
+  (`messageId`, `threadId`, `replyThreadId`, `replyToMessageId`) are
+  checked as a fallback, naming the thread a reply/forward addressed when
+  no recipient field is present. `unmark` is added to the read/mutate
+  blocklist (`unmark_message_spam` fuses the prefix onto the verb with no
+  separator, so `mark` alone never matched it). docs/hooks.md also notes
+  the late-Telegram line's two honest limits: a control-less (iMessage)
+  session's poller delivers nothing at all, and even a real delivery
+  happens on the poller's own later tick, not at the moment of the write.
+  See docs/hooks.md.
+- **`replay_fact_block_sweep.py`'s LIVE side could raise and the sweep
+  would print-and-skip with no counter and no effect on the exit code.**
+  A live-module crash silently shrank coverage — fewer cases replayed,
+  nothing to say anything had gone wrong. The live side now mirrors the
+  baseline treatment: every exception is counted and printed under its
+  own "LIVE ERROR" line, and the sweep exits non-zero if any occurred.
+
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
   and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
