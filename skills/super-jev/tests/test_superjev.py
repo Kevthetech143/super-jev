@@ -2208,20 +2208,18 @@ def test_empty_current_turn_with_prior_evidence_is_judged_not_unchecked(
     # called; see test_hook_gate_conversational_turn_is_not_judged for the
     # skip itself.
     fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
-                              "and fully caught up, 0 items in the backlog.\n")
+                              "and fully caught up.\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
     t = _write_transcript(tmp_path, [
         {"message": {"role": "user", "content": "how's the service doing?"}},
         _tool_result_record("service status: degraded, backlog growing"),
         _assistant_text_record("The service is degraded right now."),
         {"message": {"role": "user", "content": "what about now, any update?"}},
-        _assistant_text_record("The service is now stable and fully caught up, "
-                               "0 items in the backlog."),
+        _assistant_text_record("The service is now stable and fully caught up."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "The service is now stable and fully caught up, "
-                                  "0 items in the backlog."}))
+        "last_assistant_message": "The service is now stable and fully caught up."}))
     code = sj.main(["hook", "gate"])
     out, err = capsys.readouterr()
     assert code == 0
@@ -2242,20 +2240,18 @@ def test_empty_current_turn_suppressed_secondary_arm_is_recorded_for_health(
     # with the top label+score, and ledger_health counts it in the
     # SUPPRESSED bucket without ever warning on it.
     fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  The service is now stable "
-                              "and fully caught up, 0 items in the backlog.\n")
+                              "and fully caught up.\n")
     monkeypatch.setattr(sj.subprocess, "run", fake)
     t = _write_transcript(tmp_path, [
         {"message": {"role": "user", "content": "how's the service doing?"}},
         _tool_result_record("service status: degraded, backlog growing"),
         _assistant_text_record("The service is degraded right now."),
         {"message": {"role": "user", "content": "what about now, any update?"}},
-        _assistant_text_record("The service is now stable and fully caught up, "
-                               "0 items in the backlog."),
+        _assistant_text_record("The service is now stable and fully caught up."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "The service is now stable and fully caught up, "
-                                  "0 items in the backlog."}))
+        "last_assistant_message": "The service is now stable and fully caught up."}))
     code = sj.main(["hook", "gate"])
     capsys.readouterr()
     assert code == 0
@@ -2300,14 +2296,31 @@ def test_empty_current_turn_with_prior_evidence_overclaims_still_blocks(
 
 # ---------------- gate-adjudication-20260918.md: the two OVERCLAIMS false
 # mechanisms — (b) zero-tool conversational turns, (a) the receipt is one
-# turn old
+# turn old. 2026-09-18 re-adjudication: (b) is now a STRUCTURAL rule (does
+# the window carry any receipt at all?) rather than a scan of the draft's
+# own wording — see _window_has_any_receipt.
 
 def test_hook_gate_conversational_turn_is_not_judged(tmp_path, monkeypatch, capsys):
-    # Mechanism (b): a tool-free current turn whose draft carries no
-    # receipt-shaped claim at all (no number next to a result word, no
-    # file path, no PR/#N, no completion verb) — a plain status opinion,
-    # "the proof is what Jev alone could not have done today"-shaped. The
-    # judge must never be called: subprocess.run stays untouched.
+    # Mechanism (b), the TRUE conversational case: the current turn ran no
+    # tools AND the assembled window carries no receipt anywhere — no
+    # previous-turn tool output, no session receipt, no relayed worker
+    # report, no `[from: ...]` line. The judge must never be called:
+    # subprocess.run stays untouched.
+    #
+    # `_derive_evidence_text_from_transcript` is stubbed rather than built
+    # from a real zero-tool transcript: with NO tool activity anywhere,
+    # that function returns None outright (nothing to derive at all), which
+    # routes `cmd_hook` down the separate, pre-existing "no tool evidence"
+    # path (_hook_unchecked, reasons "no-tool-evidence-silent"/"-checkable")
+    # rather than this one — a window this function assembles as non-empty
+    # is, by construction, always built from at least one receipt (tool
+    # output, a receipt, or a report), so the only way to reach THIS branch
+    # with truly no receipt is a transcript that carries some non-receipt
+    # window text, which the real assembler never produces. Stubbing it
+    # exercises the branch directly against exactly the shape
+    # _window_has_any_receipt is meant to reject: a window with a
+    # `[current turn]` section (the current turn's own material) and
+    # nothing else.
     calls = []
 
     def fake_run(cmd, cwd=None, env=None, **kw):
@@ -2315,17 +2328,21 @@ def test_hook_gate_conversational_turn_is_not_judged(tmp_path, monkeypatch, caps
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(sj.subprocess, "run", fake_run)
+
+    def fake_derive(transcript_path, session_id=None, return_meta=False, **kw):
+        window = "[current turn]\nSure, that makes sense, go ahead.\n"
+        meta = {"current_turn_empty": True, "prev_turn_detail": [],
+                "receipts_count": 0, "reports_found": 0, "reports_kept": 0}
+        return (window, meta) if return_meta else window
+
+    monkeypatch.setattr(sj, "_derive_evidence_text_from_transcript", fake_derive)
     t = _write_transcript(tmp_path, [
-        {"message": {"role": "user", "content": "how's the service doing?"}},
-        _tool_result_record("service status: degraded, backlog growing"),
-        _assistant_text_record("The service is degraded right now."),
-        {"message": {"role": "user", "content": "how do you feel about that design?"}},
-        _assistant_text_record("Honestly, I think the retry approach was the right call."),
+        {"message": {"role": "user", "content": "go ahead with it, then"}},
+        _assistant_text_record("Sure, that makes sense, go ahead."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "Honestly, I think the retry approach was the "
-                                  "right call."}))
+        "last_assistant_message": "Sure, that makes sense, go ahead."}))
     code = sj.main(["hook", "gate"])
     out, err = capsys.readouterr()
     assert code == 0
@@ -2338,19 +2355,26 @@ def test_hook_gate_conversational_turn_is_not_judged(tmp_path, monkeypatch, caps
 
 
 def test_catch_ledger_records_conversational_turn_as_unchecked(tmp_path, monkeypatch):
+    # Same stub as test_hook_gate_conversational_turn_is_not_judged above —
+    # see that test's comment for why a real zero-tool transcript cannot
+    # reach this branch.
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
+
+    def fake_derive(transcript_path, session_id=None, return_meta=False, **kw):
+        window = "[current turn]\nSure, that makes sense, go ahead.\n"
+        meta = {"current_turn_empty": True, "prev_turn_detail": [],
+                "receipts_count": 0, "reports_found": 0, "reports_kept": 0}
+        return (window, meta) if return_meta else window
+
+    monkeypatch.setattr(sj, "_derive_evidence_text_from_transcript", fake_derive)
     t = _write_transcript(tmp_path, [
-        {"message": {"role": "user", "content": "how's the service doing?"}},
-        _tool_result_record("service status: degraded, backlog growing"),
-        _assistant_text_record("The service is degraded right now."),
-        {"message": {"role": "user", "content": "how do you feel about that design?"}},
-        _assistant_text_record("Honestly, I think the retry approach was the right call."),
+        {"message": {"role": "user", "content": "go ahead with it, then"}},
+        _assistant_text_record("Sure, that makes sense, go ahead."),
     ])
     _hook_stdin(monkeypatch, json.dumps({
         "hook_event_name": "Stop", "transcript_path": str(t),
-        "last_assistant_message": "Honestly, I think the retry approach was the "
-                                  "right call."}))
+        "last_assistant_message": "Sure, that makes sense, go ahead."}))
     code = sj.main(["hook", "gate"])
     assert code == 0
     recs = _read_catch_records(catch_path)
@@ -2359,34 +2383,55 @@ def test_catch_ledger_records_conversational_turn_as_unchecked(tmp_path, monkeyp
     assert recs[0]["reasons"] == ["conversational"]
 
 
-def test_draft_has_receipt_shaped_claim_true_for_numbers_paths_prs_verbs():
-    assert sj._draft_has_receipt_shaped_claim("48 tests passed") is True
-    assert sj._draft_has_receipt_shaped_claim("passed 9 of 10 cases") is True
-    assert sj._draft_has_receipt_shaped_claim("wrote skills/super-jev/superjev.py") is True
-    assert sj._draft_has_receipt_shaped_claim("PR #20 is merged") is True
-    assert sj._draft_has_receipt_shaped_claim("merged #20") is True
-    assert sj._draft_has_receipt_shaped_claim("Done, the fix is in.") is True
-    assert sj._draft_has_receipt_shaped_claim("Written the file for you.") is True
+# gate-adjudication-20260918.md rows 10, 15, 21, P1 (originally cited to
+# justify the draft-shape scan _draft_has_receipt_shaped_claim, removed):
+# eight drafts a verb/number regex on the DRAFT could never catch, each
+# one a plain-sounding status claim sitting one turn after contradicting
+# tool evidence. The structural rule (does the WINDOW carry a receipt?)
+# must judge — and block — every one of them, regardless of the draft's
+# own wording.
+GATE_ADJUDICATION_FALSE_NEGATIVE_DRAFTS = [
+    "The service is now stable and fully caught up.",
+    "The bot is back up.",
+    "Your rent is paid.",
+    "I sent the email.",
+    "The tests are green.",
+    "Nothing failed.",
+    "Backup completed.",
+    "All three are live now.",
+]
 
 
-def test_draft_has_receipt_shaped_claim_false_for_plain_conversation():
-    assert sj._draft_has_receipt_shaped_claim(
-        "I think the retry approach was the right call.") is False
-    assert sj._draft_has_receipt_shaped_claim(
-        "The splitter cuts by sentence, semicolon and colon.") is False
-    assert sj._draft_has_receipt_shaped_claim(
-        "When the runners land I'll fire the live passes back to back.") is False
-    assert sj._draft_has_receipt_shaped_claim("") is False
-    assert sj._draft_has_receipt_shaped_claim(None) is False
+@pytest.mark.parametrize("draft", GATE_ADJUDICATION_FALSE_NEGATIVE_DRAFTS)
+def test_hook_gate_structural_rule_still_blocks_the_eight_false_negatives(
+        tmp_path, monkeypatch, capsys, draft):
+    fake = FakeDoor(3, stdout="  c1   OVERCLAIMS   0.97  " + draft + "\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "how's the service doing?"}},
+        _tool_result_record("service status: degraded, backlog growing; 12 tests failed"),
+        _assistant_text_record("The service is degraded right now."),
+        {"message": {"role": "user", "content": "what about now, any update?"}},
+        _assistant_text_record(draft),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": draft}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert "conversational turn, not judged" not in err
+    assert code == 2
 
 
-def test_hook_gate_receipt_turn_relabels_the_window_and_adds_a_derived_fact(
+def test_hook_gate_receipt_turn_names_the_existing_header_in_derived_facts(
         tmp_path, monkeypatch):
-    # Mechanism (a): the draft DOES carry a receipt-shaped claim on a
-    # tool-free current turn, and the previous turn ran tools — that turn's
-    # "[previous turn -1]" header is relabelled "[receipt turn -1]" and a
-    # RECEIPT TURN sentence is added to DERIVED FACTS, so a correct
-    # restatement of a one-turn-old receipt is not scored as unsupported.
+    # Mechanism (a): the draft DOES restate a checkable result on a
+    # tool-free current turn, and the previous turn ran tools — a RECEIPT
+    # TURN sentence is added to DERIVED FACTS naming that turn, but its
+    # "[previous turn -1]" section header is left exactly as-is (no
+    # rewrite to "[receipt turn -1]" — see _receipt_turn_extra_fact for
+    # why: rewriting the header needed two more window regexes taught the
+    # new text, and both slipped through unregistered).
     captured = {}
 
     def fake_run(cmd, cwd=None, env=None, **kw):
@@ -2408,9 +2453,10 @@ def test_hook_gate_receipt_turn_relabels_the_window_and_adds_a_derived_fact(
         "hook_event_name": "Stop", "transcript_path": str(t),
         "last_assistant_message": "Confirmed: 164 tests passed, as I said."}))
     assert sj.main(["hook", "gate"]) == 0
-    assert "[receipt turn -1]" in captured["evidence_text"]
-    assert "[previous turn -1]" not in captured["evidence_text"]
+    assert "[previous turn -1]" in captured["evidence_text"]
+    assert "[receipt turn -1]" not in captured["evidence_text"]
     assert "RECEIPT TURN:" in captured["evidence_text"]
+    assert "see [previous turn -1] below" in captured["evidence_text"]
     assert "164 passed" in captured["evidence_text"]
 
 
@@ -6281,6 +6327,46 @@ def test_window_cap_is_a_no_op_under_budget_and_when_disabled(monkeypatch):
     assert out == text and m["dropped"] == []
 
 
+def test_window_cap_trims_normally_when_a_previous_turn_is_the_receipt_turn(monkeypatch):
+    # gate-adjudication-20260918.md findings 3/4: an earlier draft of the
+    # receipt-turn fix (mechanism (a)) relabelled the receipt turn's own
+    # "[previous turn -N]" header to "[receipt turn -N]" in the window
+    # text. Neither _WINDOW_PART_RE (the trimmer) nor _WINDOW_SECTION_RE
+    # (fact-line labelling) recognised that header, so the relabelled
+    # section fell out of the trim order (filed as kind "other", which is
+    # never dropped or shrunk) and displaced session receipts instead at a
+    # tight budget, with a byte tail-cut on top. The fix (see
+    # _receipt_turn_extra_fact) never rewrites the header at all — the
+    # receipt turn is named in a DERIVED FACTS sentence only — so this is
+    # a plain, unmodified "[previous turn -1]" section and must trim
+    # exactly like any other previous turn: oldest previous turn dropped
+    # first, the freshest previous turn SHRUNK (not dropped) if still over
+    # budget, and session receipts never touched or byte-tail-cut.
+    big = ("[previous turn -1]\n" + ("receipt line here\n" * 400) +
+          "\n===\n\n[previous turn -2]\nold\n\n===\n\n[session receipts]\n" +
+          ("r\n" * 50))
+    out, meta = sj.trim_window_to_token_budget(big, budget_tok=120)
+    assert meta["dropped"] == ["previous turn -2"]
+    assert "session receipts" not in meta["dropped"]
+    assert meta["shrunk"] == ["previous turn -1"]
+    assert meta["current_trimmed_chars"] == 0
+    assert "[session receipts]" in out
+    assert sj._WINDOW_SHRINK_MARKER in out
+
+
+def test_fact_window_lines_label_unchanged_by_receipt_turn_fix(monkeypatch):
+    # Finding 4's other half: _fact_window_lines must still label a
+    # previous turn's lines under its own "[previous turn -N]" header (not
+    # fall back to the default "the evidence window" label) — true by
+    # construction now that the header is never rewritten, but pinned here
+    # as a regression check.
+    win = ("[previous turn -1]\n12 failed, 0 passed\n\n===\n\n"
+          "[session receipts]\nx\n")
+    lines = sj._fact_window_lines(win)
+    assert ("[previous turn -1]", "12 failed, 0 passed") in lines
+    assert not any(label == "the evidence window" for label, _ in lines)
+
+
 def test_window_cap_default_comes_from_the_env_knob(monkeypatch):
     assert sj._gate_window_tok() == 8000
     monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "1200")
@@ -6432,6 +6518,29 @@ def test_the_scans_own_deferrals_are_deferred_not_lost():
     assert sj.SCAN_DEFERRED_REASON != sj.BUDGET_EXCEEDED_REASON
     assert sj._skip_reason_bucket(sj.SCAN_DEFERRED_REASON) == sj.SKIP_BUCKET_DEFERRED
     assert sj._skip_reason_bucket("stop-scan-timeout") == sj.SKIP_BUCKET_DEFERRED
+
+
+def test_conversational_skip_is_deferred_not_lost():
+    # gate-adjudication-20260918.md finding 2: "conversational" was left
+    # out of SKIP_REASON_BUCKETS, so it fell to SKIP_BUCKET_LOST by
+    # design (see _skip_reason_bucket's docstring) and tripped the
+    # lost-check WARN on any session that ever had an ordinary
+    # conversational turn — there is nothing lost about a reply that had
+    # no receipt anywhere in its window to check it against.
+    assert sj._skip_reason_bucket("conversational") == sj.SKIP_BUCKET_DEFERRED
+
+
+def test_ledger_health_conversational_records_never_warn():
+    recs = [{"door": "hook", "note": "gate: conversational turn (current turn ran "
+                                     "no tools, window carries no receipt anywhere) "
+                                     "— not judged, advisory only",
+             "unchecked": True, "reason": "conversational", "exit_code": 0}
+           for _ in range(6)]
+    health = sj.ledger_health(records=recs)
+    overall = health["overall"]
+    assert overall["lost"] == 0
+    assert overall["deferred"] == 6
+    assert sj._health_warnings(health) == []
 
 
 def test_a_judged_stop_event_never_writes_budget_exceeded(tmp_path, monkeypatch):

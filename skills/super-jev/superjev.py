@@ -1207,13 +1207,11 @@ _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 #   "weak" — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
 #            secondary arm) and SELF_CONTRADICTORY are advisory; OVERCLAIMS
 #            still blocks. Added after the 2026-09-18 live adjudication
-#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS fair on
-#            19 of 24 live firings — the only judge arm worth trusting to
-#            block — while the per-claim arm was fair on only 2 of 7 and
-#            SELF_CONTRADICTORY never blocks at all (v3) or is 0 of 2 fair
-#            when it does (v2). Under the default v3 rule the secondary arm
-#            already never produces a block reason on its own, so "weak"
-#            is a real change only under SUPERJEV_RULE=v2.
+#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS the only
+#            judge arm worth trusting to block, while the per-claim arm and
+#            SELF_CONTRADICTORY were not. Under the default v3 rule the
+#            secondary arm already never produces a block reason on its
+#            own, so "weak" is a real change only under SUPERJEV_RULE=v2.
 #   "0"/unset — unchanged: judge-advisory mode off, every block reason
 #            (judge or deterministic) blocks exactly as it does today.
 #
@@ -1737,75 +1735,72 @@ def _hook_block_reasons(flags, claim_rows=None, evidence=None):
 # mechanisms it still needed" for the write-up this section backs):
 #
 #   (b) zero-tool conversational turns — the current turn ran no tools and
-#       the draft is a plain answer/opinion/status with no receipt-shaped
-#       claim (rows 10, 15, 21, P1 of the adjudication: "the proof is what
-#       Jev alone could not have done today", a design answer split into
-#       13 claims, a plan sentence, an earlier-session provenance claim —
-#       none of them a claim any tool result could ever support or
-#       contradict). The judge is never called on these; see
-#       _draft_has_receipt_shaped_claim and its use in cmd_hook.
+#       the WINDOW itself carries no tool receipt anywhere (no previous-turn
+#       tool output, no session receipts, no `[from: ...]` identity line, no
+#       relayed worker report). 2026-09-18 re-adjudication: the original fix
+#       here tried to spot "conversational" from the DRAFT's own shape — a
+#       verb/number regex (_draft_has_receipt_shaped_claim) — and that regex
+#       could never be made complete: "The bot is back up.", "Your rent is
+#       paid.", "I sent the email.", "The tests are green.", "Nothing
+#       failed.", "Backup completed.", "All three are live now." and "The
+#       service is now stable and fully caught up." all block on base with
+#       contradicting evidence sitting in the previous turn, and all passed
+#       the judge unjudged under the verb-list version of this fix — a false
+#       negative for every one of them. The rule is now structural instead:
+#       it looks at what the WINDOW carries, not what words the draft used.
+#       If the window carries no receipt at all, there is nothing any tool
+#       result could support or contradict, so the judge is skipped. If the
+#       window carries ANY receipt, the judge always runs — even against a
+#       plain-sounding draft — because that receipt is exactly the kind of
+#       evidence a plain-sounding claim can still overclaim against. See
+#       _window_has_any_receipt and its use in cmd_hook.
 #   (a) the receipt is one turn old — the current turn ran no tools but the
 #       draft correctly restates a result whose receipt sits in the
 #       previous-turn block, not this turn's own (rows 13, 14, 23, 24, 27,
 #       28, 30 in part: a merge, a spawn or a log read a turn or two
 #       earlier, still real evidence for a reply about it now). The most
-#       recent previous turn that ran tools is relabelled "[receipt turn
-#       -N]" and named in DERIVED FACTS; see _receipt_turn_index and
-#       _label_receipt_turn.
+#       recent previous turn that ran tools is named in a DERIVED FACTS
+#       sentence pointing at its existing "[previous turn -N]" header (no
+#       header rewrite — see _receipt_turn_index and _receipt_turn_extra_
+#       fact; earlier drafts of this fix relabelled the header itself to
+#       "[receipt turn -N]", which needed two more regexes taught the new
+#       header text and both slipped through unregistered — see docs/
+#       hooks.md, "gate v4 — the receipt turn header").
 
-# Numbers next to a result word, either order ("48 tests passed" / "passed
-# 48 tests" / "9 of 10" / "score 0.92"). Kept deliberately narrow — a bare
-# number with no result-shaped word nearby ("I'll check turn 3") does not
-# count, on purpose; see the module docstring above for why this list
-# stays this size rather than growing to catch every possible status word.
-_RECEIPT_RESULT_WORD_RE = (r'(passed|failed|pass(?:es|ing)?|fail(?:s|ing)?|tests?|files?|'
-                           r'lines?|score|checks?|errors?|commits?|of|items?|records?|'
-                           r'requests?|rows?|cases?)')
-_RECEIPT_NUMBER_WORD_RE = re.compile(
-    r'\b\d+(?:\.\d+)?%?\b[^.\n]{0,25}\b' + _RECEIPT_RESULT_WORD_RE + r'\b'
-    r'|\b' + _RECEIPT_RESULT_WORD_RE + r'\b[^.\n]{0,25}\b\d+(?:\.\d+)?%?\b',
-    re.IGNORECASE)
-# "PR #N" / "PR N" / "#N" — reuses the same "# optional" widening gate v4
-# already applied to the deterministic merge-claim regex (see
-# _PR_MERGED_CLAIM_RE) rather than requiring the literal '#'.
-_RECEIPT_PR_RE = re.compile(r'\bPR\s*#?\d+\b|#\d+\b', re.IGNORECASE)
-# "tests pass/passed/passing", "merged", "done", "written", "created",
-# "fixed" and close siblings — the "completion verb" style the brief names
-# explicitly. Deliberately does NOT include generic status adjectives
-# ("stable", "healthy", "degraded", "caught up") — those describe a state
-# without asserting a specific completed action a tool result would show,
-# and widening this list to catch them would also catch ordinary qualified
-# status answers this fix is not meant to touch.
-_RECEIPT_COMPLETION_VERB_RE = re.compile(
-    r'\b(tests?\s+pass(?:es|ed|ing)?|merged|done|written|created|fixed|pushed|committed|'
-    r'deployed|installed|confirmed|verified|built|resolved|closed|shipped)\b',
-    re.IGNORECASE)
+# The window's own section headers that mean "a tool receipt sits under
+# this line" — previous-turn tool output, session receipts, and this
+# turn's relayed worker reports. Deliberately NOT "[current turn]": when
+# this rule runs, current_turn_empty is already True, so that section
+# never carries anything of its own anyway.
+_RECEIPT_SECTION_HEADERS = ("[previous turn -", "[session receipts]",
+                            "[current turn reports]")
 
 
-def _draft_has_receipt_shaped_claim(text):
-    """True when `text` contains a claim shaped like it cites a checkable
-    result: a number sitting near a result word, a file path, a PR/#N
-    reference, or a completion verb ("tests pass", "merged", "done",
-    "written", "created", "fixed", ...). Reuses presplit_claims's clause
-    splitter so a multi-clause draft is checked clause by clause, the same
-    granularity the judge itself reads at — one receipt-shaped clause is
-    enough, even inside an otherwise conversational reply. False for
-    empty/whitespace input. Never raises (falls back to a single-clause
-    scan of the whole text on any splitter surprise)."""
-    if not text or not text.strip():
+def _window_has_any_receipt(window_text):
+    """True when `window_text` (the assembled evidence window, before the
+    cited-file tail is appended — see cmd_hook) carries a tool receipt
+    ANYWHERE: previous-turn tool output, a session receipt, a relayed
+    worker report, or a sticky `[from: ...]` identity line. This is the
+    whole test for "conversational" (mechanism (b), see the section
+    docstring above) — deliberately a property of the WINDOW, not of the
+    draft's own wording. A verb/number scan of the draft
+    (_draft_has_receipt_shaped_claim, removed 2026-09-18) could never be
+    made complete: "The bot is back up.", "Your rent is paid.", "I sent
+    the email." and five more all carry no tracked verb or number yet are
+    still checkable against contradicting evidence one turn back. Here,
+    if the window carries no receipt at all, there is genuinely nothing
+    any tool result could support or contradict, so skipping the judge is
+    safe regardless of how the draft is phrased; if the window carries
+    ANY receipt, the judge always runs, because a receipt existing is
+    exactly what makes a plain-sounding draft checkable. False for
+    empty/whitespace input."""
+    if not window_text:
         return False
-    try:
-        clauses = presplit_claims(text) or [text]
-    except Exception:
-        clauses = [text]
-    for c in clauses:
-        if _RECEIPT_NUMBER_WORD_RE.search(c):
+    for line in window_text.splitlines():
+        s = line.strip()
+        if s.startswith(_RECEIPT_SECTION_HEADERS):
             return True
-        if _CITED_FILE_PATH_RE.search(c) or _ABS_PATH_RE.search(c) or _PATH_RE.search(c):
-            return True
-        if _RECEIPT_PR_RE.search(c):
-            return True
-        if _RECEIPT_COMPLETION_VERB_RE.search(c):
+        if '[from:' in line:
             return True
     return False
 
@@ -1825,32 +1820,28 @@ def _receipt_turn_index(window_meta):
     return None
 
 
-def _label_receipt_turn(window_text, receipt_idx):
-    """Relabels the sole `[previous turn -<receipt_idx>]` section header in
-    `window_text` as `[receipt turn -<receipt_idx>]`, so a judge reading a
-    tool-free current turn sees that turn's own results are being counted
-    as this reply's receipt rather than out-of-window material it must
-    score as unsupported. Returns (text, True) on a real relabel, or
-    (window_text, False) unchanged when `receipt_idx` is None or its
-    header is not present in the text (already trimmed by the byte/token
-    cap, or the assembled window never carried it in the first place)."""
-    if not window_text or receipt_idx is None:
-        return window_text, False
-    target = f"[previous turn -{receipt_idx}]"
-    if target not in window_text:
-        return window_text, False
-    replacement = f"[receipt turn -{receipt_idx}]"
-    return window_text.replace(target, replacement, 1), True
-
-
 def _receipt_turn_extra_fact(receipt_idx):
     """The DERIVED FACTS sentence naming the receipt turn, for
-    `compose_window_with_facts`'s `extra_facts` — see mechanism (a). None
-    when there is no receipt turn to name."""
+    `compose_window_with_facts`'s `extra_facts` — see mechanism (a). Points
+    at the receipt turn's EXISTING "[previous turn -N]" header rather than
+    rewriting it: an earlier version of this fix relabelled that header to
+    "[receipt turn -N]" so the judge could see it named in place, but that
+    meant every window-parsing regex keyed on the literal text
+    "[previous turn -N]" (_WINDOW_PART_RE for the trim order, _WINDOW_
+    SECTION_RE for fact-line labelling) had to be taught the new header
+    too, and both slipped through unregistered — the relabelled section
+    fell out of the trim order entirely (dropped whole instead of shrunk,
+    or never dropped and displacing session receipts instead — see
+    docs/hooks.md, "gate v4 — the receipt turn header") and out of fact-
+    line labelling (falling back to the default "the evidence window"
+    label at the wrong rank). Naming the turn in prose instead of
+    rewriting its header keeps every existing window regex correct with
+    no relabel to keep in sync. None when there is no receipt turn to
+    name."""
     if receipt_idx is None:
         return None
     return (f"RECEIPT TURN: the current turn ran no tools of its own; turn "
-           f"-{receipt_idx} (labelled [receipt turn -{receipt_idx}] below) is the "
+           f"-{receipt_idx} (see [previous turn -{receipt_idx}] below) is the "
            "most recent turn that did, and counts as this reply's receipt, not "
            "out-of-window material.")
 
@@ -7512,20 +7503,24 @@ def cmd_hook(a):
                     # tools of its own (window_meta["current_turn_empty"]):
                     receipt_extra_facts = None
                     if window_meta is not None and window_meta.get("current_turn_empty"):
-                        if not _draft_has_receipt_shaped_claim(text):
-                            # Mechanism (b): a plain conversational answer/
-                            # opinion/status with no receipt-shaped claim —
-                            # no number next to a result word, no file
-                            # path, no PR/#N, no completion verb — is not
-                            # something any tool result could ever support
-                            # or contradict. Skip the judge outright rather
-                            # than risk scoring it OVERCLAIMS on prose with
-                            # no claim shape at all (rows 10, 15, 21, P1 of
-                            # the adjudication).
+                        if not _window_has_any_receipt(derived):
+                            # Mechanism (b): a tool-free current turn AND
+                            # the assembled window carries no receipt
+                            # anywhere — no previous-turn tool output, no
+                            # session receipt, no relayed worker report, no
+                            # `[from: ...]` identity line. Nothing in the
+                            # window is checkable, so the judge is skipped
+                            # outright rather than risk scoring OVERCLAIMS
+                            # on prose with no evidence to check it
+                            # against (rows 10, 15, 21, P1 of the
+                            # adjudication). This is a property of the
+                            # WINDOW, not the draft's wording — see
+                            # _window_has_any_receipt's docstring for why a
+                            # verb/number scan of the draft was replaced.
                             msg = "super-jev gate: conversational turn, not judged"
                             print(msg, file=sys.stderr)
                             _hook_log("gate: conversational turn (current turn ran no "
-                                      "tools, draft carries no receipt-shaped claim) — "
+                                      "tools, window carries no receipt anywhere) — "
                                       "not judged, advisory only", exit_code=0,
                                       unchecked=True, health="none",
                                       reason="conversational")
@@ -7533,18 +7528,19 @@ def cmd_hook(a):
                                      draft_text=text, window_bytes=None,
                                      start_time=_catch_t0, payload=payload)
                             return 0
-                        # Mechanism (a): the draft DOES carry a receipt-
-                        # shaped claim on a tool-free current turn — find
-                        # the most recent previous turn that ran tools (if
-                        # any is still kept in the window) and relabel it
-                        # as the receipt turn, so a correct restatement of
-                        # a one-turn-old result is not scored as having no
-                        # in-window evidence (rows 13, 14, 23, 24, 27, 28,
-                        # 30 in part).
+                        # The window DOES carry a receipt somewhere even
+                        # though the current turn ran no tools of its own
+                        # — the judge always runs. Mechanism (a): if the
+                        # most recent previous turn that ran tools is
+                        # still kept in the window, name it in a DERIVED
+                        # FACTS sentence (no header rewrite — see
+                        # _receipt_turn_extra_fact) so a correct
+                        # restatement of a one-turn-old result is not
+                        # scored as having no in-window evidence (rows 13,
+                        # 14, 23, 24, 27, 28, 30 in part).
                         receipt_idx = _receipt_turn_index(window_meta)
-                        derived, relabeled = _label_receipt_turn(derived, receipt_idx)
-                        window_meta["receipt_turn"] = receipt_idx if relabeled else None
-                        if relabeled:
+                        window_meta["receipt_turn"] = receipt_idx
+                        if receipt_idx is not None:
                             fact = _receipt_turn_extra_fact(receipt_idx)
                             receipt_extra_facts = [fact] if fact else None
                     # Cited-file tail (see build_cited_file_block, 2026-09-18
@@ -8029,6 +8025,13 @@ SKIP_REASON_BUCKETS = {
     "spawn-dict": SKIP_BUCKET_DEFERRED,
     "no-teammate-messages": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
+    # A tool-free turn whose whole window carries no receipt anywhere is
+    # not a lost check — there was nothing checkable to lose (see
+    # _window_has_any_receipt, gate-adjudication-20260918.md mechanism
+    # (b)). Left out of this table, it fell to SKIP_BUCKET_LOST by
+    # design and tripped the lost-check WARN on any session with an
+    # ordinary conversational turn.
+    "conversational": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
     "bad-stdin": SKIP_BUCKET_LOST,
