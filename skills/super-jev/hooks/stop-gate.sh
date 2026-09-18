@@ -34,13 +34,17 @@
 #   - exits 0 (silent) on CLEAN, exits 2 with a reason on stderr to block
 #     on REJECT (fabricated quote), and on READ, additionally BLOCKS (exit
 #     2) rather than advises if a claim or draft-level flag in the gate's
-#     own output crosses its own line — NOT_SUPPORTED at or below
-#     SUPERJEV_BLOCK_NOT_SUPPORTED (default 0.20) or OVERCLAIMS at or above
-#     SUPERJEV_BLOCK_OVERCLAIM (default 0.80) always block on their own;
-#     SELF_CONTRADICTORY at or below 0.30 only counts as a block reason
-#     when the SAME run also carries a blocking NOT_SUPPORTED or OVERCLAIMS
-#     flag — self-contradiction alone never blocks — else exits 0 with an
-#     advisory line on stdout,
+#     own output crosses its own line — a claim-level NOT_SUPPORTED or
+#     CONTRADICTED at or above SUPERJEV_BLOCK_CONF (default 0.80) blocks,
+#     and so does OVERCLAIMS at or above the same line when a claim in the
+#     same run is also NOT_SUPPORTED/CONTRADICTED at 0.50 or higher — but
+#     only when the evidence gather itself was healthy enough to trust a
+#     confident verdict; a gather too thin to judge against (no evidence
+#     source, a refused directory-level test command, a probe under the
+#     char floor) suppresses every one of these into an advisory instead,
+#     because a confident-but-ungrounded verdict and a real problem print
+#     the same red table. SELF_CONTRADICTORY never blocks, alone or in
+#     company — else exits 0 with an advisory line on stdout,
 #   - if the payload carries stop_hook_active=true (Claude Code's own
 #     signal that this Stop event is a re-run because a prior Stop hook
 #     already blocked this turn), never blocks on this pass regardless of

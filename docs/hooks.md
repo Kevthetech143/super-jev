@@ -78,13 +78,16 @@ does not end and the agent is asked to try again. On PostToolUse, the lead
 agent is told the report did not check out.
 
 A block needs one of three things: a fabricated quote, or a claim the judge
-flagged as unsupported at or below the not-supported line, or a confident
-overclaim. Self-contradiction alone never blocks. A confident overclaim alone
-no longer blocks when every claim came back supported, or when the evidence
-gather was too thin to judge against, because "the draft claims more than the
-evidence carries" is the correct answer when the evidence carries nothing. That
-last rule is the 2026-09-17 precision fix, and `hook verify --from-file
---explain` prints the gather size, every claim row and which rule decided.
+flagged not-supported or contradicted with high confidence, or a confident
+overclaim sitting next to a claim the judge is at least fairly confident is
+not supported or contradicted. Self-contradiction never blocks, alone or in
+company. None of these fire on evidence too thin to judge against — no
+evidence source, a directory-level test command worker-verify refuses
+outright, a `--pr` block that carries no check-run data, or a gather under the
+char floor all turn every one of them into an advisory instead, because a
+confident-but-ungrounded verdict and a real problem print the identical red
+table. `hook verify --from-file --explain` prints the gather size, every claim
+row and which rule decided.
 
 ## The loop guard
 
@@ -133,14 +136,23 @@ pull-request evidence is state only. It carries no check-run data at all, so
 "CI is green" is unprovable no matter how green it is. The precision fix makes
 those cases advisory instead of blocking, but it cannot invent the evidence.
 
-**Open decision, and the honest fail-open.** The number beside a verdict is the
-judge's confidence in that verdict, not a measure of support. The not-supported
-block rule fires at or below its line, which means it blocks the judge's least
-confident findings and lets its most confident ones through. A claim marked
-unsupported at very high confidence does not block today. That direction is
-recorded here rather than quietly changed, because flipping it without a fresh
-bench run would trade today's false blocks for an unmeasured set of new ones.
-Treat it as the first thing to settle.
+**Decided: the block rule follows confidence upward, not downward.** The number
+beside a verdict is the judge's confidence in that verdict, not a measure of
+support — a claim marked unsupported at very high confidence is the strongest
+signal the judge can give, and the block rule now follows it upward instead of
+firing on the judge's least confident findings and letting its most confident
+ones through. The trade-off that comes with fixing the direction: the same
+number that used to block on a low-confidence finding no longer does, so a
+claim the judge only barely suspects is unsupported now reads as an advisory,
+not a block, until a human reads it. That softening is deliberate and lives
+next to the fix, not hidden by it — the fixture from the earliest false-alarm
+writeup on this page (a claim marked unsupported at low confidence, alongside
+a confident overclaim) is kept in the test suite specifically to show it now
+passes as advisory rather than blocking, so the trade is visible, not silent.
+The same confidence gate that decides a block also turns off entirely when the
+evidence gather itself was too thin to judge against, for exactly the same
+reason a low-confidence claim does not block: a confident-sounding verdict
+built on no evidence is not a confident finding.
 
 **Other things a lie can still do.** A reply that makes claims with no tool
 calls in the turn is never checked, only noted. Every hook fails open on a
