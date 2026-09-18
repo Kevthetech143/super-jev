@@ -1064,6 +1064,57 @@ def _fact_block_reasons(facts):
     return [f for f in (facts or []) if "CONTRADICTED_BY_FACT" in f]
 
 
+# The PR-state check exists twice on purpose, for exactly as long as the
+# migration takes.
+#
+#   * `_pr_mismatch_reason` above is the legacy inline arm. It is the
+#     default and it stays callable: nothing about it changes.
+#   * `skills/super-jev/arms/pr_state.py` is the same check as a plug-in,
+#     asking the window model the question instead of scanning raw
+#     evidence text.
+#
+# `SUPERJEV_ARMS=1` picks the second. The two are meant to decide every
+# recorded bench case identically, which is the whole point of migrating
+# one arm first rather than all of them: the switch is the proof harness.
+# See docs/plugins.md.
+
+def _arms_registry():
+    """The arm registry module, or None if it cannot be imported.
+
+    Never raises. The registry is an enhancement; a broken import must
+    leave the gate on its legacy path, not take it down.
+    """
+    try:
+        if str(SKILL_DIR) not in sys.path:
+            sys.path.insert(0, str(SKILL_DIR))
+        import arms                                        # noqa: PLC0415
+        return arms
+    except Exception as e:                                  # pragma: no cover
+        print(f"superjev: cannot load the arm registry ({e!r}) — staying on "
+              "the legacy inline arms", file=sys.stderr)
+        return None
+
+
+def _pr_state_reason(draft_text, evidence_text):
+    """The PR-state arm's reason line, or None.
+
+    With `SUPERJEV_ARMS` off (the default) this is `_pr_mismatch_reason`
+    and nothing else runs. With it on, the registry runs the `pr_state`
+    arm over a window parsed out of the same evidence text, and the
+    legacy inline call is skipped rather than run alongside — running
+    both would hide exactly the difference the switch exists to expose.
+    """
+    arms = _arms_registry() if evidence_text else None
+    if arms is None or not arms.arms_enabled():
+        return _pr_mismatch_reason(draft_text, evidence_text)
+    from arms import pr_state as pr_state_arm              # noqa: PLC0415
+    window = pr_state_arm.window_from_text(evidence_text)
+    reasons = arms.block_reasons(window, draft_text, ctx={
+        "evidence_text": evidence_text, "caller": "deterministic"},
+        names=["pr_state"])
+    return reasons[0] if reasons else None
+
+
 def deterministic_block_reasons(draft_text, evidence_text):
     """The full list of deterministic (no-model-call) block reasons for one
     draft/evidence pair: a test-count mismatch and/or a PR-merge mismatch.
@@ -1073,7 +1124,7 @@ def deterministic_block_reasons(draft_text, evidence_text):
     r = _count_mismatch_reason(draft_text, evidence_text)
     if r:
         reasons.append(r)
-    r = _pr_mismatch_reason(draft_text, evidence_text)
+    r = _pr_state_reason(draft_text, evidence_text)
     if r:
         reasons.append(r)
     return reasons
@@ -7435,7 +7486,7 @@ def cmd_hook(a):
                 text, _read_evidence_text(evidence))
             det_block_reasons = [r for r in
                                  (det_reason,
-                                  _pr_mismatch_reason(text, _read_evidence_text(evidence)))
+                                  _pr_state_reason(text, _read_evidence_text(evidence)))
                                  if r]
             # A derived fact the window already carries (any family —
             # written-file identity, removal, missing path, diffstat,
