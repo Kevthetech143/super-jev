@@ -937,6 +937,52 @@ set's l41, l43 and l45 (all lies, all written-file), 0 truths newly blocked
 in any of the three sets — `skills/super-jev/tests/replay_fact_block_sweep.py`
 reproduces this.
 
+## OVERCLAIMS arm — the receipt-turn fix (2026-09-18)
+
+`ops/gate-adjudication-20260918.md` hand-adjudicated every live `hook gate`
+block reachable in a real session transcript — not a bench, not a replay —
+matching each one against the actual draft and evidence the agent had at
+the time. This fix addresses one mechanism the adjudication found: a
+tool-free current turn (`window_meta["current_turn_empty"]`) whose reply
+correctly restates a result from the *previous* turn's own tool activity.
+
+**The receipt is one turn old.** A tool ran, the lead replied, got a
+follow-up question, and answered from that same receipt — the follow-up
+turn ran no tools of its own, but the reply is a correct restatement of
+something the window's own previous-turn block already carries. The judge
+still scored some of these OVERCLAIMS because nothing in the window said
+"this previous-turn material is what the current turn's claim is *about*"
+— it just looked like unlabelled history. When the current turn is
+tool-free, the most recent previous turn that ran its own tools (and is
+still kept in the assembled window; see `prev_turn_detail` from
+`_derive_evidence_text_from_transcript`) is now named in a new DERIVED
+FACTS sentence: `RECEIPT TURN: the current turn ran no tools of its own;
+turn -N (see [previous turn -N] below) is the most recent turn that did,
+and counts as this reply's receipt, not out-of-window material.` No
+previous turn ran tools (receipts-only, or nothing at all) — no fact,
+window unchanged. See `_receipt_turn_index` and `_receipt_turn_extra_fact`
+in `superjev.py`, and `compose_window_with_facts`'s `extra_facts`
+parameter, which lets a caller add a fact computed from `window_meta`
+(something `derive_window_facts` cannot see on its own, since it only ever
+reads the window text and the draft) ahead of the same no-drop guarantee
+every other derived fact gets. See
+`skills/super-jev/tests/test_superjev.py`,
+`test_window_cap_trims_normally_when_a_previous_turn_is_the_receipt_turn`
+and `test_fact_window_lines_label_unchanged_by_receipt_turn_fix`.
+
+This fix is additive to the window/judge path only — it does not touch the
+deterministic count/PR/`CONTRADICTED_BY_FACT` arms, and it is not gated
+behind `SUPERJEV_DERIVED_FACTS` (a correctness fix to what the judge sees,
+not part of the optional derived-facts feature). It addresses only the
+case above: a tool-free current turn whose receipt sits in the previous
+turn's own window block. It does not address a false block whose receipt
+lies further back than the previous turn, a block that was really the
+deterministic PR-state arm's job, or a false block on a turn that itself
+ran a tool. The adjudication's other findings — the per-claim
+NOT_SUPPORTED/CONTRADICTED arm and SELF_CONTRADICTORY — are not fixed
+here; see "Judge-advisory mode" below for `weak` mode, the way to keep
+OVERCLAIMS blocking while demoting those two arms to advisory.
+
 ## The latency budget — one call, one cap, one clock (2026-09-18)
 
 A Stop event used to have no bound on how long it could take, and on a heavy
@@ -1277,7 +1323,7 @@ one seat sharing this ledger stays visible as a whole and per-bot both.
 
 ## Judge-advisory mode
 
-`SUPERJEV_GATE_JUDGE_ADVISORY=1` is a third, opt-in failsafe next to the
+`SUPERJEV_GATE_JUDGE_ADVISORY` is a third, opt-in failsafe next to the
 stop_hook_active one above, for the same underlying worry from a different
 angle: the judge's own confidence score (OVERCLAIMS, or under
 `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm) is a model
@@ -1286,19 +1332,44 @@ wrong in a way that stops a true turn for no reason. Turning this on tells
 the gate: when a block's only reasons are the judge's, print the reason and
 let the turn end anyway, rather than stopping it.
 
-It never weakens the deterministic side of the gate. A block that carries
-even one deterministic reason — a drafted test/claim count the evidence
-contradicts, a PR-state mismatch, or a `CONTRADICTED_BY_FACT` fact sentence
-(literal string/int work over text that was already in the window, no model
-call involved) — blocks exactly as it does with the env unset, exit 2, no
-exceptions. Only a block whose reasons are judge-only is demoted.
+Two levels, granular since 2026-09-18b (`ops/gate-adjudication-20260918.md`,
+the hand adjudication of every live gate block on the primary's own seat):
+
+- **`1`** — every judge arm is advisory: OVERCLAIMS, and under
+  `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm too. The
+  original, unconditional behavior.
+- **`weak`** — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
+  secondary arm) and SELF_CONTRADICTORY are advisory; **OVERCLAIMS still
+  blocks**. The adjudication found OVERCLAIMS the only judge arm with a
+  positive live record on the primary's seat, while the per-claim arm and
+  SELF_CONTRADICTORY were not. `weak` is the setting for a session that
+  wants the judge's high-confidence catches kept live while giving up on
+  everything else it flags. Under the default v3 rule the secondary arm
+  never produces a block reason on its own in the first place (gate v4
+  demoted it to advisory-only, see below), so `weak` only changes anything
+  live under `SUPERJEV_RULE=v2`.
+- **`0`/unset** — unchanged: off, every block reason (judge or
+  deterministic) blocks exactly as it does today.
+
+It never weakens the deterministic side of the gate at any level. A block
+that carries even one deterministic reason — a drafted test/claim count the
+evidence contradicts, a PR-state mismatch, or a `CONTRADICTED_BY_FACT` fact
+sentence (literal string/int work over text that was already in the window,
+no model call involved) — blocks exactly as it does with the env unset,
+exit 2, no exceptions. Only a block whose reasons are judge-only, and (under
+`weak`) whose judge reasons are all outside OVERCLAIMS, is demoted.
 
 When that happens, `hook gate` prints the same reason line a real block
 would, prefixed `super-jev gate (judge advisory, not blocked):` instead of
 `super-jev gate blocked this`, and exits 0 instead of 2 — the turn is
 allowed to end. The catch ledger records the decision as `advisory-judge`
-rather than `block`, so `catch report` can count how many turns this mode
-let through that the gate would otherwise have stopped, on their own line:
+rather than `block`, with a `judge-advisory-mode:1` or
+`judge-advisory-mode:weak` tag appended to its `reasons` alongside the
+usual `key VERDICT score` strings (which already name the arm — OVERCLAIMS,
+NOT_SUPPORTED, CONTRADICTED — that fired), so a read of the ledger later
+can tell which mode demoted the block without re-deriving it from the
+session's own env. `catch report` can count how many turns this mode let
+through that the gate would otherwise have stopped, on their own line:
 
     judge advisories: N
 

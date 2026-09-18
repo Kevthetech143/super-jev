@@ -4,6 +4,36 @@
 
 No version bump.
 
+- **OVERCLAIMS arm — the receipt-turn fix.** A hand adjudication of every
+  live `hook gate` block on the primary's own seat
+  (`ops/gate-adjudication-20260918.md`) found one live false-block
+  mechanism this fix addresses: a tool-free current turn whose reply is a
+  correct restatement of a result from the *previous* turn's own tool
+  activity was read as having no in-window evidence. The most recent
+  previous turn that ran tools is now named in a new DERIVED FACTS
+  sentence (`RECEIPT TURN: ...`) whenever the current turn is tool-free
+  but the window carries a receipt from that previous turn — its
+  `[previous turn -N]` section header is left exactly as-is, pointed at
+  from the DERIVED FACTS sentence rather than rewritten. See
+  `_receipt_turn_index`/`_receipt_turn_extra_fact`, and
+  `compose_window_with_facts`'s `extra_facts` parameter, and docs/hooks.md,
+  "OVERCLAIMS arm — the receipt-turn fix". This addresses the tool-free-
+  turn-with-in-window-receipt case only: it does not address a false block
+  whose receipt lies beyond the previous-turn window, a block that was
+  really the deterministic PR-state arm's job, or a false block on a turn
+  that itself ran a tool.
+
+- **Judge-advisory mode, granular.** `SUPERJEV_GATE_JUDGE_ADVISORY` now
+  also accepts `weak`, alongside the existing `1`: `weak` demotes only the
+  per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's secondary arm) and
+  SELF_CONTRADICTORY to advisory — OVERCLAIMS still blocks, matching the
+  adjudication's finding that OVERCLAIMS is the only judge arm with a
+  positive live record while the secondary arm and SELF_CONTRADICTORY are
+  not. `1` (all judge arms advisory)
+  and `0`/unset (off) are unchanged. The catch ledger's `advisory-judge`
+  decision now carries a `judge-advisory-mode:1`/`judge-advisory-mode:weak`
+  tag in its `reasons`, alongside the existing `key VERDICT score` strings
+  that already name the arm. See docs/hooks.md, "Judge-advisory mode".
 - **`bot`/`origin` on every ledger record.** Both the call ledger
   (`calls.jsonl`) and the catch ledger (`catches.jsonl`) now tag every
   record with `bot` (`CLAW4MAC_BOT_ID` or `CLAUDE_BOT_ID` from the
