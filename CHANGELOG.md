@@ -6,20 +6,45 @@ No version bump.
 
 - **The catch ledger.** A new, separate JSONL file (`SUPERJEV_CATCH_LEDGER`,
   default `catches.jsonl` next to the call ledger) records one small line
-  per gate/verify hook decision — id, door, decision, the same reason
-  strings `--explain` prints, a 240-char redacted excerpt of the draft or
-  report, window size, and two blank fields (`tag`, `note`) for a human.
-  Writing it is best-effort and never affects the decision or exit code it
-  is reporting on. New `superjev.py catch` subcommand: `list [--since 24h]
-  [--untagged]`, `tag <id> fair|false|miss "note"`, and `report [--since
-  7d]`, which prints exactly three numbers (fair catches, false stops,
-  misses) plus an untagged count. Tagging a record `false` or `miss` writes
-  a bench case file (`SUPERJEV_BENCH_OUT`, default `bench-cases/` next to
-  the catch ledger) in the shape the existing replay scripts consume;
-  opt-in `SUPERJEV_CATCH_KEEP_PAYLOAD=1` also saves a redacted copy of the
-  gate's hook payload under `payloads/<id>.json` at decision time, since the
-  catch ledger itself never keeps more than the 240-char excerpt. See
-  `docs/hooks.md`, "The catch ledger".
+  per gate/verify/prompt-verify hook decision — id, door, decision, the
+  same reason strings `--explain` prints, a redacted excerpt of the draft
+  or report, window size, and two blank fields (`tag`, `note`) for a
+  human. The excerpt is sliced to 4096 chars, then redacted for
+  secrets/credentials, emails, US phone numbers, SSN-shaped digit strings
+  and 13-19 digit card numbers (catch-ledger-only patterns, never applied
+  to the gate/verify evidence window itself), then sliced to 240 chars.
+  Every real decision now gets a record, including the previously-silent
+  `hook verify --from-file`, per-teammate `hook prompt-verify` verdicts,
+  and the two budget-exceeded paths (recorded as `unchecked`, reason
+  `budget-exceeded`); the stop_hook_active second-pass demotion records as
+  its own decision, `advisory-forced`, not `advisory`. Writing a record is
+  best-effort (any Exception, not just OSError) and never affects the
+  decision or exit code it is reporting on.
+
+  New `superjev.py catch` subcommand: `list [--since 24h] [--untagged]`,
+  `tag <id> fair|false|miss "note"`, and `report [--since 7d]`, which
+  prints fair catches / false stops / misses / untagged plus a separate
+  **blocks suppressed** count (`advisory-forced` records — a real block
+  demoted to advisory, never counted as a false stop or a miss). `tag`
+  refuses (exit 2) a tag that contradicts its record's own decision
+  (`false`/`fair` only fit `block`/`advisory-forced`; `miss` only fits
+  `allow`/`advisory`/`unchecked`). An unparseable `--since` refuses (exit
+  2) rather than silently showing all time; a record with no parseable
+  timestamp is excluded from a real `--since` window and counted on its
+  own `undated: N` line.
+
+  Tagging a record `false` or `miss` appends one **catch case** —
+  `{id, ts, door, kind, draft, payload_path, reasons, note}` — to a single
+  JSON array file (`SUPERJEV_BENCH_OUT`, default `catch-cases.json` next
+  to the catch ledger). This is a new, catch-ledger-specific shape, not
+  the existing `gate-bench-*` case shape those replay scripts read — a
+  catch case has no transcript anchor to replay against. New
+  `skills/super-jev/tests/replay_catch_cases.py` reads it directly and,
+  for any case with a `payload_path` (opt-in `SUPERJEV_CATCH_KEEP_PAYLOAD=1`
+  saved a redacted hook-payload copy at decision time), re-runs the
+  original gate/verify decision offline through
+  `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD`. See `docs/hooks.md`, "The
+  catch ledger".
 
 - **Fetch none gate: floor + margin.** The none gate's confidence floor drops from 0.80 to a new default of **0.60**, and a new **margin** check joins it (`--margin N`, default **0.10**): the gate now also asks a clarifying question when the gap between the top pick's confidence and the runner-up's is below the margin, even when the top pick alone clears the floor. Rationale, in words: a confident-looking top-1 sitting in a crowded field — a runner-up almost as confident — is still a guess, just a confident-sounding one; the floor alone can't tell "clearly the best answer" apart from "the least-bad of two nearly-tied answers," and the margin is what catches the second case. An offline replay of saved live fetch rankings found the floor+margin pair served more correct top picks with fewer wrong serves than the old floor-only rule, described here in words rather than as benchmarked numbers. Both are overridable via `--floor`/`--margin` and the `SUPERJEV_FETCH_FLOOR`/`SUPERJEV_FETCH_MARGIN` env vars (a CLI flag always wins over its env var); the old floor-only behaviour is still reachable with `--floor 0.80 --margin 0`. `applyNoneGate` takes a third `margin` parameter; new `topMargin` export computes the gap (a lone top pick with no runner-up counts its own confidence as its margin). The `noMatch` decision (nothing beat "none of these") is unchanged and still takes precedence over both checks.
 

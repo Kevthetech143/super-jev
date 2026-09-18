@@ -1083,55 +1083,106 @@ The ledger above is a machine's record of what ran. The catch ledger is a
 second, much smaller file next to it, built for a human to read: one line
 per gate/verify decision, with room to say whether that decision was right.
 
-**What a record is.** Every time the Stop-hook gate or the PostToolUse
-verify hook reaches a real decision — allow, block, advisory, or the
-no-tool-evidence "unchecked" path — it appends one line to
-`SUPERJEV_CATCH_LEDGER` (default: next to the call ledger, as
-`catches.jsonl`): a short id, the timestamp, which door, the decision, the
-same reason strings `--explain` would print, a 240-character excerpt of the
-draft or report (redacted through the same guard that protects the evidence
-window — see "The evidence guard" above), how big the evidence window was,
-how long the check took, and two empty fields, `tag` and `note`, waiting for
-a human. **The full draft, report, or evidence window is never written
-here** — only the short redacted excerpt. Writing this record is
-best-effort: if the path is not writable, one line goes to stderr and the
+**What a record is.** Every time the Stop-hook gate, the PostToolUse verify
+hook (both a live hook firing and `hook verify --from-file`), or `hook
+prompt-verify` (one record per teammate-message verdict) reaches a real
+decision — allow, block, advisory, the stop_hook_active second pass
+("advisory-forced" — see below), or the no-tool-evidence/budget-exceeded
+"unchecked" path — it appends one line to `SUPERJEV_CATCH_LEDGER` (default:
+next to the call ledger, as `catches.jsonl`): a short id, the timestamp,
+which door, the decision, the same reason strings `--explain` would print, a
+240-character excerpt of the draft or report, how big the evidence window
+was, how long the check took, and two empty fields, `tag` and `note`,
+waiting for a human. **The full draft, report, or evidence window is never
+written here** — only the short redacted excerpt.
+
+The excerpt's redaction is NOT the same guard that protects the evidence
+window. The catch ledger is text a human reads and tags by hand, so it gets
+a wider net: the input is first sliced to 4096 characters, redacted for
+secrets/credentials AND emails (the evidence-window guard leaves emails
+alone by default), then, catch-ledger-only, also redacted for US phone
+numbers, SSN-shaped 3-2-4 digit strings, and 13-19 digit card numbers — then
+sliced to the final 240 characters. None of those three extra patterns ever
+touch the evidence window itself, only this excerpt and the opt-in saved
+payload below.
+
+Writing this record is best-effort: if the path is not writable (or
+anything else about the write fails), one line goes to stderr and the
 gate/verify decision that already happened is completely unaffected — the
 catch ledger is a report on a decision, never part of making one.
+
+**What still writes no record, on purpose.** Every fail-open path in this
+file — bad/empty/non-JSON stdin, no usable text field, a non-`gate`/
+`non-verify`/`non-prompt-verify` door, a non-Agent tool call, a spawn dict
+or launch-ack shape that never reaches a verdict, the outer
+unexpected-exception catch — stays unrecorded. Nothing there ever reached a
+real decision, so there is nothing to tag.
 
 **Tagging.** `superjev.py catch list [--since 24h] [--untagged]` prints one
 line per record so you can find the id. `superjev.py catch tag <id>
 fair|false|miss "why"` records a human verdict on that one decision:
 
 - `fair` — the block was right. A real overclaim or contradiction, caught.
-- `false` — the block was wrong. The draft was actually true.
+  Only fits a record whose decision is `block` or `advisory-forced`.
+- `false` — the block was wrong. The draft was actually true. Only fits
+  `block` or `advisory-forced`.
 - `miss` — an allow let something false through. It should have blocked.
+  Only fits `allow`, `advisory`, or `unchecked`.
 
-**The three numbers.** `superjev.py catch report [--since 7d]` prints
-exactly three counts plus how many records are still untagged:
+A tag that contradicts its record's own decision (e.g. `false` against an
+`allow`) is refused, exit 2, with a plain message — never silently accepted.
+
+**`--since`.** An unparseable `--since` value (anything that isn't
+`<N>m`/`<N>h`/`<N>d`) is refused, exit 2 — it never silently falls back to
+"all time". A record with a missing or unparseable timestamp is excluded
+from a real `--since` window (never silently treated as "recent enough to
+keep") and counted on its own `undated: N` line instead.
+
+**The numbers.** `superjev.py catch report [--since 7d]` prints:
 
     fair catches: N
     false stops: N
     misses: N
     untagged: N
+    blocks suppressed: N
+    undated: N          (only printed when --since is given)
 
-That is the whole scoreboard: how often the gate is catching something real,
-how often it is wrongly getting in the way, and how often something false
-gets past it. Untagged is not a fourth verdict, just a reminder of how much
-of the ledger nobody has judged yet.
+Fair/false/miss/untagged is the same scoreboard as before: how often the
+gate is catching something real, how often it is wrongly getting in the
+way, and how often something false gets past it. **Blocks suppressed** is a
+different thing entirely — a count of `advisory-forced` records, a real
+block that the stop_hook_active second pass demoted to advisory-only rather
+than blocking twice. Nothing there was judged right or wrong; it is not
+folded into false stops or misses, because neither is what happened.
 
-**Auto-bench.** Tagging a record `false` or `miss` writes a bench case file
-to `SUPERJEV_BENCH_OUT` (default: `bench-cases/` next to the catch ledger),
-in the same shape the existing replay scripts consume — a `truth` case for a
-wrongly-blocked draft, a `lie` case for a wrongly-allowed one. Say plainly
-what that file does and does not carry: its `draft` field is only the catch
-ledger's own 240-character redacted excerpt, because that is all the catch
-ledger ever kept. The full text is gone unless `SUPERJEV_CATCH_KEEP_PAYLOAD=1`
-was set at decision time, which opts in to also saving a redacted copy of
-the whole hook payload under `payloads/<id>.json` — off by default, because
-the catch ledger's whole point is to not carry the full window. A bench case
-made without that env var set is good for a title, a decision, and a tag;
-turn the env var on before the block you want to replay later if you also
-want the fuller text.
+**Catch cases (not bench cases).** Tagging a record `false` or `miss`
+appends one **catch case** to a single JSON array file,
+`SUPERJEV_BENCH_OUT` (default: `catch-cases.json` next to the catch
+ledger) — `{id, ts, door, kind (truth|lie), draft, payload_path, reasons,
+note}`. This is deliberately **not** shaped like the existing
+`gate-bench-*` case files those scripts (`replay_gate_bench.py`,
+`replay_fact_block_sweep.py`) read: a catch case has no transcript anchor
+at all — no `source_offset`, `source_idx`, `transcript_path`, or `bot` —
+because a live gate/verify hook decision was never made against one named
+spot in a recorded transcript the way a bench case is. Pretending it fit
+that shape would silently break both of those scripts' replay logic.
+
+Use `skills/super-jev/tests/replay_catch_cases.py` instead, which reads a
+catch-cases.json file directly and, for every case that carries a
+`payload_path` (`SUPERJEV_CATCH_KEEP_PAYLOAD=1` was set at decision time —
+see below), re-runs the same `hook gate`/`hook verify` decision offline
+through `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` — a fake/canned door for
+a dry run, never a live call from the script itself — and prints a
+per-case decision plus a lies-blocked/truths-blocked summary. A case with
+no `payload_path` is printed as "no payload — cannot replay" and left out
+of that summary: without the saved payload, a catch case is only ever good
+for a title, a decision, and a tag, never a full replay, because the catch
+ledger itself never keeps more than the 240-character excerpt.
+
+`SUPERJEV_CATCH_KEEP_PAYLOAD=1` opts in, at decision time, to also saving a
+redacted copy of the whole hook payload under `payloads/<id>.json` — off by
+default, because the catch ledger's whole point is to not carry the full
+window. Turn it on before the block you want to be able to replay later.
 
 ## What it costs
 

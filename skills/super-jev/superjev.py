@@ -203,6 +203,38 @@ def redact(text, redact_emails=False):
     return redact_counted(text, redact_emails)[0]
 
 
+# --------------------------------------------------- catch-ledger-only redaction
+#
+# The patterns below fire ONLY on the catch-ledger path (the 240-char draft
+# excerpt and the opt-in saved payload copy) — never on the gate/verify
+# evidence window itself, which stays governed by redact()/redact_counted()
+# above unchanged. The catch ledger is customer-facing text a human tags by
+# hand and reads later, so it gets the wider net: emails (redact() called
+# with redact_emails=True) plus US phone numbers, SSN-shaped 3-2-4 digit
+# strings, and 13-19 digit card numbers (spaces or dashes allowed).
+_CATCH_REDACT_PATTERNS = (
+    ("card-number", r"\b(?:\d[ \-]?){13,19}\b"),
+    ("phone", r"\b(?:\+?1[ \-.]?)?\(?\d{3}\)?[ \-.]\d{3}[ \-.]\d{4}\b"),
+    ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
+)
+_COMPILED_CATCH_REDACT = tuple((k, re.compile(p)) for k, p in _CATCH_REDACT_PATTERNS)
+
+
+def _catch_redact(text):
+    """The redaction used ONLY by the catch ledger (draft excerpt + saved
+    payload) — never applied to the gate/verify evidence window. Runs the
+    general redact() with redact_emails=True (secrets, credentials, plus
+    emails), then, catch-ledger-only, redacts US phone numbers, SSN-shaped
+    3-2-4 digit strings, and 13-19 digit card numbers (spaces/dashes
+    allowed). Never raises: an empty/None input returns ""."""
+    if not text:
+        return text or ""
+    out = redact(str(text), redact_emails=True)
+    for kind, rx in _COMPILED_CATCH_REDACT:
+        out = rx.sub(f"[REDACTED:{kind}]", out)
+    return out
+
+
 class GuardTally:
     """Running counters accumulated across one door call: how many paths
     were skipped and how many redactions were made, for the `guard`
@@ -1775,26 +1807,34 @@ def catch_ledger_append(entry):
     already final and returned by the caller: a broken or unwritable catch
     ledger path must never change what a hook does, only whether this
     optional record of it gets written. A write failure prints one line to
-    stderr rather than raising or failing silently."""
+    stderr rather than raising or failing silently — this catches any
+    Exception, not just OSError (a bad entry that json.dumps chokes on, a
+    permissions error, anything at all), because this call sits strictly
+    after a real decision has already been returned and must never
+    propagate."""
     entry.setdefault("id", uuid.uuid4().hex[:10])
     try:
         CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError as exc:
+    except Exception as exc:
         print(f"super-jev: could not write catch ledger at {CATCH_LEDGER_PATH}: {exc}",
               file=sys.stderr)
     return entry["id"]
 
 
 def _catch_excerpt(text):
-    """First 240 chars of a draft/report, redacted the same way any
-    evidence window is (see redact()) — no secret, credential or fleet
-    customer text ever lands in the catch ledger, because this excerpt is
-    the only piece of the original text the ledger keeps at all."""
+    """The catch ledger's excerpt: the input is first sliced to 4096 chars
+    (bounding how much text _catch_redact ever has to scan), THEN redacted
+    through _catch_redact — secrets/credentials, emails, US phone numbers,
+    SSN-shaped digit strings and 13-19 digit card numbers — and finally
+    sliced to the 240 chars actually kept. No secret, credential, email,
+    phone number, SSN-shaped string or card number ever lands in the catch
+    ledger, because this excerpt is the only piece of the original text the
+    ledger keeps at all."""
     if not text:
         return ""
-    return redact(str(text))[:240]
+    return _catch_redact(str(text)[:4096])[:240]
 
 
 def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
@@ -1849,7 +1889,7 @@ def _catch_save_payload(catch_id, payload):
         out_dir = CATCH_LEDGER_PATH.parent / "payloads"
         out_dir.mkdir(parents=True, exist_ok=True)
         raw = json.dumps(payload, ensure_ascii=False, indent=2)
-        redacted = redact(raw)
+        redacted = _catch_redact(raw)
         out_path = out_dir / f"{catch_id}.json"
         out_path.write_text(redacted, encoding="utf-8")
         return str(out_path)
@@ -1857,66 +1897,105 @@ def _catch_save_payload(catch_id, payload):
         return None
 
 
-def _catch_bench_out_dir():
-    """SUPERJEV_BENCH_OUT, if set, else <catch ledger dir>/bench-cases/."""
+def _catch_cases_path():
+    """SUPERJEV_BENCH_OUT, if set, else <catch ledger dir>/catch-cases.json
+    — ONE JSON array file that `catch tag false|miss` appends one "catch
+    case" to. NOT the old per-id bench-case-file shape (that never fit
+    this data — see _write_catch_case's docstring for why), and NOT the
+    old default directory name (bench-cases/); the default is now a single
+    file, catch-cases.json, next to the catch ledger."""
     override = os.environ.get("SUPERJEV_BENCH_OUT")
     if override:
         return Path(override).expanduser()
-    return CATCH_LEDGER_PATH.parent / "bench-cases"
+    return CATCH_LEDGER_PATH.parent / "catch-cases.json"
 
 
-def _write_bench_case(record):
-    """Write a bench case file for a catch-ledger record just tagged
-    "false" (a block that was wrong — the draft was actually true) or
-    "miss" (an allow that let a lie through). Shape follows the existing
-    replay scripts' cases.json (see
-    super-jev-experiments/gate-bench-20260918/cases2.json): id, kind
-    (truth/lie), flavor, draft, evidence_note.
+def _catch_payload_path(rec_id):
+    return CATCH_LEDGER_PATH.parent / "payloads" / f"{rec_id}.json"
 
-    Plainly, what this file DOES and DOES NOT contain: `draft` here is only
-    the catch ledger's own 240-char redacted excerpt, never the full
-    original text or evidence window — the catch ledger never stored that.
-    If SUPERJEV_CATCH_KEEP_PAYLOAD was on at decision time, `payload_path`
-    points at the saved (redacted) hook payload for this same id, which is
-    the only place the fuller evidence window might still exist; without
-    it, this case file is good for a title and a excerpt, not a full
-    replay."""
+
+def _load_full_payload_draft(rec_id):
+    """If SUPERJEV_CATCH_KEEP_PAYLOAD was on when this record was made, the
+    saved (redacted) hook payload may carry the full draft/report text
+    under one of a few keys a real gate/verify hook payload uses. Returns
+    None (never raises) when there is no payload copy, it cannot be read
+    or parsed, or none of the known keys carried a non-empty string — the
+    caller then falls back to the catch ledger's own 240-char excerpt,
+    which is all that was ever kept in that case."""
+    payload_path = _catch_payload_path(rec_id)
+    if not payload_path.exists():
+        return None
+    try:
+        data = json.loads(payload_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("last_assistant_message", "draft", "report", "text", "prompt"):
+        val = data.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
+def _write_catch_case(record):
+    """Append ONE "catch case" to the catch-cases array file (see
+    _catch_cases_path) for a catch-ledger record just tagged "false" (a
+    block that was wrong — the draft was actually true) or "miss" (an
+    allow that let a lie through).
+
+    This is deliberately NOT a "bench case" in the gate-bench sense, and
+    is never claimed to be one. A catch record has no transcript anchor —
+    no source_offset/source_idx/transcript_path/bot — so it can never
+    satisfy replay_gate_bench.py or replay_fact_block_sweep.py, which both
+    read one JSON array of cases shaped that way. Use
+    skills/super-jev/tests/replay_catch_cases.py instead, which reads
+    THIS file's own shape and, for any case that carries a payload_path,
+    can re-run the original gate/verify decision offline through
+    SUPERJEV_GATE_CMD/SUPERJEV_VERIFY_CMD.
+
+    `draft` here is the FULL draft/report text when a payload copy exists
+    (SUPERJEV_CATCH_KEEP_PAYLOAD was on at decision time — see
+    _load_full_payload_draft) — otherwise it falls back to the catch
+    ledger's own 240-char redacted excerpt, which is all that was ever
+    kept. Either way this is the same catch-ledger redaction (see
+    _catch_redact), never the raw original text."""
     tag = record.get("tag")
     # false = a block was wrong, i.e. the blocked draft was actually TRUE.
     # miss = an allow let a lie through, i.e. the allowed draft was a LIE.
     kind = "truth" if tag == "false" else "lie"
-    out_dir = _catch_bench_out_dir()
     rec_id = record.get("id", "")
-    payload_path = CATCH_LEDGER_PATH.parent / "payloads" / f"{rec_id}.json"
+    payload_path = _catch_payload_path(rec_id)
+    full_draft = _load_full_payload_draft(rec_id)
+    draft = _catch_redact(full_draft) if full_draft is not None else record.get(
+        "draft_excerpt", "")
     case = {
         "id": rec_id,
+        "ts": record.get("ts"),
+        "door": record.get("door"),
         "kind": kind,
-        "flavor": None,
-        "draft": record.get("draft_excerpt", ""),
-        "evidence_note": (
-            "catch-ledger export: 'draft' is only the ledger's own 240-char "
-            "redacted excerpt, not the full original draft/report or "
-            "evidence window — see payload_path for the saved (redacted) "
-            "hook payload if SUPERJEV_CATCH_KEEP_PAYLOAD was on when this "
-            "record was made, else that fuller text was never kept."),
-        "source": {
-            "catch_ledger_id": rec_id,
-            "door": record.get("door"),
-            "decision": record.get("decision"),
-            "ts": record.get("ts"),
-            "tag": tag,
-            "note": record.get("note"),
-        },
+        "draft": draft,
         "payload_path": str(payload_path) if payload_path.exists() else None,
+        "reasons": record.get("reasons") or [],
+        "note": record.get("note"),
     }
+    cases_path = _catch_cases_path()
     try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{rec_id}.json"
-        out_path.write_text(json.dumps(case, ensure_ascii=False, indent=2) + "\n",
+        cases_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = json.loads(cases_path.read_text(encoding="utf-8"))
+            if not isinstance(existing, list):
+                existing = []
+        except (OSError, ValueError):
+            existing = []
+        existing.append(case)
+        tmp_path = cases_path.with_suffix(cases_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + "\n",
                             encoding="utf-8")
-        return str(out_path)
+        os.replace(tmp_path, cases_path)
+        return str(cases_path)
     except OSError as exc:
-        print(f"super-jev: could not write bench case for {rec_id}: {exc}", file=sys.stderr)
+        print(f"super-jev: could not write catch case for {rec_id}: {exc}", file=sys.stderr)
         return None
 
 
@@ -1962,16 +2041,31 @@ def _catch_ts(rec):
 
 
 def _catch_filter_since(records, since_spec):
+    """Returns (kept, undated_count). `since_spec` of None/"" means no
+    filter at all — every record is kept and undated_count is 0. When a
+    real window is applied, a record with a missing or unparseable `ts` is
+    excluded from that window (never silently included, as if it were
+    always "recent") and counted separately in undated_count instead — the
+    caller reports that count on its own line rather than folding it into
+    either side of the window.
+
+    Callers must validate `since_spec` themselves before calling this (see
+    `_parse_since`) — an unparseable-but-non-empty spec is a caller error,
+    reported as exit 2, not silently treated as "no filter" here."""
     delta = _parse_since(since_spec)
     if delta is None:
-        return records
+        return records, 0
     cutoff = datetime.now(timezone.utc) - delta
     out = []
+    undated = 0
     for rec in records:
         ts = _catch_ts(rec)
-        if ts is None or ts >= cutoff:
+        if ts is None:
+            undated += 1
+            continue
+        if ts >= cutoff:
             out.append(rec)
-    return out
+    return out, undated
 
 
 def _rewrite_catch_records(records):
@@ -2003,21 +2097,49 @@ def cmd_catch(a):
     return refuse("catch: no action — use list, tag or report")
 
 
+def _catch_refuse2(line):
+    """Same shape as refuse(), but exit 2 — used only by the two `catch`
+    validation refusals (--since, tag-vs-decision) that must be
+    distinguishable from the generic REFUSED (5) other `catch` errors
+    already use."""
+    print(f"super-jev: {line}", file=sys.stderr)
+    return 2
+
+
 def _cmd_catch_list(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse2(f"catch list: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
     records = _catch_records()
-    records = _catch_filter_since(records, getattr(a, "since", None))
+    records, undated = _catch_filter_since(records, since)
     if getattr(a, "untagged", False):
         records = [r for r in records if r.get("tag") is None]
     if not records:
         print("catch list: no records")
-        return 0
-    for rec in records:
-        reasons = rec.get("reasons") or []
-        first_reason = reasons[0] if reasons else ""
-        tag = rec.get("tag") or "-"
-        print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
-              f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+    else:
+        for rec in records:
+            reasons = rec.get("reasons") or []
+            first_reason = reasons[0] if reasons else ""
+            tag = rec.get("tag") or "-"
+            print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+    if since and undated:
+        print(f"catch list: {undated} undated record(s) excluded from the --since window")
     return 0
+
+
+# Which recorded `decision` a given tag value is allowed to land on — a
+# tag that contradicts the record it names is refused rather than silently
+# accepted (see _cmd_catch_tag): "false"/"fair" only make sense against a
+# real or forced block (the thing being judged right or wrong IS a block),
+# "miss" only against a decision that let the reply through unblocked.
+_TAG_ALLOWED_DECISIONS = {
+    "fair": ("block", "advisory-forced"),
+    "false": ("block", "advisory-forced"),
+    "miss": ("allow", "advisory", "unchecked"),
+}
 
 
 def _cmd_catch_tag(a):
@@ -2030,33 +2152,53 @@ def _cmd_catch_tag(a):
     matched = None
     for rec in records:
         if rec.get("id") == catch_id:
-            rec["tag"] = value
-            rec["note"] = note
             matched = rec
             break
     if matched is None:
         return refuse(f"catch tag: no catch-ledger record with id {catch_id!r}")
+    decision = matched.get("decision")
+    allowed = _TAG_ALLOWED_DECISIONS[value]
+    if decision not in allowed:
+        return _catch_refuse2(
+            f"catch tag: {value!r} does not fit a {decision!r} record ({catch_id}) — "
+            f"{value!r} only fits: {'/'.join(allowed)}")
+    matched["tag"] = value
+    matched["note"] = note
     if not _rewrite_catch_records(records):
         return refuse(f"catch tag: could not persist the tag for {catch_id!r}")
-    bench_path = None
+    case_path = None
     if value in ("false", "miss"):
-        bench_path = _write_bench_case(matched)
+        case_path = _write_catch_case(matched)
     print(f"catch tag: {catch_id} -> {value}" +
-          (f" (bench case: {bench_path})" if bench_path else ""))
+          (f" (catch case: {case_path})" if case_path else ""))
     return 0
 
 
 def _cmd_catch_report(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse2(f"catch report: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
     records = _catch_records()
-    records = _catch_filter_since(records, getattr(a, "since", None))
+    records, undated = _catch_filter_since(records, since)
     fair = sum(1 for r in records if r.get("tag") == "fair")
     false = sum(1 for r in records if r.get("tag") == "false")
     miss = sum(1 for r in records if r.get("tag") == "miss")
     untagged = sum(1 for r in records if r.get("tag") is None)
+    # "advisory-forced" is a would-have-blocked stop_hook_active second pass
+    # (see docs/hooks.md) — reported here as its own line, "blocks
+    # suppressed", never folded into "false stops" or "misses", because it
+    # is neither: nothing was judged wrong, a real block was just demoted
+    # to advisory by the retry itself.
+    suppressed = sum(1 for r in records if r.get("decision") == "advisory-forced")
     print(f"fair catches: {fair}")
     print(f"false stops: {false}")
     print(f"misses: {miss}")
     print(f"untagged: {untagged}")
+    print(f"blocks suppressed: {suppressed}")
+    if since:
+        print(f"undated: {undated}")
     return 0
 
 
@@ -6085,7 +6227,13 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
     pr resolve to anything, there is no evidence source at all — this
     prints an advisory and returns 0 WITHOUT ever calling the verify door,
     rather than running it blind and letting an unrelated old default
-    verdict stand in for "nothing was checked"."""
+    verdict stand in for "nothing was checked". Every REAL verdict this
+    reaches (allow/block/advisory, after the door actually ran) also gets
+    a catch-ledger record, door="verify", the same as a live PostToolUse
+    verify hook — the early fail-open returns above (wrong door, unreadable
+    file, empty file, no evidence source) do not, same as every other
+    fail-open path in this file."""
+    _catch_t0 = time.monotonic()
     if door != "verify":
         msg = "super-jev hook: --from-file is only supported for `hook verify`"
         print(msg, file=sys.stderr)
@@ -6170,9 +6318,12 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
         _print_explain("verify", code, action, flags, claim_rows, evidence, notes,
                        block_reasons)
     note_tail = (" — " + "; ".join(notes)) if notes else ""
+    _catch_payload = {"door": "verify", "source": "from-file", "path": path, "report": text}
     if action == "allow":
         _hook_log(f"verify: allow (exit {code}) [from-file {path!r}]", exit_code=0,
                  flags=flags, hook_mode=False, source="manual")
+        catch_log("verify", "allow", reasons=notes, draft_text=text,
+                 start_time=_catch_t0, payload=_catch_payload)
         return 0
     if action == "block":
         reason = f"super-jev verify blocked this (exit {code})"
@@ -6185,11 +6336,15 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
                  (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else "") +
                  (f" — advisory: {'; '.join(notes)}" if notes else ""),
                  exit_code=2, flags=flags, hook_mode=False, source="manual")
+        catch_log("verify", "block", reasons=block_reasons + notes, draft_text=text,
+                 start_time=_catch_t0, payload=_catch_payload)
         return 2
     advisory = f"super-jev verify advisory (exit {code}){note_tail}"
     print(advisory)
     _hook_log(f"verify: advisory (exit {code}) [from-file {path!r}]{note_tail}",
              exit_code=0, flags=flags, hook_mode=False, source="manual")
+    catch_log("verify", "advisory", reasons=notes, draft_text=text,
+             start_time=_catch_t0, payload=_catch_payload)
     return 0
 
 
@@ -6329,6 +6484,7 @@ def cmd_hook_prompt_verify(a):
             elif derived["pr"]:
                 report_text += f"\n\nRelated pull request: PR #{derived['pr']}"
 
+            _catch_t0 = time.monotonic()
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
             tmp_path = tmp.name
@@ -6360,6 +6516,15 @@ def cmd_hook_prompt_verify(a):
             _hook_log(f"prompt-verify: {teammate_id} — {label} (exit {code}) [{used}]",
                      exit_code=0, skipped=False, flags=flags, hook_mode=True,
                      source="teammate-message")
+            # One catch-ledger record per teammate verdict — CLEAN/READ/REJECT
+            # map onto the same allow/advisory/block vocabulary every other
+            # door's catch record uses.
+            _catch_decision = {"CLEAN": "allow", "READ": "advisory",
+                               "REJECT": "block"}.get(label, "advisory")
+            catch_log("prompt-verify", _catch_decision, reasons=block_reasons,
+                     draft_text=report_text, start_time=_catch_t0,
+                     payload={"door": "prompt-verify", "teammate_id": teammate_id,
+                              "report": report_text})
             any_checked = True
         if not any_checked:
             _hook_log("prompt-verify: no teammate-message block carried a report marker",
@@ -6829,6 +6994,9 @@ def cmd_hook(a):
                       f"budget was spent after {budget.elapsed():.1f}s) — advisory, "
                       "the reply was NOT checked", exit_code=3, skipped=True,
                       reason=BUDGET_EXCEEDED_REASON)
+            catch_log("gate", "unchecked", reasons=[BUDGET_EXCEEDED_REASON],
+                     draft_text=text, window_bytes=None, start_time=_catch_t0,
+                     payload=payload)
             return 3
         tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                           encoding="utf-8")
@@ -6847,9 +7015,6 @@ def cmd_hook(a):
                 pass
         checkable = _door_reports_checkable_claim(code, door_out, door_err)
         source = "last user prompt" if tmp_ev_prompt_found else "no prompt found"
-        _catch_unchecked_flags = _parse_strong_flags(door_out) or []
-        _catch_unchecked_reasons = [f"{f.get('key')} {f.get('verdict')} {f.get('score')}"
-                                    for f in _catch_unchecked_flags]
         if checkable:
             print(UNCHECKED_ADVISORY)
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
@@ -6870,6 +7035,13 @@ def cmd_hook(a):
         notice = _running_unchecked_notice()
         if notice:
             print(notice)
+        # Computed only here, AFTER both the advisory print above and this
+        # notice — a raise from _parse_strong_flags on a malformed door_out
+        # must never be able to swallow either print (see N6/brutal review):
+        # this whole block runs strictly after them now, not before.
+        _catch_unchecked_flags = _parse_strong_flags(door_out) or []
+        _catch_unchecked_reasons = [f"{f.get('key')} {f.get('verdict')} {f.get('score')}"
+                                    for f in _catch_unchecked_flags]
         catch_log("gate", "unchecked", reasons=_catch_unchecked_reasons,
                  draft_text=text, window_bytes=None, start_time=_catch_t0,
                  payload=payload)
@@ -6991,6 +7163,9 @@ def cmd_hook(a):
                 _budget_notice = _running_unchecked_notice()
                 if _budget_notice:
                     print(_budget_notice)
+                catch_log("gate", "unchecked", reasons=[BUDGET_EXCEEDED_REASON],
+                         draft_text=text, window_bytes=None, start_time=_catch_t0,
+                         payload=payload)
                 return 3
             tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
                                               encoding="utf-8")
@@ -7203,7 +7378,7 @@ def cmd_hook(a):
             _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
                      f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
-            catch_log(door, "advisory", reasons=block_reasons, draft_text=text,
+            catch_log(door, "advisory-forced", reasons=block_reasons, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
             _print_ledger_notice_if_gate()
