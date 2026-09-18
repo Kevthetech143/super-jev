@@ -197,11 +197,29 @@ No version bump.
   blocking. The Stop-scan's REJECT label had the identical hole — most
   REJECT labels in the same adjudication ran at `health=thin` — a bare
   exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
-  same catch-ledger shape. In practice this makes the live verify door
-  advisory-only for every report until a worktree is supplied: a real
+  same catch-ledger shape. In practice this made the live verify door
+  advisory-only for every report until a worktree was supplied: a real
   PostToolUse payload carries no `worktree` key and nothing exports
-  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
-  today. See docs/hooks.md, "verify: spawn acks and gather health".
+  `SUPERJEV_HOOK_WORKTREE`, so the gather was thin on every live call.
+  See docs/hooks.md, "verify: spawn acks and gather health".
+
+- **Verify hook: a worktree is now derived from the worker's own report
+  text when the payload and the environment give it none.** Closes the
+  gap the entry above left open — a real PostToolUse(Agent) payload never
+  carries a `worktree` key, so `_evidence_inventory` in the live verify
+  path always saw a thin gather and the door stayed advisory-only. New
+  `_worktree_from_report(text)` scans the report for an absolute
+  `/Users/<user>/...` path and accepts a candidate only when it exists on
+  disk, is a directory, and contains a `.git` entry — a real worktree or
+  repo, not merely a string the worker typed — and never accepts a path
+  matching the module's own evidence-guard blocklist regardless. Source
+  precedence: the payload's own `worktree` key, then
+  `SUPERJEV_HOOK_WORKTREE`, then this report-derived path. Every live
+  `hook verify` run now logs which source won as `worktree_source`
+  (`"payload"` | `"env"` | `"report"` | `"none"`) in the call ledger, so a
+  reviewer can see when the door trusted a path the worker itself named
+  rather than one supplied upstream. See docs/hooks.md, "Correction,
+  2026-09-18 (2)".
 
 - **Two more deterministic-arm false-block sources closed.** The count
   arm's draft-side tokenizer no longer splits a mixed alnum run (a git
