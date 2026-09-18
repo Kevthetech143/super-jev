@@ -190,6 +190,22 @@ No version bump.
   now names what it actually delivers — the configured owner's Telegram,
   via the claw4mac poller — rather than just the file's name. See
   docs/hooks.md.
+- **RECEIPT SHAPES round 4: real Gmail sends produced NO receipt at all.**
+  The live Gmail MCP schema passes `to`/`cc`/`bcc` as ARRAYS of address
+  strings, not a single string, and `reply`/`forward` can carry only
+  `messageId` (their one required field) with no `to` at all when the
+  reply keeps the thread's existing recipients — a genuine send that
+  still names no recipient. List-valued recipients are now accepted
+  (joined verbatim, comma-separated); the camelCase schema keys
+  (`messageId`, `threadId`, `replyThreadId`, `replyToMessageId`) are
+  checked as a fallback, naming the thread a reply/forward addressed when
+  no recipient field is present. `unmark` is added to the read/mutate
+  blocklist (`unmark_message_spam` fuses the prefix onto the verb with no
+  separator, so `mark` alone never matched it). docs/hooks.md also notes
+  the late-Telegram line's two honest limits: a control-less (iMessage)
+  session's poller delivers nothing at all, and even a real delivery
+  happens on the poller's own later tick, not at the moment of the write.
+  See docs/hooks.md.
 
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`

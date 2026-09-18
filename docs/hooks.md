@@ -2414,6 +2414,16 @@ The family emits at most four lines, one per verb class:
   destination the code actually reaches, not a bare file path with a
   session id that names no recipient a reader could recognize.
 
+  That line still has two honest limits worth stating out loud. On a
+  session with no control adapter (an iMessage / control-less session),
+  `_relay_late_telegram_once` truncates the outbox file and delivers
+  nothing at all — the write happened, but the destination the fact
+  names is never reached on that session shape. And even when a control
+  adapter is present, delivery happens on the poller's OWN next tick, not
+  at the moment of the write — the fact is support for "queued for
+  delivery," not proof that the message has actually reached Telegram by
+  the time the draft claims it.
+
   A message-shaped tool's recipient comes from the tool's OWN input field
   only — it is never resolved against a contacts list or cross-checked
   against anything else in the window. For an internal fleet tool that
