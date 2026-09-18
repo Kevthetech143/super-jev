@@ -6897,10 +6897,21 @@ _RS_SEND_SH = re.compile(
 _RS_SEGMENT_BOUNDARY = re.compile(r'&&|\|\||\||;|\n')
 # A message-shaped tool call (Telegram/email/chat) whose recipient the tool
 # input itself names. No recipient field, no line — a "sent" fact is only
-# ever as good as the recipient it names.
+# ever as good as the recipient it names. `to`/`cc`/`bcc` on the live Gmail
+# MCP schema are ARRAYS of address strings, not a single string, so a real
+# `send_message`/`reply`/`forward` call was landing NO line at all until
+# list values were accepted here. Checked first, in order, because a named
+# recipient beats an addressed thread.
 _RS_MSG_TOOL_HINT = re.compile(r'(?i)telegram|gmail|email|slack|discord|message')
-_RS_RECIPIENT_KEYS = ("to", "recipient", "chat_id", "channel", "email", "phone",
-                      "thread_id")
+_RS_RECIPIENT_KEYS = ("to", "recipient", "chat_id", "channel", "email", "phone")
+# `reply`/`forward` on the live Gmail MCP schema can carry ONLY `messageId`
+# (required) or `threadId`, with no `to` at all — a reply-all or a forward
+# that keeps the existing recipients still SENDS, so a fact naming the
+# thread it addressed is real support, checked only when no named
+# recipient was found above. CamelCase, because that is the live schema;
+# `thread_id` is kept for any snake_case caller.
+_RS_THREAD_ID_KEYS = ("messageId", "threadId", "replyThreadId",
+                      "replyToMessageId", "thread_id")
 # The channel hint alone is not enough: a Gmail-shaped tool that only READS
 # or MUTATES (a draft, a label, a thread) is not a send, even when its input
 # happens to carry a recipient-looking field. `create_draft` is the worst
@@ -6910,12 +6921,13 @@ _RS_RECIPIENT_KEYS = ("to", "recipient", "chat_id", "channel", "email", "phone",
 # read/mutate verb in it; matched on lower-cased CamelCase/snake_case WORD
 # tokens, never a substring, so "message" in `create_draft`'s docstring (it
 # has none) or a stray "post" inside a longer word could never sneak a match
-# in either direction.
+# in either direction. `unmark` is its own token (not just `mark`) because
+# `unmark_message_spam` fuses the prefix onto the word with no separator.
 _RS_MSG_SEND_VERBS = frozenset(
     ("send", "reply", "forward", "post", "notify", "message"))
 _RS_MSG_BLOCK_VERBS = frozenset((
     "get", "list", "search", "create", "update", "label", "unlabel",
-    "trash", "untrash", "mark", "apply", "delete", "draft"))
+    "trash", "untrash", "mark", "unmark", "apply", "delete", "draft"))
 _RS_WORD_SPLIT = re.compile(r'[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])')
 
 
@@ -7367,20 +7379,38 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                 # when its own NAME carries a send verb (send/reply/forward/
                 # post/notify/message) and no read/mutate verb (get/list/
                 # search/create/update/label/unlabel/trash/untrash/mark/
-                # apply/delete/draft) — `create_draft` names a real
+                # unmark/apply/delete/draft) — `create_draft` names a real
                 # recipient and sends nothing, and would otherwise read as
                 # support for "sent"/"replied"/"notified"/"told" — AND its
-                # own input names a recipient. No recipient, no line either.
+                # own input names a recipient OR (a reply/forward with no
+                # named recipient, keeping the thread's existing ones) the
+                # thread it addressed. Neither, no line.
                 words = _rs_tool_words(tool)
-                recipient = None
+                recipient, addressed_thread = None, None
                 if (words & _RS_MSG_SEND_VERBS) and not (words & _RS_MSG_BLOCK_VERBS):
                     for key in _RS_RECIPIENT_KEYS:
                         val = inp.get(key)
-                        if isinstance(val, str) and val.strip():
+                        if isinstance(val, list):
+                            items = [v.strip() for v in val
+                                    if isinstance(v, str) and v.strip()]
+                            if items:
+                                recipient = ", ".join(items)[:60]
+                                break
+                        elif isinstance(val, str) and val.strip():
                             recipient = val.strip()[:60]
                             break
+                    if recipient is None:
+                        for key in _RS_THREAD_ID_KEYS:
+                            val = inp.get(key)
+                            if isinstance(val, str) and val.strip():
+                                addressed_thread = val.strip()[:60]
+                                break
                 if recipient:
                     phrase = f"a {tool} send naming {recipient}"
+                    if phrase not in sends:
+                        sends.append(phrase)
+                elif addressed_thread:
+                    phrase = f"a {tool} send addressed to thread {addressed_thread}"
                     if phrase not in sends:
                         sends.append(phrase)
             if tool in _RS_SCHED_TOOLS or (

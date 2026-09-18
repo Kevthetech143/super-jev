@@ -11370,9 +11370,10 @@ def test_receipt_shapes_gmail_create_draft_names_no_sent_line():
     # The worst case: `create_draft` names a REAL recipient and sends
     # nothing whatsoever. Without a verb check this reads as support for
     # "sent"/"replied"/"notified"/"told" on a message that never left.
+    # Real schema: `to` is an ARRAY of address strings.
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "mcp__claude_ai_Gmail__create_draft",
-                              {"to": "kevin@example.com", "subject": "hi",
+                              {"to": ["kevin@example.com"], "subject": "hi",
                                "body": "draft body"}),
                       _rs_result("a", "draft created")])
     assert not any(f.startswith("RECEIPT SHAPE (sent):") for f in facts)
@@ -11381,7 +11382,7 @@ def test_receipt_shapes_gmail_create_draft_names_no_sent_line():
 def test_receipt_shapes_gmail_get_thread_names_no_line_at_all():
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "mcp__claude_ai_Gmail__get_thread",
-                              {"thread_id": "t123"}),
+                              {"threadId": "t123"}),
                       _rs_result("a", "thread contents")])
     assert facts == []
 
@@ -11389,15 +11390,17 @@ def test_receipt_shapes_gmail_get_thread_names_no_line_at_all():
 def test_receipt_shapes_gmail_read_and_mutate_tools_name_no_sent_line():
     # The full blocklist from the live catalog: read and mutate verbs never
     # produce a "sent" line, even when the tool is Gmail-shaped and its
-    # input happens to carry a recipient-looking field.
+    # input happens to carry a recipient-looking or thread-id-looking
+    # field, in the real camelCase schema shape.
     for tool, extra_input in (
-        ("mcp__claude_ai_Gmail__get_thread", {"thread_id": "t1"}),
-        ("mcp__claude_ai_Gmail__trash_thread", {"thread_id": "t1"}),
+        ("mcp__claude_ai_Gmail__get_thread", {"threadId": "t1"}),
+        ("mcp__claude_ai_Gmail__trash_thread", {"threadId": "t1"}),
         ("mcp__claude_ai_Gmail__search_threads", {"query": "to:kevin"}),
-        ("mcp__claude_ai_Gmail__label_thread", {"thread_id": "t1", "label": "x"}),
-        ("mcp__claude_ai_Gmail__mark_thread_spam", {"thread_id": "t1"}),
-        ("mcp__claude_ai_Gmail__apply_sensitive_thread_label", {"thread_id": "t1"}),
-        ("mcp__claude_ai_Gmail__update_draft", {"to": "kevin@example.com"}),
+        ("mcp__claude_ai_Gmail__label_thread", {"threadId": "t1", "label": "x"}),
+        ("mcp__claude_ai_Gmail__mark_thread_spam", {"threadId": "t1"}),
+        ("mcp__claude_ai_Gmail__unmark_thread_spam", {"threadId": "t1"}),
+        ("mcp__claude_ai_Gmail__apply_sensitive_thread_label", {"threadId": "t1"}),
+        ("mcp__claude_ai_Gmail__update_draft", {"to": ["kevin@example.com"]}),
     ):
         facts = _rs_facts([_rs_user_record(),
                           _rs_use("a", tool, extra_input),
@@ -11405,10 +11408,22 @@ def test_receipt_shapes_gmail_read_and_mutate_tools_name_no_sent_line():
         assert not any(f.startswith("RECEIPT SHAPE (sent):") for f in facts), tool
 
 
+def test_receipt_shapes_gmail_unmark_message_spam_names_no_sent_line():
+    # Round-4 addition: `unmark` is fused onto the verb with no separator
+    # (`unmark_message_spam`), so it has to be its own blocklist token, not
+    # just `mark`. Present even alongside a real-looking recipient field.
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__unmark_message_spam",
+                              {"messageId": "m1", "to": ["kevin@example.com"]}),
+                      _rs_result("a", "ok")])
+    assert not any(f.startswith("RECEIPT SHAPE (sent):") for f in facts)
+
+
 def test_receipt_shapes_gmail_send_message_names_the_recipient_verbatim():
+    # Real schema: `to` is an array of address strings.
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "mcp__claude_ai_Gmail__send_message",
-                              {"to": "kevin@example.com", "subject": "hi",
+                              {"to": ["kevin@example.com"], "subject": "hi",
                                "body": "the real send"}),
                       _rs_result("a", "sent")])
     assert len(facts) == 1
@@ -11416,14 +11431,53 @@ def test_receipt_shapes_gmail_send_message_names_the_recipient_verbatim():
     assert "kevin@example.com" in facts[0]
 
 
+def test_receipt_shapes_gmail_send_message_joins_multiple_recipients_verbatim():
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__send_message",
+                              {"to": ["kevin@example.com", "ops@example.com"],
+                               "subject": "hi", "body": "the real send"}),
+                      _rs_result("a", "sent")])
+    assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (sent):")
+    assert "kevin@example.com, ops@example.com" in facts[0]
+
+
 def test_receipt_shapes_gmail_reply_is_a_sent_line():
+    # Real schema: reply's required field is `messageId`; `to` is optional
+    # and, when present, an array.
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "mcp__claude_ai_Gmail__reply",
-                              {"to": "kevin@example.com", "body": "replying"}),
+                              {"messageId": "m1", "to": ["kevin@example.com"],
+                               "body": "replying"}),
                       _rs_result("a", "sent")])
     assert len(facts) == 1
     assert facts[0].startswith("RECEIPT SHAPE (sent):")
     assert "kevin@example.com" in facts[0]
+
+
+def test_receipt_shapes_gmail_reply_with_no_to_names_the_addressed_thread():
+    # A real send: `reply`'s only REQUIRED field is `messageId` — a
+    # reply-all or a reply that keeps the thread's existing recipients
+    # carries no `to` at all, and still genuinely sends. The fact then
+    # names the thread it addressed instead of a recipient it cannot see.
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__reply",
+                              {"messageId": "m1", "body": "replying"}),
+                      _rs_result("a", "sent")])
+    assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (sent):")
+    assert "addressed to thread m1" in facts[0]
+
+
+def test_receipt_shapes_gmail_forward_with_no_to_names_the_addressed_thread():
+    # Same shape as reply: `forward`'s only required field is `messageId`.
+    facts = _rs_facts([_rs_user_record(),
+                      _rs_use("a", "mcp__claude_ai_Gmail__forward",
+                              {"messageId": "m2", "forwardText": "fyi"}),
+                      _rs_result("a", "sent")])
+    assert len(facts) == 1
+    assert facts[0].startswith("RECEIPT SHAPE (sent):")
+    assert "addressed to thread m2" in facts[0]
 
 
 def test_receipt_shapes_send_sh_must_be_in_command_position():
