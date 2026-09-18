@@ -1,5 +1,5 @@
 {
-  "note": "Synthetic fixture for the offline fetch bench, plumbing only, not evidence of real ranking accuracy. A fake catalog of 15 short entries in the shape a skills index or tools catalog actually has, 20 request -> expected-id cases, plus 5 no-match cases (expectedId null, noMatch true) that nothing in the catalog serves,, phrased closer to how a real user asks than to the catalog's own wording.",
+  "note": "Synthetic fixture for the offline fetch admission bench, plumbing only, not evidence of real ranking accuracy. Fake catalog of 15 short v2 records (plain text; utterances are added at bench time from the train split only -- see bench/fetch-bench.ts). 20 request -> expected_id cases plus 5 no-match cases (expected_id null) that nothing in the catalog serves, phrased closer to how a real user asks than to the catalog's own wording.",
   "catalog": [
     {
       "id": "pay-coned",
@@ -65,108 +65,103 @@
   "cases": [
     {
       "request": "I need to pay the electric bill before it's late",
-      "expectedId": "pay-coned"
+      "expected_id": "pay-coned"
     },
     {
       "request": "sell a put on this ticker for premium income",
-      "expectedId": "place-put"
+      "expected_id": "place-put"
     },
     {
       "request": "I already own the shares, sell a call against them",
-      "expectedId": "place-covered-call"
+      "expected_id": "place-covered-call"
     },
     {
       "request": "check my draft reply against what I actually read",
-      "expectedId": "gate"
+      "expected_id": "gate"
     },
     {
       "request": "is this claim actually supported by the evidence I collected",
-      "expectedId": "gate"
+      "expected_id": "gate"
     },
     {
       "request": "the worker said it's done, verify that before I trust it",
-      "expectedId": "worker-verify"
+      "expected_id": "worker-verify"
     },
     {
       "request": "go through every line of this dataset, don't skip any",
-      "expectedId": "sweep"
+      "expected_id": "sweep"
     },
     {
       "request": "post an update to the fleet's twitter account",
-      "expectedId": "x-account-manage"
+      "expected_id": "x-account-manage"
     },
     {
       "request": "buy this product on my personal amazon account",
-      "expectedId": "amazon-buy"
+      "expected_id": "amazon-buy"
     },
     {
       "request": "make a short comic video from this script",
-      "expectedId": "content-comic-run"
+      "expected_id": "content-comic-run"
     },
     {
       "request": "what did this item actually sell for recently on ebay",
-      "expectedId": "ebay-sold-price"
+      "expected_id": "ebay-sold-price"
     },
     {
       "request": "give me the full wheel-grade writeup on this stock",
-      "expectedId": "stock-deep-dive"
+      "expected_id": "stock-deep-dive"
     },
     {
       "request": "stress test the graphics card on this mac",
-      "expectedId": "gpu-test"
+      "expected_id": "gpu-test"
     },
     {
       "request": "pay the tenant's rent this month",
-      "expectedId": "rent-pay-eshco"
+      "expected_id": "rent-pay-eshco"
     },
     {
       "request": "this awareness card has gotten too fat, trim it",
-      "expectedId": "card-shrink"
+      "expected_id": "card-shrink"
     },
     {
       "request": "restart the agent that's stuck",
-      "expectedId": "restart-agent"
+      "expected_id": "restart-agent"
     },
     {
       "request": "check the con edison bill is paid on time",
-      "expectedId": "pay-coned"
+      "expected_id": "pay-coned"
     },
     {
       "request": "confirm a worker's report before accepting it",
-      "expectedId": "worker-verify"
+      "expected_id": "worker-verify"
     },
     {
       "request": "run this whole pile of records through jev and prove coverage",
-      "expectedId": "sweep"
+      "expected_id": "sweep"
     },
     {
       "request": "tweet this from the fleet account",
-      "expectedId": "x-account-manage"
+      "expected_id": "x-account-manage"
     },
     {
       "request": "book me a dentist appointment for next Tuesday",
-      "expectedId": null,
-      "noMatch": true
+      "expected_id": null
     },
     {
       "request": "translate this paragraph into Portuguese",
-      "expectedId": null,
-      "noMatch": true
+      "expected_id": null
     },
     {
       "request": "what is the boiling point of ethanol at sea level",
-      "expectedId": null,
-      "noMatch": true
+      "expected_id": null
     },
     {
       "request": "write a lullaby for a three year old",
-      "expectedId": null,
-      "noMatch": true
+      "expected_id": null
     },
     {
       "request": "renew my passport before it expires",
-      "expectedId": null,
-      "noMatch": true
+      "expected_id": null
     }
   ]
 }

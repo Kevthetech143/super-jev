@@ -22,11 +22,17 @@
  */
 import { budget as makeBudget } from './budget.ts';
 import { planSweep, runSweep, type SweepConfig, type SweepInputRecord, type SweepPlan, type SweepQuestion, type SweepRun } from './sweep.ts';
+import type { CatalogRecord } from './catalog.ts';
 import type { ContextBudget, CostAccount, CoverageManifest } from './types.ts';
 import type { Evaluator } from '../types.ts';
 
-/** One entry in the catalog being searched: a skill, a tool, a note, a doc. */
-export type FetchCatalogEntry = { id: string; text: string };
+/**
+ * One entry in the catalog being searched: a skill, a tool, a note, a doc.
+ * Re-exported from `catalog.ts` under fetch's original name, so existing
+ * callers that only ever built `{id, text}` literals keep compiling
+ * unchanged — `utterances`, `negatives` and `tags` are additive and optional.
+ */
+export type FetchCatalogEntry = CatalogRecord;
 
 /**
  * Records-per-call default for fetch.
@@ -117,8 +123,27 @@ export function beatsNone(choice: string | undefined, probabilities: Record<stri
 // "none of these".
 // ---------------------------------------------------------------------------
 
-/** Default number of catalog records the local prefilter keeps. Matches the per-call default so the judge sees them in one batch. */
-export const DEFAULT_PREFILTER = 40;
+/**
+ * Default number of catalog records the local prefilter keeps before the one
+ * Jev call. Fetch v2's local narrowing reads `utterances`, `negatives` and
+ * recent-turn `context`, not just `text`, so it is trusted to do more of the
+ * work than the v1 token-overlap-only pass did — the Jev stage now sees a
+ * tight top 8 rather than a full top 40, per the routing research this
+ * schema is drawn from (`SKILL-ROUTING-RESEARCH-20260917.md`, section 4).
+ */
+export const DEFAULT_PREFILTER = 8;
+
+/** Weight applied to utterance-token matches, relative to `text` (1x). A real request reads like an utterance, not a catalog description. */
+export const DEFAULT_UTTERANCE_WEIGHT = 2;
+
+/** Weight subtracted for negative-token matches against the query. */
+export const DEFAULT_NEGATIVE_WEIGHT = 1;
+
+/** Weight applied to context-turn tokens, relative to the current request (1x). Lower, so context nudges rather than overrides. */
+export const DEFAULT_CONTEXT_WEIGHT = 0.35;
+
+/** Default number of trailing context turns `--context` keeps, oldest dropped first. */
+export const DEFAULT_CONTEXT_TURNS = 3;
 
 const BM25_K1 = 1.2;
 const BM25_B = 0.75;
@@ -143,33 +168,79 @@ export type PrefilterResult = {
   scores: Record<string, number>;
 };
 
+export type PrefilterOptions = {
+  /** Recent user turns, oldest first, already trimmed to the window the caller wants. Appended to the query at `contextWeight`. */
+  context?: string[];
+  /** Weight for utterance-token matches, relative to `text` (1x). Default `DEFAULT_UTTERANCE_WEIGHT`. */
+  utteranceWeight?: number;
+  /** Weight subtracted for negative-token matches. Default `DEFAULT_NEGATIVE_WEIGHT`. */
+  negativeWeight?: number;
+  /** Weight for context-turn tokens, relative to the request (1x). Default `DEFAULT_CONTEXT_WEIGHT`. */
+  contextWeight?: number;
+};
+
+/** BM25-lite score of one tokenized document against one weighted query token bag, given a fixed df/avgLen/N. */
+function bm25Score(docTokens: string[], query: string[], df: Map<string, number>, avgLen: number, N: number): number {
+  if (!docTokens.length || !query.length) return 0;
+  const tf = new Map<string, number>();
+  for (const t of docTokens) tf.set(t, (tf.get(t) ?? 0) + 1);
+  let score = 0;
+  for (const q of query) {
+    const f = tf.get(q);
+    if (!f) continue;
+    const idf = Math.log(1 + (N - (df.get(q) ?? 0) + 0.5) / ((df.get(q) ?? 0) + 0.5));
+    score += idf * (f * (BM25_K1 + 1)) / (f + BM25_K1 * (1 - BM25_B + BM25_B * docTokens.length / avgLen));
+  }
+  return score;
+}
+
 /**
- * Keep the `n` catalog records whose text overlaps the request most, by a
- * BM25-lite score computed entirely locally. `n` of 0 disables the filter
- * and returns the whole catalog. Ties keep catalog order, so the result is
- * deterministic for a fixed catalog and request.
+ * Keep the `n` catalog records that best match the request, by a BM25-lite
+ * score computed entirely locally over `text` and `utterances` (utterances
+ * repeated `utteranceWeight` times in the scored document, so they count
+ * more without a second corpus pass), with `negatives` subtracted and
+ * `context` (recent turns) folded into the query at a lower weight. A v1
+ * record with no `utterances`/`negatives` and a call with no `context`
+ * behaves exactly as the original text-only BM25-lite pass did. `n` of 0
+ * disables the filter and returns the whole catalog. Ties keep catalog
+ * order, so the result is deterministic for a fixed catalog, request and
+ * options.
  */
-export function prefilterCatalog(catalog: FetchCatalogEntry[], request: string, n: number): PrefilterResult {
+export function prefilterCatalog(catalog: FetchCatalogEntry[], request: string, n: number, options: PrefilterOptions = {}): PrefilterResult {
   if (!Number.isInteger(n) || n < 0) throw new Error('prefilter must be a non-negative integer');
   const ids = catalog.map((e, i) => e.id ?? `record_${i}`);
   if (n === 0 || catalog.length <= n) {
     return { kept: catalog.slice(), droppedIds: [], scores: Object.fromEntries(ids.map(id => [id, 0])) };
   }
-  const docs = catalog.map(e => tokenize(e.text ?? ''));
+  const utteranceWeight = options.utteranceWeight ?? DEFAULT_UTTERANCE_WEIGHT;
+  const negativeWeight = options.negativeWeight ?? DEFAULT_NEGATIVE_WEIGHT;
+  const contextWeight = options.contextWeight ?? DEFAULT_CONTEXT_WEIGHT;
+
+  // Utterance tokens are repeated `utteranceWeight` times inside the scored
+  // document itself, so ordinary BM25 term-frequency saturation naturally
+  // gives them more pull without a second, separately-weighted corpus.
+  const docs = catalog.map(e => {
+    const textTokens = tokenize(e.text ?? '');
+    const utteranceTokens = tokenize((e.utterances ?? []).join(' '));
+    const repeated: string[] = [];
+    for (let i = 0; i < Math.max(1, Math.round(utteranceWeight)); i++) repeated.push(...utteranceTokens);
+    return [...textTokens, ...repeated];
+  });
+  const negDocs = catalog.map(e => tokenize((e.negatives ?? []).join(' ')));
   const avgLen = docs.reduce((s, d) => s + d.length, 0) / docs.length || 1;
   const df = new Map<string, number>();
   for (const d of docs) for (const t of new Set(d)) df.set(t, (df.get(t) ?? 0) + 1);
-  const query = [...new Set(tokenize(request))];
   const N = docs.length;
+
+  const primaryQuery = [...new Set(tokenize(request))];
+  const contextQuery = [...new Set(tokenize((options.context ?? []).join(' ')))];
+
   const scored = docs.map((d, i) => {
-    const tf = new Map<string, number>();
-    for (const t of d) tf.set(t, (tf.get(t) ?? 0) + 1);
-    let score = 0;
-    for (const q of query) {
-      const f = tf.get(q);
-      if (!f) continue;
-      const idf = Math.log(1 + (N - (df.get(q) ?? 0) + 0.5) / ((df.get(q) ?? 0) + 0.5));
-      score += idf * (f * (BM25_K1 + 1)) / (f + BM25_K1 * (1 - BM25_B + BM25_B * d.length / avgLen));
+    let score = bm25Score(d, primaryQuery, df, avgLen, N);
+    if (contextQuery.length) score += contextWeight * bm25Score(d, contextQuery, df, avgLen, N);
+    if (negDocs[i].length) {
+      const combinedQuery = contextQuery.length ? [...new Set([...primaryQuery, ...contextQuery])] : primaryQuery;
+      score -= negativeWeight * bm25Score(negDocs[i], combinedQuery, df, avgLen, N);
     }
     return { i, score };
   });
@@ -206,8 +277,16 @@ export type FetchOptions = {
   /** Retries per call when a whole response is unusable. Default 1. */
   maxRetries?: number;
   timeoutMs?: number;
-  /** Keep only the top n records by local token overlap before the judge call. Default 40; 0 disables. */
+  /** Keep only the top n records by local narrowing before the judge call. Default `DEFAULT_PREFILTER` (8); 0 disables. */
   prefilter?: number;
+  /** Recent user turns, oldest first, folded into local narrowing at a lower weight so a referent like "restart it" inherits its subject. */
+  context?: string[];
+  /** Weight for utterance-token matches in local narrowing. Default `DEFAULT_UTTERANCE_WEIGHT`. */
+  utteranceWeight?: number;
+  /** Weight subtracted for negative-token matches in local narrowing. Default `DEFAULT_NEGATIVE_WEIGHT`. */
+  negativeWeight?: number;
+  /** Weight for context-turn tokens in local narrowing. Default `DEFAULT_CONTEXT_WEIGHT`. */
+  contextWeight?: number;
 };
 
 export type FetchPrefilterReport = {
@@ -231,7 +310,12 @@ export type FetchPlan = {
 function applyPrefilter(catalog: FetchCatalogEntry[], request: string, options: FetchOptions): { candidates: FetchCatalogEntry[]; report: FetchPrefilterReport } {
   const n = options.prefilter ?? DEFAULT_PREFILTER;
   if (!Number.isInteger(n) || n < 0) throw new Error('prefilter must be a non-negative integer');
-  const result = prefilterCatalog(catalog, request, n);
+  const result = prefilterCatalog(catalog, request, n, {
+    context: options.context,
+    utteranceWeight: options.utteranceWeight,
+    negativeWeight: options.negativeWeight,
+    contextWeight: options.contextWeight
+  });
   return { candidates: result.kept, report: { n, kept: result.kept.length, dropped: result.droppedIds.length, droppedIds: result.droppedIds } };
 }
 
@@ -275,6 +359,15 @@ export type FetchRun = {
   plan: FetchPlan;
   /** Only records that beat "none of these", top k by score. Empty when nothing did. */
   ranked: FetchRankedEntry[];
+  /**
+   * Every judged record, regardless of whether it beat "none of these",
+   * sorted the same way as `ranked`. Used by the none gate to name the
+   * closest candidates even when nothing actually beat none, or when the
+   * catalog held no record beating the confidence floor. Never used to rank
+   * or act on its own — `ranked` is still the only list a caller should act
+   * on automatically.
+   */
+  allScored: FetchRankedEntry[];
   /** True when the catalog was non-empty, at least one record was judged, and "none of these" won for every record judged. */
   noMatch: boolean;
   /** Mean confidence of the "none" answers when `noMatch` is true; 0 otherwise. */
@@ -300,19 +393,23 @@ export async function runFetch(catalog: FetchCatalogEntry[], request: string, op
   const sweepRun: SweepRun = await runSweep(config, options.transport);
 
   const scored: FetchRankedEntry[] = [];
+  const allScored: FetchRankedEntry[] = [];
   const noneConfidences: number[] = [];
   let judged = 0;
   for (const r of sweepRun.results) {
     const cell = r.cells[0];
     const level = cell?.choice;
-    if (level !== undefined) judged += 1;
+    if (level === undefined) continue;
+    judged += 1;
+    if (level in LEVEL_SCORE) allScored.push({ id: r.id, score: LEVEL_SCORE[level], confidence: cell?.confidence ?? 0 });
     if (!beatsNone(level, cell?.probabilities)) {
-      if (level !== undefined) noneConfidences.push(level === NONE_LEVEL ? (cell?.confidence ?? 0) : (cell?.probabilities?.[NONE_LEVEL] ?? 0));
+      noneConfidences.push(level === NONE_LEVEL ? (cell?.confidence ?? 0) : (cell?.probabilities?.[NONE_LEVEL] ?? 0));
       continue;
     }
-    scored.push({ id: r.id, score: LEVEL_SCORE[level!], confidence: cell?.confidence ?? 0 });
+    scored.push({ id: r.id, score: LEVEL_SCORE[level], confidence: cell?.confidence ?? 0 });
   }
   scored.sort((a, b) => b.score - a.score || b.confidence - a.confidence || a.id.localeCompare(b.id));
+  allScored.sort((a, b) => b.score - a.score || b.confidence - a.confidence || a.id.localeCompare(b.id));
 
   const noMatch = candidates.length > 0 && judged > 0 && scored.length === 0;
   const noMatchConfidence = noMatch && noneConfidences.length
@@ -323,6 +420,7 @@ export async function runFetch(catalog: FetchCatalogEntry[], request: string, op
   return {
     plan: { plan: sweepRun.plan, k, request, catalogSize: catalog.length, prefilter: report },
     ranked: scored.slice(0, k),
+    allScored,
     noMatch,
     noMatchConfidence,
     calls: sweepRun.cost.calls,
@@ -331,6 +429,61 @@ export async function runFetch(catalog: FetchCatalogEntry[], request: string, op
     errors: sweepRun.errors,
     model: sweepRun.model
   };
+}
+
+// ---------------------------------------------------------------------------
+// None gate: act automatically only above a calibrated confidence floor.
+//
+// `runFetch` already refuses to rank a record that loses to "none of these".
+// The gate adds the second half of the OOS-detection pattern the routing
+// research recommends (section 2, "Judge stays as the last stage... with an
+// explicit 'none' option and a confidence floor"): even when a record DOES
+// beat none, a top pick below the floor is not confident enough to act on
+// automatically. Below the floor, or when `noMatch` already won, the gate
+// asks a clarifying question instead of guessing.
+// ---------------------------------------------------------------------------
+
+/** Default confidence floor below which the gate asks instead of acting. DOCUMENTED by the routing research's escalation rule, not measured live by this repo. */
+export const DEFAULT_FETCH_FLOOR = 0.80;
+
+export type FetchGateAsk = {
+  noMatch: true;
+  /** Top 3 candidates by score, whether or not they beat "none of these" — the closest things in the catalog, for the human to choose among. */
+  candidates: FetchRankedEntry[];
+  /** One clarifying question built from the top candidates' ids. */
+  ask: string;
+};
+
+export type FetchGateAct = {
+  noMatch: false;
+  ranked: FetchRankedEntry[];
+};
+
+export type FetchGateResult = FetchGateAsk | FetchGateAct;
+
+/** Build the one clarifying question the gate asks, from the ids of the closest candidates. */
+export function buildClarifyingQuestion(candidateIds: string[]): string {
+  if (!candidateIds.length) return 'Nothing in the catalog looks close to this request — can you say more about what you need?';
+  if (candidateIds.length === 1) return `Did you mean "${candidateIds[0]}"?`;
+  return `Did you mean one of: ${candidateIds.join(', ')}?`;
+}
+
+/**
+ * Apply the confidence floor to a completed run. Below the floor, or when
+ * `run.noMatch` already won, returns `{noMatch: true, candidates, ask}` so
+ * the caller can ask a clarifying question instead of guessing; the top 3
+ * candidates come from `allScored` (every judged record, whether or not it
+ * beat none), so there is still something to ask about even when nothing in
+ * the catalog beat "none of these" at all. Otherwise returns the ranked list
+ * unchanged as `{noMatch: false, ranked}`.
+ */
+export function applyNoneGate(run: FetchRun, floor: number = DEFAULT_FETCH_FLOOR): FetchGateResult {
+  if (!Number.isFinite(floor) || floor < 0 || floor > 1) throw new Error('floor must be a number in [0, 1]');
+  const top = run.ranked[0];
+  const belowFloor = run.noMatch || !top || top.confidence < floor;
+  if (!belowFloor) return { noMatch: false, ranked: run.ranked };
+  const candidates = run.allScored.slice(0, 3);
+  return { noMatch: true, candidates, ask: buildClarifyingQuestion(candidates.map(c => c.id)) };
 }
 
 /** The plan in plain words, printed before any call and by `--dry-run`. */

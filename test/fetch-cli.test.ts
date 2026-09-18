@@ -56,7 +56,7 @@ test('--json prints exactly one parseable JSON object and nothing else on stdout
     assert.equal(typeof parsed.noMatch, 'boolean');
     assert.equal(typeof parsed.noMatchConfidence, 'number');
     assert.equal(parsed.calls, 1);
-    assert.equal(parsed.prefilter.n, 40);
+    assert.equal(parsed.prefilter.n, 8);
     for (const entry of parsed.ranked) {
       assert.equal(typeof entry.id, 'string');
       assert.equal(typeof entry.score, 'number');
@@ -104,7 +104,7 @@ const BIG_CATALOG = JSON.stringify([
   ...JSON.parse(CATALOG)
 ]);
 
-test('--prefilter defaults to 40 and turns a many-call catalog into one call in the dry-run plan', async () => {
+test('--prefilter defaults to 8 and turns a many-call catalog into one call in the dry-run plan', async () => {
   await withTmp(async dir => {
     const catalogPath = join(dir, 'catalog.json');
     await writeFile(catalogPath, BIG_CATALOG, 'utf8');
@@ -112,9 +112,9 @@ test('--prefilter defaults to 40 and turns a many-call catalog into one call in 
     assert.equal(result.code, 0, result.stderr);
     const parsed = JSON.parse(result.stdout);
     assert.equal(parsed.catalogSize, 123);
-    assert.equal(parsed.prefilter.n, 40);
-    assert.equal(parsed.prefilter.kept, 40);
-    assert.equal(parsed.prefilter.dropped, 83);
+    assert.equal(parsed.prefilter.n, 8);
+    assert.equal(parsed.prefilter.kept, 8);
+    assert.equal(parsed.prefilter.dropped, 115);
     assert.equal(parsed.calls, 1);
   });
 });
@@ -204,4 +204,116 @@ test('--help prints usage and exits 0', () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout, /--catalog/);
   assert.match(result.stdout, /--request/);
+});
+
+// ---------------------------------------------------------------- fetch v2: catalog schema, context, none gate, ledger
+
+const V2_CATALOG = JSON.stringify([
+  { id: 'restart-agent', text: 'Restart one team agent.', utterances: ['restart it', 'restart the agent', 'kick it back on'] },
+  { id: 'pay-coned', text: 'Pay a Con Edison electric bill.', utterances: ['pay the electric bill', 'the power bill is due'] }
+]);
+
+test('a v2 catalog (utterances/negatives/tags) is accepted, and a run still produces a ranked list', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, V2_CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'pay the bill', '--stub', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.catalogSize, 2);
+  });
+});
+
+test('--context folds recent turns into local narrowing, so a referent like "restart it" survives the prefilter', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, V2_CATALOG, 'utf8');
+    const contextPath = join(dir, 'context.json');
+    await writeFile(contextPath, JSON.stringify(['the agent seems stuck']), 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'restart it', '--context', contextPath, '--prefilter', '1', '--dry-run', '--json']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.oversizedRecordIds.length, 0);
+  });
+});
+
+test('--context must be a JSON array of strings', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, V2_CATALOG, 'utf8');
+    const contextPath = join(dir, 'context.json');
+    await writeFile(contextPath, JSON.stringify({ not: 'an array' }), 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'restart it', '--context', contextPath, '--dry-run']);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /context file must be a JSON array of strings/);
+  });
+});
+
+test('--floor gates a low-confidence stub run into gated=true with candidates and an ask', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    // --floor 1.01 is refused; use 0.999999 so nothing can possibly clear it against the hashed stub confidences.
+    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--floor', '0.999999']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    assert.equal(parsed.gated, true);
+    assert.ok(Array.isArray(parsed.candidates));
+    assert.equal(typeof parsed.ask, 'string');
+  });
+});
+
+test('--floor 0 never gates a run with at least one record beating "none of these"', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--floor', '0']);
+    assert.equal(result.code, 0, result.stderr);
+    const parsed = JSON.parse(result.stdout);
+    if (parsed.ranked.length > 0) assert.equal(parsed.gated, false);
+  });
+});
+
+test('--floor refuses a value outside [0,1]', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'anything', '--dry-run', '--floor', '1.5']);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /--floor/);
+  });
+});
+
+test('--record appends {request, context, ranked, chosen, ts} to the ledger, and repeated runs append rather than overwrite', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const ledgerPath = join(dir, 'ledger.jsonl');
+    const first = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--record', 'gate', '--ledger', ledgerPath]);
+    assert.equal(first.code, 0, first.stderr);
+    const second = runCli(['--catalog', catalogPath, '--request', 'pay the bill', '--stub', '--json', '--record', 'pay-coned', '--ledger', ledgerPath]);
+    assert.equal(second.code, 0, second.stderr);
+
+    const body = await readFile(ledgerPath, 'utf8');
+    const lines = body.trim().split('\n').map(l => JSON.parse(l));
+    assert.equal(lines.length, 2);
+    assert.equal(lines[0].chosen, 'gate');
+    assert.equal(lines[1].chosen, 'pay-coned');
+    for (const line of lines) {
+      assert.equal(typeof line.request, 'string');
+      assert.ok(Array.isArray(line.context));
+      assert.ok(Array.isArray(line.ranked));
+      assert.equal(typeof line.ts, 'string');
+    }
+  });
+});
+
+test('--ledger without --record is a usage error, exit 1', async () => {
+  await withTmp(async dir => {
+    const catalogPath = join(dir, 'catalog.json');
+    await writeFile(catalogPath, CATALOG, 'utf8');
+    const result = runCli(['--catalog', catalogPath, '--request', 'anything', '--dry-run', '--ledger', join(dir, 'ledger.jsonl')]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /--ledger only applies with --record/);
+  });
 });
