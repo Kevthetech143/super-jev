@@ -48,6 +48,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1197,20 +1198,66 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
-# Judge-advisory mode (2026-09-18). SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a
-# `hook gate` block to an advisory print + exit 0 when EVERY reason behind it
-# came from the judge (the OVERCLAIMS arm, or — under SUPERJEV_RULE=v2 — the
-# secondary NOT_SUPPORTED/CONTRADICTED arm). It never touches a block that
-# carries even one deterministic reason (a count mismatch, a PR mismatch, or
-# a CONTRADICTED_BY_FACT fact sentence) — those still block with the same
-# exit code as today, unconditionally. See cmd_hook's "block-judge-advisory"
-# branch, which checks this against `det_block_reasons` being empty rather
-# than special-casing which judge arm fired, so it covers v2 and v3 alike.
+# Judge-advisory mode (2026-09-18, granular 2026-09-18b). SUPERJEV_GATE_
+# JUDGE_ADVISORY demotes a `hook gate` block to an advisory print + exit 0
+# when EVERY reason behind it came from the judge. Two levels:
+#
+#   "1"    — every judge arm is advisory (the OVERCLAIMS arm, or — under
+#            SUPERJEV_RULE=v2 — the secondary NOT_SUPPORTED/CONTRADICTED
+#            arm). This is the original, unconditional behavior.
+#   "weak" — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
+#            secondary arm) and SELF_CONTRADICTORY are advisory; OVERCLAIMS
+#            still blocks. Added after the 2026-09-18 live adjudication
+#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS the only
+#            judge arm worth trusting to block, while the per-claim arm and
+#            SELF_CONTRADICTORY were not. Under the default v3 rule the
+#            secondary arm already never produces a block reason on its
+#            own, so "weak" is a real change only under SUPERJEV_RULE=v2.
+#   "0"/unset — unchanged: judge-advisory mode off, every block reason
+#            (judge or deterministic) blocks exactly as it does today.
+#
+# It never touches a block that carries even one deterministic reason (a
+# count mismatch, a PR mismatch, or a CONTRADICTED_BY_FACT fact sentence) —
+# those still block with the same exit code as today, unconditionally
+# regardless of mode. See cmd_hook's "block-judge-advisory" branch, which
+# checks this against `det_block_reasons` being empty rather than special-
+# casing which judge arm fired, so it covers v2 and v3 alike.
 JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
+# Verdicts a "weak" judge-advisory mode still demotes — never OVERCLAIMS.
+_JUDGE_ADVISORY_WEAK_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "SELF_CONTRADICTORY")
+_JUDGE_ADVISORY_REASON_VERDICT_RE = re.compile(r'^\S+\s+([A-Z_]+)\s+\d')
+
+
+def _judge_advisory_mode():
+    """"1" (all judge arms advisory), "weak" (only the per-claim NOT_
+    SUPPORTED/CONTRADICTED and SELF_CONTRADICTORY arms advisory — OVERCLAIMS
+    still blocks), or "0" (off, any other value or unset)."""
+    v = os.environ.get(JUDGE_ADVISORY_ENV, "0")
+    if v == "weak":
+        return "weak"
+    if v == "1":
+        return "1"
+    return "0"
 
 
 def _judge_advisory_enabled():
-    return os.environ.get(JUDGE_ADVISORY_ENV, "0") == "1"
+    return _judge_advisory_mode() != "0"
+
+
+def _judge_advisory_reasons_are_weak_only(block_reasons):
+    """True when every "key VERDICT score" string in `block_reasons` names
+    a verdict `_JUDGE_ADVISORY_WEAK_VERDICTS` covers (never OVERCLAIMS) —
+    what "weak" mode requires before it will demote a block. An empty or
+    unparsed list is NOT weak-only (nothing to safely demote), matching the
+    fail-closed direction every other block-suppression check in this file
+    takes."""
+    if not block_reasons:
+        return False
+    for r in block_reasons:
+        m = _JUDGE_ADVISORY_REASON_VERDICT_RE.match(r.strip())
+        if not m or m.group(1) not in _JUDGE_ADVISORY_WEAK_VERDICTS:
+            return False
+    return True
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -1682,6 +1729,48 @@ def _hook_block_reasons(flags, claim_rows=None, evidence=None):
     return reasons
 
 
+# --------------------------------------- gate-adjudication-20260918.md fixes
+#
+# The receipt is one turn old — the current turn ran no tools but the
+# draft correctly restates a result whose receipt sits in the
+# previous-turn block, not this turn's own (a merge, a spawn or a log read
+# a turn or two earlier, still real evidence for a reply about it now).
+# The most recent previous turn that ran tools is named in a DERIVED FACTS
+# sentence pointing at its existing "[previous turn -N]" header (no header
+# rewrite — see _receipt_turn_index and _receipt_turn_extra_fact).
+
+
+def _receipt_turn_index(window_meta):
+    """The most recent previous turn (lowest -N, i.e. turn -1 before turn
+    -2) that ran its own tools AND is still kept in the assembled window —
+    `window_meta["prev_turn_detail"]` from `_derive_evidence_text_from_
+    transcript`, ordered turn=1 (most recent) upward — or None when no
+    previous turn qualifies (nothing kept, or every kept turn ran no tools
+    of its own, receipts-only). This is "the receipt turn" mechanism (a)
+    targets: a current turn that ran no tools can still be a correct,
+    checkable restatement of a result from the turn right before it."""
+    for d in (window_meta or {}).get("prev_turn_detail") or []:
+        if d.get("kept") and (d.get("tool_results") or 0) > 0:
+            return d.get("turn")
+    return None
+
+
+def _receipt_turn_extra_fact(receipt_idx):
+    """The DERIVED FACTS sentence naming the receipt turn, for
+    `compose_window_with_facts`'s `extra_facts`. Points at the receipt
+    turn's existing "[previous turn -N]" header rather than rewriting it,
+    so every existing window-parsing regex (_WINDOW_PART_RE for the trim
+    order, _WINDOW_SECTION_RE for fact-line labelling) stays correct with
+    nothing new to keep in sync. None when there is no receipt turn to
+    name."""
+    if receipt_idx is None:
+        return None
+    return (f"RECEIPT TURN: the current turn ran no tools of its own; turn "
+           f"-{receipt_idx} (see [previous turn -{receipt_idx}] below) is the "
+           "most recent turn that did, and counts as this reply's receipt, not "
+           "out-of-window material.")
+
+
 def _strip_patterns():
     """The compiled-pattern source strings to strip from a draft before it
     goes to the gate: SUPERJEV_STRIP_PATTERNS (a JSON list of regex
@@ -1855,6 +1944,65 @@ def _npm_missing_refusal(json_mode, door):
     return 1
 
 
+# The hook payload (stdin JSON from a real Claude Code Stop/PostToolUse/
+# UserPromptSubmit event) for the invocation currently running, if any —
+# set once by cmd_hook/cmd_hook_prompt_verify right after stdin is parsed,
+# and read back by _current_bot_id/_current_origin below so every ledger
+# write in this same process (including the ones inside run_door, which
+# fire from deep inside cmd_gate/cmd_verify) can attribute itself without
+# payload having to be threaded through every call site. A manual CLI
+# invocation (no hook) leaves this None, which both helpers treat as "no
+# hook context" rather than an error.
+_ACTIVE_HOOK_PAYLOAD = None
+
+
+def _bot_id_from_transcript_path(transcript_path):
+    """The claw4mac project-dir segment out of a transcript_path — the
+    part after "agent-cwd-" up to the next path separator, e.g.
+    "claw4mac-primary" out of ".../-Users-admin--ai-wrapper-agent-cwd-
+    claw4mac-primary/<uuid>.jsonl". None if transcript_path is not a
+    string, or carries no such segment."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    m = re.search(r'agent-cwd-([^/]+)', transcript_path)
+    return m.group(1) if m else None
+
+
+def _current_bot_id():
+    """The bot id a ledger entry attributes itself to: CLAW4MAC_SESSION_ID
+    (the env var the fleet actually sets on each seat, e.g. "primary"),
+    else CLAW4MAC_BOT_ID, else CLAUDE_BOT_ID from the environment if any of
+    the three is set, else derived from the active hook payload's
+    transcript_path (see _bot_id_from_transcript_path) with the
+    "claw4mac-" prefix stripped so a derived id lands in the same
+    vocabulary as the env vars (e.g. "primary", not "claw4mac-primary"),
+    else "unknown"."""
+    env_bot = (os.environ.get("CLAW4MAC_SESSION_ID")
+               or os.environ.get("CLAW4MAC_BOT_ID")
+               or os.environ.get("CLAUDE_BOT_ID"))
+    if env_bot:
+        return env_bot
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    derived = _bot_id_from_transcript_path(payload.get("transcript_path"))
+    if derived and derived.startswith("claw4mac-"):
+        derived = derived[len("claw4mac-"):]
+    return derived or "unknown"
+
+
+def _current_origin():
+    """"bench" when SUPERJEV_BENCH=1 in the environment, or the active hook
+    payload's session_id starts with "bench-"; "live" otherwise (including
+    every ordinary hook firing from a real Claude Code session, and every
+    manual CLI invocation with no bench markers)."""
+    if os.environ.get("SUPERJEV_BENCH") == "1":
+        return "bench"
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith("bench-"):
+        return "bench"
+    return "live"
+
+
 def ledger_append(entry):
     """Append one JSONL line to the call ledger. Never raises — a ledger
     problem must never break a door — but an unwritable ledger is not
@@ -1863,8 +2011,11 @@ def ledger_append(entry):
 
     Every entry gets a short unique `id` (if it does not already carry
     one) — `feedback --ledger-id` and the calibration export both address
-    a ledger line by this."""
+    a ledger line by this. Every entry also gets `bot` and `origin` (if
+    not already carrying them) — see _current_bot_id/_current_origin."""
     entry.setdefault("id", uuid.uuid4().hex[:12])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -1916,8 +2067,11 @@ def catch_ledger_append(entry):
     Exception, not just OSError (a bad entry that json.dumps chokes on, a
     permissions error, anything at all), because this call sits strictly
     after a real decision has already been returned and must never
-    propagate."""
+    propagate. Gets `bot` and `origin` the same way ledger_append does, if
+    not already carrying them."""
     entry.setdefault("id", uuid.uuid4().hex[:10])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -2318,6 +2472,9 @@ def _cmd_catch_list(a):
     records, undated = _catch_filter_since(records, since)
     if getattr(a, "untagged", False):
         records = [r for r in records if r.get("tag") is None]
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     only_id = getattr(a, "id", None)
     if only_id:
         records = [r for r in records if r.get("id") == only_id]
@@ -2344,12 +2501,19 @@ def _cmd_catch_list(a):
     if not records:
         print("catch list: no records")
     else:
+        # Width sized to the longest bot id actually being printed this call
+        # (floored at len("unknown")) rather than a fixed pad — a fixed pad
+        # narrower than a real seat name (e.g. "contentcreator") let that
+        # row's bot field run into the reason column with no gap.
+        bot_width = max([len(str(rec.get("bot") or "unknown")) for rec in records]
+                        + [len("unknown")])
         for rec in records:
             reasons = rec.get("reasons") or []
             first_reason = reasons[0] if reasons else ""
             tag = rec.get("tag") or "-"
+            bot = rec.get("bot") or "unknown"
             print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
-                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  bot={bot:<{bot_width}s}  {first_reason}")
     if since and undated:
         print(f"catch list: {undated} undated record(s) excluded from the --since window")
     return 0
@@ -2428,6 +2592,9 @@ def _cmd_catch_report(a):
                               "showing all time")
     records = _catch_records()
     records, undated = _catch_filter_since(records, since)
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     fair = sum(1 for r in records if r.get("tag") == "fair")
     false = sum(1 for r in records if r.get("tag") == "false")
     miss = sum(1 for r in records if r.get("tag") == "miss")
@@ -2467,6 +2634,12 @@ def _cmd_catch_report(a):
               "fair/false answer different questions, see docs/hooks.md)")
     if since:
         print(f"undated: {undated}")
+    if not bot_filter:
+        by_bot = Counter(r.get("bot") or "unknown" for r in records)
+        if by_bot:
+            print("by bot:")
+            for bot, n in sorted(by_bot.items(), key=lambda kv: (-kv[1], kv[0])):
+                print(f"  {bot}: {n}")
     return 0
 
 
@@ -2486,6 +2659,40 @@ def _cmd_catch_report(a):
 # straight from the ledger's own excerpts — never the raw payload.
 
 _CATCH_FAMILY_COUNT_MISMATCH_RE = re.compile(r'^(count mismatch \([^)]*\))')
+
+# A judge-score-shaped reason — f"{k} {v} {s:.2f}" (see _catch_reason_family's
+# own docstring) with an optional leading c<digits> claim key and an optional
+# trailing parenthetical, e.g. "c2 CONTRADICTED 0.82" or "overclaim OVERCLAIMS
+# 0.94 (overclaim==1.00 arm)". This is the one colonless shape the generic
+# fallback below is actually meant to strip down to a bare verdict name —
+# anything ELSE colonless (an advisory note, free text) does not match this
+# and is bucketed instead (see _catch_reason_advisory_bucket).
+_CATCH_FAMILY_SCORE_RE = re.compile(
+    r'^(?:c\d+|[a-z_]+)\s+[A-Z_]+\s+\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)*(?:\s*\([^)]*\))?$'
+)
+
+_CATCH_ADVISORY_BUCKET_WORD_RE = re.compile(r'^[A-Za-z]+$')
+
+_CATCH_FAMILY_MAX_LEN = 60
+
+
+def _catch_reason_advisory_bucket(reason):
+    """Fixed bucket for a reason string with no recognised `HEADER:`/
+    judge-score keyword prefix — a colonless advisory note (e.g. one
+    embedding a `--test-cmd '...'` argument). Before this, such a reason
+    became the family VERBATIM: the whole, unbounded, unescaped note
+    reached a public issue title/body (the one string that ever skipped
+    both _catch_redact and _catch_signal_escape_markdown), and one
+    advisory note per differing detail/score never collapsed into a
+    single family the way every other arm's blocks did. Uses the
+    reason's first two words when both are plain letters (so notes
+    sharing the same score-free lead-in still collapse into one family,
+    not one per note), else the fixed literal "advisory-note"."""
+    words = reason.split()
+    first_two = words[:2]
+    if first_two and all(_CATCH_ADVISORY_BUCKET_WORD_RE.match(w) for w in first_two):
+        return " ".join(first_two)[:40]
+    return "advisory-note"
 
 
 def _catch_reason_family(reason):
@@ -2512,23 +2719,43 @@ def _catch_reason_family(reason):
     same arm collapses to one family. A NAMED arm key IS part of the arm's
     identity (not a per-call index) and is kept, so "overclaim OVERCLAIMS
     0.94" -> "overclaim OVERCLAIMS" and "leaked_internal HAS_LEAKS 0.95"
-    -> "leaked_internal HAS_LEAKS" unchanged. Never raises; an empty/falsy
-    reason returns ""."""
+    -> "leaked_internal HAS_LEAKS" unchanged. A reason with neither a
+    recognised `HEADER:` prefix (no colon at all) nor the judge's own
+    score shape — a colonless advisory note, e.g. one embedding a
+    `--test-cmd '...'` argument — used to fall all the way through this
+    same generic strip and come out as the ENTIRE reason, verbatim:
+    unbounded, and never run through _catch_redact or
+    _catch_signal_escape_markdown before reaching a public issue
+    title/body. That shape is now bucketed instead (see
+    _catch_reason_advisory_bucket) so one advisory note collapses into
+    one family per score-free lead-in, not one per note. Every return
+    path is capped at _CATCH_FAMILY_MAX_LEN (60) chars and passed through
+    _catch_signal_escape_markdown — belt-and-braces alongside the same
+    escape _catch_signal_title/_catch_signal_body apply again at
+    render time, since a *recognised*-header family can still carry a
+    backtick/@handle/#NN if the draft text before the colon did. Never
+    raises; an empty/falsy reason returns ""."""
     if not reason:
         return ""
     reason = str(reason).strip()
     m = _CATCH_FAMILY_COUNT_MISMATCH_RE.match(reason)
     if m:
-        return m.group(1)
-    if reason.startswith("PR mismatch"):
-        return "PR mismatch"
-    if reason.startswith("LABELLED VALUE"):
-        return "LABELLED VALUE"
-    prefix = reason.split(":", 1)[0].strip()
-    prefix = re.sub(r'\s*\([^)]*\)\s*$', '', prefix)
-    prefix = re.sub(r'\s+\d+(\.\d+)?(/\d+(\.\d+)?)*\s*$', '', prefix)
-    prefix = re.sub(r'^c\d+\s+', '', prefix)
-    return prefix.strip()
+        family = m.group(1)
+    elif reason.startswith("PR mismatch"):
+        family = "PR mismatch"
+    elif reason.startswith("LABELLED VALUE"):
+        family = "LABELLED VALUE"
+    elif ":" not in reason and not _CATCH_FAMILY_SCORE_RE.match(reason):
+        family = _catch_reason_advisory_bucket(reason)
+    else:
+        prefix = reason.split(":", 1)[0].strip()
+        prefix = re.sub(r'\s*\([^)]*\)\s*$', '', prefix)
+        prefix = re.sub(r'\s+\d+(\.\d+)?(/\d+(\.\d+)?)*\s*$', '', prefix)
+        prefix = re.sub(r'^c\d+\s+', '', prefix)
+        prefix = prefix.strip()
+        family = prefix if prefix else _catch_reason_advisory_bucket(reason)
+    family = _catch_signal_escape_markdown(family)
+    return family[:_CATCH_FAMILY_MAX_LEN]
 
 
 def _catch_signal_groups(records, tags=("false", "miss")):
@@ -2625,8 +2852,27 @@ _CATCH_SIGNAL_TITLE_TEMPLATES = {
 
 
 def _catch_signal_title(tag, family, count):
+    """A signal's title — belt-and-braces escapes `family` again here
+    even though _catch_reason_family already bounds and escapes it, since
+    a *recognised*-header family (e.g. the text before a colon in a
+    draft-derived reason) can still carry a backtick/@handle/#NN if the
+    draft text before that colon did."""
     tmpl = _CATCH_SIGNAL_TITLE_TEMPLATES.get(tag, "{tag} pattern: {family} (x{count})")
-    return tmpl.format(tag=tag, family=family, count=count)
+    return tmpl.format(tag=tag, family=_catch_signal_escape_markdown(family), count=count)
+
+
+def _catch_signal_bot_counts(records):
+    """{bot_id: count} for one family's records, counts only — no reason/
+    draft text, so this is safe in the default (--open-reachable) body
+    the same way the rest of a signal's metadata is. A missing `bot`
+    field (an older record written before the ledger tagged bot/origin)
+    counts under "unknown", same fallback `catch list`'s own bot column
+    uses. Sorted by count desc then bot id, for a stable order."""
+    counts = {}
+    for rec in records:
+        bot = rec.get("bot") or "unknown"
+        counts[bot] = counts.get(bot, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def _build_catch_signals(records, since_spec, min_count, with_reasons=False,
@@ -2656,15 +2902,28 @@ def _build_catch_signals(records, since_spec, min_count, with_reasons=False,
             "examples": _catch_signal_examples(recs, with_reasons=with_reasons,
                                                with_drafts=with_drafts),
             "title": _catch_signal_title(tag, family, len(recs)),
+            "bot_counts": _catch_signal_bot_counts(recs),
         })
     signals.sort(key=lambda s: (-s["count"], s["tag"], s["family"]))
     return signals, undated
+
+
+def _catch_signal_bot_line(bot_counts):
+    """The counts-only per-bot breakdown line — e.g. 'primary=3,
+    worker2=1' — or "" for an empty/missing dict (older signal, or a
+    caller that never computed it)."""
+    if not bot_counts:
+        return ""
+    return ", ".join(f"{bot}={count}" for bot, count in bot_counts.items())
 
 
 def _print_catch_signal(signal):
     print(f"signal: {signal['title']}")
     print(f"  family: {signal['family']}  tag: {signal['tag']}  count: {signal['count']}")
     print(f"  first: {signal['first_ts']}  last: {signal['last_ts']}")
+    bot_line = _catch_signal_bot_line(signal.get("bot_counts"))
+    if bot_line:
+        print(f"  by bot: {bot_line}")
     for i, ex in enumerate(signal["examples"], 1):
         line = f"  example {i} ({ex['id']})"
         if "draft" in ex:
@@ -2685,15 +2944,23 @@ def _catch_signal_body(signal):
     --open — see _cmd_catch_signal) already passed through both
     _catch_redact and _catch_signal_escape_markdown via
     _catch_signal_examples, so this function only assembles strings, it
-    never touches raw text itself."""
+    never touches raw text itself. `family` is passed through
+    _catch_signal_escape_markdown again here too — same belt-and-braces
+    reasoning as _catch_signal_title."""
+    safe_family = _catch_signal_escape_markdown(signal['family'])
     lines = [
         f"## {signal['title']}",
         "",
-        f"Reason family: `{signal['family']}`",
+        f"Reason family: `{safe_family}`",
         f"Tag: {signal['tag']}",
         f"Count: {signal['count']}",
         f"First seen: {signal['first_ts']}",
         f"Last seen: {signal['last_ts']}",
+    ]
+    bot_line = _catch_signal_bot_line(signal.get("bot_counts"))
+    if bot_line:
+        lines.append(f"By bot: {bot_line}")
+    lines += [
         "",
         "### Records",
         "",
@@ -2874,7 +3141,10 @@ def _cmd_catch_signal(a):
               "to preview locally with either flag", file=sys.stderr)
         return 2
 
+    bot_filter = getattr(a, "bot", None)
     records = _catch_records()
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     signals, undated = _build_catch_signals(records, since, min_count,
                                             with_reasons=with_reasons,
                                             with_drafts=with_drafts)
@@ -5768,7 +6038,7 @@ def derive_window_facts(window_text, draft_text):
         return []
 
 
-def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
+def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_facts=None):
     """`window_text` with a DERIVED FACTS block at its HEAD and the raw
     window below it as BACKING. The cap applies AFTER the facts: facts are
     never dropped, and if facts + raw window exceed the cap the raw
@@ -5781,6 +6051,16 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     redacted window is still returned (byte-for-byte unchanged only when
     nothing secret-shaped was in it).
 
+    `extra_facts` (optional): sentences the caller has already computed
+    from information `derive_window_facts` cannot see on its own — e.g.
+    the receipt-turn note from `_receipt_turn_extra_fact` (gate-
+    adjudication-20260918.md mechanism (a)), which depends on
+    `window_meta`'s `prev_turn_detail`, not just the window text. Appended
+    ahead of the cap, same guarantee as every other fact: never dropped,
+    deduped against what `derive_window_facts` already found. Included
+    regardless of `SUPERJEV_DERIVED_FACTS` — this is a correctness fix to
+    the window itself, not part of the optional derived-facts feature.
+
     Every window is redacted (evidence-guard's `redact`) before it is used
     for anything — deriving facts from it or handing it to the judge —
     which is the Stop-hook gate window's half of the blocklist+redactor
@@ -5790,6 +6070,10 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     window_text = guard.redact(window_text)
     meta_guard = guard.to_dict()
     facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
+    if extra_facts:
+        for f in extra_facts:
+            if f and f not in facts:
+                facts.append(f)
     meta = {"facts_count": len(facts), "facts": list(facts), "facts_bytes": 0,
             "window_trimmed_bytes": 0, "guard": meta_guard}
     if not facts:
@@ -7183,6 +7467,8 @@ def cmd_hook_prompt_verify(a):
         except (ValueError, TypeError):
             _hook_log("prompt-verify: non-JSON stdin — fail-open", skipped=True)
             return 0
+        global _ACTIVE_HOOK_PAYLOAD
+        _ACTIVE_HOOK_PAYLOAD = payload
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             _hook_log("prompt-verify: no usable 'prompt' field — fail-open", skipped=True)
@@ -7491,20 +7777,36 @@ def _stop_scan_verify_one(r, budget=None):
                 pass
 
         label = {0: "CLEAN", 3: "READ", 4: "REJECT"}.get(code, "READ")
-        if block_reasons and label != "REJECT":
+        health = "thin" if evidence.get("thin") else "ok"
+        if block_reasons:
             label = "REJECT"
+        elif label == "REJECT" and health == "thin":
+            # Same hole as the live PostToolUse verify hook (see
+            # gate-adjudication-20260918.md): worker-verify's own exit
+            # code alone said REJECT, but every flag this run actually
+            # parsed was suppressed into `notes` because the gather had
+            # nothing usable — 45 of 59 REJECT labels in the 2026-09-18
+            # adjudication ran exactly this way. A bare exit code over
+            # evidence that was never gathered is "we could not check",
+            # never "we checked and it failed" — never a REJECT label.
+            label = "UNCHECKED"
         flag_str = ("; ".join(f"{f['key']} {f['verdict']} {f['score']:.2f}" for f in flags)
                    or "no flags")
         used = ", ".join(f"--{k} {v}" for k, v in
                          (("worktree", derived["worktree"]),
                           ("test-cmd", derived["test_cmd"]),
                           ("pr", derived["pr"])) if v) or "no evidence derived"
-        health = "thin" if evidence.get("thin") else "ok"
         print(f"super-jev verify {teammate_id}: {label} — {flag_str} — {used} — health {health}")
         note_tail = (" — " + "; ".join(notes)) if notes else ""
         _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
                  f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
-                 hook_mode=True, source="stop-transcript")
+                 hook_mode=True, source="stop-transcript",
+                 unchecked=(label == "UNCHECKED"),
+                 health=("none" if label == "UNCHECKED" else health),
+                 reason=("no-evidence" if label == "UNCHECKED" else None))
+        if label == "UNCHECKED":
+            catch_log("verify", "unchecked", reasons=["no-evidence"] + (notes or []),
+                     draft_text=report_text, payload=None)
     except Exception as exc:
         print(f"super-jev verify {teammate_id}: ERROR — {exc.__class__.__name__} (advisory)")
         _hook_log(f"stop-scan: {teammate_id} — error ({exc.__class__.__name__}), "
@@ -7706,6 +8008,9 @@ def cmd_hook(a):
         _hook_log("non-JSON stdin — fail-open", skipped=True)
         return 0
 
+    global _ACTIVE_HOOK_PAYLOAD
+    _ACTIVE_HOOK_PAYLOAD = payload
+
     evidence_tmp_path = None
 
     def _hook_unchecked(tp, evidence, tmp_ev_prompt_found):
@@ -7806,6 +8111,23 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
+                    # gate-adjudication-20260918.md: the receipt-turn fix,
+                    # scoped to a current turn that ran no tools of its own
+                    # (window_meta["current_turn_empty"]).
+                    receipt_extra_facts = None
+                    if window_meta is not None and window_meta.get("current_turn_empty"):
+                        # The current turn ran no tools of its own — if the
+                        # most recent previous turn that ran tools is still
+                        # kept in the window, name it in a DERIVED FACTS
+                        # sentence (no header rewrite — see
+                        # _receipt_turn_extra_fact) so a correct
+                        # restatement of a one-turn-old result is not
+                        # scored as having no in-window evidence.
+                        receipt_idx = _receipt_turn_index(window_meta)
+                        window_meta["receipt_turn"] = receipt_idx
+                        if receipt_idx is not None:
+                            fact = _receipt_turn_extra_fact(receipt_idx)
+                            receipt_extra_facts = [fact] if fact else None
                     # Cited-file tail (see build_cited_file_block, 2026-09-18
                     # SET2-AUDIT.md recommendation (b)): when the draft names
                     # its own source ("per SUMMARY.md"), fold that file's
@@ -7832,7 +8154,7 @@ def cmd_hook(a):
                     # next line, which cuts whole labelled sections in
                     # priority order rather than slicing bytes off the head.
                     derived, _facts, _fmeta = compose_window_with_facts(
-                        derived, text, cap_bytes=0)
+                        derived, text, cap_bytes=0, extra_facts=receipt_extra_facts)
                     # THE cap — one budget, in tokens, enforced here and
                     # nowhere else, on the finished text right before the
                     # call. Everything above (the builder's byte cap, the
@@ -7950,12 +8272,15 @@ def cmd_hook(a):
                     text = dict_text
                 elif is_spawn:
                     status = tool_response.get("status")
+                    print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                     _hook_log(
                         "verify: skipped — tool_response is a spawn/launch dict"
                         + (f" (status={status!r})" if status else "") +
                         "; the worker's own report is not here yet, it arrives later "
                         "in a <teammate-message> block (see `hook prompt-verify`)",
                         exit_code=0, skipped=True, reason="spawn-dict")
+                    catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                             draft_text=None, start_time=_catch_t0, payload=payload)
                     return 0
                 else:
                     text = _hook_report_text(payload)
@@ -7968,8 +8293,11 @@ def cmd_hook(a):
 
             is_ack, ack_reason = _is_launch_ack(text)
             if is_ack:
+                print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                 _hook_log(f"verify: skipped — {ack_reason}", exit_code=0, skipped=True,
                          reason="launch-ack")
+                catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                         draft_text=text, start_time=_catch_t0, payload=payload)
                 return 0
 
             worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
@@ -8005,11 +8333,11 @@ def cmd_hook(a):
         # is no weaker action to upgrade.
         # claim_rows carries the SUPPORTED rows too, which _parse_strong_flags
         # drops — without them the OVERCLAIMS-alone gate could never see
-        # that every claim was in fact supported. No evidence inventory is
-        # passed on this path: a real hook payload gives us no --test-cmd
-        # and no --pr (see the hardcoded test_cmd="" above), so there is no
-        # gather to measure. That also means a hook-driven verify can NEVER
-        # prove a test-count claim — docs/hooks.md says so in plain words.
+        # that every claim was in fact supported. A hook-driven verify gets
+        # no --test-cmd/--pr (see the hardcoded test_cmd="" above), so it
+        # can NEVER prove a test-count claim — docs/hooks.md says so in
+        # plain words — but it DOES know whether it had a worktree to look
+        # at, which is exactly what gather_health below checks.
         flags = _parse_strong_flags(door_out)
         claim_rows = _parse_claim_rows(door_out)
         # Only the gate door ever derives a wide window from the transcript
@@ -8023,6 +8351,19 @@ def cmd_hook(a):
             gather_health = {"current_turn_empty": True,
                              "reasons": ["the current turn ran no tools of its own; this "
                                         "window is previous-turn/receipts evidence only"]}
+        elif door == "verify":
+            # 2026-09-18 fix (gate-adjudication-20260918.md, verify door):
+            # `hook verify --from-file` and the Stop-scan both already
+            # compute `_evidence_inventory` and feed it in here so a thin
+            # gather suppresses a block into an advisory note instead of
+            # letting it through — the live PostToolUse hook never did,
+            # so it treated "nothing was gathered" as "healthy" and let a
+            # bare exit code stand in for a real judgement. `worktree` is
+            # the only evidence source this path ever has (test_cmd/pr are
+            # never set on a real hook payload), so this is deliberately
+            # narrower than the from-file/probe version — no --dry-run
+            # probe is spent here, just the presence/absence check.
+            gather_health = _evidence_inventory(test_cmd="", worktree=worktree, pr=None)
         block_reasons, block_notes = _hook_block_decision(flags, claim_rows, gather_health)
         # Deterministic reasons are never suppressed by the gather-health
         # check the judge-driven flags above go through — arithmetic on
@@ -8039,6 +8380,20 @@ def cmd_hook(a):
         action = action_map.get(code, "advisory")
         if block_reasons:
             action = "block"
+        elif (door == "verify" and action == "block" and gather_health is not None
+              and not _gather_healthy(gather_health)):
+            # The door's own exit code alone implied a block, but nothing
+            # this run actually parsed crossed the block line —
+            # _hook_block_decision already suppressed every flag into
+            # block_notes because the gather itself had nothing usable (no
+            # worktree, or the probe came back empty/unreadable). Blocking
+            # on a bare exit code over evidence that was never gathered
+            # mistakes "we could not check" for "we checked and it
+            # failed" — see gate-adjudication-20260918.md, verify door,
+            # rows 00:39:08 and 01:03:59 (the SAME report came back READ
+            # once --worktree/--test-cmd/--pr gave it something to gather
+            # against). Advisory, not a block; never judged.
+            action = "unchecked-no-evidence"
 
         # stop_hook_active=true is Claude Code's own signal that this Stop
         # event is a RE-RUN — a previous hook already blocked once this
@@ -8052,18 +8407,22 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
-        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1): a block whose
-        # ONLY reasons came from the judge — det_block_reasons is empty, so
-        # nothing deterministic (count mismatch, PR mismatch,
-        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory. A
-        # block carrying even one deterministic reason is untouched: it
-        # falls through to the "block" branch below exactly as it does
-        # today, env or no env. Checked after stop_hook_active so a re-run
-        # keeps its own (already advisory) handling rather than being
-        # relabeled here.
-        elif (door == "gate" and action == "block" and _judge_advisory_enabled()
-              and not det_block_reasons):
-            action = "block-judge-advisory"
+        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1/weak): a block
+        # whose ONLY reasons came from the judge — det_block_reasons is
+        # empty, so nothing deterministic (count mismatch, PR mismatch,
+        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory,
+        # mode "1" unconditionally, mode "weak" only when every one of
+        # those judge reasons names a verdict "weak" covers (never
+        # OVERCLAIMS — see _judge_advisory_reasons_are_weak_only). A block
+        # carrying even one deterministic reason is untouched: it falls
+        # through to the "block" branch below exactly as it does today, env
+        # or no env. Checked after stop_hook_active so a re-run keeps its
+        # own (already advisory) handling rather than being relabeled here.
+        elif door == "gate" and action == "block" and not det_block_reasons:
+            _jam = _judge_advisory_mode()
+            if _jam == "1" or (_jam == "weak"
+                               and _judge_advisory_reasons_are_weak_only(block_reasons)):
+                action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
         # above the block line, but the empty-current-turn health gate
@@ -8104,6 +8463,19 @@ def cmd_hook(a):
             if notice:
                 print(notice)
 
+        if action == "unchecked-no-evidence":
+            reason_bits = "; ".join(block_notes) if block_notes else f"exit {code}"
+            advisory = ("super-jev verify: no evidence gathered; not judged "
+                       f"(exit {code} suppressed — {reason_bits})")
+            print(advisory)
+            _hook_log(f"verify: unchecked — no evidence gathered (exit {code} "
+                     f"suppressed — {reason_bits}) — advisory, not judged", exit_code=0,
+                     flags=flags, unchecked=True, health="none", reason="no-evidence")
+            catch_log(door, "unchecked", reasons=["no-evidence"] + block_notes,
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
+            _print_ledger_notice_if_gate()
+            return 0
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
@@ -8131,11 +8503,18 @@ def cmd_hook(a):
                 advisory += " (advisory: " + "; ".join(block_notes) + ")"
             print(advisory, file=sys.stderr)
             _hook_log(f"gate: judge advisory, not blocked (exit {code}) — would have "
-                     f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
+                     f"blocked on: {reason_bits}{suppressed_note_tail} "
+                     f"[judge-advisory-mode:{_jam}]", exit_code=0,
                      flags=flags, reason=suppressed_reason)
-            catch_log(door, "advisory-judge", reasons=block_reasons, draft_text=text,
-                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
-                     payload=payload)
+            # The arm name (NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS) already
+            # rides inside each block_reasons string ("key VERDICT score");
+            # the mode tag is appended so the ledger also names WHICH
+            # judge-advisory mode demoted this block, without needing to
+            # re-derive it from the env at read time.
+            catch_log(door, "advisory-judge",
+                     reasons=block_reasons + [f"judge-advisory-mode:{_jam}"],
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -8279,6 +8658,12 @@ SKIP_REASON_BUCKETS = {
     "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
+    # The stop-scan's UNCHECKED verdict (worker-verify's own exit code
+    # said REJECT/CLEAN, but the gather had nothing usable, so the label
+    # was downgraded to UNCHECKED — see cmd_hook_prompt_verify's
+    # stop-scan branch) is judged against thin evidence, same as the
+    # sibling no-tool-evidence-checkable path above, not a lost check.
+    "no-evidence": SKIP_BUCKET_THIN,
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
     # The advisory teammate-report scan running out of its own time or its
@@ -9175,6 +9560,8 @@ def build_parser():
                          help="only the one record with this id — what `catch signal`'s "
                               "own issue-body pointer tells a human to run locally for "
                               "the redacted detail behind a record id")
+    ck_list.add_argument("--bot", default=None, help="only records from this bot id "
+                                                      "(see the `bot` field, e.g. primary)")
     ck_list.set_defaults(func=cmd_catch, catch_action="list")
     ck_tag = ck_subs.add_parser("tag", help="fair = block was right; false = block was "
                                             "wrong; miss = an allow let a lie through")
@@ -9185,6 +9572,8 @@ def build_parser():
     ck_report = ck_subs.add_parser("report", help="fair catches, false stops, misses, "
                                                    "plus untagged count")
     ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_report.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. primary)")
     ck_report.set_defaults(func=cmd_catch, catch_action="report")
     ck_signal = ck_subs.add_parser("signal", help="group false/miss blocks by reason "
                                                    "family; draft (or --open, file) a "
@@ -9193,6 +9582,10 @@ def build_parser():
                            help="how many same-family false/miss blocks before a "
                                 "signal fires (default 3)")
     ck_signal.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_signal.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. "
+                                                        "primary) — restricts grouping, "
+                                                        "not just the printed breakdown")
     ck_signal.add_argument("--open", action="store_true", dest="open",
                            help="actually file the issue via `gh issue create` "
                                 "(needs --repo); default just prints the signal")

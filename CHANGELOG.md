@@ -4,6 +4,26 @@
 
 No version bump.
 
+- **`catch signal` round 3: bounded reason families, per-bot grouping and
+  breakdown.** A colonless reason with no recognised `HEADER:`/judge-score
+  prefix (an advisory note, e.g. one embedding a `--test-cmd '...'`
+  argument) used to become the reason **family** verbatim — the one
+  string that reached a public issue title/body without ever going
+  through `_catch_redact` or the markdown-escape pass, and unbounded, so
+  one advisory note per differing detail never collapsed with the next
+  the way every other arm's repeat blocks did. `_catch_reason_family` now
+  buckets that shape instead (first two letters-only words, max 40 chars,
+  else the fixed literal `advisory-note`), caps every family at 60
+  characters, and always escapes it; `_catch_signal_title`/
+  `_catch_signal_body` escape the family again on top of that, since a
+  *recognised*-header family can still carry a backtick/`@handle`/`#NN`
+  from the draft text before its own colon. `catch signal` also gained
+  `--bot <id>` (same filter `catch list`/`catch report` already had,
+  restricting grouping itself, not just the printed output) and a
+  counts-only per-bot breakdown line inside every printed/issue-body
+  signal block. See docs/hooks.md, "Turning a repeat pattern into a fix
+  PR."
+
 - **`catch signal`.** The first step of the compounding loop the catch
   ledger exists to feed: harness catches -> tags -> issue -> fix PR ->
   bench robot. `superjev.py catch signal [--min 3] [--since 24h] [--open
@@ -35,6 +55,79 @@ No version bump.
   call, belt-and-braces on top of the metadata-only default body. `catch
   list` gained `--id <id>` so the pointer above is a real, working lookup.
   See docs/hooks.md, "Turning a repeat pattern into a fix PR."
+
+- **OVERCLAIMS arm — the receipt-turn fix.** A hand adjudication of every
+  live `hook gate` block on the primary's own seat
+  (`ops/gate-adjudication-20260918.md`) found one live false-block
+  mechanism this fix addresses: a tool-free current turn whose reply is a
+  correct restatement of a result from the *previous* turn's own tool
+  activity was read as having no in-window evidence. The most recent
+  previous turn that ran tools is now named in a new DERIVED FACTS
+  sentence (`RECEIPT TURN: ...`) whenever the current turn is tool-free
+  but the window carries a receipt from that previous turn — its
+  `[previous turn -N]` section header is left exactly as-is, pointed at
+  from the DERIVED FACTS sentence rather than rewritten. See
+  `_receipt_turn_index`/`_receipt_turn_extra_fact`, and
+  `compose_window_with_facts`'s `extra_facts` parameter, and docs/hooks.md,
+  "OVERCLAIMS arm — the receipt-turn fix". This addresses the tool-free-
+  turn-with-in-window-receipt case only: it does not address a false block
+  whose receipt lies beyond the previous-turn window, a block that was
+  really the deterministic PR-state arm's job, or a false block on a turn
+  that itself ran a tool.
+
+- **Judge-advisory mode, granular.** `SUPERJEV_GATE_JUDGE_ADVISORY` now
+  also accepts `weak`, alongside the existing `1`: `weak` demotes only the
+  per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's secondary arm) and
+  SELF_CONTRADICTORY to advisory — OVERCLAIMS still blocks, matching the
+  adjudication's finding that OVERCLAIMS is the only judge arm with a
+  positive live record while the secondary arm and SELF_CONTRADICTORY are
+  not. `1` (all judge arms advisory)
+  and `0`/unset (off) are unchanged. The catch ledger's `advisory-judge`
+  decision now carries a `judge-advisory-mode:1`/`judge-advisory-mode:weak`
+  tag in its `reasons`, alongside the existing `key VERDICT score` strings
+  that already name the arm. See docs/hooks.md, "Judge-advisory mode".
+- **`bot`/`origin` on every ledger record.** Both the call ledger
+  (`calls.jsonl`) and the catch ledger (`catches.jsonl`) now tag every
+  record with `bot` (`CLAW4MAC_BOT_ID` or `CLAUDE_BOT_ID` from the
+  environment if set, else the claw4mac project-dir segment out of the
+  hook payload's `transcript_path` — the part after `agent-cwd-` up to the
+  next path separator — else `"unknown"`) and `origin` (`"bench"` when
+  `SUPERJEV_BENCH=1` or the hook payload's `session_id` starts with
+  `bench-`, else `"live"`). Neither field changes a hook's decision — both
+  are best-effort, never-raise defaults applied at the same point `id`
+  already was. `superjev.py catch list`/`catch report` gain `--bot <id>`,
+  `catch list` shows a `bot=` column, and `catch report` prints a `by
+  bot:` breakdown when `--bot` is not given. See docs/hooks.md, "The
+  ledger" and "The catch ledger".
+
+- **Verify hook: spawn acks and unchecked no-evidence runs now show up in
+  the catch ledger.** Two fixes off `gate-adjudication-20260918.md`'s
+  verify-door findings — every adjudicated live verify block was false.
+  First, the live
+  `hook verify` (PostToolUse) already skipped a spawn/launch dict or a
+  launch-ack text without calling the judge — it just never told anyone:
+  the catch ledger carried nothing for those runs, so a spawn ack and a
+  real unchecked report were indistinguishable in `catches.jsonl`. It now
+  prints `super-jev verify: spawn ack, nothing to judge` on stderr and
+  logs a `door="verify"`, `decision="unchecked"`, `reasons=["spawn-ack"]`
+  catch record. Second, and the real live bug: the PostToolUse hook never
+  computed its own evidence-gather health for `verify` the way
+  `hook verify --from-file` and the Stop-scan already did, so a bare
+  worker-verify exit 4 (REJECT) blocked even when nothing was actually
+  gathered to judge the report against (no `--worktree`, the only
+  evidence source a live hook ever has). It now runs the same
+  `_evidence_inventory` check verify's other two entry points already
+  ran; when the gather is thin, a would-be block is downgraded to one
+  advisory line (`no evidence gathered; not judged`, exit 0) and logged
+  as `decision="unchecked"`, `reasons=["no-evidence", ...]` instead of
+  blocking. The Stop-scan's REJECT label had the identical hole — most
+  REJECT labels in the same adjudication ran at `health=thin` — a bare
+  exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
+  same catch-ledger shape. In practice this makes the live verify door
+  advisory-only for every report until a worktree is supplied: a real
+  PostToolUse payload carries no `worktree` key and nothing exports
+  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
+  today. See docs/hooks.md, "verify: spawn acks and gather health".
 
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
