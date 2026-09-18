@@ -768,8 +768,10 @@ every PR-state signal for the PR number the draft names
 2. among signals of the same strength, the one in the more recent window
    section (`_section_recency_rank` — the same previous-turns-oldest-to-
    newest, then receipts, then this-turn-reports, then this-turn-tools
-   layering the stale-report fact already uses), or, when two signals of
-   the same strength share one section, whichever reads later in the text.
+   layering the stale-report fact already uses); when two signals of the
+   same strength share one section and disagree, neither position in the
+   raw text is trusted as an ordering, so the tie fails CLOSED (see below)
+   instead of being resolved by which one reads later.
 
 A line only ever counts as a receipt (state-bearing or command-invocation)
 when it sits *outside* a `REPORT FROM` block and either carries the tool-
@@ -792,8 +794,8 @@ real. When two same-strength signals disagree and neither carries any
 ordering information over the other, the arm fails CLOSED: it blocks on
 whichever tied signal says NOT_MERGED (the base, pre-recency behaviour)
 rather than allow, and still records a `PR state ambiguous: PR #N has
-conflicting same-strength signals with no window section/turn marker to say
-which is newer — failing closed on the not-merged signal` line for `hook
+conflicting same-strength signals with no window section/turn ordering
+between them — failing closed on the not-merged signal` line for `hook
 gate --explain`, so a reason and a note from this one pair can be non-None
 together — the only deterministic pair where that happens. Only this one
 arm changed; the count-mismatch arm and every derived-fact family are
