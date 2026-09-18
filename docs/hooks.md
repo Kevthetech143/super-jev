@@ -151,7 +151,9 @@ where it needed a live judge re-run this pass did not do.
   judge, no model call: a drafted test count that contradicts a real
   `N passed` line in the evidence, or a drafted "PR #N merged" the
   evidence's own `gh pr view` state contradicts, blocks outright with a
-  plain reason (`count mismatch: draft N vs evidence M`). Verified on the
+  plain reason (`count mismatch (tests): draft N vs evidence M`; see
+  "receipts backfill and the labelled count arm" below for the labelling
+  rule that decides what may be paired at all). Verified on the
   bench replay to catch real count-mismatch cases without blocking a true
   claim — see `skills/super-jev/tests/replay_gate_bench.py`. Never fires
   on a bare evidence gap (a count the evidence never mentions at all): that
@@ -160,8 +162,9 @@ where it needed a live judge re-run this pass did not do.
 - **Wider evidence window.** The Stop-hook gate now also folds in the
   previous turn's tool_result content (lower priority, capped at half the
   byte budget) and up to the last 40 "receipts" — one dated fact line per
-  session, appended whenever a Stop event sees a `gh pr merge`, `gh pr
-  checks`, or `N passed` line in this turn's own tool results, so a fact
+  session, appended whenever a Stop event sees a receipt-worthy line in this
+  turn's own tool results, plus a whole-transcript backfill of the same
+  lines (see "receipts backfill and the labelled count arm"), so a fact
   from several turns back does not fall out of the window the moment the
   turn ends. PR #22's health semantics are unchanged: a turn that ran no
   tools of its own still gets no evidence here, whatever the previous turn
@@ -289,6 +292,98 @@ signature (`transcript_path`, plus the optional `n`/`max_bytes`/
 `session_id`/`prev_turns`/`cap_bytes`/`return_meta` knobs), same return
 shape (a text string or `None`, or a `(text, meta)` pair when
 `return_meta=True`).
+
+## Gate v3 — receipts backfill and the labelled count arm (2026-09-17)
+
+A follow-up diagnosis of the seven true reports the live shim blocked on the
+2026-09-17 bench (`gate-bench-20260917/results-v3-shim/` against
+`evidence-wide/`) found two distinct causes, and only one of them was about
+window size.
+
+**What the 24 KB cap cut: nothing.** Measured on all seven cases,
+`prev_dropped` was 0 and `prev_truncated` was `None` every time — the
+assembled window ran 2.3 KB to 7.0 KB against a 24576-byte cap. The cap is
+not raised, because no evidence shows it removing anything.
+
+**What the turn boundary cost: no evidence.** The offline bench walked back
+over assistant messages whose `stop_reason` was not `tool_use`; the shim
+walks back over real user prompt records, and in a team transcript teammate
+reports arrive as plain `role: "user"` text, so the shim's turns are much
+shorter. The byte difference is real, but every proof line the bench's
+previous-turn block carried was already inside the shim's spans on all seven
+cases. The boundary rule is therefore left exactly as it is — changing it
+moves bytes without moving evidence.
+
+**What actually went missing: the receipts layer.** The bench scanned the
+whole session transcript for receipt-worthy lines; the shim read only its
+own on-disk receipt store, and got 0 lines in all seven cases against 1 to
+15 in the bench files. Those lines were the proof: `MERGED`,
+`MERGED 2026-09-17T18:35:18Z`, `completed success  ... (#8)`, `N passed`.
+Two fixes:
+
+- **Transcript backfill.** `_record_receipts` only ever writes the *current*
+  turn's facts, so a fact exists in the store only if the Stop hook ran on
+  the turn that produced it. Any skipped turn leaves a permanent hole. The
+  window builder now also harvests receipt lines straight out of the
+  transcript from session start up to the current turn's boundary (capped at
+  60 lines, deduped against the store). The store became a fast path rather
+  than the only path.
+- **A wider notion of a receipt.** The old pattern
+  (`gh pr merge|gh pr checks|N passed`) matched those *commands* but not
+  their *output*: `gh pr view --json state` prints a bare `MERGED`, and
+  `gh pr checks` prints `completed  success  <job>`. Both are now
+  receipt-worthy, along with `checks passed`.
+
+  The honest tradeoff: a wider pattern also harvests prose from a teammate
+  report that happens to say `MERGED`, and a tool result is not always a
+  first-hand measurement. This makes the window more willing to *support* a
+  merge claim, not just to contradict one. It is the bench's own behaviour,
+  and it is called out here rather than buried.
+
+**The count arm now pairs labels, never bare numbers.** The deterministic
+count cross-check used to pool every integer in any clause mentioning
+tests/passed/failed into one draft set, pool every `N passed` and every
+`N of M` anywhere in the window into another, and fire when the two sets
+were disjoint. That manufactures a contradiction out of two unrelated
+numbers. Bench case t07 is the worked example: the draft said "/card is
+built ... its 29 tests pass", the window carried the line
+`152/152 passed   all green` from a previous turn's worker-verify report
+table (a different suite in a different repo), and the arm blocked a true
+report with `count mismatch: draft 29 vs evidence 152`. Case l18 fired for
+the same wrong reason — draft "56 tests pass" against the Jev line
+`10 of 10 need a human`, which is a claim tally, not a test count.
+
+The rule now:
+
+1. A draft integer is attached to a **unit label** (`tests`, `files`,
+   `prs`, `commits`) only when a keyword for that label sits within four
+   word-tokens of it, in the same clause. An integer with no unit word near
+   it — a PR number, a version, a duration — is attached to nothing.
+2. An evidence integer is read only out of a line matching a **registered
+   receipt shape** for that same label. For `tests` that means a real
+   runner summary: pytest's `N passed in <time>`, jest/vitest's
+   `Tests: ... N passed`, node/tap's `pass N`, mocha's `N passing`.
+   `152/152 passed   all green` matches none of them, which is the point.
+3. The arm fires only when the same label has counts on both sides and none
+   of the draft's counts match any of the evidence's. A draft count that
+   matches *any* same-label evidence count clears the arm, so the arm stays
+   lenient by construction; it cannot tell two same-label suites apart and
+   does not pretend to.
+4. Labels with no registered evidence shape (`files`, `prs`, `commits`) are
+   extracted from the draft and reported by `--explain`, and never paired.
+   An unpairable claim is an evidence gap, not a lie.
+
+Re-measured offline against the bench's own drafts and replayed windows: the
+arm still fires on l04 and l05 (the two count lies the v2 note credits) and
+no longer fires on t07 or l18. l18 stays blocked on OVERCLAIMS 1.00, so the
+verdict is unchanged there and only the reason improved.
+
+**`--explain` now names the turns.** The window report prints which
+transcript record opened the current turn, and one line per previous turn
+giving its record range, tool_result count, byte size, and whether it was
+kept, cut by the cap, or head-truncated. Receipts print their source split
+between the session store and the transcript backfill. A window a gate
+blocked on is only auditable if you can see the turns it read.
 
 ## The ledger
 
