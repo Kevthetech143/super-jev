@@ -4,6 +4,21 @@
 
 No version bump.
 
+- **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
+  `hook gate` block to advisory (print the reason, exit 0) when every
+  reason behind it came from the judge (the OVERCLAIMS arm, or under
+  `SUPERJEV_RULE=v2` the secondary NOT_SUPPORTED/CONTRADICTED arm) — the
+  judge's confidence score is a guess, and a wrong guess should not stop a
+  true turn. A block carrying even one deterministic reason (count
+  mismatch, PR mismatch, `CONTRADICTED_BY_FACT`) still blocks exactly as
+  today, env or no env. The stderr line is prefixed `super-jev gate (judge
+  advisory, not blocked):` instead of `super-jev gate blocked this`, and
+  the catch ledger records the decision as `advisory-judge` (tagged
+  `fair`/`false` the same way `advisory-forced` is). `catch report` prints
+  the new count on its own line, `judge advisories: N`, alongside `blocks
+  suppressed: N` — the two failsafes are counted separately. See
+  docs/hooks.md, "Judge-advisory mode".
+
 - **The catch ledger.** A new, separate JSONL file (`SUPERJEV_CATCH_LEDGER`,
   default `catches.jsonl` next to the call ledger) records one small line
   per gate/verify/prompt-verify hook decision — id, door, decision, the

@@ -1197,6 +1197,21 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
+# Judge-advisory mode (2026-09-18). SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a
+# `hook gate` block to an advisory print + exit 0 when EVERY reason behind it
+# came from the judge (the OVERCLAIMS arm, or — under SUPERJEV_RULE=v2 — the
+# secondary NOT_SUPPORTED/CONTRADICTED arm). It never touches a block that
+# carries even one deterministic reason (a count mismatch, a PR mismatch, or
+# a CONTRADICTED_BY_FACT fact sentence) — those still block with the same
+# exit code as today, unconditionally. See cmd_hook's "block-judge-advisory"
+# branch, which checks this against `det_block_reasons` being empty rather
+# than special-casing which judge arm fired, so it covers v2 and v3 alike.
+JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
+
+
+def _judge_advisory_enabled():
+    return os.environ.get(JUDGE_ADVISORY_ENV, "0") == "1"
+
 # ------------------------------------------------- the evidence inventory
 #
 # The 2026-09-17 false block. A TRUE report ("187 passed", "both checks
@@ -1932,8 +1947,10 @@ def _catch_excerpt(text):
 def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
               start_time=None, payload=None):
     """One record for the catch ledger — called once per gate/verify hook
-    decision. `decision` is one of "block", "allow", "advisory", "unchecked"
-    (see docs/hooks.md). `reasons` is the same strings --explain shows for
+    decision. `decision` is one of "block", "allow", "advisory", "unchecked",
+    "advisory-forced" (the stop_hook_active re-run failsafe), or
+    "advisory-judge" (the SUPERJEV_GATE_JUDGE_ADVISORY=1 failsafe — see
+    docs/hooks.md). `reasons` is the same strings --explain shows for
     this run (block_reasons/block_notes), never the raw evidence. `ms` is
     left as None (not guessed) when `start_time` was not captured.
 
@@ -2319,8 +2336,8 @@ def _cmd_catch_list(a):
 # real or forced block (the thing being judged right or wrong IS a block),
 # "miss" only against a decision that let the reply through unblocked.
 _TAG_ALLOWED_DECISIONS = {
-    "fair": ("block", "advisory-forced"),
-    "false": ("block", "advisory-forced"),
+    "fair": ("block", "advisory-forced", "advisory-judge"),
+    "false": ("block", "advisory-forced", "advisory-judge"),
     "miss": ("allow", "advisory", "unchecked"),
 }
 
@@ -2405,11 +2422,20 @@ def _cmd_catch_report(a):
     suppressed = sum(1 for r in records if r.get("decision") == "advisory-forced")
     suppressed_and_tagged = sum(1 for r in records if r.get("decision") == "advisory-forced"
                                 and r.get("tag") in ("fair", "false"))
+    # "advisory-judge" is the SUPERJEV_GATE_JUDGE_ADVISORY=1 twin of
+    # "advisory-forced": a real block whose only reasons came from the judge
+    # (OVERCLAIMS, or under SUPERJEV_RULE=v2 the secondary NOT_SUPPORTED/
+    # CONTRADICTED arm) got demoted to advisory rather than a stop_hook_active
+    # re-run. Reported on its own line rather than folded into "blocks
+    # suppressed" so the scoreboard can tell the two failsafes apart — one
+    # fires on a loop re-run, this one fires on every matching turn.
+    judge_advisories = sum(1 for r in records if r.get("decision") == "advisory-judge")
     print(f"fair catches: {fair}")
     print(f"false stops: {false}")
     print(f"misses: {miss}")
     print(f"untagged: {untagged}")
     print(f"blocks suppressed: {suppressed}")
+    print(f"judge advisories: {judge_advisories}")
     if suppressed_and_tagged:
         print(f"  ({suppressed_and_tagged} of the above blocks-suppressed record(s) is "
               "also tagged fair/false and counted on that line too — suppressed and "
@@ -7540,6 +7566,18 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
+        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1): a block whose
+        # ONLY reasons came from the judge — det_block_reasons is empty, so
+        # nothing deterministic (count mismatch, PR mismatch,
+        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory. A
+        # block carrying even one deterministic reason is untouched: it
+        # falls through to the "block" branch below exactly as it does
+        # today, env or no env. Checked after stop_hook_active so a re-run
+        # keeps its own (already advisory) handling rather than being
+        # relabeled here.
+        elif (door == "gate" and action == "block" and _judge_advisory_enabled()
+              and not det_block_reasons):
+            action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
         # above the block line, but the empty-current-turn health gate
@@ -7596,6 +7634,20 @@ def cmd_hook(a):
                      f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
             catch_log(door, "advisory-forced", reasons=block_reasons, draft_text=text,
+                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
+                     payload=payload)
+            _print_ledger_notice_if_gate()
+            return 0
+        if action == "block-judge-advisory":
+            reason_bits = "; ".join(block_reasons) if block_reasons else f"exit {code}"
+            advisory = f"super-jev gate (judge advisory, not blocked): {reason_bits}"
+            if block_notes:
+                advisory += " (advisory: " + "; ".join(block_notes) + ")"
+            print(advisory, file=sys.stderr)
+            _hook_log(f"gate: judge advisory, not blocked (exit {code}) — would have "
+                     f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
+                     flags=flags, reason=suppressed_reason)
+            catch_log(door, "advisory-judge", reasons=block_reasons, draft_text=text,
                      window_bytes=_catch_window_bytes, start_time=_catch_t0,
                      payload=payload)
             _print_ledger_notice_if_gate()
