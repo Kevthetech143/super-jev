@@ -25,12 +25,17 @@ switched-off paths comparable case for case.
 import sys
 from pathlib import Path
 
+from . import Verdict
+
+# `window_model` is a bare module in the skill directory, not a package, so
+# there is no relative import that reaches it. Appending rather than
+# inserting is deliberate: an arm must not reorder the importing process's
+# own search path. Keep this cheap — every hook event imports every arm in
+# the package, whether it fires or not.
 _SKILL_DIR = str(Path(__file__).resolve().parent.parent)
 if _SKILL_DIR not in sys.path:
-    sys.path.insert(0, _SKILL_DIR)
+    sys.path.append(_SKILL_DIR)
 import window_model as wm                                # noqa: E402
-
-from . import Verdict                                    # noqa: E402
 
 NAME = "pr_state"
 KIND = "deterministic"

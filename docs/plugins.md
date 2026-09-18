@@ -25,7 +25,7 @@ being there IS the registration.
 """One sentence on what this arm catches, and what it deliberately does not."""
 from . import Verdict
 
-NAME = "stale_branch"          # registry key, and the env key (upper-cased)
+NAME = "stale_branch"          # MUST equal the file stem; also the env key
 KIND = "deterministic"         # or "judge"
 DEFAULT_MODE = "block"         # or "advisory" / "off"
 
@@ -38,6 +38,11 @@ def check(window, draft, ctx):
     return Verdict(arm=NAME, decision="block",
                    reason="the one sentence a human reads and the gate blocks on",
                    explain="optional detail for a log")
+
+
+def contribute(window, draft, ctx):        # OPTIONAL — see "Contribute evidence"
+    """Extra window lines, in front of the judge. list[str] or []."""
+    return []
 ```
 
 That is the whole contract.
@@ -49,15 +54,31 @@ That is the whole contract.
   detail and is never parsed.
 - **An arm must not raise.** The registry catches anyway, because an arm
   bug must never be the reason a true reply cannot be sent, but an arm
-  that leans on that is broken.
+  that leans on that is broken. When one does, it is one stderr line and
+  one entry in the run's `errors` — a raising blocking arm fails open, but
+  it is not invisible.
+- **`NAME` must be the file stem.** An arm whose `NAME` disagrees with its
+  own filename is rejected with one stderr line and skipped. Names and
+  stems are one keyspace, so the name in `SUPERJEV_ARM_<NAME>`, the key in
+  the config file, the argument to `load_arms(names=...)` and the file on
+  disk are always the same word.
 - **A file starting with `_` is not an arm**, so private helpers still
   work. So does a module without a callable `check`: it is skipped with
   one stderr line rather than breaking discovery.
+- **Keep module-level imports cheap.** Every hook event imports every arm
+  in the package, whether it fires or not, so a top-level import of
+  something slow is paid on every turn. Import the expensive thing inside
+  `check`. For the same reason an arm reaches the skill directory with
+  `sys.path.append`, never `insert(0)`: an arm must not reorder the
+  importing process's own search path.
 
-`KIND` is documentation for now: `deterministic` means string and integer
-work with no model call and no network, `judge` means it needs the judge.
-Prefer `deterministic`. An arm that needs nothing but the window and the
-draft, like the template arm does, is the shape to aim for.
+`KIND` does one thing today, and it is the gate-level failsafe: a block
+every one of whose blocking verdicts came from a `judge`-kind arm can be
+demoted (see "Two config surfaces"). Otherwise it is documentation —
+`deterministic` means string and integer work with no model call and no
+network, `judge` means it needs `ctx["judge"]`. Prefer `deterministic`.
+An arm that needs nothing but the window and the draft, like the template
+arm does, is the shape to aim for.
 
 ### What an arm gets
 
@@ -66,15 +87,111 @@ draft, like the template arm does, is the shape to aim for.
   provenance. Query it with `lines`, `receipts_for`, `values_labelled`,
   `newest`, `claims`, `receipts`. See `docs/window-model.md`.
 - **`draft`** is the text being checked.
-- **`ctx`** is a dict of whatever the caller had spare. Treat every key as
-  optional. The deterministic gate path passes `evidence_text` (the
-  composed window as flat bytes) and `caller`.
+- **`ctx`** is the named, growing contract below.
 
 An arm that only reads `window` and `draft` works the same whether the
 window came from a live `from_transcript` build or a recorded bench
 replay through `from_text`. That is what makes an arm testable offline.
 
-## Switch modes
+### The `ctx` contract
+
+`ctx` is a **named, growing contract**, not a grab bag: every key here is
+documented, and **every key is optional**. An arm reads a key with
+`ctx.get(...)` and copes with it being absent, because the caller decides
+what it has to give and a bench replay has less than a live gate.
+
+| key | type | who sets it | what it is |
+| --- | --- | --- | --- |
+| `judge` | `() -> JudgeResult` | the registry, check phase only | the ONE judge call for this run, memoised. Absent during the evidence phase. |
+| `judge_window` | `Window` or `JudgeEvidence` | the registry, check phase only | exactly the evidence the judge was handed, window plus any contributed lines. |
+| `contributed_lines` | `tuple[str]` | the registry, check phase only | the lines `contribute` put in front of the judge this run. |
+| `evidence_text` | `str` | the deterministic gate path | the composed window as flat bytes, for an arm that wants the text rather than the pieces. |
+| `caller` | `str` | the deterministic gate path | which path asked — today only `"deterministic"`. |
+
+**Adding a key.** Three rules, and they are the whole process:
+
+1. Add the row to this table, with who sets it, in the same change that
+   sets it. A key that is set and not documented is not in the contract.
+2. Make it optional in fact, not just on paper — no arm may require it,
+   and a caller that has nothing to put there passes nothing.
+3. Never overwrite a caller's own key. The registry fills `judge`,
+   `judge_window` and `contributed_lines` with `setdefault` semantics and
+   copies the dict it was handed, so a caller's `ctx` is never mutated.
+
+## Contribute evidence: an arm that feeds the judge
+
+Some checks cannot rule on a draft from what the window already says.
+A fact family may need to put a DERIVED line in front of the judge — one
+the composer never wrote — and then let the judge weigh it. That is the
+second, optional function:
+
+```python
+def contribute(window, draft, ctx):
+    """Extra window lines for THIS run. list[str], or [] for nothing."""
+    return ["DERIVED: the draft names branch X; the window's receipts are all branch Y"]
+```
+
+`run_arms` runs in two phases, in this order:
+
+1. **The evidence phase.** Every arm's `contribute` is called. The lines
+   are collected in arm-name order and appended to the evidence under one
+   `[contributed by check arms]` block. `ctx` carries **no `judge` key**
+   in this phase, on purpose: an arm cannot both feed the judge and read
+   its answer.
+2. **The check phase.** Every arm's `check` is called, and `ctx["judge"]`
+   is now live — so the judge, if it is asked at all, is asked over the
+   window *including* the contributed lines.
+
+The underlying `Window` is never mutated. A contribution is extra
+evidence for this run, wrapped in a `JudgeEvidence` that renders the
+window and then the block; the window's own identity (and the round-trip
+property `from_text(render(w)) == w`) is untouched.
+
+An arm that only contributes still needs a `check` — return `None` from
+it. An arm that only checks needs no `contribute` at all.
+
+## One judge call per run
+
+`ctx["judge"]()` returns a `judges.JudgeResult`. The **first** call
+performs the single TypeSafe classify over the draft and the (possibly
+contributed-to) evidence; every later call in the same run returns that
+same object.
+
+```python
+NAME = "overclaims"
+KIND = "judge"
+
+def check(window, draft, ctx):
+    result = ctx["judge"]()          # one call, however many arms ask
+    if result.clean:
+        return None
+    return Verdict(arm=NAME, decision="block", reason="...")
+```
+
+- **Zero arms with `KIND = "judge"` -> zero judge calls.** Nothing asks,
+  so nothing is classified, and the `judges` package is not even
+  imported.
+- **N arms with `KIND = "judge"` -> exactly one judge call.** All N
+  interpret the same `JudgeResult` in their own `check`, each in its own
+  way, and the model is paid for once.
+
+An arm that needs nothing from the judge must not touch `ctx["judge"]`.
+
+## Two config surfaces, and they are different objects
+
+There are exactly two places behaviour is configured, and confusing them
+is the mistake this section exists to prevent.
+
+| surface | scope | what it is |
+| --- | --- | --- |
+| **per-arm mode** — `SUPERJEV_ARM_<NAME>`, config file, `DEFAULT_MODE` | one arm, every run | that arm's standing. An `advisory` arm never blocks in the first place; an `off` arm does not run. |
+| **the gate failsafe** — `SUPERJEV_GATE_JUDGE_ADVISORY` | one gate call, after the fact | that call's OUTCOME being demoted, over whatever mix of arms happened to fire. |
+
+A mode is read on every run and belongs to the arm. The failsafe is read
+once per gate call and belongs to the gate. Setting one never changes the
+other.
+
+### Per-arm mode
 
 Every arm is in one of three modes:
 
@@ -107,6 +224,42 @@ nothing, and must not spam a hook's stderr either, so it is exactly one
 line per bad value per process. A missing or malformed config file is one
 warning and no config, never an exception.
 
+### The gate failsafe
+
+One rule, stated in registry terms:
+
+> **Demote the block if every blocking verdict came from an arm whose
+> `KIND` is `judge`.**
+
+That rule lives in `arms.judge_only_blocks(verdicts, kinds)` and nowhere
+else. The gate's own reasons have not all moved to the registry yet, so
+`superjev._gate_blocking_verdicts` adapts this call's reason lists into
+verdicts and kinds and hands them to that one function — the gate never
+names which judge arm fired, which is why the rule covers the v2 and v3
+judge arms alike. A block carrying even one deterministic verdict (a
+count mismatch, a PR-state mismatch, a `CONTRADICTED_BY_FACT` fact
+sentence) is untouched and still blocks with today's exit code.
+
+Two edges, both deliberate:
+
+- a block with **no reason line at all** came from the judge's own exit
+  code, so it counts as a judge verdict — otherwise it would look like it
+  came from nobody;
+- an arm **missing from the kinds map** is treated as deterministic, so a
+  forgotten arm fails CLOSED and its block is never demoted.
+
+```sh
+SUPERJEV_GATE_JUDGE_ADVISORY=1        # the whole failsafe: demote it
+SUPERJEV_GATE_JUDGE_ADVISORY=weak     # the seam — see below
+```
+
+`weak` is recognised here and **not implemented on this branch**: it
+demotes nothing, and says so once per process rather than silently doing
+nothing. PR #59 (landing on main) is what gives it meaning — demote only
+the weak judge findings and leave the confident ones blocking. It is
+named here so the env var has one documented keyspace across both
+branches rather than two.
+
 ### The gate switch
 
 ```sh
@@ -130,16 +283,69 @@ PR-state signal the window carries for that PR, and it holds no logic of
 its own: it asks `window_model.pr_state_verdict_from_window` and wraps
 the answer in a `Verdict`.
 
-The migration is deliberately provable rather than asserted. The same
-check now exists twice — `_pr_mismatch_reason` in `superjev.py` (legacy,
-scanning raw evidence text) and the arm (asking the window model) — and
-`SUPERJEV_ARMS` picks between them. Both offline replays,
+The same check now exists twice — `_pr_mismatch_reason` in `superjev.py`
+(legacy, scanning raw evidence text) and the arm (asking the window
+model) — and `SUPERJEV_ARMS` picks between them. Both offline replays,
 `tests/replay_gate_bench.py` and `tests/replay_fact_block_sweep.py`, are
-run with the switch off and on and must print the same decisions. That is
-why one arm was migrated first instead of all of them: the switch is the
-proof harness, and the next arm gets to use it.
+run with the switch off and on and must print the same decisions.
+
+**What that proves, and what it does not.** Be clear about the limit: the
+recorded replay cases never fire the PR-state arm. `replay_gate_bench.py`
+consults it on every case and it returns nothing on all of them, and
+`replay_fact_block_sweep.py` does not reach the PR arm at all — it only
+asks whether a window carries a `CONTRADICTED_BY_FACT` sentence. So the
+replays prove that turning the switch on changes nothing else in the
+gate, which is worth proving and is all they prove. That the migrated arm
+decides the same way as its legacy twin rests on the unit tests in
+`tests/test_arms.py`, which put a contradicting window in front of both
+and compare the reason strings.
+
+That is why one arm was migrated first instead of all of them: the switch
+is the proof harness, and the next arm gets to use it.
 
 When every arm has moved, the legacy call and the switch both go.
+
+## Where arms are found
+
+`arm_names()` lists a search path, and the file being there IS the
+registration:
+
+1. `skills/super-jev/arms/` — the shipped package;
+2. every directory named by `SUPERJEV_ARMS_EXTRA_DIR` (os.pathsep
+   separated), or passed as `extra=` to `arm_names` / `load_arm` /
+   `load_arms` / `run_arms`.
+
+The package directory wins a stem collision, so a shipped arm cannot be
+shadowed by a loose file. An arm in an extra directory is still imported
+as `arms.<stem>`, so `from . import Verdict` works in it exactly as in a
+shipped arm.
+
+The extra directory exists so a **test double is never written into the
+shipped package**. `test_arms.py` writes its throwaway arms into a
+`tmp_path` and points the registry at it: a test run cannot leave an arm
+behind in a live checkout. A private local arm can use the same door.
+
+## What the gate records
+
+`run_arms` returns `(verdicts, run)`, where `run` is an `ArmRun`. The gate
+used to throw that away. Two of its fields now reach the catch ledger, as
+two separate fields on purpose:
+
+| ledger field | from | shape |
+| --- | --- | --- |
+| `arms` | `run.consulted` | `["pr_state:block", ...]` — every arm consulted, with the mode it ran in |
+| `arm_errors` | `run.errors` | `["pr_state:RuntimeError", ...]` — every arm that raised, with the exception class |
+
+"We asked this arm" and "this arm broke" are different facts, and a row
+that merged them could not tell a quiet arm from a crashed one. A raising
+blocking arm still fails open — the point of the second field is that it
+stops being invisible when it does.
+
+With the switch off, the legacy inline twin is recorded as
+`pr_state:legacy-inline`, so the row says what was consulted either way
+rather than reading as "no arms ran". Both fields are `null` on a row
+that consulted nothing (the verify door, an unchecked gate row), which is
+not the same as `[]`.
 
 ## Swap the judge
 
@@ -202,9 +408,13 @@ python3 -m pytest skills/super-jev/tests/test_arms.py -q
 python3 -m pytest skills/super-jev/tests/test_judges.py -q
 ```
 
-Both are offline. `test_arms.py` proves discovery by writing a throwaway
-arm into the package directory and taking it away again, because "the
-registry lists the directory" is the claim and a test that imported a
-hard-coded name would not test it. `test_judges.py` runs the `fake`
-backend through a real subprocess and only ever exercises `typesafe`
-with `cmd_gate` monkeypatched, so no test makes a live TypeSafe call.
+Both are offline. `test_arms.py` proves discovery by writing throwaway
+arms into a temp directory and pointing `SUPERJEV_ARMS_EXTRA_DIR` at it,
+because "the registry lists its search path" is the claim and a test that
+imported a hard-coded name would not test it. Nothing is written into
+`arms/`. The one-judge-call claim is proved by counting: a subclass of the
+shipped `fake` backend counts its own `classify` calls, and two judge arms
+in one run produce exactly one call and the same `JudgeResult` object.
+`test_judges.py` runs the `fake` backend through a real subprocess and
+only ever exercises `typesafe` with `cmd_gate` monkeypatched, so no test
+makes a live TypeSafe call.

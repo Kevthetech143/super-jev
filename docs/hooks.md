@@ -1092,9 +1092,21 @@ decision — allow, block, advisory, the stop_hook_active second pass
 next to the call ledger, as `catches.jsonl`): a short id, the timestamp,
 which door, the decision, the same reason strings `--explain` would print, a
 240-character excerpt of the draft or report, how big the evidence window
-was, how long the check took, and two empty fields, `tag` and `note`,
-waiting for a human. **The full draft, report, or evidence window is never
-written here** — only the short redacted excerpt.
+was, how long the check took, which check arms were consulted and which of
+them broke (`arms` and `arm_errors` — see below), and two empty fields,
+`tag` and `note`, waiting for a human. **The full draft, report, or
+evidence window is never written here** — only the short redacted excerpt.
+
+**`arms` and `arm_errors`.** A gate row says which check arms it consulted,
+each with the mode it ran in (`["pr_state:block", ...]`; the legacy inline
+twin appears as `pr_state:legacy-inline` while `SUPERJEV_ARMS` is off), and
+separately which arms raised, each with its exception class
+(`["pr_state:RuntimeError", ...]`). Two fields rather than one because "we
+asked this arm" and "this arm broke" are different facts: a row that merged
+them could not tell a quiet arm from a crashed one. An arm that raises
+still fails open — the second field is what stops that being invisible.
+Both are `null` on a row that consulted no arms (a verify row, an unchecked
+gate row), which is not the same as `[]`. See `docs/plugins.md`.
 
 The excerpt's redaction is NOT the same guard that protects the evidence
 window. The catch ledger is text a human reads and tags by hand, so it gets
@@ -1204,6 +1216,17 @@ guessing how well a reply is carried by its evidence, and a guess can be
 wrong in a way that stops a true turn for no reason. Turning this on tells
 the gate: when a block's only reasons are the judge's, print the reason and
 let the turn end anyway, rather than stopping it.
+
+The rule, in the registry's own terms, is **demote the block if every
+blocking verdict came from an arm whose `KIND` is `judge`** — one function,
+`arms.judge_only_blocks`, which the gate feeds through
+`_gate_blocking_verdicts` rather than keeping a second copy of the rule
+here. `SUPERJEV_GATE_JUDGE_ADVISORY=weak` is recognised as a seam for the
+`weak` setting landing on main, and demotes nothing on this branch; it says
+so once per process. Note this failsafe is a different object from a
+per-arm mode (`SUPERJEV_ARM_<NAME>=advisory`): a mode is one arm's standing
+on every run, this is one gate call's outcome demoted after the fact. See
+`docs/plugins.md`.
 
 It never weakens the deterministic side of the gate. A block that carries
 even one deterministic reason — a drafted test/claim count the evidence
