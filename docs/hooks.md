@@ -1101,10 +1101,20 @@ window. The catch ledger is text a human reads and tags by hand, so it gets
 a wider net: the input is first sliced to 4096 characters, redacted for
 secrets/credentials AND emails (the evidence-window guard leaves emails
 alone by default), then, catch-ledger-only, also redacted for US phone
-numbers, SSN-shaped 3-2-4 digit strings, and 13-19 digit card numbers — then
-sliced to the final 240 characters. None of those three extra patterns ever
-touch the evidence window itself, only this excerpt and the opt-in saved
-payload below.
+numbers, SSN-shaped 3-2-4 digit strings, and card numbers — either an
+ungrouped run of 13 or more digits, or a grouped run in an exact 4-4-4-4
+(Visa/MC/Discover) or 4-6-5 (Amex) shape using ONE consistent separator
+(space, dash, or dot) throughout — then sliced to the final 240 characters.
+An operator reading a catch record should know three exceptions to that
+card rule: a mix of separators within one grouped run is NOT redacted (it
+no longer matches the exact grouping shape); a 13-digit ungrouped run that
+looks like a unix-millisecond timestamp (starts "1", second digit 5-9) is
+left alone rather than redacted; and a grouped run whose first group looks
+like a plausible year (starts "19" or "20") is left alone as a likely date,
+not a card number. Phone, SSN, and card patterns are catch-ledger only —
+none of those three extra patterns ever touch the evidence window itself,
+only this excerpt and the opt-in saved payload below; the evidence window
+is never redacted this way.
 
 Writing this record is best-effort: if the path is not writable (or
 anything else about the write fails), one line goes to stderr and the
@@ -1151,7 +1161,12 @@ read-modify-write — the ledger rewrite and the catch-cases upsert together
 — runs under one `flock`-held lock, a sibling `.lock` file next to the
 catch ledger, not the ledger file itself. A second `catch tag` simply
 waits its turn rather than reading stale data and clobbering the first
-one's write.
+one's write. That lock only guards `catch tag` against itself, though: a
+live hook's own ledger append (`catch_ledger_append`, a plain append, never
+taken under this lock) can race a `catch tag` rewrite's read-modify-write
+of the whole file in a sub-millisecond window and lose that one new
+scoreboard row — this never touches or reverses a gate/verify decision
+itself, only the ledger's optional record of it.
 
 **`--since`.** An unparseable `--since` value (anything that isn't
 `<N>m`/`<N>h`/`<N>d`) is refused, exit 3, same family as the tag/decision

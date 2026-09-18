@@ -6703,6 +6703,23 @@ def test_catch_tag_contradiction_refusal_exits_3(tmp_path, monkeypatch, capsys):
     assert "does not fit" in err
 
 
+def test_catch_lock_readonly_dir_refuses_cleanly_no_traceback(tmp_path, monkeypatch, capsys):
+    # `_catch_lock`'s mkdir/open can raise OSError (e.g. a read-only or
+    # otherwise unwritable catch-ledger directory) — this must be a clean
+    # one-line refusal, exit 5, never a traceback.
+    _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
+    catch_path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(catch_path.parent, 0o500)
+    try:
+        code = sj.main(["catch", "tag", "any-id", "miss", "note"])
+    finally:
+        os.chmod(catch_path.parent, 0o700)
+    err = capsys.readouterr().err
+    assert code == sj.REFUSED
+    assert "Traceback" not in err
+    assert "could not open lock file" in err
+
+
 def test_catch_tag_parallel_subprocesses_never_lose_a_write(tmp_path):
     # B3: 24 parallel `catch tag` subprocesses on 24 distinct ids must all
     # land — no unlocked read-modify-write silently drops one.
@@ -6836,6 +6853,20 @@ def test_catch_redact_16_digit_card_redacted():
     out = sj._catch_redact("card number 4111111111111111 on file")
     assert "4111111111111111" not in out
     assert "REDACTED:card-number" in out
+
+
+def test_catch_redact_card_number_mixed_separators_not_redacted():
+    # N3: the grouped pattern's backreference requires ONE separator
+    # throughout a 4-4-4-4/4-6-5 run. A run that mixes separators never
+    # matches the grouped shape, and each 4-digit chunk is far too short
+    # to match the ungrouped 13+-digit plain pattern either — so a
+    # mixed-separator card number is NOT redacted. This is a known,
+    # deliberate boundary of the rule, not a bug: recording it here so a
+    # future change to the pattern notices if it silently starts (or
+    # stops) catching this shape.
+    out = sj._catch_redact("card 4111 1111-1111 1111 charged")
+    assert "4111 1111-1111 1111" in out
+    assert "REDACTED:card-number" not in out
 
 
 def test_catch_redact_13_digit_non_timestamp_shape_still_redacted():
