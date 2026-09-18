@@ -4,6 +4,7 @@
  *
  *   npm run catalog -- validate <catalog.json>
  *   npm run catalog -- learn <ledger.jsonl> <catalog.json> [--out proposals.json]
+ *   npm run catalog -- build <skills-dir> <out.json>
  *
  * `validate` reports records with fewer than three utterances, the same
  * phrasing claimed by two records, and a negative that is word-for-word
@@ -15,14 +16,21 @@
  * proposes the request text as a new utterance on the record that should
  * have won. The proposals go to a separate file for a human to review and
  * merge by hand.
+ *
+ * `build` generates a fresh catalog v2 file from a Claude Code skills
+ * directory (one subdirectory per skill, each holding a SKILL.md), deriving
+ * each record from the skill's own frontmatter description and any
+ * Trigger/Use-when lines — see `src/catalog-build-cli.ts` for the generator.
+ * `npm run catalog:build` remains as a direct alias to the same generator.
  */
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { formatCatalogValidation, parseCatalogText, validateCatalog, type CatalogRecord } from './enhance/catalog.ts';
+import { buildCatalog, usage as buildUsage } from './catalog-build-cli.ts';
 
 class CliError extends Error {}
 
-const usage = `super-jev catalog <validate|learn> ...
+const usage = `super-jev catalog <validate|learn|build> ...
 
   validate <catalog.json>
     Reports records with fewer than three utterances, the same phrasing
@@ -36,7 +44,13 @@ const usage = `super-jev catalog <validate|learn> ...
     pick. Writes a proposals file; never edits the catalog. --out defaults
     to proposals.json next to the ledger file.
 
-  --json   Print one JSON object to stdout and nothing else (both subcommands).`;
+  build <skills-dir> <out.json>
+    Walks a Claude Code skills directory and writes a fresh catalog v2 file,
+    one record per skill, from each skill's own SKILL.md. See
+    "catalog build --help" for the record shape. Validate the result with
+    "catalog validate <out.json>".
+
+  --json   Print one JSON object to stdout and nothing else (validate/learn).`;
 
 const MAX_FILE_BYTES = 32 * 1024 * 1024;
 
@@ -163,12 +177,32 @@ async function runLearn(args: string[]): Promise<number> {
   return 0;
 }
 
+async function runBuild(args: string[]): Promise<number> {
+  if (!args.length || args.includes('--help')) { console.log(buildUsage); return 0; }
+  const positional = args.filter((a) => !a.startsWith('--'));
+  if (positional.length < 2) throw new CliError(buildUsage);
+
+  const skillsDir = resolve(positional[0]);
+  const outPath = resolve(positional[1]);
+
+  let dirInfo;
+  try { dirInfo = await stat(skillsDir); }
+  catch { throw new CliError(`Skills directory does not exist: ${skillsDir}`); }
+  if (!dirInfo.isDirectory()) throw new CliError(`Not a directory: ${skillsDir}`);
+
+  const records = await buildCatalog(skillsDir);
+  await writeFile(outPath, JSON.stringify(records, null, 2) + '\n', 'utf8');
+  console.error(`Wrote ${records.length} catalog record(s) to ${outPath}`);
+  return 0;
+}
+
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   if (!args.length || args.includes('--help')) { console.log(usage); return 0; }
   const [sub, ...rest] = args;
   if (sub === 'validate') return runValidate(rest);
   if (sub === 'learn') return runLearn(rest);
+  if (sub === 'build') return runBuild(rest);
   throw new CliError(`Unknown subcommand ${sub}\n\n${usage}`);
 }
 
