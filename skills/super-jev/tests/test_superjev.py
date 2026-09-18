@@ -3957,6 +3957,36 @@ def test_deterministic_count_silent_on_a_pure_evidence_gap():
     assert sj.deterministic_block_reasons(draft, evidence) == []
 
 
+def test_deterministic_count_mismatch_blocks_on_a_slash_fraction_lie():
+    # 2026-09-18: folding "#" and "/" into the SAME character class as
+    # digits/letters (`[A-Za-z0-9#/]+`) glued a slash fraction into one
+    # non-digit token — "41/41" tokenized whole, `tok.isdigit()` dropped
+    # it, and the draft claimed no count at all, so a false "41/41 tests
+    # passed" next to a true "34 passed in 6.94s" receipt slipped through
+    # clean. "#" and "/" now tokenize as their own single-char tokens.
+    draft = "All 41/41 tests passed, Sir."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_deterministic_count_mismatch_blocks_on_a_hash_prefixed_lie():
+    draft = "Tests #52 passed, Sir."
+    evidence = "pytest output:\n34 passed in 6.94s\n"
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_deterministic_count_tokenizer_still_keeps_a_short_sha_as_one_token():
+    # Regression: "/" and "#" splitting off their own digits must not
+    # reopen the hash-split bug (36f330b) — a mixed alnum run with no
+    # "#"/"/" in it, e.g. a git short SHA, still tokenizes as ONE non-digit
+    # token and contributes no bogus count.
+    draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
+    labelled = sj._extract_labelled_draft_counts(draft)
+    assert labelled == {"tests": {61}}
+
+
 def test_deterministic_pr_mismatch_blocks_on_a_named_pr():
     draft = "PR #11 is merged into main, Sir."
     evidence = '{"number": 11, "state": "OPEN"}\n'
@@ -4841,6 +4871,44 @@ def test_count_mismatch_arm_is_silent_for_the_bt01_shape_end_to_end():
         "67:`test_v2_details` -> **61 passed**.\n"
     )
     assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+# 2026-09-18: `_extract_labelled_evidence_counts_scoped` had no REPORT FROM
+# fence exclusion, so a worker's own bold-markdown claim INSIDE its own
+# unverified report body cleared the count arm as if it were a real
+# receipt — a trust-boundary hole (a worker could just write "**61
+# passed**" in its own report text and have it count as evidence for
+# itself). Evidence counts now skip lines inside a `REPORT FROM ...
+# (unverified worker claim)` fence entirely; only a receipt sitting
+# outside one is real evidence.
+
+def test_evidence_count_arm_ignores_a_bold_claim_inside_a_report_fence():
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") in (None, set())
+
+
+def test_count_mismatch_arm_blocks_when_the_only_bold_receipt_is_inside_a_report_fence():
+    # The worker's own report claims 61; the REAL receipt right below it,
+    # outside the fence, says 53. The draft must not clear on the strength
+    # of the worker's own in-report bold claim.
+    draft = "All 61 passed, Sir."
+    evidence = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done: **61 passed**.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
 
 
 # ---- (c) --explain names the turns it chose and what was cut --------------
@@ -6000,7 +6068,7 @@ def test_facts_merge_claims_still_reads_a_real_receipt_outside_any_report_fence(
     assert not any("no merge receipt" in f for f in facts)
 
 
-def test_iter_window_report_lines_and_excluding_reports_partition_the_window():
+def test_fact_window_lines_excluding_reports_drops_only_the_report_fence():
     window = (
         "[current turn reports]\n"
         "REPORT FROM worker-x (unverified worker claim)\n"
@@ -6011,10 +6079,9 @@ def test_iter_window_report_lines_and_excluding_reports_partition_the_window():
         "[current turn]\n"
         "gh pr merge 40\n"
     )
-    report_lines = sj._iter_window_report_lines(window)
-    other_lines = sj._fact_window_lines_excluding_reports(window)
-    assert [ln for _lab, ln in report_lines] == ["gh pr merge 39"]
-    assert [ln for _lab, ln in other_lines] == ["gh pr merge 40"]
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+    assert "gh pr merge 39" not in other_lines
 
 
 # ---- (b): cited-file tail --------------------------------------------------
@@ -7111,6 +7178,55 @@ def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_valu
     )
     facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
     assert facts == []
+
+
+# 2026-09-18: the digit-then-letter guard above (mixed alnum token, e.g. a
+# git short SHA) was too broad — it skipped EVERY digit run immediately
+# followed by a letter, so a unit-suffixed value ("250ms", "4k", "8GB")
+# was silently dropped too, and "latency 250ms" next to a contradicting
+# "latency: 400" row no longer fired. Narrowed to only skip when the tail
+# right after the digits looks like the rest of a fused identifier (a
+# letter, then eventually another digit — "dca183"); a pure unit suffix
+# has no trailing digit and is kept as a value.
+
+def test_labelled_value_fact_still_skips_a_commit_hash_after_the_narrowing():
+    window = (
+        "[current turn]\n"
+        "[from: Bash git log @ /Users/admin/x]\n"
+        "head                2\n"
+    )
+    facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
+    assert facts == []
+
+
+def test_labelled_value_fact_still_contradicts_a_millisecond_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "latency: 400\n"
+    )
+    facts = sj.derive_window_facts(window, "latency 250ms after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_still_contradicts_a_k_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "cache: 9\n"
+    )
+    facts = sj.derive_window_facts(window, "cache 4k after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
+
+
+def test_labelled_value_fact_still_contradicts_a_gb_suffixed_value():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "heap: 16\n"
+    )
+    facts = sj.derive_window_facts(window, "heap 8GB after the fix.")
+    assert any("CONTRADICTED_BY_FACT" in f for f in facts)
 
 
 _SCORE_LIST_WINDOW = (
