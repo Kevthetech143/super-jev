@@ -3705,6 +3705,86 @@ def test_neutralised_report_body_lines_are_no_longer_window_structure():
         assert not sj._SECTION_SEPARATOR_RE.match(line.strip())
 
 
+# --------------------------- PR-STATE-REVIEW3 R1: prev-turn tail-cut fence
+
+def _assert_fences_balanced(text):
+    """Every `REPORT FROM ... (unverified worker claim)` opening line in
+    `text` has a matching `END REPORT FROM` line for the same `who`, and
+    vice versa -- the structural invariant a tail-keep truncation must
+    never break. A bare opener with no closer (or a closer with no
+    opener) means a report's body is reading as ordinary window text
+    somewhere, which is exactly the promotion bug this round's blocker
+    was about. Shared by the previous-turn and current-turn-reports
+    truncation tests below."""
+    opens = sorted(sj._REPORT_MARKER_LINE_RE.match(l.strip()).group(1)
+                   for l in text.splitlines() if sj._REPORT_MARKER_LINE_RE.match(l.strip()))
+    closes = sorted(sj._REPORT_END_LINE_RE.match(l.strip()).group(1)
+                    for l in text.splitlines() if sj._REPORT_END_LINE_RE.match(l.strip()))
+    assert opens == closes, (opens, closes, text)
+
+
+def test_build_prev_turns_block_tail_cut_preserves_report_fence():
+    # Direct unit coverage of _build_prev_turns_block_detailed's own
+    # tail-cut (~3279, before this round's fix it dropped straight to
+    # `tail` with no re-fence check at all). `windows[0]` is the real
+    # shape a previous turn takes once reports are appended
+    # (`texts + prev_reports[i]` in _derive_evidence_text_from_transcript):
+    # a tool result, THEN a fenced report. Sweeping the budget from far
+    # too small up past the block's full size, every rendered block must
+    # come out with its report fences balanced.
+    report = sj._render_report_block(
+        "Worker", '{"number": 52, "state": "MERGED"}\n' + "filler line. " * 40)
+    windows = [["turn -1 tool result: OPEN", report]]
+    full = len("\n\n---\n\n".join(windows[0]).encode("utf-8"))
+    for budget in range(40, full + 100, 17):
+        block, _dropped, _kept, _trunc = sj._build_prev_turns_block_detailed(windows, budget)
+        _assert_fences_balanced(block)
+
+
+def test_build_reports_block_tail_cut_preserves_report_fence():
+    # Same sweep for _build_reports_block's own, older tail-cut (~3541) --
+    # the guard this round's fix mirrors. Not previously covered by a
+    # dedicated test; now both truncation sites share this assertion.
+    report = sj._render_report_block(
+        "Worker", '{"number": 52, "state": "MERGED"}\n' + "filler line. " * 40)
+    full = len(report.encode("utf-8"))
+    for budget in range(40, full + 100, 17):
+        block, _kept, _cut = sj._build_reports_block([report], budget, "current turn reports")
+        _assert_fences_balanced(block)
+
+
+def test_pr_state_attack_prev_turn_tail_cut_no_longer_promotes_a_quoted_state_line(tmp_path):
+    # Third-round Opus review blocker, reproduced through the public
+    # composer (_derive_evidence_text_from_transcript / the same assembly
+    # derive_evidence_window wraps). A previous turn holds nothing but a
+    # worker report quoting a JSON `"state": "MERGED"` line -- a claim,
+    # not a receipt, so it must never outrank real evidence on its own.
+    # The CURRENT turn separately carries a genuine "#52 open" mention
+    # (never dropped or cut). Before this fix, a cap tight enough to
+    # tail-cut the previous turn dropped the report's opening fence,
+    # promoting the quoted MERGED line to a real state-bearing receipt
+    # (strength 2) that beat the current turn's plain "#52 open" prose
+    # (strength 0) on strength alone -- silently flipping the verdict on
+    # "PR #52 is merged, Sir." from BLOCK to ALLOW purely because of where
+    # the byte cap landed. cap=1000 truncates the previous turn; cap=1200
+    # does not (already correctly blocked, confirming the flip was really
+    # about the cut, not the scenario).
+    filler = "Ran the checks and confirmed everything looks fine here. " * 8
+    body = filler + '\n{"number": 52, "state": "MERGED"}\n' + filler
+    records = [
+        _teammate_record("Worker", body),  # previous turn -1, whole span
+        {"type": "user", "message": {"role": "user", "content": "any status on PR 52?"}},
+        *_bash_pair("c1", "gh pr view 52", "#52 open, still needs review"),
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    for cap in (1000, 1200):
+        derived, meta = sj._derive_evidence_text_from_transcript(
+            transcript, cap_bytes=cap, return_meta=True)
+        _assert_fences_balanced(derived)
+        reason, _note = sj._pr_mismatch_verdict(_DRAFT_52, derived)
+        assert reason is not None and "open" in reason, (cap, meta, derived)
+
+
 def test_hook_gate_blocks_on_deterministic_count_mismatch_via_fake_door(tmp_path, monkeypatch):
     # Full hook path: the judge itself comes back CLEAN (fake door prints a
     # SUPPORTED table), but the deterministic count cross-check still

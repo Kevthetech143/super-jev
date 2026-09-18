@@ -3280,8 +3280,18 @@ def _build_prev_turns_block_detailed(windows, budget):
         idx, joined = labeled[0]
         keep = max(budget - 48, 0)
         tail = joined.encode("utf-8")[-keep:].decode("utf-8", errors="ignore")
-        block = f"[previous turn -{idx}]\n[...older content in this turn dropped...]\n{tail}"
-        truncated = (idx, len(joined.encode("utf-8")) - len(tail.encode("utf-8")))
+        # If this tail-keep cuts into the middle of a fenced worker report,
+        # repair it: re-emit any dropped opening fence and neutralise any
+        # fragment of a real fence line left dangling at the cut, so the
+        # surviving body still reads as an unverified claim rather than
+        # being promoted to ordinary window text (mirrors the same guard
+        # _build_reports_block already applies to its own tail-cut; see
+        # _repair_report_tail).
+        cut_bytes = len(joined.encode("utf-8")) - len(tail.encode("utf-8"))
+        tail = _repair_report_tail(joined, keep, tail)
+        block = (f"[previous turn -{idx}]\n[...older content in this turn dropped...]\n"
+                f"{tail}")
+        truncated = (idx, cut_bytes)
     kept = len(windows) - dropped
     return block, dropped, kept, truncated
 
@@ -3530,12 +3540,13 @@ def _build_reports_block(reports, budget, label):
         cut += len(raw) - len(tail.encode("utf-8"))
         # Cutting the head can take the report's own opening fence with it,
         # which would leave the body reading as ordinary window text (and a
-        # worker-written line reading as a tool receipt). Re-emit the fence.
-        marker = kept[0].splitlines()[0] if kept[0].splitlines() else ""
-        refence = (marker + "\n") if _REPORT_MARKER_LINE_RE.match(marker.strip()) \
-            and not _REPORT_MARKER_LINE_RE.match(tail.splitlines()[0].strip()
-                                                 if tail.splitlines() else "") else ""
-        block = header + "[...head of this report dropped...]\n" + refence + tail
+        # worker-written line reading as a tool receipt). Repair it: re-emit
+        # the dropped opening fence and neutralise any fragment of a real
+        # fence line left dangling at the cut (see _repair_report_tail —
+        # the same scan _build_prev_turns_block_detailed uses for its own
+        # tail-cut).
+        tail = _repair_report_tail(kept[0], room, tail)
+        block = header + "[...head of this report dropped...]\n" + tail
     return block, len(kept), cut
 
 
@@ -3885,6 +3896,105 @@ def _render_report_block(who, body):
     return (f"{REPORT_LABEL.format(who=who)}\n"
             f"{_neutralise_report_body(body)}\n"
             f"{REPORT_END_LABEL.format(who=who)}")
+
+
+def _report_fence_state_at_cut(head_text, keep_bytes):
+    """(open_marker, mid_line_cut) describing what a tail-keep of the last
+    `keep_bytes` bytes of `head_text` cuts into.
+
+    `open_marker` is the `REPORT FROM ...` line still OPEN (no matching
+    `END REPORT FROM` fully seen yet) at the cut point, or "" when the cut
+    falls outside any report body. Scans `head_text` forward line by
+    line rather than only checking its own first line — a previous
+    turn's joined texts carry any tool results ahead of that turn's
+    reports (see `_previous_turn_windows` /
+    `_derive_evidence_text_from_transcript`'s `prev_windows = texts +
+    prev_reports[i]`), so a report a tail-keep cuts into can start
+    partway through the turn, not just at position zero. Also correct
+    for the position-zero case a single whole report (as
+    `_build_reports_block` tail-cuts) is in, so both truncation sites
+    share this one scan.
+
+    `mid_line_cut` is True when the cut point falls STRICTLY INSIDE a
+    line rather than exactly on a line boundary — meaning the kept
+    tail's own first line is a FRAGMENT of whatever real line was split,
+    not a genuine complete line (`_repair_report_tail` neutralises it on
+    that basis, regardless of what the fragment happens to look like).
+    The straddling line's OWN effect on `open_marker` is still applied
+    from its full, untruncated text before returning — `line` here is
+    always the complete original line (`head_text.splitlines()`), never
+    the byte-sliced tail, so a report that opens or closes exactly on
+    the line the cut lands inside is still correctly tracked; only the
+    survival of that line's bytes in the TAIL is in question, not
+    whether we can tell what kind of line it was."""
+    cut_at = max(len((head_text or "").encode("utf-8")) - keep_bytes, 0)
+    seen = 0
+    open_marker = ""
+    mid_line_cut = False
+    for line in (head_text or "").splitlines(keepends=True):
+        line_bytes = len(line.encode("utf-8"))
+        if seen >= cut_at:
+            break
+        stripped = line.strip()
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            open_marker = stripped
+        elif _REPORT_END_LINE_RE.match(stripped):
+            open_marker = ""
+        if seen + line_bytes > cut_at:
+            mid_line_cut = True
+            break
+        seen += line_bytes
+    return open_marker, mid_line_cut
+
+
+def _repair_report_tail(head_text, keep_bytes, tail_text):
+    """`tail_text` (the bytes a tail-keep truncation of `head_text` kept),
+    repaired so a fenced report the cut lands inside never hands the
+    assembled window a bare opener with no closer, and a fragment of a
+    real fence line dangling at the very start of `tail_text` never gets
+    misread as fresh structure. Two independent risks live at this one
+    seam:
+
+    1. The cut drops the report's OPENING `REPORT FROM ...` line, so its
+       body reads as ordinary window text — demoting an unverified
+       worker claim to a trusted receipt (the third-round Opus review
+       blocker this exists to close). Fixed by re-emitting that line
+       when `_report_fence_state_at_cut` says one is still open.
+
+    2. The cut lands mid-line, so `tail_text`'s own first line is a
+       FRAGMENT of whatever real line was split — most often the
+       CLOSING `END REPORT FROM ...` line — and a fragment can
+       coincidentally still match the OPENER pattern once stripped
+       (`"D REPORT FROM ..."`, missing its leading `EN`, still matches).
+       Left alone that fragment is itself forged structure. Quoted out
+       with `> ` — the same convention `_neutralise_report_body` already
+       uses for worker-controlled text — it reads as plain text instead.
+
+    Belt and braces: after both repairs, if nothing in the result closes
+    the marker being reopened (the real closer was itself cut away or
+    just neutralised as a fragment), a closing line is appended rather
+    than leaving an opened fence dangling. A truncation should never be
+    able to hand the window a fence that does not balance."""
+    marker, mid_line_cut = _report_fence_state_at_cut(head_text, keep_bytes)
+    lines = tail_text.splitlines(keepends=True)
+    if mid_line_cut and lines:
+        stripped = lines[0].strip()
+        if _REPORT_MARKER_LINE_RE.match(stripped) or _REPORT_END_LINE_RE.match(stripped):
+            lines[0] = "> " + lines[0]
+            tail_text = "".join(lines)
+    if not marker:
+        return tail_text
+    # Deliberately an exact-text compare here, not a re-match against
+    # _REPORT_MARKER_LINE_RE: a mangled fragment (handled above) is never
+    # byte-identical to the real marker line, so this cannot be fooled by
+    # one the way a pattern re-match could.
+    if not (tail_text.startswith(marker + "\n") or tail_text.rstrip("\n") == marker):
+        tail_text = marker + "\n" + tail_text
+    who_match = _REPORT_MARKER_LINE_RE.match(marker)
+    who = who_match.group(1) if who_match else ""
+    if not any(_REPORT_END_LINE_RE.match(l.strip()) for l in tail_text.splitlines()):
+        tail_text = tail_text.rstrip("\n") + "\n" + REPORT_END_LABEL.format(who=who)
+    return tail_text
 
 
 def _section_emit_slot(label):
