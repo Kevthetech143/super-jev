@@ -790,6 +790,232 @@ draft now passes — the draft's own uncited numbers can still overclaim — but
 it removes the self-contradiction a judge was otherwise left to referee with
 no rationale field to explain its read.
 
+## The deterministic PR-state arm is now recency-aware (2026-09-18)
+
+The stale-report-vs-receipt fact above (gate v4.1, point 2) only ever adds a
+DERIVED FACTS *sentence* — advisory text a judge can read. It never touched
+the separate, older deterministic block arm (`_pr_mismatch_reason`, gate v2)
+that fires `PR mismatch: draft says PR #N merged, evidence shows <state>`
+before the judge ever runs. That arm read the whole evidence window as one
+flat string and fired on the *first* non-merged mention of PR #N it found,
+with no notion of which turn it came from or whether it was a `gh`/`git`
+tool receipt or prose in a teammate/user message. In production this blocked
+a true "PR #52 merged" report because the window also carried an *older*
+teammate message saying "PR #52 ... not merged / open" from an earlier turn,
+even though the same window's *current turn* carried a real `gh pr merge`
+receipt and a `git log` line naming `(#52)` on main.
+
+`_pr_mismatch_reason` now goes through `_pr_mismatch_verdict`, which collects
+every PR-state signal for the PR number the draft names
+(`_pr_state_signals`) and picks a winner by:
+
+1. **strength** — a *state-bearing* receipt (a `gh pr view --json` state
+   field, a `"mergedAt"` field, or a literal `MERGED` state line) outranks a
+   *command-invocation* receipt (a bare `gh pr merge N` line, which only
+   proves the command was typed, not its result), which in turn outranks
+   prose in a teammate/user message or a `REPORT FROM` block, since prose
+   is a paraphrase that can go stale;
+2. among signals of the same strength, the one in the more recent window
+   section (`_section_recency_rank` — the same previous-turns-oldest-to-
+   newest, then receipts, then this-turn-reports, then this-turn-tools
+   layering the stale-report fact already uses); when two signals of the
+   same strength share one section and disagree, neither position in the
+   raw text is trusted as an ordering, so the tie fails CLOSED (see below)
+   instead of being resolved by which one reads later.
+
+A line only ever counts as a receipt (state-bearing or command-invocation)
+when it sits *outside* a `REPORT FROM` block and either carries the tool-
+output `[from: ...]` receipt identity or is itself a raw state line/JSON
+field. Prose quoting a command or citing `(#N)`/`#N` inside a `REPORT FROM`
+block — "I ran gh pr merge 52 and it failed; PR #52 is still open." — is
+read as prose, full stop, never as a receipt just because it contains
+receipt-shaped text; a bare `(#N)`/`#N` citation is never a receipt on its
+own anywhere in the window, only a possible anchor for the prose check.
+
+Only the *winning* signal is compared against the draft's claim — a mismatch
+still fires when that signal disagrees, exactly as the single-signal arm
+always did, but a newer or higher-strength signal that agrees with the
+draft now settles the question silently rather than being outvoted by an
+older mention the arm used to read first. A signal with no window
+section/turn marker around it at all carries no ordering information — it
+is never allowed to win a same-strength tie by virtue of "reading later" in
+raw concatenated text, since that order is not known to reflect anything
+real. When two same-strength signals disagree and neither carries any
+ordering information over the other, the arm fails CLOSED: it blocks on
+whichever tied signal says NOT_MERGED (the base, pre-recency behaviour)
+rather than allow, and still records a `PR state ambiguous: PR #N has
+conflicting same-strength signals with no window section/turn ordering
+between them — failing closed on the not-merged signal` line for `hook
+gate --explain`, so a reason and a note from this one pair can be non-None
+together — the only deterministic pair where that happens. Only this one
+arm changed; the count-mismatch arm and every derived-fact family are
+untouched.
+
+**The trust boundary is structure, not text (2026-09-18).** Everything
+above rests on being able to say which lines of a window are tool receipts
+and which are a worker's prose, and a report body is text the worker wrote,
+so nothing inside one can be trusted to mark its own edges. The boundary
+therefore comes from structure the **composer** controls and quotes out of
+every body it carries: each report block is fenced between a `REPORT FROM
+<who> (unverified worker claim)` line and a matching `END REPORT FROM <who>
+(unverified worker claim)` line, and any line in the body that could pass
+for a fence, a window section header or a `---`/`===` section rule is
+re-emitted with a leading `> ` (`_neutralise_report_body`). Reading it back
+(`_iter_window_report_lines`, the one walker the PR-state arm and the
+report-claim scanner share), a body ends only at its own closing fence — the
+LAST matching fence before the next section rule, never the first, so a
+fence a worker typed cannot close their block early — at a section rule, or
+at end of text; a blank line and a section header end nothing. A section
+header is honoured as a recency boundary only when it sits outside a body
+AND steps strictly upward in the composer's own emit order
+(`_section_emit_slot`: previous turns newest-first, then session receipts,
+then this turn's reports, then this turn's tool results), so a forged header
+can neither invent a newer section for a worker's own line nor demote a
+genuine receipt into an older one. A state-bearing line inside a body
+degrades to a **prose** signal for that PR rather than vanishing, because a
+quoted `{"number": N, "state": "OPEN"}` is still a claim the arm must weigh
+and dropping it left the arm with nothing to weigh at all. And ordering is
+only ever used when ordering exists: two signals can be compared on recency
+only if both sit under a section header and those headers differ, so a
+signal with no header, and two signals inside one section, are **unordered
+— which is a tie, and a tie fails closed** on the not-merged signal with the
+ambiguity note.
+
+**The who-label rule and the unconditional fragment quote (2026-09-18,
+round 6).** The `<who>` in both fence labels is worker-controlled text (a
+`teammate_id="..."` attribute, an agent name out of a task notification), and
+five review rounds found three ways it could break the fence from inside:
+an embedded newline split the label across two lines, a blank id rendered a
+label the matcher rejected (so the whole body read as trusted text), and a
+receipt-shaped id (`Worker MERGED PR #52`) put receipt text on the label line
+itself, where a byte cap landing inside the closing fence left it bare and
+newer than the genuine receipt. The rule now: ONE function
+(`_report_label_who`) decides the label token, and the fence matchers accept
+exactly its alphabet and nothing else. The token is a single word-character
+run, `[A-Za-z0-9_]`, at most 64 long, never empty (`teammate` when nothing is
+left), every other character replaced by `_`. That is deliberately tighter
+than `[A-Za-z0-9_.-]`: a token with no `.` or `-` has no internal word
+boundary, so `\bmerged\b`, `\bopen\b`, `gh pr merge N` and `#N` cannot match
+inside it, and with `(unverified worker claim)` following on the same line the
+fence line as a whole matches none of the arm's or the derived facts' per-line
+patterns whatever id the worker chose. The raw id is carried nowhere else in
+the window: it is worker text, the derived-fact families read every line
+without the walker, and the sanitised token keeps enough for a reader to know
+who spoke. Reading back, the canonical strict fence opens a body wherever it
+appears, and a line that merely *begins* `REPORT FROM` — one the strict
+matcher rejects — opens a body too, fail closed, but **only inside a
+section the composer can emit a report in**: `[current turn reports]`, or
+a `[previous turn -N]` block after the `[relayed reports in this turn]`
+mark the composer now writes ahead of that turn's first report
+(`_prev_turn_items`, `_report_marker_who`'s `allow_loose`). The scope is
+the fix for a sixth review blocker: unconditional, the rule meant any
+tool result that merely *printed* such a line — a `cat` of a saved
+report, a transcript dump, a grep hit — turned every later line of that
+same result into report prose, which demoted a genuine
+`{"number": N, "state": "OPEN"}` sitting beside it to a prose signal and
+let a bare `gh pr merge N` invocation line from an earlier result win the
+arm. A body opened either way closes on any `END REPORT FROM` line. The
+mark is itself quoted out of every report body, and a forged copy inside
+a tool result can only switch the loose rule ON, which blocks more, never
+less. At every tail-keep truncation, the first
+line of the kept tail is quoted with `> ` **unconditionally** whenever the cut
+fell inside a line, because a fragment is never a genuine line and its shape
+is not something to guess at; and every tail-keep (both builders and the
+whole-window safety cut) now shrinks its slice until the *repaired* tail fits
+the budget (`_fence_safe_tail`), since the repair adds bytes and a block that
+overshot was being sliced a second time with its opener cut off.
+
+**A command invocation is not an outcome (2026-09-18, round 7; widened
+round 8).** A state-bearing line that an in-body rule demotes to prose
+keeps a separate "state-bearing" marker, because the demotion says how
+far the line may be trusted and not whether it speaks to the outcome at
+all; so when the strongest MERGED signal carries no state value of its
+own — a bare `gh pr merge N` invocation receipt — and ANY not-merged
+signal exists at any strength, state-bearing or plain prose, the pair is
+treated as unordered, which is a tie, and the arm fails closed on the
+not-merged signal with its own note. Round 7 only caught this when the
+not-merged signal itself carried a state value; round 8 found that too
+narrow — a not-merged signal that was plain prose to begin with (never
+demoted from a state line, just a teammate saying "PR #52 is open still")
+lost outright to the invocation line on strength, so the tie rule never
+fired and the draft was wrongly allowed. An invocation-only receipt can
+never be the sole basis for allowing a merge claim against ANY not-merged
+signal — a command-invocation receipt proves only that a command was
+typed, so it carries no more weight than the prose it is being weighed
+against. Only a receipt that actually carries a state value (strength 2)
+still outranks prose; that pairing is the documented accepted tradeoff
+below and is unchanged by this widening.
+
+**The receipt floor at a tail-keep (2026-09-18, round 7).** At tiny
+budgets the fence repair's own two lines can eat most of what there is,
+so `_fence_safe_tail`'s shrinking slice could fall past the only genuine
+`[from: ...]` receipt in the text, or overshoot far enough that the caller
+dropped the whole previous turn — leaving the window a worker's claim and
+none of the evidence. It now refuses to shrink below the newest genuine
+receipt header: if the normal slice loses it, the fallback starts at that
+header and carries no report body at all. The tradeoff, plainly: receipts
+are evidence and reports are claims, so when both cannot fit the receipt
+stays and the report goes, at the cost of a tiny-budget window carrying a
+receipt line with none of the narrative around it.
+
+**Accepted tradeoff.** Strength is compared before recency, so a receipt
+sitting in an *older* window section still outranks *current-turn* prose
+saying the PR was reverted or reopened — a worker who reverts or reopens a
+merged PR and only reports that in plain prose, with no fresh receipt of
+its own, will not override an earlier merge receipt already in the window.
+This is judged the safer default, since prose alone contradicting a
+receipted fact is exactly the shape a stale or mistaken claim takes, but it
+is a real gap: clearing a stale MERGED receipt after a genuine revert needs
+a fresh receipt of its own (a new `gh pr view --json` showing the reverted
+state), not just a sentence saying so.
+
+**The reports-region mark is honoured only where the composer puts it
+(2026-09-18, round 9).** `[relayed reports in this turn]` is structure the
+composer writes as the FIRST line of a render item — directly after a
+`---`/`===` section rule or an accepted section header (`_prev_turn_items`,
+`_build_prev_turns_block_detailed`'s `"\n\n---\n\n".join`) — never mid tool
+result. The walker previously accepted the mark from ANY position outside
+a report body, so a worker's own command (say, a `cat` of a file beside a
+real `gh pr view`) could print the mark plus a loose `REPORT FROM` line and
+turn the rest of that same tool result — including a genuine
+`{"number": N, "state": "OPEN"}` on the next line — into report prose,
+demoting it to strength 0 and letting an older invocation-only MERGED
+receipt win under the "command invocation is not an outcome" rule above.
+It now tracks whether the immediately preceding content line (blank lines
+do not clear this) was a section rule or an accepted header, and only
+honours the mark there; a mark anywhere else is ordinary text and opens
+nothing.
+
+**The reports-region mark also requires a strict fence right after it
+(2026-09-18, round 10).** The round-9 fix above closed the mid-tool-result
+case but not this one: the composer starts every tool-result item at
+exactly the same boundary the mark itself needs (right after a `---`/`===`
+rule or an accepted header), so a worker's tool output that printed the
+mark as its own first line, followed by a LOOSE `REPORT FROM bob` line
+(one the strict matcher rejects), still turned the rest of that tool
+result into report prose. The walker now also requires the line directly
+after the mark to be the composer's own strict `REPORT FROM <who>
+(unverified worker claim)` fence — the one shape `_prev_turn_items`
+always puts there (`REPORTS_REGION_LABEL + "\n" + reports[0]`, and every
+`reports[0]` is `_render_report_block` output) — before it treats the
+mark as structure; a mark followed by anything else, including a loose
+fence, opens nothing. A worker printing the strict fence itself gains
+nothing either, since a strict fence already opens a report body
+anywhere in the window, mark or no mark.
+
+**Correcting an earlier round's read of the residual differential
+flips.** A prior round's report attributed the small number of
+`ALLOW`-where-branch-base-`BLOCK`s the randomized differential probe finds
+to a bare `MERGED` noise line with no PR number attached. Round 9's own
+reruns of that probe (both the original shape and one widened to also
+exercise the reports-region mark) instead land every such flip inside the
+already-documented **Accepted tradeoff** just above it: a state-bearing
+MERGED receipt (strength 2) outranking a non-state-bearing not-merged
+prose signal by strength-before-recency. No fence-repair or who-label
+behavior was implicated in the windows this round produced. Treat the
+existing Accepted-tradeoff paragraph as covering these, not a distinct,
+undocumented class.
+
 ## Gate v4.2 — written-file identity, file read-back facts (2026-09-18)
 
 `SET3-AUDIT2.md` measured the fleet's other bots (businessfi, health-fitness)
