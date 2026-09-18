@@ -7,18 +7,34 @@ No version bump.
 - **`catch signal`.** The first step of the compounding loop the catch
   ledger exists to feed: harness catches -> tags -> issue -> fix PR ->
   bench robot. `superjev.py catch signal [--min 3] [--since 24h] [--open
-  --repo owner/name] [--dry-run]` groups catch-ledger records tagged
-  `false`/`miss` by **reason family** (the reason string with its
-  numbers/values stripped, so two count mismatches with different draft
-  and evidence numbers still collapse into one family) and, once a family
-  reaches `--min`, prints a signal block with up to three redacted
-  examples. Exit 0 with signals, exit 1 with none. `--open` files a
-  GitHub issue via `gh issue create --label harness-signal` and records
-  the family in a `signals.jsonl` sidecar so the same family is never
-  filed twice; `--dry-run` prints the issue body and never calls `gh`. A
-  final email/phone/SSN check on the assembled body runs right before any
-  real `gh` call, on top of the per-example redaction. See docs/hooks.md,
-  "Turning a repeat pattern into a fix PR."
+  --repo owner/name] [--dry-run] [--with-reasons] [--with-drafts]` groups
+  catch-ledger records tagged `false`/`miss` by **reason family** (the
+  reason string with its numbers/values, and a per-call judge claim key
+  like `c2`, stripped — so two count mismatches with different draft/
+  evidence numbers, or six `c1`/`c2`/.../`OVERCLAIMS` blocks from
+  different claim indices, all still collapse into one family) and, once
+  a family reaches `--min` (an explicit `--min 0` is now refused, not
+  silently rewritten to 3), prints a signal block. A signal's own
+  printed/issue-body content is **metadata only by default** — family,
+  count, first/last timestamps, and every matching record's id, plus a
+  pointer to `catch list --id <id>` for the redacted detail locally —
+  never draft-derived text, closing off names/addresses/order numbers/
+  health details/dollar figures/non-US phone numbers/token URLs that
+  reached a public issue before even though `_catch_redact` never covered
+  those shapes. `--with-reasons`/`--with-drafts` add the redacted (and,
+  since this text can still carry markdown/GitHub-autolink syntax,
+  markdown-escaped) reason line / draft excerpt to the *local*
+  printed/`--dry-run` output only — both are refused outright (exit 2)
+  together with `--open`. Exit 0 with signals filed/previewed, exit 1
+  with no signal reaching `--min`, exit 3 if `--open` attempted a filing
+  that was refused or failed. `--open` files a GitHub issue via `gh issue
+  create --label harness-signal` and records the family in a
+  `signals.jsonl` sidecar so the same family is never filed twice;
+  `--dry-run` prints the issue body and never calls `gh`. A final email/
+  phone/SSN check on the assembled body runs right before any real `gh`
+  call, belt-and-braces on top of the metadata-only default body. `catch
+  list` gained `--id <id>` so the pointer above is a real, working lookup.
+  See docs/hooks.md, "Turning a repeat pattern into a fix PR."
 
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
