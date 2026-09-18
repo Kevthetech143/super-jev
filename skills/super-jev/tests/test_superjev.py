@@ -569,11 +569,18 @@ def test_verify_fallback_no_gh_on_path_is_graceful(tmp_path, bare_git_repo, monk
     monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
     monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
     # git and node are still needed for the rest of the fallback's evidence
-    # gather; only `gh` needs to be unreachable. Drop any PATH entry that
-    # actually has a `gh` binary in it, keep everything else.
-    kept = [d for d in os.environ.get("PATH", "").split(os.pathsep)
-           if d and not (Path(d) / "gh").exists()]
-    monkeypatch.setenv("PATH", os.pathsep.join(kept))
+    # gather; only `gh` needs to be unreachable. A CI runner can have git
+    # and gh in the SAME directory (e.g. /usr/bin on the GitHub-hosted
+    # ubuntu image), so shrinking PATH by directory is unsafe here — patch
+    # shutil.which itself, scoped to this module, so only a "gh" lookup
+    # comes back empty.
+    real_which = sj.shutil.which
+
+    def _which_no_gh(name, *a, **k):
+        if name == "gh":
+            return None
+        return real_which(name, *a, **k)
+    monkeypatch.setattr(sj.shutil, "which", _which_no_gh)
     report = tmp_path / "r.md"
     report.write_text("PR #12 is merged, checks green.", encoding="utf-8")
     code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
