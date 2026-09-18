@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, beatsNone, formatFetchPlan, planFetch, prefilterCatalog, relevanceQuestion, runFetch, tokenize, type FetchCatalogEntry
+  DEFAULT_FETCH_FLOOR, DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, applyNoneGate, beatsNone, buildClarifyingQuestion,
+  formatFetchPlan, planFetch, prefilterCatalog, relevanceQuestion, runFetch, tokenize, type FetchCatalogEntry, type FetchRun
 } from '../../src/enhance/fetch.ts';
 import { choiceAnswer } from '../../src/enhance/stub.ts';
 import type { Answer, Evaluation, Evaluator, Question, Request } from '../../src/types.ts';
@@ -178,7 +179,7 @@ test('calls is 1 when prefilter <= records per call, and more than 1 when the pr
   const cat = bigCatalog(100, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
   const on = tableTransport({ 'pay-coned': 'high' });
   const withPrefilter = await runFetch(cat, 'pay my electric bill', { transport: on.transport });
-  assert.equal(DEFAULT_PREFILTER, 40);
+  assert.equal(DEFAULT_PREFILTER, 8);
   assert.equal(withPrefilter.plan.prefilter.n, DEFAULT_PREFILTER);
   assert.equal(withPrefilter.calls, 1);
   assert.equal(on.requests.length, 1);
@@ -194,9 +195,9 @@ test('calls is 1 when prefilter <= records per call, and more than 1 when the pr
 test('the plan reports the prefilter before any call, and the dry-run call count reflects it', () => {
   const cat = bigCatalog(100, [['pay-coned', 'Pay the electric bill']]);
   const plan = planFetch(cat, 'pay my electric bill');
-  assert.equal(plan.prefilter.kept, 40);
+  assert.equal(plan.prefilter.kept, 8);
   assert.equal(plan.plan.plan.calls.length, 1);
-  assert.ok(formatFetchPlan(plan).includes('61 dropped locally'));
+  assert.ok(formatFetchPlan(plan).includes('93 dropped locally'));
   const off = planFetch(cat, 'pay my electric bill', { prefilter: 0 });
   assert.ok(off.plan.plan.calls.length > 1);
   assert.ok(formatFetchPlan(off).includes('prefilter: disabled'));
@@ -327,4 +328,155 @@ test('formatFetchPlan prints the catalog size, k and request', () => {
   assert.ok(text.includes('2 catalog record(s)'));
   assert.ok(text.includes('top-k requested: 2'));
   assert.ok(text.includes('find the payment skill'));
+});
+
+// ---------------------------------------------------------------- v2 local narrowing: utterances, negatives, context
+
+test('prefilterCatalog with no utterances/negatives/context behaves exactly like the v1 text-only pass', () => {
+  const cat: FetchCatalogEntry[] = [
+    { id: 'a', text: 'Pay the electric bill' },
+    { id: 'b', text: 'Post a tweet' }
+  ];
+  const withoutV2 = prefilterCatalog(cat, 'pay my electric bill', 1);
+  const withEmptyOptions = prefilterCatalog(cat, 'pay my electric bill', 1, {});
+  assert.deepEqual(withoutV2, withEmptyOptions);
+  assert.equal(withoutV2.kept[0].id, 'a');
+});
+
+test('prefilterCatalog weights an utterance match higher than a text-only match', () => {
+  const cat: FetchCatalogEntry[] = [
+    // "a" only matches the request through its utterance; "b" matches through its plain text.
+    // A filler record keeps the catalog bigger than n, so the "keep everything" shortcut never fires and real scoring runs.
+    { id: 'a', text: 'Something about accounts', utterances: ['restart the agent please'] },
+    { id: 'b', text: 'restart the agent' },
+    { id: 'filler', text: 'zorp quux blorf nothing relevant here' }
+  ];
+  const result = prefilterCatalog(cat, 'restart the agent please', 2);
+  assert.ok(result.scores.a > result.scores.b, `expected utterance match (${result.scores.a}) to outscore text match (${result.scores.b})`);
+});
+
+test('prefilterCatalog subtracts a negative match from the score', () => {
+  const cat: FetchCatalogEntry[] = [
+    { id: 'a', text: 'restart the agent', negatives: ['restart the site'] },
+    { id: 'b', text: 'restart the site' },
+    { id: 'filler', text: 'zorp quux blorf nothing relevant here' }
+  ];
+  const withNegative = prefilterCatalog(cat, 'restart the site', 2);
+  const withoutNegative = prefilterCatalog(cat, 'restart the site', 2, { negativeWeight: 0 });
+  // Without the negative penalty, "a" (score from its own text alone) survives into the top 2.
+  assert.ok(withoutNegative.kept.some(r => r.id === 'a'), 'without the negative penalty, a should still make the top 2');
+  // With it, the negative match pulls "a" below the filler record's score of 0 and it is dropped entirely.
+  assert.ok(!withNegative.kept.some(r => r.id === 'a'), 'the negative match should push a out of the top 2 entirely');
+});
+
+test('prefilterCatalog folds context turns into the query at a lower weight, so a referent inherits its subject', () => {
+  const cat: FetchCatalogEntry[] = [
+    { id: 'restart-agent', text: 'Restart one team agent through the control endpoint.' },
+    { id: 'pay-coned', text: 'Pay the Con Edison electric bill.' }
+  ];
+  // "restart it" alone shares no real vocabulary with either record beyond "restart".
+  // With the prior turn "the agent is stuck" folded in as context, restart-agent should win clearly.
+  const noContext = prefilterCatalog(cat, 'restart it', 1);
+  const withContext = prefilterCatalog(cat, 'restart it', 1, { context: ['the agent is stuck'] });
+  assert.equal(withContext.kept[0].id, 'restart-agent');
+  assert.ok(withContext.scores['restart-agent'] >= (noContext.scores['restart-agent'] ?? 0));
+});
+
+test('runFetch with a v2 catalog and --context still keeps v1 behaviour when no utterances/negatives/context are given', async () => {
+  const cat = catalog([['gate', 'Check a draft against its evidence.'], ['tweet', 'Post to X/Twitter.']]);
+  const { transport } = tableTransport({ gate: 'high', tweet: 'none' });
+  const run = await runFetch(cat, 'gate my reply', { transport, k: 5 });
+  assert.equal(run.ranked[0].id, 'gate');
+});
+
+// ---------------------------------------------------------------- none gate
+
+function fakeRun(overrides: Partial<FetchRun>): FetchRun {
+  return {
+    plan: { plan: { calls: [], effectiveRecordsPerCall: 1, recordsPerCallReason: '', plan: { calls: [], oversizedRecordIds: [], budget: {} as never, perCallRecordAllowance: 0, questionsCounted: false, totalEstimatedInputTokens: 0 }, totalCells: 0 } as never, k: 5, request: 'x', catalogSize: 1, prefilter: { n: 8, kept: 1, dropped: 0, droppedIds: [] } },
+    ranked: [],
+    allScored: [],
+    noMatch: false,
+    noMatchConfidence: 0,
+    calls: 1,
+    manifest: { totalRecords: 1, byKind: {} as never, outcomes: [], complete: true, problems: [] },
+    cost: {} as never,
+    errors: [],
+    model: 'stub',
+    ...overrides
+  };
+}
+
+test('applyNoneGate passes a confident top pick through unchanged', () => {
+  const run = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.95 }], allScored: [{ id: 'a', score: 1, confidence: 0.95 }] });
+  const gate = applyNoneGate(run, 0.8);
+  assert.equal(gate.noMatch, false);
+  if (!gate.noMatch) assert.deepEqual(gate.ranked, run.ranked);
+});
+
+test('applyNoneGate asks a clarifying question when the top pick is below the floor', () => {
+  const run = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.5 }], allScored: [{ id: 'a', score: 1, confidence: 0.5 }, { id: 'b', score: 0.33, confidence: 0.3 }] });
+  const gate = applyNoneGate(run, 0.8);
+  assert.equal(gate.noMatch, true);
+  if (gate.noMatch) {
+    assert.deepEqual(gate.candidates.map(c => c.id), ['a', 'b']);
+    assert.match(gate.ask, /a, b|"a"/);
+  }
+});
+
+test('applyNoneGate uses DEFAULT_FETCH_FLOOR (0.80) when no floor is given', () => {
+  assert.equal(DEFAULT_FETCH_FLOOR, 0.80);
+  const belowDefault = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.79 }], allScored: [{ id: 'a', score: 1, confidence: 0.79 }] });
+  assert.equal(applyNoneGate(belowDefault).noMatch, true);
+  const atDefault = fakeRun({ ranked: [{ id: 'a', score: 1, confidence: 0.80 }], allScored: [{ id: 'a', score: 1, confidence: 0.80 }] });
+  assert.equal(applyNoneGate(atDefault).noMatch, false);
+});
+
+test('applyNoneGate on an actual noMatch run offers the top-3 closest candidates from allScored, even though none of them beat "none of these"', () => {
+  const run = fakeRun({
+    noMatch: true,
+    ranked: [],
+    allScored: [
+      { id: 'a', score: 1 / 3, confidence: 0.4 },
+      { id: 'b', score: 1 / 3, confidence: 0.3 },
+      { id: 'c', score: 0, confidence: 0.9 },
+      { id: 'd', score: 0, confidence: 0.9 }
+    ]
+  });
+  const gate = applyNoneGate(run, 0.8);
+  assert.equal(gate.noMatch, true);
+  if (gate.noMatch) {
+    assert.equal(gate.candidates.length, 3);
+    assert.deepEqual(gate.candidates.map(c => c.id), ['a', 'b', 'c']);
+  }
+});
+
+test('applyNoneGate falls back to a plain clarifying line when there are no candidates at all', () => {
+  const run = fakeRun({ noMatch: true, ranked: [], allScored: [] });
+  const gate = applyNoneGate(run, 0.8);
+  assert.equal(gate.noMatch, true);
+  if (gate.noMatch) {
+    assert.deepEqual(gate.candidates, []);
+    assert.match(gate.ask, /can you say more/i);
+  }
+});
+
+test('applyNoneGate refuses a floor outside [0,1]', () => {
+  const run = fakeRun({});
+  assert.throws(() => applyNoneGate(run, -0.1));
+  assert.throws(() => applyNoneGate(run, 1.1));
+});
+
+test('buildClarifyingQuestion phrases one candidate as "did you mean X" and several as a list', () => {
+  assert.match(buildClarifyingQuestion(['gate']), /Did you mean "gate"\?/);
+  assert.match(buildClarifyingQuestion(['gate', 'sweep']), /Did you mean one of: gate, sweep\?/);
+  assert.match(buildClarifyingQuestion([]), /can you say more/i);
+});
+
+test('runFetch reports allScored including records that lost to "none of these"', async () => {
+  const cat = catalog([['a', 'x'], ['b', 'y']]);
+  const { transport } = tableTransport({ a: 'high', b: 'none' });
+  const run = await runFetch(cat, 'anything', { transport, k: 5 });
+  assert.deepEqual(run.ranked.map(r => r.id), ['a']);
+  assert.deepEqual(run.allScored.map(r => r.id).sort(), ['a', 'b']);
 });

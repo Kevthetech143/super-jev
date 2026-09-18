@@ -75,24 +75,39 @@ provider's preview terms restrict publishing performance numbers here.
    actually ran, with descriptions written closer to how a real user asks;
    the fetch layer must beat the injected map on both accuracy and tokens per
    turn.
-   Status: BUILT, EXPERIMENTAL — wrapped by the `fetch` door in this skill
-   (`npm run fetch` in this repo); the admission gate is not yet met. Built
-   on the same `planSweep` / `runSweep` engine `sweep` uses: a cheap local
-   prefilter (token overlap, `--prefilter`, default 40, 0 disables) trims
-   the catalog first so a typical run is one call; then one relevance
-   question per kept record, the request folded into its instructions,
-   scored `high`/`medium`/`low`/`none` where `none` is "none of these". A
-   record ranks only if it beats `none`; when `none` wins everywhere the
-   result is an empty ranked list with `noMatch` set, never a best guess.
+   Status: BUILT, EXPERIMENTAL (v2) — wrapped by the `fetch` door in this
+   skill (`npm run fetch` in this repo); the admission gate is not yet met.
+   Built on the same `planSweep` / `runSweep` engine `sweep` uses. v2 adds
+   a catalog schema (`src/enhance/catalog.ts`) drawn from the tool/skill
+   retrieval literature (ToolRet, SkillRet, aurelio-labs/semantic-router's
+   `Route(utterances=[...])`):
+   a v1 record is `{id,text}`; a v2 record adds optional `utterances`
+   (realistic user phrasings), `negatives` (near-miss phrasings that should
+   NOT route here) and `tags`. The local narrowing pass (BM25-lite,
+   `--prefilter`, default 8, 0 disables) scores `text` and `utterances`
+   (utterances weighted higher), subtracts `negatives`, and folds recent
+   turns (`--context`, lower weight) into the query so a referent like
+   "restart it" inherits its subject — a v1-only catalog scores exactly as
+   before. One relevance question per kept record, the request folded into
+   its instructions, scored `high`/`medium`/`low`/`none` where `none` is
+   "none of these". A record ranks only if it beats `none`. A **none gate**
+   (`applyNoneGate`, `--floor`, default 0.80) then asks a clarifying
+   question — `{noMatch: true, candidates, ask}` — instead of acting,
+   whenever nothing beat `none` or the top pick's confidence is below the
+   floor. A **feedback loop** (`--record`/`--ledger` on `fetch`, `catalog --
+   learn`) mines corrected picks into proposed new utterances, written to a
+   separate file, never silently merged into the catalog.
    The gate above — a bench of real past requests beating the injected map
    on accuracy and tokens per turn — is NOT yet met: only an offline
-   plumbing bench has run so far (`npm run bench:fetch` against
-   `bench/fetch-cases.json`, a synthetic fixture with match and no-match
-   cases scored by a scripted stub that is told the answer ahead of time).
-   That proves the ranking, the k cap, the no-match path and the coverage
-   manifest work; it is not evidence of real accuracy or a real token
-   saving. A live measurement against `bench/live-measure.ts` still needs
-   to run before this item's own gate is closed.
+   admission bench has run so far (`npm run bench:fetch` against
+   `bench/fetch-cases.json`, a synthetic fixture scored by a scripted stub
+   that is told the answer ahead of time, over a seeded train/holdout split
+   so a case's own text is never one of the utterances fed to its own
+   narrowing pass). That proves the narrowing pass carries the true record
+   through to the judge, the ranking, the k cap, the none gate and the
+   coverage manifest work; it is not evidence of real judge accuracy or a
+   real token saving. A live measurement against `bench/live-measure.ts`
+   still needs to run before this item's own gate is closed.
 
 7. **STEERING CABIN** — one front door for every check: gate, verify, sweep,
    fetch, permit, chain, and bench live; a door that is ever missing names

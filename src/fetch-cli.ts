@@ -9,10 +9,14 @@
  * the same `planSweep` / `runSweep` engine `npm run sweep` uses.
  */
 import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { Jev } from './jev.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
-import { DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry } from './enhance/fetch.ts';
+import {
+  DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR,
+  applyNoneGate, formatFetchPlan, planFetch, runFetch, type FetchCatalogEntry
+} from './enhance/fetch.ts';
+import { CatalogError, parseCatalogText } from './enhance/catalog.ts';
 import type { Answer, Evaluator, Question, Request } from './types.ts';
 
 // Only deliberate, local diagnostics are printed. A raw parser or filesystem
@@ -23,19 +27,34 @@ const usage = `super-jev fetch --catalog CATALOG.json --request "<text>" [option
 
 Scores the catalog against the request and prints the top-k ids and their
 scores. Pull, not push: only the top few records are ever meant to be
-loaded by the caller. A cheap local prefilter (token overlap) trims the
-catalog to the top N first, so a typical run is ONE provider call. Every
-record is judged against a "none of these" option; a record only ranks
-when it beats it, and when nothing does the result is ranked=[] with
-noMatch=true rather than a best guess.
+loaded by the caller. A cheap local narrowing pass (BM25-lite over text and,
+for a v2 catalog, utterances weighted higher, minus negatives, plus recent
+--context turns at a lower weight) trims the catalog to the top N first, so
+a typical run is ONE provider call. Every record is judged against a "none
+of these" option; a record only ranks when it beats it. The none gate then
+applies a confidence floor: below it, or when nothing beat none, the result
+is a clarifying question instead of a best guess.
 
-  --catalog FILE   JSON: an array of {"id","text"} records, or
+  --catalog FILE   JSON: an array of {"id","text",...} records (v1 {id,text}
+                   or v2 with optional "utterances"/"negatives"/"tags"), or
                    {"catalog":[...]}. This is the whole index — a skills
                    list, a tools catalog, a brain INDEX.
   --request TEXT   The plain-language request to score the catalog against.
+  --context FILE   JSON array of recent user turns, oldest first. The last
+                   --context-turns of them are folded into local narrowing
+                   at a lower weight, so a referent like "restart it"
+                   inherits its subject from the prior turn.
+  --context-turns N  How many trailing turns to keep from --context. Default ${DEFAULT_CONTEXT_TURNS}.
   --k       N      How many top ids to return. Default ${DEFAULT_K}.
-  --prefilter N    Keep only the top N records by local token overlap
-                   before the provider call. Default ${DEFAULT_PREFILTER}; 0 disables.
+  --prefilter N    Keep only the top N records by local narrowing before the
+                   provider call. Default ${DEFAULT_PREFILTER}; 0 disables.
+  --floor   N      Confidence floor for the none gate, in [0,1]. Below it the
+                   result asks a clarifying question instead of acting.
+                   Default ${DEFAULT_FETCH_FLOOR}.
+  --record  ID     After scoring, log {request, context, ranked, chosen: ID,
+                   ts} to --ledger, for the feedback loop ("npm run catalog
+                   -- learn"). Does not change the printed result.
+  --ledger  FILE   Ledger path for --record. Default .superjev/fetch-ledger.jsonl.
   --out     DIR    Output directory. Files are created; a second run to the
                     same directory overwrites rather than failing.
   --budget  N      maxInputTokens per call. Default ${DEFAULT_FETCH_MAX_INPUT_TOKENS}.
@@ -49,6 +68,7 @@ Live mode is the default and needs TYPESAFE_API_KEY. It sends catalog text
 to TypeSafe. Exit codes: 0 ok, 1 usage, 2 transport failure.`;
 
 const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
+const MAX_CONTEXT_BYTES = 1 * 1024 * 1024;
 
 /** Deterministic 32-bit FNV-1a. Used only to make the stub reproducible. */
 function hash(text: string): number {
@@ -89,19 +109,19 @@ async function readSmallFile(path: string, limit: number, what: string): Promise
   catch { throw new CliError(`Cannot read the ${what} file`); }
 }
 
+/** Parses v1 ({id,text}) and v2 (+utterances/negatives/tags) catalogs alike. See `src/enhance/catalog.ts`. */
 export function parseCatalog(text: string): FetchCatalogEntry[] {
+  try { return parseCatalogText(text); }
+  catch (error) { throw new CliError(error instanceof CatalogError ? error.message : 'The catalog file is not valid'); }
+}
+
+/** JSON array of recent user turns, oldest first. Every entry must be a string. */
+function parseContext(text: string): string[] {
   let parsed: unknown;
   try { parsed = JSON.parse(text); }
-  catch { throw new CliError('The catalog file is not valid JSON'); }
-  const list = Array.isArray(parsed) ? parsed : (parsed as { catalog?: unknown })?.catalog;
-  if (!Array.isArray(list)) throw new CliError('The catalog file must be an array of {id,text} records, or an object with a "catalog" array');
-  for (const [i, entry] of list.entries()) {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw new CliError(`Catalog entry ${i} is not a JSON object`);
-    const record = entry as Record<string, unknown>;
-    if (typeof record.text !== 'string' || !record.text.trim()) throw new CliError(`Catalog entry ${i} has no text`);
-    if (record.id !== undefined && (typeof record.id !== 'string' || !record.id.trim())) throw new CliError(`Catalog entry ${i} has a non-string id`);
-  }
-  return list as FetchCatalogEntry[];
+  catch { throw new CliError('The context file is not valid JSON'); }
+  if (!Array.isArray(parsed) || !parsed.every(v => typeof v === 'string')) throw new CliError('The context file must be a JSON array of strings (recent user turns, oldest first)');
+  return parsed as string[];
 }
 
 /** Overwrite on rerun, on purpose: a fetch is meant to be re-run every turn. */
@@ -120,16 +140,22 @@ async function main(): Promise<number> {
   const args = process.argv.slice(2);
   if (!args.length || args.includes('--help')) { console.log(usage); return 0; }
 
-  let catalogPath = '', request = '', outDir = '';
+  let catalogPath = '', request = '', outDir = '', contextPath = '', recordId = '', ledgerPath = '';
   let maxInputTokens: number | undefined, batch: number | undefined, k: number | undefined, prefilter: number | undefined;
+  let contextTurns: number | undefined, floor: number | undefined;
   let dryRun = false, stub = false, json = false;
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
     const next = () => { const v = args[++i]; if (!v || v.startsWith('--')) throw new CliError(`${flag} needs a value`); return v; };
     if (flag === '--catalog') { if (catalogPath) throw new CliError('Repeated --catalog'); catalogPath = resolve(next()); }
     else if (flag === '--request') { if (request) throw new CliError('Repeated --request'); request = next(); }
+    else if (flag === '--context') { if (contextPath) throw new CliError('Repeated --context'); contextPath = resolve(next()); }
+    else if (flag === '--context-turns') { if (contextTurns !== undefined) throw new CliError('Repeated --context-turns'); contextTurns = number(next(), '--context-turns'); }
     else if (flag === '--k') { if (k !== undefined) throw new CliError('Repeated --k'); k = number(next(), '--k'); }
     else if (flag === '--prefilter') { if (prefilter !== undefined) throw new CliError('Repeated --prefilter'); prefilter = number(next(), '--prefilter'); }
+    else if (flag === '--floor') { if (floor !== undefined) throw new CliError('Repeated --floor'); floor = number(next(), '--floor'); }
+    else if (flag === '--record') { if (recordId) throw new CliError('Repeated --record'); recordId = next(); }
+    else if (flag === '--ledger') { if (ledgerPath) throw new CliError('Repeated --ledger'); ledgerPath = resolve(next()); }
     else if (flag === '--out') { if (outDir) throw new CliError('Repeated --out'); outDir = resolve(next()); }
     else if (flag === '--budget') { if (maxInputTokens !== undefined) throw new CliError('Repeated --budget'); maxInputTokens = number(next(), '--budget'); }
     else if (flag === '--batch') { if (batch !== undefined) throw new CliError('Repeated --batch'); batch = number(next(), '--batch'); }
@@ -143,13 +169,20 @@ async function main(): Promise<number> {
   if (k !== undefined && (!Number.isInteger(k) || k < 1)) throw new CliError('--k must be a positive integer');
   if (batch !== undefined && (!Number.isInteger(batch) || batch < 1)) throw new CliError('--batch must be a positive integer');
   if (prefilter !== undefined && (!Number.isInteger(prefilter) || prefilter < 0)) throw new CliError('--prefilter must be a non-negative integer (0 disables)');
+  if (contextTurns !== undefined && (!Number.isInteger(contextTurns) || contextTurns < 0)) throw new CliError('--context-turns must be a non-negative integer');
+  if (floor !== undefined && (!Number.isFinite(floor) || floor < 0 || floor > 1)) throw new CliError('--floor must be a number in [0,1]');
+  if (ledgerPath && !recordId) throw new CliError('--ledger only applies with --record');
   // The key check happens before any file is read, so a run that cannot
   // possibly reach the provider fails immediately and cheaply.
   if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live fetch, or use --dry-run or --stub');
 
   const catalog = parseCatalog(await readSmallFile(catalogPath, MAX_CATALOG_BYTES, 'catalog'));
+  const contextTurnsN = contextTurns ?? DEFAULT_CONTEXT_TURNS;
+  const context = contextPath ? parseContext(await readSmallFile(contextPath, MAX_CONTEXT_BYTES, 'context')).slice(-contextTurnsN) : undefined;
+  const floorN = floor ?? DEFAULT_FETCH_FLOOR;
   const options = {
-    k, prefilter, ...(maxInputTokens !== undefined || batch !== undefined ? { budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) } } : {})
+    k, prefilter, context,
+    ...(maxInputTokens !== undefined || batch !== undefined ? { budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) } } : {})
   };
 
   let plan;
@@ -194,20 +227,42 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  const gate = applyNoneGate(run, floorN);
+
   const resultJson = {
     mode: stub ? 'stub' : 'live',
     request,
+    context: context ?? [],
     k: run.plan.k,
     catalogSize: run.plan.catalogSize,
     prefilter: run.plan.prefilter,
+    floor: floorN,
     ranked: run.ranked,
     noMatch: run.noMatch,
     noMatchConfidence: run.noMatchConfidence,
+    // The none gate: below the confidence floor, or when nothing beat "none
+    // of these" at all, `gated` is true and `candidates`/`ask` are the
+    // closest things to offer a human instead of a guess. See --json in the
+    // usage text — this is the shape a caller should branch on.
+    gated: gate.noMatch,
+    candidates: gate.noMatch ? gate.candidates : [],
+    ask: gate.noMatch ? gate.ask : null,
     calls: run.calls,
     model: run.model,
     manifestComplete: run.manifest.complete,
     errors: run.errors
   };
+
+  if (recordId) {
+    const path = ledgerPath || resolve('.superjev', 'fetch-ledger.jsonl');
+    try {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      const line = JSON.stringify({ request, context: context ?? [], ranked: run.ranked, chosen: recordId, ts: new Date().toISOString() }) + '\n';
+      const handle = await open(path, 'a', 0o600);
+      try { await handle.writeFile(line); } finally { await handle.close(); }
+    } catch { throw new CliError('Cannot write the ledger file'); }
+    if (!json) console.error(`Recorded chosen=${recordId} to ${path}`);
+  }
 
   if (outDir) {
     await writeOut(outDir, 'ranked.json', JSON.stringify(resultJson, null, 2) + '\n');
@@ -227,6 +282,7 @@ async function main(): Promise<number> {
 
   if (run.noMatch) console.error(`No match: "none of these" won for every record judged (confidence ${run.noMatchConfidence.toFixed(2)}); nothing in the catalog serves this request.`);
   else console.error(`Top ${run.ranked.length} of ${run.plan.catalogSize}: ${run.ranked.map(r => `${r.id}=${r.score.toFixed(2)}`).join(', ') || '(none)'}`);
+  if (gate.noMatch) console.error(`Gate: below floor ${floorN.toFixed(2)} — ${gate.ask}`);
   console.error(`calls: ${run.calls}${run.plan.prefilter.dropped ? ` (prefilter dropped ${run.plan.prefilter.dropped} of ${run.plan.catalogSize} locally)` : ''}`);
   if (outDir) console.error(`Wrote ranked.json, manifest.json and cost.json to ${outDir}`);
   if (run.errors.length) console.error(`${run.errors.length} validation or mapping problem(s) recorded`);
