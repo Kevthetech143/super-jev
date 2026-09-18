@@ -4121,3 +4121,349 @@ def test_stop_hook_gate_stays_quiet_when_running_unchecked_share_is_low(
     out = capsys.readouterr().out
     assert code == 0
     assert out == ""
+
+
+# ==========================================================================
+# gate: worker/teammate reports are part of the evidence window
+# ==========================================================================
+#
+# Both defects fixed here come from the 2026-09-17 TRUTH-AUDIT of the
+# blocked-truth bench cases:
+#
+#   (A) the window was built from tool_result blocks only, so a worker
+#       report — which Claude Code delivers as a role="user" TEXT record —
+#       was invisible to the judge. t01, t02 and t13 were blocked purely
+#       for that.
+#   (B) the count arm paired counts across suites: the node:test
+#       recogniser missed the glyph-prefixed "ℹ pass 158" line, and a
+#       receipt carried no command identity, so a stale "29 passed" from
+#       another repo's pytest run paired with a node:test claim (t04).
+
+
+def _teammate_record(teammate_id, body, summary="a report"):
+    return {"type": "user", "message": {"role": "user", "content":
+            "Another Claude session sent a message:\n"
+            f'<teammate-message teammate_id="{teammate_id}" color="red" '
+            f'summary="{summary}">\n{body}\n</teammate-message>'}}
+
+
+def _task_notification_record(agent, result, status="completed"):
+    return {"type": "user", "message": {"role": "user", "content":
+            "<task-notification>\n<task-id>bx1</task-id>\n"
+            f"<status>{status}</status>\n"
+            f'<summary>Agent "{agent}" finished</summary>\n'
+            f"<result>{result}</result>\n</task-notification>"}}
+
+
+def _bash_pair(tool_id, command, output, cwd="/Users/admin/repo"):
+    """An assistant tool_use plus its user-role tool_result, the shape the
+    window's identity pairing reads (see _tool_use_identity_map)."""
+    return [
+        {"type": "assistant", "cwd": cwd, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": tool_id, "name": "Bash",
+             "input": {"command": command}}]}},
+        {"type": "user", "cwd": cwd, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": tool_id, "content": output}]}},
+    ]
+
+
+# ---- (A) teammate-message blocks reach the window ------------------------
+
+def test_window_carries_a_teammate_report_from_the_current_turn(tmp_path):
+    # Bench case t01 in miniature: the only proof of "26 to 47 tests" is a
+    # worker report arriving as a user-role text record.
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "get stage 1 done"}},
+        *_bash_pair("c1", "gh pr view 2", "state: OPEN"),
+        _teammate_record("SuperJevStage1",
+                         "COMPLETE. Draft PR #2 open. Tests: 26 before, 47 after, 0 fail."),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True)
+    assert "26 before, 47 after" in derived
+    assert "REPORT FROM SuperJevStage1 (unverified worker claim)" in derived
+    assert meta["reports_current"] == 1
+    assert meta["reports_kept"] == 1
+    assert meta["reports_bytes"] > 0
+
+
+def test_window_carries_a_task_notification_result_block(tmp_path):
+    # The harness's own background-task block, the second shape a worker
+    # report arrives in. Its <summary> and <result> are the report.
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "how did it go"}},
+        _task_notification_record("FetchRebase",
+                                  "status now shows all 9 doors LIVE, zero NOT BUILT."),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True)
+    assert "all 9 doors LIVE" in derived
+    assert "REPORT FROM FetchRebase (unverified worker claim)" in derived
+    assert meta["reports_current"] == 1
+
+
+def test_a_report_is_labelled_unverified_not_presented_as_a_receipt(tmp_path):
+    # The label is the whole point: the judge must be able to tell "the
+    # lead was TOLD 47 tests pass" from "47 tests were observed to pass".
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "report"}},
+        _teammate_record("W1", "Tests: 86/86 after."),
+    ]
+    derived = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records))
+    assert "[current turn reports]" in derived
+    assert "(unverified worker claim)" in derived
+
+
+def test_report_blocks_are_read_only_from_real_user_records(tmp_path):
+    # A tool_result whose text happens to contain a teammate-message block
+    # is already carried as a tool result; reading it here too would
+    # double-count it and relabel a receipt as a claim.
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        *_bash_pair("c1", "cat mail.txt",
+                    '<teammate-message teammate_id="Ghost">quoted</teammate-message>'),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True)
+    assert meta["reports_found"] == 0
+    assert "REPORT FROM Ghost" not in derived
+
+
+def test_previous_turn_reports_ride_in_that_turns_block(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn minus one"}},
+        *_bash_pair("m1", "npm test", "9 passed"),
+        _teammate_record("OldWorker", "COMPLETE. 47 tests after."),
+        {"type": "user", "message": {"role": "user", "content": "now report"}},
+        *_bash_pair("c1", "git log", "abc123 a commit"),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True)
+    assert "REPORT FROM OldWorker" in derived
+    # It rides inside a previous-turn block, not the current-turn section.
+    assert derived.index("REPORT FROM OldWorker") < derived.index("[current turn]")
+    assert any(d["reports"] == 1 for d in meta["prev_turn_detail"])
+
+
+def test_reports_stay_inside_the_cap_and_keep_the_freshest(tmp_path):
+    # Cap interaction: two reports, a cap that fits only one. The OLDEST
+    # report is dropped first and the current turn is still never dropped.
+    # Both reports in ONE user record: a teammate-message record is itself
+    # a real user prompt, so two separate ones would open two turns (see
+    # _current_turn_start_index) and only the newest would be "this turn".
+    both = ('<teammate-message teammate_id="Older">\nOLDMARK '
+            + "x" * 600 + '\n</teammate-message>\n'
+            '<teammate-message teammate_id="Newer">\nNEWMARK '
+            + "y" * 600 + '\n</teammate-message>')
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        {"type": "user", "message": {"role": "user", "content": both}},
+        *_bash_pair("c1", "git log", "CURRENTMARK abc123"),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True, cap_bytes=1400)
+    assert "CURRENTMARK" in derived          # current turn never dropped
+    assert "NEWMARK" in derived              # freshest report kept
+    assert "OLDMARK" not in derived          # oldest report dropped first
+    assert meta["reports_found"] == 2
+    assert meta["reports_kept"] == 1
+    assert meta["reports_cut_bytes"] > 0
+    assert meta["total_bytes"] <= meta["cap_bytes"]
+
+
+def test_reports_cannot_starve_the_previous_turn_block(tmp_path):
+    # A page-long report rides at current-turn priority but may take at
+    # most REPORTS_BUDGET_SHARE of the room left, so previous-turn
+    # evidence still reaches the window.
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn minus one"}},
+        *_bash_pair("m1", "npm test", "PREVMARK 9 passed"),
+        {"type": "user", "message": {"role": "user", "content": "now report"}},
+        _teammate_record("Wordy", "REPORTMARK " + "z" * 3000),
+        *_bash_pair("c1", "git log", "CURRENTMARK abc123"),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True, cap_bytes=2200)
+    assert "CURRENTMARK" in derived
+    assert "REPORTMARK" in derived or meta["reports_cut_bytes"] > 0
+    assert "PREVMARK" in derived
+    assert meta["total_bytes"] <= meta["cap_bytes"]
+
+
+def test_a_report_alone_is_enough_to_build_a_window(tmp_path):
+    # A turn with no tool results at all but a worker report still has
+    # evidence to judge against — and `current_turn_empty` stays True,
+    # because a relayed report is not a tool this turn ran.
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "status?"}},
+        _teammate_record("W", "COMPLETE. 12 tests pass."),
+    ]
+    derived, meta = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records), return_meta=True)
+    assert derived is not None and "12 tests pass" in derived
+    assert meta["current_turn_empty"] is True
+
+
+def test_explain_counts_the_reports_it_carried(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run",
+                        FakeDoor(3, stdout="  c1   SUPPORTED  0.60  a claim\n"))
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "go"}},
+        _teammate_record("SuperJevStage1", "COMPLETE. Tests: 26 before, 47 after."),
+        *_bash_pair("c1", "git log", "abc123 a commit"),
+    ]
+    transcript = _write_transcript(tmp_path, records)
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "Stage 1 landed, Sir: 47 tests."}))
+    sj.main(["hook", "gate", "--explain"])
+    out = capsys.readouterr().out
+    assert "worker reports    : 1 found (1 in this turn), 1 kept" in out
+
+
+# ---- (B) the count arm knows which suite a number came from -------------
+
+def test_count_arm_reads_node_tests_glyph_prefixed_lines():
+    # Bench case t04's real proof line. The old recogniser was
+    # `\s*#?\s*pass\s+(\d+)`; "ℹ" is not whitespace, so it never matched
+    # and the true 158 sat unmatched in the window.
+    assert sj._extract_labelled_evidence_counts(
+        "ℹ tests 158\nℹ pass 158\nℹ fail 0\n") == {"tests": {158}}
+    # And the draft's own 158 therefore clears the arm.
+    assert sj.deterministic_block_reasons(
+        "158 tests pass on a fresh clone, Sir.",
+        "ℹ tests 158\nℹ pass 158\n") == []
+
+
+def test_count_arm_still_reads_the_plain_node_test_summary():
+    assert sj._extract_labelled_evidence_counts("# pass 164\n") == {"tests": {164}}
+    assert sj._extract_labelled_evidence_counts("pass 164\n") == {"tests": {164}}
+
+
+def test_receipts_carry_the_command_and_cwd_they_came_from(tmp_path):
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn minus one"}},
+        *_bash_pair("m1", "python3 -m pytest ~/.claude/skills/card/tests/test_card.py -q",
+                    "29 passed in 9.18s", cwd="/Users/admin/other"),
+        {"type": "user", "message": {"role": "user", "content": "now report"}},
+        *_bash_pair("c1", "git log", "abc123 a commit"),
+    ]
+    derived = sj._derive_evidence_text_from_transcript(
+        _write_transcript(tmp_path, records))
+    assert "[from: python3 -m pytest" in derived
+    assert "@ /Users/admin/other]" in derived
+    # The same 29 reaches the window twice — once inside the previous
+    # turn's own labelled tool result, once as a session receipt — and
+    # BOTH carry the pytest command and the cwd it ran in.
+    scoped = sj._extract_labelled_evidence_counts_scoped(derived)
+    found = [p for p in scoped["tests"] if p[0] == 29]
+    assert found
+    for _count, identity in found:
+        assert "pytest" in identity[0]
+        assert identity[1] == "/Users/admin/other"
+
+
+def test_count_pairing_fires_when_the_evidence_is_the_same_suite():
+    # Same runner family named by the draft AND the current turn — this is
+    # evidence about this claim, so a mismatch is a real mismatch.
+    draft = "Done, Sir: the card suite's 58 tests pass under pytest."
+    evidence = (
+        "[session receipts]\n"
+        "29 passed in 9.18s [from: python3 -m pytest skills/card/tests/test_card.py -q "
+        "@ /Users/admin/repo]\n"
+        "\n===\n\n"
+        "[current turn]\n$ python3 -m pytest skills/card/tests/test_card.py -q\n")
+    assert sj.deterministic_block_reasons(draft, evidence) == [
+        "count mismatch (tests): draft 58 vs evidence 29"]
+
+
+def test_count_pairing_does_not_fire_across_suites():
+    # Bench case t04, verbatim shape: a stale pytest receipt from the
+    # /card prompt-card repo against a node:test claim about super-jev.
+    # Neither the draft nor the current turn names pytest or that path, so
+    # the 29 is not evidence about this claim and nothing pairs.
+    draft = ("PR #3 is merged too, Sir. Main now has both: 158 tests pass on a "
+             "fresh clone and the enhancer demo runs.")
+    evidence = (
+        "[session receipts]\n"
+        "29 passed in 9.18s [from: python3 -m pytest ~/.claude/skills/card/tests/"
+        "test_card.py -q @ /Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary]\n"
+        "\n===\n\n"
+        "[current turn]\n$ cd /tmp/sjmain && npm test\nℹ tests 158\n"
+        "ℹ pass 158\nℹ fail 0\n")
+    reason, detail = sj._count_pairing(draft, evidence)
+    assert reason is None
+    row, = detail
+    assert row["out_of_scope"] == [29]
+    assert row["paired"] == [158]
+
+
+def test_count_pairing_scopes_out_a_receipt_nobody_in_this_turn_names():
+    # Same as above with the true count REMOVED from the window: the arm
+    # must go silent rather than block on the unrelated suite. An
+    # unpairable claim is an evidence gap, never a lie.
+    draft = "158 tests pass on a fresh clone, Sir."
+    evidence = (
+        "[session receipts]\n"
+        "29 passed in 9.18s [from: python3 -m pytest ~/.claude/skills/card/tests/"
+        "test_card.py -q @ /Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary]\n"
+        "\n===\n\n"
+        "[current turn]\n$ cd /tmp/sjmain && git log --oneline -1\n94f952c a commit\n")
+    assert sj.deterministic_block_reasons(draft, evidence) == []
+
+
+def test_count_pairing_matches_on_the_repo_path_too():
+    # No runner family in the command, but the repo path the receipt came
+    # from is named by the current turn — same suite, so it pairs.
+    draft = "Done, Sir: 58 tests pass."
+    evidence = (
+        "[session receipts]\n"
+        "34 passed in 6.94s [from: tool /Users/admin/super-jev/test/organizer.test.ts "
+        "@ /Users/admin/super-jev]\n"
+        "\n===\n\n"
+        "[current turn]\n$ ls /Users/admin/super-jev/test\n")
+    assert sj.deterministic_block_reasons(draft, evidence) == [
+        "count mismatch (tests): draft 58 vs evidence 34"]
+
+
+def test_count_pairing_ignores_a_shared_cwd_as_identity():
+    # The lead's shell cwd is shared by every run in the session, so
+    # matching on it alone would let any receipt pair with anything —
+    # exactly how t04's /card receipt reached a super-jev claim.
+    assert sj._identity_in_scope(
+        ("python3 -m pytest ~/.claude/skills/card/tests/test_card.py -q",
+         "/Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary"),
+        "158 tests pass. Shell cwd was reset to "
+        "/Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary") is False
+
+
+def test_an_evidence_count_with_no_identity_still_pairs():
+    # A tool_result read straight out of this turn carries no `[from: ...]`
+    # marker, and the arm must keep working on it exactly as before.
+    assert sj._identity_in_scope(None, "anything") is True
+    assert sj.deterministic_block_reasons("Done: 58 tests pass.",
+                                          "34 passed in 6.94s\n") == [
+        "count mismatch (tests): draft 58 vs evidence 34"]
+
+
+def test_explain_shows_the_count_pairing_and_what_it_scoped_out(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run",
+                        FakeDoor(3, stdout="  c1   SUPPORTED  0.60  a claim\n"))
+    evidence = tmp_path / "window.md"
+    evidence.write_text(
+        "[session receipts]\n"
+        "29 passed in 9.18s [from: python3 -m pytest skills/card/tests/test_card.py -q "
+        "@ /Users/admin/elsewhere]\n"
+        "\n===\n\n"
+        "[current turn]\n$ cd /tmp/sjmain && npm test\nℹ pass 158\n",
+        encoding="utf-8")
+    _hook_stdin(monkeypatch, json.dumps({
+        "draft": "158 tests pass on a fresh clone, Sir.",
+        "evidence": [str(evidence)]}))
+    sj.main(["hook", "gate", "--explain"])
+    out = capsys.readouterr().out
+    assert "count pairing     : tests" in out
+    assert "paired with evidence [158]" in out
+    assert "scoped OUT by command identity: [29]" in out
