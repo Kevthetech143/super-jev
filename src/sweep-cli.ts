@@ -16,6 +16,7 @@ import {
   type ReaskBand, type SweepInputRecord, type SweepQuestion
 } from './enhance/sweep.ts';
 import type { Answer, Evaluator, Question, Request } from './types.ts';
+import { GuardTally } from './enhance/evidence-guard.ts';
 
 // Only deliberate, local diagnostics are printed. A raw parser or filesystem
 // exception can embed record contents or sensitive paths.
@@ -100,7 +101,13 @@ async function readSmallFile(path: string, limit: number, what: string): Promise
   catch { throw new CliError(`Cannot read the ${what} file`); }
 }
 
-export function parseRecords(text: string): SweepInputRecord[] {
+/**
+ * `guard`, if passed, redacts every record's `text` (evidence-guard.ts —
+ * secret-shaped spans, e.g. an API key, replaced with `[REDACTED:kind]`)
+ * before it is sent to the judge, and tallies how many redactions were
+ * made across the whole records file for `--explain`/the report.
+ */
+export function parseRecords(text: string, guard?: GuardTally): SweepInputRecord[] {
   const records: SweepInputRecord[] = [];
   const lines = text.split('\n');
   for (let i = 0; i < lines.length; i++) {
@@ -113,7 +120,8 @@ export function parseRecords(text: string): SweepInputRecord[] {
     const record = parsed as Record<string, unknown>;
     if (typeof record.text !== 'string' || !record.text.trim()) throw new CliError(`Records line ${i + 1} has no text`);
     if (record.id !== undefined && (typeof record.id !== 'string' || !record.id.trim())) throw new CliError(`Records line ${i + 1} has a non-string id`);
-    records.push({ id: record.id as string | undefined, text: record.text, meta: record.meta });
+    const recordText = guard ? guard.redact(record.text) : record.text;
+    records.push({ id: record.id as string | undefined, text: recordText, meta: record.meta });
   }
   if (!records.length) throw new CliError('The records file contains no records');
   return records;
@@ -190,8 +198,10 @@ try {
   // possibly reach the provider fails immediately and cheaply.
   if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live sweep, or use --dry-run or --stub');
 
-  const records = parseRecords(await readSmallFile(recordsPath, MAX_RECORDS_BYTES, 'records'));
+  const guard = new GuardTally();
+  const records = parseRecords(await readSmallFile(recordsPath, MAX_RECORDS_BYTES, 'records'), guard);
   const questions = parseQuestions(await readSmallFile(questionsPath, MAX_QUESTIONS_BYTES, 'questions'));
+  console.error(guard.summary());
   const config = {
     records, questions, gate, reaskBand,
     budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) }
