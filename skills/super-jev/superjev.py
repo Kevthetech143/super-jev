@@ -4944,7 +4944,7 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
     ledger_append(entry)
 
 
-def _pr_url_from_worktree(worktree, pr_num):
+def _pr_url_from_worktree(worktree, pr_num, timeout=None):
     """https://github.com/<org>/<repo>/pull/<pr_num>, built from `git -C
     worktree remote get-url origin`, or None if there is no worktree, no
     PR number, no origin remote, or the remote is not a recognisable
@@ -4954,9 +4954,13 @@ def _pr_url_from_worktree(worktree, pr_num):
     the only thing that makes a --pr number produce real PR evidence."""
     if not worktree or not pr_num:
         return None
+    # Clamped to whatever is left of the Stop event's budget when one is in
+    # play: a git call against a network remote can hang, and this one runs
+    # before the verify check on the Stop-scan path.
+    git_timeout = 10 if timeout is None else max(min(10, timeout), 0.0)
     try:
         proc = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=git_timeout)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -4967,7 +4971,7 @@ def _pr_url_from_worktree(worktree, pr_num):
     return f"https://github.com/{m.group(1)}/{m.group(2)}/pull/{pr_num}"
 
 
-def _evidence_probe(report_path, worktree=None, test_cmd=""):
+def _evidence_probe(report_path, worktree=None, test_cmd="", timeout=None):
     """A FREE gather: worker-verify's own `--dry-run`, which assembles every
     evidence block and prints "EVIDENCE: N blocks, M chars" plus each
     block, and never calls the model. Returns its captured stdout, or ""
@@ -4975,11 +4979,19 @@ def _evidence_probe(report_path, worktree=None, test_cmd=""):
 
     It is only ever run when the answer changes something — a block that
     would rest on OVERCLAIMS alone, or an explicit --explain — so the
-    common path still pays for exactly one gather."""
+    common path still pays for exactly one gather.
+
+    FREE of model calls is not free of TIME. The gather re-runs whatever
+    `--test-cmd` was derived from the report, under the verify door's own
+    ceiling, which is minutes — so on the Stop path this is a second long
+    wait sitting behind the verify call that already ran the same command
+    once. `timeout` is the Stop event's remaining wall-clock budget (see
+    StopBudget.timeout_for); without it this probe was the one long-timeout
+    wait on that path the 2026-09-18 budget did not reach."""
     try:
         ns = argparse.Namespace(report=report_path, worktree=worktree,
                                 test_cmd=test_cmd or "", paths=[], dry_run=True,
-                                json=False, hook_mode=True)
+                                json=False, hook_mode=True, timeout=timeout)
         result = cmd_verify(ns)
     except Exception:
         return ""
@@ -5642,7 +5654,9 @@ def _stop_scan_verify_one(r, budget=None):
     try:
         derived = _derive_evidence_from_report_text(body)
         report_text = body
-        pr_url = (_pr_url_from_worktree(derived["worktree"], derived["pr"])
+        pr_url = (_pr_url_from_worktree(
+                     derived["worktree"], derived["pr"],
+                     timeout=(budget.remaining() if budget is not None else None))
                  if derived["pr"] else None)
         if pr_url:
             report_text += f"\n\nRelated pull request: {pr_url}"
@@ -5670,7 +5684,10 @@ def _stop_scan_verify_one(r, budget=None):
             has_candidate = any(f["verdict"] in _BLOCKABLE_VERDICTS and f["score"] >= line
                                 for f in flags)
             if has_candidate:
-                probe = _evidence_probe(tmp_path, derived["worktree"], derived["test_cmd"] or "")
+                probe = _evidence_probe(
+                    tmp_path, derived["worktree"], derived["test_cmd"] or "",
+                    timeout=(budget.timeout_for(_verify_timeout())
+                             if budget is not None else None))
                 if probe:
                     evidence = _evidence_inventory(test_cmd=derived["test_cmd"] or "",
                                                    worktree=derived["worktree"],

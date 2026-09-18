@@ -811,6 +811,44 @@ prioritise.
 `hook gate --explain` prints the budget line: the cap, the size before and
 after, and which sections were dropped or shrunk.
 
+### Where the waiting actually was
+
+A later, much longer Stop hang on a live session sent us back to time every
+step rather than assume. Two things came out of it.
+
+**The gate path itself shells out to nothing but the judge.** Reading a
+multi-megabyte transcript, finding the turn boundary, backfilling receipts,
+assembling the window, deriving facts, capping it, and running the
+deterministic count and pull-request arms are all local string and file work
+that finish in well under a second even on the largest session transcripts on
+this machine. There is no lock, no network call and no `git` or `gh`
+invocation anywhere on that path, and a test now pins it: a Stop gate event
+makes exactly one subprocess call and it is the gate door.
+
+**Every long-timeout wait in this file is on a verify path, not the gate.**
+The `git` calls, the `gh pull-request` calls, the derive-facts bridge and —
+much the largest — the *derived test command* all belong to `verify` and its
+local fallback. A worker report that says it ran a test suite in a named
+worktree makes the Stop-hook scan hand that command to the verify door, which
+runs it, under a ceiling measured in minutes; and if a flag then crosses the
+block line, the dry-run evidence probe gathers again and runs it a second
+time. That is the shape of a Stop hook that keeps a user waiting for many
+minutes, and it is why the scan is the thing the budget had to reach.
+
+Both of those long waits are now inside the budget. The verify check's
+timeout, the probe's, and the `git remote` lookup that precedes them are each
+clamped to whatever is left of `SUPERJEV_GATE_BUDGET_S`, so none of them can
+outlive the event. At the shipped defaults the scan does not start any of them
+at all and defers instead.
+
+**The scan reads only the transcript's tail.** `SUPERJEV_STOP_SCAN_MAX_BYTES`
+(default 2 MB) bounds it, which is a large saving on a session transcript that
+has grown to many megabytes and costs nothing, since the scan only ever wants
+reports it has not seen yet. The gate *window builder* deliberately still
+reads the whole file: it resolves the current turn by walking back from the
+end, and a truncated view could hand it half a turn. Set the knob to `0` to
+read it all, the behaviour before the bound existed.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how

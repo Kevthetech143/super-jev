@@ -71,8 +71,14 @@
 #     SUPERJEV_GATE_WINDOW_TOK (default 8000) is the one hard cap on the
 #     evidence window, applied once right before the call, giving up
 #     previous turns, then receipts, then the cited-file tail, then worker
-#     reports — never the derived facts or the current turn. See
-#     docs/hooks.md, "The latency budget".
+#     reports — never the derived facts or the current turn.
+#     SUPERJEV_STOP_SCAN_MAX_BYTES (default 2MB) bounds the scan's own read
+#     to the transcript's tail. Timed, not assumed: the gate path shells
+#     out to nothing but the judge — every long-timeout wait in the skill
+#     (git, gh, the derive-facts bridge, and above all a test command
+#     derived from a worker's report and then run twice) belongs to the
+#     verify path, and all of them are now clamped to the event budget.
+#     See docs/hooks.md, "The latency budget".
 #
 # This script is NOT installed into ~/.claude/settings.json by this skill —
 # copy the snippet below into your own settings.json to wire it in.
