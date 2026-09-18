@@ -418,6 +418,35 @@ bench output for numbers).
   nothing about the result it got has a hole here, whichever of the three
   outcomes actually happened. See `docs/coverage.md` for where this has been
   wired in and where it has not.
+- **Rule on the residue, do not label it unprovable.** This is the sibling
+  defect to "a declined check must still speak," and it shows up on claims
+  the report actually gets right. The shape: one sentence pairs a core the
+  evidence can prove with a trailing clause no local tier can observe — that
+  a click *happened*, that repos were *read* rather than merely present on
+  disk, that code still *validates* against something, that a message went
+  out *via the helper* it named. The door then does one of two things, and
+  both cost you: it says nothing about that clause, or it labels it
+  UNPROVABLE. Either way the judge has no such label to give back — it only
+  has SUPPORTED, NOT_SUPPORTED and CONTRADICTED — so an honest "cannot tell"
+  reads as "not proved," and a true report gets flagged. How to spot it: an
+  advisory (a READ line, not a hard block) on a report you have separately
+  confirmed is true, where the evidence for the flagged claim is present but
+  never actually paired with the clause the judge is unsure about. The rule:
+  once the core of a claim is backed by a check-shaped fact, write one more
+  sentence that rules on the residue instead of naming it — say plainly what
+  is observable, name what stands in for the part that is not (a matching
+  record, a consistent timestamp, a file present where the claim says it
+  would be), and say in so many words that the unobservable clause must not
+  count against the claim. Never do this when the core itself is
+  contradicted or has no matching fact at all — a planted lie has no backed
+  core for this rule to reach, so it keeps its wording and stays caught. A
+  companion rule rides with it: never print a contradiction-shaped sentence
+  the door itself goes on to retract. Pair a claimed value only with the
+  object the sentence actually names it against, not the first candidate in
+  the claim, and once a tolerance has already forgiven a gap, do not also
+  print the raw comparison line that reads as a flat conflict on its own —
+  say only the ruling. See `docs/coverage.md` for where the shared ruling
+  helper lives.
 
 ## 5. The loop: how you calibrate this yourself
 
