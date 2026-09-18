@@ -295,9 +295,10 @@ No version bump.
   originating turn (`REPORT_LABEL_PREV_TURN`), and `_report_not_merged_claims`
   reads that turn back out instead of collapsing every previous-turn
   report to one rank. (3) `tests/replay_fact_block_sweep.py` now also
-  WARNS (never fails) when a recorded lie's window carries fewer
-  receipt-worthy lines than the baseline's, closing the gap between what
-  docs/hooks.md claimed the sweep checked and what it actually ran. (4)
+  WARNS (never fails) when a recorded case's window — truth or lie —
+  carries fewer receipt-worthy lines than the baseline's, reported for
+  truths and lies separately, closing the gap between what docs/hooks.md
+  claimed the sweep checked and what it actually ran. (4)
   Matched docs/hooks.md's wording to the source comment it was
   paraphrasing loosely. (5) The merge-count derived fact now quotes the
   draft's own claimed total alongside the window's receipt count, and
