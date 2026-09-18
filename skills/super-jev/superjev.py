@@ -6181,17 +6181,19 @@ def _worktree_from_report(text):
     """The worker's own worktree, derived from the free text of its report
     (a PostToolUse tool_response, or a <teammate-message> body) — the
     fallback used when neither the hook payload nor SUPERJEV_HOOK_WORKTREE
-    names one. Scans every absolute path the report mentions
-    (`/Users/<user>/...`-shaped, no spaces) and accepts a candidate only
-    when it (a) exists on disk, (b) is a directory, and (c) contains a
-    `.git` entry (file or directory) — i.e. it really is a git worktree or
-    repo, not just any directory the worker happened to type. A candidate
-    that matches the module's own EVIDENCE GUARD blocklist (see
-    is_blocked_path / BLOCKED_PATH_PATTERNS, above — the fleet's own
-    credential-adjacent path patterns) is never accepted, no matter how it
-    looks otherwise — the existence/`.git` checks guard against a
-    FABRICATED repo, not against a report naming a real, sensitive path on
-    this machine.
+    names one. Scans every absolute, no-spaces path the report mentions
+    (the fleet's own worker convention is `/Users/<user>/...`, but this
+    matches any absolute path shape — `/home/<user>/...` included — since
+    the safety net here is the existence/`.git`/blocklist checks below,
+    not the shape of the path itself) and accepts a candidate only when it
+    (a) exists on disk, (b) is a directory, and (c) contains a `.git`
+    entry (file or directory) — i.e. it really is a git worktree or repo,
+    not just any directory the worker happened to type. A candidate that
+    matches the module's own EVIDENCE GUARD blocklist (see is_blocked_path
+    / BLOCKED_PATH_PATTERNS, above — the fleet's own credential-adjacent
+    path patterns) is never accepted, no matter how it looks otherwise —
+    the existence/`.git` checks guard against a FABRICATED repo, not
+    against a report naming a real, sensitive path on this machine.
 
     Among qualifying candidates, one introduced by the words "worktree",
     "Worktree:", or "in /..." immediately before it wins over the rest;
@@ -6201,7 +6203,7 @@ def _worktree_from_report(text):
         return None
     first_ok = None
     hinted = None
-    for m in re.finditer(r'/Users/[^/\s\'"]+/[^\s\'"\)]+', text):
+    for m in re.finditer(r'/[^/\s\'"]+(?:/[^\s\'"\)]+)+', text):
         candidate = m.group(0).rstrip("/.,;:)")
         if not candidate:
             continue
