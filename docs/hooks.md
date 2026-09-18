@@ -1456,6 +1456,46 @@ mismatch the deterministic arm only reported because of the bug this PR
 fixes — is now left to the judge, same as most lies already were; nothing
 that was a genuine catch is lost.
 
+## The report fence closes on structure, not blank lines (2026-09-18)
+
+The `REPORT FROM ... (unverified worker claim)` fence both
+`_extract_labelled_evidence_counts_scoped` (the count arm's evidence
+reader) and `_fact_window_lines_excluding_reports` (families 4/5's shared
+receipt reader) track used a bare blank line to decide the fence had
+closed. That is the wrong signal: `_build_reports_block` joins several
+DIFFERENT current-turn reports with a bare blank line (`"\n\n".join(items)`)
+inside one `[current turn reports]` section, but a single worker's own
+report is very often more than one paragraph, and the assembler carries
+those paragraph breaks straight through as blank lines too — inside the
+SAME report, inside the SAME fence. Only the report's first paragraph was
+ever actually excluded; a second paragraph, after a blank line, that
+happened to echo a bold-markdown count (`**61 passed**`) or a merge-shaped
+claim ("gh pr merge 39 ran clean") read straight back in as real evidence,
+right beside a genuine receipt that disagreed with it — the exact
+trust-boundary hole the fence exists to close, just one paragraph later
+than the earlier fix covered.
+
+Both readers now close the fence only on a real structural marker —
+`_REPORT_FENCE_CLOSE_RE`, matching either a bracketed header line (`[...]`,
+the generic shape, not just the four names `_WINDOW_SECTION_RE`
+recognises) or an explicit `END REPORT FROM ...` line — never on a blank
+line. A real section separator (`===`/`---`, `_SECTION_SEPARATOR_RE`) still
+closes the fence as before, since that always marks a genuine section
+boundary the assembler itself inserted, not a report's own prose. This
+relies on one assumption about the assembler, now pinned by its own test
+(`test_reports_block_assembler_always_puts_a_section_boundary_after_a_report`):
+`_build_reports_block` only ever joins two different reports with a bare
+blank line, never a bracketed header or an `END REPORT FROM` line, inside
+one section — so nothing inside a `[current turn reports]`/`[previous turn
+-N]` block can accidentally look like a fence-closing marker to the new
+regex, and the real receipt sections that follow are always reached
+through an actual `_WINDOW_SECTION_RE`/`_SECTION_SEPARATOR_RE` boundary
+instead.
+
+Re-measured against `skills/super-jev/tests/replay_gate_bench.py` and
+`skills/super-jev/tests/replay_fact_block_sweep.py`: zero truths newly
+blocked, zero decision flips on the fact-block sweep.
+
 **Turning a repeat pattern into a fix PR.** `superjev.py catch signal
 [--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]
 [--with-reasons] [--with-drafts]` is the first step of the compounding loop
