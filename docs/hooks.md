@@ -1321,6 +1321,89 @@ that one bot's records; without it, the report instead ends with a `by
 bot:` breakdown — record counts per bot, most-records-first — so more than
 one seat sharing this ledger stays visible as a whole and per-bot both.
 
+**Turning a repeat pattern into a fix PR.** `superjev.py catch signal
+[--min 3] [--since 24h] [--open --repo owner/name] [--dry-run]
+[--with-reasons] [--with-drafts]` is the first step of the compounding loop
+this ledger exists to feed: harness catches -> tags -> issue -> fix PR ->
+bench robot. It groups every record tagged `false` (a block that was wrong)
+or `miss` (an allow that let a lie through) by **reason family** — the
+reason string with its numbers/values (and, for a per-call judge reason
+like `c2 OVERCLAIMS 0.82`, its per-call claim key `c2`) stripped off, so
+"count mismatch (tests): draft 0/61 vs evidence 53" and "count mismatch
+(tests): draft 2/9 vs evidence 4" collapse into the same family, "count
+mismatch (tests)", and six separate `c1`/`c2`/`c3`/... `OVERCLAIMS` blocks
+all collapse into one "OVERCLAIMS" family — same detection arm misfiring
+repeatedly, not several different problems each too small to reach
+`--min` on its own. Once a family reaches `--min` (default 3, and an
+explicit `--min 0` is refused rather than silently treated as the
+default), it prints a signal block: the family, the count, first/last
+timestamps, and the record id of each matching record. Exit 0 when at
+least one family reached the threshold, exit 1 when none did, so a cron
+job can branch on it without parsing output.
+
+**A signal carries no draft-derived text by default.** Earlier, every
+signal's "examples" included a 300-char redacted draft excerpt and reason
+line straight in the printed output and the issue body, and the only
+redaction those went through, `_catch_redact`, covered a handful of narrow
+shapes: secrets/credentials, emails, US-shaped phone numbers, SSNs, and
+card numbers. A name, a street address, an order number, a health detail,
+a dollar figure, a non-US phone number, or a token-bearing URL all reached
+a *public* GitHub issue untouched. The default now is metadata only —
+family, count, first/last timestamps, and the id of every matching record
+— plus a pointer: `Run \`superjev catch list --id <id>\` locally for the
+redacted detail behind any record id above`. `catch list --id <id>` shows
+that one record's full (already-redacted) reason(s) and draft excerpt for
+someone with local ledger access; nothing draft-derived ever leaves the
+machine on its own. The reason line can still be added to the *local*
+printed/`--dry-run` output with `--with-reasons`, and the draft excerpt
+with `--with-drafts` — both are local-preview-only and are refused (exit
+2, before touching the ledger) in combination with `--open`, so a public
+issue can never carry draft-derived text no matter what flags are passed.
+Any draft-derived text `--with-reasons`/`--with-drafts` does render still
+goes through `_catch_redact` again first, then through a markdown-escape
+pass (backtick -> fullwidth lookalike, `@handle` -> `at:handle`, `#123` ->
+`no.123`) so a draft that happens to contain a code fence, a `@mention`,
+or a `#NN` auto-link/auto-close form can never render live even locally.
+
+By itself `catch signal` only prints — nothing is filed anywhere. `--open`
+actually drafts the GitHub issue via `gh issue create --repo <repo> --label
+harness-signal`, and records the (family, tag) pair plus the issue URL in
+a sidecar file, `signals.jsonl` next to the catch ledger, so the same
+family is never filed twice even across separate cron runs. `--dry-run`
+prints the exact issue body for each signal and never calls `gh` at all —
+the safe way to see what would be filed. Before any real `gh issue create`
+call, the fully assembled issue body is checked once more for anything
+email/phone/SSN-shaped — belt-and-braces on top of the metadata-only
+default body, which should never trip it. `--open` now exits 3 (not a
+silent 0) if any signal's filing was refused or failed — the same exit
+code `catch`'s other domain refusals use — so a cron job can branch on
+"ran, but nothing got filed" too.
+
+**A reason family is a bounded, always-escaped token.** One shape used to
+skip both `_catch_redact` and the markdown-escape pass entirely: a
+colonless reason with no recognised `HEADER:`/judge-score-keyword prefix
+(an advisory note — e.g. one embedding a `--test-cmd '...'` argument)
+fell through the generic family-stripping logic unchanged, so the whole,
+unbounded reason became the family verbatim, and reached a public issue
+title/body untouched. Such a reason now buckets instead: its first two
+words (letters only, max 40 chars) if it has them, else the fixed literal
+`advisory-note` — so several advisory notes sharing the same score-free
+lead-in collapse into one family, same as every other arm's repeat
+blocks, rather than one family per note. Every family, whichever path
+produced it, is capped at 60 characters and passed through the same
+markdown-escape pass `--with-reasons`/`--with-drafts` text gets; the
+title- and body-building steps escape it again on top of that, belt-and-
+braces, since a *recognised*-header family (the text before a reason's
+own colon) can still carry a backtick/`@handle`/`#NN` if the draft text
+before that colon did.
+
+**Grouping and breakdown by bot.** `catch signal --bot <id>` restricts
+which records are grouped (and so which count toward `--min`) to one bot,
+same filter `catch list --bot`/`catch report --bot` already offer. Every
+printed signal and issue body also shows a per-bot breakdown line —
+counts only, e.g. `by bot: primary=2, worker2=1` — never reason or draft
+text, so it is as safe as the rest of the default metadata-only body.
+
 ## Judge-advisory mode
 
 `SUPERJEV_GATE_JUDGE_ADVISORY` is a third, opt-in failsafe next to the
