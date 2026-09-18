@@ -129,6 +129,53 @@ No version bump.
   PROTECTED repo, which the door can refuse a worktree over but cannot
   un-write, and exits non-zero on a worker-writable hit. See docs/hooks.md,
   "The shared `.git/config` is a list of programs".
+- **RECEIPT SHAPES: a new derived-facts family that maps a tool act to the
+  plain verbs it supports.** Families 6 through 10 all check a value — a
+  filename, a labelled figure, a score, an extremum. The gap they left is a
+  missing noun, not a missing number: a draft says "logged it", "notified
+  health-fitness", "escalated it", "scheduled the scan", and the judge had to
+  bridge that to a `Write`, a relay `send.sh` call or a `CronCreate` on its
+  own, out of a column dump, in one call. `_facts_receipt_shapes` now states
+  the bridge as a sentence — an ACT of a named shape ran against a named
+  TARGET, and that act is support for exactly these verbs and nothing more —
+  in at most four lines, one per verb class (saved, sent, scheduled, handed
+  off). It is the one family that reads the TRANSCRIPT rather than the
+  assembled window, on purpose: the window's identity strings are truncated
+  (a long here-document's write to `~/a/b/c/BRIEF.md` read back as a write to
+  `~/a`), and the window also carries worker prose, so a receipt taken from
+  it is a receipt the claimant can write for itself. Tool name and tool input
+  come from the assistant `tool_use` record, the result and its error state
+  from the paired `tool_result`; the draft is never read. No matching act
+  means no line, an act whose result came back `is_error` is dropped whole
+  rather than hedged, and detection runs on a quote-masked, here-document-
+  stripped command so an `echo "--- crontab ---"` label is not a crontab
+  install and a `>` inside a `printf` argument is not a redirection. Every
+  line carries its own bound in its own text: a write says nothing about what
+  the file now contains, a send nothing about delivery, a scheduler call
+  nothing about the job having run — so a worker that writes an empty file
+  named after its claim gets the path named and no support for the claim. The
+  lines are folded in last, behind every `CONTRADICTED_BY_FACT` sentence, and
+  carry no `CONTRADICTED_BY_FACT` marker themselves, so the family is judge
+  input only and cannot block, allow or flip a decision; replaying every
+  recorded case in all four benches, main against this change, the
+  deterministic block reasons and the other families' fact lines are
+  identical. `hook gate --explain` gained a `receipt shapes` row. Off with
+  `SUPERJEV_DERIVED_FACTS=0`, same switch as every other family. See
+  docs/hooks.md, "Receipt shapes — family 11, the act-to-verb bridge".
+- **RECEIPT SHAPES round 2: the "sent" class's outbox pattern matched the
+  harness's own `answer-<hex>.txt` answer-delivery file, handing the judge
+  blanket sent/notified/escalated/reported support on almost any window.**
+  `answer-<hex>.txt` is dropped from the outbox pattern (a write there now
+  falls through to the ordinary "saved" shape); a "sent" line now only comes
+  from a channel with a knowable, named recipient — a relay send (naming the
+  task id its own command segment carried), a write to the Telegram outbox
+  file, or a message-shaped tool call (Telegram/email/chat) whose own input
+  names a recipient. The relay-send match is now anchored to the start of a
+  command segment, so `cat send.sh` / `grep task send.sh` / `chmod +x
+  send.sh` no longer fire, and a send's task-id scrape is scoped to that
+  send's own command segment so a sibling `&&`-joined command's id is never
+  attributed to it. See docs/hooks.md.
+
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
   and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
