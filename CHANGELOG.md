@@ -206,6 +206,12 @@ No version bump.
   session's poller delivers nothing at all, and even a real delivery
   happens on the poller's own later tick, not at the moment of the write.
   See docs/hooks.md.
+- **`replay_fact_block_sweep.py`'s LIVE side could raise and the sweep
+  would print-and-skip with no counter and no effect on the exit code.**
+  A live-module crash silently shrank coverage — fewer cases replayed,
+  nothing to say anything had gone wrong. The live side now mirrors the
+  baseline treatment: every exception is counted and printed under its
+  own "LIVE ERROR" line, and the sweep exits non-zero if any occurred.
 
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
