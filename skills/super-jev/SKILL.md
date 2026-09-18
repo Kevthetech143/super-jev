@@ -53,10 +53,25 @@ three doors need no env at all when the skill is used from inside a clone.
 | `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **NOT BUILT** — wishlist item 4 | — |
 | `ask "<one plain sentence>"` | picks the door for you | **LIVE** | a keyword table, no model call |
 | `status` | which doors are live here, right now | **LIVE** | — |
+| `doctor` | does the PROTECTED repo's own git config name a program git would execute | **LIVE** | `git config --list --show-origin` |
 | `hook <gate\|verify>` | a Claude Code hook shim: reads the hook payload on stdin, maps the verdict to the hook's own exit convention | **LIVE** | wraps `gate`/`verify` above |
 | `ledger [-n N]` | the last N calls this wrapper made, and a per-door count | **LIVE** | reads `ledger/calls.jsonl` under this skill |
 
 **A door that is not built exits 6 and prints its own wishlist line.** That is the point: a missing tool names itself, in the wishlist's own words, instead of a vague failure. Never hand-write "not supported" — run it and read what it says.
+
+**`doctor` is what the lead runs after a suspicious worker run.** Worker
+worktrees made with `git worktree add` SHARE `.git/config` and the refs
+directory with the protected checkout, so a worker can write a key that
+names a program — `filter.<d>.clean`, `core.fsmonitor`, `alias.*` — into
+config that the LEAD's own `git status` in the main checkout then reads. The
+`verify` door refuses such a worktree
+(`worktree-config-execution:<key>`), but refusing it does not un-write the
+config. `doctor` scans the protected repo for those keys, reports whether
+`package.json` still matches its committed pin, marks each hit as
+worker-writable or not, and exits non-zero on a worker-writable hit. It
+deliberately also lists hits from system and global config, which the
+worktree scan ignores because they are not worker-writable. See
+docs/hooks.md, "The shared `.git/config` is a list of programs".
 
 **`status` is the only honest answer to "does this work here?"** It reads the doors off disk, so a checkout without the sweep script shows `MISSING SCRIPT` rather than a promise. It also checks that `npm` itself is actually runnable — a checkout that carries the `sweep`/`bench:live` script but has no reachable `npm` shows `script present, npm not runnable`, never a false `LIVE`.
 
