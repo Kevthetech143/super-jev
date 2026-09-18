@@ -82,6 +82,176 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # tree). This env var is the only non-payload source honoured.
 HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
 
+# ---------------------------------------------------- claim pre-split (gate v2)
+#
+# jev's own auto-splitter sometimes produces exactly one claim for a whole
+# multi-fact draft (see the 2026-09-17 gate-bench analysis in
+# super-jev-experiments/gate-bench-20260917/analysis/REPORT.md). When that
+# one claim carries both true parts and one invented clause, the judge
+# scores the merged claim mid-band and the lie never crosses the block
+# line — the single biggest lever the bench found (5 of 10 misses on the
+# 40-case bench were this exact shape). This pre-split is local string
+# work, no model call: split the draft into clause-sized units on sentence
+# boundaries, `;`, `:` and standalone ` and `, dedupe, cap at 25, and hand
+# them to jev.py one per --claim (via --claims-file) instead of letting
+# jev re-derive its own split from --draft. SUPERJEV_PRESPLIT=0 disables it
+# and restores the old --draft behaviour.
+CLAIM_PRESPLIT_ENV = "SUPERJEV_PRESPLIT"
+CLAIM_PRESPLIT_CAP = 25
+_CLAIM_SPLIT_RE = re.compile(r'(?<=[.!?])\s+|;\s*|:\s+(?=\S)|\s+and\s+')
+
+
+def _presplit_enabled():
+    return os.environ.get(CLAIM_PRESPLIT_ENV, "0") == "1"  # default OFF: live bench 2026-09-17 showed presplit +1 false block, no lie gain
+
+
+def presplit_claims(draft_text, cap=CLAIM_PRESPLIT_CAP):
+    """One claim per clause-sized unit of `draft_text`: split on sentence
+    boundaries, `;`, `:` and standalone ` and `, which is the same split
+    that isolates a number-bearing clause, a status-verb clause (merged,
+    shipped, installed, deleted, created, blocked, open, ...), and a file
+    path or PR-id mention from the true clauses they used to ride inside.
+    Whatever is left over is kept too — every clause becomes a claim, not
+    just the ones matching a pattern. Deduped (case-insensitive), capped at
+    `cap`. Returns [] for empty/whitespace-only input; never raises."""
+    if not draft_text or not draft_text.strip():
+        return []
+    units = [u.strip() for u in _CLAIM_SPLIT_RE.split(draft_text.strip())]
+    claims, seen = [], set()
+    for u in units:
+        if not u:
+            continue
+        key = u.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        claims.append(u)
+        if len(claims) >= cap:
+            break
+    return claims
+
+
+# ---------------------------------------------------- deterministic count /
+# PR cross-check (gate v2)
+#
+# Pure string comparison, no model call, run BEFORE the judge. Measured on
+# the 40-case gate bench: +2 lies caught (l04, l05), 0 truths blocked,
+# because a fabricated test count is either absent from the evidence
+# entirely (an evidence gap, not fired on) or contradicts a real "N passed"
+# line the evidence does carry (fired on). Same shape for a "PR #N merged"
+# claim against `gh pr view` state in the evidence.
+_DRAFT_COUNT_NEAR_TEST_RE = re.compile(r'\btests?\b|\bpassed\b|\bfailed\b', re.IGNORECASE)
+_INT_RE = re.compile(r'\b(\d+)\b')
+_EVIDENCE_PASSED_RE = re.compile(r'\b(\d+)\s*passed\b', re.IGNORECASE)
+_EVIDENCE_N_OF_M_RE = re.compile(r'\b(\d+)\s+of\s+(\d+)\b', re.IGNORECASE)
+_PR_MERGED_CLAIM_RE = re.compile(r'PR\s*#(\d+)\b[^.\n]{0,30}?\bmerged\b', re.IGNORECASE)
+_PR_STATE_JSON_RE = re.compile(
+    r'"number"\s*:\s*(\d+)[^{}]{0,300}?"state"\s*:\s*"(\w+)"', re.DOTALL)
+
+
+def _extract_counts_near_test_words(text):
+    """Every integer that appears in a clause (split on '.'/';'/newline)
+    which also mentions test(s)/passed/failed — i.e. the numbers a draft or
+    an evidence blob is actually claiming as a test count, not every
+    incidental digit in the text."""
+    counts = set()
+    if not text:
+        return counts
+    for clause in re.split(r'[.\n;]', text):
+        if _DRAFT_COUNT_NEAR_TEST_RE.search(clause):
+            counts.update(int(x) for x in _INT_RE.findall(clause))
+    return counts
+
+
+def _extract_evidence_pass_counts(evidence_text):
+    counts = set()
+    if not evidence_text:
+        return counts
+    for m in _EVIDENCE_PASSED_RE.finditer(evidence_text):
+        counts.add(int(m.group(1)))
+    for m in _EVIDENCE_N_OF_M_RE.finditer(evidence_text):
+        counts.add(int(m.group(1)))
+        counts.add(int(m.group(2)))
+    return counts
+
+
+def _count_mismatch_reason(draft_text, evidence_text):
+    """None, or 'count mismatch: draft N[/M...] vs evidence P[/Q...]' when
+    the draft names a test count and the evidence carries at least one real
+    'N passed' count, and NONE of the drafted counts match ANY evidence
+    count. Never fires when the evidence carries no count at all — that is
+    an evidence gap (see docs/hooks.md), not a contradiction, and firing on
+    it would turn "we could not look" into "you lied", the exact bug this
+    file already guards against for OVERCLAIMS."""
+    draft_counts = _extract_counts_near_test_words(draft_text)
+    if not draft_counts:
+        return None
+    evidence_counts = _extract_evidence_pass_counts(evidence_text)
+    if not evidence_counts:
+        return None
+    if draft_counts & evidence_counts:
+        return None
+    d = "/".join(str(n) for n in sorted(draft_counts))
+    e = "/".join(str(n) for n in sorted(evidence_counts))
+    return f"count mismatch: draft {d} vs evidence {e}"
+
+
+def _pr_mismatch_reason(draft_text, evidence_text):
+    """None, or 'PR mismatch: draft says PR #N merged, evidence shows
+    <state>' when the draft claims a specific PR is merged and the
+    evidence's own `gh pr view --json state,...` (or similar) output names
+    that PR with a state other than MERGED. Only looks at PRs the draft
+    itself names — never invents a mismatch from a PR the draft never
+    mentions."""
+    if not draft_text or not evidence_text:
+        return None
+    m = _PR_MERGED_CLAIM_RE.search(draft_text)
+    if not m:
+        return None
+    pr_num = m.group(1)
+    for jm in _PR_STATE_JSON_RE.finditer(evidence_text):
+        if jm.group(1) != pr_num:
+            continue
+        state = jm.group(2).upper()
+        if state != "MERGED":
+            return f"PR mismatch: draft says PR #{pr_num} merged, evidence shows {state.lower()}"
+    om = re.search(r'#' + re.escape(pr_num) + r'\b[^.\n]{0,40}?\b(open|not merged|draft)\b',
+                   evidence_text, re.IGNORECASE)
+    if om:
+        return f"PR mismatch: draft says PR #{pr_num} merged, evidence shows {om.group(1).lower()}"
+    return None
+
+
+def deterministic_block_reasons(draft_text, evidence_text):
+    """The full list of deterministic (no-model-call) block reasons for one
+    draft/evidence pair: a test-count mismatch and/or a PR-merge mismatch.
+    Runs independently of, and before, the judge; the judge still runs for
+    everything else even when this list is non-empty."""
+    reasons = []
+    r = _count_mismatch_reason(draft_text, evidence_text)
+    if r:
+        reasons.append(r)
+    r = _pr_mismatch_reason(draft_text, evidence_text)
+    if r:
+        reasons.append(r)
+    return reasons
+
+
+def _read_evidence_text(paths):
+    """Best-effort concatenation of every evidence file's own text, for the
+    deterministic checks above. Never raises: an unreadable path is
+    skipped, not fatal."""
+    if not paths:
+        return ""
+    out = []
+    for p in paths:
+        try:
+            out.append(Path(p).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n\n".join(out)
+
+
 # A background Agent/Task spawn's tool_response is sometimes only a launch
 # acknowledgement ("Spawned successfully... now running", "Async agent
 # launched... You will be notified automatically when it completes") rather
@@ -164,7 +334,25 @@ DEFAULT_BLOCK_CONF = 0.80
 # OVERCLAIMS sits beside a real unsupported/contradicted claim" from "this
 # OVERCLAIMS is the whole story", not to be a second tunable block line.
 OVERCLAIM_COMPANION_MIN = 0.50
+# The overclaim==1.00 arm (gate v2, PR-25-class). Measured on the 40-case
+# gate bench: "any claim >= 0.80 OR overclaim == 1.00" alone catches 15/20
+# lies at 3/20 truths — but it sits on a 0.01 cliff (relaxing to >= 0.99
+# costs 3 truths immediately, since t01/t02 sit at 0.99 on that bench).
+# That is not a margin to trust on n=20 truths, so this arm is OFF by
+# default and only fires when SUPERJEV_OVERCLAIM_100_BLOCK=1: when it is
+# on, a draft-level OVERCLAIMS flag scoring >= 0.995 (treated as "the
+# judge said exactly 1.00") blocks even without the usual companion
+# NOT_SUPPORTED/CONTRADICTED claim — bypassing OVERCLAIM_COMPANION_MIN,
+# never bypassing the health check. FRAGILE: unverified beyond the one
+# 40-case bench it was measured on; put it behind a second bench before
+# trusting it in production.
+OVERCLAIM_100_ENV = "SUPERJEV_OVERCLAIM_100_BLOCK"
+OVERCLAIM_100_FLOOR = 0.995
 _BLOCKABLE_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "OVERCLAIMS")
+
+
+def _overclaim_100_enabled():
+    return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
 # ------------------------------------------------- the evidence inventory
@@ -447,6 +635,9 @@ def _hook_block_decision(flags, claim_rows=None, evidence=None):
             suppressed_health.append(f"{k} {v} {s:.2f}")
             continue
         if v == "OVERCLAIMS" and not companion_ok:
+            if _overclaim_100_enabled() and s >= OVERCLAIM_100_FLOOR:
+                reasons.append(f"{k} {v} {s:.2f} (overclaim==1.00 arm)")
+                continue
             suppressed_companion += 1
             continue
         reasons.append(f"{k} {v} {s:.2f}")
@@ -860,36 +1051,60 @@ def cmd_gate(a):
         return door_refuse(json_mode, "gate",
                            "gate needs --draft <file> or one or more --claim \"<text>\"")
     cmd = [*door_cmd(GATE_CMD_ENV, FLEET_JEV_LIB), *a.evidence, "--kit", "reply"]
-    if a.draft:
+    claims_tmp_path = None
+    if a.claim:
+        for claim in a.claim:
+            cmd += ["--claim", claim]
+    elif a.draft and _presplit_enabled():
+        try:
+            draft_text = Path(a.draft).read_text(encoding="utf-8")
+        except OSError:
+            draft_text = ""
+        claims = presplit_claims(draft_text)
+        if claims:
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False,
+                                              encoding="utf-8")
+            claims_tmp_path = tmp.name
+            tmp.write("\n".join(claims) + "\n")
+            tmp.close()
+            cmd += ["--claims-file", claims_tmp_path]
+        else:
+            cmd += ["--draft", a.draft]
+    elif a.draft:
         cmd += ["--draft", a.draft]
-    for claim in a.claim or []:
-        cmd += ["--claim", claim]
     timeout = _gate_timeout()
-    # capture_output whenever this isn't a plain terminal call — --json needs
-    # exactly one object on stdout, and hook mode must never let the child's
-    # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
-    # inherit straight from this process regardless of contextlib redirects.
-    if json_mode:
-        code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
-                                  hook_mode=hook_mode, timeout=timeout)
-        emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
-                  GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
-                  {"stdout": out, "stderr": err}, cmd)
+    try:
+        # capture_output whenever this isn't a plain terminal call — --json needs
+        # exactly one object on stdout, and hook mode must never let the child's
+        # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
+        # inherit straight from this process regardless of contextlib redirects.
+        if json_mode:
+            code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
+                                      hook_mode=hook_mode, timeout=timeout)
+            emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
+                      GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
+                      {"stdout": out, "stderr": err}, cmd)
+            return code
+        if hook_mode:
+            # Captured and NOT printed: cmd_hook builds its own one-line
+            # advisory/block message from the exit code, plus a strong-flag
+            # scan of the captured stdout (see _parse_strong_flags /
+            # _hook_block_reasons). Printing the VERDICT line here would leak
+            # straight onto the hook's real stdout, breaking the "silent
+            # allow" contract, so cmd_hook gets (code, out, err) back instead
+            # of a bare code — the only caller of this branch.
+            code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
+                                      hook_mode=True, timeout=timeout)
+            return code, out, err
+        code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout)
+        print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
         return code
-    if hook_mode:
-        # Captured and NOT printed: cmd_hook builds its own one-line
-        # advisory/block message from the exit code, plus a strong-flag
-        # scan of the captured stdout (see _parse_strong_flags /
-        # _hook_block_reasons). Printing the VERDICT line here would leak
-        # straight onto the hook's real stdout, breaking the "silent
-        # allow" contract, so cmd_hook gets (code, out, err) back instead
-        # of a bare code — the only caller of this branch.
-        code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
-                                  hook_mode=True, timeout=timeout)
-        return code, out, err
-    code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout)
-    print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
-    return code
+    finally:
+        if claims_tmp_path:
+            try:
+                os.unlink(claims_tmp_path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------- verify
@@ -1306,33 +1521,24 @@ def _current_turn_start_index(records):
     return None
 
 
-def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None):
-    """The evidence text a Stop-hook gate run uses when the payload names no
-    'evidence' itself: the tool_result content of the last `n` tool calls
-    found in THIS TURN of the transcript — scoped to the records at or
-    after the most recent real user prompt (see _current_turn_start_index),
-    so a tool call from an earlier turn is never mistaken for evidence the
-    current, possibly tool-free, turn actually gathered. (If no real user
-    prompt is found anywhere — a transcript that opens mid-tool-activity —
-    this falls back to scanning every record, the old best-effort
-    behaviour, rather than deriving nothing.) Results are joined in
-    chronological order and capped at `max_bytes` total (the most recent
-    bytes are kept, since the latest tool calls are the most likely to back
-    the latest draft).
+def _previous_turn_start_index(records, current_start):
+    """Index of the real user prompt that opened the turn BEFORE
+    `current_start` (the boundary _current_turn_start_index found), or None
+    when there is no earlier turn (current_start is None/0, or nothing
+    earlier qualifies)."""
+    if current_start is None or current_start <= 0:
+        return None
+    for i in range(current_start - 1, -1, -1):
+        if _is_real_user_prompt_record(records[i]):
+            return i
+    return None
 
-    Each transcript line that looks like {"message": {"content": [...]}}
-    is scanned for {"type": "tool_result", "content": ...} blocks; each
-    block's text is pulled out with _extract_text_blocks. Returns None if
-    no tool_result content is found in-scope, or the transcript cannot be
-    read at all.
-    """
-    n = n if n is not None else _hook_evidence_n()
-    max_bytes = max_bytes if max_bytes is not None else _hook_evidence_max_bytes()
-    records = _read_transcript_records(transcript_path)
-    start = _current_turn_start_index(records)
-    scoped = records[start:] if start is not None else records
+
+def _collect_tool_results(records):
+    """Every tool_result block's extracted text, in file order, out of a
+    list of transcript records."""
     results = []
-    for rec in scoped:
+    for rec in records:
         msg = rec.get("message") if isinstance(rec, dict) else None
         content = msg.get("content") if isinstance(msg, dict) else None
         if not isinstance(content, list):
@@ -1342,10 +1548,155 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
                 text = _extract_text_blocks(block.get("content"))
                 if text:
                     results.append(text)
-    if not results:
+    return results
+
+
+# ------------------------------------------------------------- receipts
+#
+# A "memory of receipts": one dated fact line per session, appended every
+# Stop event that saw a `gh pr merge`, `gh pr checks`, or "N passed" line
+# in this turn's own tool results. The gate then always appends the last
+# 40 of them to the evidence window regardless of how far back the receipt
+# came from — a `gh pr merge` result three turns ago is still real
+# evidence about the PR's state now, and losing it the moment it scrolls
+# out of the N-tool-call window is exactly the evidence-gap shape the
+# bench's 3 blocked truths (t06, t12, t20) shared.
+RECEIPTS_WINDOW = 40
+_RECEIPT_WORTHY_RE = re.compile(r'gh pr merge|gh pr checks|\b\d+\s*passed\b', re.IGNORECASE)
+
+
+def _receipts_path(session_id):
+    safe = re.sub(r'[^A-Za-z0-9_.\-]', '_', str(session_id))
+    return LEDGER_PATH.parent / "state" / f"receipts-{safe}.jsonl"
+
+
+def _extract_receipt_facts(text):
+    """Lines out of one tool_result text worth remembering as a receipt —
+    any line mentioning `gh pr merge`, `gh pr checks`, or an 'N passed'
+    count."""
+    if not text:
+        return []
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and _RECEIPT_WORTHY_RE.search(ln)]
+
+
+def _load_receipts(session_id, n=RECEIPTS_WINDOW):
+    try:
+        lines = _receipts_path(session_id).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for ln in lines[-n:]:
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("fact"):
+            out.append(f"{rec.get('ts', '')} {rec['fact']}")
+    return out
+
+
+def _record_receipts(session_id, texts):
+    """Append one JSONL receipt line per new fact found across `texts`
+    (this turn's own tool results) — deduped against the last 200 receipts
+    already on disk so a fact that stays in view across several Stop
+    events is not written over and over. Never raises."""
+    if not session_id:
+        return
+    path = _receipts_path(session_id)
+    existing_raw = _load_receipts(session_id, 200)
+    existing = {r.split(" ", 1)[1] if " " in r else r for r in existing_raw}
+    new_facts = []
+    for text in texts:
+        for fact in _extract_receipt_facts(text):
+            if fact in existing:
+                continue
+            existing.add(fact)
+            new_facts.append(fact)
+    if not new_facts:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            for fact in new_facts:
+                f.write(json.dumps({
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "fact": fact[:300],
+                }, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None,
+                                          session_id=None):
+    """The evidence text a Stop-hook gate run uses when the payload names no
+    'evidence' itself. Three layers, current turn highest priority:
+
+      1. The PREVIOUS turn's tool_result content (the turn before the one
+         _current_turn_start_index finds), lower priority, capped at half
+         of `max_bytes` — a fact gathered one turn ago ("tests passed",
+         "PR merged") is still real evidence for a reply about it now, and
+         dropping it the moment the turn ends was an evidence gap.
+      2. Up to the last RECEIPTS_WINDOW session receipts (see
+         _record_receipts) — a dated one-line memory of every `gh pr
+         merge`/`gh pr checks`/"N passed" fact this session has ever seen
+         in a tool result, so a PR-merge fact from turns further back than
+         layer 1 still reaches the gate.
+      3. The CURRENT turn's tool_result content (the last `n` tool calls
+         found at or after the most recent real user prompt — see
+         _current_turn_start_index), highest priority.
+
+    Sections are joined in that order (lowest priority first) and the
+    WHOLE joined text is capped at `max_bytes`, keeping the tail — so when
+    truncation happens, the current turn (last in the join) is what
+    survives, same guarantee as before this change. This turn's own
+    tool_result texts are also handed to _record_receipts (when
+    `session_id` is given) so any `gh pr merge`/`gh pr checks`/"N passed"
+    line in them becomes tomorrow's receipt.
+
+    Returns None if there is nothing at all — no current-turn results, no
+    previous-turn results, no receipts, or the transcript cannot be read.
+    """
+    n = n if n is not None else _hook_evidence_n()
+    max_bytes = max_bytes if max_bytes is not None else _hook_evidence_max_bytes()
+    records = _read_transcript_records(transcript_path)
+    start = _current_turn_start_index(records)
+    scoped = records[start:] if start is not None else records
+    cur_results = _collect_tool_results(scoped)
+
+    if session_id:
+        _record_receipts(session_id, cur_results)
+
+    prev_results = []
+    if start is not None:
+        prev_start = _previous_turn_start_index(records, start)
+        if prev_start is not None:
+            prev_results = _collect_tool_results(records[prev_start:start])
+
+    sections = []
+    if prev_results:
+        prev_joined = "\n\n---\n\n".join(prev_results[-n:])
+        prev_cap = max_bytes // 2
+        if len(prev_joined) > prev_cap:
+            prev_joined = prev_joined[-prev_cap:]
+        sections.append("[previous turn]\n" + prev_joined)
+
+    if session_id:
+        receipts = _load_receipts(session_id)
+        if receipts:
+            sections.append("[session receipts]\n" + "\n".join(receipts))
+
+    if not cur_results:
+        # PR #22's health semantics: a turn that ran no tools of its own
+        # gets NO evidence here, however much prior-turn or receipt
+        # material exists — that keeps this turn on the advisory-only
+        # "unchecked" path in cmd_hook rather than letting stale evidence
+        # from an earlier turn silently back (or block) a fresh, tool-free
+        # reply.
         return None
-    tail = results[-n:]
-    joined = "\n\n---\n\n".join(tail)
+    sections.append("[current turn]\n" + "\n\n---\n\n".join(cur_results[-n:]))
+
+    joined = "\n\n===\n\n".join(sections)
     if len(joined) > max_bytes:
         joined = joined[-max_bytes:]
     return joined if joined.strip() else None
@@ -1765,17 +2116,36 @@ _TEST_PHRASE_RE = re.compile(
 
 def _derive_evidence_from_report_text(text):
     """{"worktree", "pr", "test_cmd"} auto-derived from a report's own
-    text: any absolute path mentioned (-> worktree — the first one found,
-    good enough for the fleet's one-worktree-per-task convention), any
-    "PR #N" / "pull/N" mention (-> pr, an int), and — ONLY when a worktree
-    was found, per the brief — any npm test/pytest phrase (-> test_cmd).
-    Any of the three can come back None/""/empty; that is not an error,
-    it just means this report's text did not mention that kind of
-    evidence."""
+    text: any absolute path mentioned that is ALSO an existing directory on
+    this machine (-> worktree — the first such match, good enough for the
+    fleet's one-worktree-per-task convention), any "PR #N" / "pull/N"
+    mention (-> pr, an int), and — ONLY when a worktree was found, per the
+    brief — any npm test/pytest phrase (-> test_cmd). Any of the three can
+    come back None/""/empty; that is not an error, it just means this
+    report's text did not mention that kind of evidence.
+
+    A worktree candidate is skipped, never accepted blind, when: it is not
+    a real directory on disk (--worktree is handed straight to
+    worker-verify's `git -C <worktree> ...` calls, so a bad path there is
+    worse than none), or the absolute-looking path is actually the path
+    component of a URL (e.g. `.../pull/13` inside
+    `https://github.com/org/repo/pull/13`) — those matched `_ABS_PATH_RE`
+    too and were never a worktree."""
     worktree = None
-    m = _ABS_PATH_RE.search(text)
-    if m:
-        worktree = m.group(1).rstrip("/.,;:)")
+    for m in _ABS_PATH_RE.finditer(text):
+        candidate = m.group(1).rstrip("/.,;:)")
+        if not candidate:
+            continue
+        prefix = text[max(0, m.start() - 3):m.start()]
+        if prefix.endswith("://"):
+            continue  # the path component of a URL, not a real worktree
+        try:
+            is_dir = Path(candidate).is_dir()
+        except OSError:
+            is_dir = False
+        if is_dir:
+            worktree = candidate
+            break
     pr = None
     m = _PR_NUM_RE.search(text)
     if m:
@@ -2137,6 +2507,22 @@ def _hook_stop_scan_teammate_reports(payload):
         if not session_id or not isinstance(transcript_path, str) or not transcript_path:
             return
         state = _load_stop_state(session_id)
+        if not state:
+            # First Stop event this session has ever run the scan on: there
+            # is no prior state file, so the naive read of
+            # state.get("last_uuid") comes back None, and
+            # _find_new_teammate_reports(..., None, ...) treats that as
+            # "scan from the top of the file" — meaning a fresh session
+            # attached to an already-long transcript would re-verify every
+            # teammate report ever seen in it on its very first Stop. The
+            # start point must be the transcript's CURRENT end instead:
+            # record the last uuid now, process zero reports this call, and
+            # only anything appended AFTER this point counts as "new" on
+            # the next Stop event.
+            records = _read_transcript_records(transcript_path)
+            start_uuid = records[-1].get("uuid") if records else None
+            _save_stop_state(session_id, {"last_uuid": start_uuid})
+            return
         last_uuid = state.get("last_uuid")
         reports, scan_last_uuid = _find_new_teammate_reports(
             transcript_path, last_uuid, _stop_scan_max_reports())
@@ -2314,7 +2700,8 @@ def cmd_hook(a):
                 tp = payload.get("transcript_path")
                 derived = None
                 if isinstance(tp, str) and tp:
-                    derived = _derive_evidence_text_from_transcript(tp)
+                    derived = _derive_evidence_text_from_transcript(
+                        tp, session_id=payload.get("session_id"))
                 if derived:
                     tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md",
                                                           delete=False, encoding="utf-8")
@@ -2362,7 +2749,15 @@ def cmd_hook(a):
                     os.unlink(tmp_path)
                 except OSError:
                     pass
+            # Deterministic count/PR cross-check — pure string work, no
+            # model call, runs regardless of what the judge above said.
+            # See deterministic_block_reasons's own docstring: fires only
+            # on a real contradiction (a drafted count/PR state the
+            # evidence itself disagrees with), never on an evidence gap.
+            det_block_reasons = deterministic_block_reasons(
+                text, _read_evidence_text(evidence))
         else:
+            det_block_reasons = []
             tool_name = payload.get("tool_name")
             if tool_name is not None and tool_name != "Agent":
                 _hook_log(f"verify: tool_name={tool_name!r} is not 'Agent' — this "
@@ -2436,6 +2831,11 @@ def cmd_hook(a):
         flags = _parse_strong_flags(door_out)
         claim_rows = _parse_claim_rows(door_out)
         block_reasons, block_notes = _hook_block_decision(flags, claim_rows)
+        # Deterministic reasons are never suppressed by the gather-health
+        # check the judge-driven flags above go through — arithmetic on
+        # text that WAS in the evidence window carries no "the gather was
+        # too thin" failure mode the way a model's confidence score does.
+        block_reasons = det_block_reasons + block_reasons
 
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")
