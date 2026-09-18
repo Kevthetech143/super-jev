@@ -262,6 +262,16 @@ No version bump.
      be checked there. It fires only when the claimed total is past the
      window's count, or when the claim names no total at all.
 
+  `window_model.py` follows the new layout: a `SECTION_PREV_REPORTS` with
+  its own header, emit slot and recency rank, detected by feature so
+  `render()` stays byte-for-byte correct against a composer on either side
+  of the change. See docs/window-model.md, "The previous-turn reports
+  section". One measured cost, in the safe direction: `from_text` refuses a
+  section boundary once an unbounded report body has opened, and more
+  windows now carry a report section, so fewer recorded windows round-trip
+  to the same pieces. Nothing gained trust and no piece changed kind on
+  re-parse.
+
   Two supporting fixes came out of the same measurement. `"either merged or
   on PR #N"` was being read as a claim that PR #N was merged, and the absent
   receipt reported as a finding; a disjunction or negation between "merged"

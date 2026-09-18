@@ -99,7 +99,7 @@ __all__ = [
     "Piece", "Window", "Truncation", "PrStateSignal",
     "PIECE_KINDS", "PIECE_ORIGINS", "TRUSTED_ORIGINS", "is_trusted",
     "SECTION_CURRENT", "SECTION_RECEIPTS", "SECTION_REPORTS",
-    "SECTION_CONTRIBUTED", "SECTION_UNKNOWN",
+    "SECTION_CONTRIBUTED", "SECTION_PREV_REPORTS", "SECTION_UNKNOWN",
     "prev_section", "prev_index", "recency_rank",
     "header_for_section", "section_for_header", "emit_slot",
     "HEADER_CONTRIBUTED", "CONTRIBUTED_QUOTE_PREFIX",
@@ -188,6 +188,10 @@ SECTION_REPORTS = "reports"
 #: so they are untrusted by the one trust rule rather than by a special
 #: case, and its lines are prose-strength to every deterministic reader.
 SECTION_CONTRIBUTED = "contributed"
+#: Reports relayed in a PREVIOUS turn. Their own section since the window
+#: budget change: they used to ride inside their turn's `prev(n)` block and
+#: be dropped with it.
+SECTION_PREV_REPORTS = "prev_reports"
 #: Flat text with no recognisable composer header — a unit-test fixture, a
 #: hand-written bench evidence file. No ordering information at all.
 SECTION_UNKNOWN = "unknown"
@@ -212,8 +216,9 @@ def recency_rank(section):
 
     Mirrors `superjev._section_recency_rank` exactly: previous turns
     oldest-to-newest as -K grows smaller in magnitude (turn -1 is newer
-    than turn -2), then the session receipts, then this turn's relayed
-    reports, then this turn's own tool results. `SECTION_UNKNOWN` returns
+    than turn -2), then reports relayed in those previous turns, then the
+    session receipts, then this turn's relayed reports, then this turn's
+    own tool results. `SECTION_UNKNOWN` returns
     None rather than a number — "unknown turn", NOT "oldest" — so two
     unlabelled mentions can never be ordered against each other.
     """
@@ -225,8 +230,8 @@ def recency_rank(section):
     # own working note — so it has no recency to compare against a receipt,
     # and None ("unknown turn", not "oldest") is what keeps a reader from
     # ordering it against one.
-    return {SECTION_RECEIPTS: 0, SECTION_REPORTS: 1,
-            SECTION_CURRENT: 2}.get(section)
+    return {SECTION_PREV_REPORTS: -0.5, SECTION_RECEIPTS: 0,
+            SECTION_REPORTS: 1, SECTION_CURRENT: 2}.get(section)
 
 
 #: The composer's own section headers, and the glue between the things it
@@ -248,6 +253,11 @@ HEADER_CONTRIBUTED = "[contributed by check arms]"
 #: that keys on the row's own shape, so neutralising at the renderer is a
 #: second, independent guard behind the section boundary.
 CONTRIBUTED_QUOTE_PREFIX = "> "
+#: The header over reports relayed in a previous turn. Emitted only by a
+#: composer that has `PREV_REPORTS_LABEL` (see `_prev_reports_section`);
+#: parsed here unconditionally so a recorded window reads the same either
+#: way.
+HEADER_PREV_REPORTS = "[relayed reports in previous turns]"
 #: PR #53 adds this mark inside a previous-turn block, ahead of that turn's
 #: relayed reports. `main` does not emit it. Parsed here anyway so a
 #: recorded window from either branch reads the same.
@@ -297,7 +307,8 @@ def header_for_section(section):
         return HEADER_PREV.format(n=n)
     return {SECTION_CURRENT: HEADER_CURRENT, SECTION_RECEIPTS: HEADER_RECEIPTS,
             SECTION_REPORTS: HEADER_REPORTS,
-            SECTION_CONTRIBUTED: HEADER_CONTRIBUTED}.get(section)
+            SECTION_CONTRIBUTED: HEADER_CONTRIBUTED,
+            SECTION_PREV_REPORTS: HEADER_PREV_REPORTS}.get(section)
 
 
 def section_for_header(line):
@@ -309,7 +320,8 @@ def section_for_header(line):
         return prev_section(int(m.group(1)))
     return {HEADER_CURRENT: SECTION_CURRENT, HEADER_RECEIPTS: SECTION_RECEIPTS,
             HEADER_REPORTS: SECTION_REPORTS,
-            HEADER_CONTRIBUTED: SECTION_CONTRIBUTED}.get(s)
+            HEADER_CONTRIBUTED: SECTION_CONTRIBUTED,
+            HEADER_PREV_REPORTS: SECTION_PREV_REPORTS}.get(s)
 
 
 def emit_slot(section):
@@ -320,7 +332,8 @@ def emit_slot(section):
     The mirror of `superjev._section_emit_slot`, and deliberately NOT
     `recency_rank`. `from_transcript` joins its sections in exactly one
     order: the previous-turns block first (rendered NEWEST-first, so
-    `[previous turn -1]`, then -2, then -3), then `[session receipts]`,
+    `[previous turn -1]`, then -2, then -3), then
+    `[relayed reports in previous turns]`, then `[session receipts]`,
     then `[current turn reports]`, then `[current turn]`. Recency runs the
     other way along the previous turns — turn -1 is NEWER than turn -2 —
     so the two orders disagree on that run and must stay separate keys.
@@ -340,8 +353,9 @@ def emit_slot(section):
     n = prev_index(section)
     if n is not None:
         return (0, n)
-    return {SECTION_RECEIPTS: (1, 0), SECTION_REPORTS: (2, 0),
-            SECTION_CURRENT: (3, 0), SECTION_CONTRIBUTED: (4, 0)}.get(section)
+    return {SECTION_PREV_REPORTS: (1, 0), SECTION_RECEIPTS: (2, 0),
+            SECTION_REPORTS: (3, 0), SECTION_CURRENT: (4, 0),
+            SECTION_CONTRIBUTED: (5, 0)}.get(section)
 
 
 def _parse_identity(line):
@@ -599,7 +613,7 @@ class Window:
                 return ITEM_SEPARATOR
             if nxt.section in (SECTION_RECEIPTS, SECTION_CONTRIBUTED):
                 return RECEIPT_SEPARATOR
-            if nxt.section == SECTION_REPORTS:
+            if nxt.section in (SECTION_REPORTS, SECTION_PREV_REPORTS):
                 return REPORT_SEPARATOR
             return ITEM_SEPARATOR
         if prev_index(prev.section) is not None and prev_index(nxt.section) is not None:
@@ -815,7 +829,7 @@ def _pr_number_res(pr_str):
 
 def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
                     prev_turns=None, cap_bytes=None, records=None,
-                    policy="legacy"):
+                    policy="legacy", draft_text=None):
     """A `Window` built straight from the transcript records — the same
     inputs, the same layers and the same budget arithmetic
     `superjev._derive_evidence_text_from_transcript` uses, with every
@@ -826,6 +840,10 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
       `records`  pre-read transcript records, for a caller that already
                  has them (and for a fuzz harness that would rather not
                  touch a filesystem 100,000 times).
+      `draft_text`  the draft this window is being built for, used only
+                 to decide which session receipts to keep first when the
+                 receipts layer is over its share — the composer's own
+                 `draft_text` argument, same meaning.
       `policy`   "legacy" (default) reproduces the composer's byte
                  truncation exactly, so `render()` is byte-identical;
                  "pieces" applies `Window.fit`'s piece-preserving rule
@@ -855,19 +873,43 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
 
     prev_spans = (sj._previous_turn_spans(records, start, prev_turns)
                   if start is not None else [])
+    # A composer with PREV_REPORTS_LABEL lifts a previous turn's relayed
+    # reports OUT of that turn's block into one section of their own; an
+    # older one leaves them inside it, behind the region mark. Detected by
+    # FEATURE, like every other branch difference in this module, so the
+    # bytes follow the composer either way.
+    split_prev_reports = hasattr(sj, "PREV_REPORTS_LABEL")
     prev_turn_pieces = []
+    prev_claim_pieces = []
     for i, (a, b, _texts) in enumerate(prev_spans, start=1):
         sec = prev_section(i)
         claims = _claim_pieces(sj, records[a:b], sec)
-        prev_turn_pieces.append(_receipt_pieces(sj, records[a:b], sec)
-                                + _reports_region_mark(sj, sec, claims)
-                                + claims)
+        if split_prev_reports:
+            prev_turn_pieces.append(_receipt_pieces(sj, records[a:b], sec))
+        else:
+            prev_turn_pieces.append(_receipt_pieces(sj, records[a:b], sec)
+                                    + _reports_region_mark(sj, sec, claims)
+                                    + claims)
+    if split_prev_reports:
+        # Newest-first across turns, re-laid oldest-first, exactly as the
+        # composer flattens them (turn -1's reports are fresher than turn
+        # -2's, and within a turn file order is already oldest-first).
+        for i in range(len(prev_spans), 0, -1):
+            a, b, _t = prev_spans[i - 1]
+            prev_claim_pieces.extend(
+                _claim_pieces(sj, records[a:b], SECTION_PREV_REPORTS))
 
     fact_pieces, fact_stats = _fact_pieces(sj, records, start, session_id)
 
     meta = _compose_meta(sj, records, start, cur_receipts, cur_claims,
                          prev_spans, prev_turn_pieces, fact_pieces,
-                         fact_stats, effective_cap)
+                         fact_stats, effective_cap,
+                         prev_claim_pieces=(prev_claim_pieces
+                                            if split_prev_reports else None),
+                         prev_claims_per_turn=[
+                             _claim_pieces(sj, records[a:b], prev_section(i))
+                             for i, (a, b, _t) in enumerate(prev_spans, start=1)]
+                         if split_prev_reports else None)
 
     trunc = Truncation()
 
@@ -878,18 +920,36 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
     cur_block = ([_header_piece(SECTION_CURRENT)] + kept_cur) if kept_cur else []
     meta["current_bytes"] = _section_bytes(cur_block)
 
-    # --- layer 2: the session receipts.
-    fact_block = ([_header_piece(SECTION_RECEIPTS)] + fact_pieces) if fact_pieces else []
-    meta["receipts_bytes"] = _section_bytes(fact_block)
+    # --- layer 2: the session receipts. Their block is built LAST now
+    # (the share is a reservation, not a ceiling — see the composer), so
+    # only the full size is known here.
+    fact_block_full = ([_header_piece(SECTION_RECEIPTS)] + fact_pieces) if fact_pieces else []
+    fact_block = fact_block_full
 
     overhead = 32   # the composer's own allowance for section separators
-    remaining = effective_cap - meta["current_bytes"] - meta["receipts_bytes"] - overhead
+    if split_prev_reports:
+        receipts_reserve = min(
+            max(int(effective_cap * sj.RECEIPTS_BUDGET_SHARE), 0),
+            _section_bytes(fact_block_full))
+        meta["receipts_share_bytes"] = receipts_reserve
+        prev_reports_reserve = min(
+            max(int(effective_cap * sj.PREV_REPORTS_BUDGET_SHARE), 0),
+            _section_bytes([_header_piece(SECTION_PREV_REPORTS)] + prev_claim_pieces)
+            if prev_claim_pieces else 0)
+        remaining = effective_cap - meta["current_bytes"] - overhead
+    else:
+        receipts_reserve = 0
+        prev_reports_reserve = 0
+        meta["receipts_bytes"] = _section_bytes(fact_block)
+        remaining = (effective_cap - meta["current_bytes"]
+                     - meta["receipts_bytes"] - overhead)
 
     # --- layer 3: this turn's relayed reports, at current-turn priority
     # but capped at REPORTS_BUDGET_SHARE of what is left.
     report_block = []
     if cur_claims and remaining > 0:
-        budget = max(int(remaining * sj.REPORTS_BUDGET_SHARE), 0)
+        budget = max(int(max(remaining - receipts_reserve, 0)
+                         * sj.REPORTS_BUDGET_SHARE), 0)
         report_block, kept, cut = _fit_reports(cur_claims, budget)
         meta["reports_kept"] = kept
         meta["reports_cut_bytes"] = cut
@@ -903,10 +963,13 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
         trunc.reports_dropped = len(cur_claims)
         trunc.reports_bytes_cut = cut
 
-    # --- layer 1: the previous turns, oldest dropped first.
+    # --- layer 1: the previous turns, oldest dropped first, after the
+    # two reservations below them are set aside.
+    remaining_for_prev = max(remaining - receipts_reserve - prev_reports_reserve, 0)
     prev_block = []
-    if prev_turn_pieces and remaining > 0:
-        prev_block, dropped, kept, truncated = _fit_prev_turns(prev_turn_pieces, remaining)
+    if prev_turn_pieces and remaining_for_prev > 0:
+        prev_block, dropped, kept, truncated = _fit_prev_turns(
+            prev_turn_pieces, remaining_for_prev)
         meta["prev_dropped"] = dropped
         meta["prev_truncated"] = truncated
         trunc.prev_turns_dropped = dropped
@@ -919,8 +982,39 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
         trunc.prev_turns_dropped = len(prev_turn_pieces)
         for d in meta["prev_turn_detail"]:
             d["kept"] = False
+    if prev_block:
+        remaining -= meta["prev_bytes"] + 8
 
-    pieces = tuple(prev_block + fact_block + report_block + cur_block)
+    # --- layer 1b: reports relayed in a previous turn, reserved share
+    # then whatever the previous-turn block left unspent.
+    prev_report_block = []
+    if prev_claim_pieces and remaining > 0:
+        budget = max(remaining - receipts_reserve, prev_reports_reserve)
+        prev_report_block, kept_prev, cut_prev = _fit_reports(
+            prev_claim_pieces, budget, section=SECTION_PREV_REPORTS)
+        meta["reports_prev_kept"] = kept_prev
+        meta["reports_prev_cut_bytes"] = cut_prev
+        meta["reports_prev_bytes"] = _section_bytes(prev_report_block)
+        if prev_report_block:
+            remaining -= meta["reports_prev_bytes"] + 8
+    elif prev_claim_pieces:
+        meta["reports_prev_cut_bytes"] = sum(p.nbytes for p in prev_claim_pieces)
+    if split_prev_reports:
+        meta["reports_kept"] += meta["reports_prev_kept"]
+        meta["reports_cut_bytes"] += meta["reports_prev_cut_bytes"]
+
+        # --- layer 2, built last: the receipts get everything above them
+        # left unspent, never less than their reservation.
+        if fact_pieces:
+            fact_block, kept_receipts, dropped_receipts = _fit_receipts(
+                fact_pieces, max(remaining, receipts_reserve),
+                getattr(sj, "_receipts_relevant_to_draft", None), draft_text)
+            meta["receipts_count"] = kept_receipts
+            meta["receipts_dropped"] = dropped_receipts
+            meta["receipts_bytes"] = _section_bytes(fact_block)
+
+    pieces = tuple(prev_block + prev_report_block + fact_block
+                   + report_block + cur_block)
     win = Window(pieces=pieces, byte_cap=effective_cap, truncated=trunc, meta=meta)
 
     if policy == "pieces":
@@ -1132,9 +1226,9 @@ def _parse_section(raw_section):
             _piece("fact", SECTION_RECEIPTS, ln, "session_receipt",
                    source=_parse_identity(ln))
             for ln in lines[1:]]
-    if first == SECTION_REPORTS:
-        return ([_header_piece(SECTION_REPORTS)]
-                + _parse_claims("\n".join(lines[1:]), SECTION_REPORTS))
+    if first in (SECTION_REPORTS, SECTION_PREV_REPORTS):
+        return ([_header_piece(first)]
+                + _parse_claims("\n".join(lines[1:]), first))
     if first == SECTION_CONTRIBUTED:
         # One piece per line, `check_arm` origin, so `is_trusted` says no
         # for the ordinary reason rather than by a special case here. Kind
@@ -1436,14 +1530,47 @@ def _section_bytes(block):
     return len(_render(block, 0).encode("utf-8"))
 
 
-def _fit_reports(claims, budget):
+def _fit_receipts(facts, budget, relevance_fn=None, draft_text=None):
+    """(pieces, kept, dropped) for the session-receipts section inside
+    `budget` bytes — the composer's `_build_receipts_block` rule in piece
+    terms: the whole block when it fits, else receipts whose claim keys
+    appear in the draft first (newest-first among them), then the rest
+    newest-first, the survivors emitted in their ORIGINAL order."""
+    if not facts:
+        return [], 0, 0
+    header = _header_piece(SECTION_RECEIPTS)
+    whole = [header] + list(facts)
+    if budget > 0 and _section_bytes(whole) <= budget:
+        return whole, len(facts), 0
+    if budget <= 0:
+        return [], 0, len(facts)
+    relevant = set()
+    if relevance_fn is not None:
+        relevant = relevance_fn([p.text for p in facts], draft_text)
+    order = ([i for i in reversed(range(len(facts))) if i in relevant]
+             + [i for i in reversed(range(len(facts))) if i not in relevant])
+    kept = set()
+    used = len((header.text + HEADER_SEPARATOR).encode("utf-8"))
+    for i in order:
+        cost = facts[i].nbytes + 1
+        if used + cost > budget:
+            continue
+        kept.add(i)
+        used += cost
+    if not kept:
+        return [], 0, len(facts)
+    return ([header] + [facts[i] for i in sorted(kept)],
+            len(kept), len(facts) - len(kept))
+
+
+def _fit_reports(claims, budget, section=SECTION_REPORTS):
     """(pieces, kept, bytes_cut) for the relayed-reports section inside
     `budget` bytes — the composer's `_build_reports_block` rule in piece
     terms: whole reports go from the OLDEST end first, and if even the
     newest single report is over budget its own tail is kept."""
     if not claims or budget <= 0:
         return [], 0, 0
-    header = _header_piece(SECTION_REPORTS)
+    header = _header_piece(section)
     kept = list(claims)
     cut = 0
     block = [header] + kept
@@ -1458,7 +1585,7 @@ def _fit_reports(claims, budget):
         raw = kept[0].text.encode("utf-8")
         tail = raw[-room:].decode("utf-8", errors="ignore")
         cut += len(raw) - len(tail.encode("utf-8"))
-        block = [header, _piece("claim", SECTION_REPORTS,
+        block = [header, _piece("claim", section,
                                 REPORT_CUT_MARKER + "\n" + tail,
                                 "teammate", cut="head")]
         return block, 1, cut
@@ -1525,12 +1652,18 @@ def _fit_prev_turns(turns, budget):
 
 
 def _compose_meta(sj, records, start, cur_receipts, cur_claims, prev_spans,
-                  prev_turn_pieces, fact_pieces, fact_stats, effective_cap):
+                  prev_turn_pieces, fact_pieces, fact_stats, effective_cap,
+                  prev_claim_pieces=None, prev_claims_per_turn=None):
     """The composer's own `meta` dict for this window, field for field, so
     a caller can migrate off `derive_evidence_window(..., return_meta=True)`
     without also rewriting `hook gate --explain`."""
-    prev_reports = [[p for p in items if p.kind == "claim"]
-                    for items in prev_turn_pieces]
+    # A composer that lifts a previous turn's reports into their own
+    # section leaves none inside the per-turn blocks, so the per-turn
+    # counts come from `prev_claims_per_turn` instead.
+    prev_reports = (prev_claims_per_turn if prev_claims_per_turn is not None
+                    else [[p for p in items if p.kind == "claim"]
+                          for items in prev_turn_pieces])
+    split = prev_claim_pieces is not None
     # getattr, not a direct call: the byte-identity tests load THIS module
     # against an OLDER composer module to prove the render has not drifted,
     # and that older `sj` has no receipt-shape family at all. There the keys
@@ -1580,6 +1713,16 @@ def _compose_meta(sj, records, start, cur_receipts, cur_claims, prev_spans,
         facts = _shapes(records, start)
         meta["receipt_shape_facts"] = facts
         meta["receipt_shapes_count"] = len(facts)
+    if split:
+        meta.update({
+            "prev_scanned": len(prev_spans),
+            "receipts_dropped": 0,
+            "receipts_share_bytes": 0,
+            "reports_prev_found": len(prev_claim_pieces),
+            "reports_prev_kept": 0,
+            "reports_prev_bytes": 0,
+            "reports_prev_cut_bytes": 0,
+        })
     return meta
 
 
