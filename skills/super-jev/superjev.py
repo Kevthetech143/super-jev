@@ -3472,6 +3472,14 @@ def cmd_hook(a):
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
                       f"({tp!r}); gate ran against {source}, no checkable claim "
                       f"(exit {code}), silent", exit_code=0, unchecked=True, health="none")
+        # This IS the 2026-09-16 bug's own shape (no tool evidence
+        # derivable, silently routed unchecked) — so this path in
+        # particular always checks the running share, and prints the
+        # notice even on the otherwise-silent branch above, since silent
+        # unchecked runs are exactly what let 9 of 40 go unnoticed.
+        notice = _running_unchecked_notice()
+        if notice:
+            print(notice)
         return 0
 
     try:
@@ -3674,8 +3682,21 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
+        def _print_ledger_notice_if_gate():
+            # So an in-session bug shaped like the 2026-09-16 one (a hook
+            # silently routing replies down the unchecked path) shows up
+            # THIS turn instead of waiting for someone to read the ledger
+            # later. verify's own hook run is scoped out — this only
+            # watches the Stop-hook gate, matching the origin incident.
+            if door != "gate":
+                return
+            notice = _running_unchecked_notice()
+            if notice:
+                print(notice)
+
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code})", exit_code=0, flags=flags)
+            _print_ledger_notice_if_gate()
             return 0
         if action == "block-forced-advisory":
             reason_bits = "; ".join(block_reasons) if block_reasons else f"exit {code}"
@@ -3683,6 +3704,7 @@ def cmd_hook(a):
             print(advisory)
             _hook_log(f"gate: second pass, advisory only (exit {code}) — would have "
                      f"blocked on: {reason_bits}", exit_code=0, flags=flags)
+            _print_ledger_notice_if_gate()
             return 0
         if action == "block":
             reason = f"super-jev {door} blocked this (exit {code})"
@@ -3692,11 +3714,13 @@ def cmd_hook(a):
             _hook_log(f"{door}: block (exit {code})" +
                      (f" — strong flags: {'; '.join(block_reasons)}" if block_reasons else ""),
                      exit_code=2, flags=flags)
+            _print_ledger_notice_if_gate()
             return 2
         note_tail = (" — " + "; ".join(block_notes)) if block_notes else ""
         advisory = f"super-jev {door} advisory (exit {code}){note_tail}"
         print(advisory)
         _hook_log(f"{door}: advisory (exit {code}){note_tail}", exit_code=0, flags=flags)
+        _print_ledger_notice_if_gate()
         return 0
     except Exception as exc:  # fail-open: never wedge the session
         _hook_log(f"{door}: unexpected error ({exc.__class__.__name__}) — fail-open",
@@ -3757,6 +3781,229 @@ def _print_token_totals(label, totals):
         d = totals["by_door"][door]
         print(f"  {door:<10} {d['calls']:>4} call(s)  {d['in_tok']:>8} in_tok  "
               f"est ${d['est_cost_usd']:.6f}")
+
+
+# ---------------------------------------------------------- ledger health
+#
+# 2026-09-16: a hook bug silently routed 9 of 40 replies down the
+# "unchecked" (advisory, exit 0) path — no evidence was derivable, gate
+# ran against the last prompt instead of the real transcript, and nobody
+# noticed because the ledger line for each one looked like any other
+# advisory exit 0. The ledger already recorded every one of them; this is
+# the read side that turns that into something a human (or a WARN line)
+# actually sees.
+
+DEFAULT_LEDGER_WINDOW = 50
+DEFAULT_STOP_NOTICE_WINDOW = 20
+DEFAULT_UNCHECKED_WARN_PCT = 25.0
+UNCHECKED_WARN_ENV = "SUPERJEV_UNCHECKED_WARN"
+# A bucket with only a handful of runs is noise, not signal — one
+# unchecked run out of one is a 100% share but tells you nothing. Require
+# at least this many runs in a bucket before its share can trip a WARN.
+MIN_RUNS_FOR_WARN = 5
+
+_NOTE_DOOR_RE = re.compile(r'^([a-z][a-z-]*):\s')
+
+
+def _unchecked_warn_pct():
+    """SUPERJEV_UNCHECKED_WARN, parsed as a float percent (e.g. "25" for
+    25%); DEFAULT_UNCHECKED_WARN_PCT if unset or unparsable."""
+    raw = os.environ.get(UNCHECKED_WARN_ENV)
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return DEFAULT_UNCHECKED_WARN_PCT
+
+
+def _ledger_records(lines=None):
+    """The ledger's raw JSONL lines (or a caller-supplied list of raw
+    lines, for tests with a synthetic ledger), parsed to dicts. A line
+    that is not valid JSON is dropped rather than raising — a single
+    corrupt line must never take the whole health read down."""
+    if lines is None:
+        lines = _ledger_lines()
+    out = []
+    for line in lines:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+def _ledger_line_subdoor(entry):
+    """Which door a hook-run ledger line is actually about. Every real
+    Stop/PostToolUse hook firing shares entry['door'] == 'hook' (see
+    _hook_log) — the door it was protecting (gate, verify, prompt-verify,
+    stop-scan) instead rides in the free-text note's own "<door>: ..."
+    prefix, which every _hook_log call site that knows its door writes
+    (see cmd_hook's "allow (exit ...)"/"block (exit ...)"/"advisory
+    (exit ...)" notes and cmd_hook_prompt_verify's "prompt-verify: ..." /
+    "stop-scan: ..." notes). A hook call that failed before it even
+    parsed its input (bad/empty/non-JSON stdin) has no such prefix; those
+    land under the bare "hook" bucket."""
+    note = entry.get("note", "") or ""
+    m = _NOTE_DOOR_RE.match(note)
+    return m.group(1) if m else "hook"
+
+
+def _ledger_line_verdict(entry):
+    """block | unchecked | advisory | allow — read off exit_code/skipped/
+    unchecked, the same three-way split every _hook_log call site already
+    encodes, just named for reporting."""
+    if entry.get("exit_code") == 2:
+        return "block"
+    if entry.get("skipped") or entry.get("unchecked"):
+        return "unchecked"
+    note = entry.get("note", "") or ""
+    if "advisory" in note:
+        return "advisory"
+    return "allow"
+
+
+def _ledger_skip_reason(entry):
+    """A short, machine-matchable tag for why an unchecked/skipped line
+    was unchecked/skipped — entry['reason'] when a call site set one
+    (most skip paths do), else a tag squeezed out of the free-text note
+    (the no-tool-evidence "unchecked" path — the exact shape of the
+    2026-09-16 bug — never sets reason=, so it needs this), else
+    "other"."""
+    reason = entry.get("reason")
+    if reason:
+        return reason
+    note = (entry.get("note") or "").lower()
+    if "no tool evidence derivable" in note:
+        return "no-tool-evidence"
+    if "stdin" in note:
+        return "bad-stdin"
+    if "no usable text field" in note:
+        return "no-usable-text"
+    if "no usable report text" in note:
+        return "no-usable-report-text"
+    if "not 'agent'" in note:
+        return "not-agent-tool"
+    if "unexpected error" in note:
+        return "unexpected-error"
+    return "other"
+
+
+def _door_health_bucket(entries):
+    """{"runs","blocked","advisory","unchecked","allow",
+    "unchecked_share_pct","top_skip_reason"} for one list of hook-run
+    ledger entries (either one door's slice or the whole window)."""
+    bucket = {"runs": len(entries), "blocked": 0, "advisory": 0,
+             "unchecked": 0, "allow": 0}
+    verdict_to_key = {"block": "blocked", "advisory": "advisory",
+                      "unchecked": "unchecked", "allow": "allow"}
+    skip_reasons = {}
+    for e in entries:
+        v = _ledger_line_verdict(e)
+        bucket[verdict_to_key[v]] += 1
+        if v == "unchecked":
+            r = _ledger_skip_reason(e)
+            skip_reasons[r] = skip_reasons.get(r, 0) + 1
+    bucket["unchecked_share_pct"] = (round(100.0 * bucket["unchecked"] / bucket["runs"], 1)
+                                     if bucket["runs"] else 0.0)
+    bucket["top_skip_reason"] = (max(skip_reasons, key=skip_reasons.get)
+                                 if skip_reasons else None)
+    return bucket
+
+
+def ledger_health(window=DEFAULT_LEDGER_WINDOW, records=None):
+    """Ledger health over the last `window` hook-run ledger lines
+    (chronological, whole ledger — not per-door windows, so a
+    lightly-used door just gets fewer of its own rows). Only lines with
+    entry['door'] == 'hook' count — those are the one-line-per-hook-run
+    records this is built to watch (see the module note above); direct
+    CLI calls to gate/verify/sweep/... carry no skipped/unchecked
+    concept and would only dilute the unchecked share.
+
+    Returns {"window", "threshold_pct", "overall": bucket,
+    "doors": {door: bucket}}, each bucket shaped by _door_health_bucket.
+    `records`, if given, is a pre-parsed list of ledger dicts (tests pass
+    a synthetic ledger this way instead of touching LEDGER_PATH)."""
+    if records is None:
+        records = _ledger_records()
+    hook_lines = [e for e in records if e.get("door") == "hook"]
+    windowed = hook_lines[-window:] if window else hook_lines
+    by_door = {}
+    for e in windowed:
+        by_door.setdefault(_ledger_line_subdoor(e), []).append(e)
+    return {
+        "window": window,
+        "threshold_pct": _unchecked_warn_pct(),
+        "overall": _door_health_bucket(windowed),
+        "doors": {name: _door_health_bucket(es) for name, es in by_door.items()},
+    }
+
+
+def _health_warnings(health):
+    """[(label, bucket), ...] for every bucket (overall plus each door)
+    whose unchecked share is at or above threshold_pct AND has at least
+    MIN_RUNS_FOR_WARN runs (a 1-run 100% share is noise, not signal) —
+    the empty-ledger / all-healthy / too-few-runs case gives back []."""
+    out = []
+    threshold = health["threshold_pct"]
+    if (health["overall"]["runs"] >= MIN_RUNS_FOR_WARN
+            and health["overall"]["unchecked_share_pct"] >= threshold):
+        out.append(("overall", health["overall"]))
+    for name in sorted(health["doors"]):
+        b = health["doors"][name]
+        if b["runs"] >= MIN_RUNS_FOR_WARN and b["unchecked_share_pct"] >= threshold:
+            out.append((name, b))
+    return out
+
+
+def _print_ledger_health(health, heading="ledger health"):
+    o = health["overall"]
+    print(f"{heading} (last {health['window']} hook run(s), warn at "
+          f"{health['threshold_pct']:g}% unchecked)")
+    if not o["runs"]:
+        print("  no hook runs recorded yet")
+        return
+    print(f"  {'door':<14} {'runs':>5} {'blocked':>8} {'advisory':>9} "
+          f"{'unchecked':>10} {'unchecked%':>11}")
+    print(f"  {'overall':<14} {o['runs']:>5} {o['blocked']:>8} {o['advisory']:>9} "
+          f"{o['unchecked']:>10} {o['unchecked_share_pct']:>10.1f}%")
+    for name in sorted(health["doors"]):
+        d = health["doors"][name]
+        print(f"  {name:<14} {d['runs']:>5} {d['blocked']:>8} {d['advisory']:>9} "
+              f"{d['unchecked']:>10} {d['unchecked_share_pct']:>10.1f}%")
+    for label, bucket in _health_warnings(health):
+        print(f"  WARN: {label} unchecked share {bucket['unchecked_share_pct']:.1f}% "
+              f"({bucket['unchecked']}/{bucket['runs']}) exceeds "
+              f"{health['threshold_pct']:g}% — most common skip reason: "
+              f"{bucket['top_skip_reason'] or 'n/a'}")
+
+
+def cmd_ledger_health(a):
+    window = a.window if getattr(a, "window", None) and a.window > 0 else DEFAULT_LEDGER_WINDOW
+    health = ledger_health(window=window)
+    warnings = _health_warnings(health)
+    if getattr(a, "json", False):
+        print(json.dumps({**health, "warn": bool(warnings)}))
+    else:
+        _print_ledger_health(health)
+    return 4 if warnings else 0
+
+
+def _running_unchecked_notice(window=DEFAULT_STOP_NOTICE_WINDOW):
+    """One line, or None, for the Stop hook to print alongside its own
+    verdict when the running unchecked share over the last `window` hook
+    runs is at/over threshold — so an in-session bug like 2026-09-16's
+    shows up the same turn instead of waiting for someone to read the
+    ledger later. Scoped to hook-run lines only, same as ledger_health."""
+    health = ledger_health(window=window)
+    warnings = _health_warnings(health)
+    if not warnings:
+        return None
+    label, bucket = warnings[0]
+    return (f"[super-jev] ledger health: {label} unchecked share "
+           f"{bucket['unchecked_share_pct']:.1f}% ({bucket['unchecked']}/{bucket['runs']} "
+           f"of last {window}) — most common skip reason: "
+           f"{bucket['top_skip_reason'] or 'n/a'}. Run `superjev.py ledger health` to see more.")
 
 
 def cmd_ledger(a):
@@ -4172,6 +4419,9 @@ def cmd_status(a):
     ]
     ledger_today = _ledger_count_today()
     today_totals = _token_totals(_ledger_lines(), today_only=True)
+    window = a.window if getattr(a, "window", None) and a.window > 0 else DEFAULT_LEDGER_WINDOW
+    health = ledger_health(window=window)
+    health_warnings = _health_warnings(health)
 
     if json_mode:
         emit_json("status", "OK", 0, "door states as read off disk", {
@@ -4182,6 +4432,8 @@ def cmd_status(a):
             "ledger_path": str(LEDGER_PATH),
             "ledger_calls_today": ledger_today,
             "token_totals_today": today_totals,
+            "ledger_health": health,
+            "ledger_health_warn": bool(health_warnings),
         }, [])
         return 0
 
@@ -4196,6 +4448,8 @@ def cmd_status(a):
           " (never printed)")
     print(f"ledger: {LEDGER_PATH} ({ledger_today} call(s) today)")
     _print_token_totals("token totals, today", today_totals)
+    print()
+    _print_ledger_health(health)
     return 0
 
 
@@ -4289,6 +4543,15 @@ def build_parser():
     lg.add_argument("-n", type=int, default=20, dest="n",
                     help="how many recent lines to print (default 20)")
     lg.set_defaults(func=cmd_ledger)
+    lg_subs = lg.add_subparsers(dest="ledger_action")
+    lg_health = lg_subs.add_parser("health",
+                                   help="unchecked/skipped share per door over recent hook "
+                                        "runs, for scripts — exit 0 ok, exit 4 warn")
+    lg_health.add_argument("--window", type=int, default=DEFAULT_LEDGER_WINDOW,
+                           help=f"how many recent hook runs to look at "
+                                f"(default {DEFAULT_LEDGER_WINDOW})")
+    _add_json_flag(lg_health)
+    lg_health.set_defaults(func=cmd_ledger_health)
 
     pm = subs.add_parser("permit", help="is this one action safe to run automatically?")
     pm.add_argument("--snapshot", required=True,
@@ -4330,6 +4593,9 @@ def build_parser():
     ak.set_defaults(func=cmd_ask)
 
     st = subs.add_parser("status", help="which doors are live, which are not built")
+    st.add_argument("--window", type=int, default=DEFAULT_LEDGER_WINDOW,
+                    help=f"ledger health: how many recent hook runs to look at "
+                         f"(default {DEFAULT_LEDGER_WINDOW})")
     _add_json_flag(st)
     st.set_defaults(func=cmd_status)
 
