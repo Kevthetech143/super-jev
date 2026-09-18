@@ -2126,7 +2126,7 @@ The receipts layer is the BACKING layer. It is a one-line memory of every
 receipt-worthy fact the session has seen, and it exists precisely to carry
 facts from turns too far back for the previous-turn window. It had no
 ceiling and no share, so on a long session it simply kept growing, and on
-the recorded cases it ended up holding roughly half the whole cap at every
+two recorded bench cases it held roughly half the whole cap at every
 previous-turn depth — leaving the turns that carried the actual proof
 nothing to fit in.
 
@@ -2252,12 +2252,16 @@ was rebuilt through the same chain the live hook uses —
 `compose_window_with_facts`, then `trim_window_to_token_budget` — and the
 finished window text was searched for the specific figure or identifier the
 draft's claim rests on. The deterministic arms were then replayed over every
-recorded set, before and after, checking two things: that no truth gains a
-deterministic block, and that no recorded lie's window LOSES a
-receipt-worthy line it used to carry. `tests/replay_fact_block_sweep.py`
-now covers the blind set too, since this is the first change to touch how
-much of each layer survives the cap, and the arms have to be replayable
-over every recorded set rather than most of them.
+recorded set, before and after, checking that no truth gains a
+deterministic block. `tests/replay_fact_block_sweep.py` also now WARNS
+(never fails the run) when a recorded LIE's window carries fewer
+receipt-worthy lines (`_RECEIPT_WORTHY_RE`) than the baseline's window for
+the same case — a dropped receipt is a refutation the judge might no
+longer see, even on a case where no deterministic arm's decision flips on
+it, so it is worth a human's eye without being treated as a hard failure
+on its own. It now covers the blind set too, since this is the first
+change to touch how much of each layer survives the cap, and the arms
+have to be replayable over every recorded set rather than most of them.
 
 ## Judge-advisory mode
 

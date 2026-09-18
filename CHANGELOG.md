@@ -282,6 +282,31 @@ No version bump.
   unspent, because a hard ceiling threw evidence away in windows with room
   to spare.
 
+- **Window-budget round 2: six review findings closed.** (1) The receipts
+  layer's over-share selection dropped the OLDEST receipts first, the
+  opposite of the section's own rationale (an old receipt is what the
+  previous-turn layers cannot re-derive) — `_build_receipts_block` now
+  drops newest-first, keeping the oldest, same as the comment always said.
+  (2) A previous-turn-reports regression: `_section_recency_rank` gave
+  every relayed report the same flat rank regardless of which previous
+  turn it came from, so a stale report from turn -2 could outrank a merge
+  receipt from turn -1 and family 5's stale-report fact went silent where
+  it used to fire. Each report's marker line now carries its own
+  originating turn (`REPORT_LABEL_PREV_TURN`), and `_report_not_merged_claims`
+  reads that turn back out instead of collapsing every previous-turn
+  report to one rank. (3) `tests/replay_fact_block_sweep.py` now also
+  WARNS (never fails) when a recorded lie's window carries fewer
+  receipt-worthy lines than the baseline's, closing the gap between what
+  docs/hooks.md claimed the sweep checked and what it actually ran. (4)
+  Matched docs/hooks.md's wording to the source comment it was
+  paraphrasing loosely. (5) The merge-count derived fact now quotes the
+  draft's own claimed total alongside the window's receipt count, and
+  states plainly when the window carries no merge receipt at all, rather
+  than reading as amnesty for an unsupported claim. (6) The cited-file
+  relevant-line block is relabelled to say it is a number match, not
+  confirmation that a picked line says what the draft says, and the
+  picked lines now sit below the tail rather than above it.
+
 - **The count arm's `REPORT FROM ...` fence closed on any blank line, not
   just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
   and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt

@@ -11713,7 +11713,10 @@ def test_a_previous_turns_report_keeps_its_unverified_claim_fence(tmp_path):
         _turn("anything else?"),
     ))
     derived = sj._derive_evidence_text_from_transcript(transcript)
-    assert "REPORT FROM Worker (unverified worker claim)" in derived
+    # A previous-turn report's marker now also carries which turn it came
+    # from (REPORT_LABEL_PREV_TURN, 2026-09-18, review round 2) — still
+    # says "unverified worker claim", still opens the same fence.
+    assert "REPORT FROM Worker (unverified worker claim, previous turn -1)" in derived
 
 
 def test_a_previous_turns_report_is_not_dropped_when_its_turn_is(tmp_path):
@@ -11927,8 +11930,29 @@ def test_a_session_wide_merge_total_is_stated_as_uncheckable():
     window = "[session receipts]\nMERGED (#4)\n"
     facts = sj.derive_window_facts(
         window, "Three pull requests merged into main today, Sir.")
-    assert ("merge receipts in window: 1; the draft's session-wide total "
-            "cannot be checked here.") in facts
+    assert ("merge receipts in window: 1; the draft claims 3 merged; the "
+            "draft's session-wide total cannot be checked here.") in facts
+
+
+def test_a_zero_receipt_window_says_plainly_it_carries_no_receipt():
+    # A claimed total against ZERO corroboration must not read as amnesty
+    # ("checked, fine") — it has to say the window carries no receipt at
+    # all and the claim is unsupported here (2026-09-18, judge-safety
+    # review).
+    window = "[current turn]\nno merges here\n"
+    facts = sj.derive_window_facts(
+        window, "Three pull requests merged into main today, Sir.")
+    assert ("merge receipts in window: 0; the draft claims 3 merged; the "
+            "window carries no merge receipt at all, so this claim is "
+            "unsupported here.") in facts
+
+
+def test_a_nonzero_receipt_window_quotes_both_the_count_and_the_claim():
+    window = "[session receipts]\nMERGED (#4)\nMERGED (#5)\n"
+    facts = sj.derive_window_facts(
+        window, "Five pull requests merged into main today, Sir.")
+    assert ("merge receipts in window: 2; the draft claims 5 merged; the "
+            "draft's session-wide total cannot be checked here.") in facts
 
 
 def test_a_merge_total_the_window_already_matches_is_left_alone():
@@ -11941,7 +11965,8 @@ def test_a_universal_merge_claim_with_no_number_states_the_window_count():
     window = "[session receipts]\nMERGED (#4)\n"
     facts = sj.derive_window_facts(
         window, "Every item on the build list is merged, Sir.")
-    assert any("merge receipts in window: 1" in f for f in facts)
+    assert any("merge receipts in window: 1" in f
+               and "the draft claims every item merged" in f for f in facts)
 
 
 def test_a_draft_with_no_merge_total_gets_no_count_line():
@@ -11976,3 +12001,22 @@ def test_the_assembled_window_stays_inside_the_cap_with_every_layer_present(tmp_
         transcript, return_meta=True)
     assert len(derived.encode("utf-8")) <= meta["cap_bytes"]
     assert meta["total_bytes"] <= meta["cap_bytes"]
+
+
+# ------------------------- sweep: receipt-worthy-line-count warning check
+
+def test_sweep_receipt_worthy_line_count_matches_the_live_pattern():
+    sweep = _load_sweep_module()
+    window = ("[session receipts]\n"
+              "gh pr merge 4: merged\n"
+              "42 passed\n"
+              "some unrelated line\n")
+    assert sweep._receipt_worthy_line_count(sweep.sj, window) == 2
+
+
+def test_sweep_receipt_worthy_line_count_is_zero_for_no_module_pattern():
+    sweep = _load_sweep_module()
+
+    class _Bare:
+        pass
+    assert sweep._receipt_worthy_line_count(_Bare(), "42 passed\n") == 0
