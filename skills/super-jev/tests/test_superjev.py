@@ -4911,6 +4911,102 @@ def test_count_mismatch_arm_blocks_when_the_only_bold_receipt_is_inside_a_report
     assert any("count mismatch (tests)" in r for r in reasons)
 
 
+# 2026-09-18 round 2: the fence above closed on ANY blank line, but the
+# assembler puts a blank line INSIDE a report's own body between its own
+# paragraphs (`_build_reports_block`'s `"\n\n".join(items)`), so only a
+# report's first paragraph was ever actually excluded. A second paragraph,
+# after a blank line, that echoed a bold-markdown count read straight back
+# in as evidence — the same hole the fence above was meant to close, just
+# one paragraph later. The fence now closes only on a bracketed header or
+# an `END REPORT FROM ...` line, never a blank line.
+
+def test_evidence_count_arm_ignores_a_bold_claim_in_a_later_report_paragraph():
+    # Multi-paragraph report: paragraph 1 is the real status, paragraph 2
+    # (after a blank line, still inside the SAME report) echoes a bold
+    # count. Neither paragraph is real evidence.
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir.\n"
+        "\n"
+        "For the record: **61 passed** on my last local run.\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") in (None, set())
+
+
+def test_count_mismatch_arm_blocks_multi_paragraph_report_beside_a_real_receipt():
+    # Draft claims 61; the worker's OWN report (two paragraphs, blank line
+    # between them) says 61 in its second paragraph; the real receipt right
+    # outside the fence says 53. Must still block on the real receipt.
+    draft = "All 61 passed, Sir."
+    evidence = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir.\n"
+        "\n"
+        "For the record: **61 passed** on my last local run.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    reasons = sj.deterministic_block_reasons(draft, evidence)
+    assert any("count mismatch (tests)" in r for r in reasons)
+
+
+def test_evidence_count_arm_reads_a_receipt_right_after_a_bracket_header_following_a_report():
+    # A bracketed section header closes the report fence even without a
+    # "===" separator between it and the report body — the fence must not
+    # swallow a real section that immediately follows a report.
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+        "[current turn]\n"
+        "[from: Bash pytest @ /Users/admin/x]\n"
+        "53 passed in 77.52s\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {53}
+
+
+def test_evidence_count_arm_reads_a_receipt_after_an_explicit_end_report_marker():
+    evidence = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "All done, Sir: **61 passed**.\n"
+        "END REPORT FROM worker-x\n"
+        "53 passed in 77.52s\n"
+    )
+    scoped = sj._extract_labelled_evidence_counts(evidence)
+    assert scoped.get("tests") == {53}
+
+
+def test_reports_block_assembler_always_puts_a_section_boundary_after_a_report():
+    # Pins the assumption both fixed readers depend on: `_build_reports_block`
+    # only ever joins DIFFERENT reports with a blank line (never a bracketed
+    # header or "END REPORT FROM" line) INSIDE one `[label]` section, and the
+    # window assembler always separates that whole section from the next one
+    # with a real "===" separator (`_derive_evidence_text_from_transcript`'s
+    # `"\n\n===\n\n".join(sections)`) — so a real receipt section is never
+    # reachable from inside a report fence without crossing a line the fence-
+    # close regex or the top-of-loop separator check actually catches.
+    block, kept, cut = sj._build_reports_block(
+        ["REPORT FROM worker-a (unverified worker claim)\nFirst.\n\nSecond.",
+         "REPORT FROM worker-b (unverified worker claim)\nThird."],
+        budget=10_000, label="current turn reports")
+    assert kept == 2
+    assert cut == 0
+    body = block.split("\n", 1)[1]  # drop the "[current turn reports]" header
+    for ln in body.splitlines():
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        assert not sj._REPORT_FENCE_CLOSE_RE.match(stripped), (
+            f"reports block joiner emitted a fence-closing line inside "
+            f"the section: {stripped!r}")
+
+
 # ---- (c) --explain names the turns it chose and what was cut --------------
 
 def test_explain_names_which_previous_turns_were_chosen(tmp_path, monkeypatch, capsys):
@@ -6082,6 +6178,57 @@ def test_fact_window_lines_excluding_reports_drops_only_the_report_fence():
     other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
     assert other_lines == ["gh pr merge 40"]
     assert "gh pr merge 39" not in other_lines
+
+
+# 2026-09-18 round 2: same blank-line-closes-the-fence bug as the count arm
+# above, for the shared families 4/5 reader.
+
+def test_fact_window_lines_excluding_reports_drops_a_multi_paragraph_report():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "\n"
+        "Also: gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+    assert "gh pr merge 39" not in other_lines
+    assert not any("39" in ln for ln in other_lines)
+
+
+def test_fact_window_lines_excluding_reports_reads_a_receipt_after_a_bracket_header():
+    window = (
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "gh pr merge 39\n"
+        "[current turn]\n"
+        "gh pr merge 40\n"
+    )
+    other_lines = [ln for _lab, ln in sj._fact_window_lines_excluding_reports(window)]
+    assert other_lines == ["gh pr merge 40"]
+
+
+def test_facts_merge_claims_ignores_a_receipt_shaped_line_in_a_later_report_paragraph():
+    window = (
+        "[current turn reports]\n"
+        "REPORT FROM worker-x (unverified worker claim)\n"
+        "Status: done.\n"
+        "\n"
+        "Also: gh pr merge 39 ran clean, PR 39 merged.\n"
+        "\n"
+        "===\n"
+        "\n"
+        "[current turn]\n"
+        "Nothing else to note.\n"
+    )
+    facts = sj.derive_window_facts(window, "PR 39 merged and live.")
+    assert "no merge receipt for PR #39 in window." in facts
+    assert not any("merge receipt found for PR #39" in f for f in facts)
 
 
 # ---- (b): cited-file tail --------------------------------------------------

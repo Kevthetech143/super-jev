@@ -4,6 +4,20 @@
 
 No version bump.
 
+- **The count arm's `REPORT FROM ...` fence closed on any blank line, not
+  just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
+  and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
+  reader) both used a bare blank line to decide a worker's own report body
+  had ended — but the assembler puts a blank line INSIDE a report's own
+  multi-paragraph text too, so only the report's first paragraph was ever
+  actually excluded. A bold-markdown count, or a merge/CI-shaped claim,
+  sitting in a LATER paragraph of the same report read straight back in as
+  real evidence, right beside a genuine receipt that disagreed with it. Both
+  readers now close the fence only on a real structural marker — a
+  bracketed section header or an explicit `END REPORT FROM ...` line — never
+  on a blank line, which a report's own prose can legitimately contain. See
+  docs/hooks.md, "The report fence closes on structure, not blank lines".
+
 - **Four more deterministic-arm review findings closed, on top of the
   hash-split/noun-label fix above.** (1) The count arm's tokenizer folded
   `#` and `/` into the same character class as letters and digits

@@ -864,7 +864,16 @@ def _extract_labelled_evidence_counts_scoped(evidence_text):
     it. Lines inside a `REPORT FROM ... (unverified worker claim)` fence
     (see `_REPORT_MARKER_LINE_RE`) are now skipped entirely — a report's
     own claimed numbers never enter this table, only a real receipt line
-    sitting outside one does."""
+    sitting outside one does.
+
+    2026-09-18 round 2: the fence used to also close on a bare blank
+    line, but the assembler puts a blank line INSIDE a report's own body
+    between paragraphs (see `_REPORT_FENCE_CLOSE_RE`), so only a report's
+    first paragraph was ever actually excluded — a `**61 passed**` after a
+    blank line further down in the same report's own text read straight
+    back in as evidence. The fence now closes only on a real structural
+    marker (`_REPORT_FENCE_CLOSE_RE`: a bracketed header or an `END REPORT
+    FROM ...` line), never on a blank line."""
     out = {}
     if not evidence_text:
         return out
@@ -879,10 +888,12 @@ def _extract_labelled_evidence_counts_scoped(evidence_text):
         if _REPORT_MARKER_LINE_RE.match(stripped):
             in_report = True
             continue
-        if not stripped:
-            in_report = False
-            continue
         if in_report:
+            if _REPORT_FENCE_CLOSE_RE.match(stripped):
+                in_report = False
+            else:
+                continue
+        if not stripped:
             continue
         im = _RECEIPT_IDENTITY_RE.search(line)
         if im and not _RECEIPT_IDENTITY_RE.sub("", line).strip():
@@ -5207,6 +5218,22 @@ _FACT_REPORT_NOT_MERGED_RES = (
 )
 _REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM .+ \(unverified worker claim\)\s*$')
 
+# 2026-09-18: both `_extract_labelled_evidence_counts_scoped` and
+# `_fact_window_lines_excluding_reports` used to close a `REPORT FROM ...`
+# fence on any blank line — but the assembler itself puts a bare blank line
+# INSIDE a report's own body (between that worker's paragraphs, see
+# `_build_reports_block`'s `"\n\n".join(items)`), not just between a report
+# and the next real section. A multi-paragraph report whose first paragraph
+# was its actual result and whose SECOND paragraph (after the blank line)
+# happened to echo a bold-markdown count like "**61 passed**" reopened the
+# count arm to exactly the trust-boundary hole the fence exists to close,
+# right next to a real receipt. The fence now closes only on a line that is
+# itself a structural marker — a bracketed header (`[...]`, matching the
+# generic shape, not just the four names `_WINDOW_SECTION_RE` recognises) or
+# an explicit `END REPORT FROM ...` line — never on a blank line, which a
+# report's own prose can contain for entirely legitimate reasons.
+_REPORT_FENCE_CLOSE_RE = re.compile(r'^(?:\[.*\]|END REPORT FROM\b.*)$')
+
 # Family 6 (2026-09-18, SET3-AUDIT2.md section 5 #1) — written-file identity.
 # "I wrote/saved/created/updated file X" is the single highest-value claim
 # type SET3-AUDIT2 found with no free check: ten of thirty set-3 drafts open
@@ -5892,7 +5919,17 @@ def _fact_window_lines_excluding_reports(window_text):
     `_iter_window_report_lines` (the same fence tracking, inverted, to read
     ONLY a report's own words) — removed with no functional change, since
     it had no production caller and nothing besides its own partition test
-    exercised it."""
+    exercised it.
+
+    2026-09-18 round 2: the fence used to close on a bare blank line, but a
+    report's own multi-paragraph body has blank lines between its own
+    paragraphs (see `_REPORT_FENCE_CLOSE_RE`), so a receipt-shaped line in
+    a LATER paragraph of the same report still read back in as if it sat
+    outside the fence. Closes now only on a real structural marker — a
+    bracketed header or an `END REPORT FROM ...` line — never on a blank
+    line; a real section separator ("---"/"===") still closes it, same as
+    before, since that always marks a genuine boundary rather than a
+    report's own prose."""
     label = "the evidence window"
     in_report = False
     out = []
@@ -5906,10 +5943,15 @@ def _fact_window_lines_excluding_reports(window_text):
         if _REPORT_MARKER_LINE_RE.match(stripped):
             in_report = True
             continue
-        if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
+        if _SECTION_SEPARATOR_RE.match(stripped):
             in_report = False
             continue
         if in_report:
+            if _REPORT_FENCE_CLOSE_RE.match(stripped):
+                in_report = False
+            else:
+                continue
+        if not stripped:
             continue
         out.append((label, line))
     return out
