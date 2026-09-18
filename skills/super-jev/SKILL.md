@@ -129,6 +129,14 @@ echo '{"prompt": "... <teammate-message teammate_id=\"X\">COMPLETE: ...</teammat
 
 An example hook script, `hooks/userpromptsubmit-verify.sh`, wires this to `UserPromptSubmit` — see **Wiring** below.
 
+**Correction, 2026-09-17: `hook gate`'s own Stop event is where this actually runs.** A real fleet transcript shows a teammate's report landing as `"type":"user"` content in `transcript_path`, but Claude Code's `UserPromptSubmit` payload capture never fires for it — `prompt-verify` above only ever ran in this skill's own tests. `hook gate` (wired to `Stop`, which DOES fire every turn) now also scans the same `transcript_path` it already opens for gate evidence, for teammate-message report blocks this session has not already checked. New/seen is tracked per `session_id` in `ledger/state/stop-state-<session_id>.json` (the uuid of the last transcript record examined); an idle-notification echo of a report already seen (a `{"type":"idle_notification", ...}`-wrapped duplicate of the same text) is skipped, not double-checked. Capped at `SUPERJEV_STOP_SCAN_MAX_REPORTS` (default 3) reports and `SUPERJEV_STOP_SCAN_MAX_SECONDS` (default 120) seconds per Stop event; a report found past either cap is simply picked up on the next Stop event, not dropped. Each report is run through `verify` with the same auto-derived evidence as `prompt-verify` above, and judged by the same PR #20 0.80-confidence block rule (`_hook_block_decision`, with a `--dry-run` evidence probe spent only when a flag actually crosses the line) — but **advisory only**: this never touches the Stop event's own exit code, whatever the gate itself decided stands. Prints one line per report, alongside the gate's own advisory/silent line:
+
+```
+super-jev verify <teammate_id>: CLEAN|READ|REJECT — <flags> — <derived flags used> — health ok|thin
+```
+
+and writes one ledger line per report, `source: "stop-transcript"`. `hook prompt-verify` and its `UserPromptSubmit` wiring are left in place — harmless, and correct if Claude Code ever does start firing that payload for a teammate message — but this Stop-hook scan is the path that is actually live.
+
 **Subprocess timeouts.** `gate` and `verify` bound the wrapped tool's runtime — default 90s for gate (`SUPERJEV_GATE_TIMEOUT`), 300s for verify (`SUPERJEV_VERIFY_TIMEOUT`). A timeout never raises: it returns exit code 124, which is not in the hook's allow/block table, so it folds into the same fail-open advisory (exit 0) as everything else above.
 
 **No fd-level leak.** In `hook` mode the wrapped door's subprocess is always run with `capture_output=True` — never with the child's stdout/stderr inherited straight onto this process's own fd 1/2 — so a chatty wrapped tool's own table never escapes onto the hook's real stdout; only this shim's own single advisory/block line (or nothing, on a silent allow or a silent fail-open) is ever printed.
@@ -141,7 +149,7 @@ An example hook script, `hooks/userpromptsubmit-verify.sh`, wires this to `UserP
 
 `hooks/` in this skill ships three example scripts, not installed into `~/.claude/settings.json` by this skill:
 
-- **`hooks/stop-gate.sh`** — wires a Stop hook to `hook gate`, so nothing has to remember to gate a draft before the turn ends.
+- **`hooks/stop-gate.sh`** — wires a Stop hook to `hook gate`, so nothing has to remember to gate a draft before the turn ends. As of 2026-09-17 this same event also runs the teammate-report transcript scan described above — no separate wiring needed.
 - **`hooks/posttooluse-verify.sh`** — wires a PostToolUse hook (matcher `Agent`) to `hook verify`, so a sub-agent's final report gets checked as soon as it lands. For a *foreground* Agent call this is the whole story; for a *background* spawn, `tool_response` is only a launch ack or a spawn dict (see above) and this hook always skips — pair it with the next one.
 - **`hooks/userpromptsubmit-verify.sh`** — wires a `UserPromptSubmit` hook to `hook prompt-verify`, so a background spawn's real report — the `<teammate-message>` block that lands in the next user turn, which `PostToolUse` never sees — gets checked too.
 
