@@ -48,6 +48,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -759,6 +760,18 @@ _EVIDENCE_COUNT_RES = {
                    r'(?:pass|tests)[ \t]+(\d+)\b', re.IGNORECASE),
         # mocha: "164 passing (2s)"
         re.compile(r'\b(\d+)\s+passing\b', re.IGNORECASE),
+        # A worker's own bold-markdown summary of a run, "**61 passed**" —
+        # bench case bt01: the real receipt for the draft's true "61 tests
+        # per Muse" claim was a grep excerpt of Muse's own report,
+        # "`test_v2_details` → **61 passed**.", which carries no "in Ns"
+        # duration and so matched none of the shapes above. It stayed
+        # unmatched while an unrelated, EARLIER "53 passed in 77.52s"
+        # receipt (a different task's baseline run, still in scope by the
+        # shared muse-link tool path) paired instead and blocked a true
+        # report. The bold emphasis is what a worker uses to state a
+        # definitive run result in prose, so it is trusted the same way
+        # the glyph-prefixed node:test line above is.
+        re.compile(r'\*\*(\d+)\s+passed\*\*', re.IGNORECASE),
     ),
 }
 
@@ -782,12 +795,39 @@ def _extract_labelled_draft_counts(text):
     integer is only attached to a label when a keyword for that label sits
     within `_COUNT_LABEL_TOKEN_WINDOW` word-tokens of it, inside the same
     clause. An integer with no unit word near it ("PR #7", a version, a
-    duration) is attached to nothing and can never be paired."""
+    duration) is attached to nothing and can never be paired.
+
+    2026-09-18: the old tokenizer matched `[A-Za-z#/]+` and `\\d+` as
+    SEPARATE alternatives, so a run that mixes letters and digits with no
+    separator — a git short SHA like "0dca183" — split into a digit run
+    and a letter run that were no longer glued together: "0dca183" became
+    the three tokens "0", "dca", "183". Bench case bt01's draft said
+    "HEAD 0dca183, 61 tests per Muse"; both "0" and "183" landed within the
+    token window of "tests" and were read as claimed test counts alongside
+    the real "61", producing "count mismatch (tests): draft 0/61/183 vs
+    evidence 53" on a true report. One combined character class keeps a
+    mixed alnum run as ONE token; `tok.isdigit()` below already excludes
+    anything that is not a pure digit run, so a hash like "0dca183" is now
+    excluded outright instead of being read as two counts.
+
+    2026-09-18, second fix: folding `#` and `/` into that SAME character
+    class went too far the other way — `[A-Za-z0-9#/]+` swallows a slash
+    fraction or a hash-prefixed number into one glued, non-digit token, so
+    "41/41 passed", "3/41 tests pass" and "Tests #52 passed" tokenized as
+    "41/41", "3/41" and "Tests", "#52" — none of which is a pure digit run,
+    so `tok.isdigit()` drops them all and the draft claims no count at all.
+    A draft with no claimed count can never mismatch, so a false "41/41
+    passed" next to a true "3/41 tests pass" receipt passed clean. `#` and
+    `/` now tokenize as their OWN single-character tokens instead of
+    gluing to neighbouring digits, so "41/41" becomes "41", "/", "41" (two
+    digit tokens) and "#52" becomes "#", "52" (one digit token) while a
+    mixed alnum run with no `#`/`/` in it — "0dca183" — is untouched and
+    still glues into one non-digit token."""
     out = {}
     if not text:
         return out
     for clause in re.split(r'[.\n;]', text):
-        tokens = re.findall(r"[A-Za-z#/]+|\d+", clause)
+        tokens = re.findall(r"[A-Za-z0-9]+|[#/]", clause)
         labels = [(i, _label_for_word(t)) for i, t in enumerate(tokens)]
         labels = [(i, lab) for i, lab in labels if lab]
         if not labels:
@@ -812,14 +852,48 @@ def _extract_labelled_evidence_counts_scoped(evidence_text):
     `identity` is `(command, cwd)` when the line carries a `[from: ... @
     ...]` marker (see `_render_receipt_identity`), else None. Read line by
     line precisely so a count stays attached to its own marker: a receipt
-    from one repo must not lend its identity to the receipt below it."""
+    from one repo must not lend its identity to the receipt below it.
+
+    2026-09-18: this function had no `REPORT FROM ...` fence exclusion, so
+    a worker's own bold-markdown run summary inside its own unverified
+    report body ("**61 passed**") was read as a real evidence count —
+    the same trust-boundary hole families 4 and 5 were fixed for
+    (`_fact_window_lines_excluding_reports`), just for counts instead of
+    merge/CI claims. A worker could put a false total in its own report
+    text and have it clear the count arm as if a real receipt had printed
+    it. Lines inside a `REPORT FROM ... (unverified worker claim)` fence
+    (see `_REPORT_MARKER_LINE_RE`) are now skipped entirely — a report's
+    own claimed numbers never enter this table, only a real receipt line
+    sitting outside one does.
+
+    2026-09-18 round 2: the fence used to also close on a bare blank
+    line, but the assembler puts a blank line INSIDE a report's own body
+    between paragraphs (see `_REPORT_FENCE_CLOSE_RE`), so only a report's
+    first paragraph was ever actually excluded — a `**61 passed**` after a
+    blank line further down in the same report's own text read straight
+    back in as evidence. The fence now closes only on a real structural
+    marker (`_REPORT_FENCE_CLOSE_RE`: a bracketed header or an `END REPORT
+    FROM ...` line), never on a blank line."""
     out = {}
     if not evidence_text:
         return out
     sticky = None
+    in_report = False
     for line in evidence_text.splitlines():
+        stripped = line.strip()
         if _WINDOW_SECTION_RE.match(line) or _SECTION_SEPARATOR_RE.match(line):
             sticky = None          # a new section speaks for a new run
+            in_report = False
+            continue
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            in_report = True
+            continue
+        if in_report:
+            if _REPORT_FENCE_CLOSE_RE.match(stripped):
+                in_report = False
+            else:
+                continue
+        if not stripped:
             continue
         im = _RECEIPT_IDENTITY_RE.search(line)
         if im and not _RECEIPT_IDENTITY_RE.sub("", line).strip():
@@ -1197,20 +1271,66 @@ def _overclaim_100_enabled():
     return os.environ.get(OVERCLAIM_100_ENV, "0") == "1"
 _RED_CLAIM_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED")
 
-# Judge-advisory mode (2026-09-18). SUPERJEV_GATE_JUDGE_ADVISORY=1 demotes a
-# `hook gate` block to an advisory print + exit 0 when EVERY reason behind it
-# came from the judge (the OVERCLAIMS arm, or — under SUPERJEV_RULE=v2 — the
-# secondary NOT_SUPPORTED/CONTRADICTED arm). It never touches a block that
-# carries even one deterministic reason (a count mismatch, a PR mismatch, or
-# a CONTRADICTED_BY_FACT fact sentence) — those still block with the same
-# exit code as today, unconditionally. See cmd_hook's "block-judge-advisory"
-# branch, which checks this against `det_block_reasons` being empty rather
-# than special-casing which judge arm fired, so it covers v2 and v3 alike.
+# Judge-advisory mode (2026-09-18, granular 2026-09-18b). SUPERJEV_GATE_
+# JUDGE_ADVISORY demotes a `hook gate` block to an advisory print + exit 0
+# when EVERY reason behind it came from the judge. Two levels:
+#
+#   "1"    — every judge arm is advisory (the OVERCLAIMS arm, or — under
+#            SUPERJEV_RULE=v2 — the secondary NOT_SUPPORTED/CONTRADICTED
+#            arm). This is the original, unconditional behavior.
+#   "weak" — only the per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's
+#            secondary arm) and SELF_CONTRADICTORY are advisory; OVERCLAIMS
+#            still blocks. Added after the 2026-09-18 live adjudication
+#            (ops/gate-adjudication-20260918.md) found OVERCLAIMS the only
+#            judge arm worth trusting to block, while the per-claim arm and
+#            SELF_CONTRADICTORY were not. Under the default v3 rule the
+#            secondary arm already never produces a block reason on its
+#            own, so "weak" is a real change only under SUPERJEV_RULE=v2.
+#   "0"/unset — unchanged: judge-advisory mode off, every block reason
+#            (judge or deterministic) blocks exactly as it does today.
+#
+# It never touches a block that carries even one deterministic reason (a
+# count mismatch, a PR mismatch, or a CONTRADICTED_BY_FACT fact sentence) —
+# those still block with the same exit code as today, unconditionally
+# regardless of mode. See cmd_hook's "block-judge-advisory" branch, which
+# checks this against `det_block_reasons` being empty rather than special-
+# casing which judge arm fired, so it covers v2 and v3 alike.
 JUDGE_ADVISORY_ENV = "SUPERJEV_GATE_JUDGE_ADVISORY"
+# Verdicts a "weak" judge-advisory mode still demotes — never OVERCLAIMS.
+_JUDGE_ADVISORY_WEAK_VERDICTS = ("NOT_SUPPORTED", "CONTRADICTED", "SELF_CONTRADICTORY")
+_JUDGE_ADVISORY_REASON_VERDICT_RE = re.compile(r'^\S+\s+([A-Z_]+)\s+\d')
+
+
+def _judge_advisory_mode():
+    """"1" (all judge arms advisory), "weak" (only the per-claim NOT_
+    SUPPORTED/CONTRADICTED and SELF_CONTRADICTORY arms advisory — OVERCLAIMS
+    still blocks), or "0" (off, any other value or unset)."""
+    v = os.environ.get(JUDGE_ADVISORY_ENV, "0")
+    if v == "weak":
+        return "weak"
+    if v == "1":
+        return "1"
+    return "0"
 
 
 def _judge_advisory_enabled():
-    return os.environ.get(JUDGE_ADVISORY_ENV, "0") == "1"
+    return _judge_advisory_mode() != "0"
+
+
+def _judge_advisory_reasons_are_weak_only(block_reasons):
+    """True when every "key VERDICT score" string in `block_reasons` names
+    a verdict `_JUDGE_ADVISORY_WEAK_VERDICTS` covers (never OVERCLAIMS) —
+    what "weak" mode requires before it will demote a block. An empty or
+    unparsed list is NOT weak-only (nothing to safely demote), matching the
+    fail-closed direction every other block-suppression check in this file
+    takes."""
+    if not block_reasons:
+        return False
+    for r in block_reasons:
+        m = _JUDGE_ADVISORY_REASON_VERDICT_RE.match(r.strip())
+        if not m or m.group(1) not in _JUDGE_ADVISORY_WEAK_VERDICTS:
+            return False
+    return True
 
 # ------------------------------------------------- the evidence inventory
 #
@@ -1682,6 +1802,48 @@ def _hook_block_reasons(flags, claim_rows=None, evidence=None):
     return reasons
 
 
+# --------------------------------------- gate-adjudication-20260918.md fixes
+#
+# The receipt is one turn old — the current turn ran no tools but the
+# draft correctly restates a result whose receipt sits in the
+# previous-turn block, not this turn's own (a merge, a spawn or a log read
+# a turn or two earlier, still real evidence for a reply about it now).
+# The most recent previous turn that ran tools is named in a DERIVED FACTS
+# sentence pointing at its existing "[previous turn -N]" header (no header
+# rewrite — see _receipt_turn_index and _receipt_turn_extra_fact).
+
+
+def _receipt_turn_index(window_meta):
+    """The most recent previous turn (lowest -N, i.e. turn -1 before turn
+    -2) that ran its own tools AND is still kept in the assembled window —
+    `window_meta["prev_turn_detail"]` from `_derive_evidence_text_from_
+    transcript`, ordered turn=1 (most recent) upward — or None when no
+    previous turn qualifies (nothing kept, or every kept turn ran no tools
+    of its own, receipts-only). This is "the receipt turn" mechanism (a)
+    targets: a current turn that ran no tools can still be a correct,
+    checkable restatement of a result from the turn right before it."""
+    for d in (window_meta or {}).get("prev_turn_detail") or []:
+        if d.get("kept") and (d.get("tool_results") or 0) > 0:
+            return d.get("turn")
+    return None
+
+
+def _receipt_turn_extra_fact(receipt_idx):
+    """The DERIVED FACTS sentence naming the receipt turn, for
+    `compose_window_with_facts`'s `extra_facts`. Points at the receipt
+    turn's existing "[previous turn -N]" header rather than rewriting it,
+    so every existing window-parsing regex (_WINDOW_PART_RE for the trim
+    order, _WINDOW_SECTION_RE for fact-line labelling) stays correct with
+    nothing new to keep in sync. None when there is no receipt turn to
+    name."""
+    if receipt_idx is None:
+        return None
+    return (f"RECEIPT TURN: the current turn ran no tools of its own; turn "
+           f"-{receipt_idx} (see [previous turn -{receipt_idx}] below) is the "
+           "most recent turn that did, and counts as this reply's receipt, not "
+           "out-of-window material.")
+
+
 def _strip_patterns():
     """The compiled-pattern source strings to strip from a draft before it
     goes to the gate: SUPERJEV_STRIP_PATTERNS (a JSON list of regex
@@ -1855,6 +2017,65 @@ def _npm_missing_refusal(json_mode, door):
     return 1
 
 
+# The hook payload (stdin JSON from a real Claude Code Stop/PostToolUse/
+# UserPromptSubmit event) for the invocation currently running, if any —
+# set once by cmd_hook/cmd_hook_prompt_verify right after stdin is parsed,
+# and read back by _current_bot_id/_current_origin below so every ledger
+# write in this same process (including the ones inside run_door, which
+# fire from deep inside cmd_gate/cmd_verify) can attribute itself without
+# payload having to be threaded through every call site. A manual CLI
+# invocation (no hook) leaves this None, which both helpers treat as "no
+# hook context" rather than an error.
+_ACTIVE_HOOK_PAYLOAD = None
+
+
+def _bot_id_from_transcript_path(transcript_path):
+    """The claw4mac project-dir segment out of a transcript_path — the
+    part after "agent-cwd-" up to the next path separator, e.g.
+    "claw4mac-primary" out of ".../-Users-admin--ai-wrapper-agent-cwd-
+    claw4mac-primary/<uuid>.jsonl". None if transcript_path is not a
+    string, or carries no such segment."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return None
+    m = re.search(r'agent-cwd-([^/]+)', transcript_path)
+    return m.group(1) if m else None
+
+
+def _current_bot_id():
+    """The bot id a ledger entry attributes itself to: CLAW4MAC_SESSION_ID
+    (the env var the fleet actually sets on each seat, e.g. "primary"),
+    else CLAW4MAC_BOT_ID, else CLAUDE_BOT_ID from the environment if any of
+    the three is set, else derived from the active hook payload's
+    transcript_path (see _bot_id_from_transcript_path) with the
+    "claw4mac-" prefix stripped so a derived id lands in the same
+    vocabulary as the env vars (e.g. "primary", not "claw4mac-primary"),
+    else "unknown"."""
+    env_bot = (os.environ.get("CLAW4MAC_SESSION_ID")
+               or os.environ.get("CLAW4MAC_BOT_ID")
+               or os.environ.get("CLAUDE_BOT_ID"))
+    if env_bot:
+        return env_bot
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    derived = _bot_id_from_transcript_path(payload.get("transcript_path"))
+    if derived and derived.startswith("claw4mac-"):
+        derived = derived[len("claw4mac-"):]
+    return derived or "unknown"
+
+
+def _current_origin():
+    """"bench" when SUPERJEV_BENCH=1 in the environment, or the active hook
+    payload's session_id starts with "bench-"; "live" otherwise (including
+    every ordinary hook firing from a real Claude Code session, and every
+    manual CLI invocation with no bench markers)."""
+    if os.environ.get("SUPERJEV_BENCH") == "1":
+        return "bench"
+    payload = _ACTIVE_HOOK_PAYLOAD or {}
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id.startswith("bench-"):
+        return "bench"
+    return "live"
+
+
 def ledger_append(entry):
     """Append one JSONL line to the call ledger. Never raises — a ledger
     problem must never break a door — but an unwritable ledger is not
@@ -1863,8 +2084,11 @@ def ledger_append(entry):
 
     Every entry gets a short unique `id` (if it does not already carry
     one) — `feedback --ledger-id` and the calibration export both address
-    a ledger line by this."""
+    a ledger line by this. Every entry also gets `bot` and `origin` (if
+    not already carrying them) — see _current_bot_id/_current_origin."""
     entry.setdefault("id", uuid.uuid4().hex[:12])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -1916,8 +2140,11 @@ def catch_ledger_append(entry):
     Exception, not just OSError (a bad entry that json.dumps chokes on, a
     permissions error, anything at all), because this call sits strictly
     after a real decision has already been returned and must never
-    propagate."""
+    propagate. Gets `bot` and `origin` the same way ledger_append does, if
+    not already carrying them."""
     entry.setdefault("id", uuid.uuid4().hex[:10])
+    entry.setdefault("bot", _current_bot_id())
+    entry.setdefault("origin", _current_origin())
     try:
         CATCH_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(CATCH_LEDGER_PATH, "a", encoding="utf-8") as f:
@@ -2283,7 +2510,9 @@ def cmd_catch(a):
         return _cmd_catch_tag(a)
     if action == "report":
         return _cmd_catch_report(a)
-    return refuse("catch: no action — use list, tag or report")
+    if action == "signal":
+        return _cmd_catch_signal(a)
+    return refuse("catch: no action — use list, tag, report or signal")
 
 
 def _catch_refuse3(line):
@@ -2316,15 +2545,48 @@ def _cmd_catch_list(a):
     records, undated = _catch_filter_since(records, since)
     if getattr(a, "untagged", False):
         records = [r for r in records if r.get("tag") is None]
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
+    only_id = getattr(a, "id", None)
+    if only_id:
+        records = [r for r in records if r.get("id") == only_id]
+        if not records:
+            print(f"catch list: no record with id {only_id!r}")
+            return 0
+        # --id is the "redacted detail" lookup `catch signal`'s own issue
+        # body points a human at (see _catch_signal_body) — the one-line
+        # table below only ever shows the FIRST reason, so a single-record
+        # --id lookup prints every reason plus the redacted draft excerpt
+        # too (already _catch_redact-ed when the record was first written
+        # — see catch_log), not just that one summary line.
+        rec = records[0]
+        tag = rec.get("tag") or "-"
+        print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
+              f"{rec.get('decision','?'):10s}  tag={tag}")
+        for reason in (rec.get("reasons") or []):
+            print(f"  reason: {reason}")
+        if rec.get("note"):
+            print(f"  note: {rec['note']}")
+        if rec.get("draft_excerpt"):
+            print(f"  draft: {rec['draft_excerpt']!r}")
+        return 0
     if not records:
         print("catch list: no records")
     else:
+        # Width sized to the longest bot id actually being printed this call
+        # (floored at len("unknown")) rather than a fixed pad — a fixed pad
+        # narrower than a real seat name (e.g. "contentcreator") let that
+        # row's bot field run into the reason column with no gap.
+        bot_width = max([len(str(rec.get("bot") or "unknown")) for rec in records]
+                        + [len("unknown")])
         for rec in records:
             reasons = rec.get("reasons") or []
             first_reason = reasons[0] if reasons else ""
             tag = rec.get("tag") or "-"
+            bot = rec.get("bot") or "unknown"
             print(f"{rec.get('id','?')}  {rec.get('ts','?')}  {rec.get('door','?'):8s}  "
-                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  {first_reason}")
+                  f"{rec.get('decision','?'):10s}  tag={tag:6s}  bot={bot:<{bot_width}s}  {first_reason}")
     if since and undated:
         print(f"catch list: {undated} undated record(s) excluded from the --since window")
     return 0
@@ -2403,6 +2665,9 @@ def _cmd_catch_report(a):
                               "showing all time")
     records = _catch_records()
     records, undated = _catch_filter_since(records, since)
+    bot_filter = getattr(a, "bot", None)
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
     fair = sum(1 for r in records if r.get("tag") == "fair")
     false = sum(1 for r in records if r.get("tag") == "false")
     miss = sum(1 for r in records if r.get("tag") == "miss")
@@ -2442,6 +2707,570 @@ def _cmd_catch_report(a):
               "fair/false answer different questions, see docs/hooks.md)")
     if since:
         print(f"undated: {undated}")
+    if not bot_filter:
+        by_bot = Counter(r.get("bot") or "unknown" for r in records)
+        if by_bot:
+            print("by bot:")
+            for bot, n in sorted(by_bot.items(), key=lambda kv: (-kv[1], kv[0])):
+                print(f"  {bot}: {n}")
+    return 0
+
+
+# --------------------------------------------------------- catch signal
+#
+# `catch signal` is the first step of the compounding loop: harness
+# catches -> tags -> issue -> fix PR -> bench robot. It never invents a
+# pattern — it only groups catch-ledger records a human already tagged
+# "false" (a block that was wrong: the draft was actually true) or "miss"
+# (an allow that let a lie through) by REASON FAMILY: the reason string
+# with its numbers/values stripped, so "count mismatch (tests): draft
+# 0/61 vs evidence 53" and "count mismatch (tests): draft 2/9 vs evidence
+# 4" collapse into the same family, "count mismatch (tests)" — same
+# detection arm, different numbers. Once a family reaches --min, `catch
+# signal` offers to draft (or, with --open, actually file) a GitHub issue
+# describing the pattern with a handful of redacted examples pulled
+# straight from the ledger's own excerpts — never the raw payload.
+
+_CATCH_FAMILY_COUNT_MISMATCH_RE = re.compile(r'^(count mismatch \([^)]*\))')
+
+# A judge-score-shaped reason — f"{k} {v} {s:.2f}" (see _catch_reason_family's
+# own docstring) with an optional leading c<digits> claim key and an optional
+# trailing parenthetical, e.g. "c2 CONTRADICTED 0.82" or "overclaim OVERCLAIMS
+# 0.94 (overclaim==1.00 arm)". This is the one colonless shape the generic
+# fallback below is actually meant to strip down to a bare verdict name —
+# anything ELSE colonless (an advisory note, free text) does not match this
+# and is bucketed instead (see _catch_reason_advisory_bucket).
+_CATCH_FAMILY_SCORE_RE = re.compile(
+    r'^(?:c\d+|[a-z_]+)\s+[A-Z_]+\s+\d+(?:\.\d+)?(?:/\d+(?:\.\d+)?)*(?:\s*\([^)]*\))?$'
+)
+
+_CATCH_ADVISORY_BUCKET_WORD_RE = re.compile(r'^[A-Za-z]+$')
+
+_CATCH_FAMILY_MAX_LEN = 60
+
+
+def _catch_reason_advisory_bucket(reason):
+    """Fixed bucket for a reason string with no recognised `HEADER:`/
+    judge-score keyword prefix — a colonless advisory note (e.g. one
+    embedding a `--test-cmd '...'` argument). Before this, such a reason
+    became the family VERBATIM: the whole, unbounded, unescaped note
+    reached a public issue title/body (the one string that ever skipped
+    both _catch_redact and _catch_signal_escape_markdown), and one
+    advisory note per differing detail/score never collapsed into a
+    single family the way every other arm's blocks did. Uses the
+    reason's first two words when both are plain letters (so notes
+    sharing the same score-free lead-in still collapse into one family,
+    not one per note), else the fixed literal "advisory-note"."""
+    words = reason.split()
+    first_two = words[:2]
+    if first_two and all(_CATCH_ADVISORY_BUCKET_WORD_RE.match(w) for w in first_two):
+        return " ".join(first_two)[:40]
+    return "advisory-note"
+
+
+def _catch_reason_family(reason):
+    """The reason string with its numbers/values stripped off, so repeat
+    false/miss blocks from the SAME detection arm collapse into one
+    family regardless of which numbers or claim key fired that time.
+    Three shapes are named outright: "count mismatch (<label>)" keeps its
+    label (the label is the identity that matters, the draft/evidence
+    counts are not), "PR mismatch: ..." and "LABELLED VALUE: ..." collapse
+    to their own bare header. Anything else falls back to a generic strip:
+    drop a trailing parenthetical (e.g. "(overclaim==1.00 arm)"), then a
+    trailing run of numbers (a score like "0.94", or a key/verdict/score
+    triple's own score). The judge's own reason shape is
+    f"{k} {v} {s:.2f}" where k is either a PER-CALL claim key (c1, c2, c3,
+    ...) or a NAMED arm key (overclaim, leaked_internal, time_sensitive,
+    self_contradictory). A per-call key is not part of the family's
+    identity, only which claim index in that turn's draft happened to trip
+    the arm, so leaving it in used to split one arm's blocks across as
+    many families as there were claim indices and a real repeat pattern
+    (six separate OVERCLAIMS blocks, say) could never reach --min. A
+    leading c<digits> token is now stripped for that reason, so
+    "c2 CONTRADICTED 0.82" -> "CONTRADICTED" and "c1 OVERCLAIMS 0.91
+    (overclaim==1.00 arm)" -> "OVERCLAIMS" — every c<digits> variant of the
+    same arm collapses to one family. A NAMED arm key IS part of the arm's
+    identity (not a per-call index) and is kept, so "overclaim OVERCLAIMS
+    0.94" -> "overclaim OVERCLAIMS" and "leaked_internal HAS_LEAKS 0.95"
+    -> "leaked_internal HAS_LEAKS" unchanged. A reason with neither a
+    recognised `HEADER:` prefix (no colon at all) nor the judge's own
+    score shape — a colonless advisory note, e.g. one embedding a
+    `--test-cmd '...'` argument — used to fall all the way through this
+    same generic strip and come out as the ENTIRE reason, verbatim:
+    unbounded, and never run through _catch_redact or
+    _catch_signal_escape_markdown before reaching a public issue
+    title/body. That shape is now bucketed instead (see
+    _catch_reason_advisory_bucket) so one advisory note collapses into
+    one family per score-free lead-in, not one per note. Every return
+    path is capped at _CATCH_FAMILY_MAX_LEN (60) chars and passed through
+    _catch_signal_escape_markdown — belt-and-braces alongside the same
+    escape _catch_signal_title/_catch_signal_body apply again at
+    render time, since a *recognised*-header family can still carry a
+    backtick/@handle/#NN if the draft text before the colon did. Never
+    raises; an empty/falsy reason returns ""."""
+    if not reason:
+        return ""
+    reason = str(reason).strip()
+    m = _CATCH_FAMILY_COUNT_MISMATCH_RE.match(reason)
+    if m:
+        family = m.group(1)
+    elif reason.startswith("PR mismatch"):
+        family = "PR mismatch"
+    elif reason.startswith("LABELLED VALUE"):
+        family = "LABELLED VALUE"
+    elif ":" not in reason and not _CATCH_FAMILY_SCORE_RE.match(reason):
+        family = _catch_reason_advisory_bucket(reason)
+    else:
+        prefix = reason.split(":", 1)[0].strip()
+        prefix = re.sub(r'\s*\([^)]*\)\s*$', '', prefix)
+        prefix = re.sub(r'\s+\d+(\.\d+)?(/\d+(\.\d+)?)*\s*$', '', prefix)
+        prefix = re.sub(r'^c\d+\s+', '', prefix)
+        prefix = prefix.strip()
+        family = prefix if prefix else _catch_reason_advisory_bucket(reason)
+    family = _catch_signal_escape_markdown(family)
+    return family[:_CATCH_FAMILY_MAX_LEN]
+
+
+def _catch_signal_groups(records, tags=("false", "miss")):
+    """{(tag, family): [records...]}, sorted by ts ascending within each
+    group, for every record whose tag is in `tags` and whose first
+    reason string is non-empty — a tagged record with no reasons has
+    nothing to group by and is silently skipped, never a crash."""
+    groups = {}
+    for rec in records:
+        tag = rec.get("tag")
+        if tag not in tags:
+            continue
+        reasons = rec.get("reasons") or []
+        if not reasons:
+            continue
+        family = _catch_reason_family(reasons[0])
+        if not family:
+            continue
+        groups.setdefault((tag, family), []).append(rec)
+    for key in groups:
+        groups[key].sort(key=lambda r: r.get("ts") or "")
+    return groups
+
+
+# --------------------------------------------- markdown-injection guard
+#
+# _catch_signal_escape_markdown is only ever reached by draft-derived text
+# — a redacted reason line or draft excerpt shown under the local-only
+# --with-reasons/--with-drafts flags (see _cmd_catch_signal: that
+# combination is a hard refusal alongside --open, so this text never
+# reaches a real `gh issue create` body). Even a REDACTED excerpt is still
+# attacker-controlled text pulled from a draft the model itself wrote —
+# nothing stops it from carrying literal markdown/GitHub-autolink syntax
+# (a fenced code block, an @mention, a "fixes #NN" auto-close/auto-link
+# form) that would render live if this text were ever pasted into an
+# issue/PR body or comment. Three specific constructs are neutralised:
+#   - a backtick is replaced with the fullwidth lookalike ` (U+FF40), so
+#     draft text can never open/close a code span or escape a fenced
+#     block early;
+#   - "@handle" has its "@" replaced with "at:", so GitHub never turns it
+#     into a real user mention/notification;
+#   - "#123"-shaped text has its "#" replaced with "no.", so GitHub never
+#     auto-links/auto-closes an issue or PR off draft text.
+# Never raises: an empty/None input returns "".
+_MD_HANDLE_RX = re.compile(r'@(?=\w)')
+_MD_ISSUE_REF_RX = re.compile(r'#(?=\d)')
+
+
+def _catch_signal_escape_markdown(text):
+    if not text:
+        return text or ""
+    out = text.replace("`", "｀")
+    out = _MD_HANDLE_RX.sub("at:", out)
+    out = _MD_ISSUE_REF_RX.sub("no.", out)
+    return out
+
+
+def _catch_signal_examples(records, limit=3, with_reasons=False, with_drafts=False):
+    """Up to `limit` examples off the front of `records` (already sorted
+    oldest-first by the caller). By default an example is metadata ONLY —
+    just the record id — because a public `catch signal --open` issue
+    must never carry draft-derived text at all (see BLOCKING 1: names,
+    addresses, order numbers, health details, dollar figures, non-US
+    phone numbers and token URLs all used to reach the issue body despite
+    _catch_redact, because that redaction net only ever covered a few
+    narrow shapes — secrets, emails, US phone numbers, SSNs, card
+    numbers). A reason line is added only when `with_reasons` is set, a
+    draft excerpt only when `with_drafts` is set — both are local-only
+    flags `_cmd_catch_signal` refuses to combine with `--open` (hard
+    error, exit 2), so this function is never called with either True on
+    a run that could reach `gh issue create`. When either is set, the
+    field still goes through _catch_redact again here even though
+    draft_excerpt was already redacted when the record was first written
+    (belt and suspenders), and then through _catch_signal_escape_markdown
+    — draft-derived text is never rendered anywhere without both passes."""
+    out = []
+    for rec in records[:limit]:
+        ex = {"id": rec.get("id", "")}
+        if with_reasons:
+            reasons = rec.get("reasons") or []
+            reason_line = _catch_redact(reasons[0]) if reasons else ""
+            ex["reason"] = _catch_signal_escape_markdown(reason_line)
+        if with_drafts:
+            draft = _catch_redact(rec.get("draft_excerpt") or "")[:300]
+            ex["draft"] = _catch_signal_escape_markdown(draft)
+        out.append(ex)
+    return out
+
+
+_CATCH_SIGNAL_TITLE_TEMPLATES = {
+    "false": "false block: {family} (x{count})",
+    "miss": "missed lie: {family} (x{count})",
+}
+
+
+def _catch_signal_title(tag, family, count):
+    """A signal's title — belt-and-braces escapes `family` again here
+    even though _catch_reason_family already bounds and escapes it, since
+    a *recognised*-header family (e.g. the text before a colon in a
+    draft-derived reason) can still carry a backtick/@handle/#NN if the
+    draft text before that colon did."""
+    tmpl = _CATCH_SIGNAL_TITLE_TEMPLATES.get(tag, "{tag} pattern: {family} (x{count})")
+    return tmpl.format(tag=tag, family=_catch_signal_escape_markdown(family), count=count)
+
+
+def _catch_signal_bot_counts(records):
+    """{bot_id: count} for one family's records, counts only — no reason/
+    draft text, so this is safe in the default (--open-reachable) body
+    the same way the rest of a signal's metadata is. A missing `bot`
+    field (an older record written before the ledger tagged bot/origin)
+    counts under "unknown", same fallback `catch list`'s own bot column
+    uses. Sorted by count desc then bot id, for a stable order."""
+    counts = {}
+    for rec in records:
+        bot = rec.get("bot") or "unknown"
+        counts[bot] = counts.get(bot, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _build_catch_signals(records, since_spec, min_count, with_reasons=False,
+                         with_drafts=False):
+    """(signals, undated) — one signal dict per (tag, family) that has
+    reached `min_count` records, sorted by count desc then tag/family for
+    a stable order across runs. `since_spec` is applied via the same
+    _catch_filter_since every other `catch` subcommand uses, so an
+    undated record is excluded from the window (never silently "recent")
+    and its count is returned separately, same contract as `catch
+    list`/`catch report`. `with_reasons`/`with_drafts` are passed straight
+    through to _catch_signal_examples — see there for what each adds and
+    why both default off."""
+    filtered, undated = _catch_filter_since(records, since_spec)
+    groups = _catch_signal_groups(filtered)
+    signals = []
+    for (tag, family), recs in groups.items():
+        if len(recs) < min_count:
+            continue
+        signals.append({
+            "tag": tag,
+            "family": family,
+            "count": len(recs),
+            "first_ts": recs[0].get("ts"),
+            "last_ts": recs[-1].get("ts"),
+            "ids": [r.get("id") for r in recs],
+            "examples": _catch_signal_examples(recs, with_reasons=with_reasons,
+                                               with_drafts=with_drafts),
+            "title": _catch_signal_title(tag, family, len(recs)),
+            "bot_counts": _catch_signal_bot_counts(recs),
+        })
+    signals.sort(key=lambda s: (-s["count"], s["tag"], s["family"]))
+    return signals, undated
+
+
+def _catch_signal_bot_line(bot_counts):
+    """The counts-only per-bot breakdown line — e.g. 'primary=3,
+    worker2=1' — or "" for an empty/missing dict (older signal, or a
+    caller that never computed it)."""
+    if not bot_counts:
+        return ""
+    return ", ".join(f"{bot}={count}" for bot, count in bot_counts.items())
+
+
+def _print_catch_signal(signal):
+    print(f"signal: {signal['title']}")
+    print(f"  family: {signal['family']}  tag: {signal['tag']}  count: {signal['count']}")
+    print(f"  first: {signal['first_ts']}  last: {signal['last_ts']}")
+    bot_line = _catch_signal_bot_line(signal.get("bot_counts"))
+    if bot_line:
+        print(f"  by bot: {bot_line}")
+    for i, ex in enumerate(signal["examples"], 1):
+        line = f"  example {i} ({ex['id']})"
+        if "draft" in ex:
+            line += f": draft: {ex['draft']!r}"
+        print(line)
+        if ex.get("reason"):
+            print(f"              reason: {ex['reason']!r}")
+
+
+def _catch_signal_body(signal):
+    """The full GitHub issue body (markdown) for one signal. By default
+    (no `with_reasons`/`with_drafts` on the signal's examples — see
+    _catch_signal_examples) this holds ONLY family, count, first/last
+    timestamps and record ids, plus a pointer to run `catch list` locally
+    for the redacted detail — a public issue never carries draft-derived
+    text at all (BLOCKING 1). Any draft/reason text that IS present (the
+    local-only --with-reasons/--with-drafts modes, never reachable from
+    --open — see _cmd_catch_signal) already passed through both
+    _catch_redact and _catch_signal_escape_markdown via
+    _catch_signal_examples, so this function only assembles strings, it
+    never touches raw text itself. `family` is passed through
+    _catch_signal_escape_markdown again here too — same belt-and-braces
+    reasoning as _catch_signal_title."""
+    safe_family = _catch_signal_escape_markdown(signal['family'])
+    lines = [
+        f"## {signal['title']}",
+        "",
+        f"Reason family: `{safe_family}`",
+        f"Tag: {signal['tag']}",
+        f"Count: {signal['count']}",
+        f"First seen: {signal['first_ts']}",
+        f"Last seen: {signal['last_ts']}",
+    ]
+    bot_line = _catch_signal_bot_line(signal.get("bot_counts"))
+    if bot_line:
+        lines.append(f"By bot: {bot_line}")
+    lines += [
+        "",
+        "### Records",
+        "",
+    ]
+    examples_by_id = {ex["id"]: ex for ex in signal["examples"]}
+    for rec_id in signal["ids"]:
+        ex = examples_by_id.get(rec_id, {"id": rec_id})
+        line = f"- `{rec_id}`"
+        if "reason" in ex:
+            line += f" — reason: `{ex['reason']}`"
+        if "draft" in ex:
+            line += f" — draft: `{ex['draft']}`"
+        lines.append(line)
+    lines += [
+        "",
+        "Run `superjev catch list --id <id>` locally for the redacted detail "
+        "behind any record id above — this issue body never carries "
+        "draft-derived text (see docs/hooks.md, \"Turning a repeat pattern "
+        "into a fix PR\").",
+        "",
+        "---",
+        "Filed automatically by `superjev catch signal` from the catch ledger — "
+        "the first step of the compounding loop: harness catches -> tags -> "
+        "issue -> fix PR -> bench robot.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _catch_signal_has_pii(text):
+    """True if `text` still matches an email/phone/SSN pattern — a
+    belt-and-braces assert `catch signal --open` runs on the FULL
+    assembled issue body right before it would call `gh issue create`.
+    Since BLOCKING 1, the default (--open-reachable) body never carries
+    draft-derived text at all — only family/count/timestamps/ids/a
+    `catch list` pointer — so this should structurally never fire on that
+    path; it stays wired in as a final, cheap check that needs no draft
+    text and no monkeypatching to exercise (call it directly with a body
+    string containing a literal email). Never raises; empty/falsy text is
+    never a match."""
+    if not text:
+        return False
+    if _COMPILED_EMAIL[1].search(text):
+        return True
+    for _kind, rx in _COMPILED_CATCH_REDACT:
+        if rx.search(text):
+            return True
+    return False
+
+
+def _catch_signals_sidecar_path():
+    """<catch ledger dir>/signals.jsonl — one line per (tag, family) this
+    process has ever filed an issue for via `catch signal --open`, so the
+    same family is never filed twice. Deliberately a sidecar file, not a
+    note written back onto the matched catch-ledger records themselves:
+    a record's `note` field already carries the human's own tag reason
+    (see `catch tag`), and overwriting it with an issue URL would destroy
+    that annotation."""
+    return CATCH_LEDGER_PATH.parent / "signals.jsonl"
+
+
+def _catch_signal_already_filed(tag, family):
+    """The issue URL already on file for this (tag, family) pair, from an
+    earlier `catch signal --open` run (this process or any other), or
+    None. Reads the sidecar fresh every call — never cached — so a filed
+    signal is never re-filed even across separate cron invocations."""
+    path = _catch_signals_sidecar_path()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("tag") == tag and rec.get("family") == family:
+            return rec.get("issue_url")
+    return None
+
+
+def _catch_signal_record_filed(tag, family, count, ids, issue_url):
+    """Appends one line to the signals.jsonl sidecar recording that this
+    (tag, family) has now been filed — see _catch_signal_already_filed.
+    Never raises: a write failure prints to stderr and is otherwise
+    silent, same contract as catch_ledger_append/_rewrite_catch_records —
+    the issue is already filed by the time this runs, so a sidecar write
+    failure must never look like the filing itself failed."""
+    path = _catch_signals_sidecar_path()
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "tag": tag,
+        "family": family,
+        "count": count,
+        "ids": ids,
+        "issue_url": issue_url,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"super-jev: could not write catch signals sidecar at {path}: {exc}",
+              file=sys.stderr)
+
+
+_GH_ISSUE_TIMEOUT = 15
+
+
+def _run_gh_issue_create(repo, title, body):
+    """One `gh issue create` call for `catch signal --open`: never
+    interactive (GH_PROMPT_DISABLED=1, stdin closed), a 15s timeout, and
+    never raises. Returns (True, issue_url) on success or (False,
+    stderr-or-message) otherwise. The body is written to a temp file
+    (--body-file) rather than passed as an argv string, so a large body
+    or one containing shell-special characters is never mangled or
+    truncated by argv limits."""
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(body)
+            tmp_path = f.name
+        cmd = ["gh", "issue", "create", "--repo", repo, "--title", title,
+               "--body-file", tmp_path, "--label", "harness-signal"]
+        env = dict(os.environ)
+        env["GH_PROMPT_DISABLED"] = "1"
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=_GH_ISSUE_TIMEOUT, env=env,
+                           stdin=subprocess.DEVNULL)
+        if p.returncode != 0:
+            return False, (p.stderr or p.stdout or "gh issue create failed").strip()
+        out_lines = (p.stdout or "").strip().splitlines()
+        url = out_lines[-1].strip() if out_lines else ""
+        return True, url
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _cmd_catch_signal(a):
+    since = getattr(a, "since", None)
+    if since and _parse_since(since) is None:
+        return _catch_refuse3(f"catch signal: --since {since!r} is not a valid duration "
+                              "(e.g. 24h, 7d, 30m) — refusing rather than silently "
+                              "showing all time")
+    # N: --min 0 used to silently become --min 3 (`getattr(a, "min", 3) or 3`
+    # treats a real, explicit 0 the same as "not given" because 0 is falsy).
+    # Checked against `is None` instead, so an explicit --min 0 reaches the
+    # "--min must be at least 1" refusal below rather than being silently
+    # rewritten to 3.
+    min_count = a.min if getattr(a, "min", None) is not None else 3
+    if min_count < 1:
+        return refuse("catch signal: --min must be at least 1")
+    open_issues = getattr(a, "open", False)
+    dry_run = getattr(a, "dry_run", False)
+    repo = getattr(a, "repo", None)
+    with_reasons = getattr(a, "with_reasons", False)
+    with_drafts = getattr(a, "with_drafts", False)
+    if open_issues and not repo:
+        return refuse("catch signal --open needs --repo owner/name")
+    # BLOCKING 2: --with-reasons/--with-drafts render draft-derived text
+    # locally (escaped, but still draft-derived) — --open files a PUBLIC
+    # issue, which must never carry any draft-derived text at all (see
+    # _catch_signal_body). Refusing the combination outright, rather than
+    # silently ignoring the flags under --open, is a hard usage error
+    # (exit 2, argparse's own convention) so a caller never gets surprised
+    # by which mode actually ran.
+    if open_issues and (with_reasons or with_drafts):
+        print("super-jev: catch signal --open refuses --with-reasons/--with-drafts — "
+              "a public issue body must never carry draft-derived text; drop --open "
+              "to preview locally with either flag", file=sys.stderr)
+        return 2
+
+    bot_filter = getattr(a, "bot", None)
+    records = _catch_records()
+    if bot_filter:
+        records = [r for r in records if r.get("bot") == bot_filter]
+    signals, undated = _build_catch_signals(records, since, min_count,
+                                            with_reasons=with_reasons,
+                                            with_drafts=with_drafts)
+    if not signals:
+        print(f"catch signal: no reason family has reached --min {min_count} "
+              "false/miss block(s)")
+        if since and undated:
+            print(f"catch signal: {undated} undated record(s) excluded from the "
+                  "--since window")
+        return 1
+
+    # NIT: `--open` used to always return 0 even when every filing in the
+    # loop below failed (gh error, or the PII refusal) — a cron caller had
+    # no way to branch on "signal(s) found but nothing actually got filed"
+    # without parsing stdout/stderr. Tracked here and turned into exit 3
+    # (the shared "refused for a domain reason" exit — see _catch_refuse3)
+    # once every signal has been attempted.
+    any_filing_failed = False
+    for signal in signals:
+        _print_catch_signal(signal)
+        body = _catch_signal_body(signal)
+        if dry_run:
+            print("  --- issue body (--dry-run, gh never called) ---")
+            for line in body.splitlines():
+                print(f"  {line}")
+            print("  --- end issue body ---")
+            continue
+        if not open_issues:
+            continue
+        already = _catch_signal_already_filed(signal["tag"], signal["family"])
+        if already:
+            print(f"  already filed: {already}")
+            continue
+        if _catch_signal_has_pii(body):
+            print("  refusing to open an issue for this signal: the assembled "
+                  "body still matches an email/phone/SSN pattern after "
+                  "redaction — not filed", file=sys.stderr)
+            any_filing_failed = True
+            continue
+        ok, result = _run_gh_issue_create(repo, signal["title"], body)
+        if not ok:
+            print(f"  gh issue create failed: {result}", file=sys.stderr)
+            any_filing_failed = True
+            continue
+        print(f"  filed: {result}")
+        _catch_signal_record_filed(signal["tag"], signal["family"], signal["count"],
+                                   signal["ids"], result)
+
+    if since and undated:
+        print(f"catch signal: {undated} undated record(s) excluded from the --since "
+              "window")
+    if open_issues and any_filing_failed:
+        return 3
     return 0
 
 
@@ -4389,6 +5218,22 @@ _FACT_REPORT_NOT_MERGED_RES = (
 )
 _REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM .+ \(unverified worker claim\)\s*$')
 
+# 2026-09-18: both `_extract_labelled_evidence_counts_scoped` and
+# `_fact_window_lines_excluding_reports` used to close a `REPORT FROM ...`
+# fence on any blank line — but the assembler itself puts a bare blank line
+# INSIDE a report's own body (between that worker's paragraphs, see
+# `_build_reports_block`'s `"\n\n".join(items)`), not just between a report
+# and the next real section. A multi-paragraph report whose first paragraph
+# was its actual result and whose SECOND paragraph (after the blank line)
+# happened to echo a bold-markdown count like "**61 passed**" reopened the
+# count arm to exactly the trust-boundary hole the fence exists to close,
+# right next to a real receipt. The fence now closes only on a line that is
+# itself a structural marker — a bracketed header (`[...]`, matching the
+# generic shape, not just the four names `_WINDOW_SECTION_RE` recognises) or
+# an explicit `END REPORT FROM ...` line — never on a blank line, which a
+# report's own prose can contain for entirely legitimate reasons.
+_REPORT_FENCE_CLOSE_RE = re.compile(r'^(?:\[.*\]|END REPORT FROM\b.*)$')
+
 # Family 6 (2026-09-18, SET3-AUDIT2.md section 5 #1) — written-file identity.
 # "I wrote/saved/created/updated file X" is the single highest-value claim
 # type SET3-AUDIT2 found with no free check: ten of thirty set-3 drafts open
@@ -4602,6 +5447,20 @@ def _facts_read_back_claims(window_text, draft_text):
 # quantity (family 10). No identity anchor means silence, not a guess.
 
 _FACT_VALUE_TOKEN_RE = re.compile(r'\$?\d(?:[\d,]*\d)?(?:\.\d+)?%?')
+# 2026-09-18: a digit run immediately followed by a letter was skipped
+# outright as "the leading digits of a mixed alnum token" — meant to catch
+# a git short SHA like "0dca183" glued onto a number ("HEAD 0dca183" must
+# not read as the value 0) — but that also threw away every unit-suffixed
+# value: "latency 250ms", "cache 4k", "heap 8GB" all end in a letter right
+# after the digits and were silently dropped, so a draft's "latency 250ms"
+# next to an evidence row of "latency: 400" no longer contradicted.
+# Narrowed to the actual mixed-identifier shape: take the word chars right
+# after the matched digits (the "tail") and only treat it as a fused
+# identifier — not a value — when that tail ITSELF looks like the rest of
+# a hash: starts with a letter and has another digit further in
+# ("dca183"). A pure unit suffix ("ms", "k", "GB") never has a trailing
+# digit and is left alone.
+_FACT_MIXED_ID_TAIL_RE = re.compile(r'[A-Za-z]\w*\d')
 _FACT_SCORE_TOKEN_RE = re.compile(r'\b(0\.\d\d?|1\.00)\b')
 # Words that may sit BETWEEN a label and its value without breaking the
 # pairing ("cut under $3.55", "equity is $10,249"). A linker is never
@@ -4632,6 +5491,26 @@ _FACT_LABEL_STOPWORDS = _FACT_LINKER_WORDS | _FACT_PREP_WORDS | frozenset((
     "before", "while", "during", "since", "via", "plus", "minus", "line",
     "value", "number", "score", "time", "date",
 ))
+# 2026-09-18: a plain English noun phrase in the draft ("items 2 and 3")
+# was being read as a reference to an evidence LABEL just because a table
+# column happened to be named the same common word ("feat items"). Bench
+# regression: the draft's "items" is the noun in "items 2 and 3", not a
+# label — the value is really the first of a small enumerated number list,
+# and the evidence label ("feat items") is a longer, unrelated token.
+# `_FACT_COUNT_NOUN_STEMS` are common count nouns that, when they sit
+# right before a bare number LIST, are never trusted as a label word
+# unless the draft used real label punctuation (":" / "=" / backticks —
+# see `_fact_explicit_label_word`) or the evidence's own label is the
+# exact (multi-word) phrase the draft used.
+_FACT_COUNT_NOUN_STEMS = frozenset(("step", "item", "point", "option", "part"))
+_FACT_NUM_LIST_RE = re.compile(r'\d+(?:\s*,\s*\d+)*\s*(?:and|&)\s*\d+', re.IGNORECASE)
+# "items: 2", "items = 2", "`items` 2" — punctuation the draft itself uses
+# to mark a word as a label, immediately before the value. This is the one
+# case allowed to cross the clause-boundary rule below, on purpose: the
+# draft is not just placing a number near a word, it is explicitly naming
+# the word as this value's label.
+_FACT_EXPLICIT_LABEL_RE = re.compile(r'([A-Za-z][A-Za-z_\-]{1,20})\s*[:=]\s*$')
+_FACT_EXPLICIT_BACKTICK_LABEL_RE = re.compile(r'`([A-Za-z][A-Za-z_\-]{1,20})`\s*$')
 _FACT_WORD_RE = re.compile(r"[A-Za-z][A-Za-z_\-]{1,}")
 _FACT_CLAUSE_BOUNDARY_RE = re.compile(r'[,;:()\[\]/]')
 _FACT_COLON_ROW_RE = re.compile(r'^([^:{}\[\]"]{2,70}):\s*(.+)$')
@@ -4732,11 +5611,53 @@ def _fact_window_label_values(window_text):
     return table
 
 
+def _fact_explicit_label_word(sentence, value_start):
+    """The label word right before `value_start` when the draft marks it as
+    a label with real punctuation — "items: 2", "items = 2", "`items` 2" —
+    else None. This is the one shape allowed to cross the clause-boundary
+    rule in `_fact_draft_label_values`: the draft is not just placing a
+    number near a word, it is explicitly naming that word as this value's
+    label, so it is trusted even when the word is an otherwise-generic
+    count noun (see `_FACT_COUNT_NOUN_STEMS`)."""
+    before = sentence[max(0, value_start - 40):value_start]
+    m = _FACT_EXPLICIT_LABEL_RE.search(before)
+    if m:
+        return m.group(1)
+    m = _FACT_EXPLICIT_BACKTICK_LABEL_RE.search(before)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _fact_in_number_list_context(sentence, start, end):
+    """True when the value at `sentence[start:end]` sits inside an
+    enumerated number list — "2 and 3", "1, 2 and 3" — read from a small
+    window either side. That shape is ordinary prose counting things
+    ("items 2 and 3"), never a label/value pairing, and is what
+    `_FACT_COUNT_NOUN_STEMS` guards against in `_fact_draft_label_values`."""
+    ctx = sentence[max(0, start - 20):end + 20]
+    return bool(_FACT_NUM_LIST_RE.search(ctx))
+
+
 def _fact_draft_label_values(draft_text):
-    """`(label_key, value)` pairs the draft states by EXPLICIT adjacency.
-    Never across a comma, semicolon, colon, slash or paren, and never
-    across another value — a pairing that has to jump a clause boundary is
-    not a pairing this check is willing to assert."""
+    """`(label_key, value, explicit, guard_word)` tuples the draft states by
+    EXPLICIT adjacency. Never across a comma, semicolon, colon, slash or
+    paren, and never across another value — a pairing that has to jump a
+    clause boundary is not a pairing this check is willing to assert,
+    UNLESS the draft marks the word as a label with real punctuation (see
+    `_fact_explicit_label_word`), in which case `explicit` is True and the
+    pairing is trusted outright.
+
+    `guard_word` is the original (unstemmed) word text when the pairing
+    came from a plain adjacency match where the word is a common count
+    noun ("step"/"item"/"point"/"option"/"part") sitting next to an
+    enumerated number list ("items 2 and 3") — see
+    `_fact_in_number_list_context`. The caller (`_facts_labelled_value_claims`)
+    only trusts a `guard_word` pairing when the evidence's own label is no
+    longer than the matched word, or is the exact phrase the draft used;
+    a plain English noun phrase in the draft must not be read as a
+    reference to an unrelated, longer evidence label just because they
+    share one common word."""
     out = []
     for sentence in _FACT_SENTENCE_SPLIT_RE.split(draft_text or ""):
         range_starts = set()
@@ -4749,11 +5670,28 @@ def _fact_draft_label_values(draft_text):
             range_starts.add(m.start(2))
             keys = _fact_label_keys(m.group(1))
             if keys:
-                out.append((keys[-1], m.group(3)))
+                out.append((keys[-1], m.group(3), True, None))
         for m in _FACT_VALUE_TOKEN_RE.finditer(sentence):
             if m.start() in range_starts:
                 continue
+            if m.end() < len(sentence) and sentence[m.end()].isalpha():
+                # See `_FACT_MIXED_ID_TAIL_RE`: only skip when the tail
+                # right after the digits is itself shaped like the rest of
+                # a fused identifier (a letter followed eventually by
+                # another digit, e.g. "dca183" off "HEAD 0dca183"). A pure
+                # unit suffix ("ms", "k", "GB") has no trailing digit and
+                # is kept as a value.
+                tail_m = re.match(r'\w*', sentence[m.end():])
+                tail = tail_m.group(0) if tail_m else ""
+                if _FACT_MIXED_ID_TAIL_RE.fullmatch(tail):
+                    continue
             value = m.group(0)
+            explicit_word = _fact_explicit_label_word(sentence, m.start())
+            if explicit_word:
+                keys = _fact_label_keys(explicit_word)
+                if keys:
+                    out.append((keys[-1], value, True, None))
+                    continue
             before = sentence[max(0, m.start() - 70):m.start()]
             after = sentence[m.end():m.end() + 70]
             seg = _FACT_CLAUSE_BOUNDARY_RE.split(before)[-1]
@@ -4764,7 +5702,12 @@ def _fact_draft_label_values(draft_text):
                         continue
                     if lw in _FACT_LABEL_STOPWORDS or len(lw) < 3:
                         break
-                    out.append((_fact_stem(lw), value))
+                    guard_word = None
+                    if (_fact_stem(lw) in _FACT_COUNT_NOUN_STEMS
+                            and _fact_in_number_list_context(
+                                sentence, m.start(), m.end())):
+                        guard_word = word
+                    out.append((_fact_stem(lw), value, False, guard_word))
                     break
             seg2 = _FACT_CLAUSE_BOUNDARY_RE.split(after)[0]
             aw = _FACT_WORD_RE.findall(seg2)
@@ -4776,7 +5719,12 @@ def _fact_draft_label_values(draft_text):
                         continue
                     if lw in _FACT_LABEL_STOPWORDS or len(lw) < 3:
                         break
-                    out.append((_fact_stem(lw), value))
+                    guard_word = None
+                    if (_fact_stem(lw) in _FACT_COUNT_NOUN_STEMS
+                            and _fact_in_number_list_context(
+                                sentence, m.start(), m.end())):
+                        guard_word = word
+                    out.append((_fact_stem(lw), value, False, guard_word))
                     break
     return out
 
@@ -4791,12 +5739,23 @@ def _facts_labelled_value_claims(window_text, draft_text):
     table = _fact_window_label_values(window_text)
     if not table:
         return []
+    draft_low = (draft_text or "").lower()
     bad, good, seen = [], [], set()
-    for key, value in _fact_draft_label_values(draft_text):
+    for key, value, explicit, guard_word in _fact_draft_label_values(draft_text):
         values = table.get(key)
         if not values or len(values) != 1:
             continue
         wval, label = next(iter(values.items()))
+        if guard_word and not explicit:
+            # "items 2 and 3" is ordinary prose counting things, not a
+            # reference to this window's "feat items" column. Trust the
+            # pairing anyway only when the evidence label is no longer
+            # than the word the draft actually used, or is the exact
+            # (multi-word) phrase the draft itself wrote.
+            label_stripped = label.strip()
+            if (len(label_stripped) > len(guard_word)
+                    and label_stripped.lower() not in draft_low):
+                continue
         if _fact_value_marker(wval) != _fact_value_marker(value):
             continue
         if _fact_is_score_value(wval) != _fact_is_score_value(value):
@@ -4939,6 +5898,60 @@ def _fact_window_lines(window_text):
             label = line.strip()
             continue
         if not line.strip() or _SECTION_SEPARATOR_RE.match(line):
+            continue
+        out.append((label, line))
+    return out
+
+
+def _fact_window_lines_excluding_reports(window_text):
+    """`_fact_window_lines`, minus every line inside a `REPORT FROM ...`
+    fence. An unverified worker's own prose must not be read as an actual
+    tool-result RECEIPT by families that look for one — merge/CI claims
+    (family 4) and the receipt half of the stale-report check (family 5)
+    were reading report bodies straight through `_fact_window_lines`, so a
+    worker's own claim inside its report ("PR #12 merged") could be misread
+    as a real `gh`-shaped merge receipt rather than the unverified claim it
+    is. Same `REPORT FROM ...` fence tracking `_extract_labelled_evidence_
+    counts_scoped` uses for counts, one pass, so the exclusion can never
+    disagree about what a report's body is.
+
+    2026-09-18: this used to be paired with a mirror-image
+    `_iter_window_report_lines` (the same fence tracking, inverted, to read
+    ONLY a report's own words) — removed with no functional change, since
+    it had no production caller and nothing besides its own partition test
+    exercised it.
+
+    2026-09-18 round 2: the fence used to close on a bare blank line, but a
+    report's own multi-paragraph body has blank lines between its own
+    paragraphs (see `_REPORT_FENCE_CLOSE_RE`), so a receipt-shaped line in
+    a LATER paragraph of the same report still read back in as if it sat
+    outside the fence. Closes now only on a real structural marker — a
+    bracketed header or an `END REPORT FROM ...` line — never on a blank
+    line; a real section separator ("---"/"===") still closes it, same as
+    before, since that always marks a genuine boundary rather than a
+    report's own prose."""
+    label = "the evidence window"
+    in_report = False
+    out = []
+    for raw in (window_text or "").splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if _WINDOW_SECTION_RE.match(stripped):
+            label = stripped
+            in_report = False
+            continue
+        if _REPORT_MARKER_LINE_RE.match(stripped):
+            in_report = True
+            continue
+        if _SECTION_SEPARATOR_RE.match(stripped):
+            in_report = False
+            continue
+        if in_report:
+            if _REPORT_FENCE_CLOSE_RE.match(stripped):
+                in_report = False
+            else:
+                continue
+        if not stripped:
             continue
         out.append((label, line))
     return out
@@ -5250,12 +6263,19 @@ def derive_window_facts(window_text, draft_text):
             return []
         draft = draft_text or ""
         clauses = presplit_claims(draft) or ([draft.strip()] if draft.strip() else [])
+        # Families 4 and 5's RECEIPT half read report bodies straight
+        # through `lines` — an unverified worker's own claim inside a
+        # REPORT FROM fence could be misread as a real merge receipt.
+        # `_report_not_merged_claims` (family 5's own not-merged half)
+        # still reads `window_text` directly on purpose: that one IS
+        # about what a report says.
+        receipt_lines = _fact_window_lines_excluding_reports(window_text)
         facts = []
         facts += _facts_delete_claims(lines, clauses)
         facts += _facts_cadence_claims(lines, draft)
         facts += _facts_result_tables(lines, draft)
-        facts += _facts_merge_claims(lines, draft)
-        facts += _facts_stale_report_claims(lines, window_text)
+        facts += _facts_merge_claims(receipt_lines, draft)
+        facts += _facts_stale_report_claims(receipt_lines, window_text)
         facts += _facts_written_file_claims(window_text, draft)
         facts += _facts_read_back_claims(window_text, draft)
         facts += _facts_labelled_value_claims(window_text, draft)
@@ -5282,7 +6302,7 @@ def derive_window_facts(window_text, draft_text):
         return []
 
 
-def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
+def compose_window_with_facts(window_text, draft_text, cap_bytes=None, extra_facts=None):
     """`window_text` with a DERIVED FACTS block at its HEAD and the raw
     window below it as BACKING. The cap applies AFTER the facts: facts are
     never dropped, and if facts + raw window exceed the cap the raw
@@ -5295,6 +6315,16 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     redacted window is still returned (byte-for-byte unchanged only when
     nothing secret-shaped was in it).
 
+    `extra_facts` (optional): sentences the caller has already computed
+    from information `derive_window_facts` cannot see on its own — e.g.
+    the receipt-turn note from `_receipt_turn_extra_fact` (gate-
+    adjudication-20260918.md mechanism (a)), which depends on
+    `window_meta`'s `prev_turn_detail`, not just the window text. Appended
+    ahead of the cap, same guarantee as every other fact: never dropped,
+    deduped against what `derive_window_facts` already found. Included
+    regardless of `SUPERJEV_DERIVED_FACTS` — this is a correctness fix to
+    the window itself, not part of the optional derived-facts feature.
+
     Every window is redacted (evidence-guard's `redact`) before it is used
     for anything — deriving facts from it or handing it to the judge —
     which is the Stop-hook gate window's half of the blocklist+redactor
@@ -5304,6 +6334,10 @@ def compose_window_with_facts(window_text, draft_text, cap_bytes=None):
     window_text = guard.redact(window_text)
     meta_guard = guard.to_dict()
     facts = derive_window_facts(window_text, draft_text) if _derived_facts_enabled() else []
+    if extra_facts:
+        for f in extra_facts:
+            if f and f not in facts:
+                facts.append(f)
     meta = {"facts_count": len(facts), "facts": list(facts), "facts_bytes": 0,
             "window_trimmed_bytes": 0, "guard": meta_guard}
     if not facts:
@@ -6697,6 +7731,8 @@ def cmd_hook_prompt_verify(a):
         except (ValueError, TypeError):
             _hook_log("prompt-verify: non-JSON stdin — fail-open", skipped=True)
             return 0
+        global _ACTIVE_HOOK_PAYLOAD
+        _ACTIVE_HOOK_PAYLOAD = payload
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
             _hook_log("prompt-verify: no usable 'prompt' field — fail-open", skipped=True)
@@ -7005,20 +8041,36 @@ def _stop_scan_verify_one(r, budget=None):
                 pass
 
         label = {0: "CLEAN", 3: "READ", 4: "REJECT"}.get(code, "READ")
-        if block_reasons and label != "REJECT":
+        health = "thin" if evidence.get("thin") else "ok"
+        if block_reasons:
             label = "REJECT"
+        elif label == "REJECT" and health == "thin":
+            # Same hole as the live PostToolUse verify hook (see
+            # gate-adjudication-20260918.md): worker-verify's own exit
+            # code alone said REJECT, but every flag this run actually
+            # parsed was suppressed into `notes` because the gather had
+            # nothing usable — 45 of 59 REJECT labels in the 2026-09-18
+            # adjudication ran exactly this way. A bare exit code over
+            # evidence that was never gathered is "we could not check",
+            # never "we checked and it failed" — never a REJECT label.
+            label = "UNCHECKED"
         flag_str = ("; ".join(f"{f['key']} {f['verdict']} {f['score']:.2f}" for f in flags)
                    or "no flags")
         used = ", ".join(f"--{k} {v}" for k, v in
                          (("worktree", derived["worktree"]),
                           ("test-cmd", derived["test_cmd"]),
                           ("pr", derived["pr"])) if v) or "no evidence derived"
-        health = "thin" if evidence.get("thin") else "ok"
         print(f"super-jev verify {teammate_id}: {label} — {flag_str} — {used} — health {health}")
         note_tail = (" — " + "; ".join(notes)) if notes else ""
         _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
                  f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
-                 hook_mode=True, source="stop-transcript")
+                 hook_mode=True, source="stop-transcript",
+                 unchecked=(label == "UNCHECKED"),
+                 health=("none" if label == "UNCHECKED" else health),
+                 reason=("no-evidence" if label == "UNCHECKED" else None))
+        if label == "UNCHECKED":
+            catch_log("verify", "unchecked", reasons=["no-evidence"] + (notes or []),
+                     draft_text=report_text, payload=None)
     except Exception as exc:
         print(f"super-jev verify {teammate_id}: ERROR — {exc.__class__.__name__} (advisory)")
         _hook_log(f"stop-scan: {teammate_id} — error ({exc.__class__.__name__}), "
@@ -7220,6 +8272,9 @@ def cmd_hook(a):
         _hook_log("non-JSON stdin — fail-open", skipped=True)
         return 0
 
+    global _ACTIVE_HOOK_PAYLOAD
+    _ACTIVE_HOOK_PAYLOAD = payload
+
     evidence_tmp_path = None
 
     def _hook_unchecked(tp, evidence, tmp_ev_prompt_found):
@@ -7320,6 +8375,23 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
+                    # gate-adjudication-20260918.md: the receipt-turn fix,
+                    # scoped to a current turn that ran no tools of its own
+                    # (window_meta["current_turn_empty"]).
+                    receipt_extra_facts = None
+                    if window_meta is not None and window_meta.get("current_turn_empty"):
+                        # The current turn ran no tools of its own — if the
+                        # most recent previous turn that ran tools is still
+                        # kept in the window, name it in a DERIVED FACTS
+                        # sentence (no header rewrite — see
+                        # _receipt_turn_extra_fact) so a correct
+                        # restatement of a one-turn-old result is not
+                        # scored as having no in-window evidence.
+                        receipt_idx = _receipt_turn_index(window_meta)
+                        window_meta["receipt_turn"] = receipt_idx
+                        if receipt_idx is not None:
+                            fact = _receipt_turn_extra_fact(receipt_idx)
+                            receipt_extra_facts = [fact] if fact else None
                     # Cited-file tail (see build_cited_file_block, 2026-09-18
                     # SET2-AUDIT.md recommendation (b)): when the draft names
                     # its own source ("per SUMMARY.md"), fold that file's
@@ -7346,7 +8418,7 @@ def cmd_hook(a):
                     # next line, which cuts whole labelled sections in
                     # priority order rather than slicing bytes off the head.
                     derived, _facts, _fmeta = compose_window_with_facts(
-                        derived, text, cap_bytes=0)
+                        derived, text, cap_bytes=0, extra_facts=receipt_extra_facts)
                     # THE cap — one budget, in tokens, enforced here and
                     # nowhere else, on the finished text right before the
                     # call. Everything above (the builder's byte cap, the
@@ -7464,12 +8536,15 @@ def cmd_hook(a):
                     text = dict_text
                 elif is_spawn:
                     status = tool_response.get("status")
+                    print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                     _hook_log(
                         "verify: skipped — tool_response is a spawn/launch dict"
                         + (f" (status={status!r})" if status else "") +
                         "; the worker's own report is not here yet, it arrives later "
                         "in a <teammate-message> block (see `hook prompt-verify`)",
                         exit_code=0, skipped=True, reason="spawn-dict")
+                    catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                             draft_text=None, start_time=_catch_t0, payload=payload)
                     return 0
                 else:
                     text = _hook_report_text(payload)
@@ -7482,8 +8557,11 @@ def cmd_hook(a):
 
             is_ack, ack_reason = _is_launch_ack(text)
             if is_ack:
+                print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                 _hook_log(f"verify: skipped — {ack_reason}", exit_code=0, skipped=True,
                          reason="launch-ack")
+                catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                         draft_text=text, start_time=_catch_t0, payload=payload)
                 return 0
 
             worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
@@ -7519,11 +8597,11 @@ def cmd_hook(a):
         # is no weaker action to upgrade.
         # claim_rows carries the SUPPORTED rows too, which _parse_strong_flags
         # drops — without them the OVERCLAIMS-alone gate could never see
-        # that every claim was in fact supported. No evidence inventory is
-        # passed on this path: a real hook payload gives us no --test-cmd
-        # and no --pr (see the hardcoded test_cmd="" above), so there is no
-        # gather to measure. That also means a hook-driven verify can NEVER
-        # prove a test-count claim — docs/hooks.md says so in plain words.
+        # that every claim was in fact supported. A hook-driven verify gets
+        # no --test-cmd/--pr (see the hardcoded test_cmd="" above), so it
+        # can NEVER prove a test-count claim — docs/hooks.md says so in
+        # plain words — but it DOES know whether it had a worktree to look
+        # at, which is exactly what gather_health below checks.
         flags = _parse_strong_flags(door_out)
         claim_rows = _parse_claim_rows(door_out)
         # Only the gate door ever derives a wide window from the transcript
@@ -7537,6 +8615,19 @@ def cmd_hook(a):
             gather_health = {"current_turn_empty": True,
                              "reasons": ["the current turn ran no tools of its own; this "
                                         "window is previous-turn/receipts evidence only"]}
+        elif door == "verify":
+            # 2026-09-18 fix (gate-adjudication-20260918.md, verify door):
+            # `hook verify --from-file` and the Stop-scan both already
+            # compute `_evidence_inventory` and feed it in here so a thin
+            # gather suppresses a block into an advisory note instead of
+            # letting it through — the live PostToolUse hook never did,
+            # so it treated "nothing was gathered" as "healthy" and let a
+            # bare exit code stand in for a real judgement. `worktree` is
+            # the only evidence source this path ever has (test_cmd/pr are
+            # never set on a real hook payload), so this is deliberately
+            # narrower than the from-file/probe version — no --dry-run
+            # probe is spent here, just the presence/absence check.
+            gather_health = _evidence_inventory(test_cmd="", worktree=worktree, pr=None)
         block_reasons, block_notes = _hook_block_decision(flags, claim_rows, gather_health)
         # Deterministic reasons are never suppressed by the gather-health
         # check the judge-driven flags above go through — arithmetic on
@@ -7553,6 +8644,20 @@ def cmd_hook(a):
         action = action_map.get(code, "advisory")
         if block_reasons:
             action = "block"
+        elif (door == "verify" and action == "block" and gather_health is not None
+              and not _gather_healthy(gather_health)):
+            # The door's own exit code alone implied a block, but nothing
+            # this run actually parsed crossed the block line —
+            # _hook_block_decision already suppressed every flag into
+            # block_notes because the gather itself had nothing usable (no
+            # worktree, or the probe came back empty/unreadable). Blocking
+            # on a bare exit code over evidence that was never gathered
+            # mistakes "we could not check" for "we checked and it
+            # failed" — see gate-adjudication-20260918.md, verify door,
+            # rows 00:39:08 and 01:03:59 (the SAME report came back READ
+            # once --worktree/--test-cmd/--pr gave it something to gather
+            # against). Advisory, not a block; never judged.
+            action = "unchecked-no-evidence"
 
         # stop_hook_active=true is Claude Code's own signal that this Stop
         # event is a RE-RUN — a previous hook already blocked once this
@@ -7566,18 +8671,22 @@ def cmd_hook(a):
         # says plainly this was a fail-open, not a real allow.
         if door == "gate" and payload.get("stop_hook_active") is True and action == "block":
             action = "block-forced-advisory"
-        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1): a block whose
-        # ONLY reasons came from the judge — det_block_reasons is empty, so
-        # nothing deterministic (count mismatch, PR mismatch,
-        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory. A
-        # block carrying even one deterministic reason is untouched: it
-        # falls through to the "block" branch below exactly as it does
-        # today, env or no env. Checked after stop_hook_active so a re-run
-        # keeps its own (already advisory) handling rather than being
-        # relabeled here.
-        elif (door == "gate" and action == "block" and _judge_advisory_enabled()
-              and not det_block_reasons):
-            action = "block-judge-advisory"
+        # Judge-advisory mode (SUPERJEV_GATE_JUDGE_ADVISORY=1/weak): a block
+        # whose ONLY reasons came from the judge — det_block_reasons is
+        # empty, so nothing deterministic (count mismatch, PR mismatch,
+        # CONTRADICTED_BY_FACT) is in the mix — is demoted to advisory,
+        # mode "1" unconditionally, mode "weak" only when every one of
+        # those judge reasons names a verdict "weak" covers (never
+        # OVERCLAIMS — see _judge_advisory_reasons_are_weak_only). A block
+        # carrying even one deterministic reason is untouched: it falls
+        # through to the "block" branch below exactly as it does today, env
+        # or no env. Checked after stop_hook_active so a re-run keeps its
+        # own (already advisory) handling rather than being relabeled here.
+        elif door == "gate" and action == "block" and not det_block_reasons:
+            _jam = _judge_advisory_mode()
+            if _jam == "1" or (_jam == "weak"
+                               and _judge_advisory_reasons_are_weak_only(block_reasons)):
+                action = "block-judge-advisory"
 
         # SKIPS-20260918.md / l22-l24: a claim the judge flagged at or
         # above the block line, but the empty-current-turn health gate
@@ -7618,6 +8727,19 @@ def cmd_hook(a):
             if notice:
                 print(notice)
 
+        if action == "unchecked-no-evidence":
+            reason_bits = "; ".join(block_notes) if block_notes else f"exit {code}"
+            advisory = ("super-jev verify: no evidence gathered; not judged "
+                       f"(exit {code} suppressed — {reason_bits})")
+            print(advisory)
+            _hook_log(f"verify: unchecked — no evidence gathered (exit {code} "
+                     f"suppressed — {reason_bits}) — advisory, not judged", exit_code=0,
+                     flags=flags, unchecked=True, health="none", reason="no-evidence")
+            catch_log(door, "unchecked", reasons=["no-evidence"] + block_notes,
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
+            _print_ledger_notice_if_gate()
+            return 0
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
@@ -7645,11 +8767,18 @@ def cmd_hook(a):
                 advisory += " (advisory: " + "; ".join(block_notes) + ")"
             print(advisory, file=sys.stderr)
             _hook_log(f"gate: judge advisory, not blocked (exit {code}) — would have "
-                     f"blocked on: {reason_bits}{suppressed_note_tail}", exit_code=0,
+                     f"blocked on: {reason_bits}{suppressed_note_tail} "
+                     f"[judge-advisory-mode:{_jam}]", exit_code=0,
                      flags=flags, reason=suppressed_reason)
-            catch_log(door, "advisory-judge", reasons=block_reasons, draft_text=text,
-                     window_bytes=_catch_window_bytes, start_time=_catch_t0,
-                     payload=payload)
+            # The arm name (NOT_SUPPORTED/CONTRADICTED/OVERCLAIMS) already
+            # rides inside each block_reasons string ("key VERDICT score");
+            # the mode tag is appended so the ledger also names WHICH
+            # judge-advisory mode demoted this block, without needing to
+            # re-derive it from the env at read time.
+            catch_log(door, "advisory-judge",
+                     reasons=block_reasons + [f"judge-advisory-mode:{_jam}"],
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
             _print_ledger_notice_if_gate()
             return 0
         if action == "block":
@@ -7793,6 +8922,12 @@ SKIP_REASON_BUCKETS = {
     "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
+    # The stop-scan's UNCHECKED verdict (worker-verify's own exit code
+    # said REJECT/CLEAN, but the gather had nothing usable, so the label
+    # was downgraded to UNCHECKED — see cmd_hook_prompt_verify's
+    # stop-scan branch) is judged against thin evidence, same as the
+    # sibling no-tool-evidence-checkable path above, not a lost check.
+    "no-evidence": SKIP_BUCKET_THIN,
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
     # The advisory teammate-report scan running out of its own time or its
@@ -8685,6 +9820,12 @@ def build_parser():
     ck_list = ck_subs.add_parser("list", help="one line per catch-ledger record")
     ck_list.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
     ck_list.add_argument("--untagged", action="store_true", help="only untagged records")
+    ck_list.add_argument("--id", default=None,
+                         help="only the one record with this id — what `catch signal`'s "
+                              "own issue-body pointer tells a human to run locally for "
+                              "the redacted detail behind a record id")
+    ck_list.add_argument("--bot", default=None, help="only records from this bot id "
+                                                      "(see the `bot` field, e.g. primary)")
     ck_list.set_defaults(func=cmd_catch, catch_action="list")
     ck_tag = ck_subs.add_parser("tag", help="fair = block was right; false = block was "
                                             "wrong; miss = an allow let a lie through")
@@ -8695,7 +9836,36 @@ def build_parser():
     ck_report = ck_subs.add_parser("report", help="fair catches, false stops, misses, "
                                                    "plus untagged count")
     ck_report.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_report.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. primary)")
     ck_report.set_defaults(func=cmd_catch, catch_action="report")
+    ck_signal = ck_subs.add_parser("signal", help="group false/miss blocks by reason "
+                                                   "family; draft (or --open, file) a "
+                                                   "GitHub issue once one crosses --min")
+    ck_signal.add_argument("--min", type=int, default=3,
+                           help="how many same-family false/miss blocks before a "
+                                "signal fires (default 3)")
+    ck_signal.add_argument("--since", default=None, help="e.g. 24h, 7d, 30m")
+    ck_signal.add_argument("--bot", default=None, help="only records from this bot id "
+                                                        "(see the `bot` field, e.g. "
+                                                        "primary) — restricts grouping, "
+                                                        "not just the printed breakdown")
+    ck_signal.add_argument("--open", action="store_true", dest="open",
+                           help="actually file the issue via `gh issue create` "
+                                "(needs --repo); default just prints the signal")
+    ck_signal.add_argument("--repo", default=None,
+                           help="owner/name — required with --open")
+    ck_signal.add_argument("--dry-run", action="store_true", dest="dry_run",
+                           help="print the issue body for each signal; never calls gh")
+    ck_signal.add_argument("--with-reasons", action="store_true", dest="with_reasons",
+                           help="local preview only: add each example's redacted "
+                                "reason line — refused together with --open, a public "
+                                "issue never carries draft-derived text")
+    ck_signal.add_argument("--with-drafts", action="store_true", dest="with_drafts",
+                           help="local preview only: add each example's redacted draft "
+                                "excerpt — refused together with --open, a public issue "
+                                "never carries draft-derived text")
+    ck_signal.set_defaults(func=cmd_catch, catch_action="signal")
     ck.set_defaults(func=cmd_catch, catch_action=None)
 
     lg = subs.add_parser("ledger", help="the call ledger: recent calls and per-door counts")

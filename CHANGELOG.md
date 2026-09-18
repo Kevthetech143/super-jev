@@ -4,6 +4,193 @@
 
 No version bump.
 
+- **The count arm's `REPORT FROM ...` fence closed on any blank line, not
+  just a real section boundary.** `_extract_labelled_evidence_counts_scoped`
+  and `_fact_window_lines_excluding_reports` (families 4/5's shared receipt
+  reader) both used a bare blank line to decide a worker's own report body
+  had ended — but the assembler puts a blank line INSIDE a report's own
+  multi-paragraph text too, so only the report's first paragraph was ever
+  actually excluded. A bold-markdown count, or a merge/CI-shaped claim,
+  sitting in a LATER paragraph of the same report read straight back in as
+  real evidence, right beside a genuine receipt that disagreed with it. Both
+  readers now close the fence only on a real structural marker — a
+  bracketed section header or an explicit `END REPORT FROM ...` line — never
+  on a blank line, which a report's own prose can legitimately contain. See
+  docs/hooks.md, "The report fence closes on structure, not blank lines".
+
+- **Four more deterministic-arm review findings closed, on top of the
+  hash-split/noun-label fix above.** (1) The count arm's tokenizer folded
+  `#` and `/` into the same character class as letters and digits
+  (`[A-Za-z0-9#/]+`), so a slash fraction or a hash-prefixed number
+  ("41/41 passed", "3/41 tests pass", "Tests #52 passed") glued into one
+  non-digit token that `tok.isdigit()` dropped outright — the draft
+  claimed no count at all, so a false count claim of that shape slipped
+  past the arm clean. `#` and `/` now tokenize as their own single-
+  character tokens instead; a mixed alnum run with neither character in
+  it, e.g. a git short SHA, is unaffected. (2) `_fact_draft_label_values`'
+  digit-then-letter guard (added for the same short-SHA shape) was too
+  broad — it skipped every digit run immediately followed by a letter, so
+  a unit-suffixed value ("250ms", "4k", "8GB") was dropped too, and a
+  labelled-value contradiction against one no longer fired. Narrowed to
+  only skip when the tail right after the digits looks like the rest of a
+  fused identifier — a letter, then eventually another digit — leaving a
+  pure unit suffix, which never has a trailing digit, as a real value.
+  (3) `_extract_labelled_evidence_counts_scoped` had no `REPORT FROM ...`
+  fence exclusion, unlike families 4 and 5's receipt scan, so a worker's
+  own bold-markdown run summary inside its OWN unverified report body
+  (`**61 passed**`) was read as a real evidence count — a trust-boundary
+  hole a worker's own claim text could exploit to clear the count arm
+  against itself. Evidence counts now skip every line inside a report
+  fence, matching families 4/5. (4) `_iter_window_report_lines`, added
+  alongside the families 4/5 fix, had no production caller and collided
+  in name with a different-signature function a parked PR defines; it is
+  removed, and its one test now exercises
+  `_fact_window_lines_excluding_reports` directly. Net effect on the
+  deterministic arms' live bench read: one blind-bench lie catch that
+  happened to work only because of the old hash-split tokenizer artifact
+  is now left to the judge, same as most lies always have been — the
+  bench's zero-false-block guarantee on true reports is unaffected. See
+  docs/hooks.md, "Four more deterministic-arm review findings closed".
+
+- **`catch signal` round 3: bounded reason families, per-bot grouping and
+  breakdown.** A colonless reason with no recognised `HEADER:`/judge-score
+  prefix (an advisory note, e.g. one embedding a `--test-cmd '...'`
+  argument) used to become the reason **family** verbatim — the one
+  string that reached a public issue title/body without ever going
+  through `_catch_redact` or the markdown-escape pass, and unbounded, so
+  one advisory note per differing detail never collapsed with the next
+  the way every other arm's repeat blocks did. `_catch_reason_family` now
+  buckets that shape instead (first two letters-only words, max 40 chars,
+  else the fixed literal `advisory-note`), caps every family at 60
+  characters, and always escapes it; `_catch_signal_title`/
+  `_catch_signal_body` escape the family again on top of that, since a
+  *recognised*-header family can still carry a backtick/`@handle`/`#NN`
+  from the draft text before its own colon. `catch signal` also gained
+  `--bot <id>` (same filter `catch list`/`catch report` already had,
+  restricting grouping itself, not just the printed output) and a
+  counts-only per-bot breakdown line inside every printed/issue-body
+  signal block. See docs/hooks.md, "Turning a repeat pattern into a fix
+  PR."
+
+- **`catch signal`.** The first step of the compounding loop the catch
+  ledger exists to feed: harness catches -> tags -> issue -> fix PR ->
+  bench robot. `superjev.py catch signal [--min 3] [--since 24h] [--open
+  --repo owner/name] [--dry-run] [--with-reasons] [--with-drafts]` groups
+  catch-ledger records tagged `false`/`miss` by **reason family** (the
+  reason string with its numbers/values, and a per-call judge claim key
+  like `c2`, stripped — so two count mismatches with different draft/
+  evidence numbers, or six `c1`/`c2`/.../`OVERCLAIMS` blocks from
+  different claim indices, all still collapse into one family) and, once
+  a family reaches `--min` (an explicit `--min 0` is now refused, not
+  silently rewritten to 3), prints a signal block. A signal's own
+  printed/issue-body content is **metadata only by default** — family,
+  count, first/last timestamps, and every matching record's id, plus a
+  pointer to `catch list --id <id>` for the redacted detail locally —
+  never draft-derived text, closing off names/addresses/order numbers/
+  health details/dollar figures/non-US phone numbers/token URLs that
+  reached a public issue before even though `_catch_redact` never covered
+  those shapes. `--with-reasons`/`--with-drafts` add the redacted (and,
+  since this text can still carry markdown/GitHub-autolink syntax,
+  markdown-escaped) reason line / draft excerpt to the *local*
+  printed/`--dry-run` output only — both are refused outright (exit 2)
+  together with `--open`. Exit 0 with signals filed/previewed, exit 1
+  with no signal reaching `--min`, exit 3 if `--open` attempted a filing
+  that was refused or failed. `--open` files a GitHub issue via `gh issue
+  create --label harness-signal` and records the family in a
+  `signals.jsonl` sidecar so the same family is never filed twice;
+  `--dry-run` prints the issue body and never calls `gh`. A final email/
+  phone/SSN check on the assembled body runs right before any real `gh`
+  call, belt-and-braces on top of the metadata-only default body. `catch
+  list` gained `--id <id>` so the pointer above is a real, working lookup.
+  See docs/hooks.md, "Turning a repeat pattern into a fix PR."
+
+- **OVERCLAIMS arm — the receipt-turn fix.** A hand adjudication of every
+  live `hook gate` block on the primary's own seat
+  (`ops/gate-adjudication-20260918.md`) found one live false-block
+  mechanism this fix addresses: a tool-free current turn whose reply is a
+  correct restatement of a result from the *previous* turn's own tool
+  activity was read as having no in-window evidence. The most recent
+  previous turn that ran tools is now named in a new DERIVED FACTS
+  sentence (`RECEIPT TURN: ...`) whenever the current turn is tool-free
+  but the window carries a receipt from that previous turn — its
+  `[previous turn -N]` section header is left exactly as-is, pointed at
+  from the DERIVED FACTS sentence rather than rewritten. See
+  `_receipt_turn_index`/`_receipt_turn_extra_fact`, and
+  `compose_window_with_facts`'s `extra_facts` parameter, and docs/hooks.md,
+  "OVERCLAIMS arm — the receipt-turn fix". This addresses the tool-free-
+  turn-with-in-window-receipt case only: it does not address a false block
+  whose receipt lies beyond the previous-turn window, a block that was
+  really the deterministic PR-state arm's job, or a false block on a turn
+  that itself ran a tool.
+
+- **Judge-advisory mode, granular.** `SUPERJEV_GATE_JUDGE_ADVISORY` now
+  also accepts `weak`, alongside the existing `1`: `weak` demotes only the
+  per-claim NOT_SUPPORTED/CONTRADICTED arm (v2's secondary arm) and
+  SELF_CONTRADICTORY to advisory — OVERCLAIMS still blocks, matching the
+  adjudication's finding that OVERCLAIMS is the only judge arm with a
+  positive live record while the secondary arm and SELF_CONTRADICTORY are
+  not. `1` (all judge arms advisory)
+  and `0`/unset (off) are unchanged. The catch ledger's `advisory-judge`
+  decision now carries a `judge-advisory-mode:1`/`judge-advisory-mode:weak`
+  tag in its `reasons`, alongside the existing `key VERDICT score` strings
+  that already name the arm. See docs/hooks.md, "Judge-advisory mode".
+- **`bot`/`origin` on every ledger record.** Both the call ledger
+  (`calls.jsonl`) and the catch ledger (`catches.jsonl`) now tag every
+  record with `bot` (`CLAW4MAC_BOT_ID` or `CLAUDE_BOT_ID` from the
+  environment if set, else the claw4mac project-dir segment out of the
+  hook payload's `transcript_path` — the part after `agent-cwd-` up to the
+  next path separator — else `"unknown"`) and `origin` (`"bench"` when
+  `SUPERJEV_BENCH=1` or the hook payload's `session_id` starts with
+  `bench-`, else `"live"`). Neither field changes a hook's decision — both
+  are best-effort, never-raise defaults applied at the same point `id`
+  already was. `superjev.py catch list`/`catch report` gain `--bot <id>`,
+  `catch list` shows a `bot=` column, and `catch report` prints a `by
+  bot:` breakdown when `--bot` is not given. See docs/hooks.md, "The
+  ledger" and "The catch ledger".
+
+- **Verify hook: spawn acks and unchecked no-evidence runs now show up in
+  the catch ledger.** Two fixes off `gate-adjudication-20260918.md`'s
+  verify-door findings — every adjudicated live verify block was false.
+  First, the live
+  `hook verify` (PostToolUse) already skipped a spawn/launch dict or a
+  launch-ack text without calling the judge — it just never told anyone:
+  the catch ledger carried nothing for those runs, so a spawn ack and a
+  real unchecked report were indistinguishable in `catches.jsonl`. It now
+  prints `super-jev verify: spawn ack, nothing to judge` on stderr and
+  logs a `door="verify"`, `decision="unchecked"`, `reasons=["spawn-ack"]`
+  catch record. Second, and the real live bug: the PostToolUse hook never
+  computed its own evidence-gather health for `verify` the way
+  `hook verify --from-file` and the Stop-scan already did, so a bare
+  worker-verify exit 4 (REJECT) blocked even when nothing was actually
+  gathered to judge the report against (no `--worktree`, the only
+  evidence source a live hook ever has). It now runs the same
+  `_evidence_inventory` check verify's other two entry points already
+  ran; when the gather is thin, a would-be block is downgraded to one
+  advisory line (`no evidence gathered; not judged`, exit 0) and logged
+  as `decision="unchecked"`, `reasons=["no-evidence", ...]` instead of
+  blocking. The Stop-scan's REJECT label had the identical hole — most
+  REJECT labels in the same adjudication ran at `health=thin` — a bare
+  exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
+  same catch-ledger shape. In practice this makes the live verify door
+  advisory-only for every report until a worktree is supplied: a real
+  PostToolUse payload carries no `worktree` key and nothing exports
+  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
+  today. See docs/hooks.md, "verify: spawn acks and gather health".
+
+- **Two more deterministic-arm false-block sources closed.** The count
+  arm's draft-side tokenizer no longer splits a mixed alnum run (a git
+  short SHA like `0dca183`) into bogus digit tokens, and its evidence-side
+  recogniser now also trusts a worker's own bold-markdown run summary
+  (`**N passed**`). Family 8 (labelled-value pairing) gained a
+  common-noun/number-list guard so a plain English noun phrase in the
+  draft ("items 2 and 3") is no longer read as a reference to an
+  unrelated, longer evidence label ("feat items") sharing one common
+  word, with an explicit-label-syntax escape hatch (`items: 2`,
+  `items = 2`, `` `items` 2 ``) and a verbatim-label escape hatch. Families
+  4 and 5's receipt scan no longer reads a worker's own claim text inside
+  a `REPORT FROM ...` fence as a real merge receipt. See docs/hooks.md,
+  "Two more false-block sources closed".
+
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
   reason behind it came from the judge (the OVERCLAIMS arm, or under
