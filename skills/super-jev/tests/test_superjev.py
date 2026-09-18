@@ -3011,7 +3011,7 @@ def test_derived_evidence_refuses_npm_when_package_json_is_modified(trusted):
     assert derived["worktree"] == os.path.realpath(str(wt))
     assert derived["test_cmd"] == ""
     assert "untrusted-test-cmd" in derived["refused"]
-    assert "npm-runner:package.json-modified" in derived["refused"]
+    assert "untrusted-test-cmd:package.json-modified" in derived["refused"]
 
 
 def test_derived_evidence_refuses_npm_when_package_json_is_untracked(trusted):
@@ -9973,3 +9973,429 @@ def test_sweep_baseline_ref_env_override_wins(monkeypatch):
     monkeypatch.setattr(sweep.subprocess, "run", fake_run)
 
     assert sweep._resolve_baseline_ref() == "some-explicit-ref"
+# ============================================================================
+# THE TRUST BOUNDARY REACHES THE CONSUMER — safe_git_env
+#
+# The argv flags in GIT_SAFE_FLAGS only protect git commands THIS module
+# builds. Two things they cannot protect:
+#
+#   * the external worker-verify door, which runs `git -C <worktree> status
+#     -sb` off its own argv, and `gh`/`npm`/`node` children that run git;
+#   * this module's own git calls when the dangerous key lives in the
+#     SHARED `.git/config` of the protected repo, which a worker sitting in
+#     a GENUINE worktree can write with `git config` and which
+#     _worktree_trust therefore cannot refuse.
+#
+# Both are covered by putting the pins in the ENVIRONMENT, which git reads
+# at the same precedence as `-c` and which every child inherits.
+#
+# NOTHING HERE EVER EXECUTES A PLANTED COMMAND. Every test that plants
+# core.fsmonitor or diff.external points it at a path that does not exist,
+# so if git ever reached it the call would FAIL LOUDLY — the assertion is
+# "git succeeded, therefore the key was pinned off", never "the payload
+# happened not to do anything".
+
+def _env_config_pairs(env):
+    """The (key, value) pairs a GIT_CONFIG_COUNT environment carries, read
+    back independently of the module's own parser."""
+    n = int(env["GIT_CONFIG_COUNT"])
+    return [(env[f"GIT_CONFIG_KEY_{i}"], env[f"GIT_CONFIG_VALUE_{i}"])
+            for i in range(n)]
+
+
+def test_safe_git_env_pins_every_dangerous_key():
+    env = sj.safe_git_env({"PATH": "/usr/bin"})
+    assert env["PATH"] == "/usr/bin", "the base environment must pass through"
+    pairs = _env_config_pairs(env)
+    assert pairs == list(sj.SAFE_GIT_CONFIG_PINS)
+    assert ("core.fsmonitor", "false") in pairs
+    assert ("core.hooksPath", "/dev/null") in pairs
+    assert ("core.pager", "cat") in pairs
+    assert sj.git_env_pins_missing(env) == []
+
+
+def test_safe_git_env_keeps_inherited_pairs_but_puts_its_own_last():
+    # Git applies the numbered pairs in order and the last one wins, so our
+    # pins have to be appended, never prepended — otherwise an inherited
+    # environment could override the boundary.
+    base = {
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "Someone",
+        "GIT_CONFIG_KEY_1": "core.fsmonitor", "GIT_CONFIG_VALUE_1": "/tmp/hostile",
+    }
+    pairs = _env_config_pairs(sj.safe_git_env(base))
+    assert pairs[0] == ("user.name", "Someone"), "unrelated pairs are preserved"
+    # the inherited fsmonitor pair is dropped outright, not merely outranked
+    assert ("core.fsmonitor", "/tmp/hostile") not in pairs
+    assert pairs[1:] == list(sj.SAFE_GIT_CONFIG_PINS)
+    assert sj.git_env_pins_missing(sj.safe_git_env(base)) == []
+
+
+def test_safe_git_env_rebuilds_the_block_and_git_accepts_it(tmp_path):
+    # A stale KEY_i above the new count would renumber the sequence, and
+    # git FATALS on a malformed block ("bogus count in GIT_CONFIG_COUNT")
+    # rather than ignoring it — so a half-rebuilt environment would break
+    # every git call this module makes. The block is rebuilt from scratch,
+    # and real git is asked to confirm it reads.
+    base = {
+        "GIT_CONFIG_COUNT": "not-a-number",
+        "GIT_CONFIG_KEY_0": "left.over", "GIT_CONFIG_VALUE_0": "junk",
+        "GIT_CONFIG_KEY_9": "way.out", "GIT_CONFIG_VALUE_9": "of-range",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    env = sj.safe_git_env(base)
+    assert env["GIT_CONFIG_COUNT"] == str(len(sj.SAFE_GIT_CONFIG_PINS))
+    assert "GIT_CONFIG_KEY_9" not in env and "GIT_CONFIG_VALUE_9" not in env
+    repo = _init_repo(tmp_path / "r")
+    p = _REAL_RUN(["git", "config", "--get", "core.fsmonitor"], cwd=str(repo),
+                  capture_output=True, text=True, env=env)
+    assert "bogus count" not in (p.stderr or ""), p.stderr
+    assert (p.stdout or "").strip() == "false"
+
+
+def test_git_env_pins_missing_names_what_is_absent():
+    assert sj.git_env_pins_missing({}) == [
+        f"{k}={v}" for k, v in sj.SAFE_GIT_CONFIG_PINS]
+    # present but overridden by a LATER pair naming the same key: still
+    # missing, because the later pair is the one git would apply
+    env = sj.safe_git_env({})
+    n = int(env["GIT_CONFIG_COUNT"])
+    env["GIT_CONFIG_COUNT"] = str(n + 1)
+    env[f"GIT_CONFIG_KEY_{n}"] = "core.fsmonitor"
+    env[f"GIT_CONFIG_VALUE_{n}"] = "/tmp/hostile"
+    assert "core.fsmonitor=false" in sj.git_env_pins_missing(env)
+
+
+def test_child_env_carries_the_pins():
+    # child_env is the environment every wrapped door runs in, so this is
+    # the single line that carries the boundary into worker-verify.
+    assert sj.git_env_pins_missing(sj.child_env()) == []
+
+
+def test_env_pins_beat_an_fsmonitor_in_the_protected_repos_shared_config(trusted):
+    # THE FINDING. A worker inside a genuine worktree runs
+    #   git config core.fsmonitor <script>
+    # and the key lands in the SHARED .git/config every worktree of the
+    # protected repo reads. The worktree is real and belongs to the right
+    # repo, so _worktree_trust has nothing to refuse — only the pin covers
+    # it. The planted value is a path that does not exist, so a `git
+    # status` that ever reached it would fail; that it succeeds is the
+    # proof the pin took effect.
+    wt = trusted.worktree()
+    ghost = str(trusted.root / "no-such-fsmonitor-hook")
+    _git("config", "core.fsmonitor", ghost, cwd=wt)
+    assert not os.path.exists(ghost)
+    # the key really is visible from inside the worktree
+    assert _git("config", "--get", "core.fsmonitor", cwd=wt).strip() == ghost
+
+    # Unpinned, git REACHES the planted value: it names the missing path in
+    # its own stderr. (It then carries on and exits 0, which is the whole
+    # danger — a real script there would simply have run, silently.)
+    bare = _REAL_RUN(["git", "-C", str(wt), "status", "-sb"],
+                     capture_output=True, text=True)
+    assert ghost in (bare.stderr or ""), (
+        f"fixture is wrong: git never reached the planted key: {bare.stderr!r}")
+
+    # Pinned, git never looks at it.
+    pinned = _REAL_RUN(["git", "-C", str(wt), "status", "-sb"],
+                       capture_output=True, text=True, env=sj.safe_git_env())
+    assert pinned.returncode == 0, pinned.stderr
+    assert ghost not in (pinned.stderr or ""), pinned.stderr
+    assert "fsmonitor" not in (pinned.stderr or "").lower(), pinned.stderr
+
+
+def test_the_modules_own_git_calls_run_under_the_pins(trusted, monkeypatch):
+    # Every git call this module makes goes through _git_rc, and it has to
+    # carry the pins itself — _worktree_trust runs rev-parse against a
+    # directory named in untrusted report text before anything has vouched
+    # for it.
+    wt = trusted.worktree()
+    _git("config", "core.fsmonitor", str(trusted.root / "nope"), cwd=wt)
+    seen = []
+
+    def recording_run(cmd, **kw):
+        seen.append((list(cmd), kw.get("env")))
+        return _REAL_RUN(cmd, **kw)
+
+    monkeypatch.setattr(sj.subprocess, "run", recording_run)
+    assert sj._worktree_trust(str(wt))[1] is None
+    assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo))[0] is True
+    assert seen, "no git call was made"
+    for cmd, env in seen:
+        assert env is not None, f"no env on {cmd}"
+        assert sj.git_env_pins_missing(env) == [], f"unpinned env on {cmd}"
+
+
+def test_cmd_verify_spawns_the_door_with_the_pins_in_its_environment(
+        trusted, monkeypatch, tmp_path):
+    # The consumer. worker-verify runs `git -C <worktree> status -sb` off
+    # its own argv, so what protects that call is the environment this
+    # module hands it. subprocess.run is replaced by a capture that NEVER
+    # runs anything, so the planted fsmonitor is never reached even in
+    # principle.
+    wt = trusted.worktree()
+    _git("config", "core.fsmonitor", str(trusted.root / "never-run-me"), cwd=wt)
+    report = tmp_path / "report.md"
+    report.write_text(f"COMPLETE: shipped it in {wt}. 9 tests passed.\n",
+                      encoding="utf-8")
+    spawned = []
+
+    def capturing_run(cmd, **kw):
+        spawned.append((list(cmd), kw.get("env")))
+        return subprocess.CompletedProcess(list(cmd), 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", capturing_run)
+    code = sj.main(["verify", str(report), "--worktree", str(wt)])
+    assert code == 0
+    assert spawned, "the door was never spawned"
+    door_calls = [c for c in spawned if str(report) in " ".join(str(x) for x in c[0])]
+    assert door_calls, f"no call carried the report: {spawned}"
+    for cmd, env in spawned:
+        assert env is not None, f"no env on {cmd}"
+        assert sj.git_env_pins_missing(env) == [], f"unpinned env on {cmd}"
+        assert env["GIT_CONFIG_COUNT"] == str(len(sj.SAFE_GIT_CONFIG_PINS))
+
+
+def test_cmd_verify_refuses_to_launch_the_door_without_the_pins(monkeypatch, tmp_path):
+    # Belt and braces: if a future edit drops the pins from child_env, the
+    # door is not launched at all. An unpinned environment handed to a
+    # program that runs `git status` in a worker-named directory is the
+    # whole vulnerability, so it fails loudly here instead.
+    report = tmp_path / "report.md"
+    report.write_text("COMPLETE: done.\n", encoding="utf-8")
+    monkeypatch.setattr(sj, "child_env", lambda: {"PATH": os.environ.get("PATH", "")})
+    ran = []
+    monkeypatch.setattr(sj.subprocess, "run",
+                        lambda cmd, **kw: ran.append(cmd) or
+                        subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""))
+    code = sj.main(["verify", str(report)])
+    assert code == sj.REFUSED
+    assert ran == [], "the door must not be spawned with an unpinned environment"
+
+
+def test_every_subprocess_call_in_the_module_passes_an_env():
+    # A source-level guard, so a subprocess added later cannot quietly ship
+    # without the pins. There is no legitimate call here that should
+    # inherit a bare os.environ: every child of this door either runs git
+    # itself or spawns something that does.
+    import ast
+    tree = ast.parse((SKILL / "superjev.py").read_text(encoding="utf-8"))
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if node.func.attr not in ("run", "Popen", "check_output", "check_call", "call"):
+            continue
+        base = node.func.value
+        if not (isinstance(base, ast.Name) and base.id == "subprocess"):
+            continue
+        if not any(kw.arg == "env" for kw in node.keywords):
+            bad.append(node.lineno)
+    assert bad == [], (f"subprocess calls without env= at superjev.py lines {bad} — "
+                      "pass env=safe_git_env() or env=child_env()")
+
+
+# ============================================================================
+# NPM PROVENANCE — the vouched-for package.json, not the worker's own
+#
+# `npm test` names no program; package.json's "scripts" does. The old check
+# asked "is package.json unmodified against HEAD" INSIDE THE WORKER'S OWN
+# WORKTREE, which a worker defeated simply by COMMITTING its hostile
+# package.json: its own HEAD then agreed with its working copy. The blob is
+# now compared against the protected repo's default branch.
+
+def _commit_package_json(wt, data):
+    """Commit `data` as package.json inside `wt` — the shape a hostile
+    worker uses, where the file is not merely edited but committed on the
+    task branch so it agrees with that worktree's own HEAD."""
+    (wt / "package.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _git("add", "package.json", cwd=wt)
+    _git("-c", "user.email=t@e.invalid", "-c", "user.name=T",
+         "commit", "-qm", "worker: own package.json", cwd=wt)
+
+
+def test_npm_runner_trusts_a_worktree_whose_package_json_matches_the_protected_repo(trusted):
+    wt = trusted.worktree()
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert (ok, why) == (True, None)
+
+
+def test_npm_runner_refuses_a_hostile_package_json_committed_on_the_worker_branch(trusted):
+    # THE FINDING. Committed, so tracked and clean against its own HEAD —
+    # which is exactly what the old check accepted.
+    wt = trusted.worktree()
+    _commit_package_json(wt, {"name": "fixture",
+                              "scripts": {"test": "echo 'ok 9999 passing'"}})
+    # the old rule's two conditions both still hold, and must no longer be enough
+    assert _git("ls-files", "--error-unmatch", "--", "package.json", cwd=wt).strip()
+    assert _REAL_RUN(["git", "-C", str(wt), "diff", "--no-ext-diff", "--no-textconv",
+                      "--quiet", "HEAD", "--", "package.json"],
+                     capture_output=True, text=True).returncode == 0
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert ok is False
+    assert why == "package-json-differs"
+
+
+def test_npm_runner_refuses_an_uncommitted_edit_too(trusted):
+    wt = trusted.worktree()
+    (wt / "package.json").write_text('{"scripts":{"test":"echo pwned"}}\n',
+                                     encoding="utf-8")
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert (ok, why) == (False, "package.json-modified")
+
+
+def test_npm_runner_refuses_when_the_protected_repo_cannot_be_read(trusted, tmp_path):
+    # "Could not read the vouched-for version" is a refusal, never a pass.
+    wt = trusted.worktree()
+    empty = tmp_path / "not-a-repo"
+    empty.mkdir()
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(empty))
+    assert ok is False
+    assert why == "protected-package-json-unreadable"
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(tmp_path / "does-not-exist"))
+    assert (ok, why) == (False, "no-protected-repo")
+
+
+def test_npm_runner_reads_the_protected_repo_from_the_env_when_not_passed(trusted):
+    # The `trusted` fixture points SUPERJEV_PROTECTED_REPO at the repo, so
+    # the no-argument call must reach the same answer as the explicit one.
+    wt = trusted.worktree()
+    assert sj._npm_runner_is_trusted(str(wt)) == (True, None)
+    _commit_package_json(wt, {"scripts": {"test": "echo 9999"}})
+    assert sj._npm_runner_is_trusted(str(wt)) == (False, "package-json-differs")
+
+
+def test_derived_evidence_refuses_a_committed_hostile_package_json(trusted):
+    wt = trusted.worktree()
+    _commit_package_json(wt, {"scripts": {"test": "echo 'ok 9999 passing'"}})
+    text = f"COMPLETE: shipped it in {wt}, ran npm test, 9999 tests passed."
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] == os.path.realpath(str(wt))
+    assert derived["test_cmd"] == "", "the hostile script must not become the test cmd"
+    assert "untrusted-test-cmd" in derived["refused"]
+    assert "untrusted-test-cmd:package-json-differs" in derived["refused"]
+
+
+def test_check_test_cmd_for_fallback_refuses_a_committed_hostile_package_json(trusted):
+    # The execution chokepoint, independent of how the command was derived.
+    wt = trusted.worktree()
+    assert sj.check_test_cmd_for_fallback("npm test", str(wt)) is None
+    _commit_package_json(wt, {"scripts": {"test": "echo pwned"}})
+    bad = sj.check_test_cmd_for_fallback("npm test", str(wt))
+    assert bad is not None
+    assert "untrusted-test-cmd:package-json-differs" in bad
+    assert sj.check_test_cmd_for_fallback("npm run test:skill", str(wt)) is not None
+    # a non-npm command is unaffected by the package.json state
+    assert sj.check_test_cmd_for_fallback(
+        "python3 -m pytest tests/test_x.py", str(wt)) is None
+
+
+def test_protected_package_json_blob_prefers_the_remote_tracking_ref(trusted):
+    # origin/main first, because a worker cannot write a remote-tracking
+    # ref where a local `main` in a shared checkout can be moved.
+    assert sj.PROTECTED_DEFAULT_REFS[0] == "origin/main"
+    # the fixture has no origin, so the `main` fallback is what answers
+    sha, why = sj._protected_package_json_blob(str(trusted.repo))
+    assert why is None
+    assert sha == _git("rev-parse", "main:package.json", cwd=trusted.repo).strip()
+
+
+# ============================================================================
+# diff.external / textconv — the other two config keys that name a program
+#
+# `diff.external` replaces git's diff engine with the named program for
+# every file; a `diff.<driver>.textconv` selected by a checked-in
+# .gitattributes runs the named program over each blob. Both live in the
+# repo's own config, both would also CHANGE what a diff reports — which is
+# what the npm gate reads. `-c diff.external=` is not the fix: an empty
+# value makes git fatal out ("external diff died"). The flags are.
+
+def test_git_argv_injects_the_diff_safety_flags():
+    argv = sj.git_argv("/some/where", ["diff", "--shortstat", "HEAD"])
+    assert "--no-ext-diff" in argv and "--no-textconv" in argv
+    # right after the subcommand, before anything a caller passed
+    i = argv.index("diff")
+    assert set(argv[i + 1:i + 3]) == {"--no-ext-diff", "--no-textconv"}
+    # never a bare `-c diff.external=`, which git treats as fatal
+    assert not any(str(a).startswith("diff.external") for a in argv)
+    # idempotent: a call site that names them too does not get them twice
+    argv2 = sj.git_argv("/some/where", ["diff", *sj.GIT_DIFF_SAFE_FLAGS, "--quiet"])
+    assert argv2.count("--no-ext-diff") == 1
+    assert argv2.count("--no-textconv") == 1
+    # and a non-diff subcommand is left alone
+    assert "--no-ext-diff" not in sj.git_argv("/x", ["status", "-sb"])
+
+
+def test_npm_gate_reads_a_modified_package_json_through_a_planted_diff_external(trusted):
+    # The planted external differ is a path that does not exist, so if git
+    # ever invoked it the diff would die and the gate would report
+    # "diff-unreadable" instead of the truth. That the gate says
+    # "package.json-modified" is the proof no external ran.
+    wt = trusted.worktree()
+    ghost = str(trusted.root / "no-such-external-differ")
+    _git("config", "diff.external", ghost, cwd=wt)
+    _git("config", "diff.tc.textconv", str(trusted.root / "no-such-textconv"), cwd=wt)
+    (wt / ".gitattributes").write_text("*.json diff=tc\n", encoding="utf-8")
+    assert not os.path.exists(ghost)
+
+    (wt / "package.json").write_text('{"scripts":{"test":"echo pwned"}}\n',
+                                     encoding="utf-8")
+
+    # The fixture is real: the unflagged, patch-producing diff the old code
+    # ran DOES hand the blobs to the external program, and dies trying.
+    # This is the call that used to decide whether package.json was
+    # modified, so a planted differ that exited 0 printing nothing would
+    # have made a modified file read as clean.
+    bare = _REAL_RUN(["git", "-C", str(wt), "diff", "HEAD", "--", "package.json"],
+                     capture_output=True, text=True, env=sj.safe_git_env())
+    assert bare.returncode != 0 and "external diff" in (bare.stderr or ""), (
+        f"fixture is wrong: no external differ was invoked: {bare!r}")
+
+    ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
+    assert (ok, why) == (False, "package.json-modified"), (ok, why)
+
+    # and an unmodified working copy still reads as clean, i.e. the flags
+    # did not simply break the diff
+    _git("checkout", "--", "package.json", cwd=wt)
+    assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo)) == (True, None)
+
+
+# ============================================================================
+# SUPERJEV_WORKTREE_ROOTS=none — refuse every derived worktree
+
+def test_worktree_roots_none_refuses_every_derived_worktree(trusted, monkeypatch):
+    wt = trusted.worktree()
+    assert sj._worktree_trust(str(wt))[1] is None
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV, sj.WORKTREE_ROOTS_NONE)
+    assert sj._worktree_roots() == []
+    assert sj._worktree_trust(str(wt)) == (None, "no-allowlist-root")
+    assert sj._trusted_worktree(str(wt)) is None
+    text = f"COMPLETE: shipped it in {wt}, ran npm test, 9 tests passed."
+    derived = sj._derive_evidence_from_report_text(text)
+    assert derived["worktree"] is None
+    assert derived["test_cmd"] == ""
+    assert derived["worktree_source"] == "none"
+    assert "worktree-untrusted:no-allowlist-root" in derived["refused"]
+
+
+def test_worktree_roots_none_wins_over_a_real_root_beside_it(trusted, monkeypatch):
+    # The safe reading of a mixed value is the closed one.
+    wt = trusted.worktree()
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV,
+                       os.pathsep.join([str(trusted.root), "NONE"]))
+    assert sj._worktree_roots() == []
+    assert sj._worktree_trust(str(wt)) == (None, "no-allowlist-root")
+
+
+def test_worktree_roots_unset_or_blank_still_falls_back_to_the_default(monkeypatch):
+    # `none` is reserved precisely because the empty string cannot carry
+    # that meaning: unset and blank both mean "use the default root", so a
+    # shim exporting an accidentally-blank value gets the default rather
+    # than a silent lockdown it never asked for.
+    monkeypatch.delenv(sj.WORKTREE_ROOTS_ENV, raising=False)
+    assert sj._worktree_roots() != []
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV, "")
+    assert sj._worktree_roots() != []
+    monkeypatch.setenv(sj.WORKTREE_ROOTS_ENV, os.pathsep)
+    assert sj._worktree_roots() != []

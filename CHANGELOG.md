@@ -245,22 +245,87 @@ No version bump.
   `worktree_source` carries `"report-refused:<why>"` so a thin gather is
   never mistaken for a report that named nothing.
 
+- **Security: the trust boundary now reaches the CONSUMER, via the
+  environment.** Argv flags only cover git commands this module builds
+  itself, and that left two holes. First, the validated worktree is handed
+  on to programs that run git themselves off their own argv: the external
+  `worker-verify` door runs `git -C <worktree> status -sb`, `gh` shells
+  out to git, and a derived `npm`/`node` test command can too — so the
+  boundary ended at the door while the untrusted path went through it.
+  Second, and worse, a worker inside a GENUINE worktree of the protected
+  repo can run `git config core.fsmonitor <script>`, which lands in the
+  SHARED `.git/config` every worktree of that repo reads; the worktree is
+  real and in the right place, so `_trusted_worktree` has nothing to
+  refuse. Git reads config from the environment at the same precedence as
+  `-c`, and children inherit it, so a new `safe_git_env()` builds an
+  environment pinning `core.fsmonitor=false`, `core.hooksPath=/dev/null`
+  and `core.pager=cat`, and EVERY subprocess this module spawns now runs
+  under it — the `verify` and `gate` doors, `gh`, `_git_rc`, the derived
+  test command and the `node` derived-facts CLI. Inherited
+  `GIT_CONFIG_*` pairs are preserved and ours appended after them, since
+  git applies the pairs in order and the last wins. `cmd_verify` refuses
+  to launch `worker-verify` at all when the pins are absent from the
+  environment it is about to inherit, and a source-level test requires
+  every `subprocess` call in `superjev.py` to pass an explicit `env`, so a
+  call added later cannot ship inheriting a bare `os.environ`. The `-c`
+  flags stay on our own argv as well.
+
+- **Security: `diff.external` and textconv can no longer run, or bend what
+  a diff reports.** Two more config keys name a program git executes, and
+  neither is covered by pinning `core.fsmonitor`/`core.hooksPath`:
+  `diff.external` replaces git's diff engine for every file, and a
+  `diff.<driver>.textconv` selected by a checked-in `.gitattributes` runs
+  over each blob before diffing. Both are writable by a worker in a
+  genuine worktree, and both also CHANGE what a diff reports — which is
+  what the `npm` provenance check reads, so a planted differ that exited
+  quietly would have made a modified `package.json` read as clean. Every
+  `git diff` the door runs now carries `--no-ext-diff --no-textconv`,
+  injected centrally by `git_argv` so no call site can omit them. Pinning
+  the key is not an option: `-c diff.external=` makes git fatal out with
+  "external diff died".
+
+- **Security: `SUPERJEV_WORKTREE_ROOTS=none` refuses every derived
+  worktree.** A reserved value, not a path: no root is allowlisted, so
+  nothing derived from report text reaches the filesystem and no test
+  command runs. One `none` anywhere in the list wins over a real root
+  beside it. Unset and blank keep their existing meaning (fall back to the
+  fleet's default root), which is why the lockdown needs a word of its own
+  rather than an empty value. Refusals carry the new
+  `no-allowlist-root` token, distinct from `outside-allowlist-root`, which
+  also now covers the case where every root named failed to resolve.
+
 - **Security: every `git` call the door makes disables fsmonitor and
   hooks.** All of them now build their argv through one helper,
   `git_argv`, which prepends `-c core.fsmonitor=false -c
   core.hooksPath=/dev/null` ahead of `-C`. This is defence in depth behind
-  `_trusted_worktree`, not a substitute for it.
+  `_trusted_worktree`, not a substitute for it — and, on its own, not
+  enough; see the environment-pin entry above for what it does not cover.
 
 - **Security: a report-derived `npm test` no longer vouches for itself.**
   `npm test` names no program — `package.json`'s `scripts` does, and a
   worker can write that file. A worker could therefore report a pass count,
   have this door run its own script, and have that script's output accepted
-  as independent evidence for the report. An `npm`-family command derived
-  from report text now runs only when `package.json` is tracked in the
-  protected repo and unmodified against `HEAD`; otherwise the run records
-  `untrusted-test-cmd` and gathers no test evidence. Enforced both where
-  the command is derived and at `check_test_cmd_for_fallback`, the point
-  where it would execute.
+  as independent evidence for the report.
+
+  The first cut of this check asked the wrong question. It required
+  `package.json` to be tracked and unmodified against `HEAD`, both
+  evaluated inside the worker's OWN worktree — which a worker defeated by
+  simply committing its hostile `package.json` on its task branch, so that
+  the file was tracked and its working copy agreed with its own `HEAD`.
+  The question is not "did this worker leave `package.json` alone", it is
+  "is this the script the PROTECTED repo vouches for". So the worktree's
+  committed blob (`HEAD:package.json`) is now compared against the
+  protected repo's default-branch blob (`origin/main:package.json`,
+  falling back to `main:package.json` — the remote-tracking ref first,
+  because a local `main` in a shared checkout can be moved), and the
+  working copy must equal that same blob as well. Either lookup failing to
+  answer is a refusal, not a pass. Otherwise the run records
+  `untrusted-test-cmd` plus a specific `untrusted-test-cmd:<why>`
+  (`package-json-differs`, `package.json-modified`,
+  `package.json-not-tracked`, `protected-package-json-unreadable`, and so
+  on) and gathers no test evidence. Enforced both where the command is
+  derived and at `check_test_cmd_for_fallback`, the point where it would
+  execute.
 
 - **Fix: a path containing the word "pytest" is no longer read as a test
   command.** `_TEST_PHRASE_RE` matched `pytest` inside a longer path (a

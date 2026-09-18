@@ -1956,13 +1956,122 @@ def door_missing(env_var, fleet_path):
             "to the command that runs it, or install it at that path")
 
 
+# TRUST BOUNDARY, part two — the pins have to reach the CONSUMER.
+#
+# GIT_SAFE_FLAGS (further down) puts `-c core.fsmonitor=false -c
+# core.hooksPath=/dev/null` on the argv of every git command THIS module
+# builds. That is not enough on its own, for two reasons.
+#
+# 1. This door spawns programs that run git THEMSELVES. The external
+#    worker-verify door (FLEET_VERIFY_PY) runs `git -C <worktree> status
+#    -sb` with no safety flags of its own; `gh` shells out to git; a
+#    derived `npm`/`node` test runner can too. A `-c` flag on our argv
+#    does nothing for any of them, so the boundary would stop at the door
+#    and the untrusted worktree would be handed straight through it.
+#
+# 2. The flags would not even be sufficient for us. A worker sitting in a
+#    GENUINE worktree of the protected repo can run
+#        git config core.fsmonitor <script>
+#    and that key lands in the SHARED `.git/config` of the protected repo,
+#    which every worktree of it reads. The worktree is real and belongs to
+#    the right repo, so _worktree_trust has nothing to refuse. Pinning the
+#    key off is the only control that covers it.
+#
+# Git also reads config out of the ENVIRONMENT: GIT_CONFIG_COUNT=N plus
+# GIT_CONFIG_KEY_i/GIT_CONFIG_VALUE_i for i in 0..N-1 are applied at the
+# same highest precedence as `-c`, and unlike argv they are INHERITED by
+# every descendant process. So the pins ride in the environment of every
+# subprocess this module spawns, and the `-c` flags stay on our own argv
+# as belt and braces.
+#
+# core.pager=cat is pinned alongside them: a pager is a command the repo's
+# own config names and git executes.
+SAFE_GIT_CONFIG_PINS = (
+    ("core.fsmonitor", "false"),
+    ("core.hooksPath", "/dev/null"),
+    ("core.pager", "cat"),
+)
+GIT_CONFIG_COUNT_ENV = "GIT_CONFIG_COUNT"
+
+
+def _git_env_config_pairs(env):
+    """The (key, value) pairs a GIT_CONFIG_COUNT-shaped environment carries,
+    in git's own order. An absent, blank, non-integer or negative count
+    reads as no pairs; a numbered slot missing either half stops the scan
+    there, which is exactly how git itself would fail to use it."""
+    raw = env.get(GIT_CONFIG_COUNT_ENV)
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return []
+    pairs = []
+    for i in range(max(n, 0)):
+        k = env.get(f"GIT_CONFIG_KEY_{i}")
+        v = env.get(f"GIT_CONFIG_VALUE_{i}")
+        if k is None or v is None:
+            break
+        pairs.append((k, v))
+    return pairs
+
+
+def safe_git_env(base_env=None):
+    """A copy of `base_env` (os.environ when None) carrying
+    SAFE_GIT_CONFIG_PINS as GIT_CONFIG_COUNT/KEY_i/VALUE_i — the
+    environment EVERY subprocess this module spawns runs in, so that any
+    git anywhere below us has those keys pinned no matter what the
+    repository's own config says.
+
+    Pairs already present in `base_env` are preserved and kept FIRST; ours
+    are appended after them, and any inherited pair naming a key we pin is
+    dropped. Git applies the numbered pairs in order and, for a repeated
+    key, the last one wins — appending is what makes these pins
+    un-overridable by an inherited environment. The whole numbered block is
+    rebuilt from scratch rather than extended in place, because a stale
+    KEY_i left above the new count would renumber the sequence.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    pinned = {k.lower() for k, _ in SAFE_GIT_CONFIG_PINS}
+    pairs = [(k, v) for k, v in _git_env_config_pairs(env)
+             if k.strip().lower() not in pinned]
+    pairs.extend(SAFE_GIT_CONFIG_PINS)
+    for name in [n for n in env
+                 if n.startswith("GIT_CONFIG_KEY_") or n.startswith("GIT_CONFIG_VALUE_")]:
+        del env[name]
+    env[GIT_CONFIG_COUNT_ENV] = str(len(pairs))
+    for i, (k, v) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{i}"] = k
+        env[f"GIT_CONFIG_VALUE_{i}"] = v
+    return env
+
+
+def git_env_pins_missing(env):
+    """The SAFE_GIT_CONFIG_PINS keys `env` does NOT effectively pin, as a
+    list of "key=value" strings — empty when the environment is safe.
+
+    "Effectively" means the LAST numbered pair naming that key carries our
+    value, since that is the one git would apply. Used by cmd_verify to
+    refuse to launch the external door at all when the pins are absent, so
+    a future edit that drops them from child_env fails loudly here instead
+    of quietly handing an unpinned environment to a program that runs
+    `git status` in an untrusted worktree.
+    """
+    effective = {}
+    for k, v in _git_env_config_pairs(env):
+        effective[k.strip().lower()] = v
+    return [f"{k}={v}" for k, v in SAFE_GIT_CONFIG_PINS
+            if effective.get(k.lower()) != v]
+
+
 def child_env():
     """The environment a wrapped door runs in.
 
     A copy of ours, so SSL_CERT_FILE and TYPESAFE_API_KEY pass through
-    untouched. Neither is ever printed.
+    untouched. Neither is ever printed. Plus the git config pins from
+    safe_git_env, so the trust boundary reaches the door and everything the
+    door itself spawns — see SAFE_GIT_CONFIG_PINS for why argv flags alone
+    do not cover it.
     """
-    return dict(os.environ)
+    return safe_git_env(os.environ)
 
 
 def _semver_key(name):
@@ -3160,7 +3269,8 @@ def _run_gh_issue_create(repo, title, body):
             tmp_path = f.name
         cmd = ["gh", "issue", "create", "--repo", repo, "--title", title,
                "--body-file", tmp_path, "--label", "harness-signal"]
-        env = dict(os.environ)
+        # safe_git_env, not a bare copy: `gh` shells out to git.
+        env = safe_git_env()
         env["GH_PROMPT_DISABLED"] = "1"
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=_GH_ISSUE_TIMEOUT, env=env,
@@ -3725,20 +3835,56 @@ def _light_atoms(text):
 # not trigger fsmonitor, `status` does, so validation uses only the former.
 GIT_SAFE_FLAGS = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
+# `git diff` has two more knobs that name a command for git to EXECUTE, and
+# neither is covered by the flags above:
+#
+#   * `diff.external` replaces git's whole diff engine with the named
+#     program, for every file;
+#   * a `diff.<driver>.textconv` / `.command` entry in the repo's config,
+#     selected per-path by a checked-in `.gitattributes`, runs the named
+#     program over each blob before diffing it.
+#
+# Both live in the repo's own config, both are reachable by a worker inside
+# a genuine worktree via `git config` on the shared `.git/config`, and both
+# would also silently CHANGE what a diff reports — which is what the npm
+# provenance check below reads to decide whether package.json was modified.
+# `-c diff.external=` is not an option: an empty value makes git fatal out.
+# The flags are, so they go on every diff this module runs.
+GIT_DIFF_SAFE_FLAGS = ("--no-ext-diff", "--no-textconv")
+
 
 def git_argv(cwd, args):
     """The argv for one read-only git call against `cwd`, with fsmonitor and
-    hooks disabled. Every `git -C` this module runs is built here."""
-    return ["git", *GIT_SAFE_FLAGS, "-C", str(cwd), *[str(a) for a in args]]
+    hooks disabled. Every `git -C` this module runs is built here.
+
+    A `diff` subcommand additionally gets GIT_DIFF_SAFE_FLAGS injected right
+    after the subcommand word. Call sites pass them explicitly too, for
+    readability; the flags are booleans, so naming one twice is a no-op and
+    this stays the single guarantee that no diff can escape them.
+    """
+    args = [str(a) for a in args]
+    if args and args[0] == "diff":
+        args = [args[0], *[f for f in GIT_DIFF_SAFE_FLAGS if f not in args], *args[1:]]
+    return ["git", *GIT_SAFE_FLAGS, "-C", str(cwd), *args]
+
+
+def _git_rc(args, cwd, timeout=20):
+    """(returncode, combined output) for one read-only git call — the form
+    used where git's EXIT CODE carries meaning beyond pass/fail, as with
+    `diff --quiet` (0 = identical, 1 = differs, >1 = the command itself
+    failed). Returns -1 when git could not be run at all, so "could not
+    ask" is never mistaken for "no differences"."""
+    try:
+        p = subprocess.run(git_argv(cwd, args), capture_output=True,
+                           text=True, timeout=timeout, env=safe_git_env())
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return -1, ""
 
 
 def _git_out(args, cwd, timeout=20):
-    try:
-        p = subprocess.run(git_argv(cwd, args), capture_output=True,
-                           text=True, timeout=timeout)
-        return p.returncode == 0, (p.stdout or "") + (p.stderr or "")
-    except (OSError, subprocess.TimeoutExpired):
-        return False, ""
+    rc, out = _git_rc(args, cwd, timeout=timeout)
+    return rc == 0, out
 
 
 # A PR number named in the report, the fallback's only cue that there is any
@@ -3758,7 +3904,9 @@ def _run_gh(args, cwd, commands_log):
     out. Returns (ok, stdout)."""
     cmd = ["gh", *args]
     commands_log.append(" ".join(cmd))
-    env = dict(os.environ)
+    # safe_git_env, not a bare copy: `gh` shells out to git, and `cwd` here
+    # is a report-derived worktree.
+    env = safe_git_env()
     env["GH_PROMPT_DISABLED"] = "1"
     try:
         p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True,
@@ -3899,7 +4047,8 @@ def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, g
             evidence["tracked"] = tracked
             evidence["lengths"] = lengths
 
-        ok_d, diff_out = _git_out(["diff", "--shortstat", "origin/main...HEAD"], wt)
+        ok_d, diff_out = _git_out(
+            ["diff", *GIT_DIFF_SAFE_FLAGS, "--shortstat", "origin/main...HEAD"], wt)
         if ok_d and diff_out.strip():
             m = re.search(r'(\d+) files? changed(?:, (\d+) insertions?\(\+\))?'
                           r'(?:, (\d+) deletions?\(-\))?', diff_out)
@@ -3929,8 +4078,14 @@ def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, g
         bad = check_test_cmd_for_fallback(test_cmd, worktree)
         if bad is None:
             try:
+                # The one command this fallback EXECUTES, in a
+                # report-derived worktree. It runs under the git config
+                # pins like every other child — an `npm test` script is
+                # free to call git, and the pins are what keep the
+                # repo's own fsmonitor/hooksPath/pager out of it.
                 p = subprocess.run(shlex.split(test_cmd), cwd=worktree or None,
-                                   capture_output=True, text=True, timeout=300)
+                                   capture_output=True, text=True, timeout=300,
+                                   env=safe_git_env())
                 out = (p.stdout or "") + (p.stderr or "")
             except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 out = f"TEST COMMAND FAILED TO RUN: {exc}"
@@ -3948,7 +4103,7 @@ def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, g
     return evidence
 
 
-def check_test_cmd_for_fallback(cmd, worktree):
+def check_test_cmd_for_fallback(cmd, worktree, protected_repo=None):
     """The guardrail on the one command this fallback EXECUTES. Returns a
     refusal string, or None if the command may run.
 
@@ -3965,11 +4120,13 @@ def check_test_cmd_for_fallback(cmd, worktree):
        WORKER'S OWN REPORT TEXT. A worker that writes both its package.json
        and its report could otherwise have this door run its script and
        accept the pass count that script printed as independent evidence of
-       its own claim. So npm runs only from a package.json that is tracked
-       in the protected repo and unmodified against HEAD — see
-       _npm_runner_is_trusted. This is the last line; the derive paths
-       refuse the same command earlier (recording "untrusted-test-cmd"),
-       and this catches every other caller.
+       its own claim. So npm runs only when the worktree's package.json
+       blob matches the one the PROTECTED repo's default branch committed,
+       committed copy and working copy alike — see _npm_runner_is_trusted,
+       which explains why "unmodified against the worker's own HEAD" was
+       not enough. This is the last line; the derive paths refuse the same
+       command earlier (recording "untrusted-test-cmd:<why>"), and this
+       catches every other caller.
     """
     try:
         toks = shlex.split(cmd)
@@ -3978,10 +4135,12 @@ def check_test_cmd_for_fallback(cmd, worktree):
     if not toks:
         return "empty test command"
     if _test_cmd_is_npm(cmd):
-        ok, why = _npm_runner_is_trusted(worktree)
+        ok, why = _npm_runner_is_trusted(worktree, protected_repo)
         if not ok:
-            return ("untrusted-test-cmd: `npm` runs whatever package.json's "
-                    f"scripts name, and here {why} — so this command's own "
+            return (f"untrusted-test-cmd:{why} — `npm` runs whatever "
+                    "package.json's scripts name, and this worktree's "
+                    "package.json is not the one the protected repo's "
+                    "default branch committed, so this command's own "
                     "output cannot stand as evidence for the report that "
                     "named it. Name the underlying test command directly.")
         return None
@@ -4023,7 +4182,8 @@ def _derived_facts_fallback(report_text, worktree, test_cmd, explain=False):
     payload = json.dumps({"evidence": evidence, "claims": claims})
     try:
         p = subprocess.run([node, str(DERIVE_FACTS_CLI)], input=payload,
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30,
+                           env=safe_git_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if p.returncode != 0 or not p.stdout.strip():
@@ -4131,6 +4291,35 @@ def cmd_verify(a):
         paths_for_cmd = list(a.paths or [])
     extra_ledger = {"truncated": truncated, "est_input_tok": est_tok,
                     "input_cap_tok": cap_tok}
+
+    # BELT AND BRACES on the trust boundary. worker-verify runs `git -C
+    # <worktree> status -sb` with no safety flags of its own, and the
+    # worktree it is handed can be one derived from a worker's report text.
+    # What protects that call is the git config pins in the environment it
+    # inherits (see SAFE_GIT_CONFIG_PINS), so this refuses to launch the
+    # door at all if they are not there. child_env() puts them there, which
+    # makes this unreachable today — deliberately. It is the assertion that
+    # a future edit dropping the pins fails loudly here instead of quietly
+    # handing an unpinned environment to a program that runs `git status`
+    # in a directory a worker named.
+    door_environ = child_env()
+    missing_pins = git_env_pins_missing(door_environ)
+    if missing_pins:
+        summary = ("refusing to launch worker-verify: the git config pins that "
+                   "carry this door's trust boundary into it are not in the "
+                   "environment (" + ", ".join(missing_pins) + "). "
+                   "worker-verify runs `git -C <worktree> status`, which "
+                   "executes core.fsmonitor from the repo's own config.")
+        ledger_append({
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "door": "verify", "argv": ["<refused:git-env-pins-missing>"],
+            "exit_code": REFUSED, "ms": 0, "json_mode": json_mode,
+            "hook_mode": hook_mode, "refused": "git-env-pins-missing",
+            "missing_pins": missing_pins,
+        })
+        if hook_mode:
+            return REFUSED, "", summary
+        return door_refuse(json_mode, "verify", summary)
 
     cmd = [*door_cmd(VERIFY_CMD_ENV, FLEET_VERIFY_PY), a.report]
     if a.worktree:
@@ -7286,14 +7475,29 @@ PROTECTED_REPO_ENV = "SUPERJEV_PROTECTED_REPO"
 # under this root. Configurable, because a hook shim or a CI runner has a
 # different layout; os.pathsep-separated, like PATH.
 DEFAULT_WORKTREE_ROOTS = ("/Users/admin/super-jev-wt/",)
+# The one reserved value of SUPERJEV_WORKTREE_ROOTS: it is not a path, it
+# means "no root is allowlisted", so every worktree derived from report
+# text is refused and the derived paths gather nothing and run no test
+# command. Reserved because the empty string cannot carry that meaning —
+# unset and empty both fall back to DEFAULT_WORKTREE_ROOTS, so a shim that
+# exported an accidentally-blank value would silently get the default
+# rather than the lockdown it looked like it was asking for.
+WORKTREE_ROOTS_NONE = "none"
 
 
 def _worktree_roots():
     """The allowlist roots a report-named worktree must live under, as
     realpaths. SUPERJEV_WORKTREE_ROOTS (os.pathsep-separated) when set and
-    non-empty, else DEFAULT_WORKTREE_ROOTS."""
+    non-empty, else DEFAULT_WORKTREE_ROOTS.
+
+    Returns an EMPTY list when the value names WORKTREE_ROOTS_NONE, which
+    refuses every derived worktree; see that constant. One `none` anywhere
+    in the list wins over any real root beside it, because the safe reading
+    of a mixed value is the closed one."""
     raw = os.environ.get(WORKTREE_ROOTS_ENV) or ""
     parts = [r.strip() for r in raw.split(os.pathsep) if r.strip()]
+    if any(r.lower() == WORKTREE_ROOTS_NONE for r in parts):
+        return []
     if not parts:
         parts = list(DEFAULT_WORKTREE_ROOTS)
     roots = []
@@ -7334,14 +7538,24 @@ def _protected_repo_common_dir(protected_repo=None):
     the `protected_repo` argument, then SUPERJEV_PROTECTED_REPO, then this
     module's own checkout. Returns a realpath, or None when git cannot
     answer (no checkout at all), in which case nothing is trusted."""
+    base = _protected_repo_base(protected_repo)
+    if base is None:
+        return None
+    return _git_common_dir(base)
+
+
+def _protected_repo_base(protected_repo=None):
+    """The WORKING DIRECTORY of the repo this door protects — the place a
+    `git -C` about the protected repo itself has to run. Same resolution
+    order as _protected_repo_common_dir (argument, then
+    SUPERJEV_PROTECTED_REPO, then this module's own checkout), and None
+    when no directory is there."""
     base = protected_repo or os.environ.get(PROTECTED_REPO_ENV) or os.path.dirname(
         os.path.abspath(__file__))
     try:
-        if not os.path.isdir(base):
-            return None
+        return base if os.path.isdir(base) else None
     except OSError:
         return None
-    return _git_common_dir(base)
 
 
 def _worktree_trust(path, protected_repo=None):
@@ -7394,6 +7608,12 @@ def _worktree_trust(path, protected_repo=None):
         except OSError:
             pass
     roots = _worktree_roots()
+    # No roots at all — SUPERJEV_WORKTREE_ROOTS said `none`, or every root
+    # it named failed to resolve. Its own refusal token, so the ledger
+    # distinguishes "this deployment trusts no derived worktree" from "this
+    # path was outside the roots it does trust".
+    if not roots:
+        return None, "no-allowlist-root"
     if not any(_under_root(real, r) for r in roots):
         return None, "outside-allowlist-root"
     dotgit = os.path.join(real, ".git")
@@ -7588,7 +7808,8 @@ def _pr_url_from_worktree(worktree, pr_num, timeout=None):
     git_timeout = 10 if timeout is None else max(min(10, timeout), 0.0)
     try:
         proc = subprocess.run(git_argv(worktree, ["remote", "get-url", "origin"]),
-                              capture_output=True, text=True, timeout=git_timeout)
+                              capture_output=True, text=True, timeout=git_timeout,
+                              env=safe_git_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
@@ -7974,29 +8195,97 @@ _TEST_PHRASE_RE = re.compile(
     r'|python3?\s+-m\s+pytest[\w:.\-]*)', re.IGNORECASE)
 
 
-def _npm_runner_is_trusted(worktree):
+# The default-branch refs a protected repo's vouched-for package.json is
+# read from, in order. The remote-tracking ref first: it is the one a worker
+# cannot write, where a local `main` in a shared checkout can be moved.
+PROTECTED_DEFAULT_REFS = ("origin/main", "main")
+_BLOB_SHA_RE = re.compile(r'^[0-9a-f]{7,64}$')
+
+
+def _blob_sha(args, cwd):
+    """(sha, None) or (None, reason) for one `git rev-parse <ref>:<path>`
+    lookup — a real object id or nothing. A rev-parse that "succeeds" but
+    prints something that is not a hex object id (git echoes an unresolved
+    argument back on some paths) counts as a failure, so a garbled answer
+    can never be compared as if it were a blob."""
+    rc, out = _git_rc(args, cwd)
+    line = (out or "").strip().splitlines()
+    sha = line[0].strip() if line else ""
+    if rc != 0 or not _BLOB_SHA_RE.match(sha):
+        return None, "unreadable"
+    return sha, None
+
+
+def _protected_package_json_blob(protected_repo=None):
+    """(blob_sha, None) or (None, reason) — the package.json blob the
+    PROTECTED repo's default branch committed. Tried against
+    PROTECTED_DEFAULT_REFS in order; the first that resolves wins."""
+    base = _protected_repo_base(protected_repo)
+    if base is None:
+        return None, "no-protected-repo"
+    for ref in PROTECTED_DEFAULT_REFS:
+        sha, _why = _blob_sha(["rev-parse", f"{ref}:package.json"], base)
+        if sha:
+            return sha, None
+    return None, "protected-package-json-unreadable"
+
+
+def _npm_runner_is_trusted(worktree, protected_repo=None):
     """(ok, why) — whether an `npm test` / `npm run <script>` derived from
     report text may actually be RUN in `worktree`.
 
     `npm test` does not name what it runs; `package.json`'s "scripts" does,
     and a worker can edit that file. So the command is only as trustworthy
-    as the file behind it: the script must be the one the PROTECTED repo
-    committed. Allowed only when `package.json` is tracked in that repo
-    (`git ls-files --error-unmatch`) AND unmodified against HEAD
-    (`git diff HEAD --` is empty). A worker-modified or untracked
-    package.json means no npm fallback, and the run records the reason
-    "untrusted-test-cmd". `worktree` must ALREADY have passed
-    _trusted_worktree; this function does not re-derive that."""
+    as the file behind it — and the question is not "did this worker leave
+    its own package.json alone", it is "is this the script the PROTECTED
+    repo vouches for".
+
+    That distinction is the whole fix here. The check used to be "tracked,
+    and unmodified against HEAD" — both evaluated inside the WORKER'S OWN
+    worktree. A worker that edited package.json and then COMMITTED it on
+    its task branch passed cleanly: its HEAD was its own commit, so the
+    working copy matched, and the hostile script was tracked. The door
+    would then run that script and read its printed pass count as
+    independent evidence for the report that named it.
+
+    So the blob is compared against the protected repo's default branch,
+    which the worker cannot write:
+
+      1. `package.json` is tracked in the worktree at all;
+      2. the worktree's COMMITTED blob (`HEAD:package.json`) equals the
+         protected repo's default-branch blob (see
+         PROTECTED_DEFAULT_REFS) — a hostile package.json committed on the
+         worker's branch fails here, reason "package-json-differs";
+      3. the worktree's WORKING COPY equals that same committed blob
+         (`git diff --quiet HEAD -- package.json`), so an uncommitted edit
+         is caught too.
+
+    Either lookup failing to answer is a refusal, not a pass: "could not
+    read the vouched-for version" is never grounds for running a script.
+    `worktree` must ALREADY have passed _trusted_worktree; this function
+    does not re-derive that."""
     if not worktree:
         return False, "no-worktree"
     ok, _out = _git_out(["ls-files", "--error-unmatch", "--", "package.json"], worktree)
     if not ok:
         return False, "package.json-not-tracked"
-    ok_d, diff = _git_out(["diff", "HEAD", "--", "package.json"], worktree)
-    if not ok_d:
-        return False, "package.json-diff-unreadable"
-    if diff.strip():
+    head_blob, _why = _blob_sha(["rev-parse", "HEAD:package.json"], worktree)
+    if not head_blob:
+        return False, "package.json-head-blob-unreadable"
+    base_blob, why = _protected_package_json_blob(protected_repo)
+    if not base_blob:
+        return False, why
+    if base_blob != head_blob:
+        return False, "package-json-differs"
+    # `--quiet` makes the exit code the answer: 0 identical, 1 differs,
+    # anything else (including -1, git not runnable) is the command itself
+    # failing, which is its own refusal rather than a silent pass.
+    rc, _out = _git_rc(["diff", *GIT_DIFF_SAFE_FLAGS, "--quiet", "HEAD",
+                        "--", "package.json"], worktree)
+    if rc == 1:
         return False, "package.json-modified"
+    if rc != 0:
+        return False, "package.json-diff-unreadable"
     return True, None
 
 
@@ -8052,12 +8341,12 @@ def _derive_evidence_from_report_text(text, protected_repo=None):
         if m:
             candidate = m.group(1)
             if _test_cmd_is_npm(candidate):
-                ok, npm_why = _npm_runner_is_trusted(worktree)
+                ok, npm_why = _npm_runner_is_trusted(worktree, protected_repo)
                 if ok:
                     test_cmd = candidate
                 else:
                     refused.append("untrusted-test-cmd")
-                    refused.append(f"npm-runner:{npm_why}")
+                    refused.append(f"untrusted-test-cmd:{npm_why}")
             else:
                 test_cmd = candidate
     return {"worktree": worktree, "pr": pr, "test_cmd": test_cmd,

@@ -676,9 +676,25 @@ repository configuration:
    place to run a report-named command.
 5. **Require the realpath to sit under an allowlist root.** Set
    `SUPERJEV_WORKTREE_ROOTS` (`os.pathsep`-separated, like `PATH`) to
-   configure this; unset, it defaults to the fleet's own one-worktree-per-
-   task root. A hook shim or a CI runner with a different layout exports
-   its own.
+   configure this; unset or blank, it defaults to the fleet's own
+   one-worktree-per-task root. A hook shim or a CI runner with a different
+   layout exports its own.
+
+   The value `none` is reserved and is not a path: it means no root is
+   allowlisted, so every worktree derived from report text is refused, the
+   derived paths gather nothing from disk and run no test command. A
+   deployment that wants report text to have no reach into the filesystem
+   at all exports `SUPERJEV_WORKTREE_ROOTS=none`. One `none` anywhere in
+   the list wins over any real root beside it, because the safe reading of
+   a mixed value is the closed one. It has to be a reserved word rather
+   than the empty string precisely because unset and blank already mean
+   "use the default" — a shim that exported an accidentally-empty value
+   would otherwise get a silent lockdown it never asked for, or, read the
+   other way, a default it did not intend. Refusals from this rule carry
+   `no-allowlist-root`, distinct from `outside-allowlist-root`, so the
+   ledger separates "this deployment trusts no derived worktree" from
+   "this path was outside the roots it does trust". The same token covers
+   the case where every root named failed to resolve.
 6. **Require it to be a worktree of the PROTECTED repo.**
    `git rev-parse --git-common-dir` there must resolve to the protected
    repo's own common dir. This is the check that a planted repository
@@ -698,21 +714,105 @@ nothing is trusted — the validator fails closed, never open.
 none of them runs until the path has already passed. On top of that, every
 git call this module makes — validator or not — is built by `git_argv`,
 which prepends `-c core.fsmonitor=false -c core.hooksPath=/dev/null` ahead
-of `-C`. That is defence in depth, not the control: the control is
-refusing the path.
+of `-C`.
+
+**The boundary has to reach the consumer, and argv flags do not.** Two
+holes are left by the paragraph above, and both are closed by putting the
+pins in the ENVIRONMENT rather than only on argv.
+
+The first is that the validated path does not stop here. It is handed on
+to programs that run git THEMSELVES, off their own argv, with none of
+these flags: the external `worker-verify` door runs `git -C <worktree>
+status -sb`, `gh` shells out to git, and a derived `npm`/`node` test
+command can do whatever it likes. A `-c` flag on this module's argv does
+nothing for any of them, so the boundary would have ended at the door
+while the untrusted worktree went straight through it.
+
+The second is worse, because it defeats the validator rather than
+bypassing it. A worker sitting in a GENUINE worktree of the protected repo
+can run `git config core.fsmonitor <script>`, and that key lands in the
+SHARED `.git/config` of the protected repo, which every worktree of it
+reads. The worktree is real, in the right place, and belongs to the right
+repository, so it passes all seven steps — there is nothing for
+`_trusted_worktree` to refuse. Refusing the path is not a control against
+a repo-level setting the worker is entitled to write.
+
+Git reads configuration out of the environment too. `GIT_CONFIG_COUNT=N`
+plus `GIT_CONFIG_KEY_i` / `GIT_CONFIG_VALUE_i` are applied at the same
+highest precedence as `-c`, and unlike argv they are INHERITED by every
+descendant process. So `safe_git_env()` builds an environment pinning
+`core.fsmonitor=false`, `core.hooksPath=/dev/null` and `core.pager=cat`
+(a pager is another command the repo's config names and git executes), and
+EVERY subprocess this module spawns runs under it — `_git_rc`, the
+`worker-verify` door, the `gate` door, `gh`, the derived test command, and
+the `node` derived-facts CLI. Pairs already in the inherited environment
+are kept, ours are appended after them, and any inherited pair naming a
+key we pin is dropped, because git applies the pairs in order and the last
+one wins. The `-c` flags stay on our own argv as well; they cost nothing
+and they keep working if a child ever clears its environment.
+
+`cmd_verify` will not launch `worker-verify` at all unless the pins are in
+the environment it is about to inherit. That refusal is unreachable today,
+deliberately: it is the assertion that a future edit dropping the pins
+from `child_env` fails loudly instead of quietly handing an unpinned
+environment to a program that runs `git status` in a directory a worker
+named. A source-level test also requires every `subprocess` call in
+`superjev.py` to pass an explicit `env`, so a call added later cannot ship
+inheriting a bare `os.environ`.
+
+**`diff.external` and textconv.** `git diff` has two more knobs that name
+a program for git to execute, and neither is covered by the two keys
+above. `diff.external` replaces git's diff engine with the named program
+for every file. A `diff.<driver>.textconv` entry, selected per-path by a
+checked-in `.gitattributes`, runs the named program over each blob before
+diffing it. Both live in the repo's own config, both are reachable by a
+worker inside a genuine worktree, and both would also silently CHANGE what
+a diff reports — which matters because a diff is what the `npm` provenance
+check reads to decide whether `package.json` was modified. A planted
+external differ that exited quietly would make a modified file read as
+clean. So `--no-ext-diff --no-textconv` goes on every `git diff` this
+module runs, injected centrally by `git_argv` so no call site can forget
+them. Pinning the config key instead is not an option: `-c
+diff.external=` makes git fatal out with "external diff died", taking the
+diff with it.
 
 **A report-derived `npm test` does not vouch for itself.** `npm test`
 names no program. `package.json`'s `scripts` does, and a worker can write
 `package.json`. Left alone, a worker could claim a pass count, have this
 door run the worker's own script, and have that script's output accepted
-as independent evidence for the worker's own claim. So an `npm`-family
-command derived from report text runs only when `package.json` is tracked
-in the protected repo AND unmodified against `HEAD`. Otherwise the run
-records `untrusted-test-cmd` and gathers no test evidence at all, which is
-the honest outcome: with a modified `package.json` the test count was
-never provable from here. This is enforced where the command is derived
-and again at `check_test_cmd_for_fallback`, the point where it would
-execute, so a caller that arrives by some other route is covered too.
+as independent evidence for the worker's own claim.
+
+The question is therefore not "did this worker leave its own
+`package.json` alone", it is "is this the script the PROTECTED repo
+vouches for". Asking the first question is not enough, and asking it was
+the bug: the check used to be "tracked, and unmodified against `HEAD`",
+both evaluated inside the worker's own worktree, which a worker defeated
+by simply COMMITTING its hostile `package.json` on its task branch. Its
+`HEAD` was then its own commit, so the working copy agreed with it and the
+file was tracked. Both conditions passed and the script ran.
+
+So the blob is compared against a ref the worker cannot write. An
+`npm`-family command derived from report text runs only when all three
+hold: `package.json` is tracked in the worktree; the worktree's COMMITTED
+blob (`HEAD:package.json`) equals the protected repo's default-branch blob
+(`origin/main:package.json`, falling back to `main:package.json` — the
+remote-tracking ref first, because a local `main` in a shared checkout can
+be moved); and the worktree's WORKING COPY equals that same committed
+blob, so an uncommitted edit is caught too. Either lookup failing to
+answer is a refusal rather than a pass — "could not read the vouched-for
+version" is never grounds for running a script.
+
+Otherwise the run records `untrusted-test-cmd` plus
+`untrusted-test-cmd:<why>` and gathers no test evidence at all, which is
+the honest outcome: with a `package.json` the repo does not vouch for, the
+test count was never provable from here. The `<why>` tokens are
+`package-json-differs` (the committed blob is not the vouched-for one),
+`package.json-modified`, `package.json-not-tracked`,
+`package.json-head-blob-unreadable`, `package.json-diff-unreadable`,
+`protected-package-json-unreadable`, `no-protected-repo` and
+`no-worktree`. This is enforced where the command is derived and again at
+`check_test_cmd_for_fallback`, the point where it would execute, so a
+caller that arrives by some other route is covered too.
 
 **What the ledger says.** A refusal is never silent. `worktree_source`
 carries `"report-refused:<why>"` rather than `"none"`, so a thin gather is
@@ -724,18 +824,26 @@ and the Stop-scan line, so a reviewer counting worktree sources finds no
 hole. The `<why>` tokens are stable strings: `blocked-path`,
 `not-a-directory`, `main-checkout`, `outside-allowlist-root`,
 `not-a-worktree`, `foreign-repo`, `gitdir-outside-protected-repo`,
-`no-protected-repo`.
+`no-protected-repo`, `no-allowlist-root`.
 
 **What this does NOT do.** It does not make a trusted worktree's contents
 trustworthy — a worktree of the protected repo can still hold a worker's
 own uncommitted code, and running its committed test script is a choice
 this door makes deliberately, on the grounds that the script is the one
-the repo committed. It does not protect a caller who passes `--worktree`
-on the command line, or a payload/env-supplied worktree: those come from
-an operator, the harness, or the hook shim rather than from the report
-under suspicion, and they keep their standing. And it does not audit the
-separate `worker-verify` tool, which runs its own `git` calls without
-these flags; that is tracked outside this repo.
+the protected repo's default branch committed. It does not protect a
+caller who passes `--worktree` on the command line, or a payload/env-
+supplied worktree: those come from an operator, the harness, or the hook
+shim rather than from the report under suspicion, and they keep their
+standing.
+
+It does not read or audit the SOURCE of the separate `worker-verify` tool,
+which lives outside this repo and still builds its own `git` calls without
+safety flags. That tool is nonetheless covered, which is the point of
+putting the pins in the environment: it inherits them, so its
+`git -C <worktree> status -sb` runs with `core.fsmonitor`,
+`core.hooksPath` and `core.pager` pinned whatever the repository's config
+says. Hardening that tool's own argv is a separate, additive job; nothing
+here depends on it.
 
 ## The evidence guard — what never reaches the judge (2026-09-18)
 
