@@ -7316,6 +7316,35 @@ def test_labelled_value_fact_noun_guard_does_not_touch_a_real_non_list_adjacency
     ]
 
 
+def test_labelled_value_fact_does_not_pair_a_ratio_numerator_across_an_explicit_colon():
+    # "Status gate: 6 of 7 checks passed" — "gate:" reads as an explicit
+    # label per `_fact_explicit_label_word` (the escape hatch added
+    # alongside the count-noun guard), but "6" here is the numerator of an
+    # "N of M" ratio, not a standalone value the draft is handing "gate" as
+    # a label. Pairing a sentence-subject colon like this against an
+    # unrelated 'gate' row was a real 2026-09-18 false block — the
+    # explicit-label syntax must never cross into a ratio's own numbers,
+    # on either side of the ratio.
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat checklist.md @ /Users/admin/x]\n"
+        "- Verify gate                                0\n"
+    )
+    facts = sj.derive_window_facts(
+        window, "Status gate: 6 of 7 checks passed, one item still open.")
+    assert facts == []
+
+
+def test_labelled_value_fact_ratio_guard_also_covers_the_slash_shape():
+    window = (
+        "[current turn]\n"
+        "[from: Bash cat checklist.md @ /Users/admin/x]\n"
+        "- Verify gate                                0\n"
+    )
+    facts = sj.derive_window_facts(window, "Status gate: 6/7 checks passed so far.")
+    assert facts == []
+
+
 def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_value():
     # "HEAD 0dca183" must not read as the labelled value 0 for 'head'.
     window = (
