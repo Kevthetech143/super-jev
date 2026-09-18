@@ -78,6 +78,27 @@ HOOK_EVIDENCE_MAX_BYTES_ENV = "SUPERJEV_HOOK_EVIDENCE_MAX_BYTES"
 DEFAULT_HOOK_EVIDENCE_N = 8
 DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 
+# ---------------------------------------------------------- gate v3: wide
+# evidence window
+#
+# Measured on the 40-case gate-bench-20260917 "wide" read (previous 2
+# turns' tool_result text + session receipts, whole file capped): widening
+# the window weakens the per-claim NOT_SUPPORTED/CONTRADICTED signal (more
+# surrounding text dilutes it) but SHARPENS the draft-level OVERCLAIMS
+# flag — it stops being a symptom of a thin gather and starts reading as a
+# real "the draft claims more than the wide evidence carries" signal. See
+# docs/hooks.md ("gate v3 — wide window") for the full write-up, including
+# the cliff: 0.85 over-blocks truths on this bench (t01 sits at 0.85 on
+# the wide read), 0.90 is the measured line.
+PREV_TURNS_ENV = "SUPERJEV_PREV_TURNS"
+DEFAULT_PREV_TURNS = 2
+EVIDENCE_CAP_BYTES_ENV = "SUPERJEV_EVIDENCE_CAP_BYTES"
+DEFAULT_EVIDENCE_CAP_BYTES = 24_576  # 24 KB, the whole assembled window
+RULE_ENV = "SUPERJEV_RULE"
+DEFAULT_RULE = "v3"
+BLOCK_OVERCLAIM_ENV = "SUPERJEV_BLOCK_OVERCLAIM"
+DEFAULT_BLOCK_OVERCLAIM = 0.90
+
 # PostToolUse verify must never guess a worktree from the payload's own cwd
 # (that field describes the lead session, not necessarily the worker's
 # tree). This env var is the only non-payload source honoured.
@@ -725,8 +746,88 @@ def _parse_strong_flags(text):
     return flags
 
 
+def _block_overclaim_line():
+    try:
+        return float(os.environ.get(BLOCK_OVERCLAIM_ENV, DEFAULT_BLOCK_OVERCLAIM))
+    except (TypeError, ValueError):
+        return DEFAULT_BLOCK_OVERCLAIM
+
+
+def _block_rule():
+    """Which block rule decides: 'v3' (default) or 'v2' (legacy,
+    SUPERJEV_RULE=v2, kept for A/B against the wide-window bench). Any
+    other/unset value falls back to the default rather than raising."""
+    r = os.environ.get(RULE_ENV, DEFAULT_RULE).strip().lower()
+    return r if r in ("v2", "v3") else DEFAULT_RULE
+
+
 def _hook_block_decision(flags, claim_rows=None, evidence=None):
-    """The full block decision: (reasons, notes).
+    """Dispatches to the active rule's block decision — see `_block_rule`.
+    Both rules return the same (reasons, notes) shape; see
+    `_hook_block_decision_v2`/`_hook_block_decision_v3` for what each one
+    actually decides and why."""
+    if _block_rule() == "v2":
+        return _hook_block_decision_v2(flags, claim_rows, evidence)
+    return _hook_block_decision_v3(flags, claim_rows, evidence)
+
+
+def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
+    """gate v3 (wide evidence window; default rule). Calibrated on the
+    40-case gate-bench-20260917 wide read (see docs/hooks.md, "gate v3 —
+    wide window"):
+
+      1. OVERCLAIMS at or above SUPERJEV_BLOCK_OVERCLAIM (default 0.90)
+         blocks ON ITS OWN — no companion claim required. This supersedes
+         v2/PR #20's "0.50 companion" rule (kept as SUPERJEV_RULE=v2 for
+         A/B): the wide window sharpens OVERCLAIMS enough (see
+         docs/hooks.md, "gate v3 — wide window") that a confident reading
+         of it no longer needs a second claim to corroborate it. It is
+         STILL gated on `_gather_healthy`, same as every other flag here
+         — the wide window fixes the companion requirement, not the
+         2026-09-17 thin-evidence false block (see PR #18); those are two
+         different failure modes and only the first one is what changed.
+      2. A claim-level NOT_SUPPORTED/CONTRADICTED at or above
+         SUPERJEV_BLOCK_CONF (default 0.80) is a SECONDARY trigger, and
+         only fires when the evidence gather was healthy (same
+         `_gather_healthy` check v2 uses) — a confident red verdict
+         against evidence too thin to judge is still a statement about
+         the gather, not the worker.
+      3. SELF_CONTRADICTORY is never a block reason, alone or in company,
+         same as v2 — it still prints as an advisory.
+      4. The OVERCLAIM_100_BLOCK fragile arm (SUPERJEV_OVERCLAIM_100_BLOCK)
+         still applies underneath rule 1; with the line already at 0.90 it
+         is a near no-op, kept only so the old 0.995-floor A/B is still
+         reachable.
+
+    Deterministic count/PR mismatches are computed and merged in by the
+    caller (cmd_hook), same as v2 — this function never sees them."""
+    overclaim_line = _block_overclaim_line()
+    conf_line = _block_confidence_line()
+    healthy = _gather_healthy(evidence)
+
+    reasons, notes = [], []
+    for f in flags:
+        v, s, k = f["verdict"], f["score"], f["key"]
+        candidate = (v == "OVERCLAIMS" and
+                    (s >= overclaim_line or (_overclaim_100_enabled() and s >= OVERCLAIM_100_FLOOR)))
+        candidate = candidate or (v in _RED_CLAIM_VERDICTS and s >= conf_line)
+        if candidate:
+            if not healthy:
+                line = overclaim_line if v == "OVERCLAIMS" else conf_line
+                first = (evidence.get("reasons") or ["no evidence was gathered"])[0]
+                headline = first.split(",")[0].split(" so ")[0].strip()
+                notes.append(
+                    f"{k} {v} {s:.2f} crossed the {line:.2f} line but the "
+                    f"evidence cannot carry a verdict ({headline}) — advisory, "
+                    "not a block; run with --explain for the full gather")
+                continue
+            reasons.append(f"{k} {v} {s:.2f}")
+    return reasons, notes
+
+
+def _hook_block_decision_v2(flags, claim_rows=None, evidence=None):
+    """Legacy rule (PR #18/#20), reachable via SUPERJEV_RULE=v2. The full
+    block decision: (reasons, notes).
 
     `reasons` are the "key VERDICT score" strings for the flags that cross
     THIS hook's block line — empty means do not block. `notes` are
@@ -1728,6 +1829,28 @@ def _hook_evidence_max_bytes():
         return DEFAULT_HOOK_EVIDENCE_MAX_BYTES
 
 
+def _hook_prev_turns():
+    """How many previous turns the gate v3 wide window reaches back for
+    (SUPERJEV_PREV_TURNS, default 2)."""
+    try:
+        n = int(os.environ.get(PREV_TURNS_ENV, DEFAULT_PREV_TURNS))
+        return n if n > 0 else DEFAULT_PREV_TURNS
+    except (TypeError, ValueError):
+        return DEFAULT_PREV_TURNS
+
+
+def _hook_evidence_cap_bytes():
+    """The whole assembled wide-window evidence file's own cap
+    (SUPERJEV_EVIDENCE_CAP_BYTES, default 24576) — tighter, by default,
+    than the legacy SUPERJEV_HOOK_EVIDENCE_MAX_BYTES safety net beneath
+    it; the smaller of the two always governs."""
+    try:
+        n = int(os.environ.get(EVIDENCE_CAP_BYTES_ENV, DEFAULT_EVIDENCE_CAP_BYTES))
+        return n if n > 0 else DEFAULT_EVIDENCE_CAP_BYTES
+    except (TypeError, ValueError):
+        return DEFAULT_EVIDENCE_CAP_BYTES
+
+
 def _is_real_user_prompt_record(rec):
     """True if `rec` is a transcript line whose message is a real human
     user turn (role "user" with text/plain content) rather than a
@@ -1770,6 +1893,56 @@ def _previous_turn_start_index(records, current_start):
         if _is_real_user_prompt_record(records[i]):
             return i
     return None
+
+
+def _previous_turn_windows(records, current_start, n_turns):
+    """Up to `n_turns` previous turns' tool_result texts, most-recent-first
+    (index 0 = turn -1, index 1 = turn -2, ...), walking back from
+    `current_start` one `_previous_turn_start_index` hop at a time. Stops
+    early — returning fewer than `n_turns` windows — the moment there is
+    no earlier turn to find, same boundary rule `_previous_turn_start_index`
+    already uses."""
+    windows = []
+    boundary = current_start
+    for _ in range(max(n_turns, 0)):
+        prev_start = _previous_turn_start_index(records, boundary)
+        if prev_start is None:
+            break
+        windows.append(_collect_tool_results(records[prev_start:boundary]))
+        boundary = prev_start
+    return windows
+
+
+def _build_prev_turns_block(windows, budget):
+    """Renders `windows` (most-recent-first list of list[str], see
+    `_previous_turn_windows`) as one "[previous turn -N]" block per turn,
+    joined oldest-last. When the whole block would exceed `budget` bytes,
+    drops the OLDEST turn first (repeatedly, one turn at a time) — never
+    the current turn, which this function never sees at all. If even the
+    single most recent previous turn alone is still over budget once
+    everything else is dropped, keeps its TAIL (the freshest bytes) rather
+    than its head. Returns (block_text, turns_dropped)."""
+    if not windows or budget <= 0:
+        return "", len(windows)
+    labeled = [(idx, "\n\n---\n\n".join(texts) if texts else "")
+              for idx, texts in enumerate(windows, start=1)]
+
+    def render(items):
+        return "\n\n".join(f"[previous turn -{idx}]\n{joined}"
+                           for idx, joined in items if joined)
+
+    block = render(labeled)
+    dropped = 0
+    while len(block.encode("utf-8")) > budget and len(labeled) > 1:
+        labeled.pop()  # drop the oldest (furthest-back) turn first
+        dropped += 1
+        block = render(labeled)
+    if len(block.encode("utf-8")) > budget and labeled:
+        idx, joined = labeled[0]
+        keep = max(budget - 48, 0)
+        tail = joined.encode("utf-8")[-keep:].decode("utf-8", errors="ignore")
+        block = f"[previous turn -{idx}]\n[...older content in this turn dropped...]\n{tail}"
+    return block, dropped
 
 
 def _collect_tool_results(records):
@@ -1866,15 +2039,20 @@ def _record_receipts(session_id, texts):
 
 
 def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None,
-                                          session_id=None):
+                                          session_id=None, prev_turns=None,
+                                          cap_bytes=None, return_meta=False):
     """The evidence text a Stop-hook gate run uses when the payload names no
-    'evidence' itself. Three layers, current turn highest priority:
+    'evidence' itself — gate v3's wide window. Three layers, current turn
+    highest priority:
 
-      1. The PREVIOUS turn's tool_result content (the turn before the one
-         _current_turn_start_index finds), lower priority, capped at half
-         of `max_bytes` — a fact gathered one turn ago ("tests passed",
-         "PR merged") is still real evidence for a reply about it now, and
-         dropping it the moment the turn ends was an evidence gap.
+      1. The previous `prev_turns` turns' tool_result content (default 2,
+         SUPERJEV_PREV_TURNS — see _previous_turn_windows), lower priority,
+         most-recent-first. A fact gathered one or two turns ago ("tests
+         passed", "PR merged") is still real evidence for a reply about it
+         now, and dropping it the moment the turn ends was an evidence
+         gap. When the assembled window would exceed the cap, the OLDEST
+         previous turn is dropped first (see _build_prev_turns_block) —
+         never the current turn.
       2. Up to the last RECEIPTS_WINDOW session receipts (see
          _record_receipts) — a dated one-line memory of every `gh pr
          merge`/`gh pr checks`/"N passed" fact this session has ever seen
@@ -1882,21 +2060,33 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          layer 1 still reaches the gate.
       3. The CURRENT turn's tool_result content (the last `n` tool calls
          found at or after the most recent real user prompt — see
-         _current_turn_start_index), highest priority.
+         _current_turn_start_index), highest priority, NEVER dropped to
+         make room for anything else.
 
-    Sections are joined in that order (lowest priority first) and the
-    WHOLE joined text is capped at `max_bytes`, keeping the tail — so when
-    truncation happens, the current turn (last in the join) is what
-    survives, same guarantee as before this change. This turn's own
-    tool_result texts are also handed to _record_receipts (when
-    `session_id` is given) so any `gh pr merge`/`gh pr checks`/"N passed"
-    line in them becomes tomorrow's receipt.
+    The whole assembled file is capped at `cap_bytes` (default 24576,
+    SUPERJEV_EVIDENCE_CAP_BYTES) or the legacy `max_bytes`
+    (SUPERJEV_HOOK_EVIDENCE_MAX_BYTES), whichever is smaller — previous
+    turns are trimmed (oldest first) to fit inside that budget before the
+    sections are joined; if the joined text still somehow exceeds the cap
+    (the current turn alone is bigger than it), the TAIL is kept, same
+    guarantee as before gate v3. This turn's own tool_result texts are
+    also handed to _record_receipts (when `session_id` is given) so any
+    `gh pr merge`/`gh pr checks`/"N passed" line in them becomes
+    tomorrow's receipt.
 
     Returns None if there is nothing at all — no current-turn results, no
-    previous-turn results, no receipts, or the transcript cannot be read.
+    previous-turn results, no receipts, or the transcript cannot be read
+    (or, when `return_meta=True`, a (None, meta) pair with the same
+    shape). `meta` (used by `hook gate --explain`) carries
+    prev_turns_found/prev_dropped/prev_bytes/receipts_count/
+    receipts_bytes/current_bytes/cap_bytes/total_bytes.
     """
     n = n if n is not None else _hook_evidence_n()
     max_bytes = max_bytes if max_bytes is not None else _hook_evidence_max_bytes()
+    prev_turns = prev_turns if prev_turns is not None else _hook_prev_turns()
+    cap_bytes = cap_bytes if cap_bytes is not None else _hook_evidence_cap_bytes()
+    effective_cap = min(cap_bytes, max_bytes)
+
     records = _read_transcript_records(transcript_path)
     start = _current_turn_start_index(records)
     scoped = records[start:] if start is not None else records
@@ -1905,24 +2095,11 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
     if session_id:
         _record_receipts(session_id, cur_results)
 
-    prev_results = []
-    if start is not None:
-        prev_start = _previous_turn_start_index(records, start)
-        if prev_start is not None:
-            prev_results = _collect_tool_results(records[prev_start:start])
+    prev_windows = _previous_turn_windows(records, start, prev_turns) if start is not None else []
 
-    sections = []
-    if prev_results:
-        prev_joined = "\n\n---\n\n".join(prev_results[-n:])
-        prev_cap = max_bytes // 2
-        if len(prev_joined) > prev_cap:
-            prev_joined = prev_joined[-prev_cap:]
-        sections.append("[previous turn]\n" + prev_joined)
-
-    if session_id:
-        receipts = _load_receipts(session_id)
-        if receipts:
-            sections.append("[session receipts]\n" + "\n".join(receipts))
+    meta = {"prev_turns_found": len(prev_windows), "prev_bytes": 0, "prev_dropped": 0,
+           "receipts_count": 0, "receipts_bytes": 0, "current_bytes": 0,
+           "cap_bytes": effective_cap, "total_bytes": 0}
 
     if not cur_results:
         # PR #22's health semantics: a turn that ran no tools of its own
@@ -1931,13 +2108,41 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         # "unchecked" path in cmd_hook rather than letting stale evidence
         # from an earlier turn silently back (or block) a fresh, tool-free
         # reply.
-        return None
-    sections.append("[current turn]\n" + "\n\n---\n\n".join(cur_results[-n:]))
+        return (None, meta) if return_meta else None
 
+    cur_section = "[current turn]\n" + "\n\n---\n\n".join(cur_results[-n:])
+    meta["current_bytes"] = len(cur_section.encode("utf-8"))
+
+    receipts_section = ""
+    if session_id:
+        receipts = _load_receipts(session_id)
+        if receipts:
+            receipts_section = "[session receipts]\n" + "\n".join(receipts)
+            meta["receipts_count"] = len(receipts)
+            meta["receipts_bytes"] = len(receipts_section.encode("utf-8"))
+
+    overhead = 32  # section-join separators ("\n\n===\n\n"), one per gap
+    remaining_for_prev = effective_cap - meta["current_bytes"] - meta["receipts_bytes"] - overhead
+    prev_section = ""
+    if prev_windows and remaining_for_prev > 0:
+        prev_block, dropped = _build_prev_turns_block(prev_windows, remaining_for_prev)
+        meta["prev_dropped"] = dropped
+        if prev_block:
+            prev_section = prev_block
+            meta["prev_bytes"] = len(prev_block.encode("utf-8"))
+    elif prev_windows:
+        meta["prev_dropped"] = len(prev_windows)  # no budget left for any of them
+
+    sections = [s for s in (prev_section, receipts_section, cur_section) if s]
     joined = "\n\n===\n\n".join(sections)
-    if len(joined) > max_bytes:
-        joined = joined[-max_bytes:]
-    return joined if joined.strip() else None
+    if len(joined.encode("utf-8")) > effective_cap:
+        # The current turn alone (plus receipts) is bigger than the cap —
+        # keep the tail, same guarantee this function always carried.
+        joined = joined.encode("utf-8")[-effective_cap:].decode("utf-8", errors="ignore")
+    meta["total_bytes"] = len(joined.encode("utf-8"))
+
+    result = joined if joined.strip() else None
+    return (result, meta) if return_meta else result
 
 
 def _last_assistant_text(transcript_path):
@@ -2146,6 +2351,51 @@ def _evidence_probe(report_path, worktree=None, test_cmd=""):
     if isinstance(result, tuple) and len(result) == 3:
         return result[1] or ""
     return ""
+
+
+def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
+                               det_block_reasons, block_reasons, block_notes):
+    """`hook gate --explain`'s own report: the wide evidence window's
+    composition (bytes per segment, how many previous turns were found/
+    dropped, receipts count) and which rule fired — printed on top of, not
+    instead of, the normal advisory/block line."""
+    rule = _block_rule()
+    print("\n--- super-jev gate --explain (window) ---")
+    print(f"  evidence source   : {evidence_source}")
+    m = window_meta or {}
+    if not m:
+        print("  window            : not built (evidence came from the payload, not the "
+              "transcript)")
+    else:
+        print(f"  cap               : {m.get('cap_bytes', 0)} bytes "
+              f"(SUPERJEV_EVIDENCE_CAP_BYTES / SUPERJEV_HOOK_EVIDENCE_MAX_BYTES, "
+              "smaller wins)")
+        print(f"  current turn      : {m.get('current_bytes', 0)} bytes (never dropped)")
+        print(f"  previous turns    : {m.get('prev_turns_found', 0)} found, "
+              f"{m.get('prev_dropped', 0)} dropped (oldest first), "
+              f"{m.get('prev_bytes', 0)} bytes kept")
+        print(f"  session receipts  : {m.get('receipts_count', 0)} line(s), "
+              f"{m.get('receipts_bytes', 0)} bytes")
+        print(f"  total             : {m.get('total_bytes', 0)} bytes")
+    print(f"\n  rule              : {rule} "
+          f"({'legacy — SUPERJEV_RULE=v2' if rule == 'v2' else 'default'})")
+    if rule == "v3":
+        print(f"  overclaim line    : {_block_overclaim_line():.2f} "
+              "(SUPERJEV_BLOCK_OVERCLAIM) — blocks alone, no companion claim needed")
+        print(f"  secondary line    : {_block_confidence_line():.2f} "
+              "(SUPERJEV_BLOCK_CONF) — NOT_SUPPORTED/CONTRADICTED, healthy gather only")
+    else:
+        print(f"  block line        : {_block_confidence_line():.2f} (SUPERJEV_BLOCK_CONF); "
+              "OVERCLAIMS needs a companion claim >= 0.50")
+    if det_block_reasons:
+        print(f"  deterministic     : {'; '.join(det_block_reasons)}")
+    if block_reasons:
+        print(f"  fired on          : {'; '.join(block_reasons)}")
+    else:
+        print("  fired on          : nothing — advisory at most")
+    for n in block_notes or []:
+        print(f"  suppressed        : {n}")
+    print("--- end --explain (window) ---\n")
 
 
 def _print_explain(door, code, action, flags, claim_rows, evidence, notes,
@@ -2934,12 +3184,13 @@ def cmd_hook(a):
 
             evidence = _hook_evidence_paths(payload)
             evidence_source = "payload"
+            window_meta = None
             if not evidence:
                 tp = payload.get("transcript_path")
                 derived = None
                 if isinstance(tp, str) and tp:
-                    derived = _derive_evidence_text_from_transcript(
-                        tp, session_id=payload.get("session_id"))
+                    derived, window_meta = _derive_evidence_text_from_transcript(
+                        tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
                     tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md",
                                                           delete=False, encoding="utf-8")
@@ -3079,6 +3330,10 @@ def cmd_hook(a):
         # text that WAS in the evidence window carries no "the gather was
         # too thin" failure mode the way a model's confidence score does.
         block_reasons = det_block_reasons + block_reasons
+
+        if door == "gate" and getattr(a, "explain", False):
+            _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
+                                       det_block_reasons, block_reasons, block_notes)
 
         action_map = GATE_HOOK_ACTION if door == "gate" else VERIFY_HOOK_ACTION
         action = action_map.get(code, "advisory")
@@ -3697,8 +3952,10 @@ def build_parser():
                     help="verify --from-file only: the test command, passed straight "
                          "to worker-verify's own --test-cmd")
     hk.add_argument("--explain", action="store_true",
-                    help="verify --from-file only: print how much evidence was "
-                         "gathered, the per-claim table and which rule decided, "
+                    help="verify --from-file, or gate (stdin): print how much evidence "
+                         "was gathered (for gate: the wide window's composition — bytes "
+                         "per segment, previous turns found/dropped, receipts count), "
+                         "the per-claim table and which rule decided, "
                          "so a human can see why it blocked or did not")
     hk.add_argument("--pr", type=int, default=None,
                     help="verify --from-file only: a PR number, turned into a full "
