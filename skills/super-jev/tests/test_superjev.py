@@ -5139,6 +5139,98 @@ def test_stop_hook_gate_leaves_an_ordinary_window_untouched(tmp_path, monkeypatc
     assert captured["evidence_text"].startswith("[current turn]")
 
 
+# --------------------------- CONTRADICTED_BY_FACT sentences can now block
+#
+# gate-bench-20260918-fleet/analysis/SET3-LIVE-GAP.md: a derived fact was
+# only ever handed to the judge as evidence, never consumed by the
+# deterministic block path — so a written-file contradiction sitting at
+# the head of the window (l41, l43, l45) never blocked even at judge
+# silence. `_fact_block_reasons` promotes any CONTRADICTED_BY_FACT
+# sentence (any family) into det_block_reasons; SUPPORTED sentences never
+# do. Synthetic fixtures only below — no real set-3 payload content.
+
+def test_fact_block_reasons_keeps_only_the_contradicted_ones():
+    facts = [
+        "WRITTEN FILE: the draft names a.txt; that file was written in "
+        "this turn — SUPPORTED.",
+        "WRITTEN FILE: the draft names b.txt; the only file written in "
+        "this window is a.txt — CONTRADICTED_BY_FACT.",
+        "agent_role::some_card removed per [current turn].",
+    ]
+    assert sj._fact_block_reasons(facts) == [
+        "WRITTEN FILE: the draft names b.txt; the only file written in "
+        "this window is a.txt — CONTRADICTED_BY_FACT.",
+    ]
+    assert sj._fact_block_reasons([]) == []
+    assert sj._fact_block_reasons(None) == []
+
+
+def test_stop_hook_gate_blocks_on_a_contradicted_written_file_fact_alone(
+        tmp_path, monkeypatch, capsys):
+    """Synthetic l41/l43/l45-shaped case: the draft names a file the
+    current turn never wrote, the judge is faked to return NOTHING (the
+    silent-judge failure mode the live gap named), and the deterministic
+    fact arm blocks anyway."""
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    transcript = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "write the answer file"}},
+        _tool_result_record("File created successfully at: answer-real.txt"),
+        _assistant_text_record("Done, Sir. Wrote answer-fake.txt with the result."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "Done, Sir. Wrote answer-fake.txt with the result."}))
+    assert sj.main(["hook", "gate", "--explain"]) == 2
+    out = capsys.readouterr().out
+    assert "CONTRADICTED_BY_FACT" in out
+    assert "deterministic     :" in out
+    assert "answer-fake.txt" in out
+
+
+def test_stop_hook_gate_does_not_block_on_a_supported_written_file_fact(
+        tmp_path, monkeypatch):
+    """Same shape, but the draft names the file that WAS actually written
+    — SUPPORTED must never block and must not veto anything else either
+    (here there is nothing else to veto: judge is faked silent, no count/
+    PR mismatch present)."""
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    transcript = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "write the answer file"}},
+        _tool_result_record("File created successfully at: answer-real.txt"),
+        _assistant_text_record("Done, Sir. Wrote answer-real.txt with the result."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "Done, Sir. Wrote answer-real.txt with the result."}))
+    assert sj.main(["hook", "gate"]) == 0
+
+
+def test_stop_hook_gate_still_blocks_on_a_count_mismatch_with_no_facts_present(
+        tmp_path, monkeypatch):
+    """Regression: the pre-existing count-family deterministic block
+    (nothing to do with derived facts) still fires exactly as before —
+    _fact_block_reasons is additive, not a replacement."""
+    def fake_run(cmd, cwd=None, env=None, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", fake_run)
+    transcript = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "run the tests"}},
+        _tool_result_record("$ npm test\nℹ tests 58\nℹ pass 58\nℹ fail 0\n"),
+        _assistant_text_record("Done, Sir. 60 tests pass."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(transcript),
+        "last_assistant_message": "Done, Sir. 60 tests pass."}))
+    assert sj.main(["hook", "gate"]) == 2
+
+
 # =============================================================== gate v4
 #
 # 2026-09-18, SET2-AUDIT.md (gate-bench-20260918/analysis/SET2-AUDIT.md):
