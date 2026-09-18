@@ -265,7 +265,7 @@ Every kept record gets a `high`/`medium`/`low`/`none` relevance level and a conf
 
 ## Agent front door (Claude Code skill)
 
-`skills/super-jev/` is a small [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: a single Python file, `superjev.py`, that gives an agent one command for every check in this repo instead of four things to remember. It is a thin wrapper — every judgement still belongs to the tool it wraps. New here? **[`docs/playbook.md`](docs/playbook.md)** is the fast path in: a job-to-door table, one worked example per door, and what real dogfooding says to trust today.
+`skills/super-jev/` is a small [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: a single Python file, `superjev.py`, that gives an agent one command for every check in this repo instead of four things to remember. It is a thin wrapper — every judgement still belongs to the tool it wraps. New here? **[`docs/playbook.md`](docs/playbook.md)** is the fast path in: a job-to-door table, one worked example per door, and what real dogfooding says to trust today. **[`docs/lessons.md`](docs/lessons.md)** is what live use has taught us since: feed rules, hook lessons, and why a couple of promising-sounding changes did not pan out.
 
 Install it by symlink or copy:
 
