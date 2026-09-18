@@ -1730,79 +1730,13 @@ def _hook_block_reasons(flags, claim_rows=None, evidence=None):
 
 # --------------------------------------- gate-adjudication-20260918.md fixes
 #
-# Two of the OVERCLAIMS arm's three FALSE mechanisms found by the live
-# adjudication (see docs/hooks.md, "OVERCLAIMS arm — the two live false
-# mechanisms it still needed" for the write-up this section backs):
-#
-#   (b) zero-tool conversational turns — the current turn ran no tools and
-#       the WINDOW itself carries no tool receipt anywhere (no previous-turn
-#       tool output, no session receipts, no `[from: ...]` identity line, no
-#       relayed worker report). 2026-09-18 re-adjudication: the original fix
-#       here tried to spot "conversational" from the DRAFT's own shape — a
-#       verb/number regex (_draft_has_receipt_shaped_claim) — and that regex
-#       could never be made complete: "The bot is back up.", "Your rent is
-#       paid.", "I sent the email.", "The tests are green.", "Nothing
-#       failed.", "Backup completed.", "All three are live now." and "The
-#       service is now stable and fully caught up." all block on base with
-#       contradicting evidence sitting in the previous turn, and all passed
-#       the judge unjudged under the verb-list version of this fix — a false
-#       negative for every one of them. The rule is now structural instead:
-#       it looks at what the WINDOW carries, not what words the draft used.
-#       If the window carries no receipt at all, there is nothing any tool
-#       result could support or contradict, so the judge is skipped. If the
-#       window carries ANY receipt, the judge always runs — even against a
-#       plain-sounding draft — because that receipt is exactly the kind of
-#       evidence a plain-sounding claim can still overclaim against. See
-#       _window_has_any_receipt and its use in cmd_hook.
-#   (a) the receipt is one turn old — the current turn ran no tools but the
-#       draft correctly restates a result whose receipt sits in the
-#       previous-turn block, not this turn's own (rows 13, 14, 23, 24, 27,
-#       28, 30 in part: a merge, a spawn or a log read a turn or two
-#       earlier, still real evidence for a reply about it now). The most
-#       recent previous turn that ran tools is named in a DERIVED FACTS
-#       sentence pointing at its existing "[previous turn -N]" header (no
-#       header rewrite — see _receipt_turn_index and _receipt_turn_extra_
-#       fact; earlier drafts of this fix relabelled the header itself to
-#       "[receipt turn -N]", which needed two more regexes taught the new
-#       header text and both slipped through unregistered — see docs/
-#       hooks.md, "gate v4 — the receipt turn header").
-
-# The window's own section headers that mean "a tool receipt sits under
-# this line" — previous-turn tool output, session receipts, and this
-# turn's relayed worker reports. Deliberately NOT "[current turn]": when
-# this rule runs, current_turn_empty is already True, so that section
-# never carries anything of its own anyway.
-_RECEIPT_SECTION_HEADERS = ("[previous turn -", "[session receipts]",
-                            "[current turn reports]")
-
-
-def _window_has_any_receipt(window_text):
-    """True when `window_text` (the assembled evidence window, before the
-    cited-file tail is appended — see cmd_hook) carries a tool receipt
-    ANYWHERE: previous-turn tool output, a session receipt, a relayed
-    worker report, or a sticky `[from: ...]` identity line. This is the
-    whole test for "conversational" (mechanism (b), see the section
-    docstring above) — deliberately a property of the WINDOW, not of the
-    draft's own wording. A verb/number scan of the draft
-    (_draft_has_receipt_shaped_claim, removed 2026-09-18) could never be
-    made complete: "The bot is back up.", "Your rent is paid.", "I sent
-    the email." and five more all carry no tracked verb or number yet are
-    still checkable against contradicting evidence one turn back. Here,
-    if the window carries no receipt at all, there is genuinely nothing
-    any tool result could support or contradict, so skipping the judge is
-    safe regardless of how the draft is phrased; if the window carries
-    ANY receipt, the judge always runs, because a receipt existing is
-    exactly what makes a plain-sounding draft checkable. False for
-    empty/whitespace input."""
-    if not window_text:
-        return False
-    for line in window_text.splitlines():
-        s = line.strip()
-        if s.startswith(_RECEIPT_SECTION_HEADERS):
-            return True
-        if '[from:' in line:
-            return True
-    return False
+# The receipt is one turn old — the current turn ran no tools but the
+# draft correctly restates a result whose receipt sits in the
+# previous-turn block, not this turn's own (a merge, a spawn or a log read
+# a turn or two earlier, still real evidence for a reply about it now).
+# The most recent previous turn that ran tools is named in a DERIVED FACTS
+# sentence pointing at its existing "[previous turn -N]" header (no header
+# rewrite — see _receipt_turn_index and _receipt_turn_extra_fact).
 
 
 def _receipt_turn_index(window_meta):
@@ -1822,21 +1756,11 @@ def _receipt_turn_index(window_meta):
 
 def _receipt_turn_extra_fact(receipt_idx):
     """The DERIVED FACTS sentence naming the receipt turn, for
-    `compose_window_with_facts`'s `extra_facts` — see mechanism (a). Points
-    at the receipt turn's EXISTING "[previous turn -N]" header rather than
-    rewriting it: an earlier version of this fix relabelled that header to
-    "[receipt turn -N]" so the judge could see it named in place, but that
-    meant every window-parsing regex keyed on the literal text
-    "[previous turn -N]" (_WINDOW_PART_RE for the trim order, _WINDOW_
-    SECTION_RE for fact-line labelling) had to be taught the new header
-    too, and both slipped through unregistered — the relabelled section
-    fell out of the trim order entirely (dropped whole instead of shrunk,
-    or never dropped and displacing session receipts instead — see
-    docs/hooks.md, "gate v4 — the receipt turn header") and out of fact-
-    line labelling (falling back to the default "the evidence window"
-    label at the wrong rank). Naming the turn in prose instead of
-    rewriting its header keeps every existing window regex correct with
-    no relabel to keep in sync. None when there is no receipt turn to
+    `compose_window_with_facts`'s `extra_facts`. Points at the receipt
+    turn's existing "[previous turn -N]" header rather than rewriting it,
+    so every existing window-parsing regex (_WINDOW_PART_RE for the trim
+    order, _WINDOW_SECTION_RE for fact-line labelling) stays correct with
+    nothing new to keep in sync. None when there is no receipt turn to
     name."""
     if receipt_idx is None:
         return None
@@ -7183,20 +7107,36 @@ def _stop_scan_verify_one(r, budget=None):
                 pass
 
         label = {0: "CLEAN", 3: "READ", 4: "REJECT"}.get(code, "READ")
-        if block_reasons and label != "REJECT":
+        health = "thin" if evidence.get("thin") else "ok"
+        if block_reasons:
             label = "REJECT"
+        elif label == "REJECT" and health == "thin":
+            # Same hole as the live PostToolUse verify hook (see
+            # gate-adjudication-20260918.md): worker-verify's own exit
+            # code alone said REJECT, but every flag this run actually
+            # parsed was suppressed into `notes` because the gather had
+            # nothing usable — 45 of 59 REJECT labels in the 2026-09-18
+            # adjudication ran exactly this way. A bare exit code over
+            # evidence that was never gathered is "we could not check",
+            # never "we checked and it failed" — never a REJECT label.
+            label = "UNCHECKED"
         flag_str = ("; ".join(f"{f['key']} {f['verdict']} {f['score']:.2f}" for f in flags)
                    or "no flags")
         used = ", ".join(f"--{k} {v}" for k, v in
                          (("worktree", derived["worktree"]),
                           ("test-cmd", derived["test_cmd"]),
                           ("pr", derived["pr"])) if v) or "no evidence derived"
-        health = "thin" if evidence.get("thin") else "ok"
         print(f"super-jev verify {teammate_id}: {label} — {flag_str} — {used} — health {health}")
         note_tail = (" — " + "; ".join(notes)) if notes else ""
         _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
                  f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
-                 hook_mode=True, source="stop-transcript")
+                 hook_mode=True, source="stop-transcript",
+                 unchecked=(label == "UNCHECKED"),
+                 health=("none" if label == "UNCHECKED" else health),
+                 reason=("no-evidence" if label == "UNCHECKED" else None))
+        if label == "UNCHECKED":
+            catch_log("verify", "unchecked", reasons=["no-evidence"] + (notes or []),
+                     draft_text=report_text, payload=None)
     except Exception as exc:
         print(f"super-jev verify {teammate_id}: ERROR — {exc.__class__.__name__} (advisory)")
         _hook_log(f"stop-scan: {teammate_id} — error ({exc.__class__.__name__}), "
@@ -7498,46 +7438,18 @@ def cmd_hook(a):
                     derived, window_meta = _derive_evidence_text_from_transcript(
                         tp, session_id=payload.get("session_id"), return_meta=True)
                 if derived:
-                    # gate-adjudication-20260918.md's two OVERCLAIMS false
-                    # mechanisms, both scoped to a current turn that ran no
-                    # tools of its own (window_meta["current_turn_empty"]):
+                    # gate-adjudication-20260918.md: the receipt-turn fix,
+                    # scoped to a current turn that ran no tools of its own
+                    # (window_meta["current_turn_empty"]).
                     receipt_extra_facts = None
                     if window_meta is not None and window_meta.get("current_turn_empty"):
-                        if not _window_has_any_receipt(derived):
-                            # Mechanism (b): a tool-free current turn AND
-                            # the assembled window carries no receipt
-                            # anywhere — no previous-turn tool output, no
-                            # session receipt, no relayed worker report, no
-                            # `[from: ...]` identity line. Nothing in the
-                            # window is checkable, so the judge is skipped
-                            # outright rather than risk scoring OVERCLAIMS
-                            # on prose with no evidence to check it
-                            # against (rows 10, 15, 21, P1 of the
-                            # adjudication). This is a property of the
-                            # WINDOW, not the draft's wording — see
-                            # _window_has_any_receipt's docstring for why a
-                            # verb/number scan of the draft was replaced.
-                            msg = "super-jev gate: conversational turn, not judged"
-                            print(msg, file=sys.stderr)
-                            _hook_log("gate: conversational turn (current turn ran no "
-                                      "tools, window carries no receipt anywhere) — "
-                                      "not judged, advisory only", exit_code=0,
-                                      unchecked=True, health="none",
-                                      reason="conversational")
-                            catch_log("gate", "unchecked", reasons=["conversational"],
-                                     draft_text=text, window_bytes=None,
-                                     start_time=_catch_t0, payload=payload)
-                            return 0
-                        # The window DOES carry a receipt somewhere even
-                        # though the current turn ran no tools of its own
-                        # — the judge always runs. Mechanism (a): if the
-                        # most recent previous turn that ran tools is
-                        # still kept in the window, name it in a DERIVED
-                        # FACTS sentence (no header rewrite — see
+                        # The current turn ran no tools of its own — if the
+                        # most recent previous turn that ran tools is still
+                        # kept in the window, name it in a DERIVED FACTS
+                        # sentence (no header rewrite — see
                         # _receipt_turn_extra_fact) so a correct
                         # restatement of a one-turn-old result is not
-                        # scored as having no in-window evidence (rows 13,
-                        # 14, 23, 24, 27, 28, 30 in part).
+                        # scored as having no in-window evidence.
                         receipt_idx = _receipt_turn_index(window_meta)
                         window_meta["receipt_turn"] = receipt_idx
                         if receipt_idx is not None:
@@ -7687,12 +7599,15 @@ def cmd_hook(a):
                     text = dict_text
                 elif is_spawn:
                     status = tool_response.get("status")
+                    print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                     _hook_log(
                         "verify: skipped — tool_response is a spawn/launch dict"
                         + (f" (status={status!r})" if status else "") +
                         "; the worker's own report is not here yet, it arrives later "
                         "in a <teammate-message> block (see `hook prompt-verify`)",
                         exit_code=0, skipped=True, reason="spawn-dict")
+                    catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                             draft_text=None, start_time=_catch_t0, payload=payload)
                     return 0
                 else:
                     text = _hook_report_text(payload)
@@ -7705,8 +7620,11 @@ def cmd_hook(a):
 
             is_ack, ack_reason = _is_launch_ack(text)
             if is_ack:
+                print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                 _hook_log(f"verify: skipped — {ack_reason}", exit_code=0, skipped=True,
                          reason="launch-ack")
+                catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                         draft_text=text, start_time=_catch_t0, payload=payload)
                 return 0
 
             worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
@@ -7742,11 +7660,11 @@ def cmd_hook(a):
         # is no weaker action to upgrade.
         # claim_rows carries the SUPPORTED rows too, which _parse_strong_flags
         # drops — without them the OVERCLAIMS-alone gate could never see
-        # that every claim was in fact supported. No evidence inventory is
-        # passed on this path: a real hook payload gives us no --test-cmd
-        # and no --pr (see the hardcoded test_cmd="" above), so there is no
-        # gather to measure. That also means a hook-driven verify can NEVER
-        # prove a test-count claim — docs/hooks.md says so in plain words.
+        # that every claim was in fact supported. A hook-driven verify gets
+        # no --test-cmd/--pr (see the hardcoded test_cmd="" above), so it
+        # can NEVER prove a test-count claim — docs/hooks.md says so in
+        # plain words — but it DOES know whether it had a worktree to look
+        # at, which is exactly what gather_health below checks.
         flags = _parse_strong_flags(door_out)
         claim_rows = _parse_claim_rows(door_out)
         # Only the gate door ever derives a wide window from the transcript
@@ -7760,6 +7678,19 @@ def cmd_hook(a):
             gather_health = {"current_turn_empty": True,
                              "reasons": ["the current turn ran no tools of its own; this "
                                         "window is previous-turn/receipts evidence only"]}
+        elif door == "verify":
+            # 2026-09-18 fix (gate-adjudication-20260918.md, verify door):
+            # `hook verify --from-file` and the Stop-scan both already
+            # compute `_evidence_inventory` and feed it in here so a thin
+            # gather suppresses a block into an advisory note instead of
+            # letting it through — the live PostToolUse hook never did,
+            # so it treated "nothing was gathered" as "healthy" and let a
+            # bare exit code stand in for a real judgement. `worktree` is
+            # the only evidence source this path ever has (test_cmd/pr are
+            # never set on a real hook payload), so this is deliberately
+            # narrower than the from-file/probe version — no --dry-run
+            # probe is spent here, just the presence/absence check.
+            gather_health = _evidence_inventory(test_cmd="", worktree=worktree, pr=None)
         block_reasons, block_notes = _hook_block_decision(flags, claim_rows, gather_health)
         # Deterministic reasons are never suppressed by the gather-health
         # check the judge-driven flags above go through — arithmetic on
@@ -7776,6 +7707,20 @@ def cmd_hook(a):
         action = action_map.get(code, "advisory")
         if block_reasons:
             action = "block"
+        elif (door == "verify" and action == "block" and gather_health is not None
+              and not _gather_healthy(gather_health)):
+            # The door's own exit code alone implied a block, but nothing
+            # this run actually parsed crossed the block line —
+            # _hook_block_decision already suppressed every flag into
+            # block_notes because the gather itself had nothing usable (no
+            # worktree, or the probe came back empty/unreadable). Blocking
+            # on a bare exit code over evidence that was never gathered
+            # mistakes "we could not check" for "we checked and it
+            # failed" — see gate-adjudication-20260918.md, verify door,
+            # rows 00:39:08 and 01:03:59 (the SAME report came back READ
+            # once --worktree/--test-cmd/--pr gave it something to gather
+            # against). Advisory, not a block; never judged.
+            action = "unchecked-no-evidence"
 
         # stop_hook_active=true is Claude Code's own signal that this Stop
         # event is a RE-RUN — a previous hook already blocked once this
@@ -7845,6 +7790,19 @@ def cmd_hook(a):
             if notice:
                 print(notice)
 
+        if action == "unchecked-no-evidence":
+            reason_bits = "; ".join(block_notes) if block_notes else f"exit {code}"
+            advisory = ("super-jev verify: no evidence gathered; not judged "
+                       f"(exit {code} suppressed — {reason_bits})")
+            print(advisory)
+            _hook_log(f"verify: unchecked — no evidence gathered (exit {code} "
+                     f"suppressed — {reason_bits}) — advisory, not judged", exit_code=0,
+                     flags=flags, unchecked=True, health="none", reason="no-evidence")
+            catch_log(door, "unchecked", reasons=["no-evidence"] + block_notes,
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
+            _print_ledger_notice_if_gate()
+            return 0
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
@@ -8025,15 +7983,14 @@ SKIP_REASON_BUCKETS = {
     "spawn-dict": SKIP_BUCKET_DEFERRED,
     "no-teammate-messages": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
-    # A tool-free turn whose whole window carries no receipt anywhere is
-    # not a lost check — there was nothing checkable to lose (see
-    # _window_has_any_receipt, gate-adjudication-20260918.md mechanism
-    # (b)). Left out of this table, it fell to SKIP_BUCKET_LOST by
-    # design and tripped the lost-check WARN on any session with an
-    # ordinary conversational turn.
-    "conversational": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
+    # The stop-scan's UNCHECKED verdict (worker-verify's own exit code
+    # said REJECT/CLEAN, but the gather had nothing usable, so the label
+    # was downgraded to UNCHECKED — see cmd_hook_prompt_verify's
+    # stop-scan branch) is judged against thin evidence, same as the
+    # sibling no-tool-evidence-checkable path above, not a lost check.
+    "no-evidence": SKIP_BUCKET_THIN,
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
     # The advisory teammate-report scan running out of its own time or its

@@ -4,55 +4,24 @@
 
 No version bump.
 
-- **OVERCLAIMS arm — two live false mechanisms fixed, then the first fix
-  re-adjudicated structural.** A hand adjudication of every live `hook
-  gate` block on the primary's own seat (`ops/gate-adjudication-20260918.md`)
-  found the OVERCLAIMS arm's false blocks all traced to two mechanisms,
-  both scoped to `window_meta["current_turn_empty"]` (a turn that ran its
-  own tools is untouched by either):
-  1. **Zero-tool conversational turns.** The current turn ran no tools and
-     the draft was a plain answer/opinion/status/plan with no claim any
-     tool result could ever support or contradict ("the proof is what Jev
-     alone could not have done today", a design answer, a plan sentence).
-     The original fix checked the DRAFT for a receipt-shaped claim (a
-     number next to a result word, a file path, a PR/#N reference, or a
-     completion verb) before judging a tool-free turn at all. A same-day
-     re-adjudication found that scan could never be made complete: "The
-     bot is back up.", "Your rent is paid.", "I sent the email.", "The
-     tests are green.", "Nothing failed.", "Backup completed.", "All three
-     are live now." and "The service is now stable and fully caught up."
-     all carry contradicting evidence one turn back yet all passed the
-     judge unjudged. The rule is now **structural**: `hook gate` skips the
-     judge as "conversational" only when the current turn ran no tools of
-     its own AND the whole assembled WINDOW carries no tool receipt
-     anywhere — no previous-turn tool output, no session receipt, no
-     relayed worker report, no sticky `[from: ...]` identity line. If the
-     window carries a receipt anywhere, the judge always runs, regardless
-     of the draft's own wording. Skip is exit 0, stderr `super-jev gate:
-     conversational turn, not judged`, catch-ledger decision `unchecked`
-     reason `conversational`. See `_window_has_any_receipt`
-     (`_draft_has_receipt_shaped_claim` is removed).
-  2. **The receipt is one turn old.** A correct restatement of a result
-     whose receipt sits in the *previous* turn's block (a merge, a spawn,
-     a log read a turn or two back) was read as having no in-window
-     evidence. The most recent previous turn that ran its own tools is now
-     named in a new DERIVED FACTS sentence (`RECEIPT TURN: ...`) whenever
-     the current turn is tool-free but the window carries a receipt — its
-     `[previous turn -N]` section header is left exactly as-is, pointed at
-     from the DERIVED FACTS sentence rather than rewritten. (An earlier
-     draft of this fix DID rewrite the header to `[receipt turn -N]`, which
-     needed the window trimmer's and the fact-labeller's own section
-     regexes taught the new text — both slipped through unregistered, so a
-     relabelled receipt turn fell out of the trimmer's drop order and out
-     of fact-line labelling; see docs/hooks.md, "gate v4 — the receipt
-     turn header". Naming the turn in prose instead avoids the whole
-     class of bug.) See `_receipt_turn_index`/`_receipt_turn_extra_fact`,
-     and `compose_window_with_facts`'s `extra_facts` parameter.
-  Also: `"conversational"` is now in `SKIP_REASON_BUCKETS` (bucket
-  DEFERRED) — it was missing, which fell it to LOST by design and tripped
-  the ledger health monitor's lost-check WARN on any session that had an
-  ordinary conversational turn. See docs/hooks.md, "OVERCLAIMS arm — the
-  two live false mechanisms it still needed".
+- **OVERCLAIMS arm — the receipt-turn fix.** A hand adjudication of every
+  live `hook gate` block on the primary's own seat
+  (`ops/gate-adjudication-20260918.md`) found one live false-block
+  mechanism this fix addresses: a tool-free current turn whose reply is a
+  correct restatement of a result from the *previous* turn's own tool
+  activity was read as having no in-window evidence. The most recent
+  previous turn that ran tools is now named in a new DERIVED FACTS
+  sentence (`RECEIPT TURN: ...`) whenever the current turn is tool-free
+  but the window carries a receipt from that previous turn — its
+  `[previous turn -N]` section header is left exactly as-is, pointed at
+  from the DERIVED FACTS sentence rather than rewritten. See
+  `_receipt_turn_index`/`_receipt_turn_extra_fact`, and
+  `compose_window_with_facts`'s `extra_facts` parameter, and docs/hooks.md,
+  "OVERCLAIMS arm — the receipt-turn fix". This addresses the tool-free-
+  turn-with-in-window-receipt case only: it does not address a false block
+  whose receipt lies beyond the previous-turn window, a block that was
+  really the deterministic PR-state arm's job, or a false block on a turn
+  that itself ran a tool.
 
 - **Judge-advisory mode, granular.** `SUPERJEV_GATE_JUDGE_ADVISORY` now
   also accepts `weak`, alongside the existing `1`: `weak` demotes only the
@@ -65,6 +34,35 @@ No version bump.
   decision now carries a `judge-advisory-mode:1`/`judge-advisory-mode:weak`
   tag in its `reasons`, alongside the existing `key VERDICT score` strings
   that already name the arm. See docs/hooks.md, "Judge-advisory mode".
+
+- **Verify hook: spawn acks and unchecked no-evidence runs now show up in
+  the catch ledger.** Two fixes off `gate-adjudication-20260918.md`'s
+  verify-door findings — every adjudicated live verify block was false.
+  First, the live
+  `hook verify` (PostToolUse) already skipped a spawn/launch dict or a
+  launch-ack text without calling the judge — it just never told anyone:
+  the catch ledger carried nothing for those runs, so a spawn ack and a
+  real unchecked report were indistinguishable in `catches.jsonl`. It now
+  prints `super-jev verify: spawn ack, nothing to judge` on stderr and
+  logs a `door="verify"`, `decision="unchecked"`, `reasons=["spawn-ack"]`
+  catch record. Second, and the real live bug: the PostToolUse hook never
+  computed its own evidence-gather health for `verify` the way
+  `hook verify --from-file` and the Stop-scan already did, so a bare
+  worker-verify exit 4 (REJECT) blocked even when nothing was actually
+  gathered to judge the report against (no `--worktree`, the only
+  evidence source a live hook ever has). It now runs the same
+  `_evidence_inventory` check verify's other two entry points already
+  ran; when the gather is thin, a would-be block is downgraded to one
+  advisory line (`no evidence gathered; not judged`, exit 0) and logged
+  as `decision="unchecked"`, `reasons=["no-evidence", ...]` instead of
+  blocking. The Stop-scan's REJECT label had the identical hole — most
+  REJECT labels in the same adjudication ran at `health=thin` — a bare
+  exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
+  same catch-ledger shape. In practice this makes the live verify door
+  advisory-only for every report until a worktree is supplied: a real
+  PostToolUse payload carries no `worktree` key and nothing exports
+  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
+  today. See docs/hooks.md, "verify: spawn acks and gather health".
 
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
