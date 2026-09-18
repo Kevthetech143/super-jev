@@ -2563,10 +2563,19 @@ health-fitness", "escalated to the intake owner", "scheduled the scan"; the
 window holds a `Write`, a `send.sh` call, a `CronCreate` — and the judge has
 to bridge the two on its own, from a column dump, in one call. RECEIPT SHAPES
 states the bridge as a sentence: an **act** of a named shape ran against a
-named **target**, and that act is support for exactly these plain verbs and
-nothing more.
+named **target**, and that act supports these plain verbs.
 
-The family emits at most four lines, one per verb class:
+The family emits at most four lines, one per verb class. Each line states
+only the positive mapping (act supports verb), never a negative scope
+clause ("and nothing else — it says nothing about ..."): a wording pass on
+2026-09-18 (see CHANGELOG) found the negative clause read, to the overclaims
+judge, as a pre-written finding that the evidence could not support the
+draft, which blocked truthful drafts live. The gameability bound below is
+still true and still documented here; it is simply no longer restated
+inside the fact sentence the judge reads. The same pass changed the
+per-line target list from a closed count ("A, B and N more") to an open,
+uncounted one ("A, B and others"), since a closed count reads as an
+inventory of the whole turn's acts rather than a sample of them.
 
 - **saved** — a `Write`/`Edit`/`NotebookEdit` call, a shell redirection, a
   `tee`/`cp`/`mv` destination, or an `open(..., "w")` inside a python
@@ -2675,8 +2684,11 @@ input, so undercounting here costs nothing a block decision depends on.
 
 A write says nothing about what the file now **contains**. A send says
 nothing about **delivery**. A scheduler call says nothing about the job
-having **run**. Every line carries its own bound in its own text, because
-the bound is the gameable edge:
+having **run**. That bound is documented here rather than carried inside
+each line's own text (see "Receipt shapes — family 11" above for why:
+stating it in the line itself read to the overclaims judge as a
+pre-written finding against the draft), because the bound is the gameable
+edge:
 
 > A worker that writes an empty file named `all-36-targets-verified.md` and
 > does nothing else gets a line naming that path, and no support whatsoever
