@@ -556,6 +556,81 @@ One shared JSON fixture — `test/fixtures/gate-window-facts.json`, every
 window line copied verbatim from the analysis — pins both sides to the same
 fact sentences, which is what keeps the mirror from drifting.
 
+## The evidence guard — what never reaches the judge (2026-09-18)
+
+Before any window is handed to the judge, it passes through one guard, in
+two parts:
+
+- **Blocklist.** `isBlockedPath(p)` (TS: `src/enhance/evidence-guard.ts`) /
+  `is_blocked_path(p)` (Python: `skills/super-jev/superjev.py`) says whether
+  a path may ever be opened, read, grepped or listed. A blocked path is
+  never touched; the caller states `skipped: blocked path` as a fact instead
+  (`blockedPathFact`/`blocked_path_fact`) — so a blocked path reads
+  **UNPROVABLE**, never FALSE. Blocked: the fleet login vault (`logins.md`),
+  any `*-secret.md` or path segment naming a secret, `.env`/`.env.*`,
+  anything under a `profile/` or `documents/` directory, playwright session
+  profiles (`.config/pw-*`), anything naming cookies, `*.pem`/`*.key`,
+  `id_rsa*`, anything naming a token, anything naming credentials.
+- **Redactor.** `redact(text)` replaces secret-shaped spans with
+  `[REDACTED:kind]` before text is packed into any evidence block: an
+  OpenAI-style `sk-…` key, a GitHub token (`ghp_`/`gho_`/`ghu_`/`ghs_`/
+  `ghr_`), a Slack token (`xox[baprs]-…`), an AWS access key id (`AKIA…`), a
+  `Bearer …` value, an `Authorization:` header, a hex blob 65+ characters
+  long, or any generic key-shaped blob 30+ characters mixing letters and
+  digits. A git commit hash, an md5 or a sha256 digest (pure hex, up to 64
+  characters) is evidence, not a secret, and survives; so does a
+  slash-delimited blob (a macOS temp path looks exactly like a key) and an
+  ordinary `snake_case`/`kebab-case` identifier. Email addresses are left
+  alone unless the caller opts in (`redactEmails`/`redact_emails`) — an
+  email is often the identity a claim is *about*.
+
+Where it is wired in:
+
+- **The Stop-hook gate window** (`compose_window_with_facts`): the whole
+  window is redacted before facts are derived from it or it is handed to the
+  judge. `--explain` prints an `evidence guard` line with the path-skip and
+  redaction counts for that window.
+- **The verify fallback's local gatherer** (`_gather_local_evidence`, used
+  when no worker-verify door is installed): every path the report names is
+  checked before it is opened — a blocked one contributes
+  `blocked_path_fact` to the `lengths` block instead of being read — and the
+  captured test-command output is redacted before it enters the evidence
+  pack. `verify --explain` prints a `guard: N path(s) skipped, N
+  redaction(s)` line, and the fallback's ledger entry carries the counts
+  under `guard`.
+- **`superjev.py guard`**, a standalone door: `--paths` reports which would
+  be skipped and shows each readable one redacted; `--text` redacts a string
+  directly. Exit 0 always — it only reports; the callers above are what
+  actually skip or refuse to send something. Every call is ledgered with its
+  `guard` counts.
+- **`sweep`, `fetch` and `permit`'s own inputs.** `sweep`'s `--records`
+  parser redacts every record's `text`; `fetch`'s parser redacts the
+  catalog's own text, the plain `--request`, and any `--context` turns;
+  `permit`'s snapshot parser redacts the free-text `reversibilityNotes` and
+  `policyLines` fields (deliberately *not* `action`/`target` — permit's
+  pre-rules parse a verb and an acted-upon object out of those two, and
+  redacting a span inside them could hide the very thing a hard rule needs
+  to match). Each prints its guard summary with `--explain` (sweep prints it
+  unconditionally, to stderr).
+
+The guard lives twice, deliberately duplicated rather than bridged for the
+same reason as the derived-facts mirror above: `src/enhance/evidence-guard.ts`
+is the canonical TypeScript version (used by the CLI doors under `src/`),
+and a pure-Python mirror lives in `skills/super-jev/superjev.py` (search
+`EVIDENCE GUARD`) for the Stop hook and the verify fallback, both of which
+run in Python with no reliable node/CLI bridge on a fleet install. One
+shared fixture, `test/enhance/fixtures/evidence-guard-cases.json`, is run by
+both `test/enhance/evidence-guard.test.ts` and
+`skills/super-jev/tests/test_evidence_guard.py`, so the two sides cannot
+silently drift apart.
+
+Ported from the read guard added to `atoms.py` (the shared claim-atoms/
+fact-gatherer module the coding and research verify doors both draw on) for
+AUDIT.md findings S1 through S7: most of super-jev's verification doors had
+no read blocklist at all, and the one that did was name-only, so a grep or a
+file read rooted anywhere near a home directory could put a private line
+into an evidence pack that then left the box for the judge.
+
 ## The ledger
 
 Every call appends one JSON line: timestamp, which door, the exit code, how

@@ -18,6 +18,7 @@ import {
 } from './enhance/fetch.ts';
 import { applyPreRules, buildTriggerIndex, formatPreRuleExplain, type PreRuleExplain } from './enhance/fetch-prerules.ts';
 import { CatalogError, parseCatalogText } from './enhance/catalog.ts';
+import { GuardTally } from './enhance/evidence-guard.ts';
 import type { Answer, Evaluator, Question, Request } from './types.ts';
 
 // Only deliberate, local diagnostics are printed. A raw parser or filesystem
@@ -223,9 +224,18 @@ async function main(): Promise<number> {
   const floorN = floor ?? envNumber(process.env.SUPERJEV_FETCH_FLOOR, 'SUPERJEV_FETCH_FLOOR') ?? DEFAULT_FETCH_FLOOR;
   const marginN = margin ?? envNumber(process.env.SUPERJEV_FETCH_MARGIN, 'SUPERJEV_FETCH_MARGIN') ?? DEFAULT_FETCH_MARGIN;
 
-  const catalog = parseCatalog(await readSmallFile(catalogPath, MAX_CATALOG_BYTES, 'catalog'));
+  // Every request/record string that will be scored by the judge is
+  // redacted first (evidence-guard.ts): the catalog's own text, the plain
+  // request, and any prior-turn context. `guard.summary()` is printed with
+  // `--explain` below.
+  const guard = new GuardTally();
+  const rawCatalog = parseCatalog(await readSmallFile(catalogPath, MAX_CATALOG_BYTES, 'catalog'));
+  const catalog = rawCatalog.map(entry => ({ ...entry, text: guard.redact(entry.text) }));
+  request = guard.redact(request);
   const contextTurnsN = contextTurns ?? DEFAULT_CONTEXT_TURNS;
-  const context = contextPath ? parseContext(await readSmallFile(contextPath, MAX_CONTEXT_BYTES, 'context')).slice(-contextTurnsN) : undefined;
+  const context = contextPath
+    ? parseContext(await readSmallFile(contextPath, MAX_CONTEXT_BYTES, 'context')).slice(-contextTurnsN).map(c => guard.redact(c))
+    : undefined;
   const options = {
     k, prefilter, context,
     ...(maxInputTokens !== undefined || batch !== undefined ? { budget: { ...(maxInputTokens !== undefined ? { maxInputTokens } : {}), ...(batch !== undefined ? { maxRecordsPerCall: batch } : {}) } } : {})
@@ -288,6 +298,7 @@ async function main(): Promise<number> {
       const explainText = formatPreRuleExplain({ facts, droppedSingleWord: triggerIndex.droppedSingleWord, droppedShared: triggerIndex.droppedShared, decision } as PreRuleExplain);
       preRuleExplainText = explainText;
       console.error(explainText);
+      console.error(guard.summary() + ' over the catalog, request and context (evidence-guard).');
     }
     if (decision.kind === 'serve') {
       triggerServedId = decision.id;
