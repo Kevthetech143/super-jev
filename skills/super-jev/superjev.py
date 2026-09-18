@@ -7078,20 +7078,36 @@ def _stop_scan_verify_one(r, budget=None):
                 pass
 
         label = {0: "CLEAN", 3: "READ", 4: "REJECT"}.get(code, "READ")
-        if block_reasons and label != "REJECT":
+        health = "thin" if evidence.get("thin") else "ok"
+        if block_reasons:
             label = "REJECT"
+        elif label == "REJECT" and health == "thin":
+            # Same hole as the live PostToolUse verify hook (see
+            # gate-adjudication-20260918.md): worker-verify's own exit
+            # code alone said REJECT, but every flag this run actually
+            # parsed was suppressed into `notes` because the gather had
+            # nothing usable — 45 of 59 REJECT labels in the 2026-09-18
+            # adjudication ran exactly this way. A bare exit code over
+            # evidence that was never gathered is "we could not check",
+            # never "we checked and it failed" — never a REJECT label.
+            label = "UNCHECKED"
         flag_str = ("; ".join(f"{f['key']} {f['verdict']} {f['score']:.2f}" for f in flags)
                    or "no flags")
         used = ", ".join(f"--{k} {v}" for k, v in
                          (("worktree", derived["worktree"]),
                           ("test-cmd", derived["test_cmd"]),
                           ("pr", derived["pr"])) if v) or "no evidence derived"
-        health = "thin" if evidence.get("thin") else "ok"
         print(f"super-jev verify {teammate_id}: {label} — {flag_str} — {used} — health {health}")
         note_tail = (" — " + "; ".join(notes)) if notes else ""
         _hook_log(f"stop-scan: {teammate_id} — {label} (exit {code}) [{used}] "
                  f"health={health}{note_tail}", exit_code=0, skipped=False, flags=flags,
-                 hook_mode=True, source="stop-transcript")
+                 hook_mode=True, source="stop-transcript",
+                 unchecked=(label == "UNCHECKED"),
+                 health=("none" if label == "UNCHECKED" else health),
+                 reason=("no-evidence" if label == "UNCHECKED" else None))
+        if label == "UNCHECKED":
+            catch_log("verify", "unchecked", reasons=["no-evidence"] + (notes or []),
+                     draft_text=report_text, payload=None)
     except Exception as exc:
         print(f"super-jev verify {teammate_id}: ERROR — {exc.__class__.__name__} (advisory)")
         _hook_log(f"stop-scan: {teammate_id} — error ({exc.__class__.__name__}), "
@@ -7540,12 +7556,15 @@ def cmd_hook(a):
                     text = dict_text
                 elif is_spawn:
                     status = tool_response.get("status")
+                    print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                     _hook_log(
                         "verify: skipped — tool_response is a spawn/launch dict"
                         + (f" (status={status!r})" if status else "") +
                         "; the worker's own report is not here yet, it arrives later "
                         "in a <teammate-message> block (see `hook prompt-verify`)",
                         exit_code=0, skipped=True, reason="spawn-dict")
+                    catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                             draft_text=None, start_time=_catch_t0, payload=payload)
                     return 0
                 else:
                     text = _hook_report_text(payload)
@@ -7558,8 +7577,11 @@ def cmd_hook(a):
 
             is_ack, ack_reason = _is_launch_ack(text)
             if is_ack:
+                print("super-jev verify: spawn ack, nothing to judge", file=sys.stderr)
                 _hook_log(f"verify: skipped — {ack_reason}", exit_code=0, skipped=True,
                          reason="launch-ack")
+                catch_log("verify", "unchecked", reasons=["spawn-ack"],
+                         draft_text=text, start_time=_catch_t0, payload=payload)
                 return 0
 
             worktree = payload.get("worktree") or os.environ.get(HOOK_WORKTREE_ENV)
@@ -7595,11 +7617,11 @@ def cmd_hook(a):
         # is no weaker action to upgrade.
         # claim_rows carries the SUPPORTED rows too, which _parse_strong_flags
         # drops — without them the OVERCLAIMS-alone gate could never see
-        # that every claim was in fact supported. No evidence inventory is
-        # passed on this path: a real hook payload gives us no --test-cmd
-        # and no --pr (see the hardcoded test_cmd="" above), so there is no
-        # gather to measure. That also means a hook-driven verify can NEVER
-        # prove a test-count claim — docs/hooks.md says so in plain words.
+        # that every claim was in fact supported. A hook-driven verify gets
+        # no --test-cmd/--pr (see the hardcoded test_cmd="" above), so it
+        # can NEVER prove a test-count claim — docs/hooks.md says so in
+        # plain words — but it DOES know whether it had a worktree to look
+        # at, which is exactly what gather_health below checks.
         flags = _parse_strong_flags(door_out)
         claim_rows = _parse_claim_rows(door_out)
         # Only the gate door ever derives a wide window from the transcript
@@ -7613,6 +7635,19 @@ def cmd_hook(a):
             gather_health = {"current_turn_empty": True,
                              "reasons": ["the current turn ran no tools of its own; this "
                                         "window is previous-turn/receipts evidence only"]}
+        elif door == "verify":
+            # 2026-09-18 fix (gate-adjudication-20260918.md, verify door):
+            # `hook verify --from-file` and the Stop-scan both already
+            # compute `_evidence_inventory` and feed it in here so a thin
+            # gather suppresses a block into an advisory note instead of
+            # letting it through — the live PostToolUse hook never did,
+            # so it treated "nothing was gathered" as "healthy" and let a
+            # bare exit code stand in for a real judgement. `worktree` is
+            # the only evidence source this path ever has (test_cmd/pr are
+            # never set on a real hook payload), so this is deliberately
+            # narrower than the from-file/probe version — no --dry-run
+            # probe is spent here, just the presence/absence check.
+            gather_health = _evidence_inventory(test_cmd="", worktree=worktree, pr=None)
         block_reasons, block_notes = _hook_block_decision(flags, claim_rows, gather_health)
         # Deterministic reasons are never suppressed by the gather-health
         # check the judge-driven flags above go through — arithmetic on
@@ -7629,6 +7664,20 @@ def cmd_hook(a):
         action = action_map.get(code, "advisory")
         if block_reasons:
             action = "block"
+        elif (door == "verify" and action == "block" and gather_health is not None
+              and not _gather_healthy(gather_health)):
+            # The door's own exit code alone implied a block, but nothing
+            # this run actually parsed crossed the block line —
+            # _hook_block_decision already suppressed every flag into
+            # block_notes because the gather itself had nothing usable (no
+            # worktree, or the probe came back empty/unreadable). Blocking
+            # on a bare exit code over evidence that was never gathered
+            # mistakes "we could not check" for "we checked and it
+            # failed" — see gate-adjudication-20260918.md, verify door,
+            # rows 00:39:08 and 01:03:59 (the SAME report came back READ
+            # once --worktree/--test-cmd/--pr gave it something to gather
+            # against). Advisory, not a block; never judged.
+            action = "unchecked-no-evidence"
 
         # stop_hook_active=true is Claude Code's own signal that this Stop
         # event is a RE-RUN — a previous hook already blocked once this
@@ -7694,6 +7743,19 @@ def cmd_hook(a):
             if notice:
                 print(notice)
 
+        if action == "unchecked-no-evidence":
+            reason_bits = "; ".join(block_notes) if block_notes else f"exit {code}"
+            advisory = ("super-jev verify: no evidence gathered; not judged "
+                       f"(exit {code} suppressed — {reason_bits})")
+            print(advisory)
+            _hook_log(f"verify: unchecked — no evidence gathered (exit {code} "
+                     f"suppressed — {reason_bits}) — advisory, not judged", exit_code=0,
+                     flags=flags, unchecked=True, health="none", reason="no-evidence")
+            catch_log(door, "unchecked", reasons=["no-evidence"] + block_notes,
+                     draft_text=text, window_bytes=_catch_window_bytes,
+                     start_time=_catch_t0, payload=payload)
+            _print_ledger_notice_if_gate()
+            return 0
         if action == "allow":
             _hook_log(f"{door}: allow (exit {code}){suppressed_note_tail}", exit_code=0,
                      flags=flags, reason=suppressed_reason)
@@ -7869,6 +7931,12 @@ SKIP_REASON_BUCKETS = {
     "no-tool-evidence-silent": SKIP_BUCKET_DEFERRED,
     "no-tool-evidence-checkable": SKIP_BUCKET_THIN,
     "no-tool-evidence": SKIP_BUCKET_THIN,  # legacy tag, pre-split ledger lines
+    # The stop-scan's UNCHECKED verdict (worker-verify's own exit code
+    # said REJECT/CLEAN, but the gather had nothing usable, so the label
+    # was downgraded to UNCHECKED — see cmd_hook_prompt_verify's
+    # stop-scan branch) is judged against thin evidence, same as the
+    # sibling no-tool-evidence-checkable path above, not a lost check.
+    "no-evidence": SKIP_BUCKET_THIN,
     "bad-stdin": SKIP_BUCKET_LOST,
     "unexpected-error": SKIP_BUCKET_LOST,
     # The advisory teammate-report scan running out of its own time or its

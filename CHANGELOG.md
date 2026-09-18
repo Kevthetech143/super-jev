@@ -18,6 +18,35 @@ No version bump.
   bot:` breakdown when `--bot` is not given. See docs/hooks.md, "The
   ledger" and "The catch ledger".
 
+- **Verify hook: spawn acks and unchecked no-evidence runs now show up in
+  the catch ledger.** Two fixes off `gate-adjudication-20260918.md`'s
+  verify-door findings — every adjudicated live verify block was false.
+  First, the live
+  `hook verify` (PostToolUse) already skipped a spawn/launch dict or a
+  launch-ack text without calling the judge — it just never told anyone:
+  the catch ledger carried nothing for those runs, so a spawn ack and a
+  real unchecked report were indistinguishable in `catches.jsonl`. It now
+  prints `super-jev verify: spawn ack, nothing to judge` on stderr and
+  logs a `door="verify"`, `decision="unchecked"`, `reasons=["spawn-ack"]`
+  catch record. Second, and the real live bug: the PostToolUse hook never
+  computed its own evidence-gather health for `verify` the way
+  `hook verify --from-file` and the Stop-scan already did, so a bare
+  worker-verify exit 4 (REJECT) blocked even when nothing was actually
+  gathered to judge the report against (no `--worktree`, the only
+  evidence source a live hook ever has). It now runs the same
+  `_evidence_inventory` check verify's other two entry points already
+  ran; when the gather is thin, a would-be block is downgraded to one
+  advisory line (`no evidence gathered; not judged`, exit 0) and logged
+  as `decision="unchecked"`, `reasons=["no-evidence", ...]` instead of
+  blocking. The Stop-scan's REJECT label had the identical hole — most
+  REJECT labels in the same adjudication ran at `health=thin` — a bare
+  exit code there now prints `UNCHECKED`, not `REJECT`, and writes the
+  same catch-ledger shape. In practice this makes the live verify door
+  advisory-only for every report until a worktree is supplied: a real
+  PostToolUse payload carries no `worktree` key and nothing exports
+  `SUPERJEV_HOOK_WORKTREE`, so the gather is thin on every live call
+  today. See docs/hooks.md, "verify: spawn acks and gather health".
+
 - **Judge-advisory gate mode.** `SUPERJEV_GATE_JUDGE_ADVISORY=1` demotes a
   `hook gate` block to advisory (print the reason, exit 0) when every
   reason behind it came from the judge (the OVERCLAIMS arm, or under
