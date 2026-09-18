@@ -1275,26 +1275,64 @@ def _hook_evidence_max_bytes():
         return DEFAULT_HOOK_EVIDENCE_MAX_BYTES
 
 
+def _is_real_user_prompt_record(rec):
+    """True if `rec` is a transcript line whose message is a real human
+    user turn (role "user" with text/plain content) rather than a
+    tool_result carrier — Claude Code represents a tool result as a
+    role="user" message whose content is a list of {"type":"tool_result"}
+    blocks, indistinguishable from a human turn by role alone."""
+    msg = rec.get("message") if isinstance(rec, dict) else None
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+        return False
+    return True
+
+
+def _current_turn_start_index(records):
+    """Index into `records` of the most recent real user prompt (see
+    _is_real_user_prompt_record) — the boundary where "this turn" begins.
+    Everything at or after this index is this turn's own activity;
+    everything before it belongs to an earlier turn. None if no real user
+    prompt is found anywhere (a transcript that opens mid-tool-activity,
+    e.g. a test fixture with no leading human turn) — callers fall back to
+    scanning the whole transcript in that case, same as before this
+    boundary existed."""
+    for i in range(len(records) - 1, -1, -1):
+        if _is_real_user_prompt_record(records[i]):
+            return i
+    return None
+
+
 def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=None):
     """The evidence text a Stop-hook gate run uses when the payload names no
     'evidence' itself: the tool_result content of the last `n` tool calls
-    found anywhere in the transcript (a real Stop payload's transcript_path
-    JSONL does not mark turn boundaries in a machine-obvious way, so this is
-    a best-effort "most recent tool calls" reading, not strictly scoped to
-    the current turn only), joined in chronological order and capped at
-    `max_bytes` total (the most recent bytes are kept, since the latest
-    tool calls are the most likely to back the latest draft).
+    found in THIS TURN of the transcript — scoped to the records at or
+    after the most recent real user prompt (see _current_turn_start_index),
+    so a tool call from an earlier turn is never mistaken for evidence the
+    current, possibly tool-free, turn actually gathered. (If no real user
+    prompt is found anywhere — a transcript that opens mid-tool-activity —
+    this falls back to scanning every record, the old best-effort
+    behaviour, rather than deriving nothing.) Results are joined in
+    chronological order and capped at `max_bytes` total (the most recent
+    bytes are kept, since the latest tool calls are the most likely to back
+    the latest draft).
 
     Each transcript line that looks like {"message": {"content": [...]}}
     is scanned for {"type": "tool_result", "content": ...} blocks; each
     block's text is pulled out with _extract_text_blocks. Returns None if
-    no tool_result content is found anywhere, or the transcript cannot be
+    no tool_result content is found in-scope, or the transcript cannot be
     read at all.
     """
     n = n if n is not None else _hook_evidence_n()
     max_bytes = max_bytes if max_bytes is not None else _hook_evidence_max_bytes()
+    records = _read_transcript_records(transcript_path)
+    start = _current_turn_start_index(records)
+    scoped = records[start:] if start is not None else records
     results = []
-    for rec in _read_transcript_records(transcript_path):
+    for rec in scoped:
         msg = rec.get("message") if isinstance(rec, dict) else None
         content = msg.get("content") if isinstance(msg, dict) else None
         if not isinstance(content, list):
@@ -1433,7 +1471,7 @@ def _hook_evidence_paths(payload):
 
 
 def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, reason=None,
-              hook_mode=True, source=None):
+              hook_mode=True, source=None, health=None):
     """One ledger line for a hook decision. `exit_code` is the real code
     this hook invocation is about to return (never hard-coded to 0) —
     2 for a block, 0 for everything else, including a fail-open skip.
@@ -1449,7 +1487,10 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
     machine-matchable tag (e.g. "launch-ack") distinct from the free-text
     `note`. `hook_mode` is False and `source` is "manual" for a `hook
     verify --from-file` run — same ledger shape, but this call did not
-    come from a real Claude Code hook firing."""
+    come from a real Claude Code hook firing. `health`, if given, records
+    the evidence-gather health this run judged itself against — "none" for
+    the no-tool-evidence unchecked path (see _hook_unchecked), else
+    whatever _evidence_inventory/_gather_healthy found."""
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "door": "hook",
@@ -1465,6 +1506,8 @@ def _hook_log(note, exit_code=0, skipped=False, flags=None, unchecked=False, rea
         entry["flags"] = flags
     if unchecked:
         entry["unchecked"] = True
+    if health is not None:
+        entry["health"] = health
     if reason is not None:
         entry["reason"] = reason
     if source is not None:
@@ -2156,8 +2199,11 @@ def cmd_hook(a):
           a real Stop payload never carries this key.
         else, when "transcript_path" is present and readable: EVIDENCE is
           derived from the transcript itself — the tool_result content of
-          the last N tool calls found in it (N = SUPERJEV_HOOK_EVIDENCE_N,
-          default 8; total size capped by
+          the last N tool calls found in THIS TURN (records at or after
+          the most recent real user prompt — see
+          _current_turn_start_index; a tool call from an earlier turn is
+          never counted as this turn's evidence) (N =
+          SUPERJEV_HOOK_EVIDENCE_N, default 8; total size capped by
           SUPERJEV_HOOK_EVIDENCE_MAX_BYTES, default 50000), written to one
           temp file and passed as the sole evidence path.
         If neither an explicit "evidence" list nor a readable
@@ -2236,11 +2282,11 @@ def cmd_hook(a):
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
                       f"({tp!r}); gate ran against {source}, checkable claim reported "
                       f"(exit {code}), advisory printed", exit_code=0,
-                      flags=_parse_strong_flags(door_out), unchecked=True)
+                      flags=_parse_strong_flags(door_out), unchecked=True, health="none")
         else:
             _hook_log(f"gate: unchecked — no tool evidence derivable from transcript_path "
                       f"({tp!r}); gate ran against {source}, no checkable claim "
-                      f"(exit {code}), silent", exit_code=0, unchecked=True)
+                      f"(exit {code}), silent", exit_code=0, unchecked=True, health="none")
         return 0
 
     try:

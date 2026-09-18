@@ -1604,6 +1604,65 @@ def test_unchecked_path_is_not_taken_when_tool_evidence_exists(tmp_path, monkeyp
     assert "unchecked" not in json.loads(sj._ledger_lines()[-1])
 
 
+def test_unchecked_path_ignores_an_earlier_turns_tool_result_and_never_blocks(
+        tmp_path, monkeypatch, capsys):
+    # The live bug this guards: a two-turn transcript where turn 1 gathered
+    # a tool_result and turn 2 (the one actually being gated) ran no tools
+    # at all. Deriving evidence from the WHOLE transcript (the old
+    # behaviour) would find turn 1's tool_result, wrongly call the gather
+    # healthy, and let a confident NOT_SUPPORTED flag block turn 2's reply
+    # even though nothing backs it this turn. Scoped to turn 2 alone there
+    # is no tool_result, so this must take the unchecked/advisory-only
+    # path and exit 0 no matter how strong the fake door's flag is.
+    fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  Duplicate; PR #20 is "
+                              "already merged and live.\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "is PR #20 open or merged?"}},
+        _tool_result_record("PR #20: state=OPEN"),
+        _assistant_text_record("PR #20 is open."),
+        {"message": {"role": "user", "content": "what about now, any update?"}},
+        _assistant_text_record("Duplicate; PR #20 is already merged and live."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Duplicate; PR #20 is already merged and live."}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 0
+    assert out.strip() == UNCHECKED_LINE
+    assert err == ""
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["unchecked"] is True
+    assert rec.get("health") == "none"
+
+
+def test_unchecked_path_is_not_taken_when_this_turn_has_its_own_tool_result(
+        tmp_path, monkeypatch, capsys):
+    # Mirror of the test above: same two-turn shape, but turn 2 (the one
+    # being gated) has its own tool_result. Evidence must be derived and
+    # the same strong NOT_SUPPORTED flag must block, exit 2.
+    fake = FakeDoor(3, stdout="  c1   NOT_SUPPORTED   0.82  Duplicate; PR #20 is "
+                              "already merged and live.\n")
+    monkeypatch.setattr(sj.subprocess, "run", fake)
+    t = _write_transcript(tmp_path, [
+        {"message": {"role": "user", "content": "is PR #20 open or merged?"}},
+        _tool_result_record("PR #20: state=OPEN"),
+        _assistant_text_record("PR #20 is open."),
+        {"message": {"role": "user", "content": "check again and tell me"}},
+        _tool_result_record("PR #20: state=OPEN"),
+        _assistant_text_record("Duplicate; PR #20 is already merged and live."),
+    ])
+    _hook_stdin(monkeypatch, json.dumps({
+        "hook_event_name": "Stop", "transcript_path": str(t),
+        "last_assistant_message": "Duplicate; PR #20 is already merged and live."}))
+    code = sj.main(["hook", "gate"])
+    out, err = capsys.readouterr()
+    assert code == 2
+    assert "unchecked" not in out
+    assert err.strip() != ""
+
+
 def test_unchecked_path_real_subprocess_via_fake_door_prints_exactly_one_line(tmp_path):
     # Real child process, real fake_door.py: proves the advisory is one clean
     # stdout line and the door's own table never leaks.
