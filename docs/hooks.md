@@ -1439,3 +1439,21 @@ on every claim, lives in `docs/harnesses.md`. The short version:
 None of this is wired up. It is a map of where the three doors *could* attach
 if someone builds the adapter, not a claim that they do today on anything but
 Claude Code.
+
+## The structural window model (2026-09-18)
+
+Everything above describes the window as **text**: one flat blob the
+composer assembles and six readers each parse again, each with its own
+idea of where a section starts and where a worker's prose ends. That
+shape is what made "worker text impersonates a tool receipt" a recurring
+class of bug rather than a single fixed one.
+
+`skills/super-jev/window_model.py` is the same window as labelled
+**pieces**, with the trust boundary decided once, from the transcript
+record a piece came out of, rather than six times from text a worker
+partly chooses. It renders byte-identically to the composer today and is
+wired to nothing yet.
+
+The design note, the one trust rule, the two truncation policies, what
+the 100,000-case fuzz proves, and the per-reader migration plan are in
+[docs/window-model.md](window-model.md).
