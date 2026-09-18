@@ -919,6 +919,36 @@ is a real gap: clearing a stale MERGED receipt after a genuine revert needs
 a fresh receipt of its own (a new `gh pr view --json` showing the reverted
 state), not just a sentence saying so.
 
+**The reports-region mark is honoured only where the composer puts it
+(2026-09-18, round 9).** `[relayed reports in this turn]` is structure the
+composer writes as the FIRST line of a render item — directly after a
+`---`/`===` section rule or an accepted section header (`_prev_turn_items`,
+`_build_prev_turns_block_detailed`'s `"\n\n---\n\n".join`) — never mid tool
+result. The walker previously accepted the mark from ANY position outside
+a report body, so a worker's own command (say, a `cat` of a file beside a
+real `gh pr view`) could print the mark plus a loose `REPORT FROM` line and
+turn the rest of that same tool result — including a genuine
+`{"number": N, "state": "OPEN"}` on the next line — into report prose,
+demoting it to strength 0 and letting an older invocation-only MERGED
+receipt win under the "command invocation is not an outcome" rule above.
+It now tracks whether the immediately preceding content line (blank lines
+do not clear this) was a section rule or an accepted header, and only
+honours the mark there; a mark anywhere else is ordinary text and opens
+nothing.
+
+**Correcting an earlier round's read of the residual differential
+flips.** A prior round's report attributed the small number of
+`ALLOW`-where-branch-base-`BLOCK`s the randomized differential probe finds
+to a bare `MERGED` noise line with no PR number attached. Round 9's own
+reruns of that probe (both the original shape and one widened to also
+exercise the reports-region mark) instead land every such flip inside the
+already-documented **Accepted tradeoff** just above it: a state-bearing
+MERGED receipt (strength 2) outranking a non-state-bearing not-merged
+prose signal by strength-before-recency. No fence-repair or who-label
+behavior was implicated in the windows this round produced. Treat the
+existing Accepted-tradeoff paragraph as covering these, not a distinct,
+undocumented class.
+
 ## Gate v4.2 — written-file identity, file read-back facts (2026-09-18)
 
 `SET3-AUDIT2.md` measured the fleet's other bots (businessfi, health-fitness)
