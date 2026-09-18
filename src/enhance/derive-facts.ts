@@ -810,6 +810,12 @@ function mergeClaimFacts(lines: WindowLine[], draft: string): WindowFact[] {
  * Fires only when the draft's own total exceeds the window's receipt count,
  * or when the claim names no total at all — a total the window already
  * matches is checkable, and family 4 has already checked it.
+ *
+ * The sentence quotes the draft's own claimed total, not just the window's
+ * count, and when the window holds ZERO merge receipts it says so directly
+ * rather than a bare "0" a reader could skim past — a claimed total against
+ * zero corroboration should read as "not checked at all", not as amnesty
+ * for the claim (2026-09-18, judge-safety review).
  */
 function mergeCountFacts(found: Map<number, string>, draft: string): WindowFact[] {
   let claimedTotal: number | null = null;
@@ -824,9 +830,20 @@ function mergeCountFacts(found: Map<number, string>, draft: string): WindowFact[
   const universal = DRAFT_MERGE_UNIVERSAL.test(draft || '');
   if (claimedTotal === null && !universal) return [];
   if (claimedTotal !== null && claimedTotal <= found.size) return [];
+  const claimDesc = claimedTotal !== null
+    ? `the draft claims ${claimedTotal} merged`
+    : 'the draft claims every item merged';
+  if (found.size === 0) {
+    return [{
+      kind: 'window', family: 'merge-claim',
+      sentence: `merge receipts in window: 0; ${claimDesc}; the window carries `
+        + `no merge receipt at all, so this claim is unsupported here.`
+    }];
+  }
   return [{
     kind: 'window', family: 'merge-claim',
-    sentence: `merge receipts in window: ${found.size}; the draft's session-wide total cannot be checked here.`
+    sentence: `merge receipts in window: ${found.size}; ${claimDesc}; the draft's `
+      + `session-wide total cannot be checked here.`
   }];
 }
 

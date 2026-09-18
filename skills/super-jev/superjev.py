@@ -5398,6 +5398,17 @@ _TASK_PART_RES = (
 # a claim, and a relayed report is a claim with a named source.
 REPORT_LABEL = "REPORT FROM {who} (unverified worker claim)"
 
+# The label a report relayed in a PREVIOUS turn gets — same as REPORT_LABEL
+# but carrying the turn it was relayed in. This is what lets
+# `_report_not_merged_claims` recover which turn a stale-claim report
+# actually came from once `_previous_turn_reports`/prev_report_blocks has
+# flattened every previous turn's reports into one section: without the
+# per-report turn number, every previous-turn report reads as equally
+# fresh, and a stale report from turn -2 could outrank a merge receipt
+# from turn -1 (2026-09-18, family 5 regression). See
+# `_section_recency_rank` and `_report_not_merged_claims`.
+REPORT_LABEL_PREV_TURN = "REPORT FROM {who} (unverified worker claim, previous turn -{turn})"
+
 # How much of any ONE report block is carried, before the window's own cap
 # even applies. A worker report is often a page long; the load-bearing
 # lines (counts, PR links, COMPLETE/INCOMPLETE) are near its start.
@@ -5439,20 +5450,29 @@ def _extract_report_blocks_from_text(text):
     return out
 
 
-def _collect_report_blocks(records):
+def _collect_report_blocks(records, prev_turn=None):
     """Every labelled worker/teammate report text, in file order, out of a
     list of transcript records. Only user-role records that are NOT
     tool_result carriers are read (see _is_real_user_prompt_record) — a
     report never arrives as a tool_result, and reading tool_results here
-    would double-count them."""
+    would double-count them.
+
+    `prev_turn`, when given (an int, the turn's -K depth), tags every
+    report's marker line with `REPORT_LABEL_PREV_TURN` instead of the
+    plain `REPORT_LABEL` — carrying the report's originating turn into the
+    window text itself so a later reader (`_report_not_merged_claims`) can
+    recover per-report recency instead of treating every previous-turn
+    report as equally fresh (2026-09-18, family 5 regression)."""
     out = []
+    label = (REPORT_LABEL if prev_turn is None
+             else REPORT_LABEL_PREV_TURN.format(who="{who}", turn=prev_turn))
     for rec in records:
         if not _is_real_user_prompt_record(rec):
             continue
         msg = rec.get("message") if isinstance(rec, dict) else None
         text = _extract_text_blocks((msg or {}).get("content"))
         for who, body in _extract_report_blocks_from_text(text):
-            out.append(f"{REPORT_LABEL.format(who=who)}\n{body}")
+            out.append(f"{label.format(who=who)}\n{body}")
     return out
 
 
@@ -5569,9 +5589,12 @@ def _build_receipts_block(receipts, budget, draft_text=None):
     section held inside `budget` bytes.
 
     Selection order, when the whole block does not fit: receipts whose
-    claim keys appear in the draft first (newest-first among them), then
-    everything else newest-first, filling the budget line by line. The
-    lines that survive are then emitted in their ORIGINAL order, so the
+    claim keys appear in the draft first (oldest-first among them), then
+    everything else oldest-first, filling the budget line by line — so a
+    receipt is given up NEWEST-first, on the reasoning that an old receipt
+    is the one the previous-turn layers cannot re-derive (a recent turn's
+    own material is still sitting right there in the previous-turn blocks).
+    The lines that survive are then emitted in their ORIGINAL order, so the
     block still reads oldest-to-newest and `_section_recency_rank` keeps
     meaning what it meant. Returns ("", 0, len(receipts)) when there is
     nothing to carry or no budget at all."""
@@ -5589,8 +5612,8 @@ def _build_receipts_block(receipts, budget, draft_text=None):
         return "", 0, len(receipts)
 
     relevant = _receipts_relevant_to_draft(receipts, draft_text)
-    order = ([i for i in reversed(range(len(receipts))) if i in relevant]
-             + [i for i in reversed(range(len(receipts))) if i not in relevant])
+    order = ([i for i in range(len(receipts)) if i in relevant]
+             + [i for i in range(len(receipts)) if i not in relevant])
     kept = set()
     used = len(header.encode("utf-8"))
     for i in order:
@@ -5952,7 +5975,16 @@ _FACT_REPORT_NOT_MERGED_RES = (
     re.compile(r'\b(?:not\s+merged|open|pending)\b[^.\n]{0,40}?'
               r'\bPR\s*#?(\d+)\b', re.IGNORECASE),
 )
-_REPORT_MARKER_LINE_RE = re.compile(r'^REPORT FROM .+ \(unverified worker claim\)\s*$')
+_REPORT_MARKER_LINE_RE = re.compile(
+    r'^REPORT FROM .+ \(unverified worker claim(?:, previous turn -\d+)?\)\s*$')
+
+# Pulls the turn depth back out of a REPORT_LABEL_PREV_TURN marker line, so
+# a reader of the assembled window text can tell WHICH previous turn one
+# report among several came from, rather than treating the whole
+# `[relayed reports in previous turns]` section as one undifferentiated
+# rank (see `_section_recency_rank`, `_report_not_merged_claims`).
+_REPORT_MARKER_TURN_RE = re.compile(
+    r'^REPORT FROM .+ \(unverified worker claim, previous turn -(\d+)\)\s*$')
 
 # 2026-09-18: both `_extract_labelled_evidence_counts_scoped` and
 # `_fact_window_lines_excluding_reports` used to close a `REPORT FROM ...`
@@ -6942,12 +6974,20 @@ def _facts_merge_count_claims(found, draft_text):
     total well past what the window saturates at).
 
     So the count is stated, together with what it does and does not
-    settle: this is an UNVERIFIABLE-here claim, not a false one. Fires
+    settle: this is an UNVERIFIABLE-here claim, not a false one — and it
+    says so plainly rather than reading as amnesty for the claim. It
+    quotes the draft's own claimed total, not just the window's count, so
+    the fact names both numbers being compared; and when the window holds
+    ZERO merge receipts, it says so directly ("carries no merge receipt at
+    all") instead of a bare "0" a reader could skim past — a claimed
+    total against zero corroboration is the strongest form of this gap,
+    and the wording should not soften it toward "checked and fine" when
+    it is "not checked at all" (2026-09-18, judge-safety review). Fires
     only when the draft's own total exceeds the window's receipt count, or
     when the claim names no total at all — a claim whose number the window
     already matches or beats is checkable, and family 4 above has already
-    checked it. `found` is family 4's receipt map, so the number quoted is
-    always the count of receipts actually in this window."""
+    checked it. `found` is family 4's receipt map, so the window count
+    quoted is always the count of receipts actually in this window."""
     draft = draft_text or ""
     claimed_total = None
     for rx in _FACT_DRAFT_MERGE_TOTAL_RES:
@@ -6966,8 +7006,15 @@ def _facts_merge_count_claims(found, draft_text):
         return []
     if claimed_total is not None and claimed_total <= len(found):
         return []
-    return [f"merge receipts in window: {len(found)}; the draft's session-wide "
-            f"total cannot be checked here."]
+    claim_desc = (f"the draft claims {claimed_total} merged"
+                  if claimed_total is not None else
+                  "the draft claims every item merged")
+    n = len(found)
+    if n == 0:
+        return [f"merge receipts in window: 0; {claim_desc}; the window carries "
+                f"no merge receipt at all, so this claim is unsupported here."]
+    return [f"merge receipts in window: {n}; {claim_desc}; the draft's "
+            f"session-wide total cannot be checked here."]
 
 
 def _section_recency_rank(label):
@@ -6990,27 +7037,42 @@ def _section_recency_rank(label):
     m = re.match(r'^\[previous turn -(\d+)\]$', label)
     if m:
         return -int(m.group(1))
-    # Reports relayed in a previous turn are previous-turn material: newer
-    # than any single "[previous turn -K]" block cannot be claimed, so they
-    # rank just above the freshest of them and below the receipts layer.
+    # Reports relayed in a previous turn are previous-turn material, and
+    # used to collapse to one flat rank here — but a report's OWN marker
+    # line now carries which previous turn it came from
+    # (REPORT_LABEL_PREV_TURN), and `_report_not_merged_claims` reads that
+    # directly rather than falling back to this section-level rank, so a
+    # turn -2 report can no longer outrank a turn -1 merge receipt
+    # (2026-09-18, family 5 regression). This flat rank is now only the
+    # fallback for a report whose marker carries no turn suffix.
     return {"[relayed reports in previous turns]": -0.5,
            "[session receipts]": 0, "[current turn reports]": 1,
            "[current turn]": 2}.get(label, -1000)
 
 
 def _report_not_merged_claims(window_text):
-    """[(pr_num, section_label), ...] for every PR a REPORT FROM block
-    states is not merged / open / pending. Scans `window_text` directly
-    (not the already-filtered fact lines `_fact_window_lines` returns) so
-    a report's body is bounded by its own paragraph break or the section
-    separators the window assembly itself uses ('---', '===', a new
-    section header, or another report's own marker) — reading a claim
-    never bleeds past the report it came from into an unrelated
-    tool-result line elsewhere in the same section."""
+    """[(pr_num, section_label, turn_rank), ...] for every PR a REPORT FROM
+    block states is not merged / open / pending. Scans `window_text`
+    directly (not the already-filtered fact lines `_fact_window_lines`
+    returns) so a report's body is bounded by its own paragraph break or
+    the section separators the window assembly itself uses ('---', '===',
+    a new section header, or another report's own marker) — reading a
+    claim never bleeds past the report it came from into an unrelated
+    tool-result line elsewhere in the same section.
+
+    `turn_rank` is the report's OWN recency, read straight off its marker
+    line when the marker names a previous turn (REPORT_LABEL_PREV_TURN,
+    e.g. "previous turn -2" -> rank -2); it is None when the marker names
+    no turn (a current-turn report, or one from before this fix), in which
+    case the caller falls back to the flat section-level rank. Without
+    this, every report relayed in ANY previous turn read as equally fresh,
+    so a stale report from turn -2 could outrank a merge receipt from turn
+    -1 (2026-09-18, family 5 regression)."""
     out = []
     label = "the evidence window"
     in_report = False
     in_contributed = False
+    report_turn_rank = None
     for raw in (window_text or "").splitlines():
         stripped = raw.strip()
         # A contributed block is not a worker report, so a `REPORT FROM`
@@ -7023,18 +7085,23 @@ def _report_not_merged_claims(window_text):
         if _WINDOW_SECTION_RE.match(stripped):
             label = stripped
             in_report = False
+            report_turn_rank = None
             continue
-        if _REPORT_MARKER_LINE_RE.match(stripped):
+        marker_m = _REPORT_MARKER_LINE_RE.match(stripped)
+        if marker_m:
             in_report = True
+            turn_m = _REPORT_MARKER_TURN_RE.match(stripped)
+            report_turn_rank = -int(turn_m.group(1)) if turn_m else None
             continue
         if not stripped or _SECTION_SEPARATOR_RE.match(stripped):
             in_report = False
+            report_turn_rank = None
             continue
         if not in_report:
             continue
         for rx in _FACT_REPORT_NOT_MERGED_RES:
             for m in rx.finditer(raw):
-                out.append((int(m.group(1)), label))
+                out.append((int(m.group(1)), label, report_turn_rank))
     return out
 
 
@@ -7066,8 +7133,13 @@ def _facts_stale_report_claims(lines, window_text):
         return []
 
     reports_by_pr = {}
-    for n, label in _report_not_merged_claims(window_text):
-        rank = _section_recency_rank(label)
+    for n, label, turn_rank in _report_not_merged_claims(window_text):
+        # Prefer the report's OWN turn rank (read off its marker line)
+        # over the flat section-level rank — a report's marker names
+        # exactly which previous turn it came from, so two reports in the
+        # same "[relayed reports in previous turns]" section no longer
+        # read as equally fresh (2026-09-18, family 5 regression).
+        rank = turn_rank if turn_rank is not None else _section_recency_rank(label)
         if n not in reports_by_pr or rank > reports_by_pr[n]:
             reports_by_pr[n] = rank
 
@@ -8401,10 +8473,19 @@ def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_M
 
     When `draft_text` is given, up to CITED_FILE_RELEVANT_MAX_LINES lines
     from EARLIER in the same file that overlap the draft's own numbers and
-    label words are carried too, above the tail, each prefixed with its own
+    label words are carried too, BELOW the tail, each prefixed with its own
     line number (see `_cited_file_relevant_lines`) so a reader can tell
-    picked-out lines from the contiguous tail below them. An append-only
-    log's cited figures are routinely nowhere near its end."""
+    the contiguous tail apart from the picked-out lines that follow it. An
+    append-only log's cited figures are routinely nowhere near its end.
+
+    The selection is a NUMBER match, not a confirmation of anything: a
+    line scores purely on whether the draft's own digits or a stated ratio
+    appear on it, the same way for a line that agrees with the draft and
+    one that flatly contradicts it. It is corroboration-shaped (the
+    draft's own query controls which lines get pulled in, and a line that
+    merely shares numbers can still disagree with the draft's claim about
+    them), so the block's own heading says exactly that — never that the
+    picked lines say what the draft says (2026-09-18, review round 2)."""
     try:
         text = Path(path).read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -8421,11 +8502,14 @@ def _read_file_tail(path, max_lines=CITED_FILE_MAX_LINES, max_bytes=CITED_FILE_M
                                        exclude_from=len(lines) - max_lines)
     if not picked:
         return tail
-    head = ("(lines matching the draft's own figures, from earlier in this "
-            "file)\n"
-            + "\n".join(f"L{num}: {line}" for num, line in picked)
-            + "\n(end of matched lines; the file's tail follows)")
-    return head + "\n" + tail
+    tail_out = ("(the file's tail)\n" + tail if tail else tail)
+    picked_out = (
+        "(lines elsewhere in this file whose NUMBERS match the draft's own "
+        "figures — a number match only, not a confirmation that any picked "
+        "line says what the draft says)\n"
+        + "\n".join(f"L{num}: {line}" for num, line in picked)
+        + "\n(end of matched lines)")
+    return tail_out + "\n" + picked_out
 
 
 def build_cited_file_block(draft_text, window_text=None):
@@ -8617,7 +8701,11 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         _record_receipts(session_id, cur_items)
 
     prev_spans = _previous_turn_spans(records, start, prev_turns) if start is not None else []
-    prev_reports = [_collect_report_blocks(records[a:b]) for a, b, _t in prev_spans]
+    # spans[0] is turn -1, spans[1] is turn -2, ... — tag each turn's
+    # reports with that depth so the window text itself carries which
+    # previous turn each report came from (see REPORT_LABEL_PREV_TURN).
+    prev_reports = [_collect_report_blocks(records[a:b], prev_turn=i + 1)
+                     for i, (a, b, _t) in enumerate(prev_spans)]
     # Previous-turn tool results only. A previous turn's REPORTS used to be
     # concatenated on here and dropped with the turn; they now ride in
     # their own budgeted section (see PREV_REPORTS_BUDGET_SHARE).

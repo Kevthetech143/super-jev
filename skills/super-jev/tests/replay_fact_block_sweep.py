@@ -168,13 +168,13 @@ def _load_baseline_module():
         return None, ref, sha
 
 
-def _window_fact_reasons(mod, transcript_path, draft):
-    """One case's fact-block reasons under module `mod` (either the live
-    `sj` or a `_load_baseline_module()` result), assembling the window the
-    same way `cmd_hook`'s "hook gate" branch does: transcript derivation,
-    then the receipt-turn extra fact, then the cited-file tail, then
-    compose_window_with_facts. Raises on a bad transcript; the caller
-    decides what to do with that.
+def _assembled_window(mod, transcript_path, draft):
+    """(window_text, facts) for one case under module `mod` (either the
+    live `sj` or a `_load_baseline_module()` result), assembling the
+    window the same way `cmd_hook`'s "hook gate" branch does: transcript
+    derivation, then the receipt-turn extra fact, then the cited-file
+    tail, then compose_window_with_facts. Raises on a bad transcript; the
+    caller decides what to do with that.
 
     `receipt_facts` is only ever passed to `mod.compose_window_with_facts`
     when THAT module's own signature accepts it — the baseline module is a
@@ -201,8 +201,29 @@ def _window_fact_reasons(mod, transcript_path, draft):
     kwargs = {"cap_bytes": 0, "extra_facts": receipt_extra_facts}
     if "receipt_facts" in inspect.signature(mod.compose_window_with_facts).parameters:
         kwargs["receipt_facts"] = (wmeta or {}).get("receipt_shape_facts")
-    derived, facts, _fmeta = mod.compose_window_with_facts(derived or "", draft, **kwargs)
+    window_text, facts, _fmeta = mod.compose_window_with_facts(derived or "", draft, **kwargs)
+    return window_text, facts
+
+
+def _window_fact_reasons(mod, transcript_path, draft):
+    """One case's fact-block reasons under module `mod`. See
+    `_assembled_window`."""
+    _window_text, facts = _assembled_window(mod, transcript_path, draft)
     return mod._fact_block_reasons(facts)
+
+
+def _receipt_worthy_line_count(mod, window_text):
+    """How many lines of an assembled window text match `mod`'s own
+    receipt-worthy pattern (`_RECEIPT_WORTHY_RE`) — a cheap, deterministic
+    proxy for "lines the judge could read as a receipt", used only to
+    WARN (never fail) when a recorded lie's window loses one of these
+    lines relative to the baseline (see "How this was measured" in
+    docs/hooks.md). Never raises; a module with no such pattern (a very
+    old baseline) counts zero."""
+    rx = getattr(mod, "_RECEIPT_WORTHY_RE", None)
+    if rx is None or not window_text:
+        return 0
+    return sum(1 for line in window_text.splitlines() if rx.search(line))
 
 
 def main():
@@ -212,6 +233,7 @@ def main():
     fact_family_counts = {}
     baseline_errors = []
     live_errors = []
+    receipt_lines_dropped = []   # [(set_name, cid, old_count, new_count)]
 
     baseline, baseline_ref, baseline_sha = _load_baseline_module()
     print(f"baseline ref: {baseline_ref}  sha: {baseline_sha or '(unresolved)'}")
@@ -239,7 +261,8 @@ def main():
             # exact mirror rather than a close one.
             draft = sj._strip_machine_tags(case.get("draft") or "")
             try:
-                fact_reasons = _window_fact_reasons(sj, transcript_path, draft)
+                window_text, facts = _assembled_window(sj, transcript_path, draft)
+                fact_reasons = sj._fact_block_reasons(facts)
             except Exception as e:
                 # Mirrors the baseline treatment below: a live-side
                 # exception used to print-and-`continue` with no counter
@@ -255,9 +278,12 @@ def main():
                       f"raised {e!r}")
                 continue
             old_blocked = False
+            old_window_text = None
             if baseline is not None:
                 try:
-                    old_blocked = bool(_window_fact_reasons(baseline, transcript_path, draft))
+                    old_window_text, old_facts = _assembled_window(
+                        baseline, transcript_path, draft)
+                    old_blocked = bool(baseline._fact_block_reasons(old_facts))
                 except Exception as e:
                     # A baseline call that raises is NOT "assume not
                     # blocked" and quiet about it — that swallowed a real
@@ -284,6 +310,17 @@ def main():
                 flips.append((set_name, cid, kind))
                 if kind == "truth":
                     truths_flipped.append((set_name, cid))
+            # Warning-only check (see docs/hooks.md, "How this was
+            # measured"): a recorded LIE whose window lost a
+            # receipt-worthy line relative to the baseline is a real
+            # signal even when no deterministic arm's decision flips on
+            # it — a dropped receipt is a refutation the judge might no
+            # longer see. Never affects the exit code.
+            if kind == "lie" and old_window_text is not None:
+                old_n = _receipt_worthy_line_count(baseline, old_window_text)
+                new_n = _receipt_worthy_line_count(sj, window_text)
+                if new_n < old_n:
+                    receipt_lines_dropped.append((set_name, cid, old_n, new_n))
 
     print(f"\ncases replayed     : {total_cases}")
     print(f"fact families fired: {fact_family_counts or '(none)'}")
@@ -299,6 +336,10 @@ def main():
     print(f"truths newly blocked: {len(truths_flipped)}")
     for set_name, cid in truths_flipped:
         print(f"  TRUTH BLOCKED  {set_name} {cid}")
+    print(f"lie windows with fewer receipt lines than baseline: "
+          f"{len(receipt_lines_dropped)}")
+    for set_name, cid, old_n, new_n in receipt_lines_dropped:
+        print(f"  WARN  {set_name:<20} {cid:<6} receipt lines {old_n} -> {new_n}")
 
     if live_errors:
         print(f"\nFAIL — {len(live_errors)} live-side call(s) raised instead "

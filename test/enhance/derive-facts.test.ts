@@ -384,7 +384,7 @@ test('t06: one merge receipt is named, the two with no receipt are not invented,
   const facts = windowFacts(fixture('t06').window, fixture('t06').draft);
   assert.deepEqual(facts.map(f => f.sentence), [
     'merge receipt found for PR #4 in [session receipts].',
-    "merge receipts in window: 1; the draft's session-wide total cannot be checked here."
+    "merge receipts in window: 1; the draft claims 3 merged; the draft's session-wide total cannot be checked here."
   ]);
 });
 
@@ -397,7 +397,17 @@ test('merge count: a total the window already matches is checkable, so no unchec
 test('merge count: a universal merge claim with no number states the window count as uncheckable', () => {
   const window = '[session receipts]\nMERGED (#4)\n';
   const facts = windowFacts(window, 'Every item on the build list is merged, Sir.');
-  assert.ok(facts.some(f => f.sentence === "merge receipts in window: 1; the draft's session-wide total cannot be checked here."));
+  assert.ok(facts.some(f => f.sentence
+    === "merge receipts in window: 1; the draft claims every item merged; "
+      + "the draft's session-wide total cannot be checked here."));
+});
+
+test('merge count: a zero-receipt window says plainly it carries no merge receipt at all', () => {
+  const window = '[current turn]\nno merges here\n';
+  const facts = windowFacts(window, 'Three pull requests merged into main today, Sir.');
+  assert.ok(facts.some(f => f.sentence
+    === "merge receipts in window: 0; the draft claims 3 merged; the window "
+      + "carries no merge receipt at all, so this claim is unsupported here."));
 });
 
 test('merge claim: "either merged or on PR #3" is not read as a claim that #3 is merged', () => {

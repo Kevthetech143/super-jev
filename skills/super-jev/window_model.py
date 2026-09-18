@@ -281,7 +281,8 @@ REPORT_END_LABEL = "END REPORT FROM {who} (unverified worker claim)"
 #: closed: a label the strict parse rejects is still a label.
 _REPORT_OPEN_LOOSE_RE = re.compile(r'^REPORT FROM\b')
 _REPORT_END_LOOSE_RE = re.compile(r'^END REPORT FROM\b')
-_REPORT_WHO_RE = re.compile(r'^REPORT FROM (.*) \(unverified worker claim\)$')
+_REPORT_WHO_RE = re.compile(
+    r'^REPORT FROM (.*) \(unverified worker claim(?:, previous turn -\d+)?\)$')
 
 _PREV_HEADER_RE = re.compile(r'^\[previous turn -(\d+)\]$')
 _SECTION_SEPARATOR_LINE_RE = re.compile(r'^\s*(?:={3,}|-{3,})\s*$')
@@ -897,7 +898,8 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
         for i in range(len(prev_spans), 0, -1):
             a, b, _t = prev_spans[i - 1]
             prev_claim_pieces.extend(
-                _claim_pieces(sj, records[a:b], SECTION_PREV_REPORTS))
+                _claim_pieces(sj, records[a:b], SECTION_PREV_REPORTS,
+                             prev_turn=i))
 
     fact_pieces, fact_stats = _fact_pieces(sj, records, start, session_id)
 
@@ -907,7 +909,8 @@ def from_transcript(transcript_path, n=None, max_bytes=None, session_id=None,
                          prev_claim_pieces=(prev_claim_pieces
                                             if split_prev_reports else None),
                          prev_claims_per_turn=[
-                             _claim_pieces(sj, records[a:b], prev_section(i))
+                             _claim_pieces(sj, records[a:b], prev_section(i),
+                                          prev_turn=i)
                              for i, (a, b, _t) in enumerate(prev_spans, start=1)]
                          if split_prev_reports else None)
 
@@ -1424,11 +1427,18 @@ def _receipt_pieces(sj, records, section):
     return out
 
 
-def _claim_pieces(sj, records, section):
+def _claim_pieces(sj, records, section, prev_turn=None):
     """One claim piece per relayed worker/teammate report in `records`,
     labelled exactly as the composer labels it. Mirrors
     `superjev._collect_report_blocks`, but keeps `who` instead of
-    discarding it into a formatted string."""
+    discarding it into a formatted string.
+
+    `prev_turn`, when given, threads through to `_render_report` so a
+    report relayed in a previous turn carries that turn's depth in its own
+    marker line (`REPORT_LABEL_PREV_TURN` on a composer that has it) —
+    without this, every previous-turn report reads as equally fresh to a
+    later reader like `_section_recency_rank` (2026-09-18, review round
+    2, family 5 regression)."""
     out = []
     for rec in records:
         if not sj._is_real_user_prompt_record(rec):
@@ -1436,7 +1446,7 @@ def _claim_pieces(sj, records, section):
         msg = rec.get("message") if isinstance(rec, dict) else None
         text = sj._extract_text_blocks((msg or {}).get("content"))
         for who, body in sj._extract_report_blocks_from_text(text):
-            rendered = _render_report(sj, who, body)
+            rendered = _render_report(sj, who, body, prev_turn=prev_turn)
             out.append(_piece("claim", section, rendered, "teammate",
                               source=_parse_report_who(
                                   rendered.split("\n", 1)[0])))
@@ -1474,11 +1484,18 @@ def _reports_region_mark(sj, section, claims):
     return [_header_piece(section, label)]
 
 
-def _render_report(sj, who, body):
+def _render_report(sj, who, body, prev_turn=None):
     """One report block, rendered exactly as this checkout's composer
     renders it. Reads the composer's own renderer when the branch has one
     (PR #53 adds `_render_report_block`, which fences and neutralises the
     body) and falls back to the label-plus-body shape `main` emits.
+
+    `prev_turn`, when given, picks `sj.REPORT_LABEL_PREV_TURN` over the
+    plain `sj.REPORT_LABEL` on a composer that has it — mirroring
+    `superjev._collect_report_blocks`'s own `prev_turn` handling
+    (2026-09-18, review round 2) — and is ignored (falls back to the
+    plain label) on a composer that predates the turn-tagged marker, same
+    as every other feature-detected difference in this module.
 
     This is half of what byte-identity on either branch needs;
     `_reports_region_mark` is the other half, and leaving it out was how
@@ -1492,6 +1509,9 @@ def _render_report(sj, who, body):
     renderer = getattr(sj, "_render_report_block", None)
     if renderer is not None:
         return renderer(who, body)
+    prev_label = getattr(sj, "REPORT_LABEL_PREV_TURN", None)
+    if prev_turn is not None and prev_label is not None:
+        return f"{prev_label.format(who=who, turn=prev_turn)}\n{body}"
     return f"{sj.REPORT_LABEL.format(who=who)}\n{body}"
 
 
@@ -1534,8 +1554,12 @@ def _fit_receipts(facts, budget, relevance_fn=None, draft_text=None):
     """(pieces, kept, dropped) for the session-receipts section inside
     `budget` bytes — the composer's `_build_receipts_block` rule in piece
     terms: the whole block when it fits, else receipts whose claim keys
-    appear in the draft first (newest-first among them), then the rest
-    newest-first, the survivors emitted in their ORIGINAL order."""
+    appear in the draft first (oldest-first among them), then the rest
+    oldest-first, the survivors emitted in their ORIGINAL order. A receipt
+    is given up NEWEST-first — an old receipt is the one the previous-turn
+    layers cannot re-derive (2026-09-18, review round 2: this used to fill
+    newest-first, which drops the OLDEST receipts first, the opposite of
+    the composer's own rationale)."""
     if not facts:
         return [], 0, 0
     header = _header_piece(SECTION_RECEIPTS)
@@ -1547,8 +1571,8 @@ def _fit_receipts(facts, budget, relevance_fn=None, draft_text=None):
     relevant = set()
     if relevance_fn is not None:
         relevant = relevance_fn([p.text for p in facts], draft_text)
-    order = ([i for i in reversed(range(len(facts))) if i in relevant]
-             + [i for i in reversed(range(len(facts))) if i not in relevant])
+    order = ([i for i in range(len(facts)) if i in relevant]
+             + [i for i in range(len(facts)) if i not in relevant])
     kept = set()
     used = len((header.text + HEADER_SEPARATOR).encode("utf-8"))
     for i in order:

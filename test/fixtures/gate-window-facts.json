@@ -27,7 +27,7 @@
       "draft": "Yes, Sir. Three pull requests merged into main today on Kevthetech143/super-jev: the harness fixes, the enhancer prototype, and the live bench. CI passed on each.",
       "expect": [
         "merge receipt found for PR #4 in [session receipts].",
-        "merge receipts in window: 1; the draft's session-wide total cannot be checked here."
+        "merge receipts in window: 1; the draft claims 3 merged; the draft's session-wide total cannot be checked here."
       ]
     },
     {
