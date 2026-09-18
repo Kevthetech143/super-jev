@@ -1668,6 +1668,77 @@ def test_catch_ledger_judge_advisory_weak_reasons_carry_the_mode_tag(
     assert "judge-advisory-mode:weak" in recs[0]["reasons"]
 
 
+def _import_arms_for_test():
+    """`arms`, imported the same way `sj._arms_registry()` does — appended
+    to sys.path, not inserted, and reused if a prior test already did
+    this. Local to this test module rather than a top-level import: only
+    this cross-check needs the real registry, and every other test in
+    this file is deliberately free of it."""
+    skill_dir = str(sj.SKILL_DIR)
+    if skill_dir not in sys.path:
+        sys.path.append(skill_dir)
+    import arms                                          # noqa: PLC0415
+    return arms
+
+
+@pytest.mark.parametrize("n_verdicts", [1, 2])
+@pytest.mark.parametrize("weak", [None, "weak"])
+def test_judge_only_blocks_local_matches_the_registry(n_verdicts, weak):
+    """`sj._judge_only_blocks_local` exists so the judge-advisory failsafe
+    never has to import the arms registry (see round 4). It is a PRIVATE
+    mirror of `arms.judge_only_blocks`, and a private mirror that drifts
+    from the thing it mirrors is worse than no mirror — a demotion
+    decision the gate makes would silently stop matching the one the
+    registry would have made, with nothing to catch it. This pins the two
+    functions to agree over every `_GateVerdict` combination the gate
+    itself can construct: both arm origins (`GATE_ARM_JUDGE`,
+    `GATE_ARM_INLINE`) plus an arm name the kinds map does not know
+    (fails closed as deterministic on both sides), every verdict word
+    `_JUDGE_ADVISORY_WEAK_VERDICTS` covers, one outside it (OVERCLAIMS),
+    the unparsed case (verdict=None) and an unrecognised word — over both
+    one- and two-verdict combinations, and both the unfiltered rule and
+    the weak filter.
+    """
+    arms = _import_arms_for_test()
+    verdict_words = ["OVERCLAIMS", "NOT_SUPPORTED", "CONTRADICTED",
+                      "SELF_CONTRADICTORY", None, "WEIRD_UNRECOGNISED"]
+    arm_origins = [sj.GATE_ARM_JUDGE, sj.GATE_ARM_INLINE, "unknown-arm"]
+    kinds = {sj.GATE_ARM_INLINE: "deterministic", sj.GATE_ARM_JUDGE: "judge"}
+    weak_verdicts = sj._JUDGE_ADVISORY_WEAK_VERDICTS if weak == "weak" else None
+
+    import itertools
+    cases = 0
+    for combo in itertools.product(itertools.product(arm_origins, verdict_words),
+                                   repeat=n_verdicts):
+        verdicts = [sj._GateVerdict(arm, kinds.get(arm, "deterministic"), "r", word)
+                    for arm, word in combo]
+        local = sj._judge_only_blocks_local(verdicts, kinds, weak_verdicts=weak_verdicts)
+        registry = arms.judge_only_blocks(verdicts, kinds, weak_verdicts=weak_verdicts)
+        assert local == registry, (combo, weak_verdicts, local, registry)
+        cases += 1
+    assert cases == len(arm_origins) ** n_verdicts * len(verdict_words) ** n_verdicts
+
+
+def test_judge_only_blocks_local_matches_the_registry_on_edge_cases():
+    """The shapes the parametrised sweep above cannot express: no
+    verdicts at all, an empty kinds map (every arm falls back to
+    deterministic), and a verdict from `GATE_ARM_JUDGE` naming no verdict
+    word (the exit-code-block shape `_gate_blocking_verdicts` builds)."""
+    arms = _import_arms_for_test()
+    kinds = {sj.GATE_ARM_INLINE: "deterministic", sj.GATE_ARM_JUDGE: "judge"}
+    weak = sj._JUDGE_ADVISORY_WEAK_VERDICTS
+    cases = (
+        ([], {}),
+        ([sj._GateVerdict("x", "judge", "r", "NOT_SUPPORTED")], {}),
+        ([sj._GateVerdict(sj.GATE_ARM_JUDGE, "judge", "r", None)], kinds),
+    )
+    for verdicts, k in cases:
+        for weak_verdicts in (None, weak):
+            local = sj._judge_only_blocks_local(verdicts, k, weak_verdicts=weak_verdicts)
+            registry = arms.judge_only_blocks(verdicts, k, weak_verdicts=weak_verdicts)
+            assert local == registry, (verdicts, k, weak_verdicts, local, registry)
+
+
 def test_catch_report_counts_judge_advisories_on_its_own_line(
         tmp_path, monkeypatch, capsys):
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
@@ -7269,6 +7340,109 @@ def test_window_cap_drops_sections_lowest_priority_first(monkeypatch):
     assert "[current turn]" in out
     assert "[session receipts]" not in out
     assert "[cited files]" not in out
+
+
+#: Must match `window_model.HEADER_CONTRIBUTED`. `superjev.py` itself
+#: never imports `window_model` at module level (that is the whole point
+#: of round 4's fix), so these tests build the header from the same
+#: literal `_CONTRIBUTED_HEADER_RE` matches rather than reach for the
+#: constant through an import.
+_CONTRIBUTED_HEADER = "[contributed by check arms]"
+
+
+def _import_window_model_for_test():
+    """`window_model`, imported the same lazy way `_import_arms_for_test`
+    imports `arms` — only the re-parse assertions below need the real
+    module, so it stays out of every other test's import graph."""
+    skill_dir = str(sj.SKILL_DIR)
+    if skill_dir not in sys.path:
+        sys.path.append(skill_dir)
+    import window_model as wm                            # noqa: PLC0415
+    return wm
+
+
+def _contributed_block(size, tag="ARMTAG"):
+    """A `[contributed by check arms]` section of roughly `size` tokens,
+    filled with a distinctive tag so a test can assert its content never
+    survives a drop — a header check alone would miss a partial-cut leak
+    that left the tag behind under a DIFFERENT (or no) header."""
+    n = max(size * 4 - len(_CONTRIBUTED_HEADER) - 1, 0)
+    line = (tag + " ") * ((n // (len(tag) + 1)) + 1)
+    return _CONTRIBUTED_HEADER + "\n" + line[:n]
+
+
+def test_window_cap_drops_the_contributed_block_first_and_whole(monkeypatch):
+    # The reviewer's shape: 400 receipt lines, 200 contributed lines, a
+    # 600-token budget. The contributed block is dropped WHOLE and FIRST;
+    # receipts still pay the remaining overflow out of their own head
+    # (shrunk, never evicted) because dropping the contributed block
+    # alone is not quite enough to clear this budget.
+    receipts = "[session receipts]\n" + "\n".join(
+        f"receipt line {i} with real evidence content" for i in range(400))
+    current = "[current turn]\nshort current turn.\n"
+    contributed = _CONTRIBUTED_HEADER + "\n" + "\n".join(
+        f"> contributed claim line {i} from a check arm" for i in range(200))
+    text = "\n\n===\n\n".join([receipts, current, contributed])
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=600)
+    assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
+    assert meta["shrunk"] == ["session receipts"]
+    assert meta["tok_after"] <= 600
+    assert _CONTRIBUTED_HEADER not in out
+    assert "contributed claim line" not in out
+    assert "[session receipts]" in out
+    assert "[current turn]" in out
+    # Re-parsed, no piece anywhere still carries the contributed text —
+    # not just "under the right header", but nowhere at all.
+    wm = _import_window_model_for_test()
+    w = wm.from_text(out)
+    assert not any("contributed claim line" in (p.text or "") for p in w.pieces)
+    assert not any(p.section == wm.SECTION_CONTRIBUTED and p.trusted for p in w.pieces)
+
+
+def test_window_cap_never_shrinks_the_contributed_block(monkeypatch):
+    # A budget so tight only 1 token separates "fits" from "does not" —
+    # the contributed block must still go whole, never pay the overflow
+    # out of its own head the way every other section is allowed to.
+    receipts = "[session receipts]\n" + "receipt line\n" * 100
+    current = "[current turn]\ncurrent turn text.\n"
+    contributed = _contributed_block(200)
+    text = "\n\n===\n\n".join([receipts, current, contributed])
+    budget = sj._estimate_tokens(text) - 1
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=budget)
+    assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
+    assert sj._WINDOW_KIND_CONTRIBUTED not in meta["shrunk"]
+    assert _CONTRIBUTED_HEADER not in out
+    assert "ARMTAG" not in out
+
+
+def test_window_cap_drops_contributed_whole_even_when_only_it_is_over_budget(monkeypatch):
+    # Receipts and the current turn are both tiny and well under budget on
+    # their own; only the contributed block is oversized. It still goes
+    # whole rather than being shrunk to fit, and no fragment of it leaks
+    # into what is kept.
+    receipts = "[session receipts]\nr\n"
+    current = "[current turn]\nc\n"
+    contributed = _contributed_block(900)
+    text = "\n\n===\n\n".join([receipts, current, contributed])
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=100)
+    assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
+    assert sj._WINDOW_KIND_CONTRIBUTED not in meta["shrunk"]
+    assert "ARMTAG" not in out
+    assert _CONTRIBUTED_HEADER not in out
+
+
+def test_window_cap_contributed_block_evicted_before_any_other_section(monkeypatch):
+    # Drop order: the contributed block is _WINDOW_TRIM_ORDER[0], so on a
+    # window where EVERY section is oversized, it is the very first thing
+    # to go — before the oldest previous turn, before receipts.
+    prev = "[previous turn -1]\n" + "p" * 4000
+    receipts = "[session receipts]\n" + "r" * 4000
+    current = "[current turn]\nc" * 100
+    contributed = _contributed_block(1000)
+    text = "\n\n===\n\n".join([prev, receipts, current, contributed])
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=sj._estimate_tokens(text) - 10)
+    assert meta["dropped"][0] == sj._WINDOW_KIND_CONTRIBUTED
+    assert "ARMTAG" not in out
 
 
 def test_window_cap_shrinks_a_section_before_dropping_it(monkeypatch):
