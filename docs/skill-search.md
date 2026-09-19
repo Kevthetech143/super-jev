@@ -1,8 +1,8 @@
 # Skill search (default skill discovery)
 
 `src/skill-search-cli.ts` — the default skill-discovery entry. Given one or more
-skill-catalog roots and a request, it finds the matching skill without loading
-or executing anything.
+skill-catalog roots and a request, it finds the matching skill without
+executing anything.
 
 ```bash
 npm run skill-search -- --roots-file ROOTS.json --request-file REQUEST.json [--local-only]
@@ -37,15 +37,17 @@ to a caller, `metadataSkipped` and `duplicateCount`, are also on stdout.
 ## Advisory only — never execution permission
 
 The result is a recommendation, not an instruction to run anything. The CLI
-never loads a skill file's body, never executes a skill, and creates no files
-in the roots it scans. `exact` means the name matched, not that the skill is
-safe or appropriate; the caller decides what to do with a candidate.
+reads skill files locally only to extract frontmatter metadata — bodies are
+never sent to the judge and never appear on stdout. It never executes a skill
+and creates no files in the roots it scans. `exact` means the name matched,
+not that the skill is safe or appropriate; the caller decides what to do with
+a candidate.
 
 ## How it decides
 
 1. **Exact name** (`/skill-name` or a bare name): resolves locally, zero
-   network. A conservative typo distance resolves only an unambiguous
-   near-miss; ties and whole sentences never resolve.
+   network. Exact means an actual exact normalized name match — a near-miss
+   never resolves as exact; it flows through the judge path as suggestions.
 2. **Underspecified** (pronoun-only or empty request with no usable context):
    `clarify`, never a guess.
 3. **Judge**: the narrowed candidates go to the shared `runFetch` path — the

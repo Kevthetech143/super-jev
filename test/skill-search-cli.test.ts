@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DESCRIPTION_CAP, JUDGE_TOP_K, isUnderspecified, levenshtein, normalizeSkillName,
+  DESCRIPTION_CAP, JUDGE_TOP_K, MAX_INPUT_CHARS, isUnderspecified, normalizeSkillName,
   resolveExactSkill, runSkillSearch, scanSkillRoots,
   type SkillEntry, type SkillSearchResult
 } from '../src/skill-search-cli.ts';
@@ -168,28 +168,22 @@ test('ambiguous duplicate normalized names do not resolve exact', () => {
   assert.equal(resolveExactSkill(skills, 'foo'), null);
 });
 
-// ---------------------------------------------------------------- typo tolerance (small, portable)
+// ---------------------------------------------------------------- exact means exact (no fuzzy near-miss)
 
-test('levenshtein is a plain portable distance', () => {
-  assert.equal(levenshtein('kitten', 'sitting'), 3);
-  assert.equal(levenshtein('pdf-editor', 'pdf-editor'), 0);
-  assert.equal(levenshtein('', 'abc'), 3);
-});
-
-test('near-miss typo resolves exact only when unambiguous', () => {
+test('exact means an actual exact normalized name match, never a near-miss', () => {
   const skills: SkillEntry[] = [
-    { id: 'pdf-editor', name: 'pdf-editor', path: '/r/pdf-editor/SKILL.md', description: 'd' },
+    { id: 'card', name: 'card', path: '/r/card/SKILL.md', description: 'd' },
     { id: 'image-resize', name: 'image-resize', path: '/r/image-resize/SKILL.md', description: 'd' }
   ];
-  assert.equal(resolveExactSkill(skills, 'pdf-edtior')?.id, 'pdf-editor');
-  // A whole sentence is not a typo of a name.
-  assert.equal(resolveExactSkill(skills, 'please edit my pdf files'), null);
-  // A tie between two close names stays unresolved.
-  const tied: SkillEntry[] = [
-    { id: 'abcd-x', name: 'abcd-x', path: '/r/abcd-x/SKILL.md', description: 'd' },
-    { id: 'abcd-y', name: 'abcd-y', path: '/r/abcd-y/SKILL.md', description: 'd' }
-  ];
-  assert.equal(resolveExactSkill(tied, 'abcd-z'), null);
+  // Regression: 'care' is one edit from 'card' but must NOT resolve exact.
+  assert.equal(resolveExactSkill(skills, 'care'), null);
+  assert.equal(resolveExactSkill(skills, '/care'), null);
+  // A typo never resolves as exact; a whole sentence never does either.
+  assert.equal(resolveExactSkill(skills, 'cardd'), null);
+  assert.equal(resolveExactSkill(skills, 'please show me the card skill'), null);
+  // The real name still resolves, slash or bare, case-insensitive.
+  assert.equal(resolveExactSkill(skills, '/card')?.id, 'card');
+  assert.equal(resolveExactSkill(skills, 'Card')?.id, 'card');
 });
 
 test('normalizeSkillName strips one slash, case and trailing punctuation', () => {
@@ -203,9 +197,18 @@ test('isUnderspecified is narrow and deterministic', () => {
   assert.equal(isUnderspecified('it'), true);
   assert.equal(isUnderspecified('do that thing', []), true);
   assert.equal(isUnderspecified('', []), true);
+  // Known vague cases: action + bare pronoun with no context clarifies.
+  assert.equal(isUnderspecified('update it', []), true);
+  assert.equal(isUnderspecified('check this', []), true);
+  assert.equal(isUnderspecified('fix that', []), true);
+  assert.equal(isUnderspecified('restart it', []), true);
+  // Usable context resolves the referent: proceeds to the judge.
+  assert.equal(isUnderspecified('update it', ['the pdf-editor config']), false);
   assert.equal(isUnderspecified('restart it', ['the agent is stuck']), false);
-  assert.equal(isUnderspecified('restart it', []), false);
+  // Substantive requests always proceed.
+  assert.equal(isUnderspecified('update repository configuration', []), false);
   assert.equal(isUnderspecified('help me merge pdfs'), false);
+  assert.equal(isUnderspecified('fix the login bug', []), false);
 });
 
 test('CLI: pronoun-only request with no context clarifies and never calls the judge', async () => {
@@ -217,6 +220,30 @@ test('CLI: pronoun-only request with no context clarifies and never calls the ju
   assert.deepEqual(result.candidates, []);
   assert.ok(result.error && result.error.length > 0);
   assert.ok(out.stderr.includes('status=clarify'));
+});
+
+test('CLI: action+pronoun "update it" clarifies locally, never invents a task', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const out = await cliJson([root], { request: 'update it' }, [], { TYPESAFE_API_KEY: 'dummy-key-never-used' });
+  const result = parseStdout(out);
+  assertCleanShape(result);
+  assert.equal(result.status, 'clarify');
+  assert.equal(result.source, 'local');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('CLI: "update it" with usable context proceeds past the clarify check', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const out = await cliJson(
+    [root],
+    { request: 'update it', context: ['the pdf-editor configuration file'] },
+    ['--local-only'],
+    { TYPESAFE_API_KEY: 'dummy-key-never-used' }
+  );
+  const result = parseStdout(out);
+  assert.equal(result.status, 'suggestions');
+  assert.equal(result.source, 'local');
+  assert.ok(result.candidates.length > 0);
 });
 
 // ---------------------------------------------------------------- metadata handling
@@ -247,6 +274,27 @@ test('skills with empty or malformed descriptions are excluded and counted', asy
   assert.equal(skills.length, 1);
   assert.equal(skills[0].id, 'good-skill');
   assert.equal(skipped, 2);
+});
+
+test('YAML-ism leaks and unmatched quotes are malformed and skipped', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'skill-search-front-'));
+  roots.push(root);
+  const raw: Array<[string, string]> = [
+    ['null-desc', '---\nname: null-desc\ndescription: null\n---\n\nBody.\n'],
+    ['tilde-desc', '---\nname: tilde-desc\ndescription: ~\n---\n\nBody.\n'],
+    ['unquoted-desc', '---\nname: unquoted-desc\ndescription: "unclosed\n---\n\nBody.\n'],
+    ['good-desc', '---\nname: good-desc\ndescription: A real description.\n---\n\nBody.\n'],
+    ['empty-desc', '---\nname: empty-desc\ndescription: ""\n---\n\nBody.\n'],
+  ];
+  for (const [name, body] of raw) {
+    const dir = join(root, name);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'SKILL.md'), body);
+  }
+  const { skills, skipped } = await scanSkillRoots([root]);
+  assert.equal(skills.length, 1);
+  assert.equal(skills[0].id, 'good-desc');
+  assert.equal(skipped, 4, 'null, tilde, unmatched quote, and empty all count as skipped');
 });
 
 test('CLI: lowercase skill.md is found and skipped count is visible', async () => {
@@ -478,6 +526,48 @@ test('--help exits 0 with usage on stdout', async () => {
   assert.ok(out.stdout.includes('--roots-file'));
 });
 
+// ---------------------------------------------------------------- combined input size cap
+
+test('oversized request+context fails explicitly before any judge call', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const seen: Request[] = [];
+  const big = 'x'.repeat(MAX_INPUT_CHARS + 1);
+  await assert.rejects(
+    runSkillSearch({
+      roots: [root], request: 'short request', context: [big], apiKey: 'dummy',
+      transport: tableTransport({}, seen)
+    }),
+    /together exceed/
+  );
+  assert.equal(seen.length, 0, 'no transport call was made');
+});
+
+test('request within cap but context pushing over the cap still fails', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const seen: Request[] = [];
+  const over = 'y'.repeat(MAX_INPUT_CHARS - 10);
+  await assert.rejects(
+    runSkillSearch({
+      roots: [root], request: 'a real request', context: [over], apiKey: 'dummy',
+      transport: tableTransport({}, seen)
+    }),
+    /together exceed/
+  );
+  assert.equal(seen.length, 0, 'no transport call was made');
+});
+
+test('combined input just under the cap proceeds to the judge', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const seen: Request[] = [];
+  const under = 'z'.repeat(MAX_INPUT_CHARS - 50);
+  const { result } = await runSkillSearch({
+    roots: [root], request: 'merge my pdfs', context: [under], apiKey: 'dummy',
+    transport: tableTransport({ 'pdf-editor': { level: 'high', confidence: 0.95 } }, seen)
+  });
+  assert.equal(seen.length, 1, 'judge was called');
+  assert.ok(['suggestions', 'clarify'].includes(result.status));
+});
+
 // ---------------------------------------------------------------- malformed inputs
 
 test('malformed inputs fail closed with exit 1 and no stdout JSON', async () => {
@@ -512,6 +602,13 @@ test('malformed inputs fail closed with exit 1 and no stdout JSON', async () => 
   out = await runCli(['--roots-file', rootsPath, '--request-file', hugeRequest]);
   assert.equal(out.code, 1);
   assert.equal(out.stdout.trim(), '');
+
+  const hugeContext = join(dir, 'huge-context.json');
+  await writeFile(hugeContext, JSON.stringify({ request: 'a short request', context: ['y'.repeat(9000)] }));
+  out = await runCli(['--roots-file', rootsPath, '--request-file', hugeContext]);
+  assert.equal(out.code, 1);
+  assert.equal(out.stdout.trim(), '');
+  assert.ok(out.stderr.includes('together exceed'), 'diagnostic names the combined cap');
 
   out = await runCli(['--roots-file', rootsPath]);
   assert.equal(out.code, 1);
