@@ -811,6 +811,18 @@ def _label_for_word(word):
 _COUNT_LABEL_TOKEN_WINDOW = 4
 
 
+# Words (case-insensitive) that turn a following number into an enumerator
+# or identifier for something else — never a claimed count for a nearby
+# count-label keyword. "round 5 tests" is round 5 (not 5 tests), "Part 2
+# landed" is part 2, and "PR 4" / "issue 3" / "v 2" are references, not
+# counts.
+_COUNT_LABEL_REF_SKIP_WORDS = frozenset((
+    "pr", "prs", "round", "rounds", "step", "steps", "item", "items",
+    "phase", "phases", "part", "parts", "issue", "issues", "version",
+    "versions", "v",
+))
+
+
 def _extract_labelled_draft_counts(text):
     """{label: set(ints)} for the counts a DRAFT actually claims — an
     integer is only attached to a label when a keyword for that label sits
@@ -843,7 +855,25 @@ def _extract_labelled_draft_counts(text):
     gluing to neighbouring digits, so "41/41" becomes "41", "/", "41" (two
     digit tokens) and "#52" becomes "#", "52" (one digit token) while a
     mixed alnum run with no `#`/`/` in it — "0dca183" — is untouched and
-    still glues into one non-digit token."""
+    still glues into one non-digit token.
+
+    2026-09-18, third fix: identifiers and enumerators are not counts. A
+    digit run immediately preceded by "#" ("PR #63", "#69") is a reference,
+    not a claimed count — unless the draft itself labels that "#"-number
+    as a count: "Tests #52 passed" names the label right before the "#",
+    so 52 is still claimed and a lie there still blocks (see
+    test_deterministic_count_mismatch_blocks_on_a_hash_prefixed_lie). A
+    digit run immediately preceded (case-insensitive) by PR, round, step,
+    item, phase, part, issue, version or v ("round 5 tests", "Part 2
+    landed") is an enumerator for something else, never this label's
+    count.
+
+    2026-09-18, fourth fix: the "#" branch below and the ref-word branch
+    were an if/elif, so in "Fixed PRs #63, #68" (PRs, #, 63) the "#"
+    branch matched first and the ref-word test never ran — "PRs" maps to
+    a label, so the label carve-out kept 63/68 as claimed counts. A word
+    from _COUNT_LABEL_REF_SKIP_WORDS before the "#" now skips the digit
+    too; a real label before the "#" ("Tests #52 passed") still claims."""
     out = {}
     if not text:
         return out
@@ -855,6 +885,21 @@ def _extract_labelled_draft_counts(text):
             continue
         for i, tok in enumerate(tokens):
             if not tok.isdigit():
+                continue
+            prev = tokens[i - 1] if i else ""
+            if prev == "#":
+                # A "#"-prefixed number is a reference ("PR #63", "#69"),
+                # not a claimed count — unless the word before the "#"
+                # names the count label itself ("Tests #52 passed" really
+                # does claim 52 tests). A ref word before the "#" is also
+                # a reference: "Fixed PRs #63, #68" must skip 63/68 even
+                # though the "#" branch matched first (the ref-word elif
+                # below would never run).
+                word_before_hash = tokens[i - 2] if i >= 2 else ""
+                if (word_before_hash.lower() in _COUNT_LABEL_REF_SKIP_WORDS
+                        or _label_for_word(word_before_hash) is None):
+                    continue
+            elif prev.lower() in _COUNT_LABEL_REF_SKIP_WORDS:
                 continue
             for j, lab in labels:
                 if abs(j - i) <= _COUNT_LABEL_TOKEN_WINDOW:
@@ -6374,6 +6419,35 @@ def _fact_stem(word):
     return w
 
 
+# Generic enumerator labels — "round 3", "step 2", "item 5", "part 1",
+# "phase 2". Bare, they name no subject: one PR's "round 3" and another
+# PR's "round 4" are different rounds, so two values under one of these
+# labels may only contradict when the draft's own sentence anchors the
+# label to a subject. (The stems are the words themselves under
+# `_fact_stem`.)
+_FACT_GENERIC_LABEL_STEMS = frozenset(("round", "step", "item", "part", "phase"))
+
+# What anchors a generic label to a subject: a PR/issue reference ("#63",
+# "PR #63", "issue #69"), a file or repo path, or one of the harness's
+# bot names.
+_FACT_SUBJECT_QUALIFIER_RE = re.compile(
+    r"\#\d+\b"
+    r"|\bPRs?\s*\#?\d+\b"
+    r"|\bissues?\s*\#?\d+\b"
+    r"|\bpull\s+requests?\s*\#?\d+\b"
+    r"|\b[\w\-.]+\.(?:py|md|markdown|js|jsx|ts|tsx|mjs|cjs|json|ya?ml|toml|ini|cfg|conf|sh|bash|zsh|rs|go|java|c|cpp|cc|h|hpp|rb|php|pl|pm|html|htm|css|scss|txt|log|sql|csv)\b"
+    r"|\b(?:[\w\-.]+/){2,}[\w\-.]+\b"
+    r"|\bMuse\b|\bPrimary\b|primary-brain|super-?jev",
+    re.IGNORECASE,
+)
+
+
+def _fact_sentence_has_subject_qualifier(sentence):
+    """True when `sentence` names a subject a generic label could belong
+    to — a PR/issue number, a file or repo path, or a bot name."""
+    return bool(_FACT_SUBJECT_QUALIFIER_RE.search(sentence or ""))
+
+
 def _fact_label_keys(text):
     """The stemmed content words of a label — the identity anchors. Words
     under 3 characters and every generic receipt word are dropped."""
@@ -6485,7 +6559,8 @@ def _fact_in_number_list_context(sentence, start, end):
 
 
 def _fact_draft_label_values(draft_text):
-    """`(label_key, value, explicit, guard_word)` tuples the draft states by
+    """`(label_key, value, explicit, guard_word, sentence)` tuples the draft
+    states by
     EXPLICIT adjacency. Never across a comma, semicolon, colon, slash or
     paren, and never across another value — a pairing that has to jump a
     clause boundary is not a pairing this check is willing to assert,
@@ -6515,7 +6590,7 @@ def _fact_draft_label_values(draft_text):
             range_starts.add(m.start(2))
             keys = _fact_label_keys(m.group(1))
             if keys:
-                out.append((keys[-1], m.group(3), True, None))
+                out.append((keys[-1], m.group(3), True, None, sentence))
         ratio_spans = [m.span() for m in _FACT_RATIO_RE.finditer(sentence)]
         for m in _FACT_VALUE_TOKEN_RE.finditer(sentence):
             if m.start() in range_starts:
@@ -6541,7 +6616,7 @@ def _fact_draft_label_values(draft_text):
             if explicit_word:
                 keys = _fact_label_keys(explicit_word)
                 if keys:
-                    out.append((keys[-1], value, True, None))
+                    out.append((keys[-1], value, True, None, sentence))
                     continue
             before = sentence[max(0, m.start() - 70):m.start()]
             after = sentence[m.end():m.end() + 70]
@@ -6558,7 +6633,7 @@ def _fact_draft_label_values(draft_text):
                             and _fact_in_number_list_context(
                                 sentence, m.start(), m.end())):
                         guard_word = word
-                    out.append((_fact_stem(lw), value, False, guard_word))
+                    out.append((_fact_stem(lw), value, False, guard_word, sentence))
                     break
             seg2 = _FACT_CLAUSE_BOUNDARY_RE.split(after)[0]
             aw = _FACT_WORD_RE.findall(seg2)
@@ -6575,7 +6650,7 @@ def _fact_draft_label_values(draft_text):
                             and _fact_in_number_list_context(
                                 sentence, m.start(), m.end())):
                         guard_word = word
-                    out.append((_fact_stem(lw), value, False, guard_word))
+                    out.append((_fact_stem(lw), value, False, guard_word, sentence))
                     break
     return out
 
@@ -6592,7 +6667,7 @@ def _facts_labelled_value_claims(window_text, draft_text):
         return []
     draft_low = (draft_text or "").lower()
     bad, good, seen = [], [], set()
-    for key, value, explicit, guard_word in _fact_draft_label_values(draft_text):
+    for key, value, explicit, guard_word, sentence in _fact_draft_label_values(draft_text):
         values = table.get(key)
         if not values or len(values) != 1:
             continue
@@ -6621,6 +6696,21 @@ def _facts_labelled_value_claims(window_text, draft_text):
                         f"{key!r}; this window's own {shown!r} row also shows "
                         f"{wval} — SUPPORTED.")
         else:
+            if key in _FACT_GENERIC_LABEL_STEMS and not explicit:
+                # A bare generic enumerator label ("round 3" vs "round 4")
+                # names no subject — two different PRs can each have a
+                # "round 3". It may only contradict when the draft's own
+                # sentence anchors it to a subject (a PR/issue number, a
+                # file/path, a bot name), or when the pairing was already
+                # anchored because the draft wrote the window's exact
+                # label phrase (the number-list escape hatch). An
+                # unqualified generic label never blocks.
+                label_stripped = label.strip()
+                already_anchored = guard_word and not (
+                    len(label_stripped) > len(guard_word)
+                    and label_stripped.lower() not in draft_low)
+                if not already_anchored and not _fact_sentence_has_subject_qualifier(sentence):
+                    continue
             bad.append(f"LABELLED VALUE: the draft states {value} next to "
                        f"{key!r}; the only {key!r} value in this window is "
                        f"{wval}, on its {shown!r} row — CONTRADICTED_BY_FACT.")
