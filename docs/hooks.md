@@ -2801,3 +2801,23 @@ the thrown error keeps both texts —
 original failure is never masked by the retry's status. (The retry trigger
 is any non-2xx on a pinned call; the pin path only exists when the operator
 opted in.)
+
+## Code claims go through the noul question
+
+`gate --claim` grew a `--claim-mode` flag. In code mode every claim is asked
+of the code text as a Noul question — "Is this claim true of the code?" —
+instead of the evidence-confirms choice kit. The verdict follows the
+probability of yes: a high reading counts as supported, a low reading as
+contradicted, and the middle band as not supported, with confidence taken
+from the stronger side. When the evidence looks like a unified diff the door
+picks code mode on its own unless told otherwise, and the chosen mode is
+recorded in the JSON details. In code mode a claim is refused, with a
+rephrase hint naming the protocol shape, only when a judgment word — should,
+must, ought, "is a bug", "isn't correct", "looks wrong", and the like — is
+the main clause's predicate; the filter ignores a single leading subordinate
+clause, and `--allow-judgment` overrides. Evidence mode behaves exactly as it
+did before this change. Claims with the shape "`token` matches NAME" and its
+close variants, where the evidence defines NAME as a regex, are settled
+deterministically in Python — the arm is deliberately narrow and shape-gated,
+firing only when the name ends the claim — and never sent to the judge;
+anything else goes to the judge.

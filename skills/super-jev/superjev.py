@@ -3979,6 +3979,238 @@ class StopBudget:
         return max(min(default_timeout, rem), 0.0)
 
 
+
+# ------------------------------------------------- gate --claim: code mode
+# Protocol v1.0 rule 3 (feeding rules): claims about CODE go through the noul
+# question "Is this claim true of the code?", never through the
+# evidence-confirms choice kit. `--claim-mode code|evidence` (default: auto)
+# selects it; a unified-diff-looking evidence auto-selects code. The judgment
+# refusal judges the main clause only — one leading subordinate clause is
+# stripped first — and runs in code mode only: evidence mode keeps
+# byte-for-byte the behaviour it had before this change. Pattern claims with
+# the shape `<token> <phrase> <ALLCAPS_NAME>` (phrase: matches / does not
+# match / is matched by / is caught by / is not caught by), with the name
+# ending the claim, are answered deterministically in Python, never sent to
+# Jev. The arm is deliberately narrow (shape-gated): trailing words send the
+# claim to the judge.
+
+# A judgment counts only when it is the MAIN CLAUSE's predicate: a bare modal,
+# a copula-style judgment with optional negation ("is a bug", "isn't correct",
+# "was never broken"), or "introduces a bug". One leading subordinate clause
+# ("when"/"if"/"after"/... up to the first comma) is stripped first — judgment
+# words inside it never count. The old protocol-shape substring exemption is
+# gone: "is returned" elsewhere in the clause never masks a modal.
+_LEADING_SUBORDINATE = re.compile(
+    r"^(?:when|if|after|before|unless|once|while)\b[^,]*,",
+    re.IGNORECASE)
+
+_JUDGMENT_PREDICATE = re.compile(
+    r"\b(?P<modal>should|must|ought)\b"
+    r"|\b(?P<cop>is|are|was|were|isn't|aren't|wasn't|weren't|it's|that's|"
+    r"looks|seems|remains)\s+(?:not\s+|never\s+)?(?:a\s+|an\s+)?"
+    r"(?P<copula>bug|bugs|buggy|missing|correct|incorrect|wrong|broken|flawed|unsafe|improper)\b"
+    r"|\bintroduces?\s+(?:a\s+)?(?P<introduced>bug)",
+    re.IGNORECASE)
+
+JUDGMENT_REPHRASE_HINT = (
+    "Rephrase as a checkable fact in the protocol shape "
+    "\"when <input>, <function> returns <value>\" "
+    "-- describe what the code does, not what it should do.")
+
+_DIFF_PREFIXES = ("diff --git", "--- a/", "+++ b/", "@@")
+
+
+def _main_clause(claim):
+    """The claim with one leading subordinate clause stripped, else the claim.
+
+    A leading clause opens with when/if/after/before/unless/once/while and
+    runs to the first comma; judgment words inside it never count.
+    """
+    c = (claim or "").strip()
+    m = _LEADING_SUBORDINATE.match(c)
+    return c[m.end():].strip() if m else c
+
+
+def judgment_word(claim):
+    """The judgment word in `claim`'s main clause, or None.
+
+    A judgment counts only when it is the main clause's predicate — a bare
+    modal (should/must/ought), a copula-style judgment ("is a bug",
+    "isn't correct", "was never broken"), or "introduces a bug".
+    """
+    m = _JUDGMENT_PREDICATE.search(_main_clause(claim))
+    if not m:
+        return None
+    for name in ("modal", "copula", "introduced"):
+        if m.group(name):
+            return m.group(name).lower()
+    return None  # unreachable: every alternative binds one of the groups
+
+
+def looks_like_unified_diff(text):
+    """True when any line of `text` opens a unified-diff header or hunk."""
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith(_DIFF_PREFIXES):
+            return True
+    return False
+
+
+def noul_code_question(claim):
+    """The code-fact question: one Noul per claim, asked of the code text."""
+    return {
+        "type": "noul",
+        "instructions": "Is this claim true of the code?\n\nCLAIM: " + claim,
+        "criteria": {
+            "true": "the code text, read with ordinary programming knowledge, "
+                    "makes the claim true",
+            "false": "the code text makes the claim false or does not "
+                     "establish it",
+        },
+    }
+
+
+def code_state(evidence_items):
+    """The state a code-mode question is asked against: the code text."""
+    return "CODE:\n" + "\n\n".join(
+        "=== %s ===\n%s" % (path, text.strip())
+        for path, text in evidence_items)
+
+
+def code_verdict(p_yes):
+    """p(yes) -> (verdict, confidence). Confidence is max(p, 1-p)."""
+    p = float(p_yes)
+    conf = max(p, 1.0 - p)
+    if p >= 0.6:
+        return "SUPPORTED", conf
+    if p <= 0.4:
+        return "CONTRADICTED", conf
+    return "NOT_SUPPORTED", conf
+
+
+# The only shape the deterministic pattern arm fires on: a backticked token,
+# a matching phrase, and an ALL_CAPS name — in that order, adjacent, with the
+# name ending the claim (an optional period allowed). Anything trailing the
+# name — "but only on Windows" — sends the claim to the judge. The arm is
+# deliberately narrow (shape-gated); it never tries to read qualifiers.
+_PATTERN_PHRASE = re.compile(
+    r"`([^`]+)`\s+"
+    r"(matches|does not match|is matched by|is caught by|is not caught by)"
+    r"\s+([A-Z][A-Z0-9_]{1,})\b\s*\.?\s*$")
+
+
+def _regex_def_in_evidence(name, evidence_text):
+    """The regex string assigned to ALL_CAPS `name` in the evidence, or None.
+
+    Matches `NAME = re.compile(r"...")` and `NAME = r"..."`, one line.
+    """
+    pat = (r"(?m)^[ \t]*" + re.escape(name) + r"[ \t]*=[ \t]*"
+           r"(?:re\.compile[ \t]*\([ \t]*)?[rR]?(['\"])(.*?)\1")
+    m = re.search(pat, evidence_text or "")
+    return m.group(2) if m else None
+
+
+def pattern_claim_answer(claim, evidence_text):
+    """A deterministic answer for a pattern claim, or None.
+
+    A pattern claim has the shape `<token> <phrase> <ALLCAPS_NAME>` — in that
+    order, adjacent — where the phrase is one of matches / does not match /
+    is matched by / is caught by / is not caught by, the name ends the claim
+    (an optional period allowed), and the evidence defines NAME as a regex.
+    The token is the one in that phrase — not the first backtick in the
+    claim — matched against the regex in Python. This never goes to Jev;
+    anything else goes to the judge.
+    """
+    m = _PATTERN_PHRASE.search(claim or "")
+    if not m:
+        return None
+    token, name = m.group(1), m.group(3)
+    pattern = _regex_def_in_evidence(name, evidence_text)
+    if pattern is None:
+        return None  # NAME not defined as a regex in the evidence: the judge
+    try:
+        matched = bool(re.search(pattern, token))
+    except re.error:
+        return None  # not a usable pattern claim; let the judge see it
+    verdict = "SUPPORTED" if matched else "CONTRADICTED"
+    return {"verdict": verdict, "confidence": 1.0, "p_yes": None,
+            "arm": "pattern:code", "pattern": pattern,
+            "name": name, "token": token}
+
+
+def _load_jev_lib():
+    """Import the fleet jev lib (FLEET_JEV_LIB) for its ask()."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("fleet_jev", str(FLEET_JEV_LIB))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _code_ask(state, questions):
+    """The live call code mode makes. Monkeypatched in tests — no network."""
+    return _load_jev_lib().ask(state, questions)
+
+
+def run_code_gate(evidence_items, claims, ask_fn=None):
+    """Check each claim about the code. Returns (rows, exit_code).
+
+    Pattern claims are answered deterministically; the rest go out as one
+    batch of Noul questions. `ask_fn` is injected by tests (a fake judge);
+    production calls the live door.
+    """
+    evidence_text = "\n\n".join(t for _, t in evidence_items)
+    rows = []
+    pending = []
+    for i, claim in enumerate(claims, 1):
+        det = pattern_claim_answer(claim, evidence_text)
+        if det is not None:
+            det.update({
+                "key": "c%d" % i, "claim": claim,
+                "action": "ok" if det["verdict"] == "SUPPORTED"
+                          else "needs a human — the pattern did not match"})
+            rows.append(det)
+        else:
+            pending.append((i, claim))
+    if pending:
+        questions = {"c%d" % i: noul_code_question(c) for i, c in pending}
+        res = (ask_fn or _code_ask)(code_state(evidence_items), questions)
+        answers = res.get("answers", {})
+        for i, claim in pending:
+            p = answers.get("c%d" % i, {}).get("noul")
+            p = 0.5 if p is None else float(p)
+            verdict, conf = code_verdict(p)
+            rows.append({
+                "key": "c%d" % i, "claim": claim, "verdict": verdict,
+                "confidence": conf, "p_yes": p, "arm": "noul:code",
+                "action": "ok" if verdict == "SUPPORTED"
+                          else "needs a human — " + verdict.lower().replace("_", " ")})
+    rows.sort(key=lambda r: int(r["key"][1:]))  # c1, c2, ..., c10 — never c1, c10, c2
+    code = 3 if any(r["verdict"] in ("CONTRADICTED", "NOT_SUPPORTED")
+                    for r in rows) else 0
+    return rows, code
+
+
+def _code_summary(rows):
+    n = sum(1 for r in rows if r["verdict"] == "SUPPORTED")
+    return "%d of %d code claims supported" % (n, len(rows))
+
+
+def _render_code_gate(mode, rows, code):
+    """The code-mode table as a string: printed, captured, or ignored."""
+    lines = ["", "claim-mode: %s" % mode]
+    for r in rows:
+        lines.append("  %(key)-4s %(verdict)-14s %(confidence).2f  %(claim).70s [%(arm)s]" % r)
+        if r["action"] != "ok":
+            lines.append("       -> %s" % r["action"])
+    need = [r["key"] for r in rows if r["action"] != "ok"]
+    lines.append("")
+    lines.append("  %d of %d need a human: %s" % (len(need), len(rows),
+                                                  ", ".join(need) or "none"))
+    lines.append("")
+    lines.append("VERDICT: %s" % GATE_VERDICT.get(code, "ERROR — code %d" % code))
+    return "\n".join(lines) + "\n"
+
+
 def cmd_gate(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
@@ -3988,6 +4220,19 @@ def cmd_gate(a):
     if not a.draft and not a.claim:
         return door_refuse(json_mode, "gate",
                            "gate needs --draft <file> or one or more --claim \"<text>\"")
+
+    # The claims the door will check: explicit --claim, or the draft pre-split.
+    # Needed for the judgment filter and for code mode; the evidence path
+    # below rebuilds its own --claims-file the same way, unchanged.
+    explicit_claims = [c for c in (a.claim or []) if c and c.strip()]
+    presplit_list = []
+    if not explicit_claims and a.draft and _presplit_enabled():
+        try:
+            _dt = Path(a.draft).read_text(encoding="utf-8")
+        except OSError:
+            _dt = ""
+        presplit_list = presplit_claims(_dt)
+    claims_for_check = explicit_claims or presplit_list
 
     # Cap estimate + truncation, BEFORE any TypeSafe call. a.evidence is
     # given oldest-first (receipts/previous-turn ahead of current-turn —
@@ -4020,6 +4265,67 @@ def cmd_gate(a):
         evidence_paths = list(a.evidence)
     extra_ledger = {"truncated": truncated, "est_input_tok": est_tok,
                     "input_cap_tok": cap_tok}
+
+    # Claim mode: explicit --claim-mode wins; otherwise a unified-diff-looking
+    # evidence auto-selects code. Code mode needs per-claim questions, so with
+    # no checkable claims it falls back to the evidence reply kit.
+    mode = getattr(a, "claim_mode", None)
+    if mode is None:
+        mode = ("code" if any(looks_like_unified_diff(t) for _, t in kept_ev)
+                else "evidence")
+    if mode == "code" and not claims_for_check:
+        mode = "evidence"
+
+    # Judgment-word claims are refused with exit 2 and a rephrase hint
+    # (protocol v1.0 rule 3); --allow-judgment overrides. Code mode only:
+    # evidence mode keeps byte-for-byte the behaviour it had before.
+    if mode == "code" and not getattr(a, "allow_judgment", False):
+        rejected = [(c, judgment_word(c)) for c in claims_for_check
+                    if judgment_word(c)]
+        if rejected:
+            lines = ["gate: claim rejected — judgment word %r in %r" % (w, c)
+                     for c, w in rejected]
+            msg = "\n".join(lines) + "\n" + JUDGMENT_REPHRASE_HINT
+            if hook_mode:
+                # dropped, never an error: the hook chain continues, and the
+                # note lands in out for the operator to see
+                return 0, "gate: claim dropped — " + msg, ""
+            if json_mode:
+                # the gate's own verdict word for exit 2 is REJECT
+                emit_json("gate", "REJECT", 2, msg, {}, [])
+                return 2
+            return door_refuse(False, "gate", msg, exit_code=2)
+
+    # Code mode: claims go through the noul question, asked of the code text.
+    if mode == "code":
+        try:
+            try:
+                rows, code = run_code_gate(kept_ev, claims_for_check)
+            except Exception as exc:
+                if not hook_mode:
+                    raise
+                # the in-process lib call must never escape the hook:
+                # advisory triple, one-line reason, no stderr text to carry
+                reason = str(exc).strip().splitlines()
+                reason = reason[0] if reason else type(exc).__name__
+                return 3, "gate: code-mode judge call failed: " + reason, ""
+            text = _render_code_gate(mode, rows, code)
+        finally:
+            for pth in evidence_tmp_paths:
+                try:
+                    os.unlink(pth)
+                except OSError:
+                    pass
+        if hook_mode:
+            # mirror the evidence path's hook contract: captured, never printed
+            return code, text, ""
+        if json_mode:
+            emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
+                      _code_summary(rows),
+                      {"claim_mode": mode, "rows": rows}, [])
+            return code
+        print(text, end="")
+        return code
 
     cmd = [*door_cmd(GATE_CMD_ENV, FLEET_JEV_LIB), *evidence_paths, "--kit", "reply"]
     claims_tmp_path = None
@@ -4059,7 +4365,7 @@ def cmd_gate(a):
                                       extra_ledger=extra_ledger)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
-                      {"stdout": out, "stderr": err}, cmd)
+                      {"stdout": out, "stderr": err, "claim_mode": mode}, cmd)
             return code
         if hook_mode:
             # Captured and NOT printed: cmd_hook builds its own one-line
@@ -12751,6 +13057,13 @@ def build_parser():
     g.add_argument("evidence", nargs="+", help="the evidence files you actually read")
     g.add_argument("--draft", default="", help="your draft reply, as a file")
     g.add_argument("--claim", action="append", help="one claim; repeat per claim")
+    g.add_argument("--claim-mode", choices=["code", "evidence"], default=None,
+                   help="code: claims are asked of the code as noul questions; "
+                        "evidence: the usual evidence-confirms check. "
+                        "Default: auto — code when the evidence looks like a "
+                        "unified diff.")
+    g.add_argument("--allow-judgment", action="store_true",
+                   help="do not reject claims carrying judgment words")
     _add_json_flag(g)
     g.set_defaults(func=cmd_gate)
 
