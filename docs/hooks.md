@@ -2631,6 +2631,20 @@ inventory of the whole turn's acts rather than a sample of them.
   has no way to tell whether that hash names the RIGHT recipient — a
   mismatch there is not something this family, or any fact family, can
   catch.
+
+  One send names neither recipient nor thread in its own input: a Gmail
+  `send_message` called with only `draftId`, which sends an existing draft
+  the transcript built earlier. The family looks back through the same
+  window for the `create_draft`/`update_draft` call that built that draft —
+  matched on the draft id in the draft call's input, or on the id its
+  result names — and reads the recipients off that call's `to`/`cc`/`bcc`,
+  with the latest builder winning when an `update_draft` changed them, so
+  the line reads like any other named-recipient send. When no draft call
+  in the window matches the id, the line still records the send, naming
+  the draft id and saying the recipient is not in the window, so the
+  judge sees that a send happened without crediting a recipient the
+  family never saw. `create_draft` and `update_draft` remain blocklisted
+  as non-sends.
 - **scheduled** — a scheduler tool call, or a crontab/launchd *install*,
   with whatever id its own result handed back. Supports *scheduled / armed /
   set to fire under that id*.

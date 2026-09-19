@@ -18,6 +18,22 @@ No version bump.
   CONTRADICTED_BY_FACT path and which claims it supports unchanged.
   See docs/hooks.md, "Written-file identity".
 
+- **Send-by-draft-id lookback (family 11).** A Gmail `send_message` called
+  with only `draftId` sends an existing draft but names no recipient and
+  no thread in its own input, so the message-tool branch emitted no "sent"
+  line for a genuine send. When a send-verb tool's input carries a draft
+  id and no recipient/thread key, the family now looks back through the
+  same transcript window for the `create_draft`/`update_draft` call that
+  built that draft (matched on the id in the draft call's input, or on
+  the id its result names) and reads the recipients off that call's
+  `to`/`cc`/`bcc`, with the latest builder winning when an `update_draft`
+  changed them; the line reads like any other named-recipient send. When
+  no matching draft call is in the window, the line still records the send
+  by draft id while saying the recipient is not in the window, so the
+  judge sees that a send happened without crediting a recipient the
+  family never saw. `create_draft` and `update_draft` remain blocklisted as
+  non-sends. See docs/hooks.md, "Receipt shapes — family 11".
+
 - **Receipt shapes wording fix (family 11).** Measured live: truthful
   drafts were being blocked by the overclaims judge, and the only judge
   input that had changed was the family-11 RECEIPT SHAPE fact lines. Each
