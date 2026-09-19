@@ -3,9 +3,10 @@
  * `node src/skill-search-cli.ts --roots-file ROOTS.json --request-file REQUEST.json [--local-only]`
  *
  * Default skill discovery entry: suggest which installed skills serve one
- * plain request, without loading any skill file and without executing
- * anything. Advisory only — the caller loads the chosen SKILL.md itself and
- * decides what to run. Retrieval returns suggestions, never permission to
+ * plain request, without executing anything. Advisory only — the caller loads
+ * the chosen SKILL.md itself and decides what to run. Skill files are read
+ * locally only to extract frontmatter metadata; bodies are never sent to the
+ * judge and never printed. Retrieval returns suggestions, never permission to
  * execute: a same-technique/different-purpose match (rent vs a generic
  * browser skill) stays advisory, never auto.
  *
@@ -35,11 +36,13 @@
  * winner's path is retained as provenance. Skills with empty or malformed
  * descriptions are excluded and counted, never sent anywhere.
  *
- * Exact-name resolution (including a small portable typo tolerance) and the
- * narrow underspecified-request check are local and deterministic. Anything
- * else goes through one bounded judge call over the top 40 local matches:
- * a single attempt per batch (maxRetries 0) under a fixed timeout, with all
- * dependent call costs collected into `usage`.
+ * Exact-name resolution (exact normalized name only -- never a fuzzy
+ * near-miss) and the narrow underspecified-request check are local and
+ * deterministic. Anything else goes through the bounded judge path over the
+ * top 40 local matches: one attempt per batch (maxRetries 0) under a fixed
+ * timeout, with all dependent call costs collected into `usage`. Batch
+ * packing may split the work into more than one provider call; the bound is
+ * one attempt per batch, not a call count.
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
@@ -56,7 +59,7 @@ class CliError extends Error {}
 
 /** Short descriptions are capped, mirroring catalog-build-cli's TEXT_CAP. */
 export const DESCRIPTION_CAP = 300;
-/** Local narrowing keeps the top N records before the one judge call. */
+/** Local narrowing keeps the top N records before the judge path. */
 export const LOCAL_NARROW_N = 40;
 /** At most three candidates are ever returned. */
 export const JUDGE_TOP_K = 3;
@@ -64,6 +67,8 @@ export const JUDGE_TOP_K = 3;
 export const SKILL_SEARCH_TIMEOUT_MS = 30_000;
 /** Longer requests never reach the judge; the caller shortens them first. */
 export const MAX_REQUEST_CHARS = 4000;
+/** Request plus recent context, combined, must fit in this before the judge. */
+export const MAX_INPUT_CHARS = 8000;
 /** Input file size guard. */
 export const MAX_FILE_BYTES = 1 * 1024 * 1024;
 
@@ -112,6 +117,23 @@ export type SkillSearchOptions = {
 
 const SKILL_FILENAMES = ['SKILL.md', 'skill.md'];
 
+/**
+ * Minimal metadata validity on top of the shared parser. The shared
+ * `extractDescription` returns the raw value for YAML-ism leaks like
+ * `description: null` (as the string "null") and passes unmatched quotes
+ * through verbatim, so treat those as malformed here: the description must
+ * be a non-empty string with matched quotes. No new dependency -- the
+ * existing parser does the extraction work.
+ */
+export function descriptionOrNull(source: string): string | null {
+  const d = extractDescription(source).trim();
+  if (!d) return null;
+  if (d === 'null' || d === '~') return null;
+  const first = d[0];
+  if ((first === '"' || first === "'") && (d.length < 2 || d[d.length - 1] !== first)) return null;
+  return d;
+}
+
 async function findSkillFile(dir: string): Promise<string | null> {
   for (const name of SKILL_FILENAMES) {
     try {
@@ -157,7 +179,7 @@ export async function scanSkillRoots(roots: string[]): Promise<{ skills: SkillEn
       let source: string;
       try { source = await readFile(skillFile, 'utf8'); }
       catch { skipped++; continue; }
-      const description = extractDescription(source).trim();
+      const description = descriptionOrNull(source);
       if (!description) { skipped++; continue; }
       seen.add(name);
       skills.push({
@@ -178,50 +200,19 @@ export function normalizeSkillName(raw: string): string {
   return s.replace(/^["'`]+|["'`,.,;:!?]+$/g, '').trim();
 }
 
-/** Small, portable Levenshtein distance — no platform dictionary involved. */
-export function levenshtein(a: string, b: string): number {
-  if (a === b) return 0;
-  const m = a.length, n = b.length;
-  if (!m) return n;
-  if (!n) return m;
-  let prev = Array.from({ length: n + 1 }, (_, j) => j);
-  for (let i = 1; i <= m; i++) {
-    const cur = [i];
-    for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    }
-    prev = cur;
-  }
-  return prev[n];
-}
-
 /**
- * Resolve an exact /slash-name or unambiguous exact skill name locally, with
- * a conservative typo tolerance (edit distance <= 2 for names of length >= 6,
- * <= 1 for length 4-5, none below) that only fires when a single skill is
- * the unique best match. Ambiguous matches resolve to null — the judge path
- * decides those, never a guess here. The user's wording is never rewritten;
- * only the winning candidate's own name is returned.
+ * Resolve an exact /slash-name or exact skill name locally. Exact means an
+ * actual exact normalized name match — never a fuzzy near-miss. A near-miss
+ * (e.g. "care" for a "card" skill) resolves to null and flows through the
+ * ordinary local/judge path as suggestions, never as status "exact". Typos
+ * stay in the suggestions path; the user's wording is never rewritten, and
+ * only the winning candidate's own name is ever returned.
  */
 export function resolveExactSkill(skills: SkillEntry[], request: string): SkillEntry | null {
   const want = normalizeSkillName(request);
   if (!want) return null;
   const exact = skills.filter(s => s.name.toLowerCase() === want);
-  if (exact.length === 1) return exact[0];
-  if (exact.length > 1) return null;
-  let best: SkillEntry | null = null;
-  let bestDist = Infinity;
-  let tied = false;
-  for (const s of skills) {
-    const name = s.name.toLowerCase();
-    const threshold = name.length >= 6 ? 2 : name.length >= 4 ? 1 : 0;
-    if (!threshold) continue;
-    const d = levenshtein(want, name);
-    if (d > threshold) continue;
-    if (d < bestDist) { bestDist = d; best = s; tied = false; }
-    else if (d === bestDist) tied = true;
-  }
-  return tied ? null : best;
+  return exact.length === 1 ? exact[0] : null;
 }
 
 // Words that carry no searchable content, in tokenize()'s folded form.
@@ -229,7 +220,7 @@ export function resolveExactSkill(skills: SkillEntry[], request: string): SkillE
 // forms and vague nouns. This is an underspecified check, not a universal
 // ambiguity detector — anything with a real content word goes to the judge.
 const FILLER = new Set([
-  'it', 'its', 'this', 'that', 'these', 'those', 'them', 'they', 'their',
+  'it', 'its', 'this', 'thi', 'that', 'these', 'those', 'them', 'they', 'their',
   'he', 'him', 'his', 'she', 'her', 'we', 'us', 'our', 'you', 'your',
   'me', 'my', 'thing', 'stuff', 'something', 'anything', 'everything',
   'nothing', 'whatever', 'what', 'which', 'who', 'whom', 'whose',
@@ -248,15 +239,35 @@ export function contentTokens(text: string): string[] {
   return tokenize(text).filter(t => !FILLER.has(t));
 }
 
+// Action verbs that carry no searchable content on their own. A request that
+// is only one of these plus a bare pronoun ("update it", "check this",
+// "fix that") with no usable context cannot be searched — it clarifies.
+const VAGUE_VERBS = new Set([
+  'update', 'check', 'fix', 'change', 'modify', 'set', 'add', 'remove',
+  'restart', 'run', 'start', 'stop'
+]);
+// Bare pronouns in tokenize()'s folded form ('this' folds to 'thi' via the
+// shared trailing-s stemmer; 'its' folds to 'it').
+const BARE_PRONOUNS = new Set(['it', 'thi', 'this', 'that', 'these', 'those', 'them']);
+
 /**
- * Narrow, deterministic underspecified check: true only when the request has
- * no content tokens AND the context turns add none either. A pronoun-only
- * request with a usable referent in context ("restart it" after "the agent
- * is stuck") is NOT underspecified. Never invents a task — it clarifies.
+ * Narrow, deterministic underspecified check. True when the request has no
+ * content tokens and the context turns add none either, OR when the request
+ * is just a vague action verb plus a bare pronoun ("update it", "check
+ * this", "fix that") with no usable context. A pronoun-only request with a
+ * usable referent in context ("update it" after "the pdf-editor config") is
+ * NOT underspecified — it goes to the judge. Substantive requests
+ * ("update repository configuration") always proceed. Never invents a task
+ — it clarifies.
  */
 export function isUnderspecified(request: string, context: string[] = []): boolean {
-  if (contentTokens(request).length > 0) return false;
-  return contentTokens(context.join(' ')).length === 0;
+  if (contentTokens(context.join(' ')).length > 0) return false;
+  const content = contentTokens(request);
+  if (content.length === 0) return true;
+  if (content.length === 1 && VAGUE_VERBS.has(content[0])) {
+    return tokenize(request).some(t => BARE_PRONOUNS.has(t));
+  }
+  return false;
 }
 
 function toFetchEntries(skills: SkillEntry[]): FetchCatalogEntry[] {
@@ -305,6 +316,11 @@ export async function runSkillSearch(options: SkillSearchOptions): Promise<{ res
   if (typeof request !== 'string') throw new CliError('Provide a request string');
   if (request.length > MAX_REQUEST_CHARS) throw new CliError(`The request exceeds ${MAX_REQUEST_CHARS} characters; shorten it and retry`);
   const context = (options.context ?? []).filter(c => typeof c === 'string').slice(-DEFAULT_CONTEXT_TURNS);
+  // Bound the combined input before anything reaches the judge. Context
+  // bytes count too -- oversized input fails explicitly instead of being
+  // silently rewritten; the caller shortens the wording and retries.
+  const inputChars = request.length + context.reduce((n, c) => n + c.length, 0);
+  if (inputChars > MAX_INPUT_CHARS) throw new CliError(`The request and context together exceed ${MAX_INPUT_CHARS} characters; shorten them and retry`);
 
   const { skills, skipped, duplicates } = await scanSkillRoots(roots);
   const diagnostics: SkillSearchDiagnostics = { rootsScanned: roots.length, skillsFound: skills.length, skipped, duplicates };
@@ -439,9 +455,10 @@ function parseRequestFile(text: string): { request: string; context: string[] } 
 
 const usage = `skill-search --roots-file ROOTS.json --request-file REQUEST.json [--local-only]
 
-Suggest which installed skills serve one plain request, without loading any
-skill file and without executing anything. Advisory only: the caller loads
-the chosen SKILL.md itself and decides what to run.
+Suggest which installed skills serve one plain request, without executing
+anything. Advisory only: the caller loads the chosen SKILL.md itself and
+decides what to run. Skill files are read only to extract frontmatter
+metadata; bodies are never sent to the judge and never printed.
 
   --roots-file FILE   JSON array of trusted absolute skill-directory paths
                       (caller-owned). Each root is scanned for SKILL.md /
@@ -459,9 +476,9 @@ status is exact | suggestions | no_match | fallback | clarify. candidates
 are at most 3 {id, name, path, description} with short descriptions.
 source is "local" when no judge call was made, "jev" when one was.
 
-An exact /slash-name or unambiguous exact skill name resolves locally with
-no network. Anything else goes through one bounded judge call over the top
-40 local matches (a single attempt per batch under a fixed timeout), with
+An exact /slash-name or exact skill name resolves locally with no
+network. Anything else goes through the bounded judge path over the top
+40 local matches (one attempt per batch under a fixed timeout), with
 all dependent call costs collected into usage. A missing API key, a
 timeout, a transport error, or unusable judge answers is a "fallback" with
 local-only candidates — a service failure is never reported as no_match.
