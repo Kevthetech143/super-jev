@@ -96,6 +96,104 @@ export function validateEvaluation(request: Request, response: Evaluation): Eval
   return { ...response, answers };
 }
 
+// Judge pinning (gate pivot, 2026-09-19): the harness can pin the judge's
+// sampling so two runs of the same case stop flipping. The TypeSafe API shape
+// for these fields is not documented anywhere in this repo, so they are sent
+// under the plain names `temperature` and `seed`. The pin is OPT-IN: when
+// SUPERJEV_JUDGE_TEMPERATURE is unset, no pin fields are sent at all and the
+// request is exactly the pre-pin call. When a pin IS sent and the call gets
+// ANY non-2xx, the call is retried ONCE without the pin - no body matching
+// is involved - and the failure is detected once per evaluate: the remaining
+// runs reuse the outcome instead of retrying again. A stderr note is logged
+// only when that retry SUCCEEDS; when the retry also fails, the thrown error
+// keeps both texts ("pin rejected: <original>; unpinned retry: <second>") so
+// the original failure is never masked. The pin path only exists because the
+// operator opted in; with the env unset the pin can never be the cause of a
+// failure.
+//
+// Judge multi-run (2026-09-19): SUPERJEV_JUDGE_RUNS=N calls the judge N times
+// per evaluate. Run 1 is canonical (its validated Evaluation is returned);
+// a failure on a later run keeps run 1's evaluation, is recorded as an error,
+// and never throws. Every run's decision summary is recorded, and the case is
+// marked unstable when the runs disagree or a run failed. decisions[0] is the
+// canonical run's digest; decisions[1..] map to the `digest_2` .. `digest_N`
+// columns of decisions.tsv (the `decision` column keeps the bench's verdict).
+export const JUDGE_TEMPERATURE_ENV = 'SUPERJEV_JUDGE_TEMPERATURE';
+export const JUDGE_SEED_ENV = 'SUPERJEV_JUDGE_SEED';
+export const JUDGE_RUNS_ENV = 'SUPERJEV_JUDGE_RUNS';
+
+export type JudgePin = { temperature?: number; seed?: number };
+
+/** The pin fields to attempt, from env. OPT-IN: when SUPERJEV_JUDGE_TEMPERATURE
+ * is unset or empty, no temperature is sent at all - the default request
+ * carries no pin fields, so the pin can never be the cause of a failure.
+ * Exported for tests. */
+export function judgePinFields(env: NodeJS.ProcessEnv = process.env): JudgePin {
+  const fields: JudgePin = {};
+  const rawT = env[JUDGE_TEMPERATURE_ENV];
+  if (rawT !== undefined && rawT !== '') {
+    const t = Number(rawT);
+    if (Number.isFinite(t)) {
+      fields.temperature = t;
+    } else {
+      console.error(`judge pin: ${JUDGE_TEMPERATURE_ENV}=${JSON.stringify(rawT)} is not a number - sending without temperature`);
+    }
+  }
+  const rawS = env[JUDGE_SEED_ENV];
+  if (rawS !== undefined && rawS !== '') {
+    const n = Number(rawS);
+    if (Number.isInteger(n)) {
+      fields.seed = n;
+    } else {
+      console.error(`judge pin: ${JUDGE_SEED_ENV}=${JSON.stringify(rawS)} is not an integer - sending without seed`);
+    }
+  }
+  return fields;
+}
+
+/** How many times to call the judge per evaluate (default 1). Malformed or
+ * non-positive values degrade to 1 with a stderr warning. Exported for tests. */
+export function judgeRuns(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[JUDGE_RUNS_ENV];
+  if (raw === undefined || raw === '') return 1;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 1) return n;
+  console.error(`judge runs: ${JUDGE_RUNS_ENV}=${JSON.stringify(raw)} is not a positive integer - running the judge once`);
+  return 1;
+}
+
+/** Canonical one-line summary of one judge run's validated answers, for flip
+ * detection. Tab/newline-free so it is safe as a decisions.tsv cell.
+ * Exported for tests. */
+export function judgeDecisionSummary(evaluation: Evaluation): string {
+  const parts: string[] = [];
+  const clean = (s: string) => s.replace(/[\t\n\r]/g, ' ');
+  for (const key of Object.keys(evaluation.answers).sort()) {
+    const a = evaluation.answers[key];
+    if (a.type === 'choice') parts.push(`${clean(key)}=choice:${clean(a.choice)}`);
+    else if (a.type === 'noul') parts.push(`${clean(key)}=noul:${a.noul}`);
+    else parts.push(`${clean(key)}=score:${a.score}`);
+  }
+  return parts.join(' ');
+}
+
+export type JudgeRuns = {
+  runs: number;
+  /** decisions[0] is the canonical run's answers digest; decisions[1..] map
+   * to the `digest_2` .. `digest_N` columns of decisions.tsv. A run that
+   * failed carries an empty digest; its error is in runErrors. */
+  decisions: string[];
+  /** True when the runs disagreed with each other, or when any run failed. */
+  unstable: boolean;
+  /** runErrors[i] is null when run i+1 succeeded, else that run's error text. */
+  runErrors: (string | null)[];
+};
+
+/** Per-evaluate pin state, shared across the N judge runs: a pin rejection
+ * is detected exactly once per evaluate, and the remaining runs reuse the
+ * outcome instead of retrying again. */
+type PinState = { pin: JudgePin; rejected: boolean };
+
 export class Jev implements Evaluator {
   private key: string;
   private model: string;
@@ -106,16 +204,83 @@ export class Jev implements Evaluator {
     this.model = options.model ?? 'jev-latest';
     this.transport = options.fetch ?? fetch;
   }
-  async evaluate(request: Request, signal: AbortSignal): Promise<Evaluation> {
-    // Never retry tools. Transient inference failures are surfaced for an explicit new run.
-    const response = await this.transport('https://api.typesafe.ai/v1/systemone', {
+  private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
+    return this.transport('https://api.typesafe.ai/v1/systemone', {
       method: 'POST', signal,
       headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: this.model, ...request })
+      body: JSON.stringify({ model: this.model, ...pin, ...request })
     });
-    if (!response.ok) throw new Error(`Jev HTTP ${response.status}`);
+  }
+  private async _peekBody(response: Response): Promise<string> {
+    try { return await response.text(); } catch { return ''; }
+  }
+  /** One judge call with the pin-retry rule. `state` is the evaluate's shared
+   * pin state: when a PINNED request gets ANY non-2xx, it is retried ONCE
+   * without the pin and the failure is recorded on `state`, so the remaining
+   * runs send unpinned and never retry. No body matching is involved: any
+   * non-2xx on a pinned call degrades to the unpinned call. When the unpinned
+   * retry also fails, the thrown error carries BOTH texts. */
+  private async _judgeOnce(request: Request, signal: AbortSignal, state: PinState): Promise<Evaluation> {
+    const pin = state.rejected ? {} : state.pin;
+    let response = await this._post(request, signal, pin);
+    let pinRejection: string | null = null;
+    if (!response.ok && Object.keys(pin).length > 0) {
+      // Detected once per evaluate: mark the pin rejected before the retry
+      // so the remaining runs share the outcome (one retry, not N).
+      const bodyText = await this._peekBody(response);
+      state.rejected = true;
+      pinRejection = `Jev HTTP ${response.status}${bodyText ? `: ${bodyText}` : ''}`;
+      response = await this._post(request, signal, {});
+      if (response.ok) {
+        // The ledger note fires only on the success path: a failed retry
+        // keeps both error texts in the thrown error instead.
+        console.error('judge pin: pinned request got a non-2xx; retried once without temperature/seed');
+      }
+    }
+    if (!response.ok) {
+      const retryError = `Jev HTTP ${response.status}`;
+      if (pinRejection !== null) throw new Error(`pin rejected: ${pinRejection}; unpinned retry: ${retryError}`);
+      throw new Error(retryError);
+    }
     const result = await response.json() as Evaluation;
     // The validated copy is what the caller gets; the parsed reply is not touched.
     return validateEvaluation(request, result);
+  }
+  async evaluate(request: Request, signal: AbortSignal): Promise<Evaluation & { judgeRuns: JudgeRuns }> {
+    // Never retry tools. Transient inference failures are surfaced for an explicit new run.
+    // The one exception is the judge pin: when a PINNED request (opt-in via
+    // SUPERJEV_JUDGE_TEMPERATURE) gets any non-2xx, the call is retried ONCE
+    // without the pin (detected once per evaluate and shared across the N
+    // runs), so an opted-in pin degrades to the unpinned call.
+    const pinState: PinState = { pin: judgePinFields(), rejected: false };
+    const n = judgeRuns();
+    const decisions: string[] = [];
+    const runErrors: (string | null)[] = [];
+    let first: Evaluation | undefined;
+    for (let i = 0; i < n; i++) {
+      try {
+        const evaluation = await this._judgeOnce(request, signal, pinState);
+        if (i === 0) first = evaluation;
+        decisions.push(judgeDecisionSummary(evaluation));
+        runErrors.push(null);
+      } catch (err) {
+        if (i === 0) throw err; // run 1 is canonical: its failure still hard-fails
+        // A later run's failure keeps run 1's canonical evaluation. The failed
+        // run is recorded as an error (empty digest, fail-closed unstable)
+        // instead of throwing, so one transient error cannot hard-fail a gate.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`judge run ${i + 1} of ${n} failed (${msg}); keeping run 1's canonical evaluation`);
+        decisions.push('');
+        runErrors.push(msg);
+      }
+    }
+    const unstable = decisions.some(d => d !== decisions[0]) || runErrors.some(e => e !== null);
+    if (n > 1) {
+      // Machine-readable for the bench driver: decisions[1..] are the
+      // `digest_2` .. `digest_N` columns of decisions.tsv (the `decision`
+      // column keeps the bench's verdict).
+      console.error(`judge runs: N=${n} unstable=${unstable} decisions=${JSON.stringify(decisions)}`);
+    }
+    return { ...first!, judgeRuns: { runs: n, decisions, unstable, runErrors } };
   }
 }
