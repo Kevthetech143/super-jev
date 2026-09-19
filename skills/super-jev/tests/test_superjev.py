@@ -6633,13 +6633,13 @@ def test_fact_block_reasons_keeps_only_the_contradicted_ones():
     facts = [
         "WRITTEN FILE: the draft names a.txt; that file was written in "
         "this turn — SUPPORTED.",
-        "WRITTEN FILE: the draft names b.txt; the only file written in "
-        "this window is a.txt — CONTRADICTED_BY_FACT.",
+        "WRITTEN FILE: the draft names b.txt; file written "
+        "in this window: a.txt — CONTRADICTED_BY_FACT.",
         "agent_role::some_card removed per [current turn].",
     ]
     assert sj._fact_block_reasons(facts) == [
-        "WRITTEN FILE: the draft names b.txt; the only file written in "
-        "this window is a.txt — CONTRADICTED_BY_FACT.",
+        "WRITTEN FILE: the draft names b.txt; file written "
+        "in this window: a.txt — CONTRADICTED_BY_FACT.",
     ]
     assert sj._fact_block_reasons([]) == []
     assert sj._fact_block_reasons(None) == []
@@ -7134,8 +7134,8 @@ def test_written_file_fact_contradicts_a_basename_the_window_never_wrote():
     draft = "Reply written to answer-bbbb2222e2.txt. Done, Sir."
     facts = sj.derive_window_facts(_WRITTEN_FILE_WINDOW, draft)
     assert facts == [
-        "WRITTEN FILE: the draft names answer-bbbb2222e2.txt; the only file "
-        "written in this window is answer-bbbb2222.txt — CONTRADICTED_BY_FACT."
+        "WRITTEN FILE: the draft names answer-bbbb2222e2.txt; file written "
+        "in this window: answer-bbbb2222.txt — CONTRADICTED_BY_FACT."
     ]
 
 
@@ -7162,10 +7162,10 @@ def test_written_file_fact_covers_a_comma_and_list_without_losing_the_last_item(
 
 
 def test_written_file_fact_stays_silent_when_the_write_predates_the_current_turn():
-    # A file written in an OLDER turn is real, but is not "the only file
-    # written in this window" for a claim about THIS turn's write — a claim
-    # naming a different file must not be turned into a false contradiction
-    # against a receipt that isn't even from this turn.
+    # A file written in an OLDER turn is real, but is not stated as the
+    # sole write in this window for a claim about THIS turn's write — a
+    # claim naming a different file must not be turned into a false
+    # contradiction against a receipt that isn't even from this turn.
     window = (
         "[previous turn -1]\n"
         "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/admin/x]\n"
@@ -7193,8 +7193,8 @@ def test_written_file_fact_reads_an_edit_receipt_too():
     )
     facts = sj.derive_window_facts(window, "Updated plan-fake.md with the new figures.")
     assert facts == [
-        "WRITTEN FILE: the draft names plan-fake.md; the only file written "
-        "in this window is plan-real.md — CONTRADICTED_BY_FACT."
+        "WRITTEN FILE: the draft names plan-fake.md; file written "
+        "in this window: plan-real.md — CONTRADICTED_BY_FACT."
     ]
 
 

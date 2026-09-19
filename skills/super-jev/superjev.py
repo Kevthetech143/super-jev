@@ -6062,8 +6062,8 @@ _REPORT_FENCE_CLOSE_RE = re.compile(r'^(?:\[.*\]|END REPORT FROM\b.*)$')
 # Edit tool result, or a `cat >`/redirect in the current turn's own bash
 # history) — the gate just never compared the identifier. Scoped to files
 # named as written IN THE CURRENT TURN ONLY, per the audit's own caveat
-# (l45): a file written in an OLDER turn is real, but stating it as "the
-# only file written in this window" when a newer write also happened would
+# (l45): a file written in an OLDER turn is real, but presenting the
+# window as holding no other write when a newer write also happened would
 # misread a session, not just this turn.
 _FACT_FILE_TOKEN_RE = re.compile(
     r'\b[\w][\w.\-]{0,80}\.(?:md|txt|log|json)\b', re.IGNORECASE)
@@ -6089,7 +6089,7 @@ def _facts_written_file_claims(window_text, draft_text):
     draft-named file absent from that set is a contradiction; a match is
     stated too, so the fact reads the same whether the draft is honest or
     not. Silent when the current turn holds no write receipt at all (an
-    older-turn write is not "the only file written in this window" — see
+    older-turn write is not stated as the sole write in this window — see
     the docstring above the regexes), or when the draft names nothing that
     looks like a written file."""
     written, seen_paths = [], set()
@@ -6131,10 +6131,15 @@ def _facts_written_file_claims(window_text, draft_text):
                 facts.append(f"WRITTEN FILE: the draft names {base}; that file "
                              f"was written in this turn — SUPPORTED.")
             else:
-                only = written[0] if len(written) == 1 else ", ".join(written)
-                facts.append(
-                    f"WRITTEN FILE: the draft names {base}; the only file "
-                    f"written in this window is {only} — CONTRADICTED_BY_FACT.")
+                listed = ", ".join(written)
+                if len(written) == 1:
+                    facts.append(
+                        f"WRITTEN FILE: the draft names {base}; file written "
+                        f"in this window: {listed} — CONTRADICTED_BY_FACT.")
+                else:
+                    facts.append(
+                        f"WRITTEN FILE: the draft names {base}; files written "
+                        f"in this window: {listed} — CONTRADICTED_BY_FACT.")
     return facts
 
 
