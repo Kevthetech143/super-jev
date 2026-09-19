@@ -2751,3 +2751,53 @@ The design note, the one trust rule, the two truncation policies, what
 the fuzzes prove, what `from_text` can and cannot know about bytes a
 worker partly chose, and the per-reader migration plan are in
 [docs/window-model.md](window-model.md).
+
+## Pinning the judge's sampling (2026-09-19)
+
+The TypeSafe judge currently sets no temperature or seed, so two identical
+runs of the same case can flip. Two env vars pin the sampling — both are
+OPT-IN: when `SUPERJEV_JUDGE_TEMPERATURE` is unset, no pin fields are sent at
+all and the request is exactly the pre-pin call.
+
+- `SUPERJEV_JUDGE_TEMPERATURE` (default unset) — sent as `temperature` in the
+  judge request body, only when set.
+- `SUPERJEV_JUDGE_SEED` (default unset) — sent as `seed` only when set.
+
+The TypeSafe API shape for these fields is not documented in this repo, so
+they are sent under the plain names `temperature` and `seed`. When a pin IS
+sent and the call gets ANY non-2xx, the call is retried ONCE without the pin
+— no body matching is involved — and the failure is detected once per
+evaluate: the remaining runs reuse the outcome instead of retrying again.
+The door's stderr then carries a `judge pin:` note (which the gate's ledger
+captures through the existing stderr path). Because the pin is opt-in, an
+unpinned call can never fire a second billed judge call. Malformed values are
+dropped with a stderr warning, never an error. Unit-tested with a fake
+transport in `test/jev-pin.test.ts`
+(driven by `skills/super-jev/tests/test_judge_pin.py`); no live TypeSafe call
+is made by the tests.
+
+## Confirming judge flips with repeated runs (2026-09-19)
+
+`SUPERJEV_JUDGE_RUNS=N` (default `1`) calls the judge N times per
+`evaluate`. Run 1 is canonical — its validated `Evaluation` is returned, so
+`N=1` behaves exactly as before. A failure on a later run keeps run 1's
+evaluation, is recorded as an error, and never throws. Every run's decision
+summary (`judgeDecisionSummary`, a tab/newline-free one-line digest of the
+run's answers) is recorded on the returned evaluation as
+`judgeRuns: { runs, decisions, unstable, runErrors }`: `decisions[0]` is the
+canonical run's digest, `decisions[1..]` map to the `digest_2` ..
+`digest_N` columns of `decisions.tsv` (the `decision` column keeps the
+bench's verdict), `runErrors[i]` is null when that run succeeded and holds
+the error text when it failed, and `unstable` is true when the runs
+disagreed or a run failed. With `N > 1` one machine-readable stderr line is
+emitted per evaluate (`judge runs: N=.. unstable=.. decisions=[..]`) so a
+bench driver can record the extra columns. Malformed or non-positive values
+degrade to a single run with a stderr warning, never an error.
+
+The pin-retry rule was tightened the same day: the `judge pin:` note is
+logged only when the unpinned retry SUCCEEDS. When the retry also fails,
+the thrown error keeps both texts —
+`pin rejected: <original>; unpinned retry: <second error>` — so the
+original failure is never masked by the retry's status. (The retry trigger
+is any non-2xx on a pinned call; the pin path only exists when the operator
+opted in.)
