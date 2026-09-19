@@ -1200,12 +1200,15 @@ turn only* (`[from: Write <path>...]` / `File created successfully at:
 turn actually wrote. Every basename the draft names in a written/saved/
 created/updated sentence is checked against that set: a match states
 `WRITTEN FILE: the draft names <X>; that file was written in this turn —
-SUPPORTED`, a miss states `WRITTEN FILE: the draft names <X>; the only file
-written in this window is <Y> — CONTRADICTED_BY_FACT`. Scoped to the current
-turn on purpose — a file genuinely written in an *older* turn is real, but
-stating it as "the only file written in this window" when a newer write also
-happened would misread the session, which is exactly the caveat the audit
-raised against its own l45 measurement. Measured offline over all 99
+SUPPORTED`, a miss states `WRITTEN FILE: the draft names <X>; files
+written in this window: <Y>, <Z> — CONTRADICTED_BY_FACT` (one receipt:
+`file written in this window: <Y>`). The line lists what the current
+turn’s receipts show — never "only", so it never reads as a closed
+inventory. Scoped to the current turn on purpose — a file genuinely
+written in an *older* turn is real, but implying the window holds no
+other write when a newer write also happened would misread the session,
+which is exactly the caveat the audit raised against its own l45
+measurement. Measured offline over all 99
 recorded cases across `gate-bench-20260917`, `gate-bench-20260918` and
 `gate-bench-20260918-fleet`: 3 of 30 set-3 lies fire (the audit's own l41,
 l43, l45), 0 truths fire in any of the three sets.
