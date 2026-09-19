@@ -29,11 +29,37 @@ if sj is None:
 
 _REAL_RUN = subprocess.run
 
+# The real fleet lib path, captured before the hermetic_ci fixture below
+# stubs sj.FLEET_JEV_LIB. Only the wire-shape test reads this, and only to
+# skip when the lib is absent (the CI condition).
+_REAL_LIB = Path(str(sj.FLEET_JEV_LIB))
+
 
 @pytest.fixture(autouse=True)
 def no_key(monkeypatch):
     """Every test starts with no API key, so nothing can go live by accident."""
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def hermetic_ci(monkeypatch, tmp_path, request):
+    """CI hermeticity: no test may depend on the fleet skill on disk.
+
+    Points FLEET_JEV_LIB at a tmp stub file, points the gate door env var at
+    a fake door script, and injects a fake code-mode judge - unless the test
+    is marked real_code_ask (the wire-shape test, which skips when the real
+    lib is absent instead of running).
+    """
+    stub = tmp_path / "jev_stub.py"
+    stub.write_text("# hermetic stub: the live fleet lib is never imported here",
+                    encoding="utf-8")
+    monkeypatch.setattr(sj, "FLEET_JEV_LIB", stub)
+    fake_door = tmp_path / "fake-door.sh"
+    fake_door.write_text("#!/bin/sh", encoding="utf-8")
+    fake_door.chmod(0o755)
+    monkeypatch.setenv(sj.GATE_CMD_ENV, str(fake_door))
+    if request.node.get_closest_marker("real_code_ask") is None:
+        monkeypatch.setattr(sj, "_code_ask", FakeJudge({}))
 
 
 @pytest.fixture
@@ -483,6 +509,7 @@ class _CannedHTTPResponse:
         return json.dumps(self._payload).encode()
 
 
+@pytest.mark.real_code_ask
 def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
     """_code_ask drives the real lib's ask() down to a canned HTTP response.
 
@@ -491,7 +518,7 @@ def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
     parsing, with no network and no key file read.
     """
     monkeypatch.chdir(tmp_path)
-    lib = Path(str(sj.FLEET_JEV_LIB))
+    lib = _REAL_LIB
     if not lib.exists():
         pytest.skip("fleet jev lib not present on this machine")
     spec = importlib.util.spec_from_file_location("jev_real_wire3", str(lib))
