@@ -47,3 +47,25 @@ This is a post-hoc correction, not three new independent cases and not proof of 
 Prefer evidence-driven stages: verified descriptions -> relevant source passages -> targeted additional passages or broader candidate search when needed -> original-source verification/fallback. Repeatedly asking the same thing with the same evidence is not an accuracy strategy. Do not use increased confidence alone as proof of correctness. The next bounded engineering question is how to select source passages reliably and maintain their provenance, rather than adding infrastructure or unlimited reasoning loops.
 
 Private source maps, texts, gold labels and raw logs remain local. No source records, defaults, fleet cards or deployed services were changed. PR #82's opt-in direct-fit gate was used for evaluation; this does not merge or install it.
+
+## Explicit search-context handoff follow-up
+
+Run `context-handoff-20260920T0003` compared identical expanded navigation evidence and unchanged questions across three arms: plain request; previous-layer handoff through the existing context field; and the same handoff appended as a trusted search-stage instruction by a local evaluator adapter. The existing context field is explicitly limited by the installed prompt to resolving referents, so it alone cannot fairly test stage instructions. The adapter did not change installed code or the per-record relevance criteria.
+
+The handoff named the earlier description-layer shortlist and provisional winner, explained that the next layer supplies expanded excerpts, and explicitly warned that the earlier choice may be wrong and is not evidence. No earlier confidence, reasoning, gold labels or manually targeted extra passage was supplied. Candidate pools and order were identical between arms. Twelve reused development questions were repeated three times with rotating arm order; repeats are not independent new questions.
+
+| Arm | Correct first choice /27 positive runs | Correct sources accepted /27 | Wrong accepted | Missing-source refusals /9 |
+|---|---:|---:|---:|---:|
+| Plain evidence | 27 | 24 | 0 | 9 |
+| Existing context field | 27 | 24 | 0 | 9 |
+| Explicit stage instruction | 27 | 22 | 0 | 9 |
+
+The previously unresolved chronology request remained below the gate in all three arms. Explicit instructions increased its confidence but did not supply the missing evidence or resolve it. Two additional correct-source runs also fell below the gate with explicit instructions. There was no demonstrated accuracy or acceptance benefit from this handoff wording.
+
+A separate diagnostic gave a deliberately wrong provisional prior winner for three source-present questions, repeated three times through each handoff channel. All 18 calls still ranked the correct source first; each channel accepted six of nine and deferred the three repetitions of the unresolved request. This is resistance to these particular misleading hints, not proof of general context comprehension or immunity to anchoring.
+
+All 126 measured HTTP calls completed without errors using `jev-1.13.0`. Provider input tokens across the 36 natural runs per arm: plain 63,330; context 80,430; explicit 77,268. Output tokens were 5,310 per arm. Added context had a measured token cost with no measured retrieval gain here.
+
+Two excluded preparation runs consumed another 87 HTTP requests: the first accidentally supplied an empty shortlist for one missing-source question and the request-count assertion detected six skipped model calls; the second stopped at an overly strict exactly-three-candidates assertion. The corrected run uses scored candidates when no candidate beats none, permits shorter nonempty shortlists, and verifies all 126 result rows correspond to actual HTTP requests. Total provider requests for this follow-up, including excluded preparation: 213. Private logs preserve the failures; they are not counted as successful validation.
+
+Conclusion: retain the original question and evidence provenance, but do not add this conversational handoff by default on present evidence. Targeted relevant passages remain the stronger observed lever. General context understanding, automatic passage extraction, new held-out questions and fleet reliability remain untested by this follow-up. No runtime changes or deployment.
