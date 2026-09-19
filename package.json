@@ -17,6 +17,7 @@
     "permit": "node src/permit-cli.ts",
     "chain": "node src/chain-cli.ts",
     "fetch": "node src/fetch-cli.ts",
+    "skill-search": "node src/skill-search-cli.ts",
     "catalog": "node src/catalog-cli.ts",
     "catalog:build": "node src/catalog-build-cli.ts",
     "demo:enhance": "node examples/enhance-demo.ts",
