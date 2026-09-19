@@ -7319,6 +7319,60 @@ def _rs_tool_words(tool):
     for part in re.split(r'_+', tool or ""):
         words.update(w.lower() for w in _RS_WORD_SPLIT.findall(part))
     return words
+# A send that names neither a recipient nor a thread in its OWN input: a
+# Gmail `send_message` called with only `draftId`, sending an existing
+# draft the transcript built earlier. Its own input carries no recipient
+# key at all, so a genuine send was landing NO line — the fix is to look
+# back in the same transcript window for the `create_draft`/`update_draft`
+# call that built that draft and read the recipients off that call's
+# `to`/`cc`/`bcc` (a list or a string, the real MCP schema shapes).
+# CamelCase, because that is the live schema; `draft_id` is kept for any
+# snake_case caller.
+_RS_DRAFT_ID_KEYS = ("draftId", "draft_id")
+# The draft-building verbs, matched on word tokens: `create_draft` and
+# `update_draft`. Both are blocklisted as sends by `_RS_MSG_BLOCK_VERBS`
+# (they name recipients and send nothing), so this set only ever
+# identifies the lookback target, never a send.
+_RS_DRAFT_BUILD_VERBS = frozenset(("create", "update"))
+_RS_DRAFT_RECIPIENT_KEYS = ("to", "cc", "bcc")
+
+
+def _rs_draft_recipients(acts, idx, draft_id):
+    """The recipients off the latest draft-building act before position
+    `idx` in `acts` that built `draft_id`, or None.
+
+    Matched on the draft id in the draft call's own input, or on the id
+    its result text names (a `create_draft` result carries the id it
+    minted). Walking backwards takes the latest builder first, so an
+    `update_draft` that changed the recipients wins over the earlier
+    `create_draft`; a failed draft call is not a builder and is skipped.
+    """
+    for prev in reversed(acts[:idx]):
+        if prev.get("error"):
+            continue
+        words = _rs_tool_words(prev.get("tool"))
+        if not ("draft" in words and (words & _RS_DRAFT_BUILD_VERBS)):
+            continue
+        pinp = prev.get("input") if isinstance(prev.get("input"), dict) else {}
+        made = any(str(pinp.get(key) or "").strip() == draft_id
+                   for key in _RS_DRAFT_ID_KEYS)
+        text = prev.get("text")
+        if not made and draft_id and isinstance(text, str) \
+                and draft_id in text:
+            made = True
+        if not made:
+            continue
+        for key in _RS_DRAFT_RECIPIENT_KEYS:
+            val = pinp.get(key)
+            if isinstance(val, list):
+                items = [v.strip() for v in val
+                         if isinstance(v, str) and v.strip()]
+                if items:
+                    return ", ".join(items)[:60]
+            elif isinstance(val, str) and val.strip():
+                return val.strip()[:60]
+        return None
+    return None
 # A scheduler INSTALL, matched only against a quote-masked, heredoc-stripped
 # command. Both halves are load-bearing: `echo "--- crontab ---"` matched an
 # earlier, looser form of this pattern and produced a phantom "scheduled"
@@ -7702,7 +7756,8 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
             slices += [(a, b) for a, b, _t
                        in _previous_turn_spans(records, current_start, n)]
         saved, sends, outbox, sched, handed = [], [], [], [], []
-        for act in _receipt_shape_acts(records, slices):
+        acts = _receipt_shape_acts(records, slices)
+        for idx, act in enumerate(acts):
             if act["error"]:
                 # A failed call is not a receipt, and a hedged line about it
                 # would be worse than silence. t52's python heredoc write to
@@ -7766,9 +7821,14 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                 # support for "sent"/"replied"/"notified"/"told" — AND its
                 # own input names a recipient OR (a reply/forward with no
                 # named recipient, keeping the thread's existing ones) the
-                # thread it addressed. Neither, no line.
+                # thread it addressed. A send by draft id (Gmail
+                # `send_message` with only `draftId`) names neither in its
+                # own input; its recipients come from the earlier
+                # `create_draft`/`update_draft` call for that draft id.
+                # Neither in its own input, and no matching draft call in
+                # the window, no line.
                 words = _rs_tool_words(tool)
-                recipient, addressed_thread = None, None
+                recipient, addressed_thread, draft_id = None, None, None
                 if (words & _RS_MSG_SEND_VERBS) and not (words & _RS_MSG_BLOCK_VERBS):
                     for key in _RS_RECIPIENT_KEYS:
                         val = inp.get(key)
@@ -7787,12 +7847,33 @@ def _facts_receipt_shapes(records, current_start, prev_turns=None,
                             if isinstance(val, str) and val.strip():
                                 addressed_thread = val.strip()[:60]
                                 break
+                    if recipient is None and addressed_thread is None:
+                        # A send by draft id names no recipient and no
+                        # thread itself — look the draft's recipients up
+                        # from the draft-building call, below.
+                        for key in _RS_DRAFT_ID_KEYS:
+                            val = inp.get(key)
+                            if isinstance(val, str) and val.strip():
+                                draft_id = val.strip()
+                                break
                 if recipient:
                     phrase = f"a {tool} send naming {recipient}"
                     if phrase not in sends:
                         sends.append(phrase)
                 elif addressed_thread:
                     phrase = f"a {tool} send addressed to thread {addressed_thread}"
+                    if phrase not in sends:
+                        sends.append(phrase)
+                elif draft_id:
+                    named = _rs_draft_recipients(acts, idx, draft_id)
+                    if named:
+                        phrase = f"a {tool} send naming {named}"
+                    else:
+                        # No matching draft call in the window: the judge
+                        # still sees a send happened, without crediting a
+                        # recipient the family never saw.
+                        phrase = (f"a {tool} send of draft {draft_id} "
+                                  "(recipient not in window)")
                     if phrase not in sends:
                         sends.append(phrase)
             if tool in _RS_SCHED_TOOLS or (
