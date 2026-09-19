@@ -4151,6 +4151,13 @@ def _code_ask(state, questions):
     return _load_jev_lib().ask(state, questions)
 
 
+_code_ask_live = _code_ask  # identity of the real judge; tests replace sj._code_ask
+
+
+class _CodeLibMissing(Exception):
+    """FLEET_JEV_LIB is absent while the live code-mode judge needs it."""
+
+
 def run_code_gate(evidence_items, claims, ask_fn=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
@@ -4173,7 +4180,12 @@ def run_code_gate(evidence_items, claims, ask_fn=None):
             pending.append((i, claim))
     if pending:
         questions = {"c%d" % i: noul_code_question(c) for i, c in pending}
-        res = (ask_fn or _code_ask)(code_state(evidence_items), questions)
+        ask = ask_fn if ask_fn is not None else _code_ask
+        if ask is _code_ask_live and not FLEET_JEV_LIB.exists():
+            raise _CodeLibMissing(
+                "no fleet jev lib at %s — install the jev-check skill "
+                "or inject a judge" % FLEET_JEV_LIB)
+        res = ask(code_state(evidence_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
             p = answers.get("c%d" % i, {}).get("noul")
@@ -4214,12 +4226,6 @@ def _render_code_gate(mode, rows, code):
 def cmd_gate(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
-    bad = door_missing(GATE_CMD_ENV, FLEET_JEV_LIB)
-    if bad is not None:
-        return door_refuse(json_mode, "gate", bad)
-    if not a.draft and not a.claim:
-        return door_refuse(json_mode, "gate",
-                           "gate needs --draft <file> or one or more --claim \"<text>\"")
 
     # The claims the door will check: explicit --claim, or the draft pre-split.
     # Needed for the judgment filter and for code mode; the evidence path
@@ -4276,6 +4282,16 @@ def cmd_gate(a):
     if mode == "code" and not claims_for_check:
         mode = "evidence"
 
+    # The door subprocess is an evidence-mode requirement only: code mode
+    # must not refuse (exit 5) for a lib file the CI runner does not have.
+    if mode != "code":
+        bad = door_missing(GATE_CMD_ENV, FLEET_JEV_LIB)
+        if bad is not None:
+            return door_refuse(json_mode, "gate", bad)
+    if not a.draft and not a.claim:
+        return door_refuse(json_mode, "gate",
+                           "gate needs --draft <file> or one or more --claim \"<text>\"")
+
     # Judgment-word claims are refused with exit 2 and a rephrase hint
     # (protocol v1.0 rule 3); --allow-judgment overrides. Code mode only:
     # evidence mode keeps byte-for-byte the behaviour it had before.
@@ -4301,6 +4317,18 @@ def cmd_gate(a):
         try:
             try:
                 rows, code = run_code_gate(kept_ev, claims_for_check)
+            except _CodeLibMissing as exc:
+                # advisory, never the door's refusal: exit 3 with a one-line
+                # reason, in every output shape (text/json/hook)
+                reason = "gate: code-mode judge unavailable: %s" % exc
+                if hook_mode:
+                    return 3, reason, ""
+                if json_mode:
+                    emit_json("gate", GATE_VERDICT_WORD.get(3, "ERROR"), 3,
+                              reason, {"claim_mode": mode}, [])
+                    return 3
+                print(reason)
+                return 3
             except Exception as exc:
                 if not hook_mode:
                     raise
