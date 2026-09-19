@@ -4,6 +4,20 @@
 
 No version bump.
 
+- **Written-file fact wording (family 6).** The family-6 WRITTEN FILE
+  fact no longer states a closed inventory. The old sentence ("the
+  only file written in this window is ...") read to the judge as a
+  pre-written finding that the evidence could not support the draft,
+  and truthful drafts were being blocked the same way family 11 was
+  before its wording fix; the word "only" was also ungrammatical when
+  several files had been written, and false whenever the byte-capped
+  window text had dropped part of the turn. The line now lists what
+  the current turn’s receipts show as a positive open list
+  ("files written in this window: a.txt, b.txt", or "file written in
+  this window: a.txt" for a single receipt), keeping the
+  CONTRADICTED_BY_FACT path and which claims it supports unchanged.
+  See docs/hooks.md, "Written-file identity".
+
 - **Receipt shapes wording fix (family 11).** Measured live: truthful
   drafts were being blocked by the overclaims judge, and the only judge
   input that had changed was the family-11 RECEIPT SHAPE fact lines. Each
