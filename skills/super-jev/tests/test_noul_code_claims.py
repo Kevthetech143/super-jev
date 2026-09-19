@@ -408,6 +408,75 @@ def test_pattern_arm_trailing_words_go_to_judge(evfile, monkeypatch):
     assert obj["details"]["rows"][0]["arm"] == "noul:code"
 
 
+# -------------------------------- (4b) pattern claims: negative phrases
+
+
+NEG_PATTERN_EV = "import re\nTOKEN_RE = re.compile(r\"^foo$\")\n"
+
+# every recognized phrase crossed with a matching and a non-matching token
+_NEG_CASES = [
+    ("matches", "foo", "SUPPORTED"),
+    ("matches", "bar", "CONTRADICTED"),
+    ("does not match", "foo", "CONTRADICTED"),
+    ("does not match", "bar", "SUPPORTED"),
+    ("is matched by", "foo", "SUPPORTED"),
+    ("is matched by", "bar", "CONTRADICTED"),
+    ("is caught by", "foo", "SUPPORTED"),
+    ("is caught by", "bar", "CONTRADICTED"),
+    ("is not caught by", "foo", "CONTRADICTED"),
+    ("is not caught by", "bar", "SUPPORTED"),
+]
+
+
+@pytest.mark.parametrize("phrase,token,verdict", _NEG_CASES)
+def test_pattern_claim_polarity(phrase, token, verdict):
+    det = sj.pattern_claim_answer("`%s` %s TOKEN_RE" % (token, phrase),
+                                  NEG_PATTERN_EV)
+    assert det is not None
+    assert det["verdict"] == verdict
+    assert det["confidence"] == 1.0
+    assert det["arm"] == "pattern:code"
+    assert det["negated"] == ("not" in phrase)
+
+
+def test_pattern_negated_contradiction_action():
+    # "`foo` does not match TOKEN_RE" is false because foo DOES match --
+    # the action must say that, not claim the pattern missed
+    judge = FakeJudge({})  # must never be consulted
+    rows, code = sj.run_code_gate(
+        [("ev", NEG_PATTERN_EV)],
+        ["`foo` does not match TOKEN_RE", "`bar` does not match TOKEN_RE"],
+        ask_fn=judge)
+    assert judge.calls == []
+    assert rows[0]["verdict"] == "CONTRADICTED"
+    assert "did not match" not in rows[0]["action"]
+    assert "the token matched" in rows[0]["action"]
+    assert rows[1]["verdict"] == "SUPPORTED"
+    assert rows[1]["action"] == "ok"
+    assert code == 3
+
+
+def test_pattern_negated_supported_exits_zero():
+    judge = FakeJudge({})  # must never be consulted
+    rows, code = sj.run_code_gate(
+        [("ev", NEG_PATTERN_EV)], ["`bar` does not match TOKEN_RE"],
+        ask_fn=judge)
+    assert judge.calls == []
+    assert rows[0]["verdict"] == "SUPPORTED"
+    assert rows[0]["action"] == "ok"
+    assert code == 0
+
+
+@pytest.mark.parametrize("phrase", ["matches", "does not match"])
+def test_pattern_malformed_regex_goes_to_judge(phrase):
+    ev = "import re\nBAD_RE = re.compile(r\"([\")\n"
+    judge = FakeJudge({"c1": 0.9})
+    rows, code = sj.run_code_gate(
+        [("ev", ev)], ["`foo` %s BAD_RE" % phrase], ask_fn=judge)
+    assert len(judge.calls) == 1
+    assert rows[0]["arm"] == "noul:code"
+
+
 # ------------------------------------------------ (5) hook mode
 
 
