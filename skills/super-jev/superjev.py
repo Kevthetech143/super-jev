@@ -4117,13 +4117,15 @@ def pattern_claim_answer(claim, evidence_text):
     is matched by / is caught by / is not caught by, the name ends the claim
     (an optional period allowed), and the evidence defines NAME as a regex.
     The token is the one in that phrase — not the first backtick in the
-    claim — matched against the regex in Python. This never goes to Jev;
+    claim — matched against the regex in Python. A negative phrase
+    ("does not match", "is not caught by") flips the verdict: the claim is
+    SUPPORTED when the token does NOT match. This never goes to Jev;
     anything else goes to the judge.
     """
     m = _PATTERN_PHRASE.search(claim or "")
     if not m:
         return None
-    token, name = m.group(1), m.group(3)
+    token, phrase, name = m.group(1), m.group(2), m.group(3)
     pattern = _regex_def_in_evidence(name, evidence_text)
     if pattern is None:
         return None  # NAME not defined as a regex in the evidence: the judge
@@ -4131,10 +4133,12 @@ def pattern_claim_answer(claim, evidence_text):
         matched = bool(re.search(pattern, token))
     except re.error:
         return None  # not a usable pattern claim; let the judge see it
-    verdict = "SUPPORTED" if matched else "CONTRADICTED"
+    negated = phrase in ("does not match", "is not caught by")
+    claim_true = (not matched) if negated else matched
+    verdict = "SUPPORTED" if claim_true else "CONTRADICTED"
     return {"verdict": verdict, "confidence": 1.0, "p_yes": None,
             "arm": "pattern:code", "pattern": pattern,
-            "name": name, "token": token}
+            "name": name, "token": token, "negated": negated}
 
 
 def _load_jev_lib():
@@ -4171,10 +4175,17 @@ def run_code_gate(evidence_items, claims, ask_fn=None):
     for i, claim in enumerate(claims, 1):
         det = pattern_claim_answer(claim, evidence_text)
         if det is not None:
-            det.update({
-                "key": "c%d" % i, "claim": claim,
-                "action": "ok" if det["verdict"] == "SUPPORTED"
-                          else "needs a human — the pattern did not match"})
+            if det["verdict"] == "SUPPORTED":
+                action = "ok"
+            elif det.get("negated"):
+                # the negated claim is false because the token DID match —
+                # say that, instead of claiming the pattern missed
+                action = ("needs a human — the token matched, so the "
+                          "negated claim is false")
+            else:
+                action = "needs a human — the pattern did not match"
+            det.update({"key": "c%d" % i, "claim": claim,
+                        "action": action})
             rows.append(det)
         else:
             pending.append((i, claim))
