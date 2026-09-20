@@ -28,9 +28,11 @@ class PathConnectTests(unittest.TestCase):
         return Service(self.config['db'], self.config['registry'], lambda *_: {'status': 'no-match'})
 
     def test_preview_has_no_mutation_or_provider_call(self):
+        self.request['sources'][0]['description'] = 'Reviewed specific record description'
         before = sorted(p.name for p in self.root.iterdir())
         result = connect(self.request, self.config)
         self.assertEqual(result['reason'], 'review-required')
+        self.assertEqual(result['sources'][0]['description'], self.request['sources'][0]['description'])
         self.assertEqual(result['sources'][0]['sha256'], hashlib.sha256(self.source.read_bytes()).hexdigest())
         self.assertEqual(before, sorted(p.name for p in self.root.iterdir()))
         self.assertNotIn('First fact', json.dumps(result))
