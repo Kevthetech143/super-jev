@@ -7,8 +7,9 @@ import subprocess
 import sys
 
 TOOLS = {
-    "skills": "Find a skill",
-    "find": "Find information in reviewed brains or documents",
+    "help": "Quick Start for New Agents and focused setup answers",
+    "skills": "Skills connector: find a skill",
+    "find": "Brain/Documents/Repo connectors: find reviewed local evidence",
     "check": "Check a claim against evidence",
     "verify": "Verify an agent's work",
     "memory": "Use the opt-in experimental verified-reuse pointer/cache",
@@ -49,12 +50,21 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
 
 
 def main(args: list[str]) -> int:
+    if args and args[0] == "help":
+        from setup_help import run as setup_help
+        code, result = setup_help(args[1:])
+        print(json.dumps(result))
+        return code
     if not args or args[0] in ("tools", "--help", "-h"):
-        print(json.dumps({"tools": TOOLS}))
+        print(json.dumps({"tools": TOOLS, "setupGuide": "references/connectors.md",
+                          "setupWorkflows": {"execution": "agent-guided, not CLI commands",
+                                             "options": ["connect existing data", "start a new collection",
+                                                         "define a custom connector", "refresh reviewed data"]},
+                          "controlPanel": "memory --describe"}))
         return 0
     tool, *rest = args
     if tool not in TOOLS:
-        print(json.dumps({"status": "error", "reason": "Unknown tool; choose skills, find, check, verify, or memory"}))
+        print(json.dumps({"status": "error", "reason": "Unknown tool; choose help, skills, find, check, verify, or memory"}))
         return 2
     try:
         return subprocess.run(command(Path(__file__).resolve().parent, tool, rest)).returncode

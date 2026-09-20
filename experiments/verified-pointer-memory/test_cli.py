@@ -118,6 +118,17 @@ class PublicCliTests(unittest.TestCase):
         })
         return self.cli("--config", str(config), "--input", str(request))
 
+    def test_connector_menu_separates_setup_from_executable_actions(self):
+        process, result = self.cli("--describe")
+        self.assertEqual(process.returncode, 0)
+        self.assertFalse(result['sourceConnectors']['Repo']['automaticSync'])
+        self.assertFalse(result['sourceConnectors']['Database']['directIngestion'])
+        self.assertFalse(result['sourceConnectors']['Website']['directIngestion'])
+        self.assertTrue(result['agentSetupWorkflows']['customNames'])
+        for workflow in result['agentSetupWorkflows']['options']:
+            self.assertNotIn(workflow, result['actions'])
+        self.assertIn('register', result['actions'])
+
     def test_describe_needs_no_config_or_key(self):
         process, result = self.cli("--describe")
         self.assertEqual(process.returncode, 0, process.stderr)
