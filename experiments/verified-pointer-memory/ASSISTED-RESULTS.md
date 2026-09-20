@@ -25,6 +25,19 @@ The skill now says to copy IDs from parsed outputs and obtain reviewed evidence 
 
 ## Scope and evidence
 
-Local raw artifacts: `.local/assisted-eval/` in the candidate worktree, including original setup failures, corrected results, approvals, repeats, root repair, full inventory, and independent grading. Public source identity/line references and questions are reproducible from the frozen commit; local paths and keys are not portable configuration.
+Local raw artifacts: `.local/assisted-eval/` in the candidate worktree, including original setup failures, corrected results, approvals, repeats, root repair, full inventory, and independent grading. Source contents are pinned to the frozen commit; full requests and raw traces remain in the local evidence bundle. Local paths and keys are not portable configuration.
 
 The registered-public-repo coverage is not coverage of every private project archive, and it does not pre-cache every possible answer. Live installed checks and rollout receipts are separate from this pre-merge trial. The database retains compact original status/trace metadata; callers retain full raw evidence artifacts. Assistance remains opt-in and bounded, with explicit approval, original-source checks, freshness policies and trusted-local scope labels.
+
+## Trial questions
+
+- q01: Does the architecture give Jev implicit cross-request memory?
+- q02: Which raw data does the prepared-artifact cache explicitly say it never stores?
+- q03: What does the provider contract say a score represents?
+- q04: Can the Super Jev gate itself mark a claim contradicted by fact?
+- q05: What supported-source acceptance result did the fresh-question experiment report?
+- q06: When does the neighbor experiment support expansion, and what is its default runtime status?
+- q07: Name the cache changes or defects that must produce a miss rather than reuse, and state what binds a reviewed cache entry.
+- q08: In the fresh-question experiment, how many source-present and missing-source requests were used, and what safeguards limited live calls per case?
+- q09: Which production deployment has enabled neighbor retrieval by default, and what live reliability percentage does it guarantee?
+- q10: What patient-specific health-brain record proves that a particular treatment was completed?
