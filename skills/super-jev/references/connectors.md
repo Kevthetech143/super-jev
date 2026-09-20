@@ -43,7 +43,9 @@ No database is needed for this baseline. The index is an authoring aid, not an a
 
 Friendly setup hint: “Starting fresh? I can create a small, clearly described collection that works with Super Jev's existing preparation workflow. If you already have data, we can keep its structure and prepare a searchable view instead.” Give this hint when the source is absent or the user asks how to start, not on every successful lookup.
 
-## Set up an existing source workflow
+## Set up a new connection or repair an existing one
+
+This is onboarding/repair guidance, not a per-query checklist. Once connected, use the known tool and dataset/pointer directly. Repeat discovery, setup checks or sample tests only when the connection or scope changes or the runtime reports a problem.
 
 1. Identify the connector, exact source scope and authorized audience. Reuse known context; ask only for missing information needed to choose the right data/person. A connector does not grant new access.
 2. Inspect existing setup. For Skills, read sibling `skill-search/SKILL.md` and its roots configuration. For Brain/Documents/Repo, list reviewed datasets through `find --list-datasets`; if local memory is configured, inspect its panel and registered sources. Follow installation-specific `LOCAL-MEMORY.md` and `memory.sh` when present.
