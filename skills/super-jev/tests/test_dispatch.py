@@ -64,9 +64,36 @@ def test_check_without_shim_uses_original_python_cli(tmp_path):
     assert result.stdout.strip() == "['gate', '--claim', 'literal claim']"
 
 
+def test_memory_passthrough_uses_checkout_relative_experiment(tmp_path):
+    root, skill = installed(tmp_path)
+    entry = tmp_path / '.codex/experiments/verified-pointer-memory/cli.py'
+    entry.parent.mkdir(parents=True)
+    entry.write_text('import sys; print(repr(sys.argv[1:])); sys.exit(5)')
+    result = run(skill, 'memory', '--config', 'private.json', '--input', 'request.json')
+    assert result.returncode == 5
+    assert result.stdout.strip() == "['--config', 'private.json', '--input', 'request.json']"
+
+
+def test_memory_describe_is_machine_readable_and_explicitly_experimental(tmp_path):
+    _, skill = installed(tmp_path)
+    entry = tmp_path / '.codex/experiments/verified-pointer-memory/cli.py'
+    entry.parent.mkdir(parents=True)
+    entry.write_text('import sys; print(repr(sys.argv[1:])); sys.exit(0)')
+    result = run(skill, 'memory', '--describe')
+    assert result.returncode == 0
+    assert result.stdout.strip() == "['--describe']"
+
+
+def test_memory_reports_structured_missing_dependency(tmp_path):
+    _, skill = installed(tmp_path)
+    result = run(skill, 'memory', '--config', 'private.json', '--input', 'request.json')
+    assert result.returncode == 2
+    assert json.loads(result.stdout)['reason'] == 'missing-dependency'
+
+
 def test_missing_tool_and_unknown_tool_fail_without_fallback(tmp_path):
     _, skill = installed(tmp_path)
     assert run(skill, 'find', '--list-datasets').returncode == 2
     assert 'not installed' in json.loads(run(skill, 'skills').stdout)['reason']
     assert run(skill, 'invented').returncode == 2
-    assert set(json.loads(run(skill).stdout)['tools']) == {'skills','find','check','verify'}
+    assert set(json.loads(run(skill).stdout)['tools']) == {'skills','find','check','verify','memory'}
