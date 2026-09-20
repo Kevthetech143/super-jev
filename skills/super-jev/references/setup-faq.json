@@ -66,9 +66,14 @@
         "set up connector",
         "setup connector",
         "connect my repo",
-        "connect my brain"
+        "connect my brain",
+        "search my health records",
+        "search my records",
+        "search my brain",
+        "search my documents",
+        "search health records"
       ],
-      "answer": "Identify the source scope and audience, inspect existing setup, then reuse or prepare a reviewed dataset/pointer. For opt-in memory, inspect the panel first with `python3 <skill-directory>/dispatch.py memory --describe`.",
+      "answer": "First use: confirm the runtime and authorized dataset are ready. Run `python3 <skill-directory>/dispatch.py memory --describe` for memory capabilities, or `python3 <skill-directory>/dispatch.py find --list-datasets` for reviewed retrieval datasets. Use only the correct person/project scope. If missing, follow references/connectors.md to prepare and register reviewed material; a file path alone is not onboarding. Once ready, search directly. See SKILL.md for copyable search commands.",
       "sources": [
         "connectors.md",
         "verified-reuse.md",
