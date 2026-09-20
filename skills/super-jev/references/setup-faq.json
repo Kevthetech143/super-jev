@@ -1,0 +1,166 @@
+{
+  "topics": [
+    {
+      "id": "available-connectors",
+      "label": "Available connectors",
+      "matchPhrases": [
+        "available connectors",
+        "what connectors",
+        "which connectors",
+        "what can connect"
+      ],
+      "answer": "Skills, Brain, Documents, and Repo use configured local or reviewed workflows. Direct database and website/URL connectors are proposed, not available.",
+      "sources": [
+        "connectors.md"
+      ]
+    },
+    {
+      "id": "existing-data",
+      "label": "Use existing data",
+      "matchPhrases": [
+        "existing data",
+        "already have data",
+        "use my files",
+        "keep my files"
+      ],
+      "answer": "Keep the originals and prepare a searchable view of the authorized scope. A directory rewrite, migration, or new table is not required.",
+      "sources": [
+        "connectors.md"
+      ]
+    },
+    {
+      "id": "blank-start",
+      "label": "Start a collection",
+      "matchPhrases": [
+        "start from scratch",
+        "blank start",
+        "new collection",
+        "create a collection"
+      ],
+      "answer": "After the user asks to create it, make a small, factual collection in their project, such as an INDEX.md and coherent records. It still needs preparation and review before it is connected.",
+      "sources": [
+        "connectors.md"
+      ]
+    },
+    {
+      "id": "custom-names-adapters",
+      "label": "Custom names and adapters",
+      "matchPhrases": [
+        "custom connector",
+        "custom name",
+        "rename connector",
+        "custom adapter",
+        "new adapter"
+      ],
+      "answer": "A chosen display name can reuse an existing reviewed workflow. A genuinely new source needs an implemented, verified adapter; a name does not create fetching or syncing.",
+      "sources": [
+        "connectors.md"
+      ]
+    },
+    {
+      "id": "register-setup",
+      "label": "Register and set up",
+      "matchPhrases": [
+        "register dataset",
+        "register pointer",
+        "set up connector",
+        "setup connector",
+        "connect my repo",
+        "connect my brain"
+      ],
+      "answer": "Identify the source scope and audience, inspect existing setup, then reuse or prepare a reviewed dataset/pointer. For opt-in memory, inspect the panel first with `python3 <skill-directory>/dispatch.py memory --describe`.",
+      "sources": [
+        "connectors.md",
+        "verified-reuse.md",
+        "../SKILL.md"
+      ]
+    },
+    {
+      "id": "overview",
+      "label": "Quick Start for New Agents",
+      "matchPhrases": [
+        "how to use super jev",
+        "how to use superjev",
+        "how to use asksuperjev",
+        "super jev manual",
+        "super jev quickstart",
+        "manual",
+        "quickstart",
+        "how do i use",
+        "quick start",
+        "new agent"
+      ],
+      "answer": "Quick start: `skills` discovers configured local skills; `find` searches a selected reviewed dataset; `check` checks a claim; `verify` verifies agent work; `memory` is opt-in approved-answer reuse. For a known connection, use its tool and dataset/pointer directly. For initial setup, identify authorized scope, inspect existing setup, then reuse or prepare a reviewed dataset/pointer; inspect memory first with `python3 <skill-directory>/dispatch.py memory --describe`. Fresh results still need review and explicit approval before an exact repeat can reuse them; no semantic cache or automatic refresh is provided.",
+      "sources": [
+        "connectors.md",
+        "verified-reuse.md",
+        "../SKILL.md"
+      ]
+    },
+    {
+      "id": "source-changes-refresh",
+      "label": "Source changes and refresh",
+      "matchPhrases": [
+        "source changed",
+        "data changed",
+        "refresh source",
+        "refresh data",
+        "sync changes",
+        "automatic refresh"
+      ],
+      "answer": "Reviewed file-based connections need preparation refresh and re-registration after source changes. They do not fetch, watch, or synchronize sources automatically.",
+      "sources": [
+        "connectors.md",
+        "verified-reuse.md"
+      ]
+    },
+    {
+      "id": "verify-save",
+      "label": "Verify and save answers",
+      "matchPhrases": [
+        "verify answer",
+        "save answer",
+        "approved answer",
+        "cache answer",
+        "reuse answer"
+      ],
+      "answer": "Verified reuse is opt-in. Review the returned evidence and explicitly approve a complete answer; an exact repeat can then reuse that approved answer. There is no semantic cache reuse.",
+      "sources": [
+        "verified-reuse.md",
+        "../SKILL.md"
+      ]
+    },
+    {
+      "id": "scope-privacy",
+      "label": "Scope and privacy",
+      "matchPhrases": [
+        "privacy",
+        "authorized audience",
+        "access scope",
+        "whole brain",
+        "who can access"
+      ],
+      "answer": "A connector covers only its selected authorized scope. Repository membership or a local principal label does not itself grant access or provide authentication.",
+      "sources": [
+        "connectors.md",
+        "verified-reuse.md"
+      ]
+    },
+    {
+      "id": "settings-control-panel",
+      "label": "Settings and control panel",
+      "matchPhrases": [
+        "control panel",
+        "memory settings",
+        "memory configuration",
+        "what settings",
+        "describe memory"
+      ],
+      "answer": "Use `python3 <skill-directory>/dispatch.py memory --describe` to inspect memory actions, settings, prerequisites, and limits without configuration or a key. It does not create or change a connection.",
+      "sources": [
+        "../SKILL.md",
+        "verified-reuse.md"
+      ]
+    }
+  ]
+}
