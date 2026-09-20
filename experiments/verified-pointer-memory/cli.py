@@ -12,6 +12,7 @@ NEXT = {
     'ready': 'verify-evidence-then-approve',
     'verified-cache-hit': 'use-cited-answer',
     'preparation-required': 'review-and-refresh-preparation',
+    'refresh-required': 'refresh-source-and-preparation',
     'unknown-pointer': 'register-reviewed-dataset',
     'access-denied': 'stop-access-denied',
     'no-match': 'record-unresolved',
@@ -33,7 +34,18 @@ def describe():
     """Return supported options without needing an account or configuration."""
     return {
         'status': 'ok', 'stage': 'local-experiment', 'actions': ACTIONS,
-        'settings': DEFAULTS, 'optionalSearchFields': ['context'],
+        'settings': DEFAULTS, 'optionalSearchFields': ['context', 'freshness'],
+        'freshnessPolicies': {
+            'default': {'mode': 'snapshot'},
+            'current': {'mode': 'current', 'maxAgeSeconds': 'positive finite seconds'},
+            'limitation': 'current requires dataset.checkedAt from a trusted upstream whole-scope check; it does not establish domain truth.',
+        },
+        'contextLimitation': 'Context scopes the exact cache only; it is not sent to the retrieval provider.',
+        'principalScope': 'Principal labels are trusted-local scope labels, not authentication.',
+        'pointerLifecycle': {
+            'register': 'Replaces the pointer generation and invalidates its answers and pending tickets.',
+            'remove': 'Removes the pointer, cache and pending tickets only; it never removes originals.',
+        },
         'requiredConfig': ['db', 'registry'],
         'optionalConfig': ['retrievalCommand', *DEFAULTS],
         'resultActions': NEXT,
@@ -42,8 +54,9 @@ def describe():
         'supported': ['Persistent dataset pointers', 'Exact verified-answer reuse',
                       'Source freshness checks', 'Explicit review tickets'],
         'notSupported': ['Untrusted multi-user hosting', 'Automatic private-data approval',
-                         'Semantic cache matching', 'Autonomous background queue',
-                         'Arbitrary file ingestion'],
+                         'Semantic cache matching', 'Automatic source fetching or freshness watching',
+                         'Autonomous background queue',
+                         'Arbitrary file ingestion', 'Original-source editing or deletion'],
     }
 
 
@@ -106,12 +119,23 @@ def run(request, config):
             _, error = service.pointer(name, request['principal'])
             if error and error['status'] == 'access-denied':
                 continue
-            pointers.append({'pointer': name, 'dataset': binding['dataset'], 'status': error['status'] if error else 'available'})
+            entry = registry['datasets'].get(binding['dataset'], {})
+            pointers.append({
+                'pointer': name, 'dataset': binding['dataset'],
+                'generation': binding['generation'],
+                'checkedAt': entry.get('checkedAt'),
+                'datasetScope': entry.get('scope', entry.get('description', '')),
+                'snapshotStatus': error['status'] if error else 'available',
+                'status': error['status'] if error else 'available',
+            })
         return {**describe(), 'settings': {k: config[k] for k in DEFAULTS}, 'pointers': pointers,
                 'datasets': [{'name': name, 'description': entry.get('description', '')}
                              for name, entry in registry['datasets'].items()]}
     if action == 'search':
-        return service.search(request['pointer'], request['question'], request['principal'], request.get('context', ''))
+        if 'freshness' in request and request['freshness'] is None:
+            raise ValueError('freshness must be an object when supplied.')
+        return service.search(request['pointer'], request['question'], request['principal'],
+                              request.get('context', ''), freshness=request.get('freshness'))
     if action == 'register':
         service.register(request['pointer'], request['dataset'], request['principals'])
         return {'status': 'registered'}
