@@ -80,9 +80,17 @@ For a current-state question, briefly say: “This uses the registered snapshot;
 
 ## Connect local files: paths to searchable passages
 
-Use this when records are missing or a pointer-only dataset returns `preparation-required`. A configured memory runtime is required (`memory --describe` describes it; `memory --principal AGENT` shows that agent's pointers). The action is JSON, not a `memory connect` shell subcommand.
+Use this when records are missing or a pointer-only dataset returns `preparation-required`. A configured memory runtime is required (`memory --describe` describes it; `memory --principal AGENT` shows that agent's pointers). For a new single-agent connector, use the shortcut below; JSON remains available for shared or custom scopes. There is no positional `memory connect` subcommand.
 
-Save a request in your repo's private working area:
+From the installed skill directory:
+
+```sh
+python3 dispatch.py memory --connect my-records --file /absolute/path/to/record.md --principal YOUR_AGENT_NAME
+```
+
+Repeat `--file` for additional files. This is a local preview, not approval. Review the files and permission, then run the returned **`confirmCommand`** exactly as printed; it binds the reviewed file hashes and uses your configured runtime. No JSON editing is needed. Changed bytes return a new review preview instead of accepting old approval. Use `--replace` only for the same existing single-principal connector; shared connectors or a dataset name different from its pointer use the JSON workflow below.
+
+Alternatively, save a request in your repo's private working area:
 
 ```json
 {

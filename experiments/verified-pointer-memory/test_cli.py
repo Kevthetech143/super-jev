@@ -253,3 +253,23 @@ class FreshnessHintTests(unittest.TestCase):
             result = add_hints({'status': status, 'freshness': {'mode': 'current', 'checkedAt': 100}})
             self.assertEqual(result['status'], status)
             self.assertNotIn('snapshot-freshness', [h['code'] for h in result.get('hints', [])])
+
+
+class StarterGuidanceTests(unittest.TestCase):
+    def test_no_connection_gets_setup_and_success_stays_quiet(self):
+        from cli import add_hints
+        for body in ({'status': 'unknown-pointer'}, {'status': 'ok', 'pointers': []}, {'status': 'preparation-required'}):
+            original_status = body['status']
+            result = add_hints(body)
+            self.assertEqual(result['status'], original_status)
+            self.assertTrue(result['message'].startswith("Let's connect"))
+            self.assertEqual(result['gettingStarted']['requestTemplate']['action'], 'connect')
+        for status in ('ready', 'verified-cache-hit', 'access-denied'):
+            result = add_hints({'status': status})
+            self.assertNotIn('gettingStarted', result)
+            self.assertNotIn('message', result)
+
+    def test_specific_setup_blocker_is_not_hidden(self):
+        from cli import add_hints
+        result = add_hints({'status': 'preparation-required', 'reason': 'unsupported-source', 'hint': 'Export binary files first.'})
+        self.assertEqual(result['message'], 'Export binary files first.')

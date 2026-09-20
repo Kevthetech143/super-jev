@@ -7,6 +7,8 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 One front door: `python3 <this-skill-directory>/dispatch.py <tool> ...`. Use the user's original request and relevant context; keep backend names and setup mechanics out of ordinary replies.
 
+**Present setup help plainly:** When a response includes `message` and `setup`/`gettingStarted`, lead with that message and take the authorized next step. Do not tell a first-time user only “preparation required”; that is a machine status, not useful instructions. If they have no records yet, help create a factual collection from their supplied information before connecting it.
+
 **First use:** confirm the selected tool runs and the intended person's/project's records are prepared and connected. If records have only pointers or return `preparation-required`, use the memory `connect` action in [connector setup](references/connectors.md) to prepare authorized local text files. If other setup is missing, follow its hint; never treat a setup failure as “nothing found.” Existing working connections skip this step.
 
 From this skill directory (replace dataset/pointer and principal with your authorized configured values):
@@ -16,7 +18,10 @@ python3 dispatch.py help --topic overview
 python3 dispatch.py find --list-datasets
 python3 dispatch.py find --dataset DATASET_ID --request "Your original question"
 python3 dispatch.py memory --describe
+python3 dispatch.py memory --connect my-records --file /absolute/path/to/record.md --principal YOUR_AGENT_NAME
 ```
+
+The connect command previews files without publishing them. Review their contents and existing provider permission, then run the exact `confirmCommand` it returns. Repeat `--file` for more files. This shortcut creates a single-principal connector; use the JSON guide for shared scopes.
 
 For configured memory, `python3 dispatch.py memory --principal YOUR_AGENT_NAME` lists your pointers. Save a search request in your repo's private working area, then run `python3 /path/to/skill/dispatch.py memory --input /path/to/request.json`:
 
