@@ -84,7 +84,10 @@ def no_auto():
 check('ready_does_not_auto_approve',no_auto)
 for status in ['no-match','preparation-required','refused','error']:
  def run(st=status):
-  f=Fixture();f.s.retrieve=lambda d,q:{'status':st};eq(f.ask(),{'status':st});eq(f.ask(),{'status':st})
+  f=Fixture();f.s.retrieve=lambda d,q:{'status':st}
+  first=f.ask();second=f.ask();eq(first['status'],st);eq(second['status'],st)
+  assert first['attemptId'] != second['attemptId']
+  eq(f.s.attempt(first['attemptId'],'alice')['retrievalStatus'],st)
  check('preserve_'+status,run)
 for name,action in [('removed',lambda f:f.s.remove('docs')),('changed_source',lambda f:f.source.write_text('new')),('rebound',lambda f:f.s.register('docs','test',['alice']))]:
  def run(a=action,n=name):
