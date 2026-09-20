@@ -11,6 +11,14 @@ A connector is the source-specific way an agent connects data to Super Jev. Use 
 | Database | Proposed | No direct database ingestion connector. SQLite answer storage is not a database-source connector. An authorized reviewed export can use Documents, but say it is an export. |
 | Website/links | Proposed | No direct URL ingestion/refresh connector. An authorized reviewed local copy can use Documents, but say it is a copy, not a live connection. |
 
+## User-defined connectors and names
+
+Skills, Brain, Documents and Repo are convenient starting labels, not a closed list. Users may name a connector for their own source or purpose, such as “Workshop notes” or “Customer handbook.” Use their chosen name in conversation and a valid stable dataset/pointer identifier in tool inputs; a display name is never an executable command.
+
+For a custom connector, keep a short setup note in the user's project: chosen name, purpose, authorized sources/audience, existing backend and dataset/pointer, preparation steps, refresh responsibility, and known limits. Reuse an appropriate configured connection instead of duplicating its data. The note is an agent-readable recipe, not an automatically discovered plugin manifest; the current panel lists registered pointers, not a separate connector registry.
+
+A new label can reuse the reviewed-local-file workflow. A genuinely new source integration needs an implemented and verified adapter; naming it does not create database/URL fetching or syncing. Developers can build their own integration and connect it through the existing reviewed dataset workflow or trusted `retrievalCommand` extension. Preserve its actual interface, source bindings, scope and explicit approval checks; describe an unbuilt custom adapter as needing implementation, not ready.
+
 ## Choose existing data or a blank start
 
 If data already exists, preserve the originals and prepare a searchable view of the authorized scope. Do not require a directory rewrite, database migration, or a new table. Messy or unsupported formats may need extraction and agent review before onboarding; a connector label does not make arbitrary data readable.
