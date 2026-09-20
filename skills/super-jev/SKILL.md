@@ -7,6 +7,25 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 One front door: `python3 <this-skill-directory>/dispatch.py <tool> ...`. Use the user's original request and relevant context; keep backend names and setup mechanics out of ordinary replies.
 
+**First use:** confirm the selected tool runs and the intended person's/project's records are prepared and connected. If setup is missing, follow the returned hint and [connector setup](references/connectors.md); never treat a setup failure as “nothing found.” Existing working connections skip this step.
+
+From this skill directory (replace dataset/pointer and principal with your authorized configured values):
+
+```sh
+python3 dispatch.py help --topic overview
+python3 dispatch.py find --list-datasets
+python3 dispatch.py find --dataset DATASET_ID --request "Your original question"
+python3 dispatch.py memory --describe
+```
+
+For configured memory, `python3 dispatch.py memory --principal YOUR_AGENT_NAME` lists your pointers. Save a search request in your repo's private working area, then run `python3 /path/to/skill/dispatch.py memory --input /path/to/request.json`:
+
+```json
+{"action":"search","pointer":"POINTER_ID","principal":"YOUR_AGENT_NAME","question":"Your original question"}
+```
+
+Installed `memory.sh` supplies the runtime/config automatically when no explicit repo/config is supplied. Without it, set `SUPERJEV_REPO` to the checkout and pass `memory --config /path/to/config.json ...`; consult `LOCAL-MEMORY.md` if present. `--describe` reports capabilities, not whether records are onboarded. On `ready`, inspect evidence before answering or approving reuse; `verified-cache-hit` returns an already approved scoped answer. Missing preparation requires setup/refresh, not repeated searching.
+
 **Already connected?** Use the known roots, dataset or pointer directly. Do not reload manuals, reopen the panel, enumerate sources or repeat onboarding on every request. Revisit setup for new/changed scope, missing configuration or a reported preparation/freshness problem. Runtime integrity checks stay enabled.
 
 **New agent or need help?** Use `help --topic overview` for Quick Start, `help --question "your how-to question"` for suggested help topics, or `help --topic TOPIC` for an exact topic. Built-in answers need no data, key or Jev call; they cover maintained setup topics, not arbitrary facts. If instructions are already known, skip help. Read longer guides only when needed.

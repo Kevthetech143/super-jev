@@ -85,3 +85,18 @@ def test_help_needs_no_config_or_external_backend(monkeypatch, capsys):
     finally:
         sys.path.remove(str(DISPATCH.parent))
     assert json.loads(capsys.readouterr().out)["kind"] == "builtin-help"
+
+
+def test_health_question_gets_setup_guidance_without_health_data():
+    result, body = response('--question', 'how do I search my health records')
+    assert result.returncode == 0
+    assert 'register-setup' in [t['id'] for t in body['suggestions']]
+
+
+def test_unmatched_help_returns_labelled_quick_start_not_a_data_answer():
+    result, body = response('--question', 'an unfamiliar setup phrase')
+    assert result.returncode == 0
+    assert body['status'] == 'no-covered-topic'
+    assert body['nextAction'] == 'read-quick-start'
+    assert body['quickStart']['id'] == 'overview'
+    assert 'answer' not in body

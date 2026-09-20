@@ -57,7 +57,9 @@ def suggestions(question: str) -> dict:
     return {
         "status": "no-covered-topic",
         "kind": "builtin-help",
-        "message": "No matching topic found by local lookup; list help topics or consult the guide.",
+        "message": "No exact help match. Start with the Quick Start below; this is setup guidance, not an answer to your question.",
+        "nextAction": "read-quick-start",
+        "quickStart": topic("overview")["topic"],
         "guide": "references/connectors.md",
     }
 

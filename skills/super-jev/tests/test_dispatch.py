@@ -97,3 +97,45 @@ def test_missing_tool_and_unknown_tool_fail_without_fallback(tmp_path):
     assert 'not installed' in json.loads(run(skill, 'skills').stdout)['reason']
     assert run(skill, 'invented').returncode == 2
     assert set(json.loads(run(skill).stdout)['tools']) == {'help','skills','find','check','verify','memory'}
+
+@pytest.mark.parametrize('family', ['.codex', '.claude'])
+def test_installed_memory_wrapper_reenters_with_config(tmp_path, monkeypatch, family):
+    monkeypatch.delenv('SUPERJEV_REPO', raising=False)
+    monkeypatch.delenv('SUPERJEV_MEMORY_WRAPPER_ACTIVE', raising=False)
+    _, skill = installed(tmp_path, family)
+    repo = tmp_path / 'real repo'
+    entry = repo / 'experiments/verified-pointer-memory/cli.py'
+    entry.parent.mkdir(parents=True)
+    entry.write_text('import json,sys; print(json.dumps(sys.argv[1:]))')
+    stub(skill / 'memory.sh', f'export SUPERJEV_REPO="{repo}"\nexec "{sys.executable}" "{skill / "dispatch.py"}" memory --config local.json "$@"\n')
+    result = run(skill, 'memory', '--describe')
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == ['--config', 'local.json', '--describe']
+    result = run(skill, 'memory', '--input', 'request with spaces.json')
+    assert json.loads(result.stdout) == ['--config', 'local.json', '--input', 'request with spaces.json']
+
+
+def test_explicit_memory_repo_bypasses_wrapper(tmp_path, monkeypatch):
+    _, skill = installed(tmp_path)
+    repo = tmp_path / 'chosen'
+    entry = repo / 'experiments/verified-pointer-memory/cli.py'
+    entry.parent.mkdir(parents=True)
+    entry.write_text('print("chosen-runtime")')
+    monkeypatch.setenv('SUPERJEV_REPO', str(repo))
+    stub(skill / 'memory.sh', 'exit 99\n')
+    result = run(skill, 'memory', '--describe')
+    assert result.returncode == 0
+    assert result.stdout.strip() == 'chosen-runtime'
+
+
+def test_broken_wrapper_returns_setup_hint_without_recursing(tmp_path, monkeypatch):
+    monkeypatch.delenv('SUPERJEV_REPO', raising=False)
+    monkeypatch.delenv('SUPERJEV_MEMORY_WRAPPER_ACTIVE', raising=False)
+    _, skill = installed(tmp_path)
+    stub(skill / 'memory.sh', f'exec "{sys.executable}" "{skill / "dispatch.py"}" memory "$@"\n')
+    result = run(skill, 'memory', '--describe')
+    assert result.returncode == 2
+    body = json.loads(result.stdout)
+    assert body['reason'] == 'missing-dependency'
+    assert body['nextAction'] == 'configure-memory-runtime'
+    assert body['hint'] and body['helpCommand']
