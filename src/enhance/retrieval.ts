@@ -38,6 +38,16 @@
 // policy) becomes preparation-required, the passage call never happens, and
 // the run returns `preparation-required` instead of guessing.
 //
+// OPTIONAL EXACT-DUPLICATE GROUPING (`groupDuplicateSources`, OFF by
+// default): before the descriptions stage, sources whose original text AND
+// description are byte-identical AND whose reviewed preparations are
+// equivalent collapse to one deterministic canonical source (the smallest
+// id). Alias ids come back additively in `result.duplicateGroups`, and the
+// `sources` pointer list still covers every input source. A source that is
+// not fully reviewed — or prepared differently — never joins a group, so no
+// alias can inherit another source's approval and no distinct, better
+// prepared source is discarded. Nothing else about the chain changes.
+//
 // The BM25 bundle selection replicates the experiment format exactly:
 //   Document description: <description>
 //   Section: <heading breadcrumb>
@@ -385,6 +395,127 @@ export function preparePassages(
 }
 
 // ---------------------------------------------------------------------------
+// Optional exact-duplicate source grouping (opt-in, OFF by default)
+// ---------------------------------------------------------------------------
+
+/**
+ * One group of byte-identical sources that a run collapsed to a single
+ * canonical source. The alias ids are kept so a caller can still name every
+ * original document the canonical stands for.
+ */
+export type DuplicateSourceGroup = {
+  /** Deterministic canonical: the lexicographically smallest id in the group. */
+  canonicalId: string;
+  /** The other original ids, sorted; dropped from the chain, never from the result. */
+  aliasIds: string[];
+  /** SHA-256 of the shared original text (identical across the whole group). */
+  contentSHA: string;
+};
+
+/** Result of `groupExactDuplicateSources`: the sources to run, plus the groups formed. */
+export type DuplicateGrouping = {
+  /** Input order, aliases removed. Identical to the input when nothing grouped. */
+  canonical: RetrievalSource[];
+  /** Groups formed, sorted by canonical id. Empty when nothing grouped. */
+  groups: DuplicateSourceGroup[];
+};
+
+/**
+ * Fingerprint of a source's REVIEWED preparation, or `undefined` when the
+ * source is not fully prepared — which makes it ineligible for grouping.
+ *
+ * Every chunk of the source must carry a record that passes the same
+ * `isRecordUsable` check the preparation gate applies (bound to this source
+ * id, this content SHA, these exact offsets, reviewed, under the expected
+ * policy). The fingerprint deliberately EXCLUDES the source id (aliases
+ * differ there by definition) and covers everything the judge would see or
+ * rely on: offsets, content SHA, policy, status, reviewed text, safe heading.
+ */
+function preparationFingerprint(
+  source: RetrievalSource,
+  preparation: PreparationSource | undefined,
+  expectedPolicy: string,
+  targetWords: number
+): string | undefined {
+  if (preparation === undefined) return undefined;
+  const chunks = chunkSource(source.id, source.text, targetWords);
+  if (!chunks.length) return undefined;
+  const parts: unknown[] = [];
+  for (const chunk of chunks) {
+    const record = lookupRecord(preparation, chunk);
+    if (!isRecordUsable(record, chunk, expectedPolicy).ok) return undefined;
+    parts.push([
+      chunk.chunkIndex, chunk.startLine, chunk.endLine,
+      record!.contentSHA, record!.policy, record!.status,
+      record!.reviewedText, record!.safeHeading
+    ]);
+  }
+  return sha256Hex(JSON.stringify(parts));
+}
+
+/**
+ * Collapse EXACT duplicate sources to one canonical source each. Opt-in;
+ * nothing calls this unless `groupDuplicateSources` is set.
+ *
+ * Two sources group ONLY when all of this holds:
+ * - their original `text` is byte-identical, AND
+ * - their `description` is byte-identical, AND
+ * - both are FULLY prepared — every chunk of each has a usable reviewed
+ *   record under `expectedPolicy` — AND those preparations are equivalent
+ *   (same offsets, content SHA, policy, status, reviewed text, safe heading).
+ *
+ * Consequences, on purpose:
+ * - an unreviewed, missing, stale, or differently-prepared source NEVER
+ *   joins a group, so it can never inherit another source's approval; it
+ *   stays in the chain on its own and still reaches the preparation gate;
+ * - a source that merely looks similar (any byte of text or description
+ *   differs) is never collapsed, so a better-prepared distinct source is
+ *   never discarded;
+ * - the canonical is the lexicographically smallest id in the group, so the
+ *   choice is deterministic and independent of input order.
+ *
+ * Original text, content SHAs, and chunk offsets are untouched: grouping
+ * only decides which sources enter the chain.
+ */
+export function groupExactDuplicateSources(
+  sources: RetrievalSource[],
+  preparation: PreparationSource | undefined,
+  expectedPolicy = 'reviewed',
+  targetWords = DEFAULT_CHUNK_TARGET_WORDS
+): DuplicateGrouping {
+  if (!Array.isArray(sources)) throw new RetrievalError('groupExactDuplicateSources needs a sources array');
+  if (typeof expectedPolicy !== 'string' || !expectedPolicy) throw new RetrievalError('expectedPolicy must be a non-empty string');
+  const seen = new Set<string>();
+  for (const source of sources) {
+    if (!source || typeof source.id !== 'string' || !source.id) throw new RetrievalError('Every source needs a non-empty id');
+    if (seen.has(source.id)) throw new RetrievalError(`Duplicate source id ${JSON.stringify(source.id)}`);
+    seen.add(source.id);
+  }
+  const buckets = new Map<string, RetrievalSource[]>();
+  for (const source of sources) {
+    const fingerprint = preparationFingerprint(source, preparation, expectedPolicy, targetWords);
+    if (fingerprint === undefined) continue; // not fully prepared -> never grouped
+    const key = `${sha256Hex(source.text)}|${sha256Hex(source.description)}|${fingerprint}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(source);
+    else buckets.set(key, [source]);
+  }
+  const groups: DuplicateSourceGroup[] = [];
+  const aliases = new Set<string>();
+  for (const bucket of buckets.values()) {
+    if (bucket.length < 2) continue;
+    // Never trust the digest alone: re-check byte-exactness before collapsing.
+    const exact = bucket.every(s => s.text === bucket[0].text && s.description === bucket[0].description);
+    if (!exact) continue;
+    const ids = bucket.map(s => s.id).sort();
+    groups.push({ canonicalId: ids[0], aliasIds: ids.slice(1), contentSHA: sha256Hex(bucket[0].text) });
+    for (const id of ids.slice(1)) aliases.add(id);
+  }
+  groups.sort((a, b) => (a.canonicalId < b.canonicalId ? -1 : a.canonicalId > b.canonicalId ? 1 : 0));
+  return { canonical: sources.filter(s => !aliases.has(s.id)), groups };
+}
+
+// ---------------------------------------------------------------------------
 // Document bundles: what the judge actually sees
 // ---------------------------------------------------------------------------
 
@@ -495,6 +626,15 @@ export type RetrievalOptions = {
   includeNeighbors?: boolean;
   /** Explicit preparation records; absent means every selected passage is preparation-required. */
   preparation?: PreparationSource;
+  /**
+   * Opt-in exact-duplicate grouping. Default false (OFF) — the chain then
+   * behaves exactly as before. When true, sources whose original text AND
+   * description are byte-identical AND whose reviewed preparations are
+   * equivalent collapse to one deterministic canonical source before the
+   * descriptions stage; the alias ids come back in `duplicateGroups`.
+   * Partly-prepared, unprepared, or differing sources are never grouped.
+   */
+  groupDuplicateSources?: boolean;
   /** Cache seam — accepted, not used; a separate PR owns caching. */
   cache?: RetrievalCache;
   /** Chunk target words. Default 180. */
@@ -504,7 +644,8 @@ export type RetrievalOptions = {
 export type RetrievalStatus = 'ready' | 'no-match' | 'preparation-required' | 'refused';
 
 export type StageTrace = {
-  stage: 'descriptions' | 'local-bm25' | 'narrow-bundles' | 'wide-bundles' | 'prepare' | 'neighbors';
+  stage: 'descriptions' | 'local-bm25' | 'narrow-bundles' | 'wide-bundles' | 'prepare' | 'neighbors'
+    | 'duplicate-grouping';
   /** Provider calls made in this stage; 0 for local stages. */
   calls: number;
   kept: string[];
@@ -521,8 +662,18 @@ export type RetrievalResult = {
   pending: UnpreparedPassage[];
   /** Compact per-stage trace of what ran and what it kept/dropped. */
   trace: StageTrace[];
-  /** Original-source pointers for every source that entered the chain. */
+  /**
+   * Original-source pointers for every INPUT source — including duplicate
+   * aliases that were collapsed before the chain ran, so the input proof
+   * stays complete.
+   */
   sources: { id: string; contentSHA: string; description: string }[];
+  /**
+   * Additive, opt-in only: the exact-duplicate groups formed before the
+   * chain ran, each naming its canonical id and the alias ids it stands for.
+   * Absent entirely when `groupDuplicateSources` is off (the default).
+   */
+  duplicateGroups?: DuplicateSourceGroup[];
 };
 
 function errMessage(err: unknown): string {
@@ -637,18 +788,40 @@ export async function retrieveSources(
   if (!Number.isInteger(maxStages) || maxStages < 1) throw new RetrievalError('maxStages must be a positive integer');
   if (!Number.isInteger(prefilter) || prefilter < 0) throw new RetrievalError('prefilter must be a non-negative integer');
 
+  // -- Stage 0 (local, opt-in): collapse EXACT duplicate sources ---------------
+  // Off by default, so the default chain is byte-for-byte the old chain.
+  const grouping: DuplicateGrouping = options.groupDuplicateSources === true
+    ? groupExactDuplicateSources(sources, options.preparation, expectedPolicy, targetWords)
+    : { canonical: sources, groups: [] };
+  const activeSources = grouping.canonical;
+  // Additive result metadata: present only when the option is on.
+  const extra: { duplicateGroups?: DuplicateSourceGroup[] } =
+    options.groupDuplicateSources === true ? { duplicateGroups: grouping.groups } : {};
+
   const trace: StageTrace[] = [];
-  const descriptions = new Map(sources.map(s => [s.id, s.description]));
+  const descriptions = new Map(activeSources.map(s => [s.id, s.description]));
+  // Input proof: pointers cover EVERY input source, aliases included.
   const sourcePointers = sources.map(s => ({ id: s.id, contentSHA: sha256Hex(s.text), description: s.description }));
   const refused = (note: string): RetrievalResult =>
-    ({ status: 'refused', request, passages: [], pending: [], trace, sources: sourcePointers });
+    ({ status: 'refused', request, passages: [], pending: [], trace, sources: sourcePointers, ...extra });
+
+  if (options.groupDuplicateSources === true) {
+    trace.push({
+      stage: 'duplicate-grouping', calls: 0,
+      kept: activeSources.map(s => s.id),
+      dropped: grouping.groups.flatMap(g => g.aliasIds),
+      note: grouping.groups.length
+        ? `${grouping.groups.length} exact-duplicate group(s) collapsed; alias ids kept in duplicateGroups`
+        : 'no exact duplicates: text, description, or reviewed preparation differs across sources'
+    });
+  }
 
   // Chunk ALL source documents once, up front. Everything downstream — the
   // narrow shortlist, the global wide recovery, the neighbor lookup —
   // reads this single chunking.
   const chunksBySource = new Map<string, SourceChunk[]>();
   const allChunks: SourceChunk[] = [];
-  for (const s of sources) {
+  for (const s of activeSources) {
     const chunks = chunkSource(s.id, s.text, targetWords);
     assertChunkOffsets(chunks);
     chunksBySource.set(s.id, chunks);
@@ -659,7 +832,7 @@ export async function retrieveSources(
   let descRun: FetchRun;
   try {
     descRun = await runFetch(
-      sources.map(s => ({ id: s.id, text: s.description })),
+      activeSources.map(s => ({ id: s.id, text: s.description })),
       request,
       {
         transport: options.transport, k: docK,
@@ -688,17 +861,17 @@ export async function retrieveSources(
   const descShortlist = descRun.ranked.length ? descRun.ranked : descRun.allScored;
   const rankedSourceIds = descShortlist.slice(0, docK).map(r => r.id);
   if (!rankedSourceIds.length) {
-    trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: sources.map(s => s.id), note: 'gate deferred and no descriptions were judged' });
-    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
+    trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: activeSources.map(s => s.id), note: 'gate deferred and no descriptions were judged' });
+    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers, ...extra };
   }
   const descNote = descGate.noMatch
     ? `gate deferred (low confidence); description ranking chose top ${rankedSourceIds.length}`
     : `direct-fit top ${rankedSourceIds.length}`;
-  validateSelection(new Set(sources.map(s => s.id)), rankedSourceIds);
+  validateSelection(new Set(activeSources.map(s => s.id)), rankedSourceIds);
   trace.push({
     stage: 'descriptions', calls: descRun.calls,
     kept: rankedSourceIds,
-    dropped: sources.map(s => s.id).filter(id => !rankedSourceIds.includes(id)),
+    dropped: activeSources.map(s => s.id).filter(id => !rankedSourceIds.includes(id)),
     note: descNote
   });
 
@@ -711,7 +884,7 @@ export async function retrieveSources(
     note: `global top-${chunkK} chunks across all chunks in the top-${rankedSourceIds.length} doc(s)`
   });
   if (!narrowTop.length) {
-    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
+    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers, ...extra };
   }
 
   /**
@@ -728,7 +901,7 @@ export async function retrieveSources(
         dropped: pending.map(p => chunkIdentity(p)),
         note: `${stage}: ${pending.length} passage(s) missing/stale/unreviewed preparation — withheld before any provider passage call`
       });
-      return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers };
+      return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers, ...extra };
     }
     return poolChunks.map((c, i) => ({ chunk: c, passage: prepared[i] }));
   };
@@ -748,9 +921,9 @@ export async function retrieveSources(
       note: `accepted bundle ${bundle.id}: binding re-verified, ${prepared.length} prepared, ${pending.length} preparation-required`
     });
     if (pending.length) {
-      return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers };
+      return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers, ...extra };
     }
-    return { status: 'ready', request, passages: prepared, pending: [], trace, sources: sourcePointers };
+    return { status: 'ready', request, passages: prepared, pending: [], trace, sources: sourcePointers, ...extra };
   };
 
   type StageOutcome =
@@ -833,5 +1006,5 @@ export async function retrieveSources(
     if (neighborOutcome.accepted) return acceptTopBundle(neighborOutcome.accepted);
   }
 
-  return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
+  return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers, ...extra };
 }
