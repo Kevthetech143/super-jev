@@ -48,7 +48,7 @@ def connect(request, config):
         return _connect(request, config)
     except (OSError, ValueError, TypeError, KeyError, sqlite3.Error, subprocess.SubprocessError):
         # Never reflect subprocess stderr, document text, or arbitrary exception data.
-        return _problem('connect-failed', 'No ready connection was confirmed. Check local file access, registry/DB access and Node 24+; retry the same explicit sources after review.')
+        return _problem('connect-failed', 'No ready connection was confirmed. Check local file access, registry/DB access and Node 24+; after fixing the cause, retry the same reviewed sources with replace:true and the same pointer/dataset/principals to recover any partially published connection.')
 
 
 def _connect(request, config):
@@ -93,7 +93,7 @@ def _connect(request, config):
                         'description': description, 'sha256': _hash(raw), 'reviewedSHA': item.get('sha256')})
     if request.get('reviewed') is not True or any(s['reviewedSHA'] != s['sha256'] for s in sources):
         return {**_problem('review-required', 'Review these local files within authorized scope. To permit their entire text for provider processing, repeat connect with reviewed:true and each returned sha256. This is not automatic privacy approval.'),
-                'sources': [{k: s[k] for k in ('path', 'id', 'sha256')} for s in sources],
+                'sources': [{k: s[k] for k in ('path', 'id', 'description', 'sha256')} for s in sources],
                 'fileCount': len(sources), 'bytes': total}
     if 'replace' in request and not isinstance(request['replace'], bool):
         return _problem('invalid-replace', 'replace must be true or false.')
