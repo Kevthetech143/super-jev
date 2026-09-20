@@ -30,10 +30,10 @@ export type { PreparedArtifact, CacheBindings, ReviewReceipt, CacheMissReason, C
 export {
   RetrievalError, DEFAULT_CHUNK_TARGET_WORDS, chunkIdentity, chunkSource, assertChunkOffsets,
   bm25EntryText, topChunksGlobal, preparePassages, bundleProviderText,
-  cacheKeyFor, validateSelection, addNeighbors, retrieveSources
+  cacheKeyFor, validateSelection, addNeighbors, retrieveSources, groupExactDuplicateSources
 } from './retrieval.ts';
 export type {
   RetrievalSource, SourceChunk, PreparationRecord, PreparationSource,
   PreparedPassage, UnpreparedPassage, PassageBundle, RetrievalCache, RetrievalOptions,
-  RetrievalStatus, StageTrace, RetrievalResult
+  RetrievalStatus, StageTrace, RetrievalResult, DuplicateSourceGroup, DuplicateGrouping
 } from './retrieval.ts';

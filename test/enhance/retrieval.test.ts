@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_CHUNK_TARGET_WORDS, RetrievalError, addNeighbors, assertChunkOffsets, bm25EntryText,
   bundleProviderText, cacheKeyFor, chunkIdentity, chunkSource, preparePassages, retrieveSources,
-  sha256Hex, topChunksGlobal, validateSelection,
+  groupExactDuplicateSources, sha256Hex, topChunksGlobal, validateSelection,
   type PreparationRecord, type RetrievalSource, type SourceChunk
 } from '../../src/enhance/retrieval.ts';
 import { choiceAnswer } from '../../src/enhance/stub.ts';
@@ -791,4 +791,195 @@ test('cache seam: stable key format, accepted but unused', async () => {
   const cache = { get: (_k: string) => undefined, set: (_k: string, _v: string) => {} };
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), cache, ...REVIEWED_OPTS });
   assert.equal(result.status, 'ready', 'passing a cache changes nothing yet');
+});
+
+// ------------------------------------------- optional exact-duplicate grouping
+
+/** Two byte-identical clones: same description, same original text, different ids. */
+function cloneSource(id: string): RetrievalSource {
+  return {
+    id,
+    description: 'Clone guide: restarting the widget service safely, step by step.',
+    text: threeSectionText('clone')
+  };
+}
+
+/**
+ * Reviewed preparation whose text and heading depend ONLY on offsets, so two
+ * clones of the same document prepare EQUIVALENTLY (the alias's own id still
+ * binds each record, exactly as the preparation gate requires).
+ */
+function offsetPrepFor(sources: RetrievalSource[], policy = 'reviewed'): Map<string, PreparationRecord> {
+  const m = new Map<string, PreparationRecord>();
+  for (const s of sources) {
+    for (const c of chunkSource(s.id, s.text)) {
+      m.set(chunkIdentity(c), {
+        sourceId: c.sourceId,
+        contentSHA: c.sourceSHA,
+        chunkIndex: c.chunkIndex,
+        startLine: c.startLine,
+        endLine: c.endLine,
+        reviewedText: `REVIEWED L${c.startLine}-${c.endLine}`,
+        safeHeading: c.heading ? `Safe ${c.heading}` : 'Safe section',
+        policy,
+        status: 'reviewed'
+      });
+    }
+  }
+  return m;
+}
+
+test('grouping OFF by default: identical clones both run, no grouping metadata, no extra stage', async () => {
+  const sources = [cloneSource('doc-a'), cloneSource('doc-b')];
+  const { transport, requests } = tableTransport({
+    'descriptions:doc-a': ['high', 0.96],
+    'descriptions:doc-b': ['high', 0.95],
+    'bundles:doc-a': ['high', 0.96],
+    'bundles:doc-b': ['none', 0.9]
+  });
+  const result = await retrieveSources(sources, REQUEST, { transport, preparation: offsetPrepFor(sources), ...REVIEWED_OPTS });
+  assert.equal(result.status, 'ready');
+  assert.ok(!('duplicateGroups' in result), 'no additive metadata unless the option is on');
+  assert.deepEqual(stagesOf(result), ['descriptions', 'local-bm25', 'narrow-bundles', 'prepare']);
+  assert.ok(requestBlobs(requests)[0].includes('doc-b'), 'the alias is judged like any other source by default');
+});
+
+test('grouping ON: exact clones collapse to a deterministic canonical, alias ids retained', async () => {
+  const sources = [cloneSource('doc-b'), cloneSource('doc-a'), beta()];
+  const { transport, requests } = tableTransport({
+    'descriptions:doc-a': ['high', 0.96],
+    'descriptions:beta': ['none', 0.9],
+    'bundles:doc-a': ['high', 0.96]
+  });
+  const result = await retrieveSources(sources, REQUEST, {
+    transport, preparation: offsetPrepFor(sources), groupDuplicateSources: true, ...REVIEWED_OPTS
+  });
+  assert.equal(result.status, 'ready');
+  // Canonical = smallest id; the alias is named, never silently dropped.
+  assert.deepEqual(result.duplicateGroups, [
+    { canonicalId: 'doc-a', aliasIds: ['doc-b'], contentSHA: sha256Hex(sources[0].text) }
+  ]);
+  const group = result.trace.find(t => t.stage === 'duplicate-grouping');
+  assert.deepEqual(group?.kept, ['doc-a', 'beta']);
+  assert.deepEqual(group?.dropped, ['doc-b']);
+  assert.equal(group?.calls, 0, 'grouping is local: no provider call');
+  // Input proof and original hashes survive for EVERY input source.
+  assert.deepEqual(result.sources.map(s => s.id).sort(), ['beta', 'doc-a', 'doc-b']);
+  for (const s of result.sources) assert.match(s.contentSHA, /^[0-9a-f]{64}$/);
+  assert.equal(
+    result.sources.find(s => s.id === 'doc-a')?.contentSHA,
+    result.sources.find(s => s.id === 'doc-b')?.contentSHA
+  );
+  // The right passages still come back, bound to the canonical source only.
+  assert.equal(result.passages.length, 3);
+  assert.ok(result.passages.every(p => p.sourceId === 'doc-a'));
+  assert.deepEqual(
+    result.passages.map(p => [p.startLine, p.endLine]),
+    chunkSource('doc-a', sources[0].text).map(c => [c.startLine, c.endLine]),
+    'chunk offsets are untouched by grouping'
+  );
+  for (const blob of requestBlobs(requests)) assert.ok(!blob.includes('doc-b'), 'the alias never reaches the judge');
+});
+
+test('grouping ON: canonical choice is deterministic, independent of input order', async () => {
+  const forward = [cloneSource('a1'), cloneSource('a2'), cloneSource('a3')];
+  const reversed = [cloneSource('a3'), cloneSource('a2'), cloneSource('a1')];
+  const prep = offsetPrepFor(forward.concat(reversed));
+  const expected = [{ canonicalId: 'a1', aliasIds: ['a2', 'a3'], contentSHA: sha256Hex(forward[0].text) }];
+  for (const order of [forward, reversed]) {
+    const grouping = groupExactDuplicateSources(order, prep);
+    assert.deepEqual(grouping.groups, expected);
+    assert.deepEqual(grouping.canonical.map(s => s.id), ['a1']);
+  }
+});
+
+test('grouping ON: a different description, text, or reviewed preparation never groups', async () => {
+  const base = cloneSource('doc-a');
+  const otherDescription: RetrievalSource = { ...cloneSource('doc-b'), description: base.description + ' v2' };
+  const otherText: RetrievalSource = { ...cloneSource('doc-c'), text: base.text + '\nextra tail line' };
+  const otherPrep = cloneSource('doc-d');
+  const sources = [base, otherDescription, otherText, otherPrep];
+  const prep = offsetPrepFor(sources);
+  // doc-d is fully reviewed, but its reviewed TEXT differs -> a distinct,
+  // well-prepared source must never be collapsed into the canonical.
+  for (const c of chunkSource(otherPrep.id, otherPrep.text)) {
+    const key = chunkIdentity(c);
+    prep.set(key, { ...prep.get(key)!, reviewedText: 'REVIEWED differently' });
+  }
+  assert.deepEqual(groupExactDuplicateSources(sources, prep).groups, []);
+  assert.deepEqual(groupExactDuplicateSources(sources, prep).canonical.map(s => s.id), ['doc-a', 'doc-b', 'doc-c', 'doc-d']);
+  // A differing policy or status is equally disqualifying.
+  for (const mutation of [{ policy: 'other-policy' }, { status: 'pending' }, { safeHeading: 'Other heading' }]) {
+    const m = offsetPrepFor([base, otherPrep]);
+    for (const c of chunkSource(otherPrep.id, otherPrep.text)) {
+      const key = chunkIdentity(c);
+      m.set(key, { ...m.get(key)!, ...mutation });
+    }
+    assert.deepEqual(groupExactDuplicateSources([base, otherPrep], m).groups, [], JSON.stringify(mutation));
+  }
+});
+
+test('grouping ON: missing or stale preparation can never borrow another approval', async () => {
+  const sources = [cloneSource('doc-a'), cloneSource('doc-b')];
+  const full = offsetPrepFor(sources);
+
+  // (a) helper level: missing, stale, and unreviewed aliases all stay separate.
+  const missing = offsetPrepFor(sources);
+  for (const c of chunkSource('doc-b', sources[1].text)) missing.delete(chunkIdentity(c));
+  assert.deepEqual(groupExactDuplicateSources(sources, missing).groups, []);
+  const stale = offsetPrepFor(sources);
+  const firstB = chunkIdentity(chunkSource('doc-b', sources[1].text)[0]);
+  stale.set(firstB, { ...stale.get(firstB)!, contentSHA: '0'.repeat(64) });
+  assert.deepEqual(groupExactDuplicateSources(sources, stale).groups, []);
+  const unreviewed = offsetPrepFor(sources);
+  unreviewed.set(firstB, { ...unreviewed.get(firstB)!, status: 'pending' });
+  assert.deepEqual(groupExactDuplicateSources(sources, unreviewed).groups, []);
+  // No preparation at all groups nothing, and the wrong policy disqualifies too.
+  assert.deepEqual(groupExactDuplicateSources(sources, undefined).groups, []);
+  assert.deepEqual(groupExactDuplicateSources(sources, full, 'strict-v2').groups, []);
+  assert.deepEqual(groupExactDuplicateSources(sources, full).groups.length, 1, 'the control case does group');
+
+  // (b) run level: the unprepared alias still reaches the preparation gate.
+  const table: Table = {
+    'descriptions:doc-a': ['high', 0.96],
+    'descriptions:doc-b': ['high', 0.95],
+    'bundles:doc-a': ['high', 0.96],
+    'bundles:doc-b': ['high', 0.95]
+  };
+  const { transport } = tableTransport(table);
+  const result = await retrieveSources(sources, REQUEST, {
+    transport, preparation: missing, groupDuplicateSources: true, ...REVIEWED_OPTS
+  });
+  assert.deepEqual(result.duplicateGroups, []);
+  assert.equal(result.status, 'preparation-required');
+  assert.ok(result.pending.length >= 1);
+  assert.ok(result.pending.every(p => p.sourceId === 'doc-b' && p.reason === 'unknown'));
+  assert.ok(result.pending.every(p => !('text' in p)), 'pending passages never carry text');
+});
+
+test('grouping ON with nothing to group leaves the chain identical to the default run', async () => {
+  const sources = [alpha(), beta()];
+  const table: Table = {
+    'descriptions:alpha': ['high', 0.96],
+    'descriptions:beta': ['none', 0.9],
+    'bundles:alpha': ['high', 0.96],
+    'bundles:beta': ['none', 0.9]
+  };
+  const prep = reviewedPrepFor(sources);
+  const plain = await retrieveSources(sources, REQUEST, { transport: tableTransport(table).transport, preparation: prep, ...REVIEWED_OPTS });
+  const grouped = await retrieveSources(sources, REQUEST, {
+    transport: tableTransport(table).transport, preparation: prep, groupDuplicateSources: true, ...REVIEWED_OPTS
+  });
+  assert.equal(grouped.status, plain.status);
+  assert.deepEqual(grouped.duplicateGroups, []);
+  assert.deepEqual(grouped.passages, plain.passages);
+  assert.deepEqual(grouped.sources, plain.sources);
+  // The only trace difference is the local grouping entry.
+  assert.deepEqual(stagesOf(grouped).filter(s => s !== 'duplicate-grouping'), stagesOf(plain));
+  assert.deepEqual(grouped.trace.filter(t => t.stage !== 'duplicate-grouping'), plain.trace);
+});
+
+test('direct grouping helper rejects duplicate source ids before alias removal', () => {
+  const source = alpha();
+  assert.throws(() => groupExactDuplicateSources([source, source], undefined), /Duplicate source id/);
 });
