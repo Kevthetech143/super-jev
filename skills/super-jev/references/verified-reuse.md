@@ -1,22 +1,26 @@
-# Verified reuse: input, output, next action
+# Verified reuse and assisted recovery
 
-The intended agent contract is a registered pointer plus the original question and relevant context. The harness owns snapshot integrity, optional currentness-gate checks, exact-cache lookup and bounded retrieval passes. The caller owns checking that the evidence actually supports the answer.
+The local pointer/cache experiment reuses only explicitly approved answers. Its durable config names a SQLite `db` and reviewed-dataset `registry`; a pointer is a constrained registry binding, never an unrestricted filesystem path. Use `dispatch.py memory --describe` before the opt-in experiment and [the experiment README](../../../experiments/verified-pointer-memory/README.md) for inputs and setup.
 
-## Installed production path
+## Normal reuse
 
-Use `find --list-datasets`, then `find --dataset NAME --request QUESTION`. Dataset names are existing pointers to reviewed material. Verify whose data and how much of it the scope covers. A raw folder path is not reviewed preparation. Follow the sibling retrieval skill for setup/refresh; do not merely change hashes to silence a stale result. Production `find` has no verified-answer cache API yet.
+Submit the registered pointer, original question, principal and relevant context. A fresh retrieval always receives a durable `attemptId`; retain its original raw result and status. A `ready` response has reviewed passages, each with an `evidenceId`, and an approval ticket. Verify a complete answer yourself, then explicitly approve it. The approval evidence list may cite returned passages as `{"evidenceId":"..."}` instead of copying hand quotes. This does not make approval automatic.
 
-## Opt-in pointer/cache experiment
+Cache metadata records whether a ticket/result was resolved by `retrieval` or `agent-assisted`; assisted results also retain `originatingAttemptId`. A cache hit is usable only in its exact question, principal, context, generation and freshness scope.
 
-Only when explicitly configured from the Super Jev checkout, use the front door: `dispatch.py memory --config PRIVATE_CONFIG.json --input REQUEST.json`. Run `dispatch.py memory --describe` for the experiment's machine-readable control panel. See the [experiment README](../../../experiments/verified-pointer-memory/README.md) for one-time registration and input schema. Set `SUPERJEV_REPO` when the dispatcher is installed outside its checkout. It is an opt-in local experiment, is not installed automatically with this skill, and is not production authentication. Never substitute a guessed command when it is unavailable; preserve its structured missing-dependency error.
+## Bounded agent-assisted recovery
 
-For each real queued question:
+This is for useful growth of verified memory, not instant coverage of every new question. It is disabled by default. A trusted operator may set `allowAgentAssist: true` in the persistent experiment config for an authorized normal-search recovery; a principal label is still a local scope label, not authentication.
 
-- Submit pointer, original question, caller identity and relevant project/person/time context once.
-- `verified-cache-hit`: use the cited answer within that context.
-- `refresh-required`: perform a trusted upstream check and refresh the reviewed preparation before retrying a `current` request. `checkedAt` records that whole-scope upstream check; it is not a file modification time, an event/effective date, or proof a domain fact is still true.
-- `ready`: inspect supporting passages and original-source provenance. Submit one `approve` input containing the complete supported answer and exact evidence quotes only after verification. Copy quotes directly from the returned passage JSON, preserving exact text and newlines. Do not quote another checkout/version or outside the returned evidence. Save the complete raw response before acting. Partial evidence, model confidence and repeated agreement are insufficient.
-- `preparation-required` or `unknown-pointer`: retain the pending question and repair/register the approved scope through the setup workflow. Report incomplete coverage; do not search a different person's data.
-- `no-match`, `refused`, `error` or access denial: preserve the outcome and record a miss when appropriate. No-match is not proof of absence. Continue with other queued questions; retry this item only with a justified repair or explicitly designed diagnostic test.
+For a partial, `no-match`, or `refused` original result, inspect it with `attempt(attemptId, principal)`. Inspect registered reviewed preparation with `sources(pointer, principal, offset?, limit?)`; its default limit is 25 and maximum is 100. Independently investigate only within that authorized registered dataset. Select concrete reviewed lines, then call:
 
-A cheap agent may perform review within its authorized scope; it does not gain authority to self-approve new private source material or relax verification. Include the relevant person, date, version and record status in the question; context only scopes the exact cache key and is not passed to the retrieval provider. A completed old test is not the same as a scheduled new test; a medication list recorded on a date is not a reconciled current list; a software fix needs the named version; and a web page's published/updated date is not an upstream freshness check. Do not infer automatic supersession from a newer record. Contradictory evidence blocks approval until resolved. Keep a durable queue checkpoint and a time/call budget. Stop on queue exhaustion, cancellation or budget exhaustion. The prototype persists cache and tickets, but has no autonomous queue scheduler or production authentication boundary; do not promise unattended hours of work merely because this skill describes the loop. Consult experiment results before claiming a reliability or cost benefit.
+```text
+assist(attemptId, principal, reason,
+       references:[{sourceId, startLine, endLine}])
+```
+
+Assistance accepts only registered, reviewed preparation. It rechecks principal scope, pointer generation, source hashes and freshness, and returns a new `ready` ticket for explicit agent review. It neither retrieves raw files nor approves/trains on an answer. Verify the full answer and approve returned `evidenceId` values only when they support it. Absent or conflicting sources remain unresolved.
+
+Use at most one assistance attempt per question. Then record the unresolved result unless there is a concrete, correctable input issue. An unregistered source needs reviewed onboarding, refresh and a new original attempt; it never bypasses the registry. The database keeps original attempt status/trace metadata across pointer replacement/removal; keep full raw responses and resolution receipts in your private work artifacts. Approved resolution metadata stays with the cache entry, which invalidation can remove. Old-generation attempts remain in the database for trusted audit but cannot be read through a newly registered pointer.
+
+`refresh-required`, `preparation-required`, access denial, stale bindings and expired tickets stop the loop. Refresh/review through the ordinary lifecycle and submit a new attempt when appropriate. Never substitute ordinary search, another model, a different person's scope, or a new raw path as hidden recovery.

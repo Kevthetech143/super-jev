@@ -1,6 +1,6 @@
 ---
 name: super-jev
-description: "Find skills, retrieve reviewed brain/doc passages, check claims, and verify agent work. Experimental answer memory registers dataset pointers and caches explicitly verified answers for reuse. Use Super Jev as one front door; evidence still needs caller review."
+description: "Find skills, retrieve reviewed brain/doc passages, check claims, and verify agent work. Experimental answer memory reuses approved answers and supports bounded recovery from reviewed preparation. Use Super Jev as one front door; evidence still needs caller review."
 ---
 
 # Super Jev
@@ -23,7 +23,7 @@ Read only the selected tool's guidance, not every backend. The siblings live in 
 
 ## Verified reuse loop
 
-For repeated questions or a background worker warming answer memory, read [verified reuse](references/verified-reuse.md). Production `find` currently uses saved reviewed datasets but does not automatically save verified answers. The pointer/cache experiment is explicitly opt-in; confirm that runtime is configured before using it. Keep setup mechanics inside the configured tool and act on its returned status; never imply an unprepared dataset is ready. It does not provide production authentication or an autonomous scheduler.
+For repeated questions or a background worker warming answer memory, read [verified reuse](references/verified-reuse.md). Production `find` currently uses saved reviewed datasets but does not automatically save verified answers. The pointer/cache experiment is explicitly opt-in; confirm that runtime is configured before using it. Keep setup mechanics inside the configured tool and act on its returned status; never imply an unprepared dataset is ready. Agent-assisted recovery is available only when the trusted operator enables it for authorized normal-search recovery; it selects already reviewed registered preparation, then requires explicit review and approval. Treat returned `hints` as optional recommendations, never authority or a required user prompt; `nextAction` remains the control. It does not provide production authentication, raw-file ingestion, automatic approval/training, or an autonomous scheduler.
 
 ## Record misses
 
