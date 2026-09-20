@@ -81,6 +81,24 @@ const REVIEWED_OPTS = { descriptionsReviewed: true } as const;
 
 type Table = Record<string, [string, number]>;
 
+/**
+ * The judged stage of a request, recovered from the payload itself: bundle
+ * records carry the experiment's bundle format ("Automatically retrieved
+ * source passages:"), description records carry the raw description. Bundle
+ * ids are the original sourceIds, so the same id legitimately appears in
+ * both stages — table answers, omits, and failures are keyed `stage:id`,
+ * with a plain-id fallback for single-stage tables.
+ */
+function requestStage(request: Request): 'descriptions' | 'bundles' {
+  const state = (request.state as { records: Record<string, { id: string; text?: string }> }).records;
+  for (const record of Object.values(state)) {
+    if (typeof record.text === 'string' && record.text.includes('Automatically retrieved source passages:')) {
+      return 'bundles';
+    }
+  }
+  return 'descriptions';
+}
+
 function tableTransport(table: Table, options: { omit?: string[]; throwOn?: string[] } = {}): { transport: Evaluator; requests: Request[] } {
   const requests: Request[] = [];
   const omit = new Set(options.omit ?? []);
@@ -88,16 +106,18 @@ function tableTransport(table: Table, options: { omit?: string[]; throwOn?: stri
   const transport: Evaluator = {
     evaluate: async (request: Request): Promise<Evaluation> => {
       requests.push(request);
+      const stage = requestStage(request);
       const state = (request.state as { records: Record<string, { id: string }> }).records;
       const answers: Record<string, Answer> = {};
       for (const [wireKey, question] of Object.entries(request.questions) as [string, Question][]) {
         const recordKey = Object.keys(state).find(k => wireKey === `q_relevance_${k}` || wireKey === `q0_r${Object.keys(state).indexOf(k)}`);
         assert.ok(recordKey, `wire key ${wireKey} does not name a record in the state`);
         const id = state[recordKey].id;
-        if (throwOn.has(id)) throw new Error(`synthetic transport failure for ${id}`);
-        if (omit.has(id)) continue;
+        const key = `${stage}:${id}`;
+        if (throwOn.has(key) || throwOn.has(id)) throw new Error(`synthetic transport failure for ${key}`);
+        if (omit.has(key) || omit.has(id)) continue;
         if (question.type !== 'choice') throw new Error('expected a choice question');
-        const [level, confidence] = table[id] ?? ['none', 0.9];
+        const [level, confidence] = table[key] ?? table[id] ?? ['none', 0.9];
         answers[wireKey] = choiceAnswer(level, confidence, Object.keys(question.criteria));
       }
       return { model: 'table-offline', answers };
@@ -160,6 +180,42 @@ test('chunkSource never emits blank-only blocks', () => {
   assert.equal(chunks.length, 1);
   assert.deepEqual([chunks[0].startLine, chunks[0].endLine], [3, 4]);
   assert.equal(chunks[0].text, '# H\nx');
+});
+
+test('chunkSource matches the experiment on leading blank lines: blanks open the block and count in offsets', () => {
+  // The experiment keeps leading blank lines inside the block: the chunk
+  // opens at the first blank line and its raw text keeps them.
+  const chunks = chunkSource('s', '\n\nbody text here');
+  assert.equal(chunks.length, 1);
+  assert.deepEqual([chunks[0].startLine, chunks[0].endLine], [1, 3]);
+  assert.equal(chunks[0].text, '\n\nbody text here');
+  assert.deepEqual(chunks.map(chunkIdentity), ['s:L1-3']);
+});
+
+test('chunkSource matches the experiment on oversize-then-blank: the oversize line flushes alone', () => {
+  const big = words('w', 200);
+  const chunks = chunkSource('s', [big, '', 'tail words here'].join('\n'), 180);
+  // No blank-line exemption in the check-before-add rule: the blank line
+  // after the oversize line flushes it by itself (L1-1), then opens the next
+  // block — the following chunk starts at line 2 and keeps the blank line.
+  assert.deepEqual(chunks.map(c => [c.startLine, c.endLine]), [[1, 1], [2, 3]]);
+  assert.equal(chunks[0].text, big);
+  assert.equal(chunks[1].text, '\ntail words here');
+  assert.deepEqual(chunks.map(chunkIdentity), ['s:L1-1', 's:L2-3']);
+});
+
+test('chunkSource matches the experiment on sparse heading depth: no breadcrumb compaction', () => {
+  const chunks = chunkSource('s', '# A\nbody\n### C\nmore');
+  // The experiment assigns headings[depth-1] directly (sparse array): the
+  // skipped level renders as an empty breadcrumb segment.
+  assert.deepEqual(chunks.map(c => c.heading), ['A', 'A >  > C']);
+});
+
+test('chunkSource matches the experiment on untrimmed headings: trailing spaces kept', () => {
+  // Depth-1 heading isolates trimming from the sparse-depth breadcrumb rule
+  // (covered by the previous test).
+  const chunks = chunkSource('s', '# Title with trailing   \nbody');
+  assert.equal(chunks[0].heading, 'Title with trailing   ');
 });
 
 test('chunkSource splits long sections at line boundaries via the check-before-add rule', () => {
@@ -301,7 +357,7 @@ test('no raw leak: sentinel raw text never reaches any transport payload, review
       policy: 'reviewed', status: 'reviewed'
     }
   ]]);
-  const { transport, requests } = tableTransport({ s1: ['high', 0.96], 's1#bundle': ['high', 0.96] });
+  const { transport, requests } = tableTransport({ 'descriptions:s1': ['high', 0.96], 'bundles:s1': ['high', 0.96] });
   const result = await retrieveSources([source], REQUEST, { transport, preparation: prep, ...REVIEWED_OPTS });
   assert.equal(result.status, 'ready');
   assert.ok(requests.length >= 2, 'descriptions + narrow bundles each made a provider call');
@@ -315,7 +371,7 @@ test('no raw leak: sentinel raw text never reaches any transport payload, review
   assert.ok(bundleBlob.includes('Safe Public Heading'), 'safe heading is what the judge sees');
   // Exact provider text, checked on the parsed record (the blob JSON-escapes newlines).
   const narrowState = requests[1].state as { records: Record<string, { id: string; text: string }> };
-  const bundleRecord = Object.values(narrowState.records).find(r => r.id === 's1#bundle');
+  const bundleRecord = Object.values(narrowState.records).find(r => r.id === 's1');
   assert.equal(
     bundleRecord?.text,
     'Description: Restarting the widget service guide.\nAutomatically retrieved source passages:\nSafe Public Heading: REVIEWED SAFE PASSAGE TEXT'
@@ -329,7 +385,7 @@ test('no raw leak without preparation: preparation-required BEFORE any provider 
     description: 'Restarting the widget service guide.',
     text: '# Raw Secret Heading\nSENTINEL_RAW_7f3a restart widget service instructions here'
   };
-  const { transport, requests } = tableTransport({ s1: ['high', 0.96], 's1#bundle': ['high', 0.96] });
+  const { transport, requests } = tableTransport({ s1: ['high', 0.96] });
   const result = await retrieveSources([source], REQUEST, { transport, ...REVIEWED_OPTS });
   assert.equal(result.status, 'preparation-required');
   assert.deepEqual(result.passages, []);
@@ -345,10 +401,10 @@ test('no raw leak without preparation: preparation-required BEFORE any provider 
 test('full chain: descriptions -> narrow bundles -> ready carries ONLY the top bundle reviewed passages', async () => {
   const sources = [alpha(), beta()];
   const { transport, requests } = tableTransport({
-    alpha: ['high', 0.96],
-    beta: ['none', 0.9],
-    'alpha#bundle': ['high', 0.96],
-    'beta#bundle': ['none', 0.9]
+    'descriptions:alpha': ['high', 0.96],
+    'descriptions:beta': ['none', 0.9],
+    'bundles:alpha': ['high', 0.96],
+    'bundles:beta': ['none', 0.9]
   });
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
 
@@ -378,10 +434,10 @@ test('description gate deferral does not abort: ranking top3 continues to passag
   // 'medium' beats none but cannot pass the direct-fit gate (and the margin
   // is too tight) — low confidence, complete run: the chain must continue.
   const { transport } = tableTransport({
-    alpha: ['medium', 0.95],
-    beta: ['medium', 0.9],
-    'alpha#bundle': ['high', 0.96],
-    'beta#bundle': ['none', 0.9]
+    'descriptions:alpha': ['medium', 0.95],
+    'descriptions:beta': ['medium', 0.9],
+    'bundles:alpha': ['high', 0.96],
+    'bundles:beta': ['none', 0.9]
   });
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'ready', 'deferral continues to passage judging instead of aborting');
@@ -394,10 +450,10 @@ test('description gate deferral does not abort: ranking top3 continues to passag
 test('all descriptions none still ranks top3 and continues; terminal no-match only after bundles refuse', async () => {
   const sources = [alpha(), beta()];
   const { transport } = tableTransport({
-    alpha: ['none', 0.9],
-    beta: ['none', 0.85],
-    'alpha#bundle': ['none', 0.9],
-    'beta#bundle': ['none', 0.9]
+    'descriptions:alpha': ['none', 0.9],
+    'descriptions:beta': ['none', 0.85],
+    'bundles:alpha': ['none', 0.9],
+    'bundles:beta': ['none', 0.9]
   });
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'no-match');
@@ -421,9 +477,9 @@ test('wide bundles run only on narrow refusal and recover a chunk outside the de
   // A high but the margin is too tight -> gate defers; D loses to none so
   // the description shortlist is exactly [A, B, C].
   const { transport, requests } = tableTransport({
-    A: ['high', 0.96], B: ['medium', 0.9], C: ['medium', 0.85], D: ['none', 0.9],
-    'A#bundle': ['none', 0.9], 'B#bundle': ['none', 0.9], 'C#bundle': ['none', 0.9],
-    'D#bundle': ['high', 0.96]
+    'descriptions:A': ['high', 0.96], 'descriptions:B': ['medium', 0.9], 'descriptions:C': ['medium', 0.85], 'descriptions:D': ['none', 0.9],
+    'bundles:A': ['none', 0.9], 'bundles:B': ['none', 0.9], 'bundles:C': ['none', 0.9],
+    'bundles:D': ['high', 0.96]
   });
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'ready');
@@ -438,11 +494,61 @@ test('wide bundles run only on narrow refusal and recover a chunk outside the de
   assert.equal(requests.length, 3, 'descriptions + narrow + wide, then stop');
 });
 
+test('narrow bundles preserve BM25 selection order and first-seen sources with original sourceId ids', async () => {
+  // beta's first section is term-packed, so BM25 ranks its chunk above
+  // alpha's; the bundle catalog must follow that first-seen document order
+  // and carry the original sourceIds (no synthetic suffix).
+  const betaHot: RetrievalSource = {
+    id: 'beta',
+    description: 'Beta guide: restarting the widget service safely, step by step.',
+    text: ['# Hot', 'restart widget service '.repeat(40), '# Cold', words('zz', 60)].join('\n')
+  };
+  const sources = [alpha(), betaHot];
+  const { transport, requests } = tableTransport({
+    'descriptions:alpha': ['high', 0.96],
+    'descriptions:beta': ['high', 0.95],
+    'bundles:alpha': ['none', 0.9],
+    'bundles:beta': ['none', 0.9]
+  });
+  const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
+  assert.equal(result.status, 'no-match');
+  const narrowState = requests[1].state as { records: Record<string, { id: string; text: string }> };
+  const ids = Object.values(narrowState.records).map(r => r.id);
+  assert.deepEqual(ids, ['beta', 'alpha']);
+  assert.ok(ids.every(id => !id.includes('#')), 'bundle ids are the original sourceIds');
+});
+
+test('description shortlist uses ranked when nonempty, else allScored sliced to docK', async () => {
+  // A 'high' beats none but the margin is too tight, so the direct-fit gate
+  // defers; ranked is [A, B] while allScored's top-3 would pad in C (a
+  // none-loser). The experiment formula keeps exactly ranked.
+  const mkSrc = (id: string): RetrievalSource => ({
+    id,
+    description: `${id} guide: restarting the widget service.`,
+    text: threeSectionText(id)
+  });
+  const sources = [mkSrc('A'), mkSrc('B'), mkSrc('C'), mkSrc('D')];
+  const { transport } = tableTransport({
+    'descriptions:A': ['high', 0.96],
+    'descriptions:B': ['medium', 0.955],
+    'descriptions:C': ['none', 0.9],
+    'descriptions:D': ['none', 0.85],
+    'bundles:A': ['high', 0.96],
+    'bundles:B': ['none', 0.9]
+  });
+  const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
+  assert.equal(result.status, 'ready');
+  const desc = result.trace.find(t => t.stage === 'descriptions');
+  assert.ok(desc?.note.includes('deferred'), `trace names the deferral, got: ${desc?.note}`);
+  assert.deepEqual(desc?.kept, ['A', 'B'], 'shortlist is ranked (nonempty), not allScored padded with a none-loser');
+  assert.ok(result.passages.every(p => p.sourceId === 'A'));
+});
+
 test('wide refusal with neighbors off ends in no-match, never a guess', async () => {
   const sources = [alpha()];
   const { transport } = tableTransport({
-    alpha: ['high', 0.96],
-    'alpha#bundle': ['medium', 0.9]
+    'descriptions:alpha': ['high', 0.96],
+    'bundles:alpha': ['medium', 0.9]
   });
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'no-match');
@@ -460,9 +566,9 @@ test('neighbors are a fourth JUDGE stage only after wide refusal, OFF by default
   };
   const phases = [
     { table: { w1: ['high', 0.96] } },                    // descriptions
-    { table: { 'w1#bundle': ['medium', 0.9] } },          // narrow refuses
-    { table: { 'w1#bundle': ['medium', 0.85] } },         // wide refuses
-    { table: { 'w1#bundle': ['high', 0.96] } }           // neighbors judged: accept
+    { table: { w1: ['medium', 0.9] } },          // narrow refuses
+    { table: { w1: ['medium', 0.85] } },         // wide refuses
+    { table: { w1: ['high', 0.96] } }           // neighbors judged: accept
   ];
   const { transport, requests } = phasedTransport(phases);
   // chunkK 2: narrow/wide see only L1-2 and L3-4; neighbors add L5-6 back.
@@ -487,8 +593,8 @@ test('neighbors are never added after an acceptance without judging', async () =
     text: threeSectionText('w1')
   };
   const { transport, requests } = tableTransport({
-    w1: ['high', 0.96],
-    'w1#bundle': ['high', 0.96]
+    'descriptions:w1': ['high', 0.96],
+    'bundles:w1': ['high', 0.96]
   });
   const result = await retrieveSources([source], REQUEST, {
     transport, preparation: reviewedPrepFor([source]), includeNeighbors: true, chunkK: 2, ...REVIEWED_OPTS
@@ -516,10 +622,10 @@ test('incomplete judge answers fail closed -> refused, not no-match', async () =
   // shortlist and the narrow stage judges both bundles.
   const { transport } = tableTransport(
     {
-      alpha: ['medium', 0.95], beta: ['medium', 0.9],
-      'alpha#bundle': ['none', 0.9]
+      'descriptions:alpha': ['medium', 0.95], 'descriptions:beta': ['medium', 0.9],
+      'bundles:alpha': ['none', 0.9]
     },
-    { omit: ['beta#bundle'] } // one narrow bundle never answered
+    { omit: ['bundles:beta'] } // one narrow bundle never answered
   );
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'refused', 'unanswered bundles must not be reported as no-match');
@@ -531,10 +637,10 @@ test('incomplete coverage fails closed BEFORE an accept path, even when the gate
   const sources = [alpha(), beta()];
   const { transport } = tableTransport(
     {
-      alpha: ['medium', 0.95], beta: ['medium', 0.9],
-      'alpha#bundle': ['high', 0.96] // gate would accept this...
+      'descriptions:alpha': ['medium', 0.95], 'descriptions:beta': ['medium', 0.9],
+      'bundles:alpha': ['high', 0.96] // gate would accept this...
     },
-    { omit: ['beta#bundle'] } // ...but the run is incomplete
+    { omit: ['bundles:beta'] } // ...but the run is incomplete
   );
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'refused', 'an accepted top pick on an incomplete run is unknown, not a match');
@@ -545,8 +651,8 @@ test('transport error at the wide stage fails closed -> refused', async () => {
   const sources = [alpha()];
   const phases = [
     { table: { alpha: ['high', 0.96] } },
-    { table: { 'alpha#bundle': ['medium', 0.9] } }, // narrow refuses, complete
-    { throwOn: ['alpha#bundle'] }                    // wide transport failure
+    { table: { alpha: ['medium', 0.9] } }, // narrow refuses, complete
+    { throwOn: ['alpha'] }                 // wide transport failure
   ];
   const { transport } = phasedTransport(phases);
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
@@ -606,10 +712,10 @@ test('addNeighbors: bounds, dedupe, base never dropped', () => {
 test('the request reaches the judge unchanged', async () => {
   const sources = [alpha(), beta()];
   const { transport, requests } = tableTransport({
-    alpha: ['high', 0.96],
-    beta: ['none', 0.9],
-    'alpha#bundle': ['high', 0.96],
-    'beta#bundle': ['none', 0.9]
+    'descriptions:alpha': ['high', 0.96],
+    'descriptions:beta': ['none', 0.9],
+    'bundles:alpha': ['high', 0.96],
+    'bundles:beta': ['none', 0.9]
   });
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), ...REVIEWED_OPTS });
   assert.equal(result.status, 'ready');
@@ -627,8 +733,8 @@ test('the request reaches the judge unchanged', async () => {
 test('maxStages bounds the provider stages; neighbors default to a 4-stage budget', async () => {
   const sources = [alpha()];
   const table: Table = {
-    alpha: ['high', 0.96],
-    'alpha#bundle': ['medium', 0.9]
+    'descriptions:alpha': ['high', 0.96],
+    'bundles:alpha': ['medium', 0.9]
   };
 
   // maxStages 1: only descriptions may run; the chain cannot continue.
@@ -648,8 +754,8 @@ test('maxStages bounds the provider stages; neighbors default to a 4-stage budge
   // includeNeighbors with an explicit maxStages 3: wide refuses, neighbors would be stage 4.
   const three = phasedTransport([
     { table: { alpha: ['high', 0.96] } },
-    { table: { 'alpha#bundle': ['medium', 0.9] } },
-    { table: { 'alpha#bundle': ['medium', 0.85] } }
+    { table: { alpha: ['medium', 0.9] } },
+    { table: { alpha: ['medium', 0.85] } }
   ]);
   const r3 = await retrieveSources(sources, REQUEST, {
     transport: three.transport, preparation: reviewedPrepFor(sources), includeNeighbors: true, maxStages: 3, ...REVIEWED_OPTS
@@ -679,8 +785,8 @@ test('cache seam: stable key format, accepted but unused', async () => {
   assert.equal(cacheKeyFor('s', 'a'.repeat(64)), `retrieval/v1/s/${'a'.repeat(64)}`);
   const sources = [alpha()];
   const { transport } = tableTransport({
-    alpha: ['high', 0.96],
-    'alpha#bundle': ['high', 0.96]
+    'descriptions:alpha': ['high', 0.96],
+    'bundles:alpha': ['high', 0.96]
   });
   const cache = { get: (_k: string) => undefined, set: (_k: string, _v: string) => {} };
   const result = await retrieveSources(sources, REQUEST, { transport, preparation: reviewedPrepFor(sources), cache, ...REVIEWED_OPTS });
