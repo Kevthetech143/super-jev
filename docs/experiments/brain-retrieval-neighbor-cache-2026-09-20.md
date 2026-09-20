@@ -1,6 +1,6 @@
 # Neighbor fallback probe and prepared-artifact cache experiment
 
-Status: bounded development probes on the existing 20-source collection; not deployed, no defaults changed. These are post-hoc and synthetic exercises, not fresh-question validation.
+Status: bounded development probes on the existing 20-source collection; not deployed, no defaults changed. The neighbor probe reuses earlier questions; the cache probe uses local copies of real source records. Neither is fresh-question validation.
 
 ## Neighbor probe: post-hoc, reused questions
 
