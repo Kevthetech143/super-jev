@@ -37,6 +37,28 @@ def describe():
     """Return supported options without needing an account or configuration."""
     return {
         'status': 'ok', 'stage': 'local-experiment', 'actions': ACTIONS,
+        'connectorGuide': 'skills/super-jev/references/connectors.md',
+        'connectorStatusMeaning': 'Supported workflows, not connection health; inspect configured roots and pointer status for readiness.',
+        'sourceConnectors': {
+            'Skills': {'availability': 'configured-local-roots', 'tool': 'skills'},
+            'Brain': {'availability': 'reviewed-local-files', 'tools': ['find', 'memory']},
+            'Documents': {'availability': 'reviewed-local-files', 'tools': ['find', 'memory']},
+            'Repo': {'availability': 'reviewed-local-snapshot', 'tools': ['find', 'memory'],
+                     'automaticSync': False},
+            'Database': {'availability': 'proposed', 'directIngestion': False},
+            'Website': {'availability': 'proposed', 'directIngestion': False},
+        },
+        'agentSetupWorkflows': {
+            'mode': 'agent-guided; these are not API actions',
+            'options': ['connect-existing-data', 'start-new-collection',
+                        'define-custom-connector', 'refresh-reviewed-connection'],
+            'customNames': True,
+            'existingData': 'Preserve originals; optimize a reviewed searchable view.',
+            'newData': 'Optional INDEX.md and records/ with stable IDs, descriptions and paths; skills retain SKILL.md metadata.',
+            'onboarding': 'Agent preparation and review are required before dataset/pointer registration.',
+            'refresh': 'Manual preparation and re-registration; no automatic fetch/watch service.',
+            'extension': 'Reuse reviewed datasets or implement a checked trusted retrievalCommand adapter; no automatic connector plugin registry.',
+        },
         'settings': DEFAULTS, 'optionalSearchFields': ['context', 'freshness'],
         'optionalConfigDefaults': {'allowAgentAssist': False},
         'assistLimits': {'maxPreparations': 20, 'maxReviewedCharacters': 60000},

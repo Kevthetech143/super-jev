@@ -7,8 +7,8 @@ import subprocess
 import sys
 
 TOOLS = {
-    "skills": "Find a skill",
-    "find": "Find information in reviewed brains or documents",
+    "skills": "Skills connector: find a skill",
+    "find": "Brain/Documents/Repo connectors: find reviewed local evidence",
     "check": "Check a claim against evidence",
     "verify": "Verify an agent's work",
     "memory": "Use the opt-in experimental verified-reuse pointer/cache",
@@ -50,7 +50,11 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
 
 def main(args: list[str]) -> int:
     if not args or args[0] in ("tools", "--help", "-h"):
-        print(json.dumps({"tools": TOOLS}))
+        print(json.dumps({"tools": TOOLS, "setupGuide": "references/connectors.md",
+                          "setupWorkflows": {"execution": "agent-guided, not CLI commands",
+                                             "options": ["connect existing data", "start a new collection",
+                                                         "define a custom connector", "refresh reviewed data"]},
+                          "controlPanel": "memory --describe"}))
         return 0
     tool, *rest = args
     if tool not in TOOLS:
