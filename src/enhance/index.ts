@@ -27,3 +27,13 @@ export type {
 } from './types.ts';
 export { PreparedCache, contentShaOf, artifactDigestOf, deriveCacheKey, entryDigest, makeReviewReceipt, PREPARED_CACHE_SCHEMA, CACHE_KEY_DOMAIN, CACHE_DIR_MODE, CACHE_FILE_MODE } from './prepared-cache.ts';
 export type { PreparedArtifact, CacheBindings, ReviewReceipt, CacheMissReason, CacheLookup } from './prepared-cache.ts';
+export {
+  RetrievalError, DEFAULT_CHUNK_TARGET_WORDS, chunkIdentity, chunkSource, assertChunkOffsets,
+  bm25EntryText, topChunksGlobal, preparePassages, bundleProviderText,
+  cacheKeyFor, validateSelection, addNeighbors, retrieveSources
+} from './retrieval.ts';
+export type {
+  RetrievalSource, SourceChunk, PreparationRecord, PreparationSource,
+  PreparedPassage, UnpreparedPassage, PassageBundle, RetrievalCache, RetrievalOptions,
+  RetrievalStatus, StageTrace, RetrievalResult
+} from './retrieval.ts';
