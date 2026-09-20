@@ -38,6 +38,10 @@ def describe():
     return {
         'status': 'ok', 'stage': 'local-experiment', 'actions': ACTIONS,
         'connectorGuide': 'skills/super-jev/references/connectors.md',
+        'setupHelp': {'command': 'dispatch.py help --question QUESTION',
+                      'topicCommand': 'dispatch.py help --topic TOPIC',
+                      'kind': 'bundled setup help, not user-data answer memory',
+                      'needsDataOrProviderKey': False},
         'connectorStatusMeaning': 'Supported workflows, not connection health; inspect configured roots and pointer status for readiness.',
         'sourceConnectors': {
             'Skills': {'availability': 'configured-local-roots', 'tool': 'skills'},

@@ -11,6 +11,8 @@ A connector is the source-specific way an agent connects data to Super Jev. Use 
 | Database | Proposed | No direct database ingestion connector. SQLite answer storage is not a database-source connector. An authorized reviewed export can use Documents, but say it is an export. |
 | Website/links | Proposed | No direct URL ingestion/refresh connector. An authorized reviewed local copy can use Documents, but say it is a copy, not a live connection. |
 
+For common setup questions, use `dispatch.py help --question "your question"`; choose `help --topic TOPIC` for a maintained exact topic answer. Help ships with the skill and does not require a connection, key or fresh Jev call. It is not a guarantee of coverage for every how-to question. The guide below supplies the detailed workflow when needed.
+
 ## User-defined connectors and names
 
 Skills, Brain, Documents and Repo are convenient starting labels, not a closed list. Users may name a connector for their own source or purpose, such as “Workshop notes” or “Customer handbook.” Use their chosen name in conversation and a valid stable dataset/pointer identifier in tool inputs; a display name is never an executable command.

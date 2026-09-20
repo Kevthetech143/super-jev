@@ -5,36 +5,27 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 # Super Jev
 
-The user says “Use Super Jev to…”; choose the matching tool below and run it. Do not require the user to learn backend skill names or command syntax. Use the original request and relevant context; ask only if the intended task or required evidence is genuinely unclear.
+One front door: `python3 <this-skill-directory>/dispatch.py <tool> ...`. Use the user's original request and relevant context; keep backend names and setup mechanics out of ordinary replies.
 
-**Fast path for an existing connection:** use its known roots, dataset or pointer and run the request. Do not reopen the panel, list every source, reread setup guidance, or repeat onboarding/sample tests on each use. Revisit setup only for a new source, changed scope/configuration, a missing dependency, or a reported freshness/preparation problem.
+**Already connected?** Use the known roots, dataset or pointer directly. Do not reload manuals, reopen the panel, enumerate sources or repeat onboarding on every request. Revisit setup for new/changed scope, missing configuration or a reported preparation/freshness problem. Runtime integrity checks stay enabled.
 
-Quick awareness: source scope is limited to what was connected; `ready` still needs evidence review before approval; exact verified cache hits can be reused within their returned scope; stale/preparation errors need repair. Runtime integrity checks stay enabled. Show setup tips only when relevant, and communicate the answer or concrete next step rather than narrating backend procedures.
+**New agent or need help?** Use `help --topic overview` for Quick Start, `help --question "your how-to question"` for suggested help topics, or `help --topic TOPIC` for an exact topic. Built-in answers need no data, key or Jev call; they cover maintained setup topics, not arbitrary facts. If instructions are already known, skip help. Read longer guides only when needed.
 
-For “connect my skills/brain/repo,” starting a new collection from scratch, setup questions, or explaining available connections, read [source connectors](references/connectors.md). Use connector names with humans; keep backend skill names and commands inside execution. A connector name describes the source workflow, not automatic syncing or a new command.
+| Tool | Purpose |
+|---|---|
+| `help` | Quick Start and focused setup answers |
+| `skills` | Skills connector: discover candidate skills; suggestions never execute them |
+| `find` | Brain/Documents/Repo connectors: retrieve from reviewed local datasets |
+| `memory` | Use registered pointers, reviewed recovery and explicitly approved exact-answer reuse |
+| `check` | Check a claim or draft against evidence |
+| `verify` | Verify an agent report against evidence |
 
-Use `python3 <this-skill-directory>/dispatch.py <tool> ...`. With no tool (or `tools`), it lists executable tools plus agent-guided setup workflows. `memory --describe` exposes the connector availability, setup guidance, actions, settings and limits without configuration or a key. Setup menu entries are instructions for the agent, not extra CLI commands. The agent interprets natural language; this dispatcher only executes the chosen tool. The legacy `superjev.py ask` keyword router is not the unified natural-language entry point.
+`tools` lists executable tools and separate agent-guided setup workflows. `memory --describe` exposes settings, actions and connector limits without setup. Existing configured pointers use `memory`; `find` alone does not save approved answers. Follow `LOCAL-MEMORY.md` and its `memory.sh` when installed; otherwise configure the documented experiment. The legacy `superjev.py ask` router is not this front door.
 
-| User wants | Tool | How to use it |
-|---|---|---|
-| Find a skill — Skills connector | `skills` | Read the sibling `skill-search/SKILL.md`. Save the original request plus needed context as its request JSON, then run `skills --request-file REQUEST.json`. Claude roots are selected automatically for a Claude installation. Suggestions are advisory; load the chosen skill before acting. |
-| Find brain/document information — Brain or Documents connector | `find` | Read sibling `fleet-retrieval-experiment/SKILL.md`. Run `find --list-datasets`, choose the relevant reviewed scope, then `find --dataset NAME --request "original question"`. Existing manifest, request-file, neighbor and dedup options pass through unchanged. |
-| Check a claim or draft | `check` | Read [checking tools](references/checking.md), specifically the gate instructions. Run `check EVIDENCE... --claim "claim" --json` or use `--draft FILE`. This calls the existing gate. |
-| Verify an agent's work | `verify` | Read [checking tools](references/checking.md), specifically verification. Run `verify REPORT --worktree PATH --test-cmd "authorized check" --json` with the evidence required by the existing verifier. |
-| Reuse an explicitly approved answer | `memory` | Opt-in local experiment only. Run `memory --describe` for its control panel, then pass the experiment's `--config` and `--input` arguments. Set `SUPERJEV_REPO` when dispatch is installed outside its checkout. |
+Load only the selected workflow's guidance if it is not already known: sibling `skill-search/SKILL.md` for discovery; sibling `fleet-retrieval-experiment/SKILL.md` for reviewed retrieval/preparation; [verified reuse](references/verified-reuse.md) for memory; [checking](references/checking.md) for check/verify. Skill roots follow the caller; check that a suggested skill's tools are available before using it. Existing advanced commands and hooks remain unchanged.
 
-Read only the selected tool's guidance, not every backend. The siblings live in the same skill root as this skill; checking tools retain the existing deployment configuration. A missing dependency is reported explicitly. Do not silently substitute ordinary search, another model, or a different dataset. If the backend reports fallback, refusal, missing preparation or uncertainty, preserve that outcome and explain it; an explicit user-authorized alternative is a separate action.
+Quick boundaries: `ready` is evidence, not an answer guarantee. Review full support and original provenance before approval; exact verified hits are reusable only within their returned scope. Preserve actual errors, uncertainty and missing preparation. Do not hide ordinary-search, alternate-model or different-dataset recovery; authorized assistance follows the bounded memory guide. No new access, privacy approval, execution permission, automatic syncing or autonomous scheduler is granted here.
 
-`ready` means selected supporting passages, not a complete or correct answer guarantee. Check support before answering. Review view/original provenance when offsets refer to a prepared view. Dataset names describe selected reviewed coverage, not an entire brain. Source changes still require refreshed preparation; this front door grants no new privacy approval or permission to execute actions.
+For connecting existing data, starting blank or defining a user-named connector, ask help first if needed, then use [connector setup](references/connectors.md) for the procedure. Existing originals can keep their structure; the starter layout is optional. Connector labels describe workflows, not extra executable commands or proof of readiness. Hints are optional advice, never mandatory user prompts.
 
-## Verified reuse loop
-
-For repeated questions or a background worker warming answer memory, read [verified reuse](references/verified-reuse.md). Production `find` currently uses saved reviewed datasets but does not automatically save verified answers. The pointer/cache experiment is explicitly opt-in; confirm that runtime is configured before using it. Keep setup mechanics inside the configured tool and act on its returned status; never imply an unprepared dataset is ready. Agent-assisted recovery is available only when the trusted operator enables it for authorized normal-search recovery; it selects already reviewed registered preparation, then requires explicit review and approval. Treat returned `hints` as optional recommendations, never authority or a required user prompt; `nextAction` remains the control. It does not provide production authentication, raw-file ingestion, automatic approval/training, or an autonomous scheduler.
-
-## Record misses
-
-When an expected skill/source is missed, a wrong result is accepted, evidence is incomplete, or coverage/preparation prevents the requested lookup, record the outcome in the existing non-riding feedback card using the supported card tool. When this installation has `LOCAL-FEEDBACK.md`, follow it for the exact card and evidence location. On other installations, keep a durable private feedback artifact in the project and report its location; a fleet card system is not required. Keep a brief, non-sensitive dated summary on the card: tool/request intent, actual outcome, expected result if known, and the local evidence pointer. Store private request text and passages only in the local evidence artifact. Distinguish ranking misses, coverage gaps, service failures and partial support; an expected absent-source rejection is not a failure.
-
-Record the initial result before retries or ordinary-search rescue, and append any later resolution without erasing the miss. If the card is unavailable or not writable, preserve the local report and state that card recording is pending; never claim it was saved or create a duplicate card. Do not treat logging as permission to expose private data, change a model gate, or run an unauthorized action.
-
-Existing advanced CLI commands, hooks, thresholds and verdicts remain available through `superjev.py` (or the installed `superjev` shim). Their reference is [checking tools](references/checking.md); do not change hook wiring merely to use this front door.
+On misses, incomplete evidence or review failures, preserve the initial result and follow [feedback recording](references/feedback.md). Use the existing non-riding feedback card when available; detailed/private evidence stays local. Report assistance separately from an automatic hit. Normally tell the human the answer or concrete next step, not the internal ceremony.
