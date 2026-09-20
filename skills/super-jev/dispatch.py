@@ -86,6 +86,7 @@ def main(args: list[str]) -> int:
             except (ValueError, UnicodeError):
                 body = None
             if isinstance(body, dict) and body.get("status") == "preparation-required":
+                body.setdefault("message", "Let's connect your records so Super Jev can search them. Choose the original files for this person or project; the agent can review them and run connect to build the searchable copy. If these files were connected before, refresh that connection instead.")
                 body.setdefault("hint", "These records are not searchable yet, or their preparation is stale. Use the memory connect action with the original record paths for this person/project, review the returned file hashes under existing authorization, confirm reviewed:true, then retry the original question through memory using the returned pointer. See the connector setup example.")
                 body.setdefault("nextAction", "connect-reviewed-local-files")
                 body["setup"] = {
@@ -102,6 +103,7 @@ def main(args: list[str]) -> int:
                     ],
                     "boundary": "Proceed within existing authorization; ask only for missing permission or unclear scope. Do not expand to other patients or send private text without authorization. If runtime/storage access is missing, report that specific blocker.",
                 }
+                body = {"message": body.pop("message"), **body}
                 output = (json.dumps(body) + "\n").encode()
             sys.stdout.buffer.write(output)
             return result.returncode

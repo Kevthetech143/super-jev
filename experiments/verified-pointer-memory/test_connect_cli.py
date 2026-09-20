@@ -28,7 +28,9 @@ class ConnectCliTests(unittest.TestCase):
             body = {'action': 'connect', 'pointer': 'records', 'principals': ['owner'], 'sources': [{'path': str(source)}]}
             preview = call(body)
             self.assertEqual(preview['status'], 'preparation-required')
+            self.assertIn('Your files were found', preview['message'])
             self.assertEqual(preview['nextAction'], 'review-local-sources-then-connect')
+            self.assertEqual(preview['gettingStarted']['requestTemplate']['action'], 'connect')
             self.assertFalse((root / 'db.sqlite').exists())
             self.assertFalse((root / 'registry.json').exists())
             confirmed = call({**body, 'sources': preview['sources'], 'reviewed': True})

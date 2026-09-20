@@ -50,6 +50,7 @@ def test_find_preserves_backend_json_and_nonzero_status(tmp_path):
     assert body['setup']['requestTemplate']['action'] == 'connect'
     assert body['setup']['requestTemplate']['sources'][0]['path']
     assert body['hint']
+    assert body['message'].startswith("Let's connect")
     assert 'memory' in body['setup']['steps'][-1]
 
 
