@@ -77,7 +77,7 @@
         "preparation required",
         "connect data"
       ],
-      "answer": "For local text records, use the memory connect JSON action: pointer, principals, sources:[{path}]. Submit it with `python3 <skill-directory>/dispatch.py memory --input REQUEST.json`. Review the source text and provider permission, copy returned source hashes, then repeat with reviewed:true. The harness chunks and registers the files. Existing connectors skip onboarding. Use memory --describe for requirements and references/connectors.md for the complete example; raw paths are not permission to disclose private records.",
+      "answer": "From the installed skill directory, run `python3 dispatch.py memory --connect my-records --file /absolute/path/to/record.md --principal YOUR_AGENT_NAME`. Replace the example path and agent name; repeat --file for more files. Review the files and existing provider permission, then run the returned confirmCommand. The harness chunks and registers the reviewed bytes. Existing connections skip onboarding; shared/custom scopes use the JSON connect workflow in references/connectors.md.",
       "sources": [
         "connectors.md",
         "verified-reuse.md",

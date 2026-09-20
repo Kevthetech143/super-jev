@@ -46,3 +46,25 @@ class ConnectCliTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ConnectShortcutTests(unittest.TestCase):
+    def test_copyable_preview_confirmation_and_changed_bytes(self):
+        import shlex
+        with tempfile.TemporaryDirectory(prefix='connect space ') as folder:
+            root = Path(folder)
+            source = root / 'record with spaces.md'
+            source.write_text('A reviewed test record.\n')
+            config = root / 'config.json'
+            config.write_text(json.dumps({'db': str(root / 'db.sqlite'), 'registry': str(root / 'registry.json')}))
+            cmd = [sys.executable, str(CLI), '--config', str(config), '--connect', 'records', '--file', str(source), '--principal', 'owner']
+            preview = json.loads(subprocess.check_output(cmd, text=True))
+            self.assertEqual(preview['reason'], 'review-required')
+            self.assertFalse((root / 'db.sqlite').exists())
+            confirmation = shlex.split(preview['confirmCommand'])
+            source.write_text('Changed before approval.\n')
+            changed = json.loads(subprocess.check_output(confirmation, text=True))
+            self.assertEqual(changed['reason'], 'review-required')
+            self.assertFalse((root / 'db.sqlite').exists())
+            registered = json.loads(subprocess.check_output(shlex.split(changed['confirmCommand']), text=True))
+            self.assertEqual(registered['status'], 'registered')
