@@ -33,6 +33,50 @@ names each passage by id and offsets only, never text.
 Descriptions are the one caller text the judge sees, so `descriptionsReviewed`
 must be explicitly `true` before any provider call is made.
 
+## Optional exact-duplicate grouping (off by default)
+
+`groupDuplicateSources: true` adds ONE local step before the descriptions
+stage: sources that are exact duplicates of each other collapse to a single
+canonical source, so the same document is not judged twice under two ids.
+Default is `false`, and with the option off the chain is unchanged.
+
+Two sources group only when ALL of this holds:
+
+- their original `text` is byte-identical, AND
+- their `description` is byte-identical, AND
+- both are FULLY prepared — every chunk of each has a usable reviewed record
+  under the run's `expectedPolicy` — AND those reviewed preparations are
+  equivalent (same offsets, content SHA, policy, status, reviewed text, safe
+  heading).
+
+The canonical is the lexicographically smallest id in the group, so the
+choice is deterministic and does not depend on input order. The helper is
+exported on its own as `groupExactDuplicateSources(sources, preparation,
+expectedPolicy?, targetWords?)`.
+
+What it deliberately will NOT do:
+
+- an alias with missing, stale, unreviewed, wrong-policy, or merely
+  different preparation never joins a group, so it can never inherit another
+  source's approval — it stays in the chain on its own and still hits the
+  preparation gate (and still makes the run `preparation-required`);
+- a source whose text or description differs by a single byte is never
+  collapsed, so a distinct, better-prepared source is never discarded;
+- with no `preparation` at all, nothing groups;
+- near-duplicates, normalised text, and partial overlap are out of scope —
+  this is exact-match grouping only.
+
+Grouping only decides which sources enter the chain. Original text, content
+SHAs, and chunk offsets are untouched, the result's `sources` pointer list
+still covers EVERY input source (aliases included), and the alias ids come
+back additively in `result.duplicateGroups` (`canonicalId`, `aliasIds`,
+`contentSHA`) plus a local `duplicate-grouping` trace entry. The field is
+absent entirely when the option is off. Judging thresholds, the gate, the
+stage order, and the stage budget are all unchanged.
+
+This is assisted retrieval: the result is prepared evidence for a caller to
+act on, never an autonomous answer.
+
 ## The chain
 
 1. **chunk all sources once** (local, up front) — every source document is
