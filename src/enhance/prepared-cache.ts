@@ -115,9 +115,20 @@ export function artifactDigestOf(a: PreparedArtifact): string {
 
 /**
  * Derive the cache key from the full binding triple. The NUL separators make
- * the encoding unambiguous, so ("ab","c") can never collide with ("a","bc").
+ * the encoding unambiguous, so ("ab","c") can never collide with ("a","bc") --
+ * which holds only while the bindings contain no NUL characters themselves;
+ * embedded NULs are rejected here as well as in checkBindings.
  */
 export function deriveCacheKey(b: CacheBindings): string {
+  for (const [name, v] of [
+    ['sourceId', b.sourceId],
+    ['contentSha', b.contentSha],
+    ['policyVersion', b.policyVersion]
+  ] as const) {
+    if (typeof v !== 'string' || v.includes('\0')) {
+      throw new Error(`deriveCacheKey: ${name} must be a NUL-free string`);
+    }
+  }
   return createHash('sha256')
     .update([CACHE_KEY_DOMAIN, b.sourceId, b.contentSha, b.policyVersion].join('\0'), 'utf8')
     .digest('hex');
@@ -143,6 +154,17 @@ export function makeReviewReceipt(
   };
 }
 
+/**
+ * The cache key joins the binding triple with NUL separators, which is
+ * unambiguous only while the bindings themselves contain no NUL characters.
+ * Embedded NULs are rejected on every public key-derivation path.
+ */
+function checkNoEmbeddedNul(value: string, name: string): void {
+  if (value.includes('\0')) {
+    throw new Error(`${name} must not contain NUL characters (the cache key joins bindings with NUL separators)`);
+  }
+}
+
 function checkBindings(b: CacheBindings): void {
   if (typeof b.sourceId !== 'string' || b.sourceId.length === 0) {
     throw new Error('sourceId must be a non-empty string');
@@ -153,6 +175,9 @@ function checkBindings(b: CacheBindings): void {
   if (typeof b.policyVersion !== 'string' || b.policyVersion.length === 0) {
     throw new Error('policyVersion must be a non-empty string');
   }
+  checkNoEmbeddedNul(b.sourceId, 'sourceId');
+  checkNoEmbeddedNul(b.contentSha, 'contentSha');
+  checkNoEmbeddedNul(b.policyVersion, 'policyVersion');
 }
 
 function checkArtifact(a: PreparedArtifact): void {
@@ -188,7 +213,12 @@ interface StoredEntry {
   digest: string;
 }
 
-function entryDigest(e: Omit<StoredEntry, 'digest'>): string {
+/**
+ * Integrity digest over the stored entry. Exported so tests can build
+ * fixtures with a valid digest but deliberately stale or malformed content;
+ * not part of the cache read/write contract.
+ */
+export function entryDigest(e: Omit<StoredEntry, 'digest'>): string {
   return createHash('sha256')
     .update(
       JSON.stringify({ schema: e.schema, bindings: e.bindings, artifact: e.artifact, receipt: e.receipt }),
@@ -229,7 +259,10 @@ export class PreparedCache {
   /**
    * Look up the artifact for an exact (sourceId, source bytes, policy)
    * triple. Returns { hit: false, reason } for missing files, schema
-   * mismatches, digest failures (corruption), or binding drift.
+   * mismatches, digest failures (corruption), binding drift, malformed
+   * stored artifacts, or stored receipts whose bindings no longer match.
+   * Stored data is validated on read: malformed/missing/null values are a
+   * miss, never a throw.
    */
   lookup(sourceId: string, sourceData: string | Uint8Array, policyVersion: string): CacheLookup {
     const contentSha = contentShaOf(sourceData);
@@ -258,7 +291,33 @@ export class PreparedCache {
     if (!isRecord(eb) || eb['sourceId'] !== sourceId) return { hit: false, reason: 'binding-mismatch' };
     if (eb['contentSha'] !== contentSha) return { hit: false, reason: 'stale-source' };
     if (eb['policyVersion'] !== policyVersion) return { hit: false, reason: 'stale-policy' };
-    return { hit: true, artifact: { preparedText: entry.artifact.preparedText, refs: [...entry.artifact.refs] } };
+    // Read-time artifact shape validation: a malformed stored artifact is a
+    // miss, never a throw (artifact null/missing, preparedText not a string,
+    // refs not an array of strings).
+    const ea: unknown = entry.artifact;
+    if (
+      !isRecord(ea) ||
+      typeof ea['preparedText'] !== 'string' ||
+      !Array.isArray(ea['refs']) ||
+      !ea['refs'].every((r: unknown) => typeof r === 'string')
+    ) {
+      return { hit: false, reason: 'corrupt' };
+    }
+    const artifact: PreparedArtifact = { preparedText: ea['preparedText'], refs: ea['refs'] as string[] };
+    // Read-time receipt re-validation: the stored review receipt must still
+    // bind the current source bytes, the current policy, and the exact stored
+    // artifact. A receipt with a correctly recomputed entry digest but wrong
+    // bindings is a miss, not a hit.
+    const er: unknown = entry.receipt;
+    if (
+      !isRecord(er) ||
+      er['sourceHash'] !== contentSha ||
+      er['policyVersion'] !== policyVersion ||
+      er['artifactDigest'] !== artifactDigestOf(artifact)
+    ) {
+      return { hit: false, reason: 'binding-mismatch' };
+    }
+    return { hit: true, artifact: { preparedText: artifact.preparedText, refs: [...artifact.refs] } };
   }
 
   /**

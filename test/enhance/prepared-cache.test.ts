@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -8,6 +8,7 @@ import {
   contentShaOf,
   artifactDigestOf,
   deriveCacheKey,
+  entryDigest,
   makeReviewReceipt,
   PREPARED_CACHE_SCHEMA,
   CACHE_DIR_MODE,
@@ -18,10 +19,19 @@ import {
 const POLICY_V1 = 'prep-policy/1';
 const POLICY_V2 = 'prep-policy/2';
 
+const tempDirs: string[] = [];
+
 function freshCache(): { cache: PreparedCache; dir: string } {
   const dir = mkdtempSync(join(tmpdir(), 'prep-cache-test-'));
+  tempDirs.push(dir);
   return { cache: new PreparedCache(dir), dir };
 }
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function bytes(s: string): Uint8Array {
   return new TextEncoder().encode(s);
@@ -183,4 +193,102 @@ test('raw source bytes are never persisted; only hash-bound metadata', () => {
   assert.ok(!raw.includes('the raw source text must never appear on disk'), 'raw source absent from the entry file');
   assert.ok(raw.includes(contentShaOf(secret)), 'the content hash binding is present');
   assert.equal(PREPARED_CACHE_SCHEMA, 1);
+});
+
+/**
+ * Rewrite a stored entry file: apply `mutate` to the parsed entry, then
+ * recompute the integrity digest so the fixture has a VALID digest but
+ * deliberately stale/malformed content.
+ */
+function recomputeDigest(dir: string, key: string, mutate: (entry: any) => void): void {
+  const path = join(dir, `${key}.json`);
+  const entry = JSON.parse(readFileSync(path, 'utf8'));
+  mutate(entry);
+  const { schema, bindings, artifact, receipt } = entry;
+  entry.digest = entryDigest({ schema, bindings, artifact, receipt });
+  writeFileSync(path, JSON.stringify(entry));
+}
+
+test('a stored receipt with a valid entry digest but stale bindings misses on read', () => {
+  const { cache, dir } = freshCache();
+  const artifact = artifactFor('a');
+  const key = cache.put('src-a', SOURCE_A, POLICY_V1, artifact, receiptFor('src-a', SOURCE_A, POLICY_V1, artifact));
+
+  // Lead repro: receipt sourceHash swapped, entry digest correctly recomputed.
+  recomputeDigest(dir, key, (entry) => {
+    entry.receipt.sourceHash = contentShaOf(SOURCE_B);
+  });
+
+  const lookup = cache.lookup('src-a', SOURCE_A, POLICY_V1);
+  assert.equal(lookup.hit, false);
+  assert.equal(lookup.reason, 'binding-mismatch', 'a stale receipt is a miss even with a valid entry digest');
+});
+
+test('a receipt bound to a different artifact misses on read even with a valid entry digest', () => {
+  const { cache, dir } = freshCache();
+  const stored = artifactFor('stored');
+  const key = cache.put('src-a', SOURCE_A, POLICY_V1, stored, receiptFor('src-a', SOURCE_A, POLICY_V1, stored));
+
+  // Swap the stored artifact; the receipt still binds the original digest.
+  recomputeDigest(dir, key, (entry) => {
+    entry.artifact = { preparedText: 'prepared other', refs: ['record:other'] };
+  });
+
+  const lookup = cache.lookup('src-a', SOURCE_A, POLICY_V1);
+  assert.equal(lookup.hit, false);
+  assert.equal(lookup.reason, 'binding-mismatch');
+});
+
+test('a malformed stored artifact misses instead of throwing', () => {
+  const { cache, dir } = freshCache();
+  const artifact = artifactFor('a');
+  const key = cache.put('src-a', SOURCE_A, POLICY_V1, artifact, receiptFor('src-a', SOURCE_A, POLICY_V1, artifact));
+
+  recomputeDigest(dir, key, (entry) => {
+    entry.artifact = null;
+  });
+
+  const lookup = cache.lookup('src-a', SOURCE_A, POLICY_V1);
+  assert.equal(lookup.hit, false);
+  assert.equal(lookup.reason, 'corrupt', 'a null stored artifact is a miss, not a throw');
+});
+
+test('a stored artifact with non-string refs misses instead of throwing', () => {
+  const { cache, dir } = freshCache();
+  const artifact = artifactFor('a');
+  const key = cache.put('src-a', SOURCE_A, POLICY_V1, artifact, receiptFor('src-a', SOURCE_A, POLICY_V1, artifact));
+
+  recomputeDigest(dir, key, (entry) => {
+    entry.artifact.refs = 42;
+  });
+
+  const lookup = cache.lookup('src-a', SOURCE_A, POLICY_V1);
+  assert.equal(lookup.hit, false);
+  assert.equal(lookup.reason, 'corrupt', 'non-array refs are a miss, not a throw');
+});
+
+test('embedded NUL characters in bindings are rejected', () => {
+  const { cache } = freshCache();
+  const artifact = artifactFor('a');
+  const receipt = receiptFor('src-a', SOURCE_A, POLICY_V1, artifact);
+  assert.throws(
+    () => cache.put('src\0a', SOURCE_A, POLICY_V1, artifact, receipt),
+    /NUL/,
+    'put rejects a sourceId containing NUL'
+  );
+  assert.throws(
+    () => cache.lookup('src\0a', SOURCE_A, POLICY_V1),
+    /NUL/,
+    'lookup rejects a sourceId containing NUL'
+  );
+  assert.throws(
+    () =>
+      deriveCacheKey({
+        sourceId: 'src-a',
+        contentSha: contentShaOf(SOURCE_A),
+        policyVersion: 'policy\0v1'
+      }),
+    /NUL-free/,
+    'deriveCacheKey rejects a policyVersion containing NUL'
+  );
 });
