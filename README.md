@@ -2,6 +2,8 @@
 
 A small TypeScript harness that connects **evidence → Jev judgments → permitted actions → verified outcomes**.
 
+The opt-in, post-retrieval evidence checker and its fixed-pool CLI are documented in [experimental evidence adjudication](docs/experimental-evidence-adjudication.md). It does not alter the default organizer or retrieval paths.
+
 Domain-independent core. Pluggable data sources and tools. Local JSONL traces. Zero runtime dependencies. MIT licensed.
 
 **Status: experimental V0.2.0.** Offline demos and mocked API tests pass. The organizer passed a live Jev smoke test with four synthetic records; the two original demos passed historical live smoke tests. This is an independent community project, not affiliated with TypeSafe AI. It contains no model weights.

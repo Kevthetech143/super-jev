@@ -13,6 +13,8 @@ export { buildManifest, assertComplete, formatManifest } from './coverage.ts';
 export { CostMeter, formatCost } from './cost.ts';
 export { traverse, checkCompleteness, gatherEvidence, parseProseReferences } from './evidence.ts';
 export type { SourceDoc, EvidenceRole, EvidenceSpec, TraversalReport, RoleAssignment, CompletenessReport } from './evidence.ts';
+export { adjudicateEvidence, EvidenceAdjudicationError } from './evidence-adjudication.ts';
+export type { EvidenceRequirement, EvidenceQuote, EvidenceCandidate, EvidencePassage, EvidenceAdjudicationStatus, EvidenceFinding, EvidenceAdjudicationResult, EvidenceAdjudicationInput } from './evidence-adjudication.ts';
 export { StubEvaluator, scriptFromTable, choiceAnswer } from './stub.ts';
 export { planEnhancedRun, runEnhancedClassification, DEFAULT_PASSES } from './classify.ts';
 export type { ClassifyConfig, PassSpec, PassRecord, EnhancedRun } from './classify.ts';
