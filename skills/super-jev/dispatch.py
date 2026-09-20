@@ -78,6 +78,33 @@ def main(args: list[str]) -> int:
         env = dict(os.environ)
         if tool == "memory" and len(cmd) > 1 and Path(cmd[1]).name == "memory.sh":
             env["SUPERJEV_MEMORY_WRAPPER_ACTIVE"] = "1"
+        if tool == "find":
+            result = subprocess.run(cmd, env=env, stdout=subprocess.PIPE)
+            output = result.stdout
+            try:
+                body = json.loads(output)
+            except (ValueError, UnicodeError):
+                body = None
+            if isinstance(body, dict) and body.get("status") == "preparation-required":
+                body.setdefault("hint", "These records are not searchable yet, or their preparation is stale. Use the memory connect action with the original record paths for this person/project, review the returned file hashes under existing authorization, confirm reviewed:true, then retry the original question through memory using the returned pointer. See the connector setup example.")
+                body.setdefault("nextAction", "connect-reviewed-local-files")
+                body["setup"] = {
+                    "guide": "references/connectors.md#connect-local-files-paths-to-searchable-passages",
+                    "command": "python3 <skill-directory>/dispatch.py memory --input CONNECT.json",
+                    "requestTemplate": {"action": "connect", "pointer": "CHOSEN_SCOPE_NAME",
+                                        "principals": ["YOUR_AGENT_NAME"],
+                                        "sources": [{"path": "/absolute/path/to/original-record.md"}]},
+                    "steps": [
+                        "Select only the authorized person's/project's original text records, not a pointer-only index. Inspect existing memory pointers before choosing a name.",
+                        "Submit connect for a local preview; review source text and provider permission, then copy returned sha256 values into sources and add reviewed:true.",
+                        "For an existing connector, use its dataset and exact principal scope with replace:true only after review; otherwise use a separately named connector.",
+                        "After registered, retry the original question through memory with the returned pointer. Do not rerun find against the old unprepared dataset.",
+                    ],
+                    "boundary": "Proceed within existing authorization; ask only for missing permission or unclear scope. Do not expand to other patients or send private text without authorization. If runtime/storage access is missing, report that specific blocker.",
+                }
+                output = (json.dumps(body) + "\n").encode()
+            sys.stdout.buffer.write(output)
+            return result.returncode
         return subprocess.run(cmd, env=env).returncode
     except MissingDependency as exc:
         print(json.dumps({"status": "error", "reason": "missing-dependency", "dependency": str(exc),
