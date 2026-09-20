@@ -7,6 +7,10 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 The user says “Use Super Jev to…”; choose the matching tool below and run it. Do not require the user to learn backend skill names or command syntax. Use the original request and relevant context; ask only if the intended task or required evidence is genuinely unclear.
 
+**Fast path for an existing connection:** use its known roots, dataset or pointer and run the request. Do not reopen the panel, list every source, reread setup guidance, or repeat onboarding/sample tests on each use. Revisit setup only for a new source, changed scope/configuration, a missing dependency, or a reported freshness/preparation problem.
+
+Quick awareness: source scope is limited to what was connected; `ready` still needs evidence review before approval; exact verified cache hits can be reused within their returned scope; stale/preparation errors need repair. Runtime integrity checks stay enabled. Show setup tips only when relevant, and communicate the answer or concrete next step rather than narrating backend procedures.
+
 For “connect my skills/brain/repo,” starting a new collection from scratch, setup questions, or explaining available connections, read [source connectors](references/connectors.md). Use connector names with humans; keep backend skill names and commands inside execution. A connector name describes the source workflow, not automatic syncing or a new command.
 
 Use `python3 <this-skill-directory>/dispatch.py <tool> ...`. With no tool (or `tools`), it lists executable tools plus agent-guided setup workflows. `memory --describe` exposes the connector availability, setup guidance, actions, settings and limits without configuration or a key. Setup menu entries are instructions for the agent, not extra CLI commands. The agent interprets natural language; this dispatcher only executes the chosen tool. The legacy `superjev.py ask` keyword router is not the unified natural-language entry point.

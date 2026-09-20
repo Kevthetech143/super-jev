@@ -50,6 +50,7 @@ def describe():
         },
         'agentSetupWorkflows': {
             'mode': 'agent-guided; these are not API actions',
+            'when': 'New connection or setup/refresh problem only; existing connections use their known tool/pointer directly.',
             'options': ['connect-existing-data', 'start-new-collection',
                         'define-custom-connector', 'refresh-reviewed-connection'],
             'customNames': True,
