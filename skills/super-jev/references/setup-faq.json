@@ -71,9 +71,13 @@
         "search my records",
         "search my brain",
         "search my documents",
-        "search health records"
+        "search health records",
+        "connect files",
+        "file paths",
+        "preparation required",
+        "connect data"
       ],
-      "answer": "First use: confirm the runtime and authorized dataset are ready. Run `python3 <skill-directory>/dispatch.py memory --describe` for memory capabilities, or `python3 <skill-directory>/dispatch.py find --list-datasets` for reviewed retrieval datasets. Use only the correct person/project scope. If missing, follow references/connectors.md to prepare and register reviewed material; a file path alone is not onboarding. Once ready, search directly. See SKILL.md for copyable search commands.",
+      "answer": "For local text records, use the memory connect JSON action: pointer, principals, sources:[{path}]. Submit it with `python3 <skill-directory>/dispatch.py memory --input REQUEST.json`. Review the source text and provider permission, copy returned source hashes, then repeat with reviewed:true. The harness chunks and registers the files. Existing connectors skip onboarding. Use memory --describe for requirements and references/connectors.md for the complete example; raw paths are not permission to disclose private records.",
       "sources": [
         "connectors.md",
         "verified-reuse.md",

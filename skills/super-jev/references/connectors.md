@@ -41,7 +41,7 @@ Suggested index columns:
 
 Keep IDs stable, descriptions factual and specific, and paths resolvable. Use headings inside records; retain sources for factual claims. Add status, event/effective dates and supersedes links when records change over time; distinguish when a fact applies from when its file was edited. Unknown values remain unknown. Skills instead need valid `name` and `description` frontmatter and their normal `SKILL.md` structure—use the available skill-creation workflow, not the record template.
 
-No database is needed for this baseline. The index is an authoring aid, not an automatically parsed import contract: the agent still builds and reviews the existing manifest, descriptions and passage preparations, then registers the dataset/pointer. Follow the same sample-query and freshness checks below. Do not claim a collection is connected merely because files or an index were created.
+No user-managed database is needed for this baseline. The index is an authoring aid, not an automatically parsed import contract. The memory `connect` action prepares explicit text-file paths and registers a pointer after agent review; it maintains the manifest and passages internally. Follow the same sample-query and freshness checks below. Do not claim a collection is connected merely because files or an index were created.
 
 Friendly setup hint: “Starting fresh? I can create a small, clearly described collection that works with Super Jev's existing preparation workflow. If you already have data, we can keep its structure and prepare a searchable view instead.” Give this hint when the source is absent or the user asks how to start, not on every successful lookup.
 
@@ -51,7 +51,7 @@ This is onboarding/repair guidance, not a per-query checklist. Once connected, u
 
 1. Identify the connector, exact source scope and authorized audience. Reuse known context; ask only for missing information needed to choose the right data/person. A connector does not grant new access.
 2. Inspect existing setup. For Skills, read sibling `skill-search/SKILL.md` and its roots configuration. For Brain/Documents/Repo, list reviewed datasets through `find --list-datasets`; if local memory is configured, inspect its panel and registered sources. Follow installation-specific `LOCAL-MEMORY.md` and `memory.sh` when present.
-3. Reuse an appropriate existing dataset/pointer. Otherwise follow sibling `fleet-retrieval-experiment/SKILL.md` to create reviewed descriptions, prepared passages and source/hash bindings; for memory, follow [verified reuse](verified-reuse.md) and register that reviewed dataset with authorized principal labels. A path or URL alone is not onboarding. Do not treat repo membership as privacy approval.
+3. Reuse an appropriate ready dataset/pointer. For missing passages, use the `connect` action below with the authorized original text-file paths; the harness creates descriptions, chunks, source bindings and registration. A pointer-only index is not the source content. For a custom reviewed/redacted projection, use the existing sibling `fleet-retrieval-experiment/SKILL.md` preparation workflow instead. Do not treat repo membership as privacy approval.
 4. Run a relevant sample request. Verify returned supporting passages and any approved exact-repeat answer. Report the observed outcome; one successful sample does not prove complete coverage.
 5. Explain coverage and freshness. Reviewed file-based connectors currently require preparation refresh and re-registration after source changes. Existing guards block stale reuse; they do not automatically fetch new material. Missing preparation or uncertainty stays visible. Enabling the assisted loop does not enable automatic answer approval or a scheduler.
 
@@ -77,3 +77,28 @@ A source is the underlying file, record, repo checkout, database or webpage. A r
 - No supporting source yet: the verified-answer workflow needs reviewed material. With authorization, record the user's supplied facts in their project, retain their provenance, then prepare/register them. Do not invent a source or approve unsupported answers.
 
 For a current-state question, briefly say: “This uses the registered snapshot; newer information may exist.” Offer the concrete refresh step when needed, without a repeated onboarding ceremony. Snapshot mode supplies no checked date. Current mode requires a trusted whole-scope `checkedAt` within the requested age; this records the upstream check, not a guarantee that every fact is true or still current. File modification dates, cache approval times and event dates are not substitutes. Warnings never override a stale/refresh refusal. Automated fetching and syncing remain unimplemented.
+
+## Connect local files: paths to searchable passages
+
+Use this when records are missing or a pointer-only dataset returns `preparation-required`. A configured memory runtime is required (`memory --describe` describes it; `memory --principal AGENT` shows that agent's pointers). The action is JSON, not a `memory connect` shell subcommand.
+
+Save a request in your repo's private working area:
+
+```json
+{
+  "action": "connect",
+  "pointer": "iris-reviewed",
+  "principals": ["YOUR_AGENT_NAME"],
+  "sources": [{"path": "/absolute/path/to/authorized-record.md"}]
+}
+```
+
+Run `python3 /path/to/super-jev/dispatch.py memory --input /path/to/connect.json`.
+
+The first call returns the preparation/review requirements without publishing a connector. Review the actual source files and permission to send their **entire text** to the configured Jev provider. Use existing authorization where it clearly applies; ask only for genuinely missing permission or scope. Copy the returned source hashes into the request, add `reviewed: true`, and submit it again. Optional factual `description` values help discovery; the harness supplies basic descriptions if omitted. No user chunk-by-chunk ceremony is needed. This confirms source preparation, not the correctness of future answers.
+
+A successful `registered` response means preparation and registration finished. Search using the returned pointer and your principal, check returned evidence, and approve answers only through the existing review flow. Test an actual question before describing the connector as working end to end. Do not call the first review response “connected” or “no matching records.”
+
+Refresh uses the same pointer, dataset and exact principal scope with `replace: true` and newly reviewed source hashes. It invalidates that pointer's prior answers/tickets. Do not use replacement to widen an Iris connector to another person or to add audience members silently. If the old connector is shared or its scope is uncertain, keep it intact and create a separately named connector for the authorized scope.
+
+Initial support is explicit local nonempty UTF-8 text files on macOS/Linux, up to 50 files and 5 MiB per request. Folders, binary/PDF documents and remote URLs need prior authorized extraction or explicit file selection; there is no automatic crawl or live synchronization. The harness preserves originals. Connecting raw private material does not automatically sanitize it: if full text is not authorized for the provider, prepare a reviewed/redacted projection using the existing workflow instead.
