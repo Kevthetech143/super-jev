@@ -150,11 +150,11 @@ class RegressionTests(unittest.TestCase):
             pending = connection.execute(
                 "SELECT body FROM pending WHERE ticket = ?",
                 (ticket, )).fetchone()[0]
-        self.assertNotIn('"snapshot"', pending)
+        self.assertNotIn('snapshot', json.loads(pending))
         fixture.approve(ticket)
         with fixture.service.connect() as connection:
             cached = connection.execute("SELECT body FROM cache").fetchone()[0]
-        self.assertNotIn('"snapshot"', cached)
+        self.assertNotIn('snapshot', json.loads(cached))
 
     def test_invalid_retrieval_shape_is_structured_error(self):
         fixture = self.fixture()

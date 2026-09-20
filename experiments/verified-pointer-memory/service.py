@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 SCHEMA_VERSION = "2"
 STATUSES = {"ready", "no-match", "preparation-required", "refused", "error"}
+SNAPSHOT_FRESHNESS = {'mode': 'snapshot'}
 
 
 def pack(value: Any) -> str:
@@ -37,6 +38,32 @@ def require_text(label: str, value: Any, allow_empty: bool = False) -> str:
             f'{label} must be a {"string" if allow_empty else "nonempty string"}'
         )
     return value
+
+
+def require_time(label: str, value: Any) -> float:
+    """Validate a finite Unix-seconds value."""
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value)):
+        raise ValueError(f'{label} must be finite Unix seconds')
+    return float(value)
+
+
+def normalize_freshness(freshness: Any = None) -> dict[str, Any]:
+    """Return the supported request freshness policy, rejecting ambiguous input."""
+    if freshness is None:
+        return SNAPSHOT_FRESHNESS.copy()
+    if not isinstance(freshness, dict):
+        raise ValueError('freshness must be an object')
+    mode = freshness.get('mode')
+    if mode == 'snapshot' and set(freshness) == {'mode'}:
+        return SNAPSHOT_FRESHNESS.copy()
+    if mode == 'current' and set(freshness) == {'mode', 'maxAgeSeconds'}:
+        max_age = freshness['maxAgeSeconds']
+        if (isinstance(max_age, bool) or not isinstance(max_age, (int, float))
+                or not math.isfinite(max_age) or max_age <= 0):
+            raise ValueError('freshness.maxAgeSeconds must be a positive finite number')
+        return {'mode': 'current', 'maxAgeSeconds': float(max_age)}
+    raise ValueError('freshness must be {"mode":"snapshot"} or {"mode":"current","maxAgeSeconds":positive finite number}')
 
 
 class Service:
@@ -179,10 +206,31 @@ class Service:
         return pointer, None
 
     def key(
-        self, pointer: dict[str, Any], question: str, principal: str, context: str
+        self, pointer: dict[str, Any], question: str, principal: str, context: str,
+        freshness: dict[str, Any] | None = None,
     ) -> str:
         """Build a request key scoped to an immutable generation."""
-        return digest([pointer['generation'], question, principal, context])
+        freshness = normalize_freshness(freshness)
+        # Preserve the v2 default/snapshot cache key so saved entries remain usable.
+        key = [pointer['generation'], question, principal, context]
+        if freshness != SNAPSHOT_FRESHNESS:
+            key.append(freshness)
+        return digest(key)
+
+    def freshness(self, pointer: dict[str, Any], policy: dict[str, Any], now: float):
+        """Return caller-visible freshness metadata or require an upstream refresh."""
+        if policy['mode'] == 'snapshot':
+            return SNAPSHOT_FRESHNESS.copy(), None
+        try:
+            checked_at = require_time('dataset.checkedAt', pointer['snapshot']['entry']['checkedAt'])
+        except (KeyError, TypeError, ValueError):
+            return None, {'status': 'refresh-required'}
+        if checked_at > now:
+            return None, {'status': 'refresh-required'}
+        deadline = checked_at + policy['maxAgeSeconds']
+        if not math.isfinite(deadline) or now >= deadline:
+            return None, {'status': 'refresh-required'}
+        return {**policy, 'checkedAt': checked_at, 'deadline': deadline}, None
 
     def _same(self, row, pointer: dict[str, Any], principal: str) -> bool:
         if not row:
@@ -223,6 +271,29 @@ class Service:
             return False
         return True
 
+    def _valid_hit(self, hit: Any) -> bool:
+        """Accept only the compact, reviewed answer shape stored by approve()."""
+        if not isinstance(hit, dict) or not isinstance(hit.get('answer'), str) or not hit['answer']:
+            return False
+        try:
+            require_time('cache.expires', hit['expires'])
+        except (KeyError, ValueError):
+            return False
+        evidence = hit.get('evidence')
+        if not isinstance(evidence, list) or not evidence:
+            return False
+        for item in evidence:
+            if not isinstance(item, dict):
+                return False
+            for field in ('sourceId', 'quote', 'path', 'contentSHA'):
+                if not isinstance(item.get(field), str) or not item[field]:
+                    return False
+            start, end = item.get('startLine'), item.get('endLine')
+            if (isinstance(start, bool) or not isinstance(start, int) or start < 1
+                    or isinstance(end, bool) or not isinstance(end, int) or end < start):
+                return False
+        return True
+
     def search(
         self,
         name: str,
@@ -230,17 +301,25 @@ class Service:
         principal: str,
         context: str = '',
         now: float | None = None,
+        freshness: Any = None,
     ) -> dict[str, Any]:
         """Return a verified hit or a fresh result with a review ticket."""
         require_text('pointer', name)
         require_text('question', question)
         require_text('principal', principal)
         require_text('context', context, allow_empty=True)
-        now = time.time() if now is None else now
+        policy = normalize_freshness(freshness)
+        supplied_now = now is not None
+        now = time.time() if now is None else require_time('now', now)
         pointer, error = self.pointer(name, principal)
         if error:
             return error
-        key = self.key(pointer, question, principal, context)
+        # Pointer validation reads multiple files and can itself cross a deadline.
+        checked_now = time.time() if not supplied_now else now
+        freshness_metadata, error = self.freshness(pointer, policy, checked_now)
+        if error:
+            return error
+        key = self.key(pointer, question, principal, context, policy)
         with self.connect() as c:
             c.execute('BEGIN')
             hitrow = c.execute(
@@ -261,14 +340,24 @@ class Service:
                 try:
                     hit = json.loads(hitrow[0])
                     binding = (pointer['generation'], pointer['fingerprint'])
-                    if hitrow[1:] == binding and hit['expires'] > now:
+                    hit_now = time.time() if not supplied_now else now
+                    freshness_metadata, error = self.freshness(pointer, policy, hit_now)
+                    if error:
+                        return error
+                    if (not error and hitrow[1:] == binding
+                            and self._valid_hit(hit) and hit['expires'] > hit_now):
                         return {
                             'status': 'verified-cache-hit',
                             'answer': hit['answer'],
-                            'evidence': hit['evidence']
+                            'evidence': hit['evidence'],
+                            'freshness': freshness_metadata,
                         }
                 except (ValueError, KeyError, TypeError):
                     pass
+        provider_now = time.time() if not supplied_now else now
+        freshness_metadata, error = self.freshness(pointer, policy, provider_now)
+        if error:
+            return error
         result = self.retrieve(pointer['dataset'], question)
         if not self._valid_result(result):
             return {'status': 'error', 'reason': 'invalid-retrieval-result'}
@@ -279,6 +368,11 @@ class Service:
         fingerprint_changed = after['fingerprint'] != pointer['fingerprint']
         if generation_changed or fingerprint_changed:
             return {'status': 'pointer-changed'}
+        # Retrieval may have taken long enough for a currentness deadline to pass.
+        after_now = time.time() if not supplied_now else now
+        freshness_metadata, error = self.freshness(after, policy, after_now)
+        if error:
+            return error
         if result['status'] != 'ready':
             return result
         ticket = str(uuid.uuid4())
@@ -286,8 +380,9 @@ class Service:
             'question': question,
             'principal': principal,
             'context': context,
+            'freshness': policy,
             'result': result,
-            'expires': now + self.review_ttl_seconds,
+            'expires': after_now + self.review_ttl_seconds,
         }
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -299,7 +394,7 @@ class Service:
             c.execute('INSERT INTO pending VALUES (?,?,?,?,?)',
                       (ticket, name, pointer['generation'],
                        pointer['fingerprint'], pack(pending)))
-        return {**result, 'approvalTicket': ticket}
+        return {**result, 'approvalTicket': ticket, 'freshness': freshness_metadata}
 
     def approve(
         self,
@@ -314,7 +409,8 @@ class Service:
         require_text('ticket', ticket)
         require_text('principal', principal)
         require_text('answer', answer)
-        now = time.time() if now is None else now
+        supplied_now = now is not None
+        now = time.time() if now is None else require_time('now', now)
         invalid_evidence = (
             not isinstance(evidence, list)
             or not evidence
@@ -341,6 +437,10 @@ class Service:
         )
         if stale_binding:
             raise ValueError('stale or unauthorized review')
+        policy = normalize_freshness(pending.get('freshness'))
+        freshness_metadata, freshness_error = self.freshness(pointer, policy, now)
+        if freshness_error:
+            raise ValueError('refresh required before approval')
         manifest = self._manifest(pointer['snapshot']['entry'])
         sources = {s['id']: s for s in manifest['sources']}
         verified = []
@@ -381,10 +481,18 @@ class Service:
             raise ValueError('stale review evidence') from exc
         if digest(current_snapshot) != fingerprint:
             raise ValueError('stale review evidence')
+        # Re-sample time because evidence verification can take an unbounded time.
+        approval_now = time.time() if not supplied_now else now
+        if approval_now >= pending['expires']:
+            raise ValueError('stale or unauthorized review')
+        freshness_metadata, freshness_error = self.freshness(pointer, policy, approval_now)
+        if freshness_error:
+            raise ValueError('refresh required before approval')
         hit = {
             'answer': answer,
             'evidence': verified,
-            'expires': now + self.cache_ttl_seconds
+            'expires': min(approval_now + self.cache_ttl_seconds,
+                           freshness_metadata.get('deadline', float('inf')))
         }
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -392,11 +500,20 @@ class Service:
                                 (name, )).fetchone()
             if not self._same(current, pointer, principal):
                 raise ValueError('pointer changed during approval')
+            # Waiting for the write lock can outlast a ticket or source deadline.
+            commit_now = time.time() if not supplied_now else now
+            if commit_now >= pending['expires']:
+                raise ValueError('stale or unauthorized review')
+            freshness_metadata, freshness_error = self.freshness(pointer, policy, commit_now)
+            if freshness_error:
+                raise ValueError('refresh required before approval')
+            hit['expires'] = min(commit_now + self.cache_ttl_seconds,
+                                 freshness_metadata.get('deadline', float('inf')))
             if c.execute(
                     'DELETE FROM pending WHERE ticket=? AND generation=? AND fingerprint=?',
                 (ticket, generation, fingerprint)).rowcount != 1:
                 raise ValueError('consumed ticket')
             c.execute('INSERT OR REPLACE INTO cache VALUES (?,?,?,?,?)',
                       (self.key(pointer, pending['question'], principal,
-                                pending['context']), name, generation,
+                                pending['context'], policy), name, generation,
                        fingerprint, pack(hit)))
