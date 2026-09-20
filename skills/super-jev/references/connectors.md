@@ -11,6 +11,30 @@ A connector is the source-specific way an agent connects data to Super Jev. Use 
 | Database | Proposed | No direct database ingestion connector. SQLite answer storage is not a database-source connector. An authorized reviewed export can use Documents, but say it is an export. |
 | Website/links | Proposed | No direct URL ingestion/refresh connector. An authorized reviewed local copy can use Documents, but say it is a copy, not a live connection. |
 
+## Choose existing data or a blank start
+
+If data already exists, preserve the originals and prepare a searchable view of the authorized scope. Do not require a directory rewrite, database migration, or a new table. Messy or unsupported formats may need extraction and agent review before onboarding; a connector label does not make arbitrary data readable.
+
+If the user is starting from scratch, offer this small optional starting layout. It follows the descriptions, stable references and source checks used by the current workflow; it is not a benchmark-proven optimal format or a hard input requirement. Once the user has asked to create the collection, the agent can build it in the user's project using their actual records—do not invent facts to fill it.
+
+```text
+INDEX.md           # small catalog of records
+records/
+  example.md       # one coherent topic or record per file
+```
+
+Suggested index columns:
+
+| id | description | path |
+|---|---|---|
+| project-setup | Where this project's setup steps and prerequisites are recorded | records/project-setup.md |
+
+Keep IDs stable, descriptions factual and specific, and paths resolvable. Use headings inside records; retain sources for factual claims. Add status, event/effective dates and supersedes links when records change over time; distinguish when a fact applies from when its file was edited. Unknown values remain unknown. Skills instead need valid `name` and `description` frontmatter and their normal `SKILL.md` structure—use the available skill-creation workflow, not the record template.
+
+No database is needed for this baseline. The index is an authoring aid, not an automatically parsed import contract: the agent still builds and reviews the existing manifest, descriptions and passage preparations, then registers the dataset/pointer. Follow the same sample-query and freshness checks below. Do not claim a collection is connected merely because files or an index were created.
+
+Friendly setup hint: “Starting fresh? I can create a small, clearly described collection that works with Super Jev's existing preparation workflow. If you already have data, we can keep its structure and prepare a searchable view instead.” Give this hint when the source is absent or the user asks how to start, not on every successful lookup.
+
 ## Set up an existing source workflow
 
 1. Identify the connector, exact source scope and authorized audience. Reuse known context; ask only for missing information needed to choose the right data/person. A connector does not grant new access.
@@ -23,7 +47,7 @@ A connector is the source-specific way an agent connects data to Super Jev. Use 
 
 Keep it short: name the connector, say whether it is ready/needs setup/needs refresh/unavailable, state what is included, and identify any required next step. These are plain-language summaries; preserve actual machine `status` and `nextAction` in the execution record.
 
-Examples (use actual scope/results, not these invented counts):
+Examples (use actual scope and observed results):
 
 - “Your Skills connector searches the configured local skills. New skills need valid name and description metadata to be discoverable.”
 - “Your Brain connector is ready for the reviewed records we selected. Other records still need onboarding; updates require a refresh.”

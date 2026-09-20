@@ -7,7 +7,7 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 The user says “Use Super Jev to…”; choose the matching tool below and run it. Do not require the user to learn backend skill names or command syntax. Use the original request and relevant context; ask only if the intended task or required evidence is genuinely unclear.
 
-For “connect my skills/brain/repo,” setup questions, or explaining available connections, read [source connectors](references/connectors.md). Use connector names with humans; keep backend skill names and commands inside execution. A connector name describes the source workflow, not automatic syncing or a new command.
+For “connect my skills/brain/repo,” starting a new collection from scratch, setup questions, or explaining available connections, read [source connectors](references/connectors.md). Use connector names with humans; keep backend skill names and commands inside execution. A connector name describes the source workflow, not automatic syncing or a new command.
 
 Use `python3 <this-skill-directory>/dispatch.py <tool> ...`. With no tool (or `tools`), it lists the available options. The agent interprets natural language; this dispatcher only executes the chosen tool. The legacy `superjev.py ask` keyword router is not the unified natural-language entry point.
 
