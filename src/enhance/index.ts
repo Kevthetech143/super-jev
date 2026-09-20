@@ -25,3 +25,5 @@ export type {
   EnhanceRecord, RecordRef, ContextBudget, PlannedCall, BatchPlan,
   OutcomeKind, RecordOutcome, CoverageManifest, CostAccount, MappingReport, StubScript
 } from './types.ts';
+export { PreparedCache, contentShaOf, artifactDigestOf, deriveCacheKey, entryDigest, makeReviewReceipt, PREPARED_CACHE_SCHEMA, CACHE_KEY_DOMAIN, CACHE_DIR_MODE, CACHE_FILE_MODE } from './prepared-cache.ts';
+export type { PreparedArtifact, CacheBindings, ReviewReceipt, CacheMissReason, CacheLookup } from './prepared-cache.ts';
