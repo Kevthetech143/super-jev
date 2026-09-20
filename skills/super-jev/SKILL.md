@@ -7,7 +7,7 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 One front door: `python3 <this-skill-directory>/dispatch.py <tool> ...`. Use the user's original request and relevant context; keep backend names and setup mechanics out of ordinary replies.
 
-**First use:** confirm the selected tool runs and the intended person's/project's records are prepared and connected. If setup is missing, follow the returned hint and [connector setup](references/connectors.md); never treat a setup failure as “nothing found.” Existing working connections skip this step.
+**First use:** confirm the selected tool runs and the intended person's/project's records are prepared and connected. If records have only pointers or return `preparation-required`, use the memory `connect` action in [connector setup](references/connectors.md) to prepare authorized local text files. If other setup is missing, follow its hint; never treat a setup failure as “nothing found.” Existing working connections skip this step.
 
 From this skill directory (replace dataset/pointer and principal with your authorized configured values):
 
@@ -24,7 +24,7 @@ For configured memory, `python3 dispatch.py memory --principal YOUR_AGENT_NAME` 
 {"action":"search","pointer":"POINTER_ID","principal":"YOUR_AGENT_NAME","question":"Your original question"}
 ```
 
-Installed `memory.sh` supplies the runtime/config automatically when no explicit repo/config is supplied. Without it, set `SUPERJEV_REPO` to the checkout and pass `memory --config /path/to/config.json ...`; consult `LOCAL-MEMORY.md` if present. `--describe` reports capabilities, not whether records are onboarded. On `ready`, inspect evidence before answering or approving reuse; `verified-cache-hit` returns an already approved scoped answer. Missing preparation requires setup/refresh, not repeated searching.
+Installed `memory.sh` supplies the runtime/config automatically when no explicit repo/config is supplied. Without it, set `SUPERJEV_REPO` to the checkout and pass `memory --config /path/to/config.json ...`; consult `LOCAL-MEMORY.md` if present. `--describe` reports capabilities, not whether records are onboarded. On `ready`, inspect evidence before answering or approving reuse; `verified-cache-hit` returns an already approved scoped answer. Missing preparation requires `connect` onboarding/refresh, not repeated searching. The harness chunks and registers files; the agent reviews source scope and permission. Existing authorization may cover this review—do not ask the human to approve each chunk.
 
 **Already connected?** Use the known roots, dataset or pointer directly. Do not reload manuals, reopen the panel, enumerate sources or repeat onboarding on every request. Revisit setup for new/changed scope, missing configuration or a reported preparation/freshness problem. Runtime integrity checks stay enabled.
 
