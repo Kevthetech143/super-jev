@@ -1,253 +1,461 @@
-/**
- * EXPERIMENTAL SOURCE RETRIEVAL — opt-in library, not a default path.
- *
- * Status: experimental. The lead is still measuring whether the neighbor
- * stage helps; nothing here carries an accuracy promise, and none of this
- * runs unless a caller opts in. It changes no CLI, no fleet default, and no
- * existing `runFetch` behaviour — it only reuses `runFetch`,
- * `prefilterCatalog` and `applyDirectFitGate` as library pieces.
- *
- * What it does: given a small set of source documents (each with a short
- * description and a full text), it runs a bounded async stage chain to pull
- * prepared passages out of the most relevant sources:
- *
- *   1. `descriptions` (provider) — `runFetch` over the source descriptions
- *      with the filter-8 local prefilter, gated by `applyDirectFitGate`, so
- *      only a source the relevance rubric called a direct fit survives.
- *   2. local BM25 (local, no provider call) — each surviving source is cut
- *      into deterministic heading-aware ~180-word chunks
- *      (`chunkSource`), and `prefilterCatalog` keeps the local top-4 chunks
- *      per source.
- *   3. `narrow-bundles` (provider) — one bundle per chunk, judged by
- *      `runFetch` and gated by `applyDirectFitGate`.
- *   4. `wide-bundles` (provider, ONLY on refusal) — when the narrow stage's
- *      gate refuses, each source's kept chunks are re-judged as one wide
- *      bundle per source.
- *   5. optional `neighbors` stage (OFF by default) — adds the immediately
- *      preceding/following chunk in the same source, deduped, never dropping
- *      the base selection.
- *   6. `prepare` (local) — every selected passage is bound to its source's
- *      content SHA and a preparation policy via an explicit
- *      callback/map. An unknown, stale, or unreviewed selection returns
- *      `preparation_required` — NEVER the raw text as a fallback. There is no
- *      automatic redaction and no automatic approval.
- *
- * Stages are bounded by `maxStages` (provider stages only — a stage's
- * provider calls may still batch; the bound is not an HTTP-call cap).
- * Incomplete answers, transport errors, and unknown judge ids fail closed:
- * the result is `refused`, never a guess.
- *
- * A minimal cache adapter seam (`RetrievalCache` + `cacheKeyFor`) is
- * accepted in options for a future PR; no cache is implemented here and
- * passing one changes nothing yet.
- */
+// EXPERIMENTAL SOURCE RETRIEVAL (opt-in).
+//
+// This module is EXPERIMENTAL: it never runs unless the caller explicitly
+// opts in by calling `retrieveSources`. Nothing else in the package imports
+// or invokes it; `index.ts` re-exports it so the experiment is discoverable,
+// not so the default sweep path changes.
+//
+// What it does: replicate the evaluation of source description + retrieval
+// passages for the model-eval harness, in this order:
+//
+//   1. Descriptions stage (provider; local filter of 8 like the experiment):
+//      judge which sources matter for the request.
+//   2. Passage stages (provider), each judging document-GROUPED bundles of
+//      prepared passages — never isolated paragraphs:
+//        a. narrow: bundles built from the GLOBAL top-4 BM25 chunks across
+//           all chunks in the description shortlist (top-3 docs by default);
+//        b. wide: same, but from the GLOBAL top-4 chunks across ALL
+//           documents in the corpus — only after the narrow bundles refuse;
+//        c. neighbors (opt-in, off by default): previous/next chunks are
+//           added to the wide selection and judged again as bundles — only
+//           after the wide bundles refuse.
+//
+// A description-stage direct-fit gate may DEFER (low confidence) without
+// aborting the chain: the description ranking's top docK docs still continue
+// to passage judging. Description-only can never produce `ready`.
+//
+// PREPARATION CONTRACT (caller-reviewed by the judge): preparation happens
+// BEFORE any passage provider call. Every preparation record binds
+// caller-REVIEWED passage text and a safe heading to:
+//   - the source id,
+//   - the source content SHA,
+//   - the exact chunk offsets,
+//   - the policy the text was reviewed under,
+//   - the artifact identity (`doc:Lstart-end`).
+// The judge sees ONLY reviewed text and safe headings; raw chunk text and
+// raw headings never leave this module. Any selected chunk that lacks a
+// valid reviewed record (missing, stale, unreviewed, or under the wrong
+// policy) becomes preparation-required, the passage call never happens, and
+// the run returns `preparation-required` instead of guessing.
+//
+// The BM25 bundle selection replicates the experiment format exactly:
+//   Document description: <description>
+//   Section: <heading breadcrumb>
+//   Passage: <raw local text>
+// Scores are sorted descending with a stable chunk-identity tie-break.
+//
+// Nothing here fetches a URL or touches the network; the only IO is the
+// caller-provided transport (an `Evaluator`) for judging.
+
+import {
+  applyDirectFitGate, prefilterCatalog, runFetch,
+  type FetchCatalogEntry, type FetchRun
+} from './fetch.ts';
 import { createHash } from 'node:crypto';
-import { applyDirectFitGate, prefilterCatalog, runFetch, type FetchCatalogEntry, type FetchRun } from './fetch.ts';
 import type { Evaluator } from '../types.ts';
 
-export class RetrievalError extends Error {}
-
-/** SHA-256 hex of a UTF-8 string. */
+/** SHA-256 hex of the given UTF-8 text. */
 export function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-// ---------------------------------------------------------------------------
-// Sources and chunks
-// ---------------------------------------------------------------------------
-
-/** One source document: a short description for the judge, and the full text to chunk locally. */
-export type RetrievalSource = {
-  id: string;
-  /** One-paragraph description, judged in the descriptions stage. */
-  description: string;
-  /** Full source text, chunked locally — never sent whole to the judge. */
-  text: string;
-};
-
-/**
- * One deterministic chunk of a source. `sourceSHA` is the SHA-256 of the
- * full source text the chunk was cut from, so a passage can always be bound
- * back to the exact bytes it came from. Lines are 1-based; `startLine` is
- * inclusive and `endLine` is inclusive.
- */
-export type SourceChunk = {
-  sourceId: string;
-  sourceSHA: string;
-  /** 0-based chunk index within the source. */
-  chunkIndex: number;
-  startLine: number;
-  endLine: number;
-  /** Nearest preceding markdown heading, `#`s stripped; null when the chunk precedes the first heading. */
-  heading: string | null;
-  text: string;
-};
-
-/** Default chunk target: ~180 words, per the brief. */
-export const DEFAULT_CHUNK_TARGET_WORDS = 180;
-
-const HEADING_RE = /^(#{1,6})\s+(.*\S)\s*$/;
-
+/** Local word count (whitespace-split, non-blank tokens). */
 function wordCount(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
-/**
- * Cut a source into deterministic heading-aware ~180-word chunks at line
- * boundaries. A markdown heading opens a new chunk (the heading line leads
- * it); a section longer than `targetWords` is split at line boundaries once
- * it reaches the target, so chunks run ~180 words and never split a line.
- * The section heading carries over to continuation chunks, so every passage
- * stays attributable. Pure function of (sourceId, text, targetWords): no
- * randomness, no I/O, stable order.
- */
-export function chunkSource(sourceId: string, text: string, targetWords: number = DEFAULT_CHUNK_TARGET_WORDS): SourceChunk[] {
-  if (typeof sourceId !== 'string' || !sourceId) throw new RetrievalError('chunkSource needs a non-empty sourceId');
-  if (typeof text !== 'string') throw new RetrievalError('chunkSource needs source text as a string');
-  if (!Number.isInteger(targetWords) || targetWords < 1) throw new RetrievalError('targetWords must be a positive integer');
-  if (!text.trim()) return [];
-  const lines = text.split('\n');
-  const sourceSHA = sha256Hex(text);
-  const chunks: SourceChunk[] = [];
-  let heading: string | null = null;
-  let start = 0;
-  let words = 0;
-  let index = 0;
-  const close = (endExclusive: number): void => {
-    if (endExclusive <= start) return;
-    chunks.push({
-      sourceId, sourceSHA, chunkIndex: index++,
-      startLine: start + 1, endLine: endExclusive,
-      heading, text: lines.slice(start, endExclusive).join('\n')
-    });
-  };
-  for (let i = 0; i < lines.length; i++) {
-    const m = HEADING_RE.exec(lines[i]);
-    if (m) {
-      if (i > start) { close(i); start = i; words = 0; }
-      heading = m[2].trim();
-    }
-    words += wordCount(lines[i]);
-    if (words >= targetWords) { close(i + 1); start = i + 1; words = 0; }
-  }
-  close(lines.length);
-  return chunks;
-}
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
 
-/**
- * Validate chunks: 1-based lines, start <= end, non-empty text, a valid
- * sourceSHA, and no duplicate (sourceId, chunkIndex) pairs. Selections are
- * routinely subsets of a source's full chunk list, so the chunk indexes are
- * NOT required to form a 0-based sequence. Throws `RetrievalError` — invalid
- * offsets never flow silently into a result.
- */
-export function assertChunkOffsets(chunks: SourceChunk[]): void {
-  if (!Array.isArray(chunks)) throw new RetrievalError('chunks must be an array');
-  const seen = new Set<string>();
-  for (const c of chunks) {
-    if (!c || typeof c.sourceId !== 'string' || !c.sourceId) throw new RetrievalError('chunk has no sourceId');
-    if (typeof c.sourceSHA !== 'string' || !/^[0-9a-f]{64}$/.test(c.sourceSHA)) throw new RetrievalError(`chunk ${c.sourceId}#${c.chunkIndex} has no valid sourceSHA`);
-    if (!Number.isInteger(c.chunkIndex) || c.chunkIndex < 0) throw new RetrievalError(`chunk has invalid chunkIndex`);
-    if (!Number.isInteger(c.startLine) || !Number.isInteger(c.endLine) || c.startLine < 1 || c.endLine < c.startLine) {
-      throw new RetrievalError(`chunk ${c.sourceId}#${c.chunkIndex} has invalid offsets startLine=${c.startLine} endLine=${c.endLine}`);
-    }
-    if (typeof c.text !== 'string' || !c.text) throw new RetrievalError(`chunk ${c.sourceId}#${c.chunkIndex} has empty text`);
-    const key = `${c.sourceId}#${c.chunkIndex}`;
-    if (seen.has(key)) throw new RetrievalError(`duplicate chunk ${key}`);
-    seen.add(key);
+/** Fail-closed error for retrieval caller mistakes and invariant violations. */
+export class RetrievalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetrievalError';
   }
 }
 
 // ---------------------------------------------------------------------------
-// Preparation: explicit binding of passages to reviewed source bytes
+// Inputs: sources
 // ---------------------------------------------------------------------------
 
-export type PreparationStatus = 'reviewed' | 'pending' | 'rejected';
-
-/**
- * A record that a source's exact bytes were prepared under a policy.
- * Binding is by `contentSHA`: a record only clears a passage when its
- * `contentSHA` equals the chunk's `sourceSHA`.
- */
-export type PreparationRecord = {
-  contentSHA: string;
-  /** The preparation policy this record was reviewed under. */
-  policy: string;
-  status: PreparationStatus;
-};
-
-/** Explicit preparation source: a contentSHA-keyed map, or a callback the caller owns. */
-export type PreparationSource =
-  | Map<string, PreparationRecord>
-  | ((sourceId: string, contentSHA: string) => PreparationRecord | undefined);
-
-function lookupPreparation(prep: PreparationSource | undefined, sourceId: string, contentSHA: string): PreparationRecord | undefined {
-  if (!prep) return undefined;
-  if (prep instanceof Map) return prep.get(contentSHA);
-  return prep(sourceId, contentSHA);
-}
-
-/** A passage cleared for use: bound to its source bytes and a reviewed preparation policy. */
-export type PreparedPassage = {
-  sourceId: string;
+/** One source document to retrieve from. */
+export type RetrievalSource = {
+  /** Stable document id; also the id the judge sees. */
+  id: string;
+  /** Caller-provided description; only sent to the judge when affirmed reviewed. */
   description: string;
-  /** The source content SHA this passage was prepared against. */
-  contentSHA: string;
-  /** The preparation policy that reviewed it. */
-  policy: string;
-  chunkIndex: number;
-  startLine: number;
-  endLine: number;
-  heading: string | null;
+  /** Full original text, chunked once, up front, with exact offsets and SHA. */
   text: string;
 };
 
-export type UnpreparedReason = 'unknown' | 'stale' | 'unreviewed';
+// ---------------------------------------------------------------------------
+// Chunking: replicate the experiment's section chunker exactly
+// ---------------------------------------------------------------------------
+
+/** One exact-offset chunk of a source document, carrying its content SHA. */
+export type SourceChunk = {
+  sourceId: string;
+  /** SHA-256 (hex) of the source's full original text. */
+  sourceSHA: string;
+  /** Zero-based chunk index within the source. */
+  chunkIndex: number;
+  /** Exact 1-based line numbers in the original text, inclusive. */
+  startLine: number;
+  endLine: number;
+  /** Heading breadcrumb ("A > B"), or '' when the chunk has no heading. */
+  heading: string;
+  /** Exact raw local text of the chunk (never sent to a provider). */
+  text: string;
+};
+
+/** Chunk target words, matching the experiment. */
+export const DEFAULT_CHUNK_TARGET_WORDS = 180;
+
+/** Artifact identity for a chunk: `doc:Lstart-end`. */
+export function chunkIdentity(chunk: Pick<SourceChunk, 'sourceId' | 'startLine' | 'endLine'>): string {
+  return `${chunk.sourceId}:L${chunk.startLine}-${chunk.endLine}`;
+}
 
 /**
- * A selected passage that may NOT be used. Carries no text — never a raw
- * fallback. `unknown`: no preparation record; `stale`: the record's
- * contentSHA does not match the chunk's bytes (source changed since review);
- * `unreviewed`: a record exists but its status is not `reviewed`.
+ * Validate a chunk list before any provider call: exact offsets must be
+ * well-formed (1-based, start <= end), every chunk must carry a plausible
+ * content SHA, identities must be unique, and raw text must be non-empty.
+ * Throws `RetrievalError` on any violation — fail closed, never guessed.
  */
-export type UnpreparedPassage = {
+export function assertChunkOffsets(chunks: SourceChunk[]): void {
+  const seen = new Set<string>();
+  for (const chunk of chunks) {
+    if (!Number.isInteger(chunk.startLine) || !Number.isInteger(chunk.endLine) ||
+        chunk.startLine < 1 || chunk.endLine < chunk.startLine) {
+      throw new RetrievalError(
+        `invalid chunk offsets for ${JSON.stringify(chunk.sourceId)}: ` +
+        `startLine=${chunk.startLine} endLine=${chunk.endLine} — failing closed`
+      );
+    }
+    if (typeof chunk.sourceSHA !== 'string' || !/^[0-9a-f]{64}$/.test(chunk.sourceSHA)) {
+      throw new RetrievalError(`chunk for ${JSON.stringify(chunk.sourceId)} lacks a valid content SHA — failing closed`);
+    }
+    if (typeof chunk.text !== 'string' || !chunk.text) {
+      throw new RetrievalError(`chunk ${JSON.stringify(chunkIdentity(chunk))} has empty raw text — failing closed`);
+    }
+    const id = chunkIdentity(chunk);
+    if (seen.has(id)) throw new RetrievalError(`duplicate chunk identity ${JSON.stringify(id)} — failing closed`);
+    seen.add(id);
+  }
+}
+
+/**
+ * Chunk one source document like the experiment's section chunker:
+ * - heading lines start a new section (the boundary FLUSHES before the
+ *   heading, so a section never crosses a heading);
+ * - a heading breadcrumb stack is carried through nested headings
+ *   ("A > B", or '' before any heading);
+ * - BEFORE appending a line, flush the open block when
+ *   currentWords + nextLineWords > targetWords;
+ * - blank-only blocks are dropped (never emitted);
+ * - every chunk records its exact original line offsets and the source's
+ *   content SHA.
+ */
+export function chunkSource(
+  sourceId: string,
+  text: string,
+  targetWords = DEFAULT_CHUNK_TARGET_WORDS
+): SourceChunk[] {
+  if (typeof sourceId !== 'string' || !sourceId) throw new RetrievalError('chunkSource needs a non-empty sourceId');
+  if (typeof text !== 'string') throw new RetrievalError('chunkSource needs text as a string');
+  if (!Number.isInteger(targetWords) || targetWords < 1) throw new RetrievalError('targetWords must be a positive integer');
+
+  const sourceSHA = sha256Hex(text);
+  const lines = text.split('\n');
+  const chunks: SourceChunk[] = [];
+  let current: string[] = [];
+  let currentStart = 0; // 0-based index into lines
+  let breadcrumb: string[] = [];
+
+  const currentWords = () => current.reduce((n, line) => n + wordCount(line), 0);
+
+  const flush = (endExclusive: number) => {
+    if (!current.length) return;
+    const startLine = currentStart + 1;
+    const endLine = endExclusive; // 1-based inclusive
+    const heading = breadcrumb.join(' > ');
+    chunks.push({
+      sourceId, sourceSHA, chunkIndex: chunks.length,
+      startLine, endLine, heading, text: current.join('\n')
+    });
+    current = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line);
+    if (headingMatch) {
+      // Heading boundary flushes BEFORE the heading; the heading starts the
+      // next block and enters the breadcrumb stack.
+      flush(i);
+      const depth = headingMatch[1].length;
+      breadcrumb = [...breadcrumb.slice(0, depth - 1), headingMatch[2].trim()];
+      current = [line];
+      currentStart = i;
+      continue;
+    }
+    const words = wordCount(line);
+    if (current.length && words > 0 && currentWords() + words > targetWords) {
+      // Check-before-add: flush the open block BEFORE adding the line, so
+      // the target is a ceiling on the block BEFORE the line, never after.
+      flush(i);
+      current = [line];
+      currentStart = i;
+      continue;
+    }
+    if (!current.length && words === 0) continue; // never open a blank-only block
+    if (!current.length) currentStart = i;
+    current.push(line);
+  }
+  flush(lines.length);
+
+  assertChunkOffsets(chunks);
+  return chunks;
+}
+
+// ---------------------------------------------------------------------------
+// BM25 over local chunks (experiment format, global top-K)
+// ---------------------------------------------------------------------------
+
+/** Experiment BM25 input text for one chunk. Local only — never a provider payload. */
+export function bm25EntryText(
+  description: string,
+  chunk: Pick<SourceChunk, 'heading' | 'text'>
+): string {
+  return `Document description: ${description}\nSection: ${chunk.heading}\nPassage: ${chunk.text}`;
+}
+
+/**
+ * Global top-K BM25 chunks across a chunk pool: score descending, then a
+ * stable chunk-identity tie-break (never catalog order). K is global across
+ * the pool, not per source.
+ *
+ * Reuses `prefilterCatalog` for the BM25-lite scoring. Two of its quirks
+ * are handled explicitly:
+ * - its internal tie-break is catalog order, so the catalog is sorted by
+ *   chunk identity first — making its tie-break exactly the required
+ *   chunk-ID tie-break, including at the K boundary;
+ * - it zeroes all scores when it keeps the whole catalog, so when K covers
+ *   every chunk it keeps one fewer (scores stay real) and the dropped tail
+ *   chunk is re-attached at the end, where it provably belongs.
+ */
+export function topChunksGlobal(
+  chunks: SourceChunk[],
+  descriptions: Map<string, string>,
+  request: string,
+  k: number
+): SourceChunk[] {
+  assertChunkOffsets(chunks);
+  if (!Number.isInteger(k) || k < 1) throw new RetrievalError('topChunksGlobal k must be a positive integer');
+  if (typeof request !== 'string' || !request.trim()) throw new RetrievalError('topChunksGlobal needs a non-empty request');
+  const byId = (a: SourceChunk, b: SourceChunk) =>
+    chunkIdentity(a) < chunkIdentity(b) ? -1 : chunkIdentity(a) > chunkIdentity(b) ? 1 : 0;
+  const ordered = chunks.slice().sort(byId);
+  const limit = Math.min(k, ordered.length);
+  const entries: FetchCatalogEntry[] = ordered.map(chunk => ({
+    id: chunkIdentity(chunk),
+    text: bm25EntryText(descriptions.get(chunk.sourceId) ?? '', chunk)
+  }));
+  const byIdentity = new Map(ordered.map(c => [chunkIdentity(c), c]));
+  const keepAll = limit >= ordered.length;
+  // Keep one fewer when K covers everything so the scores stay real.
+  const res = prefilterCatalog(entries, request, keepAll ? Math.max(ordered.length - 1, 0) : limit);
+  const scored = res.kept
+    .map(e => ({ id: e.id, score: res.scores[e.id] ?? 0 }))
+    .sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const ranked = scored.map(s => byIdentity.get(s.id)!);
+  const tail = keepAll ? res.droppedIds.map(id => byIdentity.get(id)!).filter(Boolean) : [];
+  return [...ranked, ...tail].slice(0, limit);
+}
+
+// ---------------------------------------------------------------------------
+// Preparation: caller-reviewed text and safe headings
+// ---------------------------------------------------------------------------
+
+/** One caller preparation record for a chunk. */
+export type PreparationRecord = {
   sourceId: string;
+  contentSHA: string;
   chunkIndex: number;
   startLine: number;
   endLine: number;
-  reason: UnpreparedReason;
-  /** The SHA the chunk was cut from, for the audit trail. */
-  expectedSHA: string;
+  /** Caller-REVIEWED passage text — the only text the judge ever sees. */
+  reviewedText: string;
+  /** Safe heading — the only heading the judge ever sees. */
+  safeHeading: string;
+  /** Policy the text was reviewed under; must equal the run's expectedPolicy. */
+  policy: string;
+  /** Must be 'reviewed' for the record to count. */
+  status: string;
 };
 
 /**
- * Bind selected chunks to preparation records. Every prepared passage is
- * bound to its source contentSHA and preparation policy; anything else lands
- * in `pending` with its reason and no text. No automatic redaction, no
- * automatic approval — an unreviewed selection is reported, not laundered.
+ * Where preparation records come from: either a Map keyed by chunk identity
+ * (`doc:Lstart-end`), or a callback `(sourceId, chunkIndex, contentSHA)`.
+ */
+export type PreparationSource =
+  | Map<string, PreparationRecord>
+  | ((sourceId: string, chunkIndex: number, contentSHA: string) => PreparationRecord | undefined);
+
+/** One passage the judge may see: reviewed text + safe heading only, never raw text. */
+export type PreparedPassage = {
+  sourceId: string;
+  description: string;
+  contentSHA: string;
+  policy: string;
+  chunkIndex: number;
+  startLine: number;
+  endLine: number;
+  /** Caller-reviewed text; raw chunk text is NEVER carried here. */
+  reviewedText: string;
+  /** Safe heading; the raw heading is NEVER carried here. */
+  safeHeading: string;
+};
+
+/** One selected chunk with no usable preparation — id and offsets only, never text. */
+export type UnpreparedPassage = Pick<SourceChunk, 'sourceId' | 'chunkIndex' | 'startLine' | 'endLine'> & {
+  /** 'unknown' | 'stale' | 'unreviewed' */
+  reason: string;
+};
+
+function isRecordUsable(
+  record: PreparationRecord | undefined,
+  chunk: SourceChunk,
+  expectedPolicy: string
+): { ok: true } | { ok: false; reason: 'unknown' | 'stale' | 'unreviewed' } {
+  if (!record) return { ok: false, reason: 'unknown' };
+  if (record.status !== 'reviewed' || record.policy !== expectedPolicy) return { ok: false, reason: 'unreviewed' };
+  if (record.sourceId !== chunk.sourceId || record.contentSHA !== chunk.sourceSHA ||
+      record.chunkIndex !== chunk.chunkIndex || record.startLine !== chunk.startLine ||
+      record.endLine !== chunk.endLine) {
+    return { ok: false, reason: 'stale' };
+  }
+  if (typeof record.reviewedText !== 'string' || !record.reviewedText ||
+      typeof record.safeHeading !== 'string' || !record.safeHeading) {
+    return { ok: false, reason: 'unreviewed' };
+  }
+  return { ok: true };
+}
+
+function lookupRecord(source: PreparationSource, chunk: SourceChunk): PreparationRecord | undefined {
+  if (source instanceof Map) return source.get(chunkIdentity(chunk));
+  return source(chunk.sourceId, chunk.chunkIndex, chunk.sourceSHA);
+}
+
+/**
+ * Preparation gate: bind every selected chunk to a caller-reviewed record.
+ * Returns the prepared passages in the input order plus the pending list
+ * (id + exact offsets + reason only — never text). The caller decides whether
+ * to run or stop; there is deliberately no raw fallback.
  */
 export function preparePassages(
   chunks: SourceChunk[],
   descriptions: Map<string, string>,
-  preparation: PreparationSource | undefined
+  preparation: PreparationSource | undefined,
+  expectedPolicy = 'reviewed'
 ): { prepared: PreparedPassage[]; pending: UnpreparedPassage[] } {
   assertChunkOffsets(chunks);
+  if (typeof expectedPolicy !== 'string' || !expectedPolicy) throw new RetrievalError('expectedPolicy must be a non-empty string');
   const prepared: PreparedPassage[] = [];
   const pending: UnpreparedPassage[] = [];
-  for (const c of chunks) {
-    const base = { sourceId: c.sourceId, chunkIndex: c.chunkIndex, startLine: c.startLine, endLine: c.endLine, expectedSHA: c.sourceSHA };
-    const record = lookupPreparation(preparation, c.sourceId, c.sourceSHA);
-    if (!record) { pending.push({ ...base, reason: 'unknown' }); continue; }
-    if (record.contentSHA !== c.sourceSHA) { pending.push({ ...base, reason: 'stale' }); continue; }
-    if (record.status !== 'reviewed') { pending.push({ ...base, reason: 'unreviewed' }); continue; }
+  for (const chunk of chunks) {
+    const record = preparation === undefined ? undefined : lookupRecord(preparation, chunk);
+    const check = preparation === undefined
+      ? { ok: false as const, reason: 'unknown' as const }
+      : isRecordUsable(record, chunk, expectedPolicy);
+    if (!check.ok) {
+      pending.push({
+        sourceId: chunk.sourceId, chunkIndex: chunk.chunkIndex,
+        startLine: chunk.startLine, endLine: chunk.endLine, reason: check.reason
+      });
+      continue;
+    }
     prepared.push({
-      sourceId: c.sourceId, description: descriptions.get(c.sourceId) ?? '',
-      contentSHA: c.sourceSHA, policy: record.policy,
-      chunkIndex: c.chunkIndex, startLine: c.startLine, endLine: c.endLine,
-      heading: c.heading, text: c.text
+      sourceId: chunk.sourceId,
+      description: descriptions.get(chunk.sourceId) ?? '',
+      contentSHA: chunk.sourceSHA,
+      policy: record!.policy,
+      chunkIndex: chunk.chunkIndex,
+      startLine: chunk.startLine,
+      endLine: chunk.endLine,
+      reviewedText: record!.reviewedText,
+      safeHeading: record!.safeHeading
     });
   }
   return { prepared, pending };
+}
+
+// ---------------------------------------------------------------------------
+// Document bundles: what the judge actually sees
+// ---------------------------------------------------------------------------
+
+/**
+ * The experiment's exact provider text for judging one document bundle: the
+ * source description, then the prepared (reviewed) passages. Built ONLY
+ * from caller-reviewed text — raw chunk text and raw headings never appear.
+ */
+export function bundleProviderText(description: string, passages: PreparedPassage[]): string {
+  return 'Description: ' + description + '\nAutomatically retrieved source passages:\n' +
+    passages.map(p => p.safeHeading + ': ' + p.reviewedText).join('\n');
+}
+
+/**
+ * One document-grouped bundle of prepared passages, as the judge sees it.
+ * Narrow, wide, and neighbor stages all judge bundles — never isolated
+ * paragraphs.
+ */
+export type PassageBundle = {
+  /** `<sourceId>#bundle` */
+  id: string;
+  sourceId: string;
+  /** The raw chunks behind the bundle (for binding re-verification). */
+  chunks: SourceChunk[];
+  passages: PreparedPassage[];
+  /** Exact text sent to the provider for this bundle. */
+  providerText: string;
+};
+
+/** One preparation-checked chunk paired with its reviewed passage. */
+type CheckedPair = { chunk: SourceChunk; passage: PreparedPassage };
+
+/**
+ * Group preparation-checked pairs into one document bundle per source.
+ * Sources follow `sourceOrder` (unknown sources last, by id); passages
+ * inside a bundle follow document order.
+ */
+function groupPairsIntoBundles(
+  pairs: CheckedPair[],
+  descriptions: Map<string, string>,
+  sourceOrder: string[]
+): PassageBundle[] {
+  const order = new Map(sourceOrder.map((id, i) => [id, i]));
+  const bySource = new Map<string, CheckedPair[]>();
+  for (const pair of pairs) {
+    const list = bySource.get(pair.chunk.sourceId) ?? [];
+    list.push(pair);
+    bySource.set(pair.chunk.sourceId, list);
+  }
+  const sourceIds = [...bySource.keys()].sort((a, b) =>
+    (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER) ||
+    (a < b ? -1 : a > b ? 1 : 0));
+  return sourceIds.map(sourceId => {
+    const group = bySource.get(sourceId)!.slice()
+      .sort((a, b) => a.chunk.startLine - b.chunk.startLine || a.chunk.chunkIndex - b.chunk.chunkIndex);
+    return {
+      id: `${sourceId}#bundle`,
+      sourceId,
+      chunks: group.map(g => g.chunk),
+      passages: group.map(g => g.passage),
+      providerText: bundleProviderText(descriptions.get(sourceId) ?? '', group.map(g => g.passage))
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -273,19 +481,32 @@ export function cacheKeyFor(sourceId: string, contentSHA: string): string {
 export type RetrievalOptions = {
   /** The judge transport. Required. */
   transport: Evaluator;
+  /**
+   * MUST be true: affirms the `description` strings are caller-reviewed,
+   * provider-safe input. Anything else throws before any provider call —
+   * descriptions are the one raw caller text the judge sees, so the
+   * affirmation is explicit, never inferred.
+   */
+  descriptionsReviewed: boolean;
+  /** Policy every preparation record must have been reviewed under. Default 'reviewed'. */
+  expectedPolicy?: string;
   /** Sources kept after the descriptions stage. Default 3 ("ranked top3 docs"). */
   docK?: number;
-  /** Local BM25 chunks kept per gated source. Default 4 ("top4 chunks"). */
+  /** Local BM25 chunks kept GLOBALLY (across the pool, not per source). Default 4. */
   chunkK?: number;
   /** Local prefilter width inside the descriptions stage. Default 8 ("filter8"). */
   prefilter?: number;
-  /** Max provider stages (descriptions, narrow-bundles, wide-bundles). Default 3. */
+  /**
+   * Max provider stages. Default 3 without neighbors (descriptions,
+   * narrow-bundles, wide-bundles), 4 when `includeNeighbors` is on (adds
+   * the neighbors judge stage).
+   */
   maxStages?: number;
   /** Retries per provider call. Default 0 — retrieval never retries a judge call. */
   maxRetries?: number;
   /** Per-call timeout in ms, passed through to the sweep engine. */
   timeoutMs?: number;
-  /** Optional fourth stage: add the immediately adjacent chunk(s) in the same source. Default false (OFF). */
+  /** Optional fourth judge stage, ONLY after wide refusal. Default false (OFF). */
   includeNeighbors?: boolean;
   /** Explicit preparation records; absent means every selected passage is preparation-required. */
   preparation?: PreparationSource;
@@ -309,7 +530,7 @@ export type StageTrace = {
 export type RetrievalResult = {
   status: RetrievalStatus;
   request: string;
-  /** `ready` only: prepared passages, grouped per source in source-rank order, each with its description. */
+  /** `ready` only: the top-ranked bundle's prepared passages. */
   passages: PreparedPassage[];
   /** `preparation-required` only: selected but unprepared passages — ids and offsets, never text. */
   pending: UnpreparedPassage[];
@@ -325,9 +546,10 @@ function errMessage(err: unknown): string {
 
 /**
  * A run whose judge coverage is incomplete: transport errors, unanswered
- * records, failed validation, or bookkeeping gaps. A `noMatch` on top of an
- * incomplete run is not "nothing matched" — it is unknown, and fails closed
- * to `refused`.
+ * records, failed validation, or bookkeeping gaps. A `noMatch` — or an
+ * accepted top pick — on top of an incomplete run is not "nothing matched"
+ * / "a match": it is unknown, and fails closed to `refused`. Checked BEFORE
+ * any accept path, not only on no-match.
  */
 function runIncomplete(run: FetchRun): boolean {
   if (run.errors.length) return true;
@@ -349,14 +571,12 @@ export function validateSelection(askedIds: Set<string>, selectedIds: string[]):
   }
 }
 
-type Bundle = { id: string; chunk: SourceChunk };
-
 async function judgeBundles(
-  bundles: Bundle[],
+  bundles: PassageBundle[],
   request: string,
   options: RetrievalOptions
 ): Promise<FetchRun> {
-  const catalog: FetchCatalogEntry[] = bundles.map(b => ({ id: b.id, text: b.chunk.text }));
+  const catalog: FetchCatalogEntry[] = bundles.map(b => ({ id: b.id, text: b.providerText }));
   return runFetch(catalog, request, {
     transport: options.transport,
     k: bundles.length,
@@ -367,7 +587,7 @@ async function judgeBundles(
 }
 
 /**
- * Optional fourth stage (OFF by default): for each selected chunk, add the
+ * Neighbor lookup for the fourth judge stage: for each selected chunk, the
  * immediately preceding and following chunk in the same source. Dedupes by
  * (sourceId, chunkIndex) and never drops the base selection. Out-of-range
  * neighbors (first/last chunk) simply contribute nothing on that side.
@@ -394,8 +614,9 @@ export function addNeighbors(selected: SourceChunk[], chunksBySource: Map<string
  * Run the experimental retrieval chain. Opt-in only; see the module header.
  * Never throws for judge behaviour (refusals, no-matches, transport errors
  * become terminal statuses); throws `RetrievalError` only for caller input
- * problems (bad options, duplicate source ids, foreign judge ids, invalid
- * offsets) — all fail-closed, never guessed around.
+ * problems (bad options, unaffirmed descriptions, duplicate source ids,
+ * foreign judge ids, invalid chunk offsets) — all fail-closed, never
+ * guessed around.
  */
 export async function retrieveSources(
   sources: RetrievalSource[],
@@ -403,6 +624,11 @@ export async function retrieveSources(
   options: RetrievalOptions
 ): Promise<RetrievalResult> {
   if (!options?.transport) throw new RetrievalError('Provide a transport (an Evaluator) to retrieve sources');
+  if (options.descriptionsReviewed !== true) {
+    throw new RetrievalError(
+      'descriptionsReviewed must be true: descriptions are caller-reviewed provider-safe input sent to the judge'
+    );
+  }
   if (typeof request !== 'string' || !request.trim()) throw new RetrievalError('Provide a non-empty request');
   if (!Array.isArray(sources)) throw new RetrievalError('Provide a sources array');
   const seen = new Set<string>();
@@ -415,20 +641,34 @@ export async function retrieveSources(
   }
   const docK = options.docK ?? 3;
   const chunkK = options.chunkK ?? 4;
-  const maxStages = options.maxStages ?? 3;
+  const includeNeighbors = options.includeNeighbors ?? false;
+  const maxStages = options.maxStages ?? (includeNeighbors ? 4 : 3);
   const targetWords = options.targetWords ?? DEFAULT_CHUNK_TARGET_WORDS;
   const prefilter = options.prefilter ?? 8;
+  const expectedPolicy = options.expectedPolicy ?? 'reviewed';
+  if (typeof expectedPolicy !== 'string' || !expectedPolicy) throw new RetrievalError('expectedPolicy must be a non-empty string');
   if (!Number.isInteger(docK) || docK < 1) throw new RetrievalError('docK must be a positive integer');
   if (!Number.isInteger(chunkK) || chunkK < 1) throw new RetrievalError('chunkK must be a positive integer');
   if (!Number.isInteger(maxStages) || maxStages < 1) throw new RetrievalError('maxStages must be a positive integer');
   if (!Number.isInteger(prefilter) || prefilter < 0) throw new RetrievalError('prefilter must be a non-negative integer');
 
   const trace: StageTrace[] = [];
-  const byId = new Map(sources.map(s => [s.id, s]));
   const descriptions = new Map(sources.map(s => [s.id, s.description]));
   const sourcePointers = sources.map(s => ({ id: s.id, contentSHA: sha256Hex(s.text), description: s.description }));
   const refused = (note: string): RetrievalResult =>
     ({ status: 'refused', request, passages: [], pending: [], trace, sources: sourcePointers });
+
+  // Chunk ALL source documents once, up front. Everything downstream — the
+  // narrow shortlist, the global wide recovery, the neighbor lookup —
+  // reads this single chunking.
+  const chunksBySource = new Map<string, SourceChunk[]>();
+  const allChunks: SourceChunk[] = [];
+  for (const s of sources) {
+    const chunks = chunkSource(s.id, s.text, targetWords);
+    assertChunkOffsets(chunks);
+    chunksBySource.set(s.id, chunks);
+    allChunks.push(...chunks);
+  }
 
   // -- Stage 1: descriptions (filter8), provider --------------------------------
   let descRun: FetchRun;
@@ -448,155 +688,168 @@ export async function retrieveSources(
     return refused('descriptions stage transport error');
   }
   let stagesUsed = 1;
+  // Completeness BEFORE any interpretation of the gate: a no-match on top
+  // of an incomplete run is unknown, not "nothing matched".
+  if (runIncomplete(descRun)) {
+    trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: [], note: `judge coverage incomplete: ${descRun.errors.join('; ')}` });
+    return refused('descriptions stage judge coverage incomplete');
+  }
   const descGate = applyDirectFitGate(descRun);
-  trace.push({
-    stage: 'descriptions', calls: descRun.calls,
-    kept: descGate.noMatch ? [] : descGate.ranked.map(r => r.id),
-    dropped: sources.map(s => s.id).filter(id => descGate.noMatch || !descGate.ranked.some(r => r.id === id)),
-    note: descGate.noMatch ? 'gate refused: no direct fit among descriptions' : `direct-fit top ${descGate.ranked.length}`
-  });
+  let rankedSourceIds: string[];
+  let descNote: string;
   if (descGate.noMatch) {
-    // A no-match WITH judge errors is not "nothing matched" — it is unknown. Fail closed.
-    if (runIncomplete(descRun)) return refused(`descriptions stage judge coverage incomplete: ${descRun.errors.join('; ')}`);
-    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
-  }
-  const rankedSourceIds = descGate.ranked.map(r => r.id);
-  validateSelection(new Set(sources.map(s => s.id)), rankedSourceIds);
-
-  // -- Local: chunk the gated sources, BM25 top chunkK per source ----------------
-  const chunksBySource = new Map<string, SourceChunk[]>();
-  const keptChunks: SourceChunk[] = [];
-  const bm25Kept: string[] = [];
-  for (const id of rankedSourceIds) {
-    const src = byId.get(id);
-    if (!src) throw new RetrievalError(`unknown source id ${JSON.stringify(id)} — failing closed`);
-    const chunks = chunkSource(src.id, src.text, targetWords);
-    chunksBySource.set(id, chunks);
-    if (!chunks.length) continue;
-    const entries: FetchCatalogEntry[] = chunks.map(c => ({ id: `${c.sourceId}#${c.chunkIndex}`, text: c.text }));
-    const top = prefilterCatalog(entries, request, chunkK);
-    const keepIds = new Set(top.kept.map(e => e.id));
-    for (const c of chunks) {
-      if (keepIds.has(`${c.sourceId}#${c.chunkIndex}`)) { keptChunks.push(c); bm25Kept.push(`${c.sourceId}#${c.chunkIndex}`); }
-    }
-  }
-  trace.push({
-    stage: 'local-bm25', calls: 0, kept: bm25Kept,
-    dropped: [],
-    note: `chunked ${rankedSourceIds.length} gated source(s), kept local BM25 top-${chunkK} chunks per source`
-  });
-  if (!keptChunks.length) {
-    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
-  }
-
-  // -- Stage 2: narrow bundles (one chunk per bundle), provider ------------------
-  if (stagesUsed >= maxStages) return refused('narrow-bundles stage exceeds maxStages');
-  const narrowBundles: Bundle[] = keptChunks.map(c => ({ id: `${c.sourceId}#${c.chunkIndex}`, chunk: c }));
-  let narrowRun: FetchRun;
-  try {
-    narrowRun = await judgeBundles(narrowBundles, request, options);
-  } catch (err) {
-    trace.push({ stage: 'narrow-bundles', calls: 0, kept: [], dropped: [], note: `transport error: ${errMessage(err)}` });
-    return refused('narrow-bundles stage transport error');
-  }
-  stagesUsed += 1;
-  const narrowGate = applyDirectFitGate(narrowRun);
-  validateSelection(new Set(narrowBundles.map(b => b.id)), narrowGate.noMatch ? [] : narrowGate.ranked.map(r => r.id));
-  trace.push({
-    stage: 'narrow-bundles', calls: narrowRun.calls,
-    kept: narrowGate.noMatch ? [] : narrowGate.ranked.map(r => r.id),
-    dropped: narrowBundles.map(b => b.id).filter(id => narrowGate.noMatch || !narrowGate.ranked.some(r => r.id === id)),
-    note: narrowGate.noMatch ? 'gate refused narrow bundles' : `direct-fit top ${narrowGate.ranked.length} narrow bundle(s)`
-  });
-
-  // -- Stage 3: wide bundles (one per source), ONLY on refusal, provider --------
-  let selectedBundles: Bundle[];
-  if (!narrowGate.noMatch) {
-    const byBundleId = new Map(narrowBundles.map(b => [b.id, b]));
-    selectedBundles = narrowGate.ranked.map(r => {
-      const b = byBundleId.get(r.id);
-      if (!b) throw new RetrievalError(`judge selected unknown bundle id ${JSON.stringify(r.id)} — failing closed`);
-      return b;
-    });
-  } else {
-    if (runIncomplete(narrowRun)) return refused(`narrow-bundles stage judge coverage incomplete: ${narrowRun.errors.join('; ')}`);
-    if (stagesUsed >= maxStages) return refused('wide-bundles stage exceeds maxStages (narrow bundles refused)');
-    const perSource = new Map<string, SourceChunk[]>();
-    for (const c of keptChunks) {
-      const list = perSource.get(c.sourceId) ?? [];
-      list.push(c);
-      perSource.set(c.sourceId, list);
-    }
-    const wideBundles: Bundle[] = [...perSource.entries()].map(([sourceId, chunks]) => ({
-      // The wide bundle's "chunk" is a synthetic view over the source's kept
-      // chunks; its text is what the judge sees. Offsets stay per-chunk below.
-      id: `${sourceId}#wide`,
-      chunk: {
-        sourceId, sourceSHA: chunks[0].sourceSHA, chunkIndex: -1,
-        startLine: Math.min(...chunks.map(c => c.startLine)),
-        endLine: Math.max(...chunks.map(c => c.endLine)),
-        heading: chunks[0].heading,
-        text: chunks.map(c => c.text).join('\n\n')
-      }
-    }));
-    let wideRun: FetchRun;
-    try {
-      wideRun = await judgeBundles(wideBundles, request, options);
-    } catch (err) {
-      trace.push({ stage: 'wide-bundles', calls: 0, kept: [], dropped: [], note: `transport error: ${errMessage(err)}` });
-      return refused('wide-bundles stage transport error');
-    }
-    stagesUsed += 1;
-    const wideGate = applyDirectFitGate(wideRun);
-    validateSelection(new Set(wideBundles.map(b => b.id)), wideGate.noMatch ? [] : wideGate.ranked.map(r => r.id));
-    trace.push({
-      stage: 'wide-bundles', calls: wideRun.calls,
-      kept: wideGate.noMatch ? [] : wideGate.ranked.map(r => r.id),
-      dropped: wideBundles.map(b => b.id).filter(id => wideGate.noMatch || !wideGate.ranked.some(r => r.id === id)),
-      note: wideGate.noMatch ? 'gate refused wide bundles' : `direct-fit top ${wideGate.ranked.length} wide bundle(s)`
-    });
-    if (wideGate.noMatch) {
-      if (runIncomplete(wideRun)) return refused(`wide-bundles stage judge coverage incomplete: ${wideRun.errors.join('; ')}`);
+    // Low confidence does NOT abort the chain: like the experiment, keep
+    // the description ranking's top docK docs and continue to passage
+    // judging. A description-only run can never be ready.
+    rankedSourceIds = descRun.allScored.slice(0, docK).map(r => r.id);
+    if (!rankedSourceIds.length) {
+      trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: sources.map(s => s.id), note: 'gate deferred and no descriptions were judged' });
       return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
     }
-    // A selected wide bundle resolves back to the source's kept chunks —
-    // the unit the judge saw, the chunks the preparation binds to.
-    selectedBundles = [];
-    for (const r of wideGate.ranked) {
-      const sourceId = r.id.slice(0, -'#wide'.length);
-      const chunks = perSource.get(sourceId);
-      if (!chunks) throw new RetrievalError(`judge selected unknown wide bundle ${JSON.stringify(r.id)} — failing closed`);
-      for (const c of chunks) selectedBundles.push({ id: `${c.sourceId}#${c.chunkIndex}`, chunk: c });
-    }
+    descNote = `gate deferred (low confidence); description ranking chose top ${rankedSourceIds.length}`;
+  } else {
+    rankedSourceIds = descGate.ranked.map(r => r.id);
+    descNote = `direct-fit top ${rankedSourceIds.length}`;
+  }
+  validateSelection(new Set(sources.map(s => s.id)), rankedSourceIds);
+  trace.push({
+    stage: 'descriptions', calls: descRun.calls,
+    kept: rankedSourceIds,
+    dropped: sources.map(s => s.id).filter(id => !rankedSourceIds.includes(id)),
+    note: descNote
+  });
+
+  // -- Local: BM25 global top chunkK across all chunks in the shortlist -------
+  const shortlist = new Set(rankedSourceIds);
+  const shortlistChunks = allChunks.filter(c => shortlist.has(c.sourceId));
+  const narrowTop = topChunksGlobal(shortlistChunks, descriptions, request, chunkK);
+  trace.push({
+    stage: 'local-bm25', calls: 0, kept: narrowTop.map(chunkIdentity), dropped: [],
+    note: `global top-${chunkK} chunks across all chunks in the top-${rankedSourceIds.length} doc(s)`
+  });
+  if (!narrowTop.length) {
+    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
   }
 
-  // -- Optional stage 4: neighbors (OFF by default) ------------------------------
-  let finalChunks = selectedBundles.map(b => b.chunk);
-  if (options.includeNeighbors) {
-    finalChunks = addNeighbors(finalChunks, chunksBySource);
+  /**
+   * Preparation gate for a provider passage pool: EVERY chunk the judge is
+   * about to see must carry a valid reviewed record, or the whole run is
+   * preparation-required — checked BEFORE any passage call, never a raw
+   * fallback. Returns the checked pairs, or the terminal result.
+   */
+  const checkPool = (poolChunks: SourceChunk[], stage: string): CheckedPair[] | RetrievalResult => {
+    const { prepared, pending } = preparePassages(poolChunks, descriptions, options.preparation, expectedPolicy);
+    if (pending.length) {
+      trace.push({
+        stage: 'prepare', calls: 0, kept: [],
+        dropped: pending.map(p => chunkIdentity(p)),
+        note: `${stage}: ${pending.length} passage(s) missing/stale/unreviewed preparation — withheld before any provider passage call`
+      });
+      return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers };
+    }
+    return poolChunks.map((c, i) => ({ chunk: c, passage: prepared[i] }));
+  };
+  const isTerminal = (v: CheckedPair[] | RetrievalResult): v is RetrievalResult => !Array.isArray(v);
+
+  /**
+   * Accept path: re-verify the artifact binding of the top-ranked bundle's
+   * chunks, then return ONLY that bundle's supporting prepared passages —
+   * never every low-ranked candidate.
+   */
+  const acceptTopBundle = (bundle: PassageBundle): RetrievalResult => {
+    const { prepared, pending } = preparePassages(bundle.chunks, descriptions, options.preparation, expectedPolicy);
+    trace.push({
+      stage: 'prepare', calls: 0,
+      kept: prepared.map(p => chunkIdentity(p)),
+      dropped: pending.map(p => chunkIdentity(p)),
+      note: `accepted bundle ${bundle.id}: binding re-verified, ${prepared.length} prepared, ${pending.length} preparation-required`
+    });
+    if (pending.length) {
+      return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers };
+    }
+    return { status: 'ready', request, passages: prepared, pending: [], trace, sources: sourcePointers };
+  };
+
+  type StageOutcome =
+    | { done: true; result: RetrievalResult }
+    | { done: false; accepted?: PassageBundle };
+
+  /**
+   * Run one document-bundle judge stage: judge, fail closed on foreign ids,
+   * check completeness BEFORE any accept path, then gate. Returns the
+   * terminal result, or the single top-ranked bundle on acceptance.
+   */
+  const runJudgeStage = async (
+    stage: 'narrow-bundles' | 'wide-bundles' | 'neighbors',
+    bundles: PassageBundle[]
+  ): Promise<StageOutcome> => {
+    let run: FetchRun;
+    try {
+      run = await judgeBundles(bundles, request, options);
+    } catch (err) {
+      trace.push({ stage, calls: 0, kept: [], dropped: [], note: `transport error: ${errMessage(err)}` });
+      return { done: true, result: refused(`${stage} stage transport error`) };
+    }
+    stagesUsed += 1;
+    const gate = applyDirectFitGate(run);
+    const asked = new Set(bundles.map(b => b.id));
+    validateSelection(asked, gate.noMatch ? [] : gate.ranked.map(r => r.id));
+    if (runIncomplete(run)) {
+      trace.push({ stage, calls: run.calls, kept: [], dropped: [], note: `judge coverage incomplete: ${run.errors.join('; ')}` });
+      return { done: true, result: refused(`${stage} stage judge coverage incomplete`) };
+    }
+    trace.push({
+      stage, calls: run.calls,
+      kept: gate.noMatch ? [] : gate.ranked.map(r => r.id),
+      dropped: bundles.map(b => b.id).filter(id => gate.noMatch || !gate.ranked.some(r => r.id === id)),
+      note: gate.noMatch ? 'gate refused bundles' : `direct-fit top bundle ${gate.ranked[0].id}`
+    });
+    if (gate.noMatch) return { done: false };
+    const top = bundles.find(b => b.id === gate.ranked[0].id);
+    if (!top) throw new RetrievalError(`judge selected unknown bundle id ${JSON.stringify(gate.ranked[0].id)} — failing closed`);
+    return { done: false, accepted: top };
+  };
+
+  // -- Stage 2: narrow bundles (document-grouped prepared passages), provider --
+  if (stagesUsed >= maxStages) return refused('narrow-bundles stage exceeds maxStages');
+  const narrowChecked = checkPool(narrowTop, 'narrow-bundles');
+  if (isTerminal(narrowChecked)) return narrowChecked;
+  const narrowBundles = groupPairsIntoBundles(narrowChecked, descriptions, rankedSourceIds);
+  const narrowOutcome = await runJudgeStage('narrow-bundles', narrowBundles);
+  if (narrowOutcome.done) return narrowOutcome.result;
+  if (narrowOutcome.accepted) return acceptTopBundle(narrowOutcome.accepted);
+
+  // -- Stage 3: wide bundles (GLOBAL corpus top chunkK), ONLY on narrow refusal
+  if (stagesUsed >= maxStages) return refused('wide-bundles stage exceeds maxStages (narrow bundles refused)');
+  const wideTop = topChunksGlobal(allChunks, descriptions, request, chunkK);
+  trace.push({
+    stage: 'local-bm25', calls: 0, kept: wideTop.map(chunkIdentity), dropped: [],
+    note: `wide selection: global top-${chunkK} chunks across the whole corpus (recovers outside the shortlist)`
+  });
+  const wideChecked = checkPool(wideTop, 'wide-bundles');
+  if (isTerminal(wideChecked)) return wideChecked;
+  const wideOrder = [...rankedSourceIds, ...sources.map(s => s.id).filter(id => !shortlist.has(id)).sort()];
+  const wideBundles = groupPairsIntoBundles(wideChecked, descriptions, wideOrder);
+  const wideOutcome = await runJudgeStage('wide-bundles', wideBundles);
+  if (wideOutcome.done) return wideOutcome.result;
+  if (wideOutcome.accepted) return acceptTopBundle(wideOutcome.accepted);
+
+  // -- Stage 4: neighbors — a FOURTH judge stage, ONLY after wide refusal -----
+  if (includeNeighbors) {
+    if (stagesUsed >= maxStages) return refused('neighbors stage exceeds maxStages (wide bundles refused)');
+    const neighborChunks = addNeighbors(wideTop, chunksBySource);
     trace.push({
       stage: 'neighbors', calls: 0,
-      kept: finalChunks.map(c => `${c.sourceId}#${c.chunkIndex}`),
-      dropped: [],
-      note: `neighbor stage on: ${finalChunks.length - selectedBundles.length} adjacent chunk(s) added, base selection kept`
+      kept: neighborChunks.map(chunkIdentity), dropped: [],
+      note: `local: added ${neighborChunks.length - wideTop.length} adjacent chunk(s) for judging; base selection kept`
     });
+    const neighborChecked = checkPool(neighborChunks, 'neighbors');
+    if (isTerminal(neighborChecked)) return neighborChecked;
+    const neighborBundles = groupPairsIntoBundles(neighborChecked, descriptions, wideOrder);
+    const neighborOutcome = await runJudgeStage('neighbors', neighborBundles);
+    if (neighborOutcome.done) return neighborOutcome.result;
+    if (neighborOutcome.accepted) return acceptTopBundle(neighborOutcome.accepted);
   }
 
-  // -- Prepare: bind every selected passage, or report preparation_required ------
-  const { prepared, pending } = preparePassages(finalChunks, descriptions, options.preparation);
-  trace.push({
-    stage: 'prepare', calls: 0,
-    kept: prepared.map(p => `${p.sourceId}#${p.chunkIndex}`),
-    dropped: pending.map(p => `${p.sourceId}#${p.chunkIndex}`),
-    note: `${prepared.length} prepared, ${pending.length} preparation-required`
-  });
-  if (pending.length) {
-    // Withhold the whole selection: a partially-cleared bundle is not a
-    // cleared answer, and unprepared text is never returned as a fallback.
-    return { status: 'preparation-required', request, passages: [], pending, trace, sources: sourcePointers };
-  }
-  // Group prepared passages per source, in source-rank order, with description.
-  const rank = new Map(rankedSourceIds.map((id, i) => [id, i]));
-  prepared.sort((a, b) => (rank.get(a.sourceId) ?? 0) - (rank.get(b.sourceId) ?? 0) || a.chunkIndex - b.chunkIndex);
-  return { status: 'ready', request, passages: prepared, pending: [], trace, sources: sourcePointers };
+  return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
 }

@@ -1,9 +1,8 @@
 # Experimental source retrieval (opt-in)
 
-Status: **experimental**. The lead is still measuring whether the neighbor
-stage helps. Nothing here carries an accuracy promise, and none of it runs
-unless a caller opts in. It changes no CLI, no fleet default, and no
-existing `runFetch` behaviour.
+Status: **experimental**. Nothing here carries an accuracy promise, and none
+of it runs unless a caller opts in by calling `retrieveSources`. It changes
+no CLI, no fleet default, and no existing `runFetch` behaviour.
 
 ## What it is
 
@@ -12,58 +11,80 @@ small set of source documents through a bounded async stage chain. It reuses
 three existing pieces and adds no new framework or dependency:
 
 - `runFetch` — the one-question relevance sweep, used for the descriptions
-  stage and for judging chunk bundles.
-- `prefilterCatalog` — the local BM25-lite pass, used to keep the top-4
-  chunks per gated source without a provider call.
+  stage and for judging document bundles.
+- `prefilterCatalog` — the local BM25-lite pass, used to keep the global
+  top-4 chunks (`chunkK`) across a chunk pool without a provider call.
 - `applyDirectFitGate` — the experimental direct-fit gate (PR #82 branch):
   a stage's output is only acted on when the rubric called the top pick a
   direct fit (`high`), above the confidence floor and margin.
 
+## Preparation first
+
+Preparation happens BEFORE any passage provider call. Every preparation
+record binds caller-REVIEWED passage text and a safe heading to the source
+id, the source content SHA, the exact chunk offsets, the expected policy,
+and the artifact identity (`doc:Lstart-end`). The judge sees ONLY reviewed
+text and safe headings — raw chunk text and raw headings never leave the
+module. Any selected chunk without a valid reviewed record (missing, stale,
+unreviewed, or under the wrong policy) makes the whole run
+`preparation-required`: the passage call never happens, and the pending list
+names each passage by id and offsets only, never text.
+
+Descriptions are the one caller text the judge sees, so `descriptionsReviewed`
+must be explicitly `true` before any provider call is made.
+
 ## The chain
 
-1. **descriptions** (provider) — `runFetch` over the source descriptions
-   with the filter-8 local prefilter; gated by `applyDirectFitGate`.
-   Keeps the ranked top-3 docs by default (`docK`).
-2. **local BM25** (local) — each surviving source is cut by `chunkSource`
-   into deterministic heading-aware ~180-word chunks at line boundaries;
-   `prefilterCatalog` keeps the local top-4 chunks per source (`chunkK`).
-3. **narrow-bundles** (provider) — one bundle per chunk, judged and gated.
-4. **wide-bundles** (provider, **only on refusal**) — when the narrow
-   stage's gate refuses, each source's kept chunks are re-judged as one
-   wide bundle per source.
-5. **neighbors** (optional, **OFF by default**) — adds the immediately
-   preceding/following chunk in the same source, deduped, never dropping
-   the base selection.
-6. **prepare** (local) — binds every selected passage to its source's
-   content SHA and a preparation policy.
+1. **chunk all sources once** (local, up front) — every source document is
+   cut by `chunkSource` into deterministic heading-aware ~180-word chunks at
+   line boundaries, exactly like the experiment's section chunker: a heading
+   boundary flushes before the heading, a breadcrumb stack is carried
+   (`A > B`), the open block flushes before adding a line when
+   current-words + next-line-words exceeds the target, blank-only blocks are
+   dropped, and every chunk records exact original line offsets plus the
+   source content SHA.
+2. **descriptions** (provider) — `runFetch` over the source descriptions
+   with the filter-8 local prefilter; gated by `applyDirectFitGate`. A
+   low-confidence/deferred gate does NOT abort the chain: the description
+   ranking's top-3 docs (`docK`) continue to passage judging. A
+   description-only run can never produce `ready`.
+3. **local BM25** (local) — the GLOBAL top-4 chunks (`chunkK`) across ALL
+   chunks in the description shortlist, scored in the experiment's exact
+   format (`Document description: … / Section: … / Passage: …`), score
+   descending with a stable chunk-identity tie-break.
+4. **narrow-bundles** (provider) — the top chunks are preparation-checked,
+   then judged as DOCUMENT-GROUPED bundles of prepared passages (never
+   isolated paragraphs), in the experiment's exact bundle format
+   (`Description: … / Automatically retrieved source passages: / <safe
+   heading>: <reviewed text>`).
+5. **wide-bundles** (provider, **only on narrow refusal**) — the GLOBAL
+   top-4 chunks across the WHOLE corpus, so a match outside the description
+   shortlist can be recovered; judged as document bundles the same way.
+6. **neighbors** (optional, **OFF by default**) — a genuine FOURTH judge
+   stage, **only after wide refusal**: previous/next same-document chunks
+   are added to the wide selection (deduped, base never dropped),
+   preparation-checked, and judged as bundles. Neighbors are never appended
+   after an acceptance without judging.
 
-Stages are bounded by `maxStages` (default 3: descriptions, narrow-bundles,
-wide-bundles). The bound counts provider stages — a stage's provider calls
-may still batch; it is not an HTTP-call cap. Judge calls are never retried
-(`maxRetries: 0`); `timeoutMs` is configurable and passed through.
-
-## Preparation, not redaction
-
-A passage is usable only when an explicit preparation callback or
-contentSHA-keyed map binds it to the exact source bytes (`contentSHA`) and a
-`reviewed` preparation policy. Unknown, stale (bytes changed since review),
-or unreviewed selections return `preparation_required` — never the raw text
-as a fallback, and never an automatic redaction or approval. A
-`preparation_required` result withholds the whole selection and names each
-pending passage by source, chunk, and offsets only.
+Stages are bounded by `maxStages` (default 3 without neighbors:
+descriptions, narrow-bundles, wide-bundles; 4 when `includeNeighbors` is
+on). Judge calls are never retried (`maxRetries: 0`); `timeoutMs` is
+configurable and passed through.
 
 ## Fail-closed
 
-Incomplete judge coverage, transport errors, and unknown judge ids never
-produce passages: the result is `refused`. A `no-match` is only reported
-when the judge actually answered and found no direct fit. Caller input
-problems (duplicate source ids, foreign ids, invalid chunk offsets) throw
-`RetrievalError`.
+Errors and completeness are checked BEFORE every accept path, not only on
+no-match: transport errors, unanswered records, failed validation, and
+bookkeeping gaps make the result `refused`. Unknown judge ids throw
+`RetrievalError`. A `no-match` is only reported when the judge actually
+answered and found no direct fit. Caller input problems (unaffirmed
+descriptions, duplicate source ids, invalid chunk offsets) throw
+`RetrievalError` before any provider call.
 
 ## Ready results
 
-A `ready` result carries the prepared passages grouped per source in
-source-rank order (each with its description), a compact per-stage trace
+A `ready` result carries ONLY the top-ranked bundle's supporting prepared
+passages — never every low-ranked candidate — plus a compact per-stage trace
 (what ran, provider calls, kept/dropped ids), and original-source pointers
 (`id`, `contentSHA`, `description`) for every source that entered the chain.
 
