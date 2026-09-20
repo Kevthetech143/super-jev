@@ -32,6 +32,13 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
         entry = root / "fleet-retrieval-experiment/run.sh"
         cmd = ["sh", str(entry), *args]
     elif tool == "memory":
+        wrapper = skill_dir / "memory.sh"
+        # The installed wrapper supplies deployment-local repo/config, then re-enters
+        # this dispatcher. Explicit repo/config choices must not be overwritten.
+        if (not os.environ.get("SUPERJEV_REPO") and "--config" not in args
+                and not any(arg.startswith("--config=") for arg in args)
+                and not os.environ.get("SUPERJEV_MEMORY_WRAPPER_ACTIVE") and wrapper.is_file()):
+            return ["sh", str(wrapper), *args]
         repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
         entry = repo / "experiments/verified-pointer-memory/cli.py"
         cmd = [sys.executable, str(entry), *args]
@@ -67,9 +74,16 @@ def main(args: list[str]) -> int:
         print(json.dumps({"status": "error", "reason": "Unknown tool; choose help, skills, find, check, verify, or memory"}))
         return 2
     try:
-        return subprocess.run(command(Path(__file__).resolve().parent, tool, rest)).returncode
+        cmd = command(Path(__file__).resolve().parent, tool, rest)
+        env = dict(os.environ)
+        if tool == "memory" and len(cmd) > 1 and Path(cmd[1]).name == "memory.sh":
+            env["SUPERJEV_MEMORY_WRAPPER_ACTIVE"] = "1"
+        return subprocess.run(cmd, env=env).returncode
     except MissingDependency as exc:
-        print(json.dumps({"status": "error", "reason": "missing-dependency", "dependency": str(exc)}))
+        print(json.dumps({"status": "error", "reason": "missing-dependency", "dependency": str(exc),
+                          "nextAction": "configure-memory-runtime",
+                          "hint": "Memory needs the Super Jev repository runtime first. Set SUPERJEV_REPO to its checkout (containing experiments/verified-pointer-memory/cli.py), or repair the installed memory.sh wrapper. Then run memory --describe; data queries also need a reviewed dataset and memory config.",
+                          "helpCommand": "help --topic register-setup"}))
         return 2
     except OSError as exc:
         print(json.dumps({"status": "error", "reason": str(exc)}))
