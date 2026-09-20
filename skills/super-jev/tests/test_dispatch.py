@@ -44,7 +44,13 @@ def test_find_preserves_backend_json_and_nonzero_status(tmp_path):
     stub(root / 'fleet-retrieval-experiment/run.sh', 'echo \'{"status":"preparation-required"}\'\nexit 4\n')
     result = run(skill, 'find', '--dataset', 'example', '--request', 'exact request')
     assert result.returncode == 4
-    assert json.loads(result.stdout)['status'] == 'preparation-required'
+    body = json.loads(result.stdout)
+    assert body['status'] == 'preparation-required'
+    assert body['nextAction'] == 'connect-reviewed-local-files'
+    assert body['setup']['requestTemplate']['action'] == 'connect'
+    assert body['setup']['requestTemplate']['sources'][0]['path']
+    assert body['hint']
+    assert 'memory' in body['setup']['steps'][-1]
 
 
 @pytest.mark.parametrize('tool,door', [('check','gate'),('verify','verify')])
@@ -139,3 +145,29 @@ def test_broken_wrapper_returns_setup_hint_without_recursing(tmp_path, monkeypat
     assert body['reason'] == 'missing-dependency'
     assert body['nextAction'] == 'configure-memory-runtime'
     assert body['hint'] and body['helpCommand']
+
+
+@pytest.mark.parametrize('payload', [b'{"status":"ready","passages":[{"text":"unchanged"}]}\n', b'not json\n', b'[]\n', b'{"status":"error","reason":"no access"}\n'])
+def test_find_nonpreparation_outputs_unchanged(tmp_path, payload):
+    root, skill = installed(tmp_path)
+    entry = root / 'fleet-retrieval-experiment/run.sh'
+    fixture = tmp_path / 'output'
+    fixture.write_bytes(payload)
+    stub(entry, f'cat "{fixture}"\nexit 3\n')
+    result = run(skill, 'find', '--request', 'original')
+    assert result.returncode == 3
+    assert result.stdout.encode() == payload
+
+
+def test_find_preserves_pending_sources_and_backend_reason(tmp_path):
+    root, skill = installed(tmp_path)
+    payload = {'status': 'preparation-required', 'reason': 'stale-source',
+               'pending': [{'sourceId': 'record', 'startLine': 4, 'endLine': 9}],
+               'passages': [], 'nextAction': 'existing-backend-action', 'hint': 'Existing specific guidance'}
+    fixture = tmp_path / 'response.json'
+    fixture.write_text(json.dumps(payload))
+    stub(root / 'fleet-retrieval-experiment/run.sh', f'cat "{fixture}"\n')
+    body = json.loads(run(skill, 'find').stdout)
+    for key, value in payload.items():
+        assert body[key] == value
+    assert body['setup']['requestTemplate']['action'] == 'connect'
