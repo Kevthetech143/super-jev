@@ -15,7 +15,7 @@ For each real queued question:
 - Submit pointer, original question, caller identity and relevant project/person/time context once.
 - `verified-cache-hit`: use the cited answer within that context.
 - `refresh-required`: perform a trusted upstream check and refresh the reviewed preparation before retrying a `current` request. `checkedAt` records that whole-scope upstream check; it is not a file modification time, an event/effective date, or proof a domain fact is still true.
-- `ready`: inspect supporting passages and original-source provenance. Submit one `approve` input containing the complete supported answer and exact evidence quotes only after verification. Partial evidence, model confidence and repeated agreement are insufficient.
+- `ready`: inspect supporting passages and original-source provenance. Submit one `approve` input containing the complete supported answer and exact evidence quotes only after verification. Copy quotes directly from the returned passage JSON, preserving exact text and newlines. Do not quote another checkout/version or outside the returned evidence. Save the complete raw response before acting. Partial evidence, model confidence and repeated agreement are insufficient.
 - `preparation-required` or `unknown-pointer`: retain the pending question and repair/register the approved scope through the setup workflow. Report incomplete coverage; do not search a different person's data.
 - `no-match`, `refused`, `error` or access denial: preserve the outcome and record a miss when appropriate. No-match is not proof of absence. Continue with other queued questions; retry this item only with a justified repair or explicitly designed diagnostic test.
 
