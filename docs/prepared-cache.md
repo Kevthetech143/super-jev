@@ -20,7 +20,9 @@ live query. The source is hashed (sha256), never persisted.
 
 The NUL separators make the encoding unambiguous. The filename is the
 64-hex key, so different keys can never overwrite each other and no path
-traversal is possible.
+traversal is possible. Bindings containing NUL characters are rejected
+(`put`, `lookup` and `deriveCacheKey` throw): the unambiguous-separator
+claim holds only for NUL-free bindings.
 
 ## Read validation
 
@@ -28,11 +30,17 @@ traversal is possible.
 
 - `missing` — no entry file for the derived key
 - `schema` — entry written by an unknown schema version
-- `corrupt` — JSON unparseable or digest mismatch
+- `corrupt` — JSON unparseable, digest mismatch, or the stored artifact is
+  malformed (missing/null/non-string `preparedText`, `refs` not a string
+  array). Malformed stored data is always a miss, never a throw.
 - `stale-source` — content SHA drifted (a hand-copied entry no longer matches
   the bytes it claims to describe)
 - `stale-policy` — policy version drifted
-- `binding-mismatch` — source ID drifted
+- `binding-mismatch` — source ID drifted, or the stored review receipt no
+  longer binds the current source bytes, the current policy version, and the
+  exact stored artifact. The receipt is re-validated on every read, even when
+  the entry digest is valid: a receipt with a correctly recomputed digest but
+  wrong bindings is a miss, not a hit.
 
 ## Write validation
 
@@ -85,6 +93,10 @@ wiring: the cache only acts when the caller constructs it and calls it.
 `test/enhance/prepared-cache.test.ts` covers local file I/O and reuse
 behavior with synthetic source bytes: cold/warm callback counts, changed
 source, old-receipt rejection, policy invalidation, corruption, ID isolation,
-reload, multiple keys, file modes, and the no-raw-sources invariant. No
+reload, multiple keys, file modes, and the no-raw-sources invariant. The
+attempt-2 correction adds: valid-digest-but-stale-receipt and
+valid-digest-but-swapped-artifact read misses, malformed stored artifact read
+misses (never a throw), embedded-NUL binding rejection, and automatic
+cleanup of the synthetic tempdirs after each test. No
 measured LLM or lead-time savings are claimed — the preparation callbacks in
 tests are counters, not models.
