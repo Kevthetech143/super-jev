@@ -106,11 +106,11 @@ def add_hints(result, config=None):
                       'action': 'approve'})
     elif status == 'preparation-required':
         hints.append({'code': 'refresh-preparation',
-                      'message': 'Review and refresh the registered preparation before retrying.',
+                      'message': 'Update the source or replace its exported copy, then review, rebuild preparation and re-register before retrying.',
                       'action': 'register'})
     elif status == 'refresh-required':
         hints.append({'code': 'refresh-upstream',
-                      'message': 'Run the trusted upstream freshness check before retrying.',
+                      'message': 'Obtain current source material and run the trusted whole-scope freshness check; refresh preparation and re-register if changed. Registration alone does not sync data.',
                       'action': 'search'})
     elif status == 'unknown-pointer':
         hints.append({'code': 'register-pointer',
@@ -120,6 +120,10 @@ def add_hints(result, config=None):
         hints.append({'code': 'assist-disabled',
                       'message': 'An operator can enable assistance with allowAgentAssist.',
                       'action': 'panel'})
+    if status in ('ready', 'verified-cache-hit') and result.get('freshness', {}).get('mode') == 'snapshot':
+        hints.append({'code': 'snapshot-freshness',
+                      'message': 'Based on the registered snapshot, not a live sync. For current-state questions, refresh the source and preparation or request current-mode freshness checks.',
+                      'action': 'search'})
     if status == 'ok' and result.get('pointers'):
         missing = sum(p.get('missingSourceDescriptions', 0)
                       for p in result['pointers'])

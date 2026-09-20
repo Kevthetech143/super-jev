@@ -67,3 +67,13 @@ Examples (use actual scope and observed results):
 - “A direct database connector is not available yet. We can plan a reviewed export if that suits your needs.”
 
 If data changed, say that the connection needs refreshing rather than that no answer exists. If retrieval needs agent assistance, report that separately from an automatic hit. Never say “your whole brain is connected,” “live synced,” or “always up to date” without evidence of that exact capability and coverage.
+
+## Freshness and manual updates
+
+A source is the underlying file, record, repo checkout, database or webpage. A registered connector may hold only a reviewed snapshot of it. Connected does not mean automatically synchronized.
+
+- Registered local files changed: update/review the preparation and re-register. Known changed bindings block reuse.
+- Export or local copy: obtain the newer export/copy first, then review, rebuild preparation and re-register. Unchanged copies cannot reveal changes upstream. Record who owns this manual refresh.
+- No supporting source yet: the verified-answer workflow needs reviewed material. With authorization, record the user's supplied facts in their project, retain their provenance, then prepare/register them. Do not invent a source or approve unsupported answers.
+
+For a current-state question, briefly say: “This uses the registered snapshot; newer information may exist.” Offer the concrete refresh step when needed, without a repeated onboarding ceremony. Snapshot mode supplies no checked date. Current mode requires a trusted whole-scope `checkedAt` within the requested age; this records the upstream check, not a guarantee that every fact is true or still current. File modification dates, cache approval times and event dates are not substitutes. Warnings never override a stale/refresh refusal. Automated fetching and syncing remain unimplemented.
