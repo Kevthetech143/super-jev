@@ -101,6 +101,26 @@ def add_hints(result, config=None):
     """Attach small deterministic operator guidance to actionable results."""
     status = result.get('status')
     hints = []
+    needs_start = status in ('unknown-pointer', 'preparation-required') or (
+        status == 'ok' and result.get('pointers') == [])
+    if needs_start:
+        if result.get('reason') == 'review-required':
+            message = 'Your files were found. Review their contents and existing permission for Jev, then confirm the returned hashes with reviewed:true. The harness will build the searchable copy.'
+        elif result.get('hint'):
+            message = result['hint']
+        else:
+            message = "Let's connect your records so Super Jev can search them. Choose the original files for this person or project; the agent can review them and run connect to build the searchable copy. If these files were connected before, refresh that connection instead."
+        result.setdefault('message', message)
+        result.setdefault('gettingStarted', {
+            'guide': 'references/connectors.md#connect-local-files-paths-to-searchable-passages',
+            'steps': ['Choose the authorized original text files for this person/project. If you have no records yet, the agent can help create them from your supplied facts.',
+                      'Submit a connect request for a local preview, review the files and permission, then confirm the returned sha256 values with reviewed:true.',
+                      'Once registered, search using the returned memory pointer. Reuse that connection next time; do not repeat onboarding.'],
+            'requestTemplate': {'action': 'connect', 'pointer': 'CHOSEN_SCOPE_NAME',
+                                'principals': ['YOUR_AGENT_NAME'],
+                                'sources': [{'path': '/absolute/path/to/original-record.md'}]},
+            'command': 'python3 <skill-directory>/dispatch.py memory --input CONNECT.json',
+        })
     if status == 'no-match' and config and config.get('allowAgentAssist'):
         hints.append({'code': 'inspect-sources',
                       'message': 'Review registered sources for relevant line ranges.',
@@ -118,9 +138,9 @@ def add_hints(result, config=None):
                       'message': 'Obtain current source material and run the trusted whole-scope freshness check; refresh preparation and re-register if changed. Registration alone does not sync data.',
                       'action': 'search'})
     elif status == 'unknown-pointer':
-        hints.append({'code': 'register-pointer',
-                      'message': 'Register an approved reviewed dataset pointer first.',
-                      'action': 'register'})
+        hints.append({'code': 'connect-records',
+                      'message': 'Use gettingStarted to connect your authorized original files, or select an existing pointer from your memory panel.',
+                      'action': 'connect'})
     elif (status == 'error' and result.get('reason') == 'agent assist is disabled'):
         hints.append({'code': 'assist-disabled',
                       'message': 'An operator can enable assistance with allowAgentAssist.',
@@ -278,6 +298,8 @@ def main():
         result = {'status': 'error', 'reason': str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
     add_hints(result, config)
     result.setdefault('nextAction', NEXT.get(result['status'], 'record-unresolved'))
+    if 'message' in result:
+        result = {'message': result.pop('message'), **result}
     print(json.dumps(result))
     return 1 if result['status'] == 'error' else 0
 
