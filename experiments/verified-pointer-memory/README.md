@@ -22,7 +22,7 @@ For human-facing Skills, Brain, Documents and Repo setup terminology, see the bu
 | Make live Jev retrieval calls | Supply your own `TYPESAFE_API_KEY`; your provider account's terms and charges apply |
 | Supply another trusted retrieval adapter | Optional administrator-set `retrievalCommand` argument array |
 | Host untrusted users or agents behind a shared API | No: caller names are scope labels, not authentication |
-| Point at arbitrary raw files and obtain automatic complete coverage | No: descriptions and passage preparation require review |
+| Connect explicit local UTF-8 files | Yes: `connect` previews hashes, then prepares/registers reviewed bytes; no automatic complete-answer guarantee |
 | Leave it autonomously reviewing a queue for hours | Not yet: no scheduler or autonomous reviewer is bundled |
 
 ## Control panel and quickstart
@@ -64,6 +64,21 @@ agent must still judge whether it supports the complete answer.
 
 For an installed skill outside the checkout, set `SUPERJEV_REPO` to your checkout.
 The direct equivalent entrypoint is `python3 experiments/verified-pointer-memory/cli.py`.
+
+## Connect your own text files
+
+On macOS/Linux (local file locking required), the `connect` action accepts a pointer name, authorized principals and explicit local
+`sources:[{"path":"/absolute/record.md"}]`. It previews source hashes without
+publishing data. After reviewing the full source text and permission for provider
+processing, copy those hashes into each source's `sha256`, add `reviewed:true`, and
+submit again. The harness creates canonical chunks, reviewed preparations, hash
+bindings and registration. No manual manifest or passage authoring is required.
+
+Use `replace:true` only to refresh the same dataset and principal scope. This
+invalidates prior pointer answers/tickets. Folder crawling, PDF extraction, remote
+fetching and automatic sync are not included. Full-text review is not automatic
+redaction or answer approval. See the [connector guide](../../skills/super-jev/references/connectors.md#connect-local-files-paths-to-searchable-passages)
+for a copyable request and the setup/refresh workflow.
 
 ## Configuration and actions
 
