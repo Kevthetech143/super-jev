@@ -106,9 +106,14 @@
         "refresh source",
         "refresh data",
         "sync changes",
-        "automatic refresh"
+        "automatic refresh",
+        "stale data",
+        "outdated data",
+        "manual update",
+        "connected source",
+        "live sync"
       ],
-      "answer": "Reviewed file-based connections need preparation refresh and re-registration after source changes. They do not fetch, watch, or synchronize sources automatically.",
+      "answer": "Connected means registered, not automatically synced. Changed local files need reviewed preparation rebuilt and re-registration. For an export or copy, obtain its newer version first; unchanged copies cannot detect upstream changes. With no source, create an authorized factual record before onboarding. Snapshot answers do not establish currentness; current mode requires a trusted whole-scope freshness check. Never substitute cache approval time for a source check. Automatic fetching/syncing is not provided.",
       "sources": [
         "connectors.md",
         "verified-reuse.md"
