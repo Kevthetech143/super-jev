@@ -31,7 +31,7 @@ def test_exact_topic_returns_curated_answer_and_sources():
     result, body = response("--topic", "register-setup")
     assert result.returncode == 0
     assert body["topic"]["answer"]
-    assert "memory --describe" in body["topic"]["answer"]
+    assert "memory --connect" in body["topic"]["answer"]
     assert body["topic"]["sources"]
 
 
