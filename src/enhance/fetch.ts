@@ -542,6 +542,25 @@ export function applyNoneGate(run: FetchRun, floor: number = DEFAULT_FETCH_FLOOR
   return { noMatch: true, candidates, ask: buildClarifyingQuestion(candidates.map(c => c.id)) };
 }
 
+/**
+ * Experimental, opt-in form of `applyNoneGate` for callers that may act only
+ * on a record the relevance rubric called a direct fit. It retains every
+ * confidence, margin, and `noMatch` check from `applyNoneGate`, then also
+ * requires the accepted top score to be the current `high` score (exactly
+ * 1). All other relevance levels, unknown scores, and non-finite scores use
+ * the same advisory candidate-and-question result as the ordinary gate.
+ *
+ * This function is deliberately not used by fetch's default flow.
+ */
+export function applyDirectFitGate(run: FetchRun, floor: number = DEFAULT_FETCH_FLOOR, margin: number = DEFAULT_FETCH_MARGIN): FetchGateResult {
+  const gated = applyNoneGate(run, floor, margin);
+  if (gated.noMatch) return gated;
+  const top = run.ranked[0];
+  if (top?.score === LEVEL_SCORE.high) return gated;
+  const candidates = run.allScored.slice(0, 3);
+  return { noMatch: true, candidates, ask: buildClarifyingQuestion(candidates.map(c => c.id)) };
+}
+
 /** The plan in plain words, printed before any call and by `--dry-run`. */
 export function formatFetchPlan(p: FetchPlan): string {
   const lines = [

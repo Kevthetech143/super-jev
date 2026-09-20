@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN, DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, applyNoneGate, beatsNone, buildClarifyingQuestion,
+  DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN, DEFAULT_K, DEFAULT_PREFILTER, RELEVANCE_LEVELS, applyDirectFitGate, applyNoneGate, beatsNone, buildClarifyingQuestion,
   formatFetchPlan, planFetch, prefilterCatalog, relevanceQuestion, runFetch, tokenize, topMargin, type FetchCatalogEntry, type FetchRun
 } from '../../src/enhance/fetch.ts';
 import { choiceAnswer } from '../../src/enhance/stub.ts';
@@ -511,6 +511,45 @@ test('applyNoneGate falls back to a plain clarifying line when there are no cand
     assert.deepEqual(gate.candidates, []);
     assert.match(gate.ask, /can you say more/i);
   }
+});
+
+test('applyDirectFitGate is opt-in: legacy accepts a confident, well-separated low result while direct-fit asks', () => {
+  const run = fakeRun({
+    ranked: [{ id: 'wrong-source', score: 1 / 3, confidence: 0.61 }, { id: 'runner-up', score: 1 / 3, confidence: 0.44 }],
+    allScored: [{ id: 'wrong-source', score: 1 / 3, confidence: 0.61 }, { id: 'runner-up', score: 1 / 3, confidence: 0.44 }]
+  });
+  assert.equal(applyNoneGate(run).noMatch, false);
+  const direct = applyDirectFitGate(run);
+  assert.equal(direct.noMatch, true);
+  if (direct.noMatch) assert.deepEqual(direct.candidates, run.allScored);
+});
+
+test('applyDirectFitGate refuses medium, unknown, and non-finite top scores', () => {
+  for (const score of [2 / 3, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const run = fakeRun({
+      ranked: [{ id: 'candidate', score, confidence: 0.9 }],
+      allScored: [{ id: 'candidate', score, confidence: 0.9 }]
+    });
+    assert.equal(applyDirectFitGate(run).noMatch, true, `score ${String(score)} must be advisory`);
+  }
+});
+
+test('applyDirectFitGate serves only a high direct fit that clears the existing confidence and margin checks', () => {
+  const clear = fakeRun({
+    ranked: [{ id: 'direct', score: 1, confidence: 0.9 }, { id: 'other', score: 2 / 3, confidence: 0.7 }],
+    allScored: [{ id: 'direct', score: 1, confidence: 0.9 }, { id: 'other', score: 2 / 3, confidence: 0.7 }]
+  });
+  assert.equal(applyDirectFitGate(clear).noMatch, false);
+
+  const lowConfidence = fakeRun({ ranked: [{ id: 'direct', score: 1, confidence: 0.59 }], allScored: [{ id: 'direct', score: 1, confidence: 0.59 }] });
+  const nearTie = fakeRun({
+    ranked: [{ id: 'direct', score: 1, confidence: 0.9 }, { id: 'other', score: 1, confidence: 0.85 }],
+    allScored: [{ id: 'direct', score: 1, confidence: 0.9 }, { id: 'other', score: 1, confidence: 0.85 }]
+  });
+  const noMatch = fakeRun({ noMatch: true, ranked: [], allScored: [{ id: 'direct', score: 1, confidence: 0.99 }] });
+  assert.equal(applyDirectFitGate(lowConfidence).noMatch, true);
+  assert.equal(applyDirectFitGate(nearTie).noMatch, true);
+  assert.equal(applyDirectFitGate(noMatch).noMatch, true);
 });
 
 test('applyNoneGate refuses a floor outside [0,1]', () => {
