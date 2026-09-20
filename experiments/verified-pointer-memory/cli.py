@@ -4,6 +4,8 @@ import json
 import math
 import os
 import sqlite3
+import shlex
+import sys
 import subprocess
 from pathlib import Path
 from service import Service
@@ -65,6 +67,9 @@ def describe():
             'refresh': 'Manual preparation and re-registration; no automatic fetch/watch service.',
             'extension': 'Reuse reviewed datasets or implement a checked trusted retrievalCommand adapter; no automatic connector plugin registry.',
         },
+        'connectQuickStart': {'preview': 'memory --connect my-records --file /absolute/path/to/record.md --principal YOUR_AGENT_NAME',
+                              'confirmation': 'Review the files, then run the exact confirmCommand returned by the preview.',
+                              'scope': 'Shortcut uses one principal and dataset equal to pointer; use JSON for shared/existing scopes.'},
         'connectOptions': {'sources': 'Explicit local UTF-8 files: path, optional description/id, reviewed sha256',
                            'reviewed': 'true only after permission/content review for provider processing',
                            'replace': 'true to refresh the same dataset and principal scope; invalidates its cached answers',
@@ -101,6 +106,28 @@ def add_hints(result, config=None):
     """Attach small deterministic operator guidance to actionable results."""
     status = result.get('status')
     hints = []
+    needs_start = status in ('unknown-pointer', 'preparation-required') or (
+        status == 'ok' and result.get('pointers') == [])
+    if needs_start:
+        if result.get('reason') == 'review-required':
+            message = 'Your files were found. Review their contents and existing permission for Jev, then confirm the returned hashes with reviewed:true. The harness will build the searchable copy.'
+        elif result.get('hint'):
+            message = result['hint']
+        else:
+            message = "Let's connect your records so Super Jev can search them. Choose the original files for this person or project; the agent can review them and run connect to build the searchable copy. If these files were connected before, refresh that connection instead."
+        result.setdefault('message', message)
+        result.setdefault('gettingStarted', {
+            'previewCommand': 'python3 dispatch.py memory --connect my-records --file /absolute/path/to/record.md --principal YOUR_AGENT_NAME',
+            'commandContext': 'Run from the installed skill directory; replace the example path and principal. Review files before running the returned confirmCommand.',
+            'guide': 'references/connectors.md#connect-local-files-paths-to-searchable-passages',
+            'steps': ['Choose the authorized original text files for this person/project. If you have no records yet, the agent can help create them from your supplied facts.',
+                      'Submit a connect request for a local preview, review the files and permission, then confirm the returned sha256 values with reviewed:true.',
+                      'Once registered, search using the returned memory pointer. Reuse that connection next time; do not repeat onboarding.'],
+            'requestTemplate': {'action': 'connect', 'pointer': 'CHOSEN_SCOPE_NAME',
+                                'principals': ['YOUR_AGENT_NAME'],
+                                'sources': [{'path': '/absolute/path/to/original-record.md'}]},
+            'command': 'python3 <skill-directory>/dispatch.py memory --input CONNECT.json',
+        })
     if status == 'no-match' and config and config.get('allowAgentAssist'):
         hints.append({'code': 'inspect-sources',
                       'message': 'Review registered sources for relevant line ranges.',
@@ -118,9 +145,9 @@ def add_hints(result, config=None):
                       'message': 'Obtain current source material and run the trusted whole-scope freshness check; refresh preparation and re-register if changed. Registration alone does not sync data.',
                       'action': 'search'})
     elif status == 'unknown-pointer':
-        hints.append({'code': 'register-pointer',
-                      'message': 'Register an approved reviewed dataset pointer first.',
-                      'action': 'register'})
+        hints.append({'code': 'connect-records',
+                      'message': 'Use gettingStarted to connect your authorized original files, or select an existing pointer from your memory panel.',
+                      'action': 'connect'})
     elif (status == 'error' and result.get('reason') == 'agent assist is disabled'):
         hints.append({'code': 'assist-disabled',
                       'message': 'An operator can enable assistance with allowAgentAssist.',
@@ -258,26 +285,52 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--describe', action='store_true', help='Show actions, settings and limits without setup.')
     parser.add_argument('--config')
-    parser.add_argument('--input', help='JSON action file; omit for the control panel.')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--input', help='JSON action file; omit for the control panel.')
+    mode.add_argument('--connect', metavar='NAME', help='Preview or connect a named set of local text files.')
+    parser.add_argument('--file', action='append', default=[], metavar='PATH', help='File to preview; repeat for more files.')
+    parser.add_argument('--reviewed-file', action='append', nargs=2, default=[], metavar=('PATH', 'SHA256'), help='Confirm reviewed file bytes and permission for provider processing; repeat for more files.')
+    parser.add_argument('--replace', action='store_true', help='Refresh an existing connector with the same scope.')
     parser.add_argument('--principal', default='local', help='Local scope for the control panel, not authentication.')
     args = parser.parse_args()
     config = None
     try:
+        if (args.file or args.reviewed_file or args.replace) and not args.connect:
+            raise ValueError('--file, --reviewed-file and --replace require --connect.')
+        if args.file and args.reviewed_file:
+            raise ValueError('Use --file for preview OR --reviewed-file for confirmation, not both.')
         if args.describe:
             result = describe()
         else:
             if not args.config:
                 raise ValueError('Supply --config, or use --describe.')
-            request = json.loads(Path(args.input).read_text()) if args.input else {'action': 'panel', 'principal': args.principal}
+            if args.connect:
+                request = {'action': 'connect', 'pointer': args.connect, 'principals': [args.principal],
+                           'sources': ([{'path': path, 'sha256': sha} for path, sha in args.reviewed_file]
+                                       if args.reviewed_file else [{'path': path} for path in args.file]),
+                           'reviewed': bool(args.reviewed_file), 'replace': args.replace}
+            else:
+                request = json.loads(Path(args.input).read_text()) if args.input else {'action': 'panel', 'principal': args.principal}
             if not isinstance(request, dict):
                 raise ValueError('Input must be a JSON object.')
             config = load_config(args.config)
             result = run(request, config)
+            if args.connect and result.get('reason') == 'review-required':
+                confirm = [sys.executable, str(Path(__file__).resolve()), '--config', str(Path(args.config).resolve()),
+                           '--connect', args.connect, '--principal', args.principal]
+                for source in result['sources']:
+                    confirm.extend(['--reviewed-file', source['path'], source['sha256']])
+                if args.replace:
+                    confirm.append('--replace')
+                result['confirmCommand'] = shlex.join(confirm)
+                result['confirmWhen'] = 'Run only after reviewing these files and existing permission for their full text to be processed by the configured provider.'
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
         # Do not expose provider stderr, credentials, source passages or cache bodies.
         result = {'status': 'error', 'reason': str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
     add_hints(result, config)
     result.setdefault('nextAction', NEXT.get(result['status'], 'record-unresolved'))
+    if 'message' in result:
+        result = {'message': result.pop('message'), **result}
     print(json.dumps(result))
     return 1 if result['status'] == 'error' else 0
 
