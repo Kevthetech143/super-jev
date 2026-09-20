@@ -236,3 +236,20 @@ class PublicCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreshnessHintTests(unittest.TestCase):
+    def test_snapshot_guidance_preserves_result_without_inventing_dates(self):
+        from cli import add_hints
+        for status in ('ready', 'verified-cache-hit'):
+            result = add_hints({'status': status, 'freshness': {'mode': 'snapshot'}, 'answer': 'supported'})
+            self.assertEqual(result['answer'], 'supported')
+            self.assertEqual(result['freshness'], {'mode': 'snapshot'})
+            self.assertIn('snapshot-freshness', [h['code'] for h in result['hints']])
+
+    def test_current_hits_and_refusals_do_not_get_snapshot_advice(self):
+        from cli import add_hints
+        for status in ('verified-cache-hit', 'refresh-required', 'preparation-required'):
+            result = add_hints({'status': status, 'freshness': {'mode': 'current', 'checkedAt': 100}})
+            self.assertEqual(result['status'], status)
+            self.assertNotIn('snapshot-freshness', [h['code'] for h in result.get('hints', [])])
