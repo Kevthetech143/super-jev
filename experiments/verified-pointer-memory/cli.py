@@ -24,6 +24,7 @@ NEXT = {
 DEFAULTS = {'cacheTtlSeconds': 86400, 'reviewTtlSeconds': 600, 'providerTimeoutSeconds': 120}
 ACTIONS = {
     'describe': [], 'panel': ['principal'],
+    'connect': ['pointer', 'sources', 'principals'],
     'register': ['pointer', 'dataset', 'principals'], 'remove': ['pointer'],
     'search': ['pointer', 'question', 'principal'],
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
@@ -60,10 +61,14 @@ def describe():
             'customNames': True,
             'existingData': 'Preserve originals; optimize a reviewed searchable view.',
             'newData': 'Optional INDEX.md and records/ with stable IDs, descriptions and paths; skills retain SKILL.md metadata.',
-            'onboarding': 'Agent preparation and review are required before dataset/pointer registration.',
+            'onboarding': 'memory connect prepares and registers explicit local UTF-8 files after agent source review; no manual chunking required.',
             'refresh': 'Manual preparation and re-registration; no automatic fetch/watch service.',
             'extension': 'Reuse reviewed datasets or implement a checked trusted retrievalCommand adapter; no automatic connector plugin registry.',
         },
+        'connectOptions': {'sources': 'Explicit local UTF-8 files: path, optional description/id, reviewed sha256',
+                           'reviewed': 'true only after permission/content review for provider processing',
+                           'replace': 'true to refresh the same dataset and principal scope; invalidates its cached answers',
+                           'limitations': 'No recursive folders, PDF extraction, URL/DB fetching or automatic synchronization'},
         'settings': DEFAULTS, 'optionalSearchFields': ['context', 'freshness'],
         'optionalConfigDefaults': {'allowAgentAssist': False},
         'assistLimits': {'maxPreparations': 20, 'maxReviewedCharacters': 60000},
@@ -88,7 +93,7 @@ def describe():
         'notSupported': ['Untrusted multi-user hosting', 'Automatic private-data approval',
                          'Semantic cache matching', 'Automatic source fetching or freshness watching',
                          'Autonomous background queue',
-                         'Arbitrary file ingestion', 'Original-source editing or deletion'],
+                         'Arbitrary-format ingestion or recursive crawling', 'Original-source editing or deletion'],
     }
 
 
@@ -106,8 +111,8 @@ def add_hints(result, config=None):
                       'action': 'approve'})
     elif status == 'preparation-required':
         hints.append({'code': 'refresh-preparation',
-                      'message': 'Update the source or replace its exported copy, then review, rebuild preparation and re-register before retrying.',
-                      'action': 'register'})
+                      'message': 'Use the memory connect JSON action with the authorized original text-file paths to prepare this scope. Review the source hashes, then confirm reviewed:true; use replace:true only to refresh the same connector. See references/connectors.md.',
+                      'action': 'connect'})
     elif status == 'refresh-required':
         hints.append({'code': 'refresh-upstream',
                       'message': 'Obtain current source material and run the trusted whole-scope freshness check; refresh preparation and re-register if changed. Registration alone does not sync data.',
@@ -132,7 +137,7 @@ def add_hints(result, config=None):
                           'message': f'{missing} registered sources have no description.',
                           'action': 'register'})
     if hints:
-        result['hints'] = hints
+        result['hints'] = result.get('hints', []) + hints
     return result
 
 
@@ -179,6 +184,10 @@ def run(request, config):
             return result
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return {'status': 'error', 'reason': 'Retrieval failed or returned invalid JSON.'}
+
+    if request.get('action') == 'connect':
+        from path_connect import connect
+        return connect(request, config)
 
     service = Service(config['db'], config['registry'], retrieve,
                       cache_ttl_seconds=config['cacheTtlSeconds'],
@@ -268,7 +277,7 @@ def main():
         # Do not expose provider stderr, credentials, source passages or cache bodies.
         result = {'status': 'error', 'reason': str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
     add_hints(result, config)
-    result['nextAction'] = NEXT.get(result['status'], 'record-unresolved')
+    result.setdefault('nextAction', NEXT.get(result['status'], 'record-unresolved'))
     print(json.dumps(result))
     return 1 if result['status'] == 'error' else 0
 
