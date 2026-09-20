@@ -5,11 +5,13 @@ checks freshness, returns a verified exact-repeat answer when available, or runs
 Super Jev retrieval. The output says what to do next. A reviewing agent approves
 fresh answers with citations before they enter memory.
 
-This is an opt-in experiment, not an installed production feature. It includes
+This is an opt-in local experiment, not installed or enabled by default. It includes
 its driving instructions in `skills/super-jev/references/verified-reuse.md` and a
 machine-readable control panel. It has no private account, card, or Mac-path
 dependency. The default live bridge calls the existing repository retrieval
 engine; it does not reimplement ranking or silently use another model.
+
+For human-facing Skills, Brain, Documents and Repo setup terminology, see the bundled [source connector guide](../../skills/super-jev/references/connectors.md). These workflows reuse existing inputs; automatic source connectors and refresh are not implied.
 
 ## Who can use it
 

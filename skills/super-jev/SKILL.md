@@ -1,18 +1,20 @@
 ---
 name: super-jev
-description: "Find skills, retrieve reviewed brain/doc passages, check claims, and verify agent work. Experimental answer memory reuses approved answers and supports bounded recovery from reviewed preparation. Use Super Jev as one front door; evidence still needs caller review."
+description: "Find skills and reviewed brain/doc evidence through Super Jev source connectors. Check claims, verify agent work, and reuse explicitly approved answers with bounded reviewed-source recovery. Evidence still needs caller review."
 ---
 
 # Super Jev
 
 The user says “Use Super Jev to…”; choose the matching tool below and run it. Do not require the user to learn backend skill names or command syntax. Use the original request and relevant context; ask only if the intended task or required evidence is genuinely unclear.
 
+For “connect my skills/brain/repo,” setup questions, or explaining available connections, read [source connectors](references/connectors.md). Use connector names with humans; keep backend skill names and commands inside execution. A connector name describes the source workflow, not automatic syncing or a new command.
+
 Use `python3 <this-skill-directory>/dispatch.py <tool> ...`. With no tool (or `tools`), it lists the available options. The agent interprets natural language; this dispatcher only executes the chosen tool. The legacy `superjev.py ask` keyword router is not the unified natural-language entry point.
 
 | User wants | Tool | How to use it |
 |---|---|---|
-| Find a skill or capability | `skills` | Read the sibling `skill-search/SKILL.md`. Save the original request plus needed context as its request JSON, then run `skills --request-file REQUEST.json`. Claude roots are selected automatically for a Claude installation. Suggestions are advisory; load the chosen skill before acting. |
-| Find information in brains or documents | `find` | Read sibling `fleet-retrieval-experiment/SKILL.md`. Run `find --list-datasets`, choose the relevant reviewed scope, then `find --dataset NAME --request "original question"`. Existing manifest, request-file, neighbor and dedup options pass through unchanged. |
+| Find a skill — Skills connector | `skills` | Read the sibling `skill-search/SKILL.md`. Save the original request plus needed context as its request JSON, then run `skills --request-file REQUEST.json`. Claude roots are selected automatically for a Claude installation. Suggestions are advisory; load the chosen skill before acting. |
+| Find brain/document information — Brain or Documents connector | `find` | Read sibling `fleet-retrieval-experiment/SKILL.md`. Run `find --list-datasets`, choose the relevant reviewed scope, then `find --dataset NAME --request "original question"`. Existing manifest, request-file, neighbor and dedup options pass through unchanged. |
 | Check a claim or draft | `check` | Read [checking tools](references/checking.md), specifically the gate instructions. Run `check EVIDENCE... --claim "claim" --json` or use `--draft FILE`. This calls the existing gate. |
 | Verify an agent's work | `verify` | Read [checking tools](references/checking.md), specifically verification. Run `verify REPORT --worktree PATH --test-cmd "authorized check" --json` with the evidence required by the existing verifier. |
 | Reuse an explicitly approved answer | `memory` | Opt-in local experiment only. Run `memory --describe` for its control panel, then pass the experiment's `--config` and `--input` arguments. Set `SUPERJEV_REPO` when dispatch is installed outside its checkout. |
