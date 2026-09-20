@@ -147,16 +147,22 @@ export function assertChunkOffsets(chunks: SourceChunk[]): void {
 }
 
 /**
- * Chunk one source document like the experiment's section chunker:
- * - heading lines start a new section (the boundary FLUSHES before the
- *   heading, so a section never crosses a heading);
- * - a heading breadcrumb stack is carried through nested headings
- *   ("A > B", or '' before any heading);
- * - BEFORE appending a line, flush the open block when
- *   currentWords + nextLineWords > targetWords;
- * - blank-only blocks are dropped (never emitted);
- * - every chunk records its exact original line offsets and the source's
- *   content SHA.
+ * Chunk one source document EXACTLY like the experiment's section chunker
+ * (chunk-parity-reference.mjs) — boundary parity point for point:
+ * - a heading line flushes the open block BEFORE the heading; the heading
+ *   line itself then starts the next block and enters the breadcrumb stack;
+ * - the breadcrumb stack is sparse across depths: `slice(0, depth - 1)` then
+ *   direct index assignment, so a depth-3 heading under a depth-1 parent
+ *   yields `A >  > C` (the skipped level renders empty) — never compacted;
+ * - heading text is kept UNTRIMMED (the regex's `(.*)` capture, as-is);
+ * - BEFORE appending a line, the open block flushes when
+ *   openWords + nextLineWords > targetWords, with NO blank-line exemption:
+ *   an oversize line followed by a blank line flushes the oversize line
+ *   alone, and the blank line opens the next block;
+ * - blank lines are kept inside the block and count toward its offsets —
+ *   only a block with no non-blank line at all is dropped (never emitted);
+ * - every chunk records its exact original 1-based line offsets and the
+ *   source's content SHA.
  */
 export function chunkSource(
   sourceId: string,
@@ -170,51 +176,37 @@ export function chunkSource(
   const sourceSHA = sha256Hex(text);
   const lines = text.split('\n');
   const chunks: SourceChunk[] = [];
-  let current: string[] = [];
-  let currentStart = 0; // 0-based index into lines
-  let breadcrumb: string[] = [];
+  let headings: string[] = [];
+  let block: string[] = [];
+  let start = 0; // 1-based start line of the open block
+  let words = 0;
 
-  const currentWords = () => current.reduce((n, line) => n + wordCount(line), 0);
-
-  const flush = (endExclusive: number) => {
-    if (!current.length) return;
-    const startLine = currentStart + 1;
-    const endLine = endExclusive; // 1-based inclusive
-    const heading = breadcrumb.join(' > ');
+  const flush = (): void => {
+    if (!block.some(x => x.trim())) { block = []; words = 0; return; }
+    const startLine = start;
+    const endLine = start + block.length - 1;
     chunks.push({
       sourceId, sourceSHA, chunkIndex: chunks.length,
-      startLine, endLine, heading, text: current.join('\n')
+      startLine, endLine, heading: headings.join(' > '), text: block.join('\n')
     });
-    current = [];
+    block = []; words = 0;
   };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const headingMatch = /^(#{1,6})\s+(.+)$/.exec(line);
-    if (headingMatch) {
-      // Heading boundary flushes BEFORE the heading; the heading starts the
-      // next block and enters the breadcrumb stack.
-      flush(i);
-      const depth = headingMatch[1].length;
-      breadcrumb = [...breadcrumb.slice(0, depth - 1), headingMatch[2].trim()];
-      current = [line];
-      currentStart = i;
-      continue;
+    const h = /^(#{1,6})\s+(.*)/.exec(line);
+    if (h) {
+      flush();
+      headings = headings.slice(0, h[1].length - 1);
+      headings[h[1].length - 1] = h[2];
     }
-    const words = wordCount(line);
-    if (current.length && words > 0 && currentWords() + words > targetWords) {
-      // Check-before-add: flush the open block BEFORE adding the line, so
-      // the target is a ceiling on the block BEFORE the line, never after.
-      flush(i);
-      current = [line];
-      currentStart = i;
-      continue;
-    }
-    if (!current.length && words === 0) continue; // never open a blank-only block
-    if (!current.length) currentStart = i;
-    current.push(line);
+    const count = wordCount(line);
+    if (words && words + count > targetWords) flush();
+    if (!block.length) start = i + 1;
+    block.push(line);
+    words += count;
   }
-  flush(lines.length);
+  flush();
 
   assertChunkOffsets(chunks);
   return chunks;
@@ -412,7 +404,7 @@ export function bundleProviderText(description: string, passages: PreparedPassag
  * paragraphs.
  */
 export type PassageBundle = {
-  /** `<sourceId>#bundle` */
+  /** the original sourceId (experiment bundle identity) */
   id: string;
   sourceId: string;
   /** The raw chunks behind the bundle (for binding re-verification). */
@@ -426,36 +418,29 @@ export type PassageBundle = {
 type CheckedPair = { chunk: SourceChunk; passage: PreparedPassage };
 
 /**
- * Group preparation-checked pairs into one document bundle per source.
- * Sources follow `sourceOrder` (unknown sources last, by id); passages
- * inside a bundle follow document order.
+ * Group preparation-checked pairs into one document bundle per source,
+ * exactly like the experiment: sources follow FIRST-SEEN order in the
+ * BM25-selected pair list, passages inside a bundle keep BM25 selection
+ * order (never re-sorted by start line), and the bundle id is the original
+ * sourceId.
  */
 function groupPairsIntoBundles(
   pairs: CheckedPair[],
-  descriptions: Map<string, string>,
-  sourceOrder: string[]
+  descriptions: Map<string, string>
 ): PassageBundle[] {
-  const order = new Map(sourceOrder.map((id, i) => [id, i]));
   const bySource = new Map<string, CheckedPair[]>();
   for (const pair of pairs) {
-    const list = bySource.get(pair.chunk.sourceId) ?? [];
-    list.push(pair);
-    bySource.set(pair.chunk.sourceId, list);
+    const list = bySource.get(pair.chunk.sourceId);
+    if (list) list.push(pair);
+    else bySource.set(pair.chunk.sourceId, [pair]);
   }
-  const sourceIds = [...bySource.keys()].sort((a, b) =>
-    (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER) ||
-    (a < b ? -1 : a > b ? 1 : 0));
-  return sourceIds.map(sourceId => {
-    const group = bySource.get(sourceId)!.slice()
-      .sort((a, b) => a.chunk.startLine - b.chunk.startLine || a.chunk.chunkIndex - b.chunk.chunkIndex);
-    return {
-      id: `${sourceId}#bundle`,
-      sourceId,
-      chunks: group.map(g => g.chunk),
-      passages: group.map(g => g.passage),
-      providerText: bundleProviderText(descriptions.get(sourceId) ?? '', group.map(g => g.passage))
-    };
-  });
+  return [...bySource.entries()].map(([sourceId, group]) => ({
+    id: sourceId,
+    sourceId,
+    chunks: group.map(g => g.chunk),
+    passages: group.map(g => g.passage),
+    providerText: bundleProviderText(descriptions.get(sourceId) ?? '', group.map(g => g.passage))
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -694,23 +679,21 @@ export async function retrieveSources(
     trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: [], note: `judge coverage incomplete: ${descRun.errors.join('; ')}` });
     return refused('descriptions stage judge coverage incomplete');
   }
+  // Experiment parity (first.mjs): the description shortlist is the
+  // ranking's top docK — `ranked` when any record beat "none of these",
+  // otherwise the top docK of `allScored`. The direct-fit gate only names
+  // the deferral in the trace; a deferred gate never aborts the chain and
+  // never swaps the list. A description-only run can never be `ready`.
   const descGate = applyDirectFitGate(descRun);
-  let rankedSourceIds: string[];
-  let descNote: string;
-  if (descGate.noMatch) {
-    // Low confidence does NOT abort the chain: like the experiment, keep
-    // the description ranking's top docK docs and continue to passage
-    // judging. A description-only run can never be ready.
-    rankedSourceIds = descRun.allScored.slice(0, docK).map(r => r.id);
-    if (!rankedSourceIds.length) {
-      trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: sources.map(s => s.id), note: 'gate deferred and no descriptions were judged' });
-      return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
-    }
-    descNote = `gate deferred (low confidence); description ranking chose top ${rankedSourceIds.length}`;
-  } else {
-    rankedSourceIds = descGate.ranked.map(r => r.id);
-    descNote = `direct-fit top ${rankedSourceIds.length}`;
+  const descShortlist = descRun.ranked.length ? descRun.ranked : descRun.allScored;
+  const rankedSourceIds = descShortlist.slice(0, docK).map(r => r.id);
+  if (!rankedSourceIds.length) {
+    trace.push({ stage: 'descriptions', calls: descRun.calls, kept: [], dropped: sources.map(s => s.id), note: 'gate deferred and no descriptions were judged' });
+    return { status: 'no-match', request, passages: [], pending: [], trace, sources: sourcePointers };
   }
+  const descNote = descGate.noMatch
+    ? `gate deferred (low confidence); description ranking chose top ${rankedSourceIds.length}`
+    : `direct-fit top ${rankedSourceIds.length}`;
   validateSelection(new Set(sources.map(s => s.id)), rankedSourceIds);
   trace.push({
     stage: 'descriptions', calls: descRun.calls,
@@ -814,7 +797,7 @@ export async function retrieveSources(
   if (stagesUsed >= maxStages) return refused('narrow-bundles stage exceeds maxStages');
   const narrowChecked = checkPool(narrowTop, 'narrow-bundles');
   if (isTerminal(narrowChecked)) return narrowChecked;
-  const narrowBundles = groupPairsIntoBundles(narrowChecked, descriptions, rankedSourceIds);
+  const narrowBundles = groupPairsIntoBundles(narrowChecked, descriptions);
   const narrowOutcome = await runJudgeStage('narrow-bundles', narrowBundles);
   if (narrowOutcome.done) return narrowOutcome.result;
   if (narrowOutcome.accepted) return acceptTopBundle(narrowOutcome.accepted);
@@ -828,8 +811,7 @@ export async function retrieveSources(
   });
   const wideChecked = checkPool(wideTop, 'wide-bundles');
   if (isTerminal(wideChecked)) return wideChecked;
-  const wideOrder = [...rankedSourceIds, ...sources.map(s => s.id).filter(id => !shortlist.has(id)).sort()];
-  const wideBundles = groupPairsIntoBundles(wideChecked, descriptions, wideOrder);
+  const wideBundles = groupPairsIntoBundles(wideChecked, descriptions);
   const wideOutcome = await runJudgeStage('wide-bundles', wideBundles);
   if (wideOutcome.done) return wideOutcome.result;
   if (wideOutcome.accepted) return acceptTopBundle(wideOutcome.accepted);
@@ -845,7 +827,7 @@ export async function retrieveSources(
     });
     const neighborChecked = checkPool(neighborChunks, 'neighbors');
     if (isTerminal(neighborChecked)) return neighborChecked;
-    const neighborBundles = groupPairsIntoBundles(neighborChecked, descriptions, wideOrder);
+    const neighborBundles = groupPairsIntoBundles(neighborChecked, descriptions);
     const neighborOutcome = await runJudgeStage('neighbors', neighborBundles);
     if (neighborOutcome.done) return neighborOutcome.result;
     if (neighborOutcome.accepted) return acceptTopBundle(neighborOutcome.accepted);

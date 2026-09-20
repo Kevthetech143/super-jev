@@ -39,10 +39,13 @@ must be explicitly `true` before any provider call is made.
    cut by `chunkSource` into deterministic heading-aware ~180-word chunks at
    line boundaries, exactly like the experiment's section chunker: a heading
    boundary flushes before the heading, a breadcrumb stack is carried
-   (`A > B`), the open block flushes before adding a line when
-   current-words + next-line-words exceeds the target, blank-only blocks are
-   dropped, and every chunk records exact original line offsets plus the
-   source content SHA.
+   (`A > B`, sparse across depths — a skipped level renders empty, e.g.
+   `A >  > C` — and heading text is kept untrimmed), the open block flushes
+   before adding a line when current-words + next-line-words exceeds the
+   target (no blank-line exemption: an oversize line followed by a blank
+   line flushes alone), blank lines stay inside the block and count toward
+   its offsets, blank-only blocks are dropped, and every chunk records exact
+   original line offsets plus the source content SHA.
 2. **descriptions** (provider) — `runFetch` over the source descriptions
    with the filter-8 local prefilter; gated by `applyDirectFitGate`. A
    low-confidence/deferred gate does NOT abort the chain: the description
@@ -56,7 +59,9 @@ must be explicitly `true` before any provider call is made.
    then judged as DOCUMENT-GROUPED bundles of prepared passages (never
    isolated paragraphs), in the experiment's exact bundle format
    (`Description: … / Automatically retrieved source passages: / <safe
-   heading>: <reviewed text>`).
+   heading>: <reviewed text>`). Bundles carry the original sourceId as
+   their id and follow the BM25 selection order (first-seen document order);
+   passages inside a bundle keep BM25 order.
 5. **wide-bundles** (provider, **only on narrow refusal**) — the GLOBAL
    top-4 chunks across the WHOLE corpus, so a match outside the description
    shortlist can be recovered; judged as document bundles the same way.
