@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """One small dispatcher over the installed Super Jev tools; no judging logic."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -10,7 +11,12 @@ TOOLS = {
     "find": "Find information in reviewed brains or documents",
     "check": "Check a claim against evidence",
     "verify": "Verify an agent's work",
+    "memory": "Use the opt-in experimental verified-reuse pointer/cache",
 }
+
+
+class MissingDependency(FileNotFoundError):
+    """Raised when an optional dispatcher backend is unavailable."""
 
 
 def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
@@ -24,6 +30,10 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
     elif tool == "find":
         entry = root / "fleet-retrieval-experiment/run.sh"
         cmd = ["sh", str(entry), *args]
+    elif tool == "memory":
+        repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
+        entry = repo / "experiments/verified-pointer-memory/cli.py"
+        cmd = [sys.executable, str(entry), *args]
     else:
         entry = skill_dir / "superjev"
         if entry.is_file():
@@ -32,6 +42,8 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
             entry = skill_dir / "superjev.py"
             cmd = [sys.executable, str(entry), "gate" if tool == "check" else "verify", *args]
     if not entry.is_file():
+        if tool == "memory":
+            raise MissingDependency(str(entry))
         raise FileNotFoundError(f"Required Super Jev tool is not installed: {entry}")
     return cmd
 
@@ -42,10 +54,13 @@ def main(args: list[str]) -> int:
         return 0
     tool, *rest = args
     if tool not in TOOLS:
-        print(json.dumps({"status": "error", "reason": "Unknown tool; choose skills, find, check, or verify"}))
+        print(json.dumps({"status": "error", "reason": "Unknown tool; choose skills, find, check, verify, or memory"}))
         return 2
     try:
         return subprocess.run(command(Path(__file__).resolve().parent, tool, rest)).returncode
+    except MissingDependency as exc:
+        print(json.dumps({"status": "error", "reason": "missing-dependency", "dependency": str(exc)}))
+        return 2
     except OSError as exc:
         print(json.dumps({"status": "error", "reason": str(exc)}))
         return 2
