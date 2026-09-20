@@ -1,0 +1,154 @@
+"""Local-only experimental control panel and input/output interface."""
+import argparse
+import json
+import math
+import os
+import sqlite3
+import subprocess
+from pathlib import Path
+from service import Service
+
+NEXT = {
+    'ready': 'verify-evidence-then-approve',
+    'verified-cache-hit': 'use-cited-answer',
+    'preparation-required': 'review-and-refresh-preparation',
+    'unknown-pointer': 'register-reviewed-dataset',
+    'access-denied': 'stop-access-denied',
+    'no-match': 'record-unresolved',
+    'refused': 'record-refusal',
+    'error': 'record-error',
+    'pointer-changed': 'resubmit-after-review',
+    'registered': 'search', 'removed': 'done', 'saved': 'continue', 'ok': 'choose-action',
+}
+DEFAULTS = {'cacheTtlSeconds': 86400, 'reviewTtlSeconds': 600, 'providerTimeoutSeconds': 120}
+ACTIONS = {
+    'describe': [], 'panel': ['principal'],
+    'register': ['pointer', 'dataset', 'principals'], 'remove': ['pointer'],
+    'search': ['pointer', 'question', 'principal'],
+    'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
+}
+
+
+def describe():
+    """Return supported options without needing an account or configuration."""
+    return {
+        'status': 'ok', 'stage': 'local-experiment', 'actions': ACTIONS,
+        'settings': DEFAULTS, 'optionalSearchFields': ['context'],
+        'requiredConfig': ['db', 'registry'],
+        'optionalConfig': ['retrievalCommand', *DEFAULTS],
+        'resultActions': NEXT,
+        'requirements': ['Python 3.10+', 'Node 24+ for bundled retrieval',
+                         'Reviewed local dataset', 'TYPESAFE_API_KEY for live Jev calls'],
+        'supported': ['Persistent dataset pointers', 'Exact verified-answer reuse',
+                      'Source freshness checks', 'Explicit review tickets'],
+        'notSupported': ['Untrusted multi-user hosting', 'Automatic private-data approval',
+                         'Semantic cache matching', 'Autonomous background queue',
+                         'Arbitrary file ingestion'],
+    }
+
+
+def load_config(path):
+    """Resolve deployment-local paths and reject unsupported configuration."""
+    location = Path(path).resolve()
+    config = json.loads(location.read_text())
+    if not isinstance(config, dict):
+        raise ValueError('Config must be an object.')
+    unknown = set(config) - {'db', 'registry', 'retrievalCommand', *DEFAULTS}
+    if unknown:
+        raise ValueError('Unsupported configuration setting.')
+    for name in ('db', 'registry'):
+        p = Path(config[name]).expanduser()
+        config[name] = str(p if p.is_absolute() else location.parent / p)
+    for name, default in DEFAULTS.items():
+        value = config.setdefault(name, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise ValueError('Time settings must be positive finite seconds.')
+    command = config.setdefault('retrievalCommand', ['node', str(Path(__file__).with_name('retrieve.ts').resolve())])
+    if not isinstance(command, list) or not command or any(not isinstance(x, str) or not x for x in command):
+        raise ValueError('retrievalCommand must be an administrator-provided argument array.')
+    return config
+
+
+def run(request, config):
+    """Execute one explicit action; no implicit fallback or approval."""
+    def retrieve(dataset, question):
+        payload = {'registry': config['registry'], 'dataset': dataset, 'question': question}
+        try:
+            process = subprocess.run(
+                config['retrievalCommand'], input=json.dumps(payload),
+                capture_output=True, text=True, timeout=config['providerTimeoutSeconds'],
+            )
+            if process.returncode:
+                return {'status': 'error', 'reason': 'Retrieval command failed.'}
+            result = json.loads(process.stdout)
+            if not isinstance(result, dict) or result.get('status') not in NEXT:
+                raise ValueError('Invalid retrieval output.')
+            return result
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return {'status': 'error', 'reason': 'Retrieval failed or returned invalid JSON.'}
+
+    service = Service(config['db'], config['registry'], retrieve,
+                      cache_ttl_seconds=config['cacheTtlSeconds'],
+                      review_ttl_seconds=config['reviewTtlSeconds'])
+    action = request.get('action', 'search')
+    if action not in ACTIONS:
+        raise ValueError('Unknown action; use --describe.')
+    for field in ACTIONS[action]:
+        if field not in request:
+            raise ValueError(f'Missing required field: {field}')
+    if action == 'panel':
+        registry = json.loads(Path(config['registry']).read_text())
+        with service.connect() as connection:
+            rows = connection.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
+        pointers = []
+        for name, body in rows:
+            binding = json.loads(body)
+            _, error = service.pointer(name, request['principal'])
+            if error and error['status'] == 'access-denied':
+                continue
+            pointers.append({'pointer': name, 'dataset': binding['dataset'], 'status': error['status'] if error else 'available'})
+        return {**describe(), 'settings': {k: config[k] for k in DEFAULTS}, 'pointers': pointers,
+                'datasets': [{'name': name, 'description': entry.get('description', '')}
+                             for name, entry in registry['datasets'].items()]}
+    if action == 'search':
+        return service.search(request['pointer'], request['question'], request['principal'], request.get('context', ''))
+    if action == 'register':
+        service.register(request['pointer'], request['dataset'], request['principals'])
+        return {'status': 'registered'}
+    if action == 'remove':
+        service.remove(request['pointer'])
+        return {'status': 'removed'}
+    if action == 'approve':
+        service.approve(request['ticket'], request['principal'], request['answer'], request['evidence'], approved=request['approved'] is True)
+        return {'status': 'saved'}
+    return describe()
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--describe', action='store_true', help='Show actions, settings and limits without setup.')
+    parser.add_argument('--config')
+    parser.add_argument('--input', help='JSON action file; omit for the control panel.')
+    parser.add_argument('--principal', default='local', help='Local scope for the control panel, not authentication.')
+    args = parser.parse_args()
+    try:
+        if args.describe:
+            result = describe()
+        else:
+            if not args.config:
+                raise ValueError('Supply --config, or use --describe.')
+            request = json.loads(Path(args.input).read_text()) if args.input else {'action': 'panel', 'principal': args.principal}
+            if not isinstance(request, dict):
+                raise ValueError('Input must be a JSON object.')
+            result = run(request, load_config(args.config))
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        # Do not expose provider stderr, credentials, source passages or cache bodies.
+        result = {'status': 'error', 'reason': str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
+    result['nextAction'] = NEXT.get(result['status'], 'record-unresolved')
+    print(json.dumps(result))
+    return 1 if result['status'] == 'error' else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

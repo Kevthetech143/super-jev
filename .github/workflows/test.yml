@@ -19,3 +19,5 @@ jobs:
           python-version: '3.x'
       - run: pip install pytest
       - run: npm run test:skill
+      - run: python3 -m unittest discover -s experiments/verified-pointer-memory -p "test_*.py"
+      - run: python3 experiments/verified-pointer-memory/stress.py
