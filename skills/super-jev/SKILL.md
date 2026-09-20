@@ -18,7 +18,10 @@ python3 dispatch.py help --topic overview
 python3 dispatch.py find --list-datasets
 python3 dispatch.py find --dataset DATASET_ID --request "Your original question"
 python3 dispatch.py memory --describe
+python3 dispatch.py memory --connect my-records --file /absolute/path/to/record.md --principal YOUR_AGENT_NAME
 ```
+
+The connect command previews files without publishing them. Review their contents and existing provider permission, then run the exact `confirmCommand` it returns. Repeat `--file` for more files. This shortcut creates a single-principal connector; use the JSON guide for shared scopes.
 
 For configured memory, `python3 dispatch.py memory --principal YOUR_AGENT_NAME` lists your pointers. Save a search request in your repo's private working area, then run `python3 /path/to/skill/dispatch.py memory --input /path/to/request.json`:
 
