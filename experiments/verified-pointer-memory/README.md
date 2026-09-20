@@ -35,7 +35,7 @@ python3 skills/super-jev/dispatch.py memory --config .local/pointer-demo/config.
 ```
 
 `--describe` returns actions, input fields, supported settings, prerequisites,
-result actions and limitations. The configured panel also lists dataset
+result actions and limitations, including the freshness policy and its limits. The configured panel also lists dataset
 coverage descriptions and the caller's pointers with their readiness.
 `--principal NAME` selects the panel's local scope; it is not login/authentication.
 The example generator creates only a fixed public synthetic record, refuses an
@@ -84,13 +84,44 @@ Inputs are JSON files; every result has `status` and `nextAction`:
 ```json
 {"action":"register","pointer":"my-brain","dataset":"reviewed-brain","principals":["worker"]}
 {"pointer":"my-brain","question":"Where is the policy?","principal":"worker","context":"project/person/as-of scope"}
+{"pointer":"my-brain","question":"What is Alice's current medication list after reconciliation?","principal":"worker","freshness":{"mode":"current","maxAgeSeconds":3600}}
 {"action":"remove","pointer":"my-brain"}
 ```
 
 `register` and `remove` are administrative actions for the trusted local operator.
+Search defaults to `{"mode":"snapshot"}`. Snapshot means the reviewed
+manifest/original hashes still match the registered snapshot; it must not be
+described as current information. A current request requires exactly
+`{"mode":"current","maxAgeSeconds":positive finite seconds}`. Its dataset
+registry entry must contain `checkedAt`, finite Unix seconds no later than the
+request, recorded by a trusted upstream check of the *entire* dataset scope.
+Missing, future, or expired `checkedAt` returns `refresh-required` with
+`nextAction: refresh-source-and-preparation` before a cache lookup or provider
+call. Current ready and cache-hit responses include the mode, `checkedAt`, and
+deadline. Current cache entries cannot outlive that deadline.
+
+`checkedAt` is neither an event/effective date nor proof that a fact remains
+true. It is not inferred from file modification times. This experiment does
+not fetch sources, watch for changes, or infer supersession. The reviewer must
+still resolve contradictions and verify the relevant person, date, version and
+record status before approval; contradictory evidence must not be approved
+until resolved. Include those facts in the original question. `context` scopes
+the exact cache key, so a new context cannot reuse an old-context answer, but
+the retrieval provider receives only `registry`, `dataset`, and `question`.
+
+| Question type | Evidence the reviewer must establish |
+|---|---|
+| Old completed test vs scheduled test | A scheduled test is planned, not a completed result. |
+| Medication list | A list recorded as of a date is not a verified current reconciliation; a newer note does not automatically supersede it. |
+| Software fix | The fix applies to the named version; verify the version in question. |
+| Internet fact | Published or updated date is not the last trusted upstream whole-scope check. |
+
 The optional retrieval command receives `registry`, `dataset`, and `question`.
 Only a successful command with a recognized retrieval status is accepted.
 Provider stderr and credentials are not returned through the interface.
+Read [the data lifecycle contract](DATA-LIFECYCLE.md) before onboarding or
+refreshing a dataset; it documents the supported controls and the responsibilities
+that this local harness cannot automate.
 
 ## Storage and lifecycle
 
@@ -136,3 +167,5 @@ Synthetic tests verify storage/failure mechanics; they do not measure Jev accura
 Private live traces, sources, keys, databases and preparation artifacts must not
 be committed. These small tests do not prove arbitrary-data reliability, hours-long
 worker endurance, or end-to-end token savings.
+
+Freshness lifecycle test scope and live project-memory observations: [FRESHNESS-RESULTS.md](FRESHNESS-RESULTS.md).
