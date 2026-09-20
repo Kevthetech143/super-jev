@@ -4,7 +4,7 @@ The local pointer/cache experiment reuses only explicitly approved answers. Its 
 
 ## Normal reuse
 
-Submit the registered pointer, original question, principal and relevant context. A fresh retrieval always receives a durable `attemptId`; retain its original raw result and status. A `ready` response has reviewed passages, each with an `evidenceId`, and an approval ticket. Verify a complete answer yourself, then explicitly approve it. The approval evidence list may cite returned passages as `{"evidenceId":"..."}` instead of copying hand quotes. This does not make approval automatic.
+Submit the registered pointer, original question, principal and relevant context. A fresh retrieval always receives a durable `attemptId`; retain its original raw result and status. A `ready` response has reviewed passages, each with an `evidenceId`, and an approval ticket. Verify a complete answer yourself, then explicitly approve it. The approval evidence list may cite returned passages as `{"evidenceId":"..."}` instead of copying hand quotes. This does not make approval automatic. Copy tickets, attempt IDs and evidence IDs directly from parsed responses; never reconstruct them by hand.
 
 Cache metadata records whether a ticket/result was resolved by `retrieval` or `agent-assisted`; assisted results also retain `originatingAttemptId`. A cache hit is usable only in its exact question, principal, context, generation and freshness scope.
 
@@ -19,7 +19,7 @@ assist(attemptId, principal, reason,
        references:[{sourceId, startLine, endLine}])
 ```
 
-Assistance accepts only registered, reviewed preparation. It rechecks principal scope, pointer generation, source hashes and freshness, and returns a new `ready` ticket for explicit agent review. It neither retrieves raw files nor approves/trains on an answer. Verify the full answer and approve returned `evidenceId` values only when they support it. Absent or conflicting sources remain unresolved.
+Assistance accepts only registered, reviewed preparation. It rechecks principal scope, pointer generation, source hashes and freshness, and returns a new `ready` ticket for explicit agent review. It neither retrieves raw files nor approves/trains on an answer. Verify every factual claim in the full answer and approve returned `evidenceId` values only when they support it. If original-source inspection reveals an extra fact absent from the returned passages, bring its reviewed lines into an assistance ticket before approving an answer that includes it. Absent or conflicting sources remain unresolved.
 
 Use at most one assistance attempt per question. Then record the unresolved result unless there is a concrete, correctable input issue. An unregistered source needs reviewed onboarding, refresh and a new original attempt; it never bypasses the registry. The database keeps original attempt status/trace metadata across pointer replacement/removal; keep full raw responses and resolution receipts in your private work artifacts. Approved resolution metadata stays with the cache entry, which invalidation can remove. Old-generation attempts remain in the database for trusted audit but cannot be read through a newly registered pointer.
 
