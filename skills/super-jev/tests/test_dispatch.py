@@ -96,4 +96,4 @@ def test_missing_tool_and_unknown_tool_fail_without_fallback(tmp_path):
     assert run(skill, 'find', '--list-datasets').returncode == 2
     assert 'not installed' in json.loads(run(skill, 'skills').stdout)['reason']
     assert run(skill, 'invented').returncode == 2
-    assert set(json.loads(run(skill).stdout)['tools']) == {'skills','find','check','verify','memory'}
+    assert set(json.loads(run(skill).stdout)['tools']) == {'help','skills','find','check','verify','memory'}
