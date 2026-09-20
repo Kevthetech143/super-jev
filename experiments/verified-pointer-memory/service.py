@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 STATUSES = {"ready", "no-match", "preparation-required", "refused", "error"}
 SNAPSHOT_FRESHNESS = {'mode': 'snapshot'}
 
@@ -66,6 +66,50 @@ def normalize_freshness(freshness: Any = None) -> dict[str, Any]:
     raise ValueError('freshness must be {"mode":"snapshot"} or {"mode":"current","maxAgeSeconds":positive finite number}')
 
 
+def valid_v2_schema(connection: sqlite3.Connection, tables: set[str]) -> bool:
+    """Recognize only the exact schema produced by version 2 of this service."""
+    expected_columns = {
+        'schema_meta': [('singleton', 'INTEGER', 0, 1),
+                        ('version', 'TEXT', 1, 0)],
+        'pointers': [('name', 'TEXT', 0, 1), ('body', 'TEXT', 1, 0)],
+        'cache': [('k', 'TEXT', 0, 1), ('pointer', 'TEXT', 1, 0),
+                  ('generation', 'TEXT', 1, 0), ('fingerprint', 'TEXT', 1, 0),
+                  ('body', 'TEXT', 1, 0)],
+        'pending': [('ticket', 'TEXT', 0, 1), ('pointer', 'TEXT', 1, 0),
+                    ('generation', 'TEXT', 1, 0), ('fingerprint', 'TEXT', 1, 0),
+                    ('body', 'TEXT', 1, 0)],
+    }
+    if tables != set(expected_columns):
+        return False
+    for table, expected in expected_columns.items():
+        actual = [(row[1], row[2].upper(), row[3], row[5]) for row in
+                  connection.execute(f'PRAGMA table_info({table})')]
+        if actual != expected:
+            return False
+    schema_sql = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+    ).fetchone()[0]
+    if 'CHECK(singleton = 1)' not in schema_sql:
+        return False
+    expected_indexes = {
+        'schema_meta': [],
+        'pointers': [('sqlite_autoindex_pointers_1', 1, 'pk', ['name'])],
+        'cache': [('cache_pointer', 0, 'c', ['pointer']),
+                  ('sqlite_autoindex_cache_1', 1, 'pk', ['k'])],
+        'pending': [('pending_pointer', 0, 'c', ['pointer']),
+                    ('sqlite_autoindex_pending_1', 1, 'pk', ['ticket'])],
+    }
+    for table, expected in expected_indexes.items():
+        actual = []
+        for row in connection.execute(f'PRAGMA index_list({table})'):
+            columns = [item[2] for item in
+                       connection.execute(f'PRAGMA index_info({row[1]})')]
+            actual.append((row[1], row[2], row[3], columns))
+        if sorted(actual) != sorted(expected):
+            return False
+    return True
+
+
 class Service:
     """Store verified dataset pointers, review tickets, and approved results."""
 
@@ -77,6 +121,7 @@ class Service:
         *,
         cache_ttl_seconds: float = 86400,
         review_ttl_seconds: float = 600,
+        allow_agent_assist: bool = False,
     ) -> None:
         ttl_values = (
             ("cache_ttl_seconds", cache_ttl_seconds),
@@ -91,6 +136,9 @@ class Service:
         self.retrieve = retrieve
         self.cache_ttl_seconds = float(cache_ttl_seconds)
         self.review_ttl_seconds = float(review_ttl_seconds)
+        if not isinstance(allow_agent_assist, bool):
+            raise ValueError('allow_agent_assist must be a boolean')
+        self.allow_agent_assist = allow_agent_assist
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             rows = c.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -103,6 +151,15 @@ class Service:
                 versions = c.execute(
                     'SELECT version FROM schema_meta'
                 ).fetchall()
+                if versions == [('2',)]:
+                    if not valid_v2_schema(c, tables):
+                        raise ValueError('invalid version 2 database layout')
+                    c.execute('CREATE TABLE attempts(attempt TEXT PRIMARY KEY, '
+                              'pointer TEXT NOT NULL, generation TEXT, '
+                              'fingerprint TEXT, body TEXT NOT NULL)')
+                    c.execute('CREATE INDEX attempts_pointer ON attempts(pointer)')
+                    c.execute('UPDATE schema_meta SET version=?', (SCHEMA_VERSION,))
+                    return
                 if versions != [(SCHEMA_VERSION,)]:
                     raise ValueError(
                         'unsupported verified-pointer-memory schema; expected '
@@ -121,6 +178,10 @@ class Service:
                 'pointer TEXT NOT NULL, generation TEXT NOT NULL, '
                 'fingerprint TEXT NOT NULL, body TEXT NOT NULL)',
                 'CREATE INDEX pending_pointer ON pending(pointer)',
+                'CREATE TABLE attempts(attempt TEXT PRIMARY KEY, '
+                'pointer TEXT NOT NULL, generation TEXT, fingerprint TEXT, '
+                'body TEXT NOT NULL)',
+                'CREATE INDEX attempts_pointer ON attempts(pointer)',
             )
             for statement in statements:
                 c.execute(statement)
@@ -237,7 +298,9 @@ class Service:
             return False
         current = json.loads(row[0])
         same_generation = current['generation'] == pointer['generation']
-        return same_generation and principal in current['principals']
+        same_fingerprint = current['fingerprint'] == pointer['fingerprint']
+        return (same_generation and same_fingerprint
+                and principal in current['principals'])
 
     def _valid_result(self, result: Any) -> bool:
         if not isinstance(result, dict):
@@ -294,6 +357,233 @@ class Service:
                 return False
         return True
 
+    def _record_attempt(
+        self, name: str, question: str, principal: str, context: str,
+        freshness: dict[str, Any], status: str, trace: Any,
+        pointer: dict[str, Any] | None = None,
+    ) -> str:
+        """Persist an immutable original retrieval attempt and return its id."""
+        attempt = str(uuid.uuid4())
+        body = {
+            'question': question, 'context': context, 'principal': principal,
+            'freshness': freshness, 'retrievalStatus': status,
+            'trace': trace.get('trace', []) if isinstance(trace, dict) else [],
+            **({'retrievalReason': trace['reason']}
+               if isinstance(trace, dict) and isinstance(trace.get('reason'), str)
+               else {}),
+            'createdAt': time.time(),
+        }
+        generation = pointer.get('generation') if pointer else None
+        fingerprint = pointer.get('fingerprint') if pointer else None
+        with self.connect() as c:
+            c.execute('INSERT INTO attempts VALUES (?,?,?,?,?)',
+                      (attempt, name, generation, fingerprint, pack(body)))
+        return attempt
+
+    def _stored_pointer(self, name: str, principal: str) -> dict[str, Any] | None:
+        """Return a stored binding only when its principal scope permits it."""
+        with self.connect() as c:
+            row = c.execute('SELECT body FROM pointers WHERE name=?',
+                            (name,)).fetchone()
+        if not row:
+            return None
+        pointer = json.loads(row[0])
+        return pointer if principal in pointer.get('principals', []) else None
+
+    def attempt(self, attempt_id: str, principal: str) -> dict[str, Any]:
+        """Inspect an attempt using its original principal scope label."""
+        require_text('attemptId', attempt_id)
+        require_text('principal', principal)
+        with self.connect() as c:
+            row = c.execute(
+                'SELECT pointer,generation,fingerprint,body FROM attempts WHERE attempt=?',
+                (attempt_id,),
+            ).fetchone()
+        if not row:
+            raise ValueError('unknown attempt')
+        body = json.loads(row[3])
+        if body['principal'] != principal:
+            raise ValueError('unauthorized attempt')
+        with self.connect() as c:
+            current = c.execute('SELECT body FROM pointers WHERE name=?',
+                                (row[0],)).fetchone()
+        if not current:
+            raise ValueError('unauthorized attempt')
+        binding = json.loads(current[0])
+        if (principal not in binding.get('principals', [])
+                or binding.get('generation') != row[1]
+                or binding.get('fingerprint') != row[2]):
+            raise ValueError('unauthorized attempt')
+        return {'status': 'ok', 'attemptId': attempt_id, 'pointer': row[0],
+                'generation': row[1], 'fingerprint': row[2], **body}
+
+    @staticmethod
+    def _passage_id(ticket: str, passage: dict[str, Any]) -> str:
+        return digest([ticket, {key: passage[key] for key in
+                      ('sourceId', 'path', 'contentSHA', 'startLine', 'endLine',
+                       'reviewedText')}])
+
+    def _ticket(
+        self, name: str, pointer: dict[str, Any], question: str, principal: str,
+        context: str, policy: dict[str, Any], result: dict[str, Any], now: float,
+        resolution: str, originating_attempt: str,
+        fixed_now: bool = False,
+        assistance_reason: str | None = None,
+    ) -> dict[str, Any]:
+        ticket = str(uuid.uuid4())
+        passages = [{**p, 'evidenceId': self._passage_id(ticket, p)}
+                    for p in result['passages']]
+        result = {**result, 'passages': passages}
+        pending = {
+            'question': question, 'principal': principal, 'context': context,
+            'freshness': policy, 'result': result,
+            'expires': now + self.review_ttl_seconds,
+            'resolution': resolution, 'originatingAttemptId': originating_attempt,
+            **({'assistanceReason': assistance_reason}
+               if assistance_reason is not None else {}),
+        }
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            current = c.execute('SELECT body FROM pointers WHERE name=?',
+                                (name,)).fetchone()
+            if not self._same(current, pointer, principal):
+                raise ValueError('pointer changed while creating ticket')
+            ticket_now = now if fixed_now else time.time()
+            _, freshness_error = self.freshness(pointer, policy, ticket_now)
+            if freshness_error:
+                raise ValueError('refresh required while creating ticket')
+            pending['expires'] = ticket_now + self.review_ttl_seconds
+            c.execute('INSERT INTO pending VALUES (?,?,?,?,?)',
+                      (ticket, name, pointer['generation'],
+                       pointer['fingerprint'], pack(pending)))
+        return {**result, 'approvalTicket': ticket,
+                'resolution': resolution,
+                'originatingAttemptId': originating_attempt}
+
+    def assist(
+        self, attempt_id: str, principal: str, reason: str,
+        references: list[dict[str, Any]], now: float | None = None,
+    ) -> dict[str, Any]:
+        """Create a review ticket from referenced, registered preparations."""
+        if not self.allow_agent_assist:
+            raise ValueError('agent assist is disabled')
+        require_text('reason', reason)
+        inspected = self.attempt(attempt_id, principal)
+        if inspected['retrievalStatus'] not in {'ready', 'no-match', 'refused'}:
+            raise ValueError('attempt is not eligible for assistance')
+        if (not isinstance(references, list) or not references or
+                len(references) > 20 or any(not isinstance(r, dict) for r in references)):
+            raise ValueError('references must contain 1 to 20 objects')
+        name = inspected['pointer']
+        pointer, error = self.pointer(name, principal)
+        if error:
+            raise ValueError(error['status'])
+        if (pointer['generation'] != inspected['generation'] or
+                pointer['fingerprint'] != inspected['fingerprint']):
+            raise ValueError('attempt pointer binding is stale')
+        policy = normalize_freshness(inspected['freshness'])
+        supplied_now = now is not None
+        check_now = time.time() if now is None else require_time('now', now)
+        freshness_metadata, error = self.freshness(pointer, policy, check_now)
+        if error:
+            raise ValueError(error['status'])
+        manifest = self._manifest(pointer['snapshot']['entry'])
+        sources = {source['id']: source for source in manifest['sources']}
+        selected: list[dict[str, Any]] = []
+        seen = set()
+        for ref in references:
+            if set(ref) != {'sourceId', 'startLine', 'endLine'}:
+                raise ValueError('invalid reference fields')
+            source_id = require_text('reference.sourceId', ref['sourceId'])
+            start, end = ref['startLine'], ref['endLine']
+            if (isinstance(start, bool) or not isinstance(start, int) or start < 1 or
+                    isinstance(end, bool) or not isinstance(end, int) or end < start):
+                raise ValueError('invalid reference bounds')
+            source = sources.get(source_id)
+            if not source:
+                raise ValueError('reference is outside registered sources')
+            try:
+                line_count = len(Path(source['path']).read_text().splitlines())
+            except (OSError, UnicodeError) as exc:
+                raise ValueError('registered source is unreadable') from exc
+            if end > line_count:
+                raise ValueError('reference bounds exceed registered source')
+            try:
+                matches = [p for p in manifest['preparations']
+                           if p.get('sourceId') == source_id
+                           and p.get('status') == 'reviewed'
+                           and p.get('policy') == 'reviewed'
+                           and p.get('contentSHA') == source['contentSHA']
+                           and not isinstance(p.get('startLine'), bool)
+                           and isinstance(p.get('startLine'), int)
+                           and not isinstance(p.get('endLine'), bool)
+                           and isinstance(p.get('endLine'), int)
+                           and p['startLine'] <= end and p['endLine'] >= start]
+            except (KeyError, TypeError) as exc:
+                raise ValueError('invalid reviewed preparation') from exc
+            if not matches:
+                raise ValueError('reference does not resolve to reviewed preparation')
+            for prep in matches:
+                identity = (source_id, prep['startLine'], prep['endLine'], prep['contentSHA'])
+                if identity not in seen:
+                    seen.add(identity)
+                    selected.append({
+                        'sourceId': source_id, 'path': source['path'],
+                        'contentSHA': prep['contentSHA'],
+                        'startLine': prep['startLine'], 'endLine': prep['endLine'],
+                        'reviewedText': prep['reviewedText'],
+                    })
+        if len(selected) > 20 or sum(len(p['reviewedText']) for p in selected) > 60000:
+            raise ValueError('assisted evidence exceeds limits')
+        # Recheck the complete binding after reading and selecting preparations.
+        current, error = self.pointer(name, principal)
+        if (error or current['generation'] != pointer['generation'] or
+                current['fingerprint'] != pointer['fingerprint']):
+            raise ValueError('attempt pointer binding is stale')
+        final_now = check_now if supplied_now else time.time()
+        _, error = self.freshness(current, policy, final_now)
+        if error:
+            raise ValueError(error['status'])
+        result = {'status': 'ready', 'passages': selected}
+        if not self._valid_result(result):
+            raise ValueError('invalid reviewed preparation')
+        response = self._ticket(
+            name, pointer, inspected['question'], principal, inspected['context'],
+            policy, result, final_now, 'agent-assisted', attempt_id, supplied_now,
+            reason)
+        return {**response, 'freshness': freshness_metadata}
+
+    def sources(
+        self, name: str, principal: str, offset: int = 0, limit: int = 25,
+    ) -> dict[str, Any]:
+        """List the registered reviewed sources available through a pointer."""
+        if (isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
+                isinstance(limit, bool) or not isinstance(limit, int)
+                or limit < 1 or limit > 100):
+            raise ValueError('offset must be nonnegative and limit must be 1 to 100')
+        pointer, error = self.pointer(name, principal)
+        if error:
+            return error
+        manifest = self._manifest(pointer['snapshot']['entry'])
+        rows = []
+        for source in manifest['sources']:
+            try:
+                line_count = len(Path(source['path']).read_text().splitlines())
+            except (OSError, UnicodeError):
+                return {'status': 'preparation-required'}
+            rows.append({
+                'sourceId': source['id'], 'contentSHA': source['contentSHA'],
+                'path': source['path'],
+                'description': source.get('description', ''),
+                'lineCount': line_count,
+            })
+        page = rows[offset:offset + limit]
+        result = {'status': 'ok', 'sources': page, 'offset': offset,
+                  'limit': limit, 'total': len(rows)}
+        if offset + len(page) < len(rows):
+            result['nextOffset'] = offset + len(page)
+        return result
+
     def search(
         self,
         name: str,
@@ -313,12 +603,17 @@ class Service:
         now = time.time() if now is None else require_time('now', now)
         pointer, error = self.pointer(name, principal)
         if error:
-            return error
+            stored = self._stored_pointer(name, principal)
+            attempt = self._record_attempt(name, question, principal, context,
+                                           policy, error['status'], error, stored)
+            return {**error, 'attemptId': attempt}
         # Pointer validation reads multiple files and can itself cross a deadline.
         checked_now = time.time() if not supplied_now else now
         freshness_metadata, error = self.freshness(pointer, policy, checked_now)
         if error:
-            return error
+            attempt = self._record_attempt(name, question, principal, context,
+                                           policy, error['status'], error, pointer)
+            return {**error, 'attemptId': attempt}
         key = self.key(pointer, question, principal, context, policy)
         with self.connect() as c:
             c.execute('BEGIN')
@@ -351,50 +646,49 @@ class Service:
                             'answer': hit['answer'],
                             'evidence': hit['evidence'],
                             'freshness': freshness_metadata,
+                            'resolution': hit.get('resolution', 'retrieval'),
+                            **({'originatingAttemptId': hit['originatingAttemptId']}
+                               if hit.get('originatingAttemptId') else {}),
                         }
                 except (ValueError, KeyError, TypeError):
                     pass
         provider_now = time.time() if not supplied_now else now
         freshness_metadata, error = self.freshness(pointer, policy, provider_now)
         if error:
-            return error
+            attempt = self._record_attempt(name, question, principal, context,
+                                           policy, error['status'], error, pointer)
+            return {**error, 'attemptId': attempt}
         result = self.retrieve(pointer['dataset'], question)
         if not self._valid_result(result):
-            return {'status': 'error', 'reason': 'invalid-retrieval-result'}
+            result = {'status': 'error', 'reason': 'invalid-retrieval-result'}
+            attempt = self._record_attempt(name, question, principal, context,
+                                           policy, result['status'], result, pointer)
+            return {**result, 'attemptId': attempt}
+        attempt = self._record_attempt(name, question, principal, context,
+                                       policy, result['status'], result, pointer)
         after, error = self.pointer(name, principal)
         if error:
-            return error
+            return {**error, 'attemptId': attempt}
         generation_changed = after['generation'] != pointer['generation']
         fingerprint_changed = after['fingerprint'] != pointer['fingerprint']
         if generation_changed or fingerprint_changed:
-            return {'status': 'pointer-changed'}
+            return {'status': 'pointer-changed', 'attemptId': attempt}
         # Retrieval may have taken long enough for a currentness deadline to pass.
         after_now = time.time() if not supplied_now else now
         freshness_metadata, error = self.freshness(after, policy, after_now)
         if error:
-            return error
+            return {**error, 'attemptId': attempt}
         if result['status'] != 'ready':
-            return result
-        ticket = str(uuid.uuid4())
-        pending = {
-            'question': question,
-            'principal': principal,
-            'context': context,
-            'freshness': policy,
-            'result': result,
-            'expires': after_now + self.review_ttl_seconds,
-        }
-        with self.connect() as c:
-            c.execute('BEGIN IMMEDIATE')
-            current = c.execute(
-                'SELECT body FROM pointers WHERE name=?', (name,)
-            ).fetchone()
-            if not self._same(current, pointer, principal):
-                return {'status': 'pointer-changed'}
-            c.execute('INSERT INTO pending VALUES (?,?,?,?,?)',
-                      (ticket, name, pointer['generation'],
-                       pointer['fingerprint'], pack(pending)))
-        return {**result, 'approvalTicket': ticket, 'freshness': freshness_metadata}
+            return {**result, 'attemptId': attempt}
+        try:
+            response = self._ticket(name, pointer, question, principal, context,
+                                    policy, result, after_now, 'retrieval', attempt,
+                                    supplied_now)
+        except ValueError as exc:
+            if str(exc) == 'refresh required while creating ticket':
+                return {'status': 'refresh-required', 'attemptId': attempt}
+            return {'status': 'pointer-changed', 'attemptId': attempt}
+        return {**response, 'attemptId': attempt, 'freshness': freshness_metadata}
 
     def approve(
         self,
@@ -445,7 +739,20 @@ class Service:
         sources = {s['id']: s for s in manifest['sources']}
         verified = []
         for item in evidence:
-            quote = item['quote']
+            evidence_id = item.get('evidenceId')
+            if evidence_id is not None:
+                if set(item) != {'evidenceId'} or not isinstance(evidence_id, str):
+                    raise ValueError('invalid evidence id')
+                returned = [p for p in pending['result'].get('passages', [])
+                            if p.get('evidenceId') == evidence_id]
+                if len(returned) != 1:
+                    raise ValueError('evidence id not in ticket')
+                item = {'sourceId': returned[0]['sourceId'],
+                        'quote': returned[0]['reviewedText']}
+            try:
+                quote = item['quote']
+            except KeyError as exc:
+                raise ValueError('invalid evidence') from exc
             matches = []
             for passage in pending['result'].get('passages', []):
                 wrong_source = passage['sourceId'] != item['sourceId']
@@ -491,6 +798,10 @@ class Service:
         hit = {
             'answer': answer,
             'evidence': verified,
+            'resolution': pending.get('resolution', 'retrieval'),
+            'originatingAttemptId': pending.get('originatingAttemptId'),
+            **({'assistanceReason': pending['assistanceReason']}
+               if pending.get('assistanceReason') else {}),
             'expires': min(approval_now + self.cache_ttl_seconds,
                            freshness_metadata.get('deadline', float('inf')))
         }

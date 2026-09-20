@@ -202,7 +202,8 @@ class PublicCliTests(unittest.TestCase):
                 self.register(config)
                 process, result = self.search(config)
                 self.assertNotEqual(process.returncode, 0)
-                self.assertEqual(result, {"status": "error", "reason": reason, "nextAction": "record-error"})
+                self.assertIsInstance(result["attemptId"], str)
+                self.assertEqual({k: result[k] for k in ("status", "reason", "nextAction")}, {"status": "error", "reason": reason, "nextAction": "record-error"})
                 self.assertEqual(calls.read_text().splitlines(), ["call"])
 
     def test_bundled_bridge_rejects_unreviewed_or_stale_data_without_key(self):

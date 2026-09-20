@@ -27,6 +27,9 @@ ACTIONS = {
     'register': ['pointer', 'dataset', 'principals'], 'remove': ['pointer'],
     'search': ['pointer', 'question', 'principal'],
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
+    'assist': ['attemptId', 'principal', 'reason', 'references'],
+    'attempt': ['attemptId', 'principal'],
+    'sources': ['pointer', 'principal'],
 }
 
 
@@ -35,6 +38,8 @@ def describe():
     return {
         'status': 'ok', 'stage': 'local-experiment', 'actions': ACTIONS,
         'settings': DEFAULTS, 'optionalSearchFields': ['context', 'freshness'],
+        'optionalConfigDefaults': {'allowAgentAssist': False},
+        'assistLimits': {'maxPreparations': 20, 'maxReviewedCharacters': 60000},
         'freshnessPolicies': {
             'default': {'mode': 'snapshot'},
             'current': {'mode': 'current', 'maxAgeSeconds': 'positive finite seconds'},
@@ -47,7 +52,7 @@ def describe():
             'remove': 'Removes the pointer, cache and pending tickets only; it never removes originals.',
         },
         'requiredConfig': ['db', 'registry'],
-        'optionalConfig': ['retrievalCommand', *DEFAULTS],
+        'optionalConfig': ['retrievalCommand', 'allowAgentAssist', *DEFAULTS],
         'resultActions': NEXT,
         'requirements': ['Python 3.10+', 'Node 24+ for bundled retrieval',
                          'Reviewed local dataset', 'TYPESAFE_API_KEY for live Jev calls'],
@@ -60,13 +65,54 @@ def describe():
     }
 
 
+def add_hints(result, config=None):
+    """Attach small deterministic operator guidance to actionable results."""
+    status = result.get('status')
+    hints = []
+    if status == 'no-match' and config and config.get('allowAgentAssist'):
+        hints.append({'code': 'inspect-sources',
+                      'message': 'Review registered sources for relevant line ranges.',
+                      'action': 'sources'})
+    elif status == 'ready':
+        hints.append({'code': 'review-evidence',
+                      'message': 'Check that the passages fully support the answer, then approve their evidence IDs.',
+                      'action': 'approve'})
+    elif status == 'preparation-required':
+        hints.append({'code': 'refresh-preparation',
+                      'message': 'Review and refresh the registered preparation before retrying.',
+                      'action': 'register'})
+    elif status == 'refresh-required':
+        hints.append({'code': 'refresh-upstream',
+                      'message': 'Run the trusted upstream freshness check before retrying.',
+                      'action': 'search'})
+    elif status == 'unknown-pointer':
+        hints.append({'code': 'register-pointer',
+                      'message': 'Register an approved reviewed dataset pointer first.',
+                      'action': 'register'})
+    elif (status == 'error' and result.get('reason') == 'agent assist is disabled'):
+        hints.append({'code': 'assist-disabled',
+                      'message': 'An operator can enable assistance with allowAgentAssist.',
+                      'action': 'panel'})
+    if status == 'ok' and result.get('pointers'):
+        missing = sum(p.get('missingSourceDescriptions', 0)
+                      for p in result['pointers'])
+        if missing:
+            hints.append({'code': 'source-descriptions-missing',
+                          'message': f'{missing} registered sources have no description.',
+                          'action': 'register'})
+    if hints:
+        result['hints'] = hints
+    return result
+
+
 def load_config(path):
     """Resolve deployment-local paths and reject unsupported configuration."""
     location = Path(path).resolve()
     config = json.loads(location.read_text())
     if not isinstance(config, dict):
         raise ValueError('Config must be an object.')
-    unknown = set(config) - {'db', 'registry', 'retrievalCommand', *DEFAULTS}
+    unknown = set(config) - {'db', 'registry', 'retrievalCommand',
+                             'allowAgentAssist', *DEFAULTS}
     if unknown:
         raise ValueError('Unsupported configuration setting.')
     for name in ('db', 'registry'):
@@ -79,6 +125,9 @@ def load_config(path):
     command = config.setdefault('retrievalCommand', ['node', str(Path(__file__).with_name('retrieve.ts').resolve())])
     if not isinstance(command, list) or not command or any(not isinstance(x, str) or not x for x in command):
         raise ValueError('retrievalCommand must be an administrator-provided argument array.')
+    assist = config.setdefault('allowAgentAssist', False)
+    if not isinstance(assist, bool):
+        raise ValueError('allowAgentAssist must be a boolean.')
     return config
 
 
@@ -102,7 +151,8 @@ def run(request, config):
 
     service = Service(config['db'], config['registry'], retrieve,
                       cache_ttl_seconds=config['cacheTtlSeconds'],
-                      review_ttl_seconds=config['reviewTtlSeconds'])
+                      review_ttl_seconds=config['reviewTtlSeconds'],
+                      allow_agent_assist=config['allowAgentAssist'])
     action = request.get('action', 'search')
     if action not in ACTIONS:
         raise ValueError('Unknown action; use --describe.')
@@ -127,8 +177,15 @@ def run(request, config):
                 'datasetScope': entry.get('scope', entry.get('description', '')),
                 'snapshotStatus': error['status'] if error else 'available',
                 'status': error['status'] if error else 'available',
+                'missingSourceDescriptions': sum(
+                    1 for source in binding.get('snapshot', {}).get('sources', [])
+                    if not isinstance(source.get('description'), str)
+                    or not source['description'].strip()),
             })
-        return {**describe(), 'settings': {k: config[k] for k in DEFAULTS}, 'pointers': pointers,
+        return {**describe(), 'settings': {k: config[k] for k in DEFAULTS},
+                'agentAssistEnabled': config['allowAgentAssist'],
+                'storagePaths': {'db': config['db'], 'registry': config['registry']},
+                'pointers': pointers,
                 'datasets': [{'name': name, 'description': entry.get('description', '')}
                              for name, entry in registry['datasets'].items()]}
     if action == 'search':
@@ -145,6 +202,14 @@ def run(request, config):
     if action == 'approve':
         service.approve(request['ticket'], request['principal'], request['answer'], request['evidence'], approved=request['approved'] is True)
         return {'status': 'saved'}
+    if action == 'assist':
+        return service.assist(request['attemptId'], request['principal'],
+                              request['reason'], request['references'])
+    if action == 'attempt':
+        return service.attempt(request['attemptId'], request['principal'])
+    if action == 'sources':
+        return service.sources(request['pointer'], request['principal'],
+                               request.get('offset', 0), request.get('limit', 25))
     return describe()
 
 
@@ -156,6 +221,7 @@ def main():
     parser.add_argument('--input', help='JSON action file; omit for the control panel.')
     parser.add_argument('--principal', default='local', help='Local scope for the control panel, not authentication.')
     args = parser.parse_args()
+    config = None
     try:
         if args.describe:
             result = describe()
@@ -165,10 +231,12 @@ def main():
             request = json.loads(Path(args.input).read_text()) if args.input else {'action': 'panel', 'principal': args.principal}
             if not isinstance(request, dict):
                 raise ValueError('Input must be a JSON object.')
-            result = run(request, load_config(args.config))
+            config = load_config(args.config)
+            result = run(request, config)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
         # Do not expose provider stderr, credentials, source passages or cache bodies.
         result = {'status': 'error', 'reason': str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
+    add_hints(result, config)
     result['nextAction'] = NEXT.get(result['status'], 'record-unresolved')
     print(json.dumps(result))
     return 1 if result['status'] == 'error' else 0

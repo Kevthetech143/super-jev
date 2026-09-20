@@ -5,7 +5,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from service import Service, pack, sha
+from service import Service, SCHEMA_VERSION, pack, sha
 
 
 class Fixture:
@@ -159,7 +159,9 @@ class RegressionTests(unittest.TestCase):
     def test_invalid_retrieval_shape_is_structured_error(self):
         fixture = self.fixture()
         fixture.service.retrieve = lambda dataset, question: []
-        self.assertEqual(fixture.service.search("docs", "new", "alice"), {
+        result = fixture.service.search("docs", "new", "alice")
+        self.assertIsInstance(result["attemptId"], str)
+        self.assertEqual({k: result[k] for k in ("status", "reason")}, {
             "status": "error",
             "reason": "invalid-retrieval-result"
         })
@@ -180,7 +182,8 @@ class RegressionTests(unittest.TestCase):
                     })
                 result = fixture.service.search(
                     "docs", f"invalid {index}", "alice")
-                self.assertEqual(result, {
+                self.assertIsInstance(result["attemptId"], str)
+                self.assertEqual({k: result[k] for k in ("status", "reason")}, {
                     "status": "error",
                     "reason": "invalid-retrieval-result",
                 })
@@ -237,7 +240,7 @@ class RegressionTests(unittest.TestCase):
             connection.execute("INSERT INTO marker VALUES ('keep')")
         with sqlite3.connect(unsupported) as connection:
             before = list(connection.iterdump())
-        with self.assertRaisesRegex(ValueError, "expected version 2"):
+        with self.assertRaisesRegex(ValueError, f"expected version {SCHEMA_VERSION}"):
             Service(unsupported, fixture.registry, fixture.retrieve)
         with sqlite3.connect(unsupported) as connection:
             self.assertEqual(list(connection.iterdump()), before)
@@ -253,7 +256,7 @@ class RegressionTests(unittest.TestCase):
             list(pool.map(construct, range(8)))
         with sqlite3.connect(concurrent_db) as connection:
             rows = connection.execute("SELECT version FROM schema_meta").fetchall()
-        self.assertEqual(rows, [("2",)])
+        self.assertEqual(rows, [(SCHEMA_VERSION,)])
 
 
 if __name__ == "__main__":
