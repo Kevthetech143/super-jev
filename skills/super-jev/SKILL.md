@@ -43,3 +43,6 @@ Do not: treat "preparation required" as an answer; repeat a failed search instea
 [Connector setup, onboarding and refresh](../super-jev-connect/SKILL.md) (bulk prepare, labels, held files, refresh) · [connector reference](references/connectors.md) · [verified reuse](references/verified-reuse.md) · [checking](references/checking.md) · [feedback recording](references/feedback.md)
 
 On misses, incomplete evidence, or review failures, follow [feedback recording](references/feedback.md); report assistance separately from an automatic hit.
+
+## Close the loop (auto-catch)
+After answering from an opened file, run `python3 ask.py --principal YOU --done "final answer"` — with `autoCatch` on (`ask.py --auto-catch on --principal YOU`), a passing Jev check caches the file's own quotes for reuse in both lanes. Off (default) changes nothing. Optional: wire `hooks/superjev-auto-catch-stop.sh` as a Claude Code Stop hook to call `--done` automatically.

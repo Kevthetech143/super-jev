@@ -24,3 +24,17 @@ Assistance accepts only registered, reviewed preparation. It rechecks principal 
 Use at most one assistance attempt per question. Then record the unresolved result unless there is a concrete, correctable input issue. An unregistered source needs reviewed onboarding, refresh and a new original attempt; it never bypasses the registry. The database keeps original attempt status/trace metadata across pointer replacement/removal; keep full raw responses and resolution receipts in your private work artifacts. Approved resolution metadata stays with the cache entry, which invalidation can remove. Old-generation attempts remain in the database for trusted audit but cannot be read through a newly registered pointer.
 
 `refresh-required`, `preparation-required`, access denial, stale bindings and expired tickets stop the loop. Refresh/review through the ordinary lifecycle and submit a new attempt when appropriate. Never substitute ordinary search, another model, a different person's scope, or a new raw path as hidden recovery.
+
+## Auto-catch gate table
+
+`--done` approves only when the existing check door returns ALL of:
+
+| Gate | Line | On fail |
+|---|---|---|
+| claim rows | every `c<N>` SUPPORTED ≥ 0.80 | pending-catch |
+| overclaim | HONEST | pending-catch |
+| time_sensitive | NOT_TIME_SENSITIVE ≥ 0.90 | pending-catch |
+| leaked_internal | CLEAN | pending-catch |
+| evidence pick | opened candidate, else top only if it beats #2 by ≥ 0.20 | close-call, nothing cached |
+
+Approved answers cache the file's verbatim quotes (never agent prose) through the existing `--approve` and `--add --source <file>` paths; the `--source` hash makes a later edit withhold the answer as STALE. Every decision appends one line to `<state>/auto-catch.log`.
