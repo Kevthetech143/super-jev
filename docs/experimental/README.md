@@ -9,7 +9,6 @@ stays importable and documented for a future 1.1 track.
 - enhancer.md — enhancer design notes
 - experimental-retrieval.md — retrieval experiments
 - harnesses.md — harness experiment notes
-- hooks.md — hooks research (large file)
 - launch-x.md — launch experiment notes
 - lessons.md — lessons from experiment runs
 - organizer-validation.md — organizer validation notes

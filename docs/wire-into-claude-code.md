@@ -34,6 +34,9 @@ fi
 exit 0
 ```
 
+Tested with: `bash -n` syntax check plus one dry run against synthetic
+reply/trace files on 2026-09-21 (block case and pass case both behaved).
+
 ## 3. Roadmap
 
 The auto-catch hook (approved hits kept without a manual command) arrives in 1.1.

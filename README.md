@@ -49,7 +49,7 @@ and Stop-hook claim gate), [AGENT-GUIDE](docs/AGENT-GUIDE.md) (the daily loop), 
 | harness loop (demo / replay) | LIVE |
 | sweep | MEASURED — has live bench scripts |
 | catalog | MEASURED — has live bench scripts |
-| fetch | MEASURED — has live bench scripts |
+| fetch | MEASURED — bench scripts exist; admission gate not yet met (see AGENTS.md) |
 | chain-cli | EXPERIMENTAL — see src/experimental/ |
 | derive-facts | EXPERIMENTAL — see src/experimental/ |
 | investigate | EXPERIMENTAL — see src/experimental/ |
@@ -89,10 +89,11 @@ Tested on macOS and Linux. Windows is untested.
 ## Uninstall
 
 ```bash
-rm ~/.claude/skills/super-jev ~/.claude/skills/super-jev-connect   # skill symlinks (AGENTS.md:33-34)
-rm -rf "${SUPERJEV_STATE_DIR:-~/.local/state/super-jev}"            # state dir (skills/super-jev/ask.py:90-92)
-# remove the pointer memory config.json you passed via the installed memory.sh wrapper / --config
-# (skills/super-jev/ask.py:233-234; its location is deployment-local)
+# 1. skill symlinks (see AGENTS.md)
+rm ~/.claude/skills/super-jev ~/.claude/skills/super-jev-connect
+# 2. state directory (skills/super-jev/ask.py:90-92)
+rm -r "${SUPERJEV_STATE_DIR:-$HOME/.local/state/super-jev}"
+# 3. pointer memory: delete the config.json you created for the memory wrapper (skills/super-jev/ask.py:233-234)
 ```
 
 ## Doors
@@ -102,6 +103,7 @@ rm -rf "${SUPERJEV_STATE_DIR:-~/.local/state/super-jev}"            # state dir 
 - `navigation` — `src/navigation-cli.ts`: navigate a file catalog for the best evidence files for one question.
 - `skill-search` — `src/skill-search-cli.ts`: suggest which installed skills serve one request; advisory only.
 - `permit` — `src/permit-cli.ts`: is this one harness action safe to run automatically?
+- `permit` hard rules: destructive/irreversible actions are refused by hard code (before any model call) — documented in `docs/playbook.md`, see the permit row.
 - `catalog` — `src/catalog-cli.ts`: maintenance door for fetch v2 catalogs (validate / learn / build).
 - `catalog-build` — `src/catalog-build-cli.ts`: build a fetch v2 catalog JSON from a skills directory.
 - `fetch` — `src/fetch-cli.ts`: score a catalog against one request and print only the top-k ids.

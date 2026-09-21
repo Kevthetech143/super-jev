@@ -97,6 +97,6 @@ an improvement and not noise.
 ## Related pages
 
 - [`docs/playbook.md`](playbook.md) — which door to use for which job, worked examples.
-- [`docs/hooks.md`](hooks.md) — hook wiring in detail.
+- [`docs/wire-into-claude-code.md`](wire-into-claude-code.md) — hook wiring in detail.
 - [`docs/wishlist.md`](wishlist.md) — what's built, what's still missing, and the
   admission bar for each.

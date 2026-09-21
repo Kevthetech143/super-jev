@@ -387,7 +387,7 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # surrounding text dilutes it) but SHARPENS the draft-level OVERCLAIMS
 # flag — it stops being a symptom of a thin gather and starts reading as a
 # real "the draft claims more than the wide evidence carries" signal. See
-# docs/hooks.md ("gate v3 — wide window") for the full write-up, including
+# docs/wire-into-claude-code.md ("gate v3 — wide window") for the full write-up, including
 # the cliff: 0.85 over-blocks truths on this bench (t01 sits at 0.85 on
 # the wide read), 0.90 is the measured line.
 PREV_TURNS_ENV = "SUPERJEV_PREV_TURNS"
@@ -1127,7 +1127,7 @@ def _count_mismatch_reason(draft_text, evidence_text):
     the evidence counts.
 
     Never fires when the evidence carries no count for that label — that is
-    an evidence gap (see docs/hooks.md), not a contradiction, and firing on
+    an evidence gap (see docs/wire-into-claude-code.md), not a contradiction, and firing on
     it would turn "we could not look" into "you lied", the exact bug this
     file already guards against for OVERCLAIMS. Never pairs numbers across
     labels, and never pairs a bare number with anything."""
@@ -1211,7 +1211,7 @@ def _fact_block_reasons(facts):
 
     `SUPPORTED` (and any other non-CONTRADICTED_BY_FACT verdict — CHECKED,
     RESIDUE, advisory-only lines) never appears here and so never blocks
-    and never vetoes another arm; see docs/hooks.md."""
+    and never vetoes another arm; see docs/wire-into-claude-code.md."""
     return [f for f in (facts or []) if "CONTRADICTED_BY_FACT" in f]
 
 
@@ -1415,7 +1415,7 @@ _REPORT_MARKER_RE = re.compile(
 # block reason when the judge said it with HIGH confidence, at or above the
 # line, never at or below it. (Decided 2026-09-17, PR #18's open decision —
 # the earlier "blocks at or below the line" direction is gone; see
-# docs/hooks.md.)
+# docs/wire-into-claude-code.md.)
 #
 # A gate/verify run that comes back READ (exit 3, "advisory") can still
 # carry a claim-level or draft-level flag strong enough that letting it
@@ -1441,7 +1441,7 @@ _REPORT_MARKER_RE = re.compile(
 # SELF_CONTRADICTORY is never a block reason, alone or in company — a
 # calmer rewrite of a reply still reads as mildly self-contradictory to
 # jev's own scoring (hedging language does), and blocking on it was what
-# looped the Stop gate on 2026-09-17 (see docs/hooks.md, The loop guard).
+# looped the Stop gate on 2026-09-17 (see docs/wire-into-claude-code.md, The loop guard).
 # It still prints in the table as an advisory.
 #
 # A fabricated quote is already exit 2 from jev.py itself and already maps
@@ -1911,14 +1911,14 @@ def _hook_block_decision(flags, claim_rows=None, evidence=None):
 
 def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
     """gate v3 (wide evidence window; default rule). Calibrated on the
-    40-case gate-bench-20260917 wide read (see docs/hooks.md, "gate v3 —
+    40-case gate-bench-20260917 wide read (see docs/wire-into-claude-code.md, "gate v3 —
     wide window"):
 
       1. OVERCLAIMS at or above SUPERJEV_BLOCK_OVERCLAIM (default 0.90)
          blocks ON ITS OWN — no companion claim required. This supersedes
          v2/PR #20's "0.50 companion" rule (kept as SUPERJEV_RULE=v2 for
          A/B): the wide window sharpens OVERCLAIMS enough (see
-         docs/hooks.md, "gate v3 — wide window") that a confident reading
+         docs/wire-into-claude-code.md, "gate v3 — wide window") that a confident reading
          of it no longer needs a second claim to corroborate it. It is
          STILL gated on `_gather_healthy`, same as every other flag here
          — the wide window fixes the companion requirement, not the
@@ -1927,7 +1927,7 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
       2. A claim-level NOT_SUPPORTED/CONTRADICTED at or above
          SUPERJEV_BLOCK_CONF (default 0.80) is a SECONDARY trigger —
          2026-09-18, demoted from blocking to ADVISORY-ONLY (see
-         docs/hooks.md, "gate v4 — secondary arm demoted"): across both
+         docs/wire-into-claude-code.md, "gate v4 — secondary arm demoted"): across both
          gate-bench sets (70 cases) this arm never once was the sole
          reason a real lie got caught, and on the untuned set-2 replies it
          was the sole reason 5 true replies got blocked (longer,
@@ -1952,7 +1952,7 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
     no tools, as long as the gather is otherwise healthy. A reply is not
     made safe by the fact that this turn ran no tools; suppressing the
     primary arm on an empty current turn was worth three caught lies
-    against zero blocked truths on the 40-case bench (docs/hooks.md). The
+    against zero blocked truths on the 40-case bench (docs/wire-into-claude-code.md). The
     empty-current-turn health gate itself is otherwise unchanged by the
     2026-09-18 demotion — it still governs whether the secondary arm's
     advisory calls out the empty-turn caveat, same wording as before.
@@ -2542,7 +2542,7 @@ def _ledger_lines():
 # door invocation. The catch ledger is narrower and purpose-built: one
 # record per gate/verify hook DECISION (allow/block/advisory/unchecked),
 # small enough that an operator can tag each one fair/false/miss by hand and
-# read the three-number scoreboard `catch report` prints. See docs/hooks.md,
+# read the three-number scoreboard `catch report` prints. See docs/wire-into-claude-code.md,
 # "The catch ledger".
 
 def _default_catch_ledger_path():
@@ -2590,7 +2590,7 @@ def _catch_excerpt(text):
     through _catch_redact — secrets/credentials, emails, US phone numbers,
     SSN-shaped digit strings, and card numbers (an ungrouped 13+ digit run,
     or a grouped 4-4-4-4/4-6-5 run using one consistent separator, each
-    with its own narrow exception — see _catch_redact and docs/hooks.md) —
+    with its own narrow exception — see _catch_redact and docs/wire-into-claude-code.md) —
     and finally sliced to the 240 chars actually kept. No secret,
     credential, email, phone number, SSN-shaped string or card number ever
     lands in the catch ledger, because this excerpt is the only piece of
@@ -2606,7 +2606,7 @@ def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
     decision. `decision` is one of "block", "allow", "advisory", "unchecked",
     "advisory-forced" (the stop_hook_active re-run failsafe), or
     "advisory-judge" (the SUPERJEV_GATE_JUDGE_ADVISORY=1 failsafe — see
-    docs/hooks.md). `reasons` is the same strings --explain shows for
+    docs/wire-into-claude-code.md). `reasons` is the same strings --explain shows for
     this run (block_reasons/block_notes), never the raw evidence. `ms` is
     left as None (not guessed) when `start_time` was not captured.
 
@@ -3113,7 +3113,7 @@ def _cmd_catch_report(a):
     miss = sum(1 for r in records if r.get("tag") == "miss")
     untagged = sum(1 for r in records if r.get("tag") is None)
     # "advisory-forced" is a would-have-blocked stop_hook_active second pass
-    # (see docs/hooks.md) — reported here as its own line, "blocks
+    # (see docs/wire-into-claude-code.md) — reported here as its own line, "blocks
     # suppressed", never folded into "false stops" or "misses" by ITSELF,
     # because being demoted to advisory is neither: nothing was judged
     # right or wrong yet, a real block was just held back by the retry.
@@ -3144,7 +3144,7 @@ def _cmd_catch_report(a):
     if suppressed_and_tagged:
         print(f"  ({suppressed_and_tagged} of the above blocks-suppressed record(s) is "
               "also tagged fair/false and counted on that line too — suppressed and "
-              "fair/false answer different questions, see docs/hooks.md)")
+              "fair/false answer different questions, see docs/wire-into-claude-code.md)")
     if since:
         print(f"undated: {undated}")
     if not bot_filter:
@@ -3491,7 +3491,7 @@ def _catch_signal_body(signal):
         "",
         "Run `superjev catch list --id <id>` locally for the redacted detail "
         "behind any record id above — this issue body never carries "
-        "draft-derived text (see docs/hooks.md, \"Turning a repeat pattern "
+        "draft-derived text (see docs/wire-into-claude-code.md, \"Turning a repeat pattern "
         "into a fix PR\").",
         "",
         "---",
@@ -6076,7 +6076,7 @@ def _build_receipts_block(receipts, budget, draft_text=None):
 # prints `success`. On the 2026-09-17 bench the proof for t08/t10/t12/t13
 # ("PR #7 merged", "PR #8 landed with CI green", "PRs 8, 9, 10, 11 merged")
 # was exactly those lines, and the shim's window carried none of them while
-# the offline bench's did — see docs/hooks.md, "gate v3 — receipts".
+# the offline bench's did — see docs/wire-into-claude-code.md, "gate v3 — receipts".
 _RECEIPT_WORTHY_RE = re.compile(
     r'gh pr merge'
     r'|gh pr checks'
@@ -9178,7 +9178,7 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          (`_backfill_receipts_from_transcript`) covering every turn the
          Stop hook never ran on. The store alone left the live shim with
          zero receipts on all 40 cases of the 2026-09-17 bench while the
-         transcripts carried 1 to 15 lines each — see docs/hooks.md,
+         transcripts carried 1 to 15 lines each — see docs/wire-into-claude-code.md,
          "gate v3 — receipts backfill and the labelled count arm". This
          layer takes at most RECEIPTS_BUDGET_SHARE of the cap (see
          `_build_receipts_block`); uncapped, it grew on a long session
@@ -9237,7 +9237,7 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
 
     `meta["current_turn_empty"]` is True whenever the CURRENT turn
     contributed no tool_result content, regardless of whether previous-turn
-    or receipt material exists (2026-09-17, see docs/hooks.md, "gate v3 —
+    or receipt material exists (2026-09-17, see docs/wire-into-claude-code.md, "gate v3 —
     empty current turn"). Before this, a tool-free current turn made this
     function return None outright — even with 10 KB of previous-turn
     evidence sitting right there — which routed `cmd_hook` to the
@@ -9333,7 +9333,7 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         # previous-turn/receipts material wholesale. That stopped stale
         # evidence from silently BACKING a tool-free reply, but it also
         # stopped that same evidence from BLOCKING one, and those two are
-        # not symmetric (see docs/hooks.md, "gate v3 — empty current
+        # not symmetric (see docs/wire-into-claude-code.md, "gate v3 — empty current
         # turn"). Now we keep going and let the previous-turn/receipts
         # sections below fill the window; `current_turn_empty` (set above)
         # is how cmd_hook tells the block decision this window's current
@@ -9482,7 +9482,7 @@ def derive_evidence_window(transcript_path, n=None, max_bytes=None, session_id=N
     exact wide-evidence-window assembler `hook gate` judges a draft
     against, exposed under a stable, non-underscore name for a bench or
     any other external caller to import directly rather than
-    reimplementing turn-boundary logic of its own (see docs/hooks.md,
+    reimplementing turn-boundary logic of its own (see docs/wire-into-claude-code.md,
     "gate v3 — empty current turn": a second implementation of the window
     is why the 2026-09-17 bench and the live shim ever disagreed in the
     first place). Same arguments, same return shape — a text string or
@@ -11824,7 +11824,7 @@ def cmd_hook(a):
         # drops — without them the OVERCLAIMS-alone gate could never see
         # that every claim was in fact supported. A hook-driven verify gets
         # no --test-cmd/--pr (see the hardcoded test_cmd="" above), so it
-        # can NEVER prove a test-count claim — docs/hooks.md says so in
+        # can NEVER prove a test-count claim — docs/wire-into-claude-code.md says so in
         # plain words — but it DOES know whether it had a worktree to look
         # at, which is exactly what gather_health below checks.
         flags = _parse_strong_flags(door_out)

@@ -327,7 +327,7 @@ shape the gate cannot parse, or the exit-code block above — is **not**
 demotable under a filter. Fail closed: a finding that cannot say which
 verdict it is must not be demoted by a rule that selects on verdicts.
 
-See `docs/hooks.md`, "Judge-advisory mode", for the operator's view of
+See `docs/wire-into-claude-code.md`, "Judge-advisory mode", for the operator's view of
 both levels.
 
 ### The gate switch

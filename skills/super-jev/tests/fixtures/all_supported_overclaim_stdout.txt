@@ -2,8 +2,8 @@
 jev claude-fable-5-1 · 2 chunk(s) · 12800 in_tok · 1880ms · 2026-09-18T00:30:00Z
 
   c1   SUPPORTED       0.99  commit 9f2a1c0 is pushed on branch docs/hooks-critique
-  c2   SUPPORTED       0.94  docs/hooks.md exists in that worktree
-  c3   SUPPORTED       0.88  the README links to docs/hooks.md
+  c2   SUPPORTED       0.94  docs/wire-into-claude-code.md exists in that worktree
+  c3   SUPPORTED       0.88  the README links to docs/wire-into-claude-code.md
 
   leaked_internal    CLEAN                0.96
   time_sensitive     NOT_TIME_SENSITIVE   0.92
