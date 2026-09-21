@@ -291,6 +291,11 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
     record.write_text("\n".join(lines) + "\n")
     description = f"{question[:120]} {label_bracket(labels)}"
     req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": [{"path": str(record), "description": description}]}
+    if exists and replace:
+        # `remove` drops the pointer from this principal's approved-answer set but the
+        # harness keeps the dataset registered under that pointer name, so reconnecting
+        # it still needs the same replace:true a stale-source reconnect uses.
+        req["replace"] = True
     preview = memory(req)
     if preview.get("status") != "preparation-required" or "sources" not in preview:
         print("connect preview failed:", json.dumps(preview)[:300])
