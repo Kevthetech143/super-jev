@@ -171,7 +171,8 @@ def test_add_writes_manual_record_connects_new_pointer_never_replace_then_approv
                      "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
         if req["action"] == "connect" and req.get("reviewed"):
             assert req.get("replace") is not True
-            return {"status": "registered"}
+            return {"status": "registered",
+                     "sources": [{"id": "file:abc123", "originalPath": req["sources"][0]["path"]}]}
         if req["action"] == "search":
             return {"status": "ready", "approvalTicket": "tix",
                      "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
@@ -195,6 +196,83 @@ def test_add_writes_manual_record_connects_new_pointer_never_replace_then_approv
     assert connects[0]["pointer"] == expected_pointer
     assert connects[1]["reviewed"] is True
     assert connects[1]["sources"][0]["sha256"] == "deadbeef"
+    assist_calls = [c for c in calls if c["action"] == "assist"]
+    assert assist_calls == []
+
+
+def test_add_falls_back_to_assist_on_no_match_then_approves_with_returned_ticket(tmp_path, monkeypatch):
+    src_file = tmp_path / "src.txt"
+    src_file.write_text("hello source\n")
+    question = "which pointers hold the shared brain now"
+    expected_pointer = f"alice-manual-{hashlib.sha1(question.encode()).hexdigest()[:10]}"
+    calls = []
+
+    def fake_memory(req):
+        calls.append(req)
+        if req["action"] == "panel":
+            return {"pointers": []}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            return {"status": "registered",
+                     "sources": [{"id": "file:src-id", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "no-match", "attemptId": "attempt-1"}
+        if req["action"] == "assist":
+            return {"status": "ready", "approvalTicket": "assist-tix",
+                     "passages": [{"sourceId": "file:src-id", "reviewedText": "The manual answer text."}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.add_manual("alice", question, "The manual answer text.", str(src_file), tmp_path)
+
+    assert rc == 0
+    record = tmp_path / "manual" / f"{expected_pointer}.md"
+    expected_last_line = len(record.read_text().splitlines())
+    assist_calls = [c for c in calls if c["action"] == "assist"]
+    assert len(assist_calls) == 1
+    assert assist_calls[0]["attemptId"] == "attempt-1"
+    assert assist_calls[0]["principal"] == "alice"
+    assert assist_calls[0]["references"] == [{"sourceId": "file:src-id", "startLine": 1, "endLine": expected_last_line}]
+    approve_calls = [c for c in calls if c["action"] == "approve"]
+    assert len(approve_calls) == 1
+    assert approve_calls[0]["ticket"] == "assist-tix"
+    assert approve_calls[0]["evidence"] == [{"sourceId": "file:src-id", "quote": "The manual answer text."}]
+
+
+def test_add_prints_config_hint_and_exits_1_when_assist_disabled(tmp_path, monkeypatch, capsys):
+    src_file = tmp_path / "src.txt"
+    src_file.write_text("hello source\n")
+    calls = []
+
+    def fake_memory(req):
+        calls.append(req)
+        if req["action"] == "panel":
+            return {"pointers": []}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            return {"status": "registered",
+                     "sources": [{"id": "file:src-id", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "no-match", "attemptId": "attempt-1"}
+        if req["action"] == "assist":
+            return {"status": "error", "reason": "agent assist is disabled"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    question = "which pointers hold the shared brain when disabled"
+    rc = ask.add_manual("alice", question, "The manual answer text.", str(src_file), tmp_path)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "allowAgentAssist" in out
+    approve_calls = [c for c in calls if c["action"] == "approve"]
+    assert approve_calls == []
 
 
 def test_add_refuses_when_pointer_already_exists_for_question(tmp_path, monkeypatch, capsys):
@@ -215,54 +293,106 @@ def test_add_refuses_when_pointer_already_exists_for_question(tmp_path, monkeypa
     assert expected_pointer in out
 
 
-def test_cache_hit_on_manual_pointer_warns_when_source_file_changed(tmp_path, monkeypatch, capsys):
-    manual_dir = tmp_path / "manual"
-    manual_dir.mkdir()
+def test_second_manual_entry_leaves_first_pointer_untouched(tmp_path, monkeypatch):
+    """Adding a second manual entry must never replace or remove another pointer."""
+    registered_pointers = []
+    calls = []
+
+    def fake_memory(req):
+        calls.append(json.loads(json.dumps(req)))  # req is mutated in place by add_manual; snapshot it
+        if req["action"] == "panel":
+            return {"pointers": list(registered_pointers)}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            assert req.get("replace") is not True
+            registered_pointers.append(req["pointer"])
+            return {"status": "registered",
+                     "sources": [{"id": "file:" + req["pointer"], "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix-" + req["pointer"],
+                     "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        if req["action"] == "remove":
+            raise AssertionError("must never remove another pointer while adding a new one")
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc1 = ask.add_manual("alice", "first manual question", "answer one", None, tmp_path)
+    rc2 = ask.add_manual("alice", "second manual question", "answer two", None, tmp_path)
+
+    assert rc1 == 0
+    assert rc2 == 0
+    assert len(registered_pointers) == 2
+    assert registered_pointers[0] != registered_pointers[1]
+    remove_calls = [c for c in calls if c["action"] == "remove"]
+    assert remove_calls == []
+    connects = [c for c in calls if c["action"] == "connect" and c.get("reviewed")]
+    assert connects[0]["pointer"] == registered_pointers[0]
+    assert connects[1]["pointer"] == registered_pointers[1]
+    # The second add's connect call never references the first pointer's name.
+    assert registered_pointers[0] not in json.dumps(connects[1])
+
+
+def test_cache_hit_on_manual_pointer_with_changed_source_is_invalidated_not_served(tmp_path, monkeypatch, capsys):
+    # Staleness is keyed off the manual record this principal+question would have
+    # written (ask.manual_record_path), not off evidence.path -- the harness only
+    # ever returns its own internal prepared-copy path there, never the caller's file.
+    question = "q"
+    record = ask.manual_record_path(tmp_path, "alice", question)
+    record.parent.mkdir(parents=True)
     src = tmp_path / "orig.txt"
     src.write_text("version 1\n")
     recorded_hash = hashlib.sha256(src.read_bytes()).hexdigest()
-    record = manual_dir / "alice-manual-abc123.md"
-    record.write_text(f"# q\n\nsource_path: {src}\nsource_sha256: {recorded_hash}\n\nThe answer.\n")
+    record.write_text(f"# {question}\n\nsource_path: {src}\nsource_sha256: {recorded_hash}\n\nThe answer.\n")
     src.write_text("version 2, changed since recording\n")
 
     def fake_memory(req):
         if req["action"] == "cached":
             return {"status": "verified-cache-hit", "answer": "The answer.",
-                     "evidence": [{"sourceId": "s", "quote": "The answer.", "path": str(record), "contentSHA": "x"}],
+                     "evidence": [{"sourceId": "s", "quote": "The answer.",
+                                  "path": "/registry/.prepared-xyz/0.txt", "contentSHA": "x"}],
                      "freshness": {"mode": "snapshot"}, "resolution": "retrieval"}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.lookup("q", "alice", tmp_path)
+    rc = ask.lookup(question, "alice", tmp_path)
 
-    assert rc == 0
+    assert rc == 1
     out = capsys.readouterr().out
-    assert "WARNING: source changed since this answer was recorded" in out
+    assert "STALE: source changed since this answer was recorded" in out
     assert str(src) in out
+    assert "CACHE HIT" not in out
+    assert "The answer." not in out
 
 
-def test_cache_hit_on_manual_pointer_with_unchanged_source_has_no_warning(tmp_path, monkeypatch, capsys):
-    manual_dir = tmp_path / "manual"
-    manual_dir.mkdir()
+def test_cache_hit_on_manual_pointer_with_unchanged_source_serves_the_answer(tmp_path, monkeypatch, capsys):
+    question = "q"
+    record = ask.manual_record_path(tmp_path, "alice", question)
+    record.parent.mkdir(parents=True)
     src = tmp_path / "orig.txt"
     src.write_text("version 1\n")
     recorded_hash = hashlib.sha256(src.read_bytes()).hexdigest()
-    record = manual_dir / "alice-manual-abc123.md"
-    record.write_text(f"# q\n\nsource_path: {src}\nsource_sha256: {recorded_hash}\n\nThe answer.\n")
+    record.write_text(f"# {question}\n\nsource_path: {src}\nsource_sha256: {recorded_hash}\n\nThe answer.\n")
 
     def fake_memory(req):
         if req["action"] == "cached":
             return {"status": "verified-cache-hit", "answer": "The answer.",
-                     "evidence": [{"sourceId": "s", "quote": "The answer.", "path": str(record), "contentSHA": "x"}],
+                     "evidence": [{"sourceId": "s", "quote": "The answer.",
+                                  "path": "/registry/.prepared-xyz/0.txt", "contentSHA": "x"}],
                      "freshness": {"mode": "snapshot"}, "resolution": "retrieval"}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.lookup("q", "alice", tmp_path)
+    rc = ask.lookup(question, "alice", tmp_path)
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "WARNING" not in out
+    assert "STALE" not in out
+    assert "CACHE HIT" in out
+    assert "The answer." in out
 
 
 def test_missing_principal_prints_usage_and_exits_2(monkeypatch, capsys):

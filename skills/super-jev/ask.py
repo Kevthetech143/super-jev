@@ -17,11 +17,18 @@
 
   ask.py --principal AGENT --add "question" "answer" [--source /path]
       Manual entry, no file needed: writes one record, connects it as its own
-      one-file pointer "<principal>-manual-<10 hex question hash>", approves
-      it. Never replaces a pointer or touches another pointer's answers; many
-      small manual pointers are fine, `cached` checks them all. Same wording
-      twice refuses. --source records that file's path+sha256; a later hit on
-      this pointer re-hashes it and WARNs (still answers) if changed.
+      one-file pointer "<principal>-manual-<10 hex question hash>", then
+      approves it. Approval never depends on retrieval matching the tiny
+      record: it searches once, and on anything short of "ready" falls back
+      to the harness's assisted path (quoting the record's own reviewed
+      text) so the answer is still cached. If agent assist is disabled on
+      this deployment, --add prints the config to flip and exits 1 instead
+      of silently leaving the answer uncached. Never replaces a pointer or
+      touches another pointer's answers; many small manual pointers are
+      fine, `cached` checks them all. Same wording twice refuses. --source
+      records that file's path+sha256; a later cache hit on this pointer
+      re-hashes it and, if changed, WITHHOLDS the answer (STALE, exit 1)
+      instead of serving stale evidence.
 
   ask.py --principal AGENT --miss "question" "where it actually was"
       Log-only: the answer was found somewhere ask.py didn't reach.
@@ -65,9 +72,10 @@ def my_pointers(principal: str) -> list:
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def warn_if_source_changed(record_path: Path) -> None:
+def changed_source(record_path: Path):
+    """Return the recorded source path if its current hash no longer matches, else None."""
     if not record_path.is_file():
-        return
+        return None
     source_path = source_hash = None
     for line in record_path.read_text().splitlines():
         if line.startswith("source_path:"):
@@ -75,26 +83,38 @@ def warn_if_source_changed(record_path: Path) -> None:
         elif line.startswith("source_sha256:"):
             source_hash = line.split(":", 1)[1].strip()
     if source_path and source_hash and Path(source_path).is_file() and sha256_file(Path(source_path)) != source_hash:
-        print(f"WARNING: source changed since this answer was recorded ({source_path})")
+        return source_path
+    return None
 
-def print_hit(hit: dict, sdir: Path) -> None:
+def manual_pointer_name(principal: str, question: str) -> str:
+    return f"{principal}-manual-{hashlib.sha1(question.encode()).hexdigest()[:10]}"
+
+def manual_record_path(sdir: Path, principal: str, question: str) -> Path:
+    return sdir / "manual" / f"{manual_pointer_name(principal, question)}.md"
+
+def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
+    # The harness's evidence "path" is always its own internal prepared-copy path,
+    # never the caller's file -- so staleness is checked against the manual record
+    # this exact principal+question would have written, not against evidence.path.
+    record = manual_record_path(sdir, principal, question)
+    if record.is_file():
+        stale_source = changed_source(record)
+        if stale_source:
+            print(f"STALE: source changed since this answer was recorded ({stale_source}); answer withheld. Re-add with --add after verifying.")
+            return 1
     print("CACHE HIT")
     print("answer:", hit.get("answer") or "")
-    manual_dir, seen = str(sdir / "manual"), set()
     for e in (hit.get("evidence") or [])[:3]:
         print("  evidence:", e.get("sourceId", ""), "|", str(e.get("quote", ""))[:120])
-        path = e.get("path")
-        if path and path not in seen and path.startswith(manual_dir + os.sep):
-            seen.add(path)
-            warn_if_source_changed(Path(path))
+    return 0
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
     t0 = time.time()
     cache = memory({"action": "cached", "principal": principal, "question": question})
     if cache.get("status") == "verified-cache-hit":
-        print_hit(cache, sdir)
-        log(sdir, "lookup", question=question, result="cache-hit", secs=round(time.time() - t0, 1))
-        return 0
+        rc = print_hit(cache, sdir, principal, question)
+        log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
+        return rc
     pointers = my_pointers(principal)
 
     def nav(ptr):
@@ -142,6 +162,14 @@ def find_pointer(sdir: Path, question: str):
             return rec["top"][0]["pointer"]
     return None
 
+def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path) -> int:
+    evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
+    res = memory({"action": "approve", "ticket": ticket_result["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
+    ok = res.get("status") in ("approved", "saved", "ok")
+    print("approve:", res.get("status"), "" if ok else json.dumps(res)[:200])
+    log(sdir, "approve", question=question, pointer=pointer, result=res.get("status"))
+    return 0 if ok else 1
+
 def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None) -> int:
     pointer = pointer or find_pointer(sdir, question)
     if not pointer:
@@ -155,15 +183,42 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
         print(f"cannot approve: search returned {out.get('status')} on {pointer}. Use --add to record it manually.")
         log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
         return 1
-    evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in out.get("passages", [])[:3] if p.get("reviewedText")]
-    res = memory({"action": "approve", "ticket": out["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
-    ok = res.get("status") in ("approved", "saved", "ok")
-    print("approve:", res.get("status"), "" if ok else json.dumps(res)[:200])
-    log(sdir, "approve", question=question, pointer=pointer, result=res.get("status"))
-    return 0 if ok else 1
+    return send_approval(principal, question, answer, pointer, out, sdir)
+
+ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
+                        "persistent experiment config (the config.json passed via memory.sh / "
+                        "--config; see LOCAL-MEMORY.md) before --add can approve a manual entry "
+                        "that retrieval does not match on its own.")
+
+def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path) -> int:
+    """Approve a just-registered manual pointer, falling back to assisted review on a retrieval miss."""
+    out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
+    if out.get("status") == "verified-cache-hit":
+        print("already cached")
+        return 0
+    if out.get("status") == "ready":
+        return send_approval(principal, question, answer, pointer, out, sdir)
+    attempt_id = out.get("attemptId")
+    if not attempt_id:
+        print(f"cannot approve: search returned {out.get('status')} on {pointer} with no attempt to assist from.")
+        log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
+        return 1
+    last_line = len(record.read_text().splitlines())
+    reason = f"manual entry for {pointer}: the record is a single small reviewed source and its own text is the answer."
+    assisted = memory({"action": "assist", "attemptId": attempt_id, "principal": principal, "reason": reason,
+                       "references": [{"sourceId": source_id, "startLine": 1, "endLine": last_line}]})
+    if assisted.get("status") == "error" and assisted.get("reason") == "agent assist is disabled":
+        print(ASSIST_DISABLED_HINT)
+        log(sdir, "approve", question=question, pointer=pointer, result="assist-disabled")
+        return 1
+    if assisted.get("status") != "ready":
+        print(f"cannot approve: assist returned {assisted.get('status')} on {pointer}.")
+        log(sdir, "approve", question=question, pointer=pointer, result=assisted.get("status"))
+        return 1
+    return send_approval(principal, question, answer, pointer, assisted, sdir)
 
 def add_manual(principal: str, question: str, answer: str, source, sdir: Path) -> int:
-    pointer = f"{principal}-manual-{hashlib.sha1(question.encode()).hexdigest()[:10]}"
+    pointer = manual_pointer_name(principal, question)
     if pointer in my_pointers(principal):
         print(f"refused: {pointer} already exists for this question wording; use different wording, or remove the pointer explicitly.")
         return 1
@@ -186,11 +241,12 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path) -
         s["sha256"] = hashes[s["path"]]
     req["reviewed"] = True
     reg = memory(req)
-    if reg.get("status") != "registered":
+    if reg.get("status") != "registered" or not reg.get("sources"):
         print("connect failed:", json.dumps(reg)[:300])
         return 1
     print(f"manual entry written: {record.name}; pointer {pointer} registered")
-    return approve(principal, question, answer, sdir, pointer=pointer)
+    source_id = reg["sources"][0]["id"]
+    return approve_manual(principal, question, answer, pointer, source_id, record, sdir)
 
 def resolve_principal(args: list) -> tuple[str, list]:
     if "--principal" in args:
