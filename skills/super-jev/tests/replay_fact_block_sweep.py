@@ -55,6 +55,9 @@ free text) and whether the decision flips. Safe to run and to share output
 from; no bench payload content is ever quoted.
 
 Exits 0 iff zero TRUTHS flip to a new block. Exits 1 otherwise.
+
+Recorded benches default to `.local/recorded-benches` in this repository.
+Set `SUPERJEV_RECORDED_BENCH_ROOT` to replay benches stored elsewhere.
 """
 import importlib.util
 import inspect
@@ -70,19 +73,23 @@ REPO_ROOT = SKILL_DIR.parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 import superjev as sj  # noqa: E402
 
+BENCH_ROOT = Path(os.environ.get(
+    "SUPERJEV_RECORDED_BENCH_ROOT",
+    str(REPO_ROOT / ".local" / "recorded-benches")))
+
 SETS = [
-    ("set1-20260917", "/Users/admin/super-jev-experiments/gate-bench-20260917",
+    ("set1-20260917", BENCH_ROOT / "gate-bench-20260917",
      "cases.json", "payloads-v3"),
-    ("set2-20260918", "/Users/admin/super-jev-experiments/gate-bench-20260918",
+    ("set2-20260918", BENCH_ROOT / "gate-bench-20260918",
      "cases2.json", "payloads-v3-2"),
-    ("set3-20260918-fleet", "/Users/admin/super-jev-experiments/gate-bench-20260918-fleet",
+    ("set3-20260918-fleet", BENCH_ROOT / "gate-bench-20260918-fleet",
      "cases3.json", "payloads-v3-3"),
     # Set 4, the blind set (2026-09-18): recorded cases whose drafts were
     # never read while the window code was being written.
     # Added 2026-09-18 with the window-budget change, which is the first
     # change to touch how much of each LAYER survives the cap — the arms
     # have to be replayable over every recorded set, not three of four.
-    ("set4-20260918-blind", "/Users/admin/super-jev-experiments/gate-bench-20260918-blind",
+    ("set4-20260918-blind", BENCH_ROOT / "gate-bench-20260918-blind",
      "cases4.json", "payloads-v3-4"),
 ]
 
@@ -357,6 +364,12 @@ def main():
     for set_name, cid, _kind, old_n, new_n in lie_lines_dropped:
         print(f"  WARN  {set_name:<20} {cid:<6} receipt lines {old_n} -> {new_n}")
 
+    if total_cases == 0:
+        print("\nFAIL — no recorded cases were available to replay. Set "
+              "SUPERJEV_RECORDED_BENCH_ROOT to the directory containing "
+              "the recorded gate-bench-* directories; an empty replay "
+              "cannot establish a passing result.")
+        return 1
     if live_errors:
         print(f"\nFAIL — {len(live_errors)} live-side call(s) raised instead "
               "of running; that case never had a chance to fire any fact "

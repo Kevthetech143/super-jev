@@ -98,15 +98,15 @@ test('rule defers: "format the code" / "run the formatter" is not a disk wipe, n
 // of judge, with no model call.
 // ---------------------------------------------------------------------------
 test('rule fires: amount over the default $200 threshold needs approval, no judge', () => {
-  const result = decide("pay Iris Martinez's rent via ManageGo, $1450, to a payee already on file", 'eshco.managego.com');
+  const result = decide("pay the tenant's rent through the property portal, $450, to a payee already on file", 'tenant-portal.example');
   assert.equal(result.verdict, 'needs_approval');
   assert.equal(result.settledBy, 'money_rule');
-  assert.equal(result.facts.money.amountUsd, 1450);
+  assert.equal(result.facts.money.amountUsd, 450);
   assert.equal(result.facts.money.overThreshold, true);
 });
 
 test('rule defers: amount under threshold with no new payee is left to the judge', () => {
-  const result = decide('pay the ConEd electric bill, $184.50', 'ConEd BillMatrix processor');
+  const result = decide('pay the electric bill, $184.50', 'utility payment processor');
   assert.equal(result.verdict, 'defer_to_judge');
   assert.equal(result.facts.money.overThreshold, false);
   assert.equal(result.facts.money.newPayee, false);
@@ -211,14 +211,14 @@ test('parseActionObject extracts rm -rf path, force-push branch, drop target, fo
   assert.equal(drop.dropTarget, 'staging.records');
   assert.equal(drop.dropKind, 'table');
   assert.equal(parseActionObject('format the external disk').formatTarget, 'external');
-  assert.equal(parseActionObject('pay $184.50 to conEd').amountUsd, 184.5);
+  assert.equal(parseActionObject('pay $184.50 to the utility').amountUsd, 184.5);
   const payee = parseActionObject('wire $500 to newvendor');
   assert.equal(payee.payee, 'newvendor');
 });
 
 test('scopeFacts: inside vs outside the given worktree', () => {
-  const inside = scopeFacts('/Users/admin/wt/task/file.txt', '/Users/admin/wt/task');
+  const inside = scopeFacts('/Users/example/wt/task/file.txt', '/Users/example/wt/task');
   assert.equal(inside.insideTaskWorktree, true);
-  const outside = scopeFacts('/Users/admin/elsewhere/file.txt', '/Users/admin/wt/task');
+  const outside = scopeFacts('/Users/example/elsewhere/file.txt', '/Users/example/wt/task');
   assert.equal(outside.insideTaskWorktree, false);
 });

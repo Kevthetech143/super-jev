@@ -26,8 +26,8 @@ import re
 import shutil
 import subprocess
 
-# R6: resolve node from PATH, falling back to the pinned nvm install.
-NODE = shutil.which("node") or "/Users/admin/.nvm/versions/node/v24.11.1/bin/node"
+# R6: resolve node from PATH; the suite fails clearly when it is unavailable.
+NODE = shutil.which("node") or "node"
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 

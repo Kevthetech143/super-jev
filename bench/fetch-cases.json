@@ -2,8 +2,8 @@
   "note": "Synthetic fixture for the offline fetch admission bench, plumbing only, not evidence of real ranking accuracy. Fake catalog of 15 short v2 records (plain text; utterances are added at bench time from the train split only -- see bench/fetch-bench.ts). 20 request -> expected_id cases plus 5 no-match cases (expected_id null) that nothing in the catalog serves, phrased closer to how a real user asks than to the catalog's own wording.",
   "catalog": [
     {
-      "id": "pay-coned",
-      "text": "Pay a Con Edison electric bill via the guest pay-as-guest flow on coned.com. No login needed."
+      "id": "pay-utility",
+      "text": "Pay an example utility electric bill via the guest pay-as-guest flow on utility.example. No login needed."
     },
     {
       "id": "place-put",
@@ -30,8 +30,8 @@
       "text": "Post, reply to, or edit the profile of the fleet's X/Twitter account."
     },
     {
-      "id": "amazon-buy",
-      "text": "Buy a single item on Kelvin's personal Amazon account through the product page's Buy Now button."
+      "id": "store-buy",
+      "text": "Buy a single item from a personal store account through the product page's Buy Now button."
     },
     {
       "id": "content-comic-run",
@@ -50,8 +50,8 @@
       "text": "Run a no-install graphics stress test on any connected Mac."
     },
     {
-      "id": "rent-pay-eshco",
-      "text": "Pay a tenant's monthly rent on the Eshco ManageGo portal from the checking account on file."
+      "id": "rent-pay-portal",
+      "text": "Pay a tenant's monthly rent through a property portal from the checking account on file."
     },
     {
       "id": "card-shrink",
@@ -65,7 +65,7 @@
   "cases": [
     {
       "request": "I need to pay the electric bill before it's late",
-      "expected_id": "pay-coned"
+      "expected_id": "pay-utility"
     },
     {
       "request": "sell a put on this ticker for premium income",
@@ -96,8 +96,8 @@
       "expected_id": "x-account-manage"
     },
     {
-      "request": "buy this product on my personal amazon account",
-      "expected_id": "amazon-buy"
+      "request": "buy this product from my personal store account",
+      "expected_id": "store-buy"
     },
     {
       "request": "make a short comic video from this script",
@@ -117,7 +117,7 @@
     },
     {
       "request": "pay the tenant's rent this month",
-      "expected_id": "rent-pay-eshco"
+      "expected_id": "rent-pay-portal"
     },
     {
       "request": "this awareness card has gotten too fat, trim it",
@@ -128,8 +128,8 @@
       "expected_id": "restart-agent"
     },
     {
-      "request": "check the con edison bill is paid on time",
-      "expected_id": "pay-coned"
+      "request": "check the electric bill is paid on time",
+      "expected_id": "pay-utility"
     },
     {
       "request": "confirm a worker's report before accepting it",

@@ -515,7 +515,7 @@ from different suites in different repositories:
   cwd it came from, read off the `tool_use` input the transcript already
   holds and paired through the `tool_use_id`:
 
-      [from: python3 -m pytest skills/card/tests/test_card.py -q @ /Users/admin/repo]
+      [from: python3 -m pytest skills/card/tests/test_card.py -q @ /path/to/repo]
 
   A lone header line identifies every count printed beneath it until the
   next section or header; a receipt carries its marker on its own line.
@@ -924,7 +924,7 @@ and global config, which the worktree scan ignores, because a human
 reading a report can tell the difference and wants to see them. The
 hand-rolled equivalent is:
 
-    git -C /Users/admin/super-jev config --list --show-origin \
+    git -C "$HOME/super-jev" config --list --show-origin \
       | grep -E 'filter|diff\.|fsmonitor|hooksPath'
 
 **A report-derived `npm test` does not vouch for itself.** `npm test`
@@ -1183,7 +1183,7 @@ no rationale field to explain its read.
 
 ## Gate v4.2 — written-file identity, file read-back facts (2026-09-18)
 
-`SET3-AUDIT2.md` measured the fleet's other bots (businessfi, health-fitness)
+`SET3-AUDIT2.md` measured the fleet's other bots (finance-assistant, health-fitness)
 against a rebuilt, fully falsifiable lie arm and found the gate's only
 blocking arm — the overclaim detector — is a prose-style signal, anti-
 correlated with truthfulness on that fleet, while the judge itself named the
@@ -2604,7 +2604,7 @@ inventory of the whole turn's acts rather than a sample of them.
 
   The late-Telegram outbox line names what it ACTUALLY delivers, not just
   the file it happens to be a write to: `_relay_late_telegram_once` in
-  `/Users/admin/claw4mac/core/app.py` (the claw4mac poller) reads that
+  `$CLAW4MAC_ROOT/core/app.py` (the claw4mac poller) reads that
   file on its own polling cadence and, on non-empty content, calls the
   control adapter's `send_message`, which the poller's own comment states
   "targets the configured owner chat_id" — so the fact line says delivery

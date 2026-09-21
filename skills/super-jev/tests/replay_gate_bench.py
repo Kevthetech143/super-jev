@@ -8,8 +8,8 @@ catches and which truths it would block (must be 0 truths blocked by the
 deterministic arm on the recorded cases)".
 
 Reads the bench's own drafts/<id>.md and evidence/<id>.md straight off
-disk (bench dir default: /Users/admin/super-jev-experiments/
-gate-bench-20260917 — the same 40-case bench the 2026-09-17 REPORT.md
+disk (bench dir default: this repository's `.local/recorded-benches/`
+`gate-bench-20260917` — the same 40-case bench the 2026-09-17 REPORT.md
 analysis was built from; override with GATE_BENCH_DIR if it lives
 elsewhere) and cases.json for each case's id/kind. It does NOT run
 presplit_claims through a judge — pre-split only changes what a live
@@ -33,16 +33,18 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 import superjev as sj  # noqa: E402
 
-DEFAULT_BENCH_DIR = "/Users/admin/super-jev-experiments/gate-bench-20260917"
+REPO_ROOT = SKILL_DIR.parent.parent
+DEFAULT_BENCH_DIR = REPO_ROOT / ".local" / "recorded-benches" / "gate-bench-20260917"
 
 
 def main():
-    bench_dir = Path(os.environ.get("GATE_BENCH_DIR", DEFAULT_BENCH_DIR))
+    bench_dir = Path(os.environ.get("GATE_BENCH_DIR", str(DEFAULT_BENCH_DIR)))
     cases_path = bench_dir / "cases.json"
     if not cases_path.exists():
-        print(f"replay_gate_bench: no bench at {bench_dir} "
-              f"(set GATE_BENCH_DIR) — nothing to replay, skipping")
-        return 0
+        print(f"replay_gate_bench: FAIL — no bench at {bench_dir} "
+              f"(set GATE_BENCH_DIR); an empty replay cannot establish "
+              f"a passing result")
+        return 1
 
     cases = json.loads(cases_path.read_text(encoding="utf-8"))
     caught, missed, truths_blocked, truths_clean = [], [], [], []

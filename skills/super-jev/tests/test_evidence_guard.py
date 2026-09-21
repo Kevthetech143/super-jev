@@ -50,17 +50,17 @@ def test_redactions_with_emails():
 
 
 def test_blocked_path_fact_is_unprovable_not_missing():
-    fact = sj.blocked_path_fact("/Users/admin/agents/global/profile/logins.md")
+    fact = sj.blocked_path_fact("/Users/example/agents/global/profile/logins.md")
     assert fact["ok"] is False
     assert fact["exists"] is None
     assert fact["blocked"] is True
-    assert fact["cmd"] == f"({sj.SKIPPED_FACT}: /Users/admin/agents/global/profile/logins.md)"
+    assert fact["cmd"] == f"({sj.SKIPPED_FACT}: /Users/example/agents/global/profile/logins.md)"
 
 
 def test_guard_tally_counts_across_a_call():
     tally = sj.GuardTally()
-    tally.check_path("/Users/admin/agents/global/profile/logins.md")
-    tally.check_path("/Users/admin/super-jev/README.md")
+    tally.check_path("/Users/example/agents/global/profile/logins.md")
+    tally.check_path("/Users/example/super-jev/README.md")
     tally.redact("key is sk-abcdefghijklmnopqrstuvwxyz123456 in the log")
     tally.redact("token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
     assert tally.paths_skipped == 1

@@ -67,8 +67,7 @@ COMPOSER_DIR = Path(os.environ.get("SUPERJEV_WM_COMPOSER_DIR") or SKILL_DIR)
 #: PR #53's worktree, whose composer renders a previous turn's relayed
 #: reports behind a `[relayed reports in this turn]` mark that `main` does
 #: not emit. `render()` has to match both.
-PR53_DIR = Path(os.environ.get(
-    "SUPERJEV_PR53_DIR", "/Users/admin/super-jev-wt/prstaterecency"))
+PR53_DIR = Path(os.environ.get("SUPERJEV_PR53_DIR") or SKILL_DIR)
 
 
 def _load_superjev(directory):
@@ -96,7 +95,8 @@ import window_model as wm        # noqa: E402
 #: to be counted rather than waved at.
 OWN_COMPOSER = COMPOSER_DIR.resolve() == SKILL_DIR.resolve()
 
-DEFAULT_ROOT = "/Users/admin/super-jev-experiments"
+REPO_ROOT = SKILL_DIR.parent.parent
+DEFAULT_ROOT = REPO_ROOT / ".local" / "recorded-benches"
 #: The recorded gate benches, oldest first.
 BENCHES = (
     ("gate-bench-20260917", "payloads-v3"),
@@ -146,9 +146,10 @@ def main():
     root = os.environ.get("SUPERJEV_BENCH_ROOT", DEFAULT_ROOT)
     found = list(cases(root))
     if not found:
-        print(f"replay_window_model: no recorded benches under {root} "
-              f"(set SUPERJEV_BENCH_ROOT) — nothing to replay, skipping")
-        return 0
+        print(f"replay_window_model: FAIL — no recorded benches under {root} "
+              f"(set SUPERJEV_BENCH_ROOT); an empty replay cannot establish "
+              f"a passing result")
+        return 1
 
     print(f"composer under test: {COMPOSER_DIR}")
 
