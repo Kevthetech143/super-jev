@@ -159,6 +159,18 @@ approved answers. `--max-files` (default 250) refuses an oversized run before
 any drafting starts. `--no-connect` stops after drafting and gating, for a
 dry run.
 
+### Ask loop
+
+`python3 ask.py --principal YOUR_AGENT "question"` is the front door over
+everything above: harness `cached` action first (no local map, zero provider
+calls), then every connected pointer in parallel. State (`lookups.jsonl`,
+`manual/`) lives under `$SUPERJEV_STATE_DIR` or
+`~/.local/state/super-jev/<principal>/`, never inside a repo checkout.
+`--add "question" "answer" [--source /path]` records a fact with no file as
+its own one-file `<principal>-manual-<hash>` pointer, so it never replaces or
+invalidates any other pointer's approved answers; a later cache hit on that
+pointer re-hashes `--source` and warns if the original file changed.
+
 ## Navigation structure
 
 Record how the connected view is organized at onboarding. Supported structures are `flat-files` (default) and `folder-tree`. These describe only the explicit reviewed source set, not the entire disk. The connector exposes stable node IDs, a root, and available navigation actions. A database or arbitrary graph is not silently treated as a tree; direct database ingestion and automatic index-link parsing remain unsupported.

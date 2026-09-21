@@ -4,6 +4,18 @@
 
 No version bump.
 
+- **Ask: cache-first lookup loop.** Added `skills/super-jev/ask.py`, a front
+  door that checks a new harness `cached` action before doing anything else,
+  so a repeat question is answered with zero provider calls and without any
+  local approved-answer map. On a miss it navigates every pointer the caller
+  can see in parallel; a pointer that errors prints its own status line and
+  the run exits with an unresolved count instead of being folded silently
+  into "nothing found." `--approve` promotes a good search hit into a cached
+  answer. `--add` records a fact with no file as its own small one-file
+  manual pointer, so it never replaces or invalidates any other pointer's
+  approved answers, and a later hit on a manual pointer warns if its
+  recorded source file changed underneath it. `--miss` logs that the answer
+  was found somewhere the loop didn't reach.
 - **Bulk prepare.** Added `skills/super-jev/prepare_bulk.py`, a folder-scale
   front end to the checked connect flow. It inventories `*.md` files under a
   root, skipping hidden directories, backups, and vault-style subdirectories,

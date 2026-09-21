@@ -669,6 +669,59 @@ class Service:
             return {'status': 'pointer-changed'}
         return {**result, 'candidates': mapped}
 
+    def _cache_lookup(
+        self, pointer: dict[str, Any], name: str, principal: str, question: str,
+        context: str, policy: dict[str, Any], now: float, supplied_now: bool,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Validate and return a verified cache hit for an already-fetched pointer.
+
+        This is the one hit-validation path: request key derivation, generation/
+        fingerprint rebinding against the live row, the freshness policy check, and
+        _valid_hit(). search() and cached() both call this so a cache hit means the
+        same thing everywhere. Returns (hit, None) on a verified hit, (None, error)
+        if the live pointer binding disagrees with the caller's view, or (None, None)
+        on a plain miss. Never touches retrieve() or navigate_provider().
+        """
+        key = self.key(pointer, question, principal, context, policy)
+        with self.connect() as c:
+            c.execute('BEGIN')
+            hitrow = c.execute(
+                'SELECT body,generation,fingerprint FROM cache WHERE k=?',
+                (key,),
+            ).fetchone()
+            current = c.execute(
+                'SELECT body FROM pointers WHERE name=?', (name,)
+            ).fetchone()
+            if not current:
+                return None, {'status': 'unknown-pointer'}
+            current_pointer = json.loads(current[0])
+            if principal not in current_pointer['principals']:
+                return None, {'status': 'access-denied'}
+            if current_pointer['generation'] != pointer['generation']:
+                return None, {'status': 'pointer-changed'}
+            if hitrow:
+                try:
+                    hit = json.loads(hitrow[0])
+                    binding = (pointer['generation'], pointer['fingerprint'])
+                    hit_now = time.time() if not supplied_now else now
+                    freshness_metadata, error = self.freshness(pointer, policy, hit_now)
+                    if error:
+                        return None, error
+                    if (hitrow[1:] == binding
+                            and self._valid_hit(hit) and hit['expires'] > hit_now):
+                        return {
+                            'status': 'verified-cache-hit',
+                            'answer': hit['answer'],
+                            'evidence': hit['evidence'],
+                            'freshness': freshness_metadata,
+                            'resolution': hit.get('resolution', 'retrieval'),
+                            **({'originatingAttemptId': hit['originatingAttemptId']}
+                               if hit.get('originatingAttemptId') else {}),
+                        }, None
+                except (ValueError, KeyError, TypeError):
+                    pass
+        return None, None
+
     def search(
         self,
         name: str,
@@ -699,44 +752,11 @@ class Service:
             attempt = self._record_attempt(name, question, principal, context,
                                            policy, error['status'], error, pointer)
             return {**error, 'attemptId': attempt}
-        key = self.key(pointer, question, principal, context, policy)
-        with self.connect() as c:
-            c.execute('BEGIN')
-            hitrow = c.execute(
-                'SELECT body,generation,fingerprint FROM cache WHERE k=?',
-                (key,),
-            ).fetchone()
-            current = c.execute(
-                'SELECT body FROM pointers WHERE name=?', (name,)
-            ).fetchone()
-            if not current:
-                return {'status': 'unknown-pointer'}
-            current_pointer = json.loads(current[0])
-            if principal not in current_pointer['principals']:
-                return {'status': 'access-denied'}
-            if current_pointer['generation'] != pointer['generation']:
-                return {'status': 'pointer-changed'}
-            if hitrow:
-                try:
-                    hit = json.loads(hitrow[0])
-                    binding = (pointer['generation'], pointer['fingerprint'])
-                    hit_now = time.time() if not supplied_now else now
-                    freshness_metadata, error = self.freshness(pointer, policy, hit_now)
-                    if error:
-                        return error
-                    if (not error and hitrow[1:] == binding
-                            and self._valid_hit(hit) and hit['expires'] > hit_now):
-                        return {
-                            'status': 'verified-cache-hit',
-                            'answer': hit['answer'],
-                            'evidence': hit['evidence'],
-                            'freshness': freshness_metadata,
-                            'resolution': hit.get('resolution', 'retrieval'),
-                            **({'originatingAttemptId': hit['originatingAttemptId']}
-                               if hit.get('originatingAttemptId') else {}),
-                        }
-                except (ValueError, KeyError, TypeError):
-                    pass
+        hit, error = self._cache_lookup(pointer, name, principal, question, context, policy, now, supplied_now)
+        if error:
+            return error
+        if hit:
+            return hit
         provider_now = time.time() if not supplied_now else now
         freshness_metadata, error = self.freshness(pointer, policy, provider_now)
         if error:
@@ -774,6 +794,44 @@ class Service:
                 return {'status': 'refresh-required', 'attemptId': attempt}
             return {'status': 'pointer-changed', 'attemptId': attempt}
         return {**response, 'attemptId': attempt, 'freshness': freshness_metadata}
+
+    def _visible_pointers(self, principal: str) -> list[str]:
+        """Names of registered pointers this principal is included in, name-sorted."""
+        with self.connect() as c:
+            rows = c.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
+        return [name for name, body in rows
+                if principal in json.loads(body).get('principals', [])]
+
+    def cached(
+        self, principal: str, question: str, pointer: str | None = None, context: str = '',
+    ) -> dict[str, Any]:
+        """Check for an already-approved answer, making zero provider calls.
+
+        With no pointer, checks every pointer this principal can see. Returns the
+        same shape as a search() verified-cache-hit when an approved answer exists
+        -- via the shared _cache_lookup() validation, so scope, generation and
+        source freshness are checked exactly as search() checks them -- else
+        {'status': 'cache-miss', 'checked': [pointer, ...]}. Never calls retrieve()
+        or navigate_provider(); a stale, denied or unknown pointer is simply
+        excluded from the hit and recorded as checked.
+        """
+        require_text('principal', principal)
+        require_text('question', question)
+        require_text('context', context, allow_empty=True)
+        policy = normalize_freshness(None)
+        now = time.time()
+        names = [pointer] if pointer else self._visible_pointers(principal)
+        checked = []
+        for name in names:
+            bound, error = self.pointer(name, principal)
+            if error:
+                checked.append(name)
+                continue
+            hit, error = self._cache_lookup(bound, name, principal, question, context, policy, now, False)
+            if hit:
+                return hit
+            checked.append(name)
+        return {'status': 'cache-miss', 'checked': checked}
 
     def approve(
         self,
