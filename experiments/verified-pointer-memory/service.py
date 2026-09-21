@@ -119,6 +119,7 @@ class Service:
         registry: str | Path,
         retrieve: Callable[[str, str], dict[str, Any]],
         *,
+        navigate_provider: Callable[[str, dict[str, Any], Any], dict[str, Any]] | None = None,
         cache_ttl_seconds: float = 86400,
         review_ttl_seconds: float = 600,
         allow_agent_assist: bool = False,
@@ -134,6 +135,7 @@ class Service:
         self.db = str(db)
         self.registry = Path(registry)
         self.retrieve = retrieve
+        self.navigate_provider = navigate_provider
         self.cache_ttl_seconds = float(cache_ttl_seconds)
         self.review_ttl_seconds = float(review_ttl_seconds)
         if not isinstance(allow_agent_assist, bool):
@@ -583,6 +585,89 @@ class Service:
         if offset + len(page) < len(rows):
             result['nextOffset'] = offset + len(page)
         return result
+
+    def navigate(
+        self, name: str, principal: str, question: str, limits: Any = None,
+    ) -> dict[str, Any]:
+        """Return source candidates only after checking pointer state around navigation."""
+        require_text('pointer', name)
+        require_text('principal', principal)
+        require_text('question', question)
+        if limits is not None and not isinstance(limits, dict):
+            raise ValueError('limits must be an object')
+        pointer, error = self.pointer(name, principal)
+        if error:
+            return error
+        manifest = self._manifest(pointer['snapshot']['entry'])
+        sources = {source['id']: source for source in manifest['sources']}
+        catalog = manifest.get('catalog')
+        if catalog is None:
+            nodes = [{'id': 'root', 'label': 'Sources',
+                      'description': 'Reviewed connector sources',
+                      'children': ['source:' + digest(source_id)[:24]
+                                   for source_id in sorted(sources)]}]
+            nodes.extend({'id': 'source:' + digest(source_id)[:24],
+                          'label': Path(source.get('originalPath', source['path'])).name,
+                          'description': source.get('description', ''),
+                          'sourceId': source_id}
+                         for source_id, source in sorted(sources.items()))
+            catalog = {'version': 1, 'structure': 'flat-files',
+                       'rootId': 'root', 'nodes': nodes}
+        if self.navigate_provider is None:
+            return {'status': 'error', 'reason': 'Navigation is unavailable.'}
+        result = self.navigate_provider(question, catalog, limits)
+        if (not isinstance(result, dict)
+                or result.get('status') not in {'candidates', 'no-candidates',
+                                                'budget-exhausted'}
+                or not isinstance(result.get('candidates'), list)
+                or isinstance(result.get('calls'), bool)
+                or not isinstance(result.get('calls'), int)
+                or result['calls'] < 0
+                or not isinstance(result.get('trace'), list)
+                or result.get('complete') is not False
+                or not isinstance(result.get('message'), str)):
+            return {'status': 'error', 'reason': 'Navigation returned invalid output.'}
+        mapped = []
+        catalog_nodes = {node.get('id'): node for node in catalog.get('nodes', [])
+                         if isinstance(node, dict) and isinstance(node.get('id'), str)}
+        seen_candidates = set()
+        for candidate in result['candidates']:
+            candidate_path = candidate.get('path') if isinstance(candidate, dict) else None
+            candidate_node = candidate.get('nodeId') if isinstance(candidate, dict) else None
+            source_id = candidate.get('sourceId') if isinstance(candidate, dict) else None
+            valid_path = (isinstance(candidate_path, list) and candidate_path
+                          and candidate_path[0] == catalog.get('rootId')
+                          and candidate_path[-1] == candidate_node)
+            if valid_path:
+                valid_path = all(
+                    child in catalog_nodes.get(parent, {}).get('children', [])
+                    for parent, child in zip(candidate_path, candidate_path[1:]))
+            leaf = catalog_nodes.get(candidate_node, {})
+            if (not isinstance(candidate, dict)
+                    or set(candidate) != {'sourceId', 'nodeId', 'path', 'score'}
+                    or source_id not in sources
+                    or not isinstance(candidate_node, str)
+                    or candidate_node in seen_candidates
+                    or leaf.get('sourceId') != source_id
+                    or not valid_path
+                    or any(not isinstance(node, str) for node in candidate['path'])
+                    or isinstance(candidate.get('score'), bool)
+                    or not isinstance(candidate.get('score'), (int, float))
+                    or not math.isfinite(candidate['score'])
+                    or not 0 <= candidate['score'] <= 1):
+                return {'status': 'error', 'reason': 'Navigation returned invalid output.'}
+            seen_candidates.add(candidate_node)
+            source = sources[candidate['sourceId']]
+            mapped.append({**candidate, 'originalPath': source.get('originalPath', source['path']),
+                           'contentSHA': source['contentSHA'],
+                           'description': source.get('description', '')})
+        after, error = self.pointer(name, principal)
+        if error:
+            return error
+        if (after['generation'] != pointer['generation']
+                or after['fingerprint'] != pointer['fingerprint']):
+            return {'status': 'pointer-changed'}
+        return {**result, 'candidates': mapped}
 
     def search(
         self,

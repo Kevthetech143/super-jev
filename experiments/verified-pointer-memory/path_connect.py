@@ -13,6 +13,7 @@ from service import Service
 
 MAX_FILES = 50
 MAX_BYTES = 5 * 1024 * 1024
+MAX_CATALOG_NODES = 200
 
 
 def _hash(raw):
@@ -42,6 +43,54 @@ def _atomic(path, data):
             os.unlink(name)
 
 
+def _catalog(sources, structure):
+    """Build a deterministic, bounded navigation catalog from explicit sources."""
+    paths = [Path(source['path']) for source in sources]
+    common = Path(os.path.commonpath([str(path.parent) for path in paths]))
+    groups = {}
+    leaves = []
+    for source in sources:
+        if source['navigationPath'] is not None:
+            labels = source['navigationPath']
+        elif structure == 'folder-tree':
+            labels = list(Path(source['path']).parent.relative_to(common).parts)
+        else:
+            labels = []
+        parent = 'root'
+        prefix = []
+        for label in labels:
+            prefix.append(label)
+            node_id = 'group:' + _hash(json.dumps(prefix, ensure_ascii=False,
+                                                   separators=(',', ':')).encode())[:24]
+            groups.setdefault(node_id, {'id': node_id, 'label': label,
+                                         'description': 'Source group', 'children': []})
+            children = groups[parent]['children'] if parent != 'root' else None
+            if children is not None and node_id not in children:
+                children.append(node_id)
+            parent = node_id
+        leaf_id = 'source:' + _hash(source['id'].encode())[:24]
+        leaf = {'id': leaf_id, 'label': Path(source['path']).name,
+                'description': source['description'], 'sourceId': source['id']}
+        leaves.append((parent, leaf))
+    root = {'id': 'root', 'label': 'Sources',
+            'description': 'Reviewed connector sources', 'children': []}
+    for node_id, node in groups.items():
+        # A group without a group parent is a root child.
+        if not any(node_id in other['children'] for other in groups.values()):
+            root['children'].append(node_id)
+    nodes = [root] + [groups[key] for key in sorted(groups)]
+    by_id = {'root': root, **groups}
+    for parent, leaf in leaves:
+        by_id[parent]['children'].append(leaf['id'])
+        nodes.append(leaf)
+    for node in nodes:
+        if 'children' in node:
+            node['children'].sort()
+    if len(nodes) > MAX_CATALOG_NODES:
+        raise ValueError('navigation catalog exceeds 200 nodes')
+    return {'version': 1, 'structure': structure, 'rootId': 'root', 'nodes': nodes}
+
+
 def connect(request, config):
     """Prepare approved bytes without network calls; return no source content."""
     try:
@@ -63,6 +112,10 @@ def _connect(request, config):
     items = request.get('sources')
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_FILES:
         return _problem('source-limit', 'Supply 1–50 explicit UTF-8 text file paths, up to 5 MiB total. Directories are not expanded.')
+    explicit_navigation = 'structure' in request
+    structure = request.get('structure', 'flat-files')
+    if structure not in ('flat-files', 'folder-tree'):
+        return _problem('unsupported-structure', 'Use structure "flat-files" or "folder-tree". Directories are never crawled.')
     sources, seen_paths, seen_ids, total = [], set(), set(), 0
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get('path'), str):
@@ -87,13 +140,45 @@ def _connect(request, config):
         description = item.get('description', 'Local text file: ' + path.name)
         if not isinstance(description, str) or not description.strip() or len(description) > 4000:
             return _problem('invalid-description', 'Omit description for a filename description, or supply a factual description of at most 4000 characters.')
+        navigation_path = item.get('navigationPath')
+        if navigation_path is not None:
+            explicit_navigation = True
+            if structure != 'folder-tree':
+                return _problem('invalid-navigation-path', 'navigationPath requires structure "folder-tree" so grouped sources are not presented as flat files.')
+            if (not isinstance(navigation_path, list) or len(navigation_path) > 8
+                    or any(not isinstance(label, str) or not label.strip()
+                           or len(label) > 200 for label in navigation_path)):
+                return _problem('invalid-navigation-path', 'navigationPath must be an array of at most 8 nonempty labels, each at most 200 characters.')
         seen_paths.add(path)
         seen_ids.add(source_id)
         sources.append({'id': source_id, 'path': str(path), 'raw': raw, 'text': text,
-                        'description': description, 'sha256': _hash(raw), 'reviewedSHA': item.get('sha256')})
-    if request.get('reviewed') is not True or any(s['reviewedSHA'] != s['sha256'] for s in sources):
+                        'description': description, 'navigationPath': navigation_path,
+                        'sha256': _hash(raw), 'reviewedSHA': item.get('sha256')})
+    if structure == 'folder-tree':
+        common = Path(os.path.commonpath([str(Path(source['path']).parent)
+                                         for source in sources]))
+        if any(source['navigationPath'] is None
+               and len(Path(source['path']).parent.relative_to(common).parts) > 8
+               for source in sources):
+            return _problem('invalid-navigation-path', 'Derived folder grouping exceeds 8 levels. Supply a navigationPath of at most 8 labels for that source.')
+    try:
+        catalog = _catalog(sources, structure)
+    except (ValueError, OSError):
+        return _problem('navigation-limit', 'The explicit source grouping must fit within 200 catalog nodes and 50 source leaves.')
+    navigation_sha = _hash(json.dumps(catalog, sort_keys=True, separators=(',', ':'),
+                                      ensure_ascii=False).encode())
+    navigation_reviewed = (request.get('navigationSHA') == navigation_sha
+                           if explicit_navigation or 'navigationSHA' in request
+                           else True)
+    if (request.get('reviewed') is not True
+            or any(s['reviewedSHA'] != s['sha256'] for s in sources)
+            or not navigation_reviewed):
         return {**_problem('review-required', 'Review these local files within authorized scope. To permit their entire text for provider processing, repeat connect with reviewed:true and each returned sha256. This is not automatic privacy approval.'),
-                'sources': [{k: s[k] for k in ('path', 'id', 'description', 'sha256')} for s in sources],
+                'sources': [{**{k: s[k] for k in ('path', 'id', 'description', 'sha256')},
+                             **({'navigationPath': s['navigationPath']}
+                                if s['navigationPath'] is not None else {})} for s in sources],
+                'structure': structure, 'catalog': catalog,
+                'navigationSHA': navigation_sha,
                 'fileCount': len(sources), 'bytes': total}
     if 'replace' in request and not isinstance(request['replace'], bool):
         return _problem('invalid-replace', 'replace must be true or false.')
@@ -125,7 +210,8 @@ def _connect(request, config):
         if any(_hash(Path(s['path']).read_bytes()) != s['sha256'] for s in sources):
             return _problem('source-changed', 'A source changed after review. Review current bytes and repeat connect with their hashes.')
         folder = Path(tempfile.mkdtemp(prefix='.prepared-', dir=registry.parent))
-        manifest = {'expectedPolicy': 'reviewed', 'descriptionsAffirmed': True, 'sources': [], 'preparations': []}
+        manifest = {'expectedPolicy': 'reviewed', 'descriptionsAffirmed': True,
+                    'catalog': catalog, 'sources': [], 'preparations': []}
         for i, (s, passages) in enumerate(zip(sources, chunks)):
             prepared_path = folder / f'{i}.txt'
             _write(prepared_path, s['raw'])
@@ -136,6 +222,7 @@ def _connect(request, config):
         manifest_raw = json.dumps(manifest, ensure_ascii=False).encode()
         _write(manifest_path, manifest_raw)
         data['datasets'][dataset] = {'description': 'Reviewed local text connector: ' + dataset,
+            'structure': structure,
             'pathConnection': {'pointer': pointer, 'principals': sorted(principals)},
             'scope': f'Only the {len(sources)} explicitly supplied local files; no recursive discovery or automatic synchronization.',
             'manifestPath': str(manifest_path), 'manifestSHA256': _hash(manifest_raw),
@@ -147,6 +234,7 @@ def _connect(request, config):
         if error:
             return _problem('source-changed', 'A source changed during connection. Review it and reconnect with replace:true.')
     return {'status': 'registered', 'pointer': pointer, 'dataset': dataset,
+            'structure': structure, 'navigationSHA': navigation_sha,
             'sources': [{'id': s['id'], 'originalPath': s['path']} for s in sources],
             'fileCount': len(sources), 'passageCount': len(manifest['preparations']),
             'nextAction': 'search', 'hint': 'Ready for snapshot searches. Originals are unchanged; upstream synchronization and privacy approval are not automatic.'}

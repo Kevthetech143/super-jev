@@ -1,0 +1,148 @@
+{
+  "message": "Source candidates are navigation leads only; they have not been read or verified.",
+  "status": "candidates",
+  "candidates": [
+    {
+      "sourceId": "deploy-rollback",
+      "nodeId": "source:67546d93e80caf29732055a6",
+      "path": [
+        "root",
+        "group:297dcba7e684252487542f56",
+        "group:b6fb2dad3288f1410e4db21f",
+        "source:67546d93e80caf29732055a6"
+      ],
+      "score": 0.9221186208571546,
+      "originalPath": "<fixture>/sources/Engineering/Deployment/rollback.md",
+      "contentSHA": "a0343f912afe8ccacd32cd785b2c7dfc846da8f2c6b9484ad013b5d93c598c44",
+      "description": "Instructions for undoing a failed deployment and restoring the previous release."
+    },
+    {
+      "sourceId": "release-notes",
+      "nodeId": "source:4ae1eb667fb53609046cecfd",
+      "path": [
+        "root",
+        "group:297dcba7e684252487542f56",
+        "group:b6fb2dad3288f1410e4db21f",
+        "source:4ae1eb667fb53609046cecfd"
+      ],
+      "score": 1.57580792210943e-108,
+      "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+      "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+      "description": "Historical release notes and shipped feature descriptions."
+    }
+  ],
+  "calls": 3,
+  "trace": [
+    {
+      "path": [
+        "root"
+      ],
+      "choices": [
+        {
+          "nodeId": "root",
+          "probabilities": {
+            "group:297dcba7e684252487542f56": 0.88,
+            "group:87524fde778bc9dd0bf75900": 0.01
+          },
+          "none": 0.11
+        }
+      ],
+      "discarded": 0,
+      "remaining": 2
+    },
+    {
+      "path": [
+        "root",
+        "group:297dcba7e684252487542f56"
+      ],
+      "choices": [
+        {
+          "nodeId": "group:297dcba7e684252487542f56",
+          "probabilities": {
+            "group:10ead633731e1fceee9097a2": 0.07,
+            "group:b6fb2dad3288f1410e4db21f": 0.9,
+            "group:d40e2b454c5049e6661dc6d8": 0
+          },
+          "none": 0.03
+        }
+      ],
+      "discarded": 2,
+      "remaining": 3
+    },
+    {
+      "path": [
+        "root",
+        "group:87524fde778bc9dd0bf75900"
+      ],
+      "choices": [
+        {
+          "nodeId": "group:87524fde778bc9dd0bf75900",
+          "probabilities": {
+            "group:9a3644b7a14b8f18569345ed": 0.83,
+            "group:a74506d535582eacd3a15cd3": 0
+          },
+          "none": 0.17
+        }
+      ],
+      "discarded": 2,
+      "remaining": 3
+    },
+    {
+      "path": [
+        "root",
+        "group:297dcba7e684252487542f56",
+        "group:b6fb2dad3288f1410e4db21f"
+      ],
+      "choices": [
+        {
+          "nodeId": "group:b6fb2dad3288f1410e4db21f",
+          "probabilities": {
+            "source:4ae1eb667fb53609046cecfd": 0,
+            "source:67546d93e80caf29732055a6": 0.99
+          },
+          "none": 0.01
+        }
+      ],
+      "discarded": 0,
+      "remaining": 2
+    },
+    {
+      "path": [
+        "root",
+        "group:297dcba7e684252487542f56",
+        "group:10ead633731e1fceee9097a2"
+      ],
+      "choices": [
+        {
+          "nodeId": "group:10ead633731e1fceee9097a2",
+          "probabilities": {
+            "source:776b17088dc5c42e637829df": 0.12
+          },
+          "none": 0.88
+        }
+      ],
+      "discarded": 0,
+      "remaining": 2
+    },
+    {
+      "path": [
+        "root",
+        "group:87524fde778bc9dd0bf75900",
+        "group:9a3644b7a14b8f18569345ed"
+      ],
+      "choices": [
+        {
+          "nodeId": "group:9a3644b7a14b8f18569345ed",
+          "probabilities": {
+            "source:d34ca0ab152ec59972e87627": 0.01
+          },
+          "none": 0.99
+        }
+      ],
+      "discarded": 0,
+      "remaining": 2
+    }
+  ],
+  "complete": false,
+  "nextAction": "inspect-source-files"
+}
