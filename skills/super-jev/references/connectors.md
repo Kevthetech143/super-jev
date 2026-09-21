@@ -159,6 +159,32 @@ approved answers. `--max-files` (default 250) refuses an oversized run before
 any drafting starts. `--no-connect` stops after drafting and gating, for a
 dry run.
 
+By default the writer is `claude -p --model haiku` (change the model with
+`--writer-model`). Systems without Claude Code can supply another local writer:
+
+```sh
+python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME \
+  --writer-command 'my-description-writer --model small'
+```
+
+`--writer-command` is parsed into an argument list and run without a shell.
+The program receives the existing UTF-8 writer prompt on standard input: its
+final `FILES:` section is a JSON array of the file records. It must write only
+a JSON array to standard output. Each array member must be an object with
+`path`, `description`, and `question`; `path` must match an input file path.
+The writer should send diagnostics only to standard error. A start failure,
+nonzero exit, or invalid JSON stops the bulk run with an error; writer output
+and diagnostics are never echoed, so command output containing sensitive text
+is not logged by this tool.
+
+For example, a small adapter can read the prompt, parse the text after its
+`FILES:` marker, and emit its result array. It does not need Claude Code or a
+particular model SDK:
+
+```sh
+my-description-writer --model small < prompt.txt > result.json
+```
+
 ### Ask loop
 
 `python3 ask.py --principal YOUR_AGENT "question"` is the front door over
