@@ -590,6 +590,85 @@ def test_list_merges_part_pointer_caches(tmp_path, monkeypatch):
     assert paths == {"/a/one.md", "/a/two.md"}
 
 
+def _write_manual_record(state_dir, principal, name, kind, status, as_of, subject, body="The answer.\n"):
+    manual_dir = state_dir / principal / "manual"
+    manual_dir.mkdir(parents=True, exist_ok=True)
+    p = manual_dir / f"{name}.md"
+    p.write_text(
+        f"# some question\n\nkind: {kind}\nstatus: {status}\nas_of: {as_of}\nsubject: {subject}\n"
+        f"project: {principal}\n\n{body}\nrecorded: 2026-09-21 00:00 UTC\n"
+    )
+    return p
+
+
+def test_manual_label_rows_reads_headers_and_filters_like_list_cmd(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(state_dir))
+    today = pb.date.today().isoformat()
+    _write_manual_record(state_dir, "agent", "agent-manual-aaa", "record", "active", today, "taxes 2025")
+    _write_manual_record(state_dir, "agent", "agent-manual-bbb", "index", "closed", "2020-01-01", "old stuff")
+    _write_manual_record(state_dir, "agent", "agent-manual-ccc", "record", "active", "unknown", "no date fact")
+
+    rows, excluded = pb.manual_label_rows("agent")
+    paths = {r[4] for r in rows}
+    assert paths == {"agent-manual-aaa", "agent-manual-bbb", "agent-manual-ccc"}
+
+    rows2, excluded2 = pb.manual_label_rows("agent", status="active")
+    assert {r[4] for r in rows2} == {"agent-manual-aaa", "agent-manual-ccc"}
+
+    rows3, excluded3 = pb.manual_label_rows("agent", within_days=30)
+    assert {r[4] for r in rows3} == {"agent-manual-aaa"}
+    assert excluded3 == 1  # ccc's as_of is unknown
+
+
+def test_manual_label_rows_no_manual_dir_returns_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "nowhere"))
+    rows, excluded = pb.manual_label_rows("agent")
+    assert rows == [] and excluded == 0
+
+
+def test_list_with_principal_only_shows_manual_records(tmp_path, monkeypatch, capsys):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(state_dir))
+    _write_manual_record(state_dir, "agent", "agent-manual-xyz", "pointer", "active", "2026-09-01", "super-jev")
+
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--list", "--principal", "agent"])
+    rc = pb.main()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "agent-manual-xyz" in out
+    assert "super-jev" in out
+
+
+def test_list_with_pointer_and_principal_merges_both_sources(tmp_path, monkeypatch, capsys):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    (cache_dir / "my-records.json").write_text(json.dumps({
+        "/a/one.md": {"pass": True, "kind": "dashboard", "status": "active", "as_of": "2026-01-01", "subject": "One"},
+    }))
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(state_dir))
+    _write_manual_record(state_dir, "agent", "agent-manual-abc", "record", "active", "2026-02-01", "Two")
+
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--list", "--pointer", "my-records", "--principal", "agent"])
+    rc = pb.main()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "/a/one.md" in out
+    assert "agent-manual-abc" in out
+
+
+def test_list_neither_pointer_nor_principal_is_usage_error(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--list"])
+    rc = pb.main()
+    assert rc == 2
+    assert "REFUSED" in capsys.readouterr().out
+
+
 def test_inventory_multiple_roots_union_in_order(tmp_path):
     root_a = tmp_path / "a"
     root_b = tmp_path / "b"

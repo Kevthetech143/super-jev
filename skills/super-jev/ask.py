@@ -19,6 +19,8 @@
       hit. Nothing ready -> hints --add.
 
   ask.py --principal AGENT --add "question" "answer" [--source /path]
+                                 [--subject TEXT] [--kind KIND] [--status STATUS]
+                                 [--as-of YYYY-MM-DD] [--replace-entry]
       Manual entry, no file needed: writes one record, connects it as its own
       one-file pointer "<principal>-manual-<10 hex question hash>", then
       approves it. Approval never depends on retrieval matching the tiny
@@ -28,10 +30,23 @@
       this deployment, --add prints the config to flip and exits 1 instead
       of silently leaving the answer uncached. Never replaces a pointer or
       touches another pointer's answers; many small manual pointers are
-      fine, `cached` checks them all. Same wording twice refuses. --source
-      records that file's path+sha256; a later cache hit on this pointer
-      re-hashes it and, if changed, WITHHOLDS the answer (STALE, exit 1)
-      instead of serving stale evidence.
+      fine, `cached` checks them all. Same wording twice refuses unless
+      --replace-entry is given, which removes the existing manual pointer
+      for that exact wording first, then adds fresh. --source records that
+      file's path+sha256; a later cache hit on this pointer re-hashes it
+      and, if changed, WITHHOLDS the answer (STALE, exit 1) instead of
+      serving stale evidence.
+
+      The record carries the same kind/status/as_of/subject labels
+      prepare_bulk.py's bulk pipeline drafts and gates for onboarded files,
+      so a manual entry gets the same chance at a hit: --kind (record,
+      note, pointer, index, dashboard, playbook, ledger, research; default
+      record), --status (active, closed, paper, done, unknown; default
+      active), --as-of (default today), --subject (default: the first four
+      meaningful words of the question). An invalid --kind/--status/--as-of
+      value is a usage error (exit 2), never silently coerced. Labels ride
+      the connect description in the same bracket format bulk prepare uses
+      and `prepare_bulk.py --list --principal AGENT` reads them back.
 
   ask.py --principal AGENT --miss "question" "where it actually was"
       Log-only: the answer was found somewhere ask.py didn't reach.
@@ -42,13 +57,35 @@ $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket  # noqa: E402
+
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
+DEFAULT_KIND = "record"
+DEFAULT_STATUS = "active"
+
+# Words too generic to carry into a derived --subject; keeps the default to the
+# question's actual content words.
+SUBJECT_STOPWORDS = {
+    "a", "an", "the", "is", "was", "are", "were", "did", "does", "do", "what", "where",
+    "who", "how", "why", "when", "which", "of", "for", "to", "in", "on", "and", "or",
+    "his", "her", "their", "my", "your", "its", "it", "this", "that", "with", "at",
+    "by", "from", "as", "be", "been", "has", "have", "had",
+}
+
+
+def derive_subject(question: str) -> str:
+    """Default --subject: the first four meaningful (non-stopword) words of the question."""
+    words = re.findall(r"[A-Za-z0-9']+", question)
+    meaningful = [w for w in words if w.lower() not in SUBJECT_STOPWORDS] or words
+    return " ".join(meaningful[:4]) if meaningful else "unknown"
 
 def state_dir(principal: str) -> Path:
     root = os.environ.get("SUPERJEV_STATE_DIR")
@@ -224,21 +261,36 @@ def approve_manual(principal: str, question: str, answer: str, pointer: str, sou
         return 1
     return send_approval(principal, question, answer, pointer, assisted, sdir)
 
-def add_manual(principal: str, question: str, answer: str, source, sdir: Path) -> int:
+def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
+                kind: str = DEFAULT_KIND, status: str = DEFAULT_STATUS,
+                as_of: str = None, subject: str = None, replace: bool = False) -> int:
+    labels = validate_labels({
+        "kind": kind, "status": status,
+        "as_of": as_of or time.strftime("%Y-%m-%d"),
+        "subject": subject or derive_subject(question),
+    })
     pointer = manual_pointer_name(principal, question)
-    if pointer in my_pointers(principal):
-        print(f"refused: {pointer} already exists for this question wording; use different wording, or remove the pointer explicitly.")
+    exists = pointer in my_pointers(principal)
+    if exists and not replace:
+        print(f"refused: {pointer} already exists for this question wording; use different wording, --replace-entry, or remove the pointer explicitly.")
         return 1
     manual_dir = sdir / "manual"
     manual_dir.mkdir(parents=True, exist_ok=True)
     record = manual_dir / f"{pointer}.md"
-    lines = [f"# {question}", ""]
+    if exists and replace:
+        res = memory({"action": "remove", "pointer": pointer, "principal": principal})
+        print(f"removed existing manual entry: pointer {pointer} ({res.get('status', res)})")
+        if record.is_file():
+            record.unlink()
+    lines = [f"# {question}", "", f"kind: {labels['kind']}", f"status: {labels['status']}",
+             f"as_of: {labels['as_of']}", f"subject: {labels['subject']}", f"project: {principal}", ""]
     if source and Path(source).is_file():
         src = Path(source).resolve()
         lines += [f"source_path: {src}", f"source_sha256: {sha256_file(src)}", ""]
     lines += [answer, "", f"recorded: {time.strftime('%Y-%m-%d %H:%M %Z')}"]
     record.write_text("\n".join(lines) + "\n")
-    req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": [{"path": str(record), "description": question[:120]}]}
+    description = f"{question[:120]} {label_bracket(labels)}"
+    req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": [{"path": str(record), "description": description}]}
     preview = memory(req)
     if preview.get("status") != "preparation-required" or "sources" not in preview:
         print("connect preview failed:", json.dumps(preview)[:300])
@@ -274,10 +326,45 @@ def main() -> int:
     if a[0] == "--approve":
         return approve(principal, a[1], a[2], sdir)
     if a[0] == "--add":
-        src = a[a.index("--source") + 1] if "--source" in a else None
-        end = a.index("--source") if "--source" in a else len(a)
-        return add_manual(principal, a[1], " ".join(a[2:end]), src, sdir)
+        return do_add(principal, a[1:], sdir)
     return lookup(" ".join(a), principal, sdir)
+
+ADD_VALUE_FLAGS = {"--source", "--subject", "--kind", "--status", "--as-of"}
+
+def do_add(principal: str, a: list, sdir: Path) -> int:
+    """Parse `--add "question" "answer words..." [flags]`. Flags may appear anywhere
+    after the question; everything else in order becomes the answer text."""
+    if not a:
+        print("usage: --add \"question\" \"answer\" [--source PATH] [--subject TEXT] "
+              "[--kind KIND] [--status STATUS] [--as-of YYYY-MM-DD] [--replace-entry]")
+        return 2
+    question, rest = a[0], a[1:]
+    values = {f: None for f in ADD_VALUE_FLAGS}
+    replace, answer_words, i = False, [], 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in ADD_VALUE_FLAGS:
+            if i + 1 >= len(rest):
+                print(f"usage: {tok} requires a value"); return 2
+            values[tok] = rest[i + 1]
+            i += 2
+        elif tok == "--replace-entry":
+            replace = True
+            i += 1
+        else:
+            answer_words.append(tok)
+            i += 1
+    kind = values["--kind"] or DEFAULT_KIND
+    status = values["--status"] or DEFAULT_STATUS
+    as_of = values["--as-of"] or time.strftime("%Y-%m-%d")
+    if kind not in KIND_VALUES:
+        print(f"usage: --kind must be one of {sorted(KIND_VALUES)}"); return 2
+    if status not in STATUS_VALUES:
+        print(f"usage: --status must be one of {sorted(STATUS_VALUES)}"); return 2
+    if not DATE_RE.match(as_of):
+        print("usage: --as-of must be YYYY-MM-DD"); return 2
+    return add_manual(principal, question, " ".join(answer_words), values["--source"], sdir,
+                       kind=kind, status=status, as_of=as_of, subject=values["--subject"], replace=replace)
 
 if __name__ == "__main__":
     sys.exit(main())

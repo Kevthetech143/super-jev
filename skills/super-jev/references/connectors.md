@@ -203,15 +203,18 @@ and `labels_confidence` in the cache entry, and the file still connects on
 its plain description. Only a file whose labels also gated clean carries them
 in brackets in the connect description, so ranking sees them; this costs two
 judge calls per file whose description passes (one when it doesn't).
-`python3 prepare_bulk.py --list --pointer NAME [--status active]
-[--kind dashboard] [--within-days 30] [--subject NAME]` reads the labels back
-out of `prepare-cache/<pointer>.json` (and any `<pointer>-N.json` part
-caches), filters and sorts by `as_of` descending, and never calls the writer,
-the gate, or memory; `--within-days` excludes files whose `as_of` is unknown
-and reports how many were excluded. A label is only as true as the file it
-was drafted and gated from; `as_of` shows staleness, not currency — live
-truth for anything time-sensitive still needs a gated roll-up read fresh, not
-a cached label.
+`python3 prepare_bulk.py --list [--pointer NAME] [--principal YOUR_AGENT_NAME]
+[--status active] [--kind dashboard] [--within-days 30] [--subject NAME]`
+reads the labels back out of `prepare-cache/<pointer>.json` (and any
+`<pointer>-N.json` part caches) with `--pointer`, and out of that principal's
+`ask.py --add` manual records (shown as `<principal>-manual-*` in the path
+column) with `--principal`; either or both may be given, and at least one is
+required. Filters and sorts the merged rows by `as_of` descending, and never
+calls the writer, the gate, or memory; `--within-days` excludes rows whose
+`as_of` is unknown and reports how many were excluded. A label is only as
+true as the file or record it came from; `as_of` shows staleness, not
+currency — live truth for anything time-sensitive still needs a gated
+roll-up read fresh, not a cached label.
 
 ### Ask loop
 
@@ -224,6 +227,19 @@ calls), then every connected pointer in parallel. State (`lookups.jsonl`,
 its own one-file `<principal>-manual-<hash>` pointer, so it never replaces or
 invalidates any other pointer's approved answers; a later cache hit on that
 pointer re-hashes `--source` and warns if the original file changed.
+
+`--add` also takes `--subject TEXT`, `--kind KIND`, `--status STATUS`, and
+`--as-of YYYY-MM-DD`, the same enums bulk prepare gates (`kind`: record, note,
+pointer, index, dashboard, playbook, ledger, research; `status`: active,
+closed, paper, done, unknown), defaulting to `record`/`active`/today/the
+question's first four meaningful words. An invalid value is a usage error,
+never silently coerced. The record's header carries these as `kind:`,
+`status:`, `as_of:`, `subject:`, and `project:` lines, and the connect
+description carries them in the same bracket format bulk prepare uses, so
+`prepare_bulk.py --list --principal YOUR_AGENT` sees manual entries alongside
+bulk-onboarded files. Re-adding the same wording normally refuses;
+`--replace-entry` instead removes the existing manual pointer for that exact
+wording and its record first, then adds fresh.
 
 ## Navigation structure
 
