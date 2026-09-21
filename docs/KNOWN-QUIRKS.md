@@ -38,11 +38,11 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 - **Cause:** the literal placeholder string trips the secret scan — a false positive.
 - **Workaround:** review the file, then admit it with `prepare_bulk.py --allow-held`.
 
-## 7. hooks.md over the size ceiling
+## 7. hooks.md withheld from rc.1
 
-- **Symptom:** the hooks research doc (in docs/experimental/) will not load in one read.
-- **Cause:** the file grew past the size ceiling for a single read.
-- **Workaround:** read it in sections.
+- **Symptom:** references to `docs/hooks.md` (the long hook research notes) now 404.
+- **Cause:** hooks.md withheld from rc.1: the long hook research notes carried internal names and are being scrubbed.
+- **Workaround:** the hook wiring you need is in `docs/wire-into-claude-code.md`.
 
 ## 8. Helper first fire is a dry-fire
 
@@ -61,3 +61,8 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 - **Symptom:** `skills/super-jev/superjev.py` is one 13,355-line file, far over the size ceiling.
 - **Cause:** the superjev skill is still a monolith; the split into one module per door is the first 1.1 job.
 - **Workaround:** none needed — behavior is unaffected; the file is exempt in gate.json allow_paths.
+
+## 11. Env var names from the author's harness
+**Symptom:** `superjev.py` reads `CLAW4MAC_SESSION_ID`, `CLAW4MAC_BOT_ID` and `CLAUDE_BOT_ID` to derive a principal name.
+**Cause:** compatibility with the harness Super Jev was built in. They are optional; unset, the principal comes from `--principal`.
+**Workaround:** pass `--principal` explicitly. 1.1 renames them to `SUPERJEV_*` with a fallback.

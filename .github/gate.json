@@ -28,7 +28,21 @@
     "CHANGEME",
     "XXX"
   ],
-  "private_names": [],
+  "private_names": [
+    "claw4mac",
+    "claw4mac-primary",
+    "CLAW4MAC_",
+    "health-fitness",
+    "finance-assistant",
+    "amazon-bm-fb",
+    "primary-brain",
+    "primary-helper",
+    "ai-guide",
+    "businessfi",
+    "kelvin",
+    "Kelvin",
+    "muse-link"
+  ],
   "size_ceiling_lines": 2000,
   "stoplist": [
     "__pycache__",

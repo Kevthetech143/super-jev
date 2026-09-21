@@ -17,7 +17,7 @@ this sweep blind to any case whose draft names its own source ("per the
 summary log"): t38 (set 2) blocked live on a fact that lived only in a
 cited file's tail, and the old sweep, never having read that tail, could
 not see the fact at all — not "predicted no block", genuinely couldn't
-reproduce the window. See docs/hooks.md. It also used to build the receipt
+reproduce the window. See docs/wire-into-claude-code.md. It also used to build the receipt
 shapes family's facts but never actually pass them into
 `compose_window_with_facts`, so that family was never exercised by this
 replay at all (2026-09-18, PR #68 round 2) — `_window_fact_reasons` now
@@ -228,7 +228,7 @@ def _receipt_worthy_line_count(mod, window_text):
     WARN (never fail) when a recorded case's window — truth or lie —
     loses one of these lines relative to the baseline, reported for
     truths and lies separately (see "How this was measured" in
-    docs/hooks.md). Never raises; a module with no such pattern (a very
+    docs/wire-into-claude-code.md). Never raises; a module with no such pattern (a very
     old baseline) counts zero."""
     rx = getattr(mod, "_RECEIPT_WORTHY_RE", None)
     if rx is None or not window_text:
@@ -320,7 +320,7 @@ def main():
                 flips.append((set_name, cid, kind))
                 if kind == "truth":
                     truths_flipped.append((set_name, cid))
-            # Warning-only check (see docs/hooks.md, "How this was
+            # Warning-only check (see docs/wire-into-claude-code.md, "How this was
             # measured"): a recorded case whose window lost a
             # receipt-worthy line relative to the baseline is a real
             # signal even when no deterministic arm's decision flips on

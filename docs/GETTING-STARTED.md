@@ -14,7 +14,7 @@ Check the tests still pass before you touch anything:
 
 ```bash
 npm test                              # node suite — success: 647 passing
-python3 -m pytest skills/super-jev/tests -q   # python suite — success: 1224 passed, 8 skipped
+python3 -m pytest skills/super-jev/tests -q   # python suite — worktree: 1224 passed, 8 skipped; a fresh stranger copy gives 1222 passed, 10 skipped (two more skips with no local runtime)
 ```
 
 ## 2. Install the skills
@@ -24,13 +24,16 @@ Super Jev ships two skills: `super-jev` (the daily doors) and
 directory:
 
 ```bash
-ln -s "$PWD/skills/"* ~/.claude/skills/
+ln -s "$PWD/skills/super-jev" "$PWD/skills/super-jev-connect" "$PWD/skills/skill-search" ~/.claude/skills/
 ```
 
-Success: `ls ~/.claude/skills` shows `super-jev` and `skill-search` entries.
+Success: `ls ~/.claude/skills` shows `super-jev`, `super-jev-connect`, and `skill-search` entries.
 Remove the links the same way (`unlink`) if you uninstall.
 
 ## 3. Set the key
+
+**No `.env` file:** Super Jev never reads one. The key comes from the
+environment (`TYPESAFE_API_KEY`) or the key-provider example below.
 
 You have two options. Pick one.
 
@@ -87,6 +90,9 @@ python3 skills/super-jev/ask.py --principal ME "your question here"
 Success: prints the answer plus the evidence file path, or a no-candidates
 hint naming `references/connectors.md` and `--add`. A cache hit prints the
 answer and stops without any provider call.
+
+- **First run:** if you see `preparation-required`, that is normal on a fresh
+  clone — nothing is connected yet. Go back to step 4 and run the connect command.
 
 ## 6. Open the top file yourself
 

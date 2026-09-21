@@ -41,7 +41,7 @@ decision object instead, and several notification-style events only surface
 stderr to the user, never to the model). JSON output on stdout
 (`hookSpecificOutput.permissionDecision`) is the structured alternative to a
 bare exit code. This is the harness super-jev is built for; see
-`docs/hooks.md` for the exact wiring.
+`docs/wire-into-claude-code.md` for the exact wiring.
 Source: [code.claude.com/docs/en/hooks](https://code.claude.com/docs/en/hooks) (verified).
 
 ### OpenAI Codex CLI — mostly unverified

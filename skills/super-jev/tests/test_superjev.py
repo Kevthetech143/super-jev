@@ -1331,7 +1331,7 @@ HIGH_CONF_LIE_STDOUT = (FIXTURES / "lie_stop_high_confidence_stdout.txt").read_t
 def test_hook_gate_the_exact_lie_output_is_now_advisory(tmp_path, monkeypatch, capsys):
     # The original 2026-09-17 repro (exit 3/READ; c1 NOT_SUPPORTED 0.18,
     # overclaim OVERCLAIMS 0.98). Kept as a regression marker for the
-    # 2026-09-17 confidence-direction fix (docs/hooks.md, "Decided: the
+    # 2026-09-17 confidence-direction fix (docs/wire-into-claude-code.md, "Decided: the
     # block rule follows confidence"): the float is the judge's CONFIDENCE
     # in the verdict, and 0.18 means the judge barely suspects c1 at all —
     # the strongest defensible reading is "a human should read this", not
@@ -1449,7 +1449,7 @@ def test_hook_gate_stop_hook_active_false_still_blocks(tmp_path, monkeypatch, ca
 # SUPERJEV_RULE=v2 the secondary NOT_SUPPORTED/CONTRADICTED arm) is demoted
 # to advisory (exit 0) when SUPERJEV_GATE_JUDGE_ADVISORY=1. A block carrying
 # even one deterministic reason (count mismatch, PR mismatch,
-# CONTRADICTED_BY_FACT) is untouched — see docs/hooks.md, "Judge-advisory
+# CONTRADICTED_BY_FACT) is untouched — see docs/wire-into-claude-code.md, "Judge-advisory
 # mode".
 
 def test_hook_gate_judge_advisory_demotes_a_judge_only_block_to_exit_0(
@@ -3960,7 +3960,7 @@ def test_parse_claim_rows_ignores_the_draft_level_rows():
     # Not a pytest invocation at all — the guardrail has no opinion. Note
     # that this is ALSO how the directory-level run gets in anyway: the npm
     # script wraps the very command the guardrail refuses. Recorded here on
-    # purpose; docs/hooks.md names it as a failure mode.
+    # purpose; docs/wire-into-claude-code.md names it as a failure mode.
     ("npm run test:skill", False),
     ("node --test test/*.test.ts", False),
     ("", False),
@@ -4060,7 +4060,7 @@ def test_the_same_flags_still_block_when_the_gather_was_healthy():
 
 def test_overclaims_alone_is_advisory_when_every_claim_came_back_supported():
     """v2 (legacy) only: exercises the 0.50-companion rule, superseded by
-    gate v3's default (see docs/hooks.md, "gate v3 — wide window") — under
+    gate v3's default (see docs/wire-into-claude-code.md, "gate v3 — wide window") — under
     v3, OVERCLAIMS at or above 0.90 blocks with no companion claim
     required, so this calls the v2 function directly rather than the
     dispatcher. No evidence inventory at all here — all-claims-SUPPORTED
@@ -4130,7 +4130,7 @@ def test_thin_evidence_suppresses_even_a_confident_contradiction():
 
 def test_the_original_lie_fixture_is_now_advisory_not_a_block():
     """v2 (legacy) only, via `_hook_block_decision_v2` directly. Regression
-    marker for the 2026-09-17 direction fix (see docs/hooks.md, "Decided:
+    marker for the 2026-09-17 direction fix (see docs/wire-into-claude-code.md, "Decided:
     the block rule follows confidence"). c1 NOT_SUPPORTED 0.18 means the
     judge barely suspects c1 — under the new >= line it is not a block
     candidate at all, and OVERCLAIMS 0.98 has no companion claim at or
@@ -4569,7 +4569,7 @@ def test_deterministic_count_mismatch_blocks_before_the_judge():
     evidence = "pytest output:\n34 passed in 6.94s\n"
     reasons = sj.deterministic_block_reasons(draft, evidence)
     # The reason line now names the unit label it paired on (2026-09-17 —
-    # see docs/hooks.md, "the labelled count arm"); the arm itself is the
+    # see docs/wire-into-claude-code.md, "the labelled count arm"); the arm itself is the
     # same pure-string check running before the judge.
     assert any("count mismatch (tests): draft 58 vs evidence 34" in r for r in reasons)
 
@@ -4799,7 +4799,7 @@ def test_wide_window_cap_drops_the_oldest_previous_turn_first(tmp_path):
     # themselves receipt-worthy ("gh pr merge", "9 passed"), so a turn the
     # cap dropped from the previous-turn block can still reach the window
     # as a one-line receipt. That is the receipts layer doing its job (see
-    # docs/hooks.md); what this test is about is which previous-turn block
+    # docs/wire-into-claude-code.md); what this test is about is which previous-turn block
     # survives the cap.
     assert "[previous turn -2]" not in derived  # the OLDEST is dropped first
     assert meta["prev_dropped"] >= 1
@@ -4942,7 +4942,7 @@ def test_evidence_window_returns_none_when_current_turn_and_prior_material_both_
 
 
 def test_public_derive_evidence_window_wraps_the_private_function_identically(tmp_path):
-    # docs/hooks.md, "gate v3 — empty current turn": external benches
+    # docs/wire-into-claude-code.md, "gate v3 — empty current turn": external benches
     # should import this stable name rather than reimplementing the
     # window logic.
     records = [
@@ -5253,7 +5253,7 @@ def test_status_json_includes_token_totals_today(tmp_path, monkeypatch, capsys):
 #   (c) `--explain`, which reported how MANY previous turns were chosen but
 #       not WHICH, so a block could not be audited.
 #
-# See docs/hooks.md, "gate v3 — receipts backfill and the labelled count
+# See docs/wire-into-claude-code.md, "gate v3 — receipts backfill and the labelled count
 # arm". Every test here is offline: fixture transcripts and the fake door,
 # no live judge call.
 
@@ -11249,7 +11249,7 @@ def test_receipt_shapes_write_fact_is_a_positive_mapping_only():
     # the overclaims judge as a pre-written finding that the draft cannot
     # be supported — measured live as false-positive blocks on truthful
     # drafts and traced to this family (see CHANGELOG). The bound stays
-    # documented in docs/hooks.md, "receipt shapes"; the fact sentence
+    # documented in docs/wire-into-claude-code.md, "receipt shapes"; the fact sentence
     # itself now states only the positive act-to-verb mapping.
     facts = _rs_facts([_rs_user_record(),
                       _rs_use("a", "Write",

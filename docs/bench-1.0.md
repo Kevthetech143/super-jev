@@ -10,7 +10,7 @@ Node 24, pytest installed, no network needed except the skill-search local run.
   `test/enhance/*.test.ts`, `test/bench/*.test.ts`:
   **647 pass, 0 fail, 0 skipped** (13.6 s).
 - `python3 -m pytest skills/super-jev/tests -q` — skill front-door suite:
-  **1222 passed, 10 skipped** (173 s).
+  **1222 passed, 10 skipped** (173 s) — the release worktree run gives 1224 passed, 8 skipped (two fewer skips with a local runtime).
 - `npm run skill-search -- --roots-file <roots> --request-file <request> --local-only`:
   exit 0, **3 skills suggested from 1 root, `source: local`**, no network.
   roots file: `["<worktree>/skills"]`;
