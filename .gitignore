@@ -11,6 +11,7 @@ __pycache__/
 *.pyc
 
 skills/super-jev/ledger/
+skills/super-jev/prepare-cache/
 .superjev/
 
 # Private local datasets, pointer databases, and demonstration configuration.

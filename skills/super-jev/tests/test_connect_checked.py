@@ -58,6 +58,23 @@ def test_not_supported_refuses_and_never_calls_memory(tmp_path, monkeypatch, cap
     assert "REFUSED" in out
 
 
+def test_contradicted_refuses_and_never_calls_memory(tmp_path, monkeypatch, capsys):
+    f = make_source_file(tmp_path, "a2.md")
+    req_path = make_request(tmp_path, [{"path": str(f), "description": "a description the file disproves"}])
+
+    memory_calls = []
+    monkeypatch.setattr(cc, "gate", lambda desc, path: {"state": "CONTRADICTED", "confidence": 0.82, "secs": 0.1})
+    monkeypatch.setattr(cc, "memory", lambda req: memory_calls.append(req) or {"status": "should-not-be-called"})
+    monkeypatch.setattr(sys, "argv", ["connect_checked.py", str(req_path)])
+
+    rc = cc.main()
+
+    assert rc == 1
+    assert memory_calls == []
+    out = capsys.readouterr().out
+    assert "REFUSED" in out
+
+
 def test_unchecked_over_ceiling_refuses(tmp_path, monkeypatch, capsys):
     f = make_source_file(tmp_path, "big.md")
     req_path = make_request(tmp_path, [{"path": str(f), "description": "a huge file"}])
@@ -183,6 +200,22 @@ def test_gate_parses_not_supported_line_from_dispatch_output(tmp_path, monkeypat
 
     assert verdict["state"] == "NOT_SUPPORTED"
     assert verdict["confidence"] == 0.69
+
+
+def test_gate_parses_contradicted_line_from_dispatch_output(tmp_path, monkeypatch):
+    f = make_source_file(tmp_path, "g.md")
+    sample = "some preamble\n  c1   CONTRADICTED  0.82  some text\ntrailer\n"
+
+    class FakeResult:
+        stdout = sample
+        stderr = ""
+
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: FakeResult())
+
+    verdict = cc.gate("a description", str(f))
+
+    assert verdict["state"] == "CONTRADICTED"
+    assert verdict["confidence"] == 0.82
 
 
 def test_gate_parses_ceiling_message_as_unchecked(tmp_path, monkeypatch):
