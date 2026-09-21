@@ -13,6 +13,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -87,6 +88,65 @@ def test_limit_over_50_refuses(tmp_path, monkeypatch, capsys):
     rc = pb.main()
     assert rc == 2
     assert "REFUSED" in capsys.readouterr().out
+
+
+def test_writer_uses_claude_by_default_and_never_uses_a_shell(monkeypatch):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = '[{"path": "/tmp/one.md", "description": "One.", "question": "What is one?"}]'
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return Result()
+
+    monkeypatch.setattr(pb.subprocess, "run", fake_run)
+    got = pb.writer([{"path": "/tmp/one.md"}], "haiku")
+
+    assert got["/tmp/one.md"]["description"] == "One."
+    assert calls[0][0] == ["claude", "-p", "--model", "haiku"]
+    assert calls[0][1]["capture_output"] is True
+    assert calls[0][1]["text"] is True
+    assert "shell" not in calls[0][1]
+
+
+def test_custom_writer_command_runs_adapter_end_to_end(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nContent about one.\n")
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9})
+    adapter = (
+        "import json,sys; prompt=sys.stdin.read(); "
+        "files=json.loads(prompt.split('FILES:\\n', 1)[1]); "
+        "print(json.dumps([{'path': x['path'], 'description': 'Describes one.', "
+        "'question': 'What is one?'} for x in files]))"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(adapter)}"
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--writer-command", command, "--no-connect"]))
+
+    assert pb.main() == 0
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    assert cache[str(f)]["description"] == "Describes one."
+
+
+def test_writer_failure_stops_run_without_echoing_writer_output(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "one.md").write_text("# One\nContent about one.\n")
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+
+    def broken_writer(items, model, feedback=None, command=None):
+        raise pb.WriterError("writer exited with status 7")
+
+    monkeypatch.setattr(pb, "writer", broken_writer)
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-connect"]))
+
+    assert pb.main() == 1
+    out = capsys.readouterr().out
+    assert "ERROR: description writer failed: writer exited with status 7" in out
 
 
 def test_passing_draft_is_gated_connected_and_cached(tmp_path, monkeypatch, capsys):
