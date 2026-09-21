@@ -5,7 +5,7 @@ import {
   deriveFacts, formatDerivedFacts, preRules, testSummaryLines, parseTestCounts,
   windowFacts, windowLines, draftClauses,
   type Evidence
-} from '../../src/enhance/derive-facts.ts';
+} from '../../src/experimental/derive-facts.ts';
 
 // --------------------------------------------------------------- deriveFacts, one per atom
 

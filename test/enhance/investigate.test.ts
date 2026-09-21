@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planInvestigation, runInvestigation } from '../../src/enhance/investigate.ts';
+import { planInvestigation, runInvestigation } from '../../src/experimental/investigate.ts';
 import { StubEvaluator, choiceAnswer, scriptFromTable } from '../../src/enhance/stub.ts';
 import { assertComplete } from '../../src/enhance/coverage.ts';
 import { estimateTokens } from '../../src/enhance/budget.ts';

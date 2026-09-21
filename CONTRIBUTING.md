@@ -21,3 +21,12 @@ the PR, deletes the branch, confirms the merged state, and optionally
 fast-forwards a local checkout with `git pull --ff-only`. It prints a single
 final line: `PASS <sha>` or `FAIL: <step>`. Keep measurement-style claims out
 of PR titles and bodies so the scrub step stays quiet.
+
+## Running the tests
+
+```bash
+npm test
+python3 -m pytest skills/super-jev/tests -q
+```
+
+PRs fill in the PR template (`.github/PULL_REQUEST_TEMPLATE.md`), including the "Docs touched" section.

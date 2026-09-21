@@ -1,12 +1,12 @@
-import { budget as makeBudget } from './budget.ts';
-import { callInputTokens, planBatches, questionTokens, type QuestionCost } from './batch.ts';
-import { keyedPairs, mapAnswers, mappingIsExact, toRefs } from './reference.ts';
-import { decideOutcome, readAnswer, type GateConfig, type PassResult } from './outcome.ts';
-import { buildManifest } from './coverage.ts';
-import { CostMeter } from './cost.ts';
-import { gatherEvidence, type CompletenessReport, type EvidenceSpec, type SourceDoc } from './evidence.ts';
+import { budget as makeBudget } from '../enhance/budget.ts';
+import { callInputTokens, planBatches, questionTokens, type QuestionCost } from '../enhance/batch.ts';
+import { keyedPairs, mapAnswers, mappingIsExact, toRefs } from '../enhance/reference.ts';
+import { decideOutcome, readAnswer, type GateConfig, type PassResult } from '../enhance/outcome.ts';
+import { buildManifest } from '../enhance/coverage.ts';
+import { CostMeter } from '../enhance/cost.ts';
+import { gatherEvidence, type CompletenessReport, type EvidenceSpec, type SourceDoc } from '../enhance/evidence.ts';
 import { validateEvaluation } from '../jev.ts';
-import type { BatchPlan, ContextBudget, CostAccount, CoverageManifest, Evaluation, MappingReport, Question, RecordOutcome, Request } from './types.ts';
+import type { BatchPlan, ContextBudget, CostAccount, CoverageManifest, Evaluation, MappingReport, Question, RecordOutcome, Request } from '../enhance/types.ts';
 import type { Evaluator } from '../types.ts';
 
 export type InvestigationCase = {

@@ -21,7 +21,7 @@
  * fleet-local worker-verify door is not installed — see cmd_verify's
  * docstring there for why a fallback exists at all.
  */
-import { deriveFacts, formatDerivedFacts, preRules, type Evidence } from './enhance/derive-facts.ts';
+import { deriveFacts, formatDerivedFacts, preRules, type Evidence } from './derive-facts.ts';
 
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
