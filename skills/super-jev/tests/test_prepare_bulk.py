@@ -803,6 +803,160 @@ def test_split_120_approved_files_into_3_parts_one_connect_per_part(tmp_path, mo
     assert "splitting 120 approved files into 3 parts" in out
 
 
+def test_secret_scan_ignores_url_digits_but_still_holds_real_card_number(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "url.md").write_text(
+        "# Report\nSee https://example.com/file/1234567890123456 for details.\n"
+    )
+    (root / "card.md").write_text("# Card\nCard on file: 1234 5678 9012 3456\n")
+
+    files, held = pb.inventory([root])
+
+    assert {p.name for p in files} == {"url.md"}
+    held_by_name = {Path(p).name: why for p, why in held}
+    assert set(held_by_name) == {"card.md"}
+    assert "card/password" in held_by_name["card.md"]
+
+
+def test_secret_scan_ignores_iso_dates_in_card_check(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "dates.md").write_text(
+        "# Log\nEntries: 2026-09-14 2026-09-15 2026-09-16 2026-09-17\n"
+    )
+
+    files, held = pb.inventory([root])
+
+    assert {p.name for p in files} == {"dates.md"}
+    assert held == []
+
+
+def test_secret_scan_keyword_rule_unaffected_by_date_or_url_scrub(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "pw.md").write_text(
+        "# Notes\nSee https://example.com/setup as of 2026-09-14: the password is hunter2\n"
+    )
+
+    files, held = pb.inventory([root])
+
+    assert files == []
+    held_by_name = {Path(p).name: why for p, why in held}
+    assert "card/password" in held_by_name["pw.md"]
+
+
+def test_allow_held_admits_secret_file_with_override_reason(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
+
+    files, held = pb.inventory([root], allow_held=True)
+
+    assert {p.name for p in files} == {"pw.md"}
+    held_by_name = {Path(p).name: why for p, why in held}
+    assert "admitted by --allow-held" in held_by_name["pw.md"]
+
+
+def test_allow_held_does_not_lift_size_ceiling_hold(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "big.md").write_text("x" * 100)
+    monkeypatch.setattr(pb, "CEILING_BYTES", 50)
+
+    files, held = pb.inventory([root], allow_held=True)
+
+    assert files == []
+    held_by_name = {Path(p).name: why for p, why in held}
+    assert "size ceiling" in held_by_name["big.md"]
+
+
+def test_allow_held_flag_end_to_end_admits_file_into_connect_set(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "pw.md"
+    f.write_text("# Creds\nthe password for the router is hunter2\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "Router credentials note.", "question": "What is the router password?"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--allow-held", "--no-connect"]))
+    rc = pb.main()
+
+    assert rc == 0
+    report = json.loads((pb.CACHE_DIR / "my-records-report.json").read_text())
+    assert report["approved"] == [str(f)]
+    held_names = {Path(p).name for p, _why in report["held"]}
+    assert held_names == {"pw.md"}
+
+
+def test_writer_banner_shows_default_and_recommends_cheap_model(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nContent about one.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.delenv("SUPERJEV_WRITER_COMMAND", raising=False)
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "Describes one.", "question": "What is one?"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-connect"]))
+    rc = pb.main()
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "writer: claude -p --model haiku" in out
+    assert "cheap writer model" in out
+    assert "Haiku" in out
+
+
+def test_writer_banner_shows_explicit_writer_command_no_recommendation(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "one.md").write_text("# One\nContent about one.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None, command=None: {
+        str(root / "one.md"): {"path": str(root / "one.md"), "description": "Describes one.", "question": "What is one?"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--writer-command", "my-writer --flag", "--no-connect"]))
+    rc = pb.main()
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "writer: my-writer --flag" in out
+    assert "cheap writer model" not in out
+
+
+def test_writer_banner_reads_env_var_when_flag_omitted(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "one.md").write_text("# One\nContent about one.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setenv("SUPERJEV_WRITER_COMMAND", "env-writer --opt")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None, command=None: {
+        str(root / "one.md"): {"path": str(root / "one.md"), "description": "Describes one.", "question": "What is one?"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-connect"]))
+    rc = pb.main()
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "writer: env-writer --opt" in out
+    assert "cheap writer model" not in out
+
+
 def test_refresh_drops_removed_file_from_cache_and_reports_it(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()

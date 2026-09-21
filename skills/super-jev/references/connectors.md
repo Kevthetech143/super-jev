@@ -1,5 +1,7 @@
 # Source connectors
 
+Onboarding a new connector or refreshing one? Start at [`super-jev-connect/SKILL.md`](../../super-jev-connect/SKILL.md) — this page is the deep reference it links back to.
+
 A connector is the source-specific way an agent connects data to Super Jev. Use these names when explaining the product. Existing connector workflows share backends; these labels do not create a `connect` command, a new plugin, or automatic synchronization.
 
 | Human-facing connector | Available today | Agent execution/setup |
@@ -139,7 +141,12 @@ subdirectories, and holds back any file that looks like it carries
 card/password text or sits over the gate's size ceiling, writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
 secret-pattern case, the pattern type, line number and a digit-masked line so
-a human can review without opening the file. A cheap writer model drafts one
+a human can review without opening the file. The card-number check ignores ISO
+dates and URLs first, so a long numeric id in a URL or a run of dates on one
+line cannot trigger a false hold; the password/api-key keyword check is
+unaffected. `--allow-held` admits a file the secret scan alone would hold --
+it is still listed in the held file, noting the override -- as an explicit
+operator decision; it never lifts the size-ceiling hold. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,
@@ -160,14 +167,22 @@ any drafting starts. `--no-connect` stops after drafting and gating, for a
 dry run.
 
 By default the writer is `claude -p --model haiku` (change the model with
-`--writer-model`). Systems without Claude Code can supply another local writer:
+`--writer-model`) — a proven cheap default; bulk labeling should never run on
+a premium model. Every run prints a `writer: <command>` banner naming
+whichever command actually runs, and, when neither `--writer-command` nor the
+`SUPERJEV_WRITER_COMMAND` env var is set, a second line recommending a cheap
+writer and naming that default. Systems without Claude Code can supply
+another local writer, by flag or by env var:
 
 ```sh
 python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME \
   --writer-command 'my-description-writer --model small'
+
+export SUPERJEV_WRITER_COMMAND='my-description-writer --model small'
+python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME
 ```
 
-`--writer-command` is parsed into an argument list and run without a shell.
+`--writer-command` takes precedence over the env var; either is parsed into an argument list and run without a shell.
 The program receives the existing UTF-8 writer prompt on standard input: its
 final `FILES:` section is a JSON array of the file records. It must write only
 a JSON array to standard output. Each array member must be an object with
