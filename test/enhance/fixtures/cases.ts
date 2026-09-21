@@ -1,5 +1,4 @@
-// Ported verbatim from the offline experiment package
-// /Users/admin/super-jev-experiments/jev-robust/cases.ts.
+// Ported from the offline `jev-robust` experiment package.
 //
 // 32 labeled classification records and 12 linked-evidence investigations. All
 // synthetic, written as adversarial examples; labels were fixed before the

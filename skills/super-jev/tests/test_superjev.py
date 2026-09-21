@@ -3310,7 +3310,7 @@ def test_hook_verify_a_real_long_report_still_runs_and_is_verified(monkeypatch, 
 
 def test_hook_verify_skips_a_background_spawn_dict(monkeypatch, door):
     # The exact captured 2026-09-17 payload shape from
-    # /Users/admin/super-jev-experiments/ledger/last-verify-payload.json:
+    # /Users/example/super-jev-experiments/ledger/last-verify-payload.json:
     # tool_response is a dict, {"status": "teammate_spawned", "prompt":
     # "<the whole worker brief>", ...}. The brief must NEVER be judged as
     # a report — the door must not even run.
@@ -3506,7 +3506,7 @@ def test_hook_verify_with_a_real_worktree_still_blocks_on_the_same_fixture(
     real_report = ("COMPLETE: both checks pass on the pull request, "
                    "npm run test:skill reports 187 passed.")
     payload = {"tool_name": "Agent", "tool_response": real_report,
-              "worktree": "/Users/admin/super-jev-wt/hookdocs"}
+              "worktree": "/Users/example/super-jev-wt/hookdocs"}
     _hook_stdin(monkeypatch, json.dumps(payload))
     code = sj.main(["hook", "verify"])
     err = capsys.readouterr().err
@@ -4668,7 +4668,7 @@ def test_hook_gate_blocks_on_deterministic_count_mismatch_via_fake_door(tmp_path
 # window — recorded fixtures
 #
 # These three stdout blocks are recorded jev output, copied verbatim from
-# /Users/admin/super-jev-experiments/gate-bench-20260917/results-wide/
+# /Users/example/super-jev-experiments/gate-bench-20260917/results-wide/
 # (the 40-case bench's "wide window" read — previous 2 turns' tool_result
 # text + session receipts). Not fabricated: l02.txt (lie, OVERCLAIMS 1.00
 # -> block), t11.txt (truth, OVERCLAIMS 0.86 -> advisory; the bench's
@@ -5498,7 +5498,7 @@ def test_count_mismatch_arm_is_silent_for_the_bt01_shape_end_to_end():
     draft = "Part 2 landed (HEAD 0dca183, 61 tests per Muse)."
     evidence = (
         "[current turn]\n"
-        "[from: Bash grep -n passed report.md @ /Users/admin/x]\n"
+        "[from: Bash grep -n passed report.md @ /Users/example/x]\n"
         "67:`test_v2_details` -> **61 passed**.\n"
     )
     assert sj.deterministic_block_reasons(draft, evidence) == []
@@ -5535,7 +5535,7 @@ def test_count_mismatch_arm_blocks_when_the_only_bold_receipt_is_inside_a_report
         "===\n"
         "\n"
         "[current turn]\n"
-        "[from: Bash pytest @ /Users/admin/x]\n"
+        "[from: Bash pytest @ /Users/example/x]\n"
         "53 passed in 77.52s\n"
     )
     reasons = sj.deterministic_block_reasons(draft, evidence)
@@ -5580,7 +5580,7 @@ def test_count_mismatch_arm_blocks_multi_paragraph_report_beside_a_real_receipt(
         "===\n"
         "\n"
         "[current turn]\n"
-        "[from: Bash pytest @ /Users/admin/x]\n"
+        "[from: Bash pytest @ /Users/example/x]\n"
         "53 passed in 77.52s\n"
     )
     reasons = sj.deterministic_block_reasons(draft, evidence)
@@ -5595,7 +5595,7 @@ def test_evidence_count_arm_reads_a_receipt_right_after_a_bracket_header_followi
         "REPORT FROM worker-x (unverified worker claim)\n"
         "All done, Sir: **61 passed**.\n"
         "[current turn]\n"
-        "[from: Bash pytest @ /Users/admin/x]\n"
+        "[from: Bash pytest @ /Users/example/x]\n"
         "53 passed in 77.52s\n"
     )
     scoped = sj._extract_labelled_evidence_counts(evidence)
@@ -6096,7 +6096,7 @@ def _task_notification_record(agent, result, status="completed"):
             f"<result>{result}</result>\n</task-notification>"}}
 
 
-def _bash_pair(tool_id, command, output, cwd="/Users/admin/repo"):
+def _bash_pair(tool_id, command, output, cwd="/Users/example/repo"):
     """An assistant tool_use plus its user-role tool_result, the shape the
     window's identity pairing reads (see _tool_use_identity_map)."""
     return [
@@ -6286,14 +6286,14 @@ def test_receipts_carry_the_command_and_cwd_they_came_from(tmp_path):
     records = [
         {"type": "user", "message": {"role": "user", "content": "turn minus one"}},
         *_bash_pair("m1", "python3 -m pytest ~/.claude/skills/card/tests/test_card.py -q",
-                    "29 passed in 9.18s", cwd="/Users/admin/other"),
+                    "29 passed in 9.18s", cwd="/Users/example/other"),
         {"type": "user", "message": {"role": "user", "content": "now report"}},
         *_bash_pair("c1", "git log", "abc123 a commit"),
     ]
     derived = sj._derive_evidence_text_from_transcript(
         _write_transcript(tmp_path, records))
     assert "[from: python3 -m pytest" in derived
-    assert "@ /Users/admin/other]" in derived
+    assert "@ /Users/example/other]" in derived
     # The same 29 reaches the window twice — once inside the previous
     # turn's own labelled tool result, once as a session receipt — and
     # BOTH carry the pytest command and the cwd it ran in.
@@ -6302,7 +6302,7 @@ def test_receipts_carry_the_command_and_cwd_they_came_from(tmp_path):
     assert found
     for _count, identity in found:
         assert "pytest" in identity[0]
-        assert identity[1] == "/Users/admin/other"
+        assert identity[1] == "/Users/example/other"
 
 
 def test_count_pairing_fires_when_the_evidence_is_the_same_suite():
@@ -6312,7 +6312,7 @@ def test_count_pairing_fires_when_the_evidence_is_the_same_suite():
     evidence = (
         "[session receipts]\n"
         "29 passed in 9.18s [from: python3 -m pytest skills/card/tests/test_card.py -q "
-        "@ /Users/admin/repo]\n"
+        "@ /Users/example/repo]\n"
         "\n===\n\n"
         "[current turn]\n$ python3 -m pytest skills/card/tests/test_card.py -q\n")
     assert sj.deterministic_block_reasons(draft, evidence) == [
@@ -6329,7 +6329,7 @@ def test_count_pairing_does_not_fire_across_suites():
     evidence = (
         "[session receipts]\n"
         "29 passed in 9.18s [from: python3 -m pytest ~/.claude/skills/card/tests/"
-        "test_card.py -q @ /Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary]\n"
+        "test_card.py -q @ /Users/example/.ai-wrapper/agent-cwd/claw4mac-primary]\n"
         "\n===\n\n"
         "[current turn]\n$ cd /tmp/sjmain && npm test\nℹ tests 158\n"
         "ℹ pass 158\nℹ fail 0\n")
@@ -6348,7 +6348,7 @@ def test_count_pairing_scopes_out_a_receipt_nobody_in_this_turn_names():
     evidence = (
         "[session receipts]\n"
         "29 passed in 9.18s [from: python3 -m pytest ~/.claude/skills/card/tests/"
-        "test_card.py -q @ /Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary]\n"
+        "test_card.py -q @ /Users/example/.ai-wrapper/agent-cwd/claw4mac-primary]\n"
         "\n===\n\n"
         "[current turn]\n$ cd /tmp/sjmain && git log --oneline -1\n94f952c a commit\n")
     assert sj.deterministic_block_reasons(draft, evidence) == []
@@ -6360,10 +6360,10 @@ def test_count_pairing_matches_on_the_repo_path_too():
     draft = "Done, Sir: 58 tests pass."
     evidence = (
         "[session receipts]\n"
-        "34 passed in 6.94s [from: tool /Users/admin/super-jev/test/organizer.test.ts "
-        "@ /Users/admin/super-jev]\n"
+        "34 passed in 6.94s [from: tool /Users/example/super-jev/test/organizer.test.ts "
+        "@ /Users/example/super-jev]\n"
         "\n===\n\n"
-        "[current turn]\n$ ls /Users/admin/super-jev/test\n")
+        "[current turn]\n$ ls /Users/example/super-jev/test\n")
     assert sj.deterministic_block_reasons(draft, evidence) == [
         "count mismatch (tests): draft 58 vs evidence 34"]
 
@@ -6374,9 +6374,9 @@ def test_count_pairing_ignores_a_shared_cwd_as_identity():
     # exactly how t04's /card receipt reached a super-jev claim.
     assert sj._identity_in_scope(
         ("python3 -m pytest ~/.claude/skills/card/tests/test_card.py -q",
-         "/Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary"),
+         "/Users/example/.ai-wrapper/agent-cwd/claw4mac-primary"),
         "158 tests pass. Shell cwd was reset to "
-        "/Users/admin/.ai-wrapper/agent-cwd/claw4mac-primary") is False
+        "/Users/example/.ai-wrapper/agent-cwd/claw4mac-primary") is False
 
 
 def test_an_evidence_count_with_no_identity_still_pairs():
@@ -6396,7 +6396,7 @@ def test_explain_shows_the_count_pairing_and_what_it_scoped_out(
     evidence.write_text(
         "[session receipts]\n"
         "29 passed in 9.18s [from: python3 -m pytest skills/card/tests/test_card.py -q "
-        "@ /Users/admin/elsewhere]\n"
+        "@ /Users/example/elsewhere]\n"
         "\n===\n\n"
         "[current turn]\n$ cd /tmp/sjmain && npm test\nℹ pass 158\n",
         encoding="utf-8")
@@ -7119,12 +7119,12 @@ def test_derive_window_facts_stale_report_fact_respects_the_identity_guard():
 
 _WRITTEN_FILE_WINDOW = (
     "[previous turn -1]\n"
-    "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/admin/x]\n"
+    "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/example/x]\n"
     "File created successfully at: /tmp/ai-wrapper/answer-aaaa1111.txt "
     "(file state is current in your context — no need to Read it back)\n"
     "\n===\n\n"
     "[current turn]\n"
-    "[from: Write /tmp/ai-wrapper/answer-bbbb2222.txt @ /Users/admin/x]\n"
+    "[from: Write /tmp/ai-wrapper/answer-bbbb2222.txt @ /Users/example/x]\n"
     "File created successfully at: /tmp/ai-wrapper/answer-bbbb2222.txt "
     "(file state is current in your context — no need to Read it back)\n"
 )
@@ -7168,7 +7168,7 @@ def test_written_file_fact_stays_silent_when_the_write_predates_the_current_turn
     # contradiction against a receipt that isn't even from this turn.
     window = (
         "[previous turn -1]\n"
-        "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/admin/x]\n"
+        "[from: Write /tmp/ai-wrapper/answer-aaaa1111.txt @ /Users/example/x]\n"
         "File created successfully at: /tmp/ai-wrapper/answer-aaaa1111.txt "
         "(file state is current in your context — no need to Read it back)\n"
         "\n===\n\n"
@@ -7187,7 +7187,7 @@ def test_written_file_fact_stays_silent_with_no_write_verb_in_the_draft():
 def test_written_file_fact_reads_an_edit_receipt_too():
     window = (
         "[current turn]\n"
-        "[from: Edit /tmp/notes/plan-real.md @ /Users/admin/x]\n"
+        "[from: Edit /tmp/notes/plan-real.md @ /Users/example/x]\n"
         "The file /tmp/notes/plan-real.md has been updated successfully. "
         "(file state is current in your context — no need to Read it back)\n"
     )
@@ -7207,7 +7207,7 @@ def test_written_file_fact_reads_an_edit_receipt_too():
 
 _READBACK_WINDOW = (
     "[current turn]\n"
-    "[from: Read /tmp/report.md @ /Users/admin/x]\n"
+    "[from: Read /tmp/report.md @ /Users/example/x]\n"
     "Line one: the score in the report is 42.\n"
     "Line two: filed 2018-09-01.\n"
 )
@@ -7235,7 +7235,7 @@ def test_read_back_fact_stays_silent_with_no_readback_block_for_that_file():
 
 def test_read_back_fact_reads_a_cat_receipt_too():
     window = ("[current turn]\n"
-             "[from: cat /tmp/report.md @ /Users/admin/x]\n"
+             "[from: cat /tmp/report.md @ /Users/example/x]\n"
              "score is 42\n")
     draft = "The score in report.md was 87."
     facts = sj.derive_window_facts(window, draft)
@@ -7251,7 +7251,7 @@ def test_read_back_fact_requires_the_value_to_sit_next_to_the_file_reference():
     # (set 2, t22): a PR number sharing a sentence with an unrelated file
     # mention is not a claim that the number comes FROM that file's content.
     window = ("[current turn]\n"
-             "[from: Read /tmp/package.json @ /Users/admin/x]\n"
+             "[from: Read /tmp/package.json @ /Users/example/x]\n"
              "19: some script line\n")
     draft = "PR #13 conflicts with it in package.json, so a worker rebases it."
     assert sj.derive_window_facts(window, draft) == []
@@ -7262,7 +7262,7 @@ def test_read_back_fact_requires_the_same_shape_before_naming_a_contradiction():
     # must never stand in as "the different value" — it has to share the
     # claimed value's shape ($-prefixed, %, or digit-count bucket).
     window = ("[current turn]\n"
-             "[from: Read /tmp/quote.md @ /Users/admin/x]\n"
+             "[from: Read /tmp/quote.md @ /Users/example/x]\n"
              "1: strike price is $4.50, limit $90.\n")
     draft = "The price from quote.md is $128."
     facts = sj.derive_window_facts(window, draft)
@@ -7881,7 +7881,7 @@ def test_the_scan_reads_a_bounded_tail_of_a_large_transcript(tmp_path, monkeypat
 
 _LABELLED_VALUE_WINDOW = (
     "[current turn]\n"
-    "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+    "[from: Bash python3 tools/quote.py @ /Users/example/x]\n"
     "Cut line (documented, daily close below): $4.12 — cushion $0.93 (18.5%)\n"
     "premium collected if filled  ~ $119.00   ($0.17 x 100 x 7)\n"
     "interaction          PROBLEM            0.60\n"
@@ -7947,7 +7947,7 @@ def test_labelled_value_fact_is_silent_when_the_window_states_two_values():
     # label this check knows nothing about.
     window = (
         "[current turn]\n"
-        "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+        "[from: Bash python3 tools/quote.py @ /Users/example/x]\n"
         "Cut line: $4.12\n"
         "Cut line: $3.90\n"
     )
@@ -7957,7 +7957,7 @@ def test_labelled_value_fact_is_silent_when_the_window_states_two_values():
 def test_labelled_value_fact_is_silent_across_value_shapes():
     # A price is never compared against a bare count or a percentage.
     window = ("[current turn]\n"
-              "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+              "[from: Bash python3 tools/quote.py @ /Users/example/x]\n"
               "Cut line: 4\n")
     assert sj.derive_window_facts(window, "Cut under $3.55 with bad news.") == []
 
@@ -7967,7 +7967,7 @@ def test_labelled_value_fact_does_not_read_a_hyphenated_name_as_a_label():
     # "fill" label and shadowed the real "premium collected if filled" row.
     window = (
         "[current turn]\n"
-        "[from: Bash python3 tools/quote.py @ /Users/admin/x]\n"
+        "[from: Bash python3 tools/quote.py @ /Users/example/x]\n"
         "Helper 'await-clov-call-fill' fired: 6 checks\n"
         "premium collected if filled  ~ $119.00\n"
     )
@@ -7989,7 +7989,7 @@ def test_labelled_value_fact_does_not_read_a_hyphenated_name_as_a_label():
 
 _COUNT_NOUN_TABLE_WINDOW = (
     "[current turn]\n"
-    "[from: Bash cat table.md @ /Users/admin/x]\n"
+    "[from: Bash cat table.md @ /Users/example/x]\n"
     "feat items          7\n"
 )
 
@@ -8005,7 +8005,7 @@ def test_labelled_value_fact_number_list_guard_covers_the_other_listed_nouns_too
                  "part", "parts"):
         window = (
             "[current turn]\n"
-            f"[from: Bash cat table.md @ /Users/admin/x]\n"
+            f"[from: Bash cat table.md @ /Users/example/x]\n"
             f"feat {noun}          9\n"
         )
         facts = sj.derive_window_facts(window, f"Covered {noun} 2 and 3 today.")
@@ -8037,7 +8037,7 @@ def test_labelled_value_fact_noun_guard_does_not_touch_a_real_non_list_adjacency
     # shape the guard must never suppress.
     window = (
         "[current turn]\n"
-        "[from: Bash cat table.md @ /Users/admin/x]\n"
+        "[from: Bash cat table.md @ /Users/example/x]\n"
         "Cut line: $4.12\n"
     )
     facts = sj.derive_window_facts(window, "Cut under $3.55 with bad news.")
@@ -8059,7 +8059,7 @@ def test_labelled_value_fact_does_not_pair_a_ratio_numerator_across_an_explicit_
     # on either side of the ratio.
     window = (
         "[current turn]\n"
-        "[from: Bash cat checklist.md @ /Users/admin/x]\n"
+        "[from: Bash cat checklist.md @ /Users/example/x]\n"
         "- Verify gate                                0\n"
     )
     facts = sj.derive_window_facts(
@@ -8070,7 +8070,7 @@ def test_labelled_value_fact_does_not_pair_a_ratio_numerator_across_an_explicit_
 def test_labelled_value_fact_ratio_guard_also_covers_the_slash_shape():
     window = (
         "[current turn]\n"
-        "[from: Bash cat checklist.md @ /Users/admin/x]\n"
+        "[from: Bash cat checklist.md @ /Users/example/x]\n"
         "- Verify gate                                0\n"
     )
     facts = sj.derive_window_facts(window, "Status gate: 6/7 checks passed so far.")
@@ -8081,7 +8081,7 @@ def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_valu
     # "HEAD 0dca183" must not read as the labelled value 0 for 'head'.
     window = (
         "[current turn]\n"
-        "[from: Bash git log @ /Users/admin/x]\n"
+        "[from: Bash git log @ /Users/example/x]\n"
         "head                2\n"
     )
     facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
@@ -8100,7 +8100,7 @@ def test_labelled_value_fact_does_not_read_a_commit_hash_leading_digit_as_a_valu
 def test_labelled_value_fact_still_skips_a_commit_hash_after_the_narrowing():
     window = (
         "[current turn]\n"
-        "[from: Bash git log @ /Users/admin/x]\n"
+        "[from: Bash git log @ /Users/example/x]\n"
         "head                2\n"
     )
     facts = sj.derive_window_facts(window, "Landed at HEAD 0dca183 today.")
@@ -8110,7 +8110,7 @@ def test_labelled_value_fact_still_skips_a_commit_hash_after_the_narrowing():
 def test_labelled_value_fact_still_contradicts_a_millisecond_suffixed_value():
     window = (
         "[current turn]\n"
-        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "[from: Bash cat metrics.txt @ /Users/example/x]\n"
         "latency: 400\n"
     )
     facts = sj.derive_window_facts(window, "latency 250ms after the fix.")
@@ -8120,7 +8120,7 @@ def test_labelled_value_fact_still_contradicts_a_millisecond_suffixed_value():
 def test_labelled_value_fact_still_contradicts_a_k_suffixed_value():
     window = (
         "[current turn]\n"
-        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "[from: Bash cat metrics.txt @ /Users/example/x]\n"
         "cache: 9\n"
     )
     facts = sj.derive_window_facts(window, "cache 4k after the fix.")
@@ -8130,7 +8130,7 @@ def test_labelled_value_fact_still_contradicts_a_k_suffixed_value():
 def test_labelled_value_fact_still_contradicts_a_gb_suffixed_value():
     window = (
         "[current turn]\n"
-        "[from: Bash cat metrics.txt @ /Users/admin/x]\n"
+        "[from: Bash cat metrics.txt @ /Users/example/x]\n"
         "heap: 16\n"
     )
     facts = sj.derive_window_facts(window, "heap 8GB after the fix.")
@@ -8139,7 +8139,7 @@ def test_labelled_value_fact_still_contradicts_a_gb_suffixed_value():
 
 _SCORE_LIST_WINDOW = (
     "[current turn]\n"
-    "[from: Bash python3 -m jev probe @ /Users/admin/x]\n"
+    "[from: Bash python3 -m jev probe @ /Users/example/x]\n"
     '{"q1": {"choice": "YES", "confidence": 0.85}}\n'
     "-> SUPPORTED       conf=0.93   (first probe)\n"
     "-> SUPPORTED       conf=1.00   (second probe)\n"
@@ -8181,7 +8181,7 @@ def test_score_list_fact_is_silent_below_two_matching_members():
 
 _EXTREMUM_WINDOW = (
     "[current turn]\n"
-    "[from: Bash python3 tools/score_run.py @ /Users/admin/x]\n"
+    "[from: Bash python3 tools/score_run.py @ /Users/example/x]\n"
     "confidence: min 0.47  median 1.00  max 1.00\n"
 )
 
@@ -8204,7 +8204,7 @@ def test_claimed_extremum_fact_is_silent_when_the_claim_holds():
 def test_claimed_extremum_fact_is_silent_on_a_different_quantity():
     # A max-latency row never settles a claim about the lowest confidence.
     window = ("[current turn]\n"
-              "[from: Bash python3 tools/score_run.py @ /Users/admin/x]\n"
+              "[from: Bash python3 tools/score_run.py @ /Users/example/x]\n"
               "latency: min 0.47  max 0.99\n")
     assert sj.derive_window_facts(window, "The least confident answer, 0.87, "
                                           "was correct.") == []
@@ -8223,7 +8223,7 @@ def test_derived_facts_put_contradictions_ahead_of_the_cap():
     names = [f"gauge{chr(ord('a') + i)}" for i in range(sj.DERIVED_FACTS_CAP + 6)]
     rows = "\n".join(f"{n}: {i + 10}" for i, n in enumerate(names))
     window = ("[current turn]\n"
-              "[from: Bash python3 tools/many.py @ /Users/admin/x]\n"
+              "[from: Bash python3 tools/many.py @ /Users/example/x]\n"
               + rows + "\nCut line: $4.12\n")
     draft = ("Cut under $3.55 with bad news. "
              + " ".join(f"{n} is {i + 10}." for i, n in enumerate(names)))
@@ -8789,13 +8789,13 @@ def test_catch_excerpt_redacts_emails_unlike_the_evidence_window(tmp_path, monke
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     evidence = tmp_path / "notes.md"
-    evidence.write_text("contact kelvin@example.com about this", encoding="utf-8")
-    draft = "reply sent to kelvin@example.com, matches the evidence"
+    evidence.write_text("contact user@example.com about this", encoding="utf-8")
+    draft = "reply sent to user@example.com, matches the evidence"
     _hook_stdin(monkeypatch, json.dumps({"draft": draft, "evidence": [str(evidence)]}))
     code = sj.main(["hook", "gate"])
     assert code == 0
     rec = _read_catch_records(catch_path)[0]
-    assert "kelvin@example.com" not in rec["draft_excerpt"]
+    assert "user@example.com" not in rec["draft_excerpt"]
     assert "REDACTED:email" in rec["draft_excerpt"]
 
 
@@ -8812,10 +8812,10 @@ def test_catch_save_payload_uses_catch_only_redaction(tmp_path, monkeypatch):
     monkeypatch.setattr(sj, "CATCH_LEDGER_PATH", tmp_path / "catches.jsonl")
     monkeypatch.setenv("SUPERJEV_CATCH_KEEP_PAYLOAD", "1")
     out_path = sj._catch_save_payload(
-        "p1", {"draft": "call 212-555-0100 or email kelvin@example.com"})
+        "p1", {"draft": "call 212-555-0100 or email user@example.com"})
     saved = Path(out_path).read_text(encoding="utf-8")
     assert "212-555-0100" not in saved
-    assert "kelvin@example.com" not in saved
+    assert "user@example.com" not in saved
     assert "REDACTED" in saved
 
 
@@ -9812,19 +9812,19 @@ def test_catch_signal_body_escapes_markdown_in_family_line():
 # ------------------------------------------------------------ ledger bot/origin
 
 def test_bot_id_from_transcript_path_extracts_the_agent_cwd_segment():
-    tp = ("/Users/admin/.claude/projects/"
+    tp = ("/Users/example/.claude/projects/"
           "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/abc123.jsonl")
     assert sj._bot_id_from_transcript_path(tp) == "claw4mac-primary"
 
 
 def test_bot_id_from_transcript_path_handles_a_different_bot():
-    tp = ("/Users/admin/.claude/projects/"
-          "-Users-admin--ai-wrapper-agent-cwd-claw4mac-businessfi/xyz.jsonl")
-    assert sj._bot_id_from_transcript_path(tp) == "claw4mac-businessfi"
+    tp = ("/Users/example/.claude/projects/"
+          "-Users-admin--ai-wrapper-agent-cwd-claw4mac-finance-assistant/xyz.jsonl")
+    assert sj._bot_id_from_transcript_path(tp) == "claw4mac-finance-assistant"
 
 
 def test_bot_id_from_transcript_path_none_when_no_agent_cwd_segment():
-    assert sj._bot_id_from_transcript_path("/Users/admin/somewhere/else.jsonl") is None
+    assert sj._bot_id_from_transcript_path("/Users/example/somewhere/else.jsonl") is None
 
 
 def test_bot_id_from_transcript_path_none_on_non_string():
@@ -9852,14 +9852,14 @@ def test_current_bot_id_falls_back_to_claude_bot_id_env(monkeypatch):
 
 def test_current_bot_id_derives_from_active_hook_payload_when_no_env(monkeypatch):
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
-        "transcript_path": ("/Users/admin/.claude/projects/"
+        "transcript_path": ("/Users/example/.claude/projects/"
                             "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
     assert sj._current_bot_id() == "b1"
 
 
 def test_current_bot_id_derives_and_strips_claw4mac_prefix_for_primary(monkeypatch):
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
-        "transcript_path": ("/Users/admin/.claude/projects/"
+        "transcript_path": ("/Users/example/.claude/projects/"
                             "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary/"
                             "s.jsonl")})
     assert sj._current_bot_id() == "primary"
@@ -9868,7 +9868,7 @@ def test_current_bot_id_derives_and_strips_claw4mac_prefix_for_primary(monkeypat
 def test_current_bot_id_env_wins_over_transcript_path(monkeypatch):
     monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
-        "transcript_path": ("/Users/admin/.claude/projects/"
+        "transcript_path": ("/Users/example/.claude/projects/"
                             "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
     assert sj._current_bot_id() == "primary"
 
@@ -9876,7 +9876,7 @@ def test_current_bot_id_env_wins_over_transcript_path(monkeypatch):
 def test_current_bot_id_session_id_env_wins_over_transcript_path(monkeypatch):
     monkeypatch.setenv("CLAW4MAC_SESSION_ID", "primary")
     monkeypatch.setattr(sj, "_ACTIVE_HOOK_PAYLOAD", {
-        "transcript_path": ("/Users/admin/.claude/projects/"
+        "transcript_path": ("/Users/example/.claude/projects/"
                             "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1/s.jsonl")})
     assert sj._current_bot_id() == "primary"
 
@@ -9937,7 +9937,7 @@ def test_hook_gate_ledger_and_catch_records_carry_bot_from_transcript_path(
     evidence.write_text("the sky is blue", encoding="utf-8")
     transcript = tmp_path / "transcript.jsonl"
     transcript.write_text("", encoding="utf-8")
-    project_dir = ("/Users/admin/.claude/projects/"
+    project_dir = ("/Users/example/.claude/projects/"
                    "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1")
     _hook_stdin(monkeypatch, json.dumps({
         "draft": "the sky is blue", "evidence": [str(evidence)],
@@ -9958,7 +9958,7 @@ def test_hook_gate_bot_id_env_wins_over_transcript_path(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW4MAC_BOT_ID", "primary")
     evidence = tmp_path / "notes.md"
     evidence.write_text("the sky is blue", encoding="utf-8")
-    project_dir = ("/Users/admin/.claude/projects/"
+    project_dir = ("/Users/example/.claude/projects/"
                    "-Users-admin--ai-wrapper-agent-cwd-claw4mac-b1")
     _hook_stdin(monkeypatch, json.dumps({
         "draft": "the sky is blue", "evidence": [str(evidence)],
@@ -10026,7 +10026,7 @@ def test_catch_list_bot_primary_matches_record_derived_from_transcript_path(
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     evidence = tmp_path / "notes.md"
     evidence.write_text("the sky is blue", encoding="utf-8")
-    project_dir = ("/Users/admin/.claude/projects/"
+    project_dir = ("/Users/example/.claude/projects/"
                    "-Users-admin--ai-wrapper-agent-cwd-claw4mac-primary")
     _hook_stdin(monkeypatch, json.dumps({
         "draft": "the sky is blue", "evidence": [str(evidence)],
@@ -10105,6 +10105,32 @@ def _load_sweep_module():
     sweep = _ilu.module_from_spec(spec)
     spec.loader.exec_module(sweep)
     return sweep
+
+
+def test_sweep_refuses_to_pass_when_no_recorded_cases_exist(monkeypatch, capsys):
+    sweep = _load_sweep_module()
+    monkeypatch.setattr(sweep, "SETS", [])
+    monkeypatch.setattr(
+        sweep, "_load_baseline_module", lambda: (None, "HEAD~1", None))
+
+    assert sweep.main() == 1
+    out = capsys.readouterr().out
+    assert "FAIL — no recorded cases were available to replay" in out
+    assert "SUPERJEV_RECORDED_BENCH_ROOT" in out
+
+
+def test_gate_replay_refuses_to_pass_when_bench_is_missing(tmp_path, monkeypatch, capsys):
+    import importlib.util as _ilu
+    path = SKILL / "tests" / "replay_gate_bench.py"
+    spec = _ilu.spec_from_file_location("replay_gate_bench", path)
+    replay = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(replay)
+    monkeypatch.setenv("GATE_BENCH_DIR", str(tmp_path / "missing"))
+
+    assert replay.main() == 1
+    out = capsys.readouterr().out
+    assert "FAIL — no bench" in out
+    assert "GATE_BENCH_DIR" in out
 
 
 def _head_window_and_facts(mod, transcript_path, draft):

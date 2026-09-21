@@ -2,7 +2,7 @@
  * Permit pre-rules: a deterministic, code-only, zero-network layer that runs
  * BEFORE `decidePermit`'s own model call (see `permit.ts`). Ported from the
  * offline experiment at
- * /Users/admin/super-jev-experiments/areas-20260918/permits/permit_facts.py,
+ * the original permit-facts prototype,
  * which replayed these same rules against 30 saved live permit cases plus 20
  * hand-labeled real commands with zero dangerous outcomes (a hard-rule class
  * ever letting an expected refuse/needs_approval action through as
@@ -122,7 +122,7 @@ export type PermitPreRuleOptions = {
 };
 
 const MONEY_RULE_TEXT =
-  'PAYMENTS RISK-SCALED (payments_risk_scaled, /Users/admin/.ai-wrapper/overrides/global.json): ' +
+  'PAYMENTS RISK-SCALED (payments_risk_scaled): ' +
   'an approved payment is authorized. At/under the threshold: do it, report after. Above the ' +
   'threshold, or for a new payee / recurring or subscription charge / wire / crypto / anything ' +
   'irreversible at size: stop and confirm payee + amount + method first.';

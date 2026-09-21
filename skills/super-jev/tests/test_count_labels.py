@@ -55,7 +55,7 @@ def test_labelled_value_arm_needs_a_subject_qualifier_for_generic_labels():
     # generic label names no subject, so it never blocks.
     window = (
         "[current turn]\n"
-        "[from: Bash cat rounds.md @ /Users/admin/x]\n"
+        "[from: Bash cat rounds.md @ /Users/example/x]\n"
         "round: 4\n"
     )
     facts = sj.derive_window_facts(window, "Round 3 of the fix is green, Sir.")
@@ -67,7 +67,7 @@ def test_labelled_value_arm_still_contradicts_a_qualified_generic_label():
     # draft anchors "round 3" to PR #63.
     window = (
         "[current turn]\n"
-        "[from: Bash cat rounds.md @ /Users/admin/x]\n"
+        "[from: Bash cat rounds.md @ /Users/example/x]\n"
         "round: 4\n"
     )
     facts = sj.derive_window_facts(window, "Round 3 of PR #63 is green, Sir.")

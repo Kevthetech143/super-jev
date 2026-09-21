@@ -1,5 +1,5 @@
 {
- "note": "Answers recorded from the live pilot calls in /Users/admin/super-jev-experiments/jev-robust/results.json. Reused here only to script an offline stub. They prove nothing about accuracy.",
+ "note": "Answers recorded in a private pilot artifact (local path omitted). Reused here only to script an offline stub. They prove nothing about accuracy.",
  "classification": {
   "namedShuffled": {
    "D20": {

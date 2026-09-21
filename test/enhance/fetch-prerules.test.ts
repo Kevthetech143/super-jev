@@ -28,9 +28,9 @@ function tableTransport(table: Record<string, string>): Evaluator {
 
 const fixtureCatalog: FetchCatalogEntry[] = [
   {
-    id: 'pay-coned',
-    text: 'Pay the Con Edison electric bill via the guest checkout flow.',
-    utterances: ['pay the electric bill', 'pay my coned bill', 'electric'],
+    id: 'pay-utility',
+    text: 'Pay the example utility electric bill via the guest checkout flow.',
+    utterances: ['pay the electric bill', 'pay my utility bill', 'electric'],
     negatives: ['gas bill']
   },
   {
@@ -57,10 +57,10 @@ const fixtureCatalog: FetchCatalogEntry[] = [
 
 test('buildTriggerIndex excludes single-word utterances from every trigger set', () => {
   const idx = buildTriggerIndex(fixtureCatalog);
-  const conedTriggers = idx.triggersByRecord.get('pay-coned')!;
-  assert.ok(!conedTriggers.includes('electric'), 'a single-word utterance must never be a trigger');
-  assert.ok(conedTriggers.includes('pay the electric bill'));
-  assert.deepEqual(idx.droppedSingleWord.get('pay-coned'), ['electric']);
+  const utilityTriggers = idx.triggersByRecord.get('pay-utility')!;
+  assert.ok(!utilityTriggers.includes('electric'), 'a single-word utterance must never be a trigger');
+  assert.ok(utilityTriggers.includes('pay the electric bill'));
+  assert.deepEqual(idx.droppedSingleWord.get('pay-utility'), ['electric']);
 });
 
 test('buildTriggerIndex excludes an utterance shared by more than one record, from every owner', () => {
@@ -79,8 +79,8 @@ test('normalizePhrase lowercases, strips punctuation and collapses whitespace', 
 test('factsForRequest finds a record whose trigger phrase is a substring of the request', () => {
   const idx = buildTriggerIndex(fixtureCatalog);
   const facts = factsForRequest('can you please pay the electric bill today', idx);
-  assert.deepEqual(facts.matchedRecordIds, ['pay-coned']);
-  assert.equal(facts.matchedPhraseByRecord.get('pay-coned'), 'pay the electric bill');
+  assert.deepEqual(facts.matchedRecordIds, ['pay-utility']);
+  assert.equal(facts.matchedPhraseByRecord.get('pay-utility'), 'pay the electric bill');
   assert.equal(facts.anyTriggerHit, true);
 });
 
@@ -107,7 +107,7 @@ test('R1 fires: a unique multi-word trigger with no negative hit serves directly
   assert.equal(decision.kind, 'serve');
   if (decision.kind === 'serve') {
     assert.equal(decision.source, 'trigger');
-    assert.equal(decision.id, 'pay-coned');
+    assert.equal(decision.id, 'pay-utility');
     assert.match(decision.reason, /R1/);
   }
   assert.equal(called, false, 'applyPreRules must not invoke the transport when R1 settles the request');
@@ -115,7 +115,7 @@ test('R1 fires: a unique multi-word trigger with no negative hit serves directly
 
 test('R1 does not fire on a single-word utterance alone', async () => {
   const idx = buildTriggerIndex(fixtureCatalog);
-  const transport = tableTransport({ 'pay-coned': 'medium' });
+  const transport = tableTransport({ 'pay-utility': 'medium' });
   const { decision } = await applyPreRules(fixtureCatalog, 'electric', idx, { transport });
   assert.notEqual(decision.kind, 'serve');
 });
@@ -140,13 +140,13 @@ test('R1 does not fire when the request also matches one of the record\'s own ne
 test('R2 fires: the judge\'s own top-1 has a negative-phrase hit in the request, and is demoted', async () => {
   const idx = buildTriggerIndex(fixtureCatalog);
   // The request itself carries no catalog trigger word combination that
-  // resolves R1 (only "gas bill", which is pay-coned's negative, not a
+  // resolves R1 (only "gas bill", which is pay-utility's negative, not a
   // trigger of any record), so this exercises the judge + R2 path.
-  const transport = tableTransport({ 'pay-coned': 'high' });
+  const transport = tableTransport({ 'pay-utility': 'high' });
   const { decision } = await applyPreRules(fixtureCatalog, 'can you pay the gas bill', idx, { transport });
   assert.equal(decision.kind, 'demote');
   if (decision.kind === 'demote') {
-    assert.equal(decision.id, 'pay-coned');
+    assert.equal(decision.id, 'pay-utility');
     assert.match(decision.reason, /R2/);
   }
 });
@@ -170,7 +170,7 @@ test('R3 fires: no record\'s trigger appears anywhere, and the judge top-1 confi
         if (question.type !== 'choice') continue;
         const recordKey = Object.keys(state).find(k => wireKey === `q_relevance_${k}` || wireKey === `q0_r${Object.keys(state).indexOf(k)}`);
         const id = state[recordKey!].id;
-        answers[wireKey] = id === 'pay-coned'
+        answers[wireKey] = id === 'pay-utility'
           ? choiceAnswer('low', 0.3, Object.keys(question.criteria))
           : choiceAnswer('none', 0.5, Object.keys(question.criteria));
       }
@@ -184,7 +184,7 @@ test('R3 fires: no record\'s trigger appears anywhere, and the judge top-1 confi
 
 test('R3 does not fire when a trigger is present, even if the judge confidence is low', async () => {
   const idx = buildTriggerIndex(fixtureCatalog);
-  const transport = tableTransport({ 'pay-coned': 'low' });
+  const transport = tableTransport({ 'pay-utility': 'low' });
   const { decision } = await applyPreRules(fixtureCatalog, 'pay the electric bill maybe', idx, { transport }, 0.9);
   // R1 should have already served this before the judge is even asked.
   assert.equal(decision.kind, 'serve');
@@ -192,7 +192,7 @@ test('R3 does not fire when a trigger is present, even if the judge confidence i
 
 test('R3 does not fire when the judge top-1 confidence clears the floor', async () => {
   const idx = buildTriggerIndex(fixtureCatalog);
-  const transport = tableTransport({ 'pay-coned': 'high' });
+  const transport = tableTransport({ 'pay-utility': 'high' });
   const { decision } = await applyPreRules(fixtureCatalog, 'order a pizza for dinner', idx, { transport }, 0.5);
   assert.equal(decision.kind, 'fallThrough');
 });
@@ -204,9 +204,9 @@ test('formatPreRuleExplain prints the matched trigger, the ambiguity count and t
   const facts = factsForRequest('pay the electric bill', idx);
   const text = formatPreRuleExplain({
     facts, droppedSingleWord: idx.droppedSingleWord, droppedShared: idx.droppedShared,
-    decision: { kind: 'serve', source: 'trigger', id: 'pay-coned', reason: 'R1: unique multi-word trigger "pay the electric bill" matched record pay-coned; no negatives hit; no judge call made' }
+    decision: { kind: 'serve', source: 'trigger', id: 'pay-utility', reason: 'R1: unique multi-word trigger "pay the electric bill" matched record pay-utility; no negatives hit; no judge call made' }
   });
-  assert.match(text, /trigger hit: record pay-coned/);
+  assert.match(text, /trigger hit: record pay-utility/);
   assert.match(text, /ambiguity guard: 1 utterance/);
   assert.match(text, /R1/);
 });
