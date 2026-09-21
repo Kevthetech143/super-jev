@@ -1,6 +1,6 @@
 # super-jev wishlist
 
-Seven items, no filler. super-jev is a Jev-tuned harness: one judge behind one
+Ten items, no filler. super-jev is a Jev-tuned harness: one judge behind one
 adapter, thresholds measured against Jev. Each module (batching, named
 records, coverage, evidence chains, outcomes, cost, sweep) stands alone and
 can be replaced or left out. A different judge is possible but means
@@ -130,3 +130,57 @@ Proof for all seven: the live bench (`bench/live-measure.ts`) reports
 accuracy, accepted-error rate, review rate, coverage, tokens and latency
 together. A feature ships only once measured, and the numbers live in the
 bench output, not in this document.
+
+8. **AUTO-CATCH** — a verified hit is kept for reuse without the agent
+   remembering to approve it, on any model, with or without harness hooks.
+   Closes: the approved-answer cache staying empty because approval is a
+   manual command nobody runs; the same lookup paid for again every day.
+   Harness: `ask` leaves a receipt (question, attempt, top files); `--done
+   "<answer>"` picks the opened evidence file, runs the claim gate on the
+   cited sentences, and approves the FILE'S QUOTES (never the agent's prose)
+   into both the exact lane and the searchable lane only when SUPPORTED at
+   the line, honest, not time-sensitive, and the top file clearly beats the
+   second. One config switch, default off; the Claude Code Stop hook is an
+   optional shortcut that calls the same `--done`. Every decision logged.
+   Status: PLANNED — build brief and tests in progress (feat/auto-catch).
+
+9. **RECIPES** — cache the HOW, not the answer: a live question ("any Back
+   Market orders today?") resolves to a registered read-only script the
+   agent already found once, and the harness runs it and returns fresh data.
+   Closes: agents re-hunting the same API or command every time a live
+   question repeats; the cache being useless for anything that changes.
+   Harness: a manual entry whose answer is `RECIPE: <path> sha256=<h>` with
+   the script as `--source`; `ask --run` executes it only when the path is
+   inside one allowlisted recipes folder, the hash still matches, argv is a
+   list (no shell), and the output is non-empty with exit 0 — otherwise it
+   hands the recipe to the agent instead. Read-only recipes only in v1; per
+   principal; `autoRun` switch default off; every run logged. Ties to item 5
+   (ACTION PERMIT) the day a recipe is allowed to change anything. Meant to
+   grow slowly: one recipe per proven lookup, never a generic executor.
+   Status: PROTOTYPE PASSED 2026-09-21 — exact hit ran live, a paraphrase
+   found and ran it via the search lane, a tampered script was withheld as
+   STALE by the existing source-hash check. Build after item 8.
+
+10. **BROWSER DRIVER** — Jev decides the next browser action; a long-lived
+    Playwright process does the typing. Cache the HOW of a login as a recipe.
+    Closes: agents burning a full LLM turn per click, and the 1 s-per-command
+    cost of spawning `playwright-cli` 6-8 times per step (measured: a 2-pick
+    Jev login took 33.6 s wall, 1.3 s of it Jev).
+    Harness: (a) code enumerates 2-14 candidate actions from the accessibility
+    snapshot (click/fill/DONE); (b) Jev picks one as a Choice question;
+    (c) a code permit gate runs before any action — deny list, per-site allow
+    list, confidence floor, credentials filled from the vault and never sent to
+    Jev, credential guard on every payload; (d) goal check + extraction are JS
+    predicates owned by code; (e) `actions.jsonl` stays the audit trail.
+    Speed: one long-lived browser process with the same persistent profiles
+    (steps become function calls), batching as the interim step; after one
+    Jev-approved login, replay it as a recipe (item 9) and call Jev only when
+    the page differs. Headless is a flag, not the fix.
+    Status: PROVEN 2026-09-21 — click bench 5/5 at 320 ms median vs a full
+    LLM turn at 5.7 s; full Back Market SSC login from logged-out with 2 Jev
+    picks (0.92, 0.99), goal check passed, case list reached; credential guard
+    refused a poisoned payload. Prototype: primary-brain/ops/jev-click-bench-
+    20260921/ (jevdrive.py). Build window: usage resets Thu 2026-09-24; target
+    fixed and set up by Fri 2026-09-25. Owner: Primary. Basis note from
+    businessfi: businessfi-brain/ops/jev-click-decider-basis-20260921.md.
+
