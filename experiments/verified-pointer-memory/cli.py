@@ -187,7 +187,7 @@ def load_config(path):
     if not isinstance(config, dict):
         raise ValueError('Config must be an object.')
     unknown = set(config) - {'db', 'registry', 'retrievalCommand', 'navigationCommand',
-                             'allowAgentAssist', *DEFAULTS}
+                             'allowAgentAssist', 'autoCatch', *DEFAULTS}
     if unknown:
         raise ValueError('Unsupported configuration setting.')
     for name in ('db', 'registry'):
@@ -206,6 +206,9 @@ def load_config(path):
     assist = config.setdefault('allowAgentAssist', False)
     if not isinstance(assist, bool):
         raise ValueError('allowAgentAssist must be a boolean.')
+    auto_catch = config.setdefault('autoCatch', False)
+    if not isinstance(auto_catch, bool):
+        raise ValueError('autoCatch must be a boolean.')
     return config
 
 

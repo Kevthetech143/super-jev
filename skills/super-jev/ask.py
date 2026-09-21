@@ -51,6 +51,14 @@
   ask.py --principal AGENT --miss "question" "where it actually was"
       Log-only: the answer was found somewhere ask.py didn't reach.
 
+  ask.py --principal AGENT --auto-catch on|off
+      Flip the auto-catch switch (default off). Off = today's behavior exactly.
+  ask.py --principal AGENT --opened PATH
+      Mark a receipt candidate opened (the Claude Code PostToolUse hook calls this on Read).
+  ask.py --principal AGENT --done "final answer text"
+      The catch: run the existing check door once against the receipt's evidence
+      file; past the gate, cache the file's own quotes via --approve and --add.
+
 AGENT can also come from SUPERJEV_PRINCIPAL. State lives under
 $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo.
 """
@@ -66,6 +74,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket  # noqa: E402
+import auto_catch  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -148,9 +157,14 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
         print("  evidence:", e.get("sourceId", ""), "|", str(e.get("quote", ""))[:120])
     return 0
 
-def lookup(question: str, principal: str, sdir: Path) -> int:
+_last_lookup = {"candidates": [], "attempt_id": None}
+
+
+def _lookup_impl(question: str, principal: str, sdir: Path) -> int:
     t0 = time.time()
     cache = memory({"action": "cached", "principal": principal, "question": question})
+    _last_lookup["candidates"] = []
+    _last_lookup["attempt_id"] = cache.get("attemptId")
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
@@ -180,6 +194,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             error_lines.append(f"[{ptr}] {kind}")
     merged.sort(reverse=True)
     top = merged[:5]
+    _last_lookup["candidates"] = [{"path": p, "pointer": ptr, "score": s} for s, p, ptr in top]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
     # Hits always print first: a pointer error must never bury a real candidate
@@ -195,6 +210,26 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(f"no-candidates across {len(pointers)} pointers. Connect sources (see references/connectors.md) or record a fact with --add.")
         return 0
     return 0
+
+def lookup(question: str, principal: str, sdir: Path) -> int:
+    """lookup() with the auto-catch receipt layer.
+
+    Switch off (the default): identical to _lookup_impl -- no receipt file, no
+    extra output, no extra calls. Switch on: a stale live receipt (no --done
+    since) is logged as not-caught, then every ask overwrites the principal's
+    receipt with the fresh candidates.
+    """
+    if auto_catch.enabled(sdir):
+        prev = auto_catch.load_receipt(sdir, principal)
+        if prev is not None and not prev.get("done"):
+            auto_catch.log_line(sdir, "not-caught", principal, prev.get("question", ""))
+    rc = _lookup_impl(question, principal, sdir)
+    if auto_catch.enabled(sdir):
+        auto_catch.write_receipt(sdir, principal, question,
+                                 _last_lookup["candidates"],
+                                 attempt_id=_last_lookup.get("attempt_id"))
+    return rc
+
 
 def find_pointer(sdir: Path, question: str):
     path = sdir / "lookups.jsonl"
@@ -335,6 +370,30 @@ def main() -> int:
         return approve(principal, a[1], a[2], sdir)
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
+    if a[0] == "--auto-catch":
+        if len(a) < 2 or a[1] not in ("on", "off"):
+            print('usage: --auto-catch on|off [--principal X]')
+            return 2
+        print(auto_catch.set_enabled(sdir, a[1] == "on"))
+        return 0
+    if a[0] == "--opened":
+        if len(a) < 2:
+            print('usage: --opened PATH [--principal X]')
+            return 2
+        ok = auto_catch.mark_opened(sdir, principal, a[1])
+        print(("opened recorded: " + a[1]) if ok else "no live receipt names that path; ask first")
+        return 0
+    if a[0] == "--done":
+        if len(a) < 2:
+            print('usage: --done "final answer text" [--principal X]')
+            return 2
+        return auto_catch.do_done(
+            " ".join(a[1:]), principal, sdir,
+            approve_fn=lambda q, quotes: approve(principal, q, quotes, sdir),
+            add_fn=lambda q, quotes, src: add_manual(
+                principal, q, quotes, src, sdir, kind=DEFAULT_KIND,
+                status=DEFAULT_STATUS, as_of=time.strftime("%Y-%m-%d"),
+                subject=derive_subject(q)))
     return lookup(" ".join(a), principal, sdir)
 
 ADD_VALUE_FLAGS = {"--source", "--subject", "--kind", "--status", "--as-of"}
