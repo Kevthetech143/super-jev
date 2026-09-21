@@ -185,6 +185,25 @@ particular model SDK:
 my-description-writer --model small < prompt.txt > result.json
 ```
 
+The writer also drafts four labels per file alongside the description: `kind`
+(dashboard, playbook, ledger, record, index, pointer, research, note),
+`status` (active, closed, paper, done, unknown — using only what the file
+itself states; "NOT FILED"/pending/open counts as active), `as_of` (the date
+the file claims for that status, or unknown), and `subject` (1-4 words). A
+label outside its enum is coerced to `unknown` locally before anything is
+gated, so a bad writer response never crashes the run. The gate checks ONE
+claim per file — the description plus a sentence built from the labels — and
+the connect description carries the labels in brackets so ranking can see
+them. `python3 prepare_bulk.py --list --pointer NAME [--status active]
+[--kind dashboard] [--within-days 30] [--subject NAME]` reads the labels back
+out of `prepare-cache/<pointer>.json` (and any `<pointer>-N.json` part
+caches), filters and sorts by `as_of` descending, and never calls the writer,
+the gate, or memory; `--within-days` excludes files whose `as_of` is unknown
+and reports how many were excluded. A label is only as true as the file it
+was drafted and gated from; `as_of` shows staleness, not currency — live
+truth for anything time-sensitive still needs a gated roll-up read fresh, not
+a cached label.
+
 ### Ask loop
 
 `python3 ask.py --principal YOUR_AGENT "question"` is the front door over

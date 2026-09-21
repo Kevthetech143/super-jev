@@ -15,6 +15,7 @@ import importlib.util
 import json
 import shlex
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -305,6 +306,156 @@ def test_no_connect_writes_report_and_never_calls_memory(tmp_path, monkeypatch, 
     assert report["approved"] == [str(f)]
     out = capsys.readouterr().out
     assert "no connect (--no-connect)" in out
+
+
+def test_validate_labels_coerces_unknown_enum_and_bad_date():
+    labels = pb.validate_labels({"kind": "spreadsheet", "status": "kinda-active", "as_of": "not-a-date",
+                                  "subject": "  CLOV  "})
+    assert labels == {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "CLOV"}
+
+
+def test_validate_labels_passes_through_valid_values():
+    labels = pb.validate_labels({"kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "CLOV"})
+    assert labels == {"kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "CLOV"}
+
+
+def test_claim_sentence_includes_as_of_when_known():
+    labels = {"kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "CLOV"}
+    assert pb.claim_sentence(labels) == "This file is a dashboard about CLOV. Its status is active as of 2026-09-14."
+
+
+def test_claim_sentence_omits_as_of_when_unknown():
+    labels = {"kind": "note", "status": "unknown", "as_of": "unknown", "subject": "CLOV"}
+    assert pb.claim_sentence(labels) == "This file is a note about CLOV. Its status is unknown."
+
+
+def test_labeled_description_carries_brackets():
+    labels = {"kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "CLOV"}
+    out = pb.labeled_description("CLOV campaign tracker.", labels)
+    assert out == ("CLOV campaign tracker. [kind: dashboard; status: active; as_of: 2026-09-14; subject: CLOV]")
+
+
+def test_labels_drafted_gated_once_cached_and_sent_to_connect(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nCLOV campaign, not yet filed, as of 2026-09-14.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "CLOV wheel campaign tracker.", "question": "What is CLOV status?",
+                  "kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "CLOV"}
+    })
+
+    gate_calls = []
+
+    def fake_gate(claim, path):
+        gate_calls.append(claim)
+        return {"state": "SUPPORTED", "confidence": 0.95, "secs": 0.1}
+
+    monkeypatch.setattr(pb, "gate", fake_gate)
+
+    calls = []
+    monkeypatch.setattr(pb, "memory", fake_connect_memory(calls))
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
+    rc = pb.main()
+
+    assert rc == 0
+    # exactly one gate call per file (no separate description-only call)
+    assert len(gate_calls) == 1
+    assert gate_calls[0] == ("CLOV wheel campaign tracker. This file is a dashboard about CLOV. "
+                              "Its status is active as of 2026-09-14.")
+
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    assert cache[str(f)]["kind"] == "dashboard"
+    assert cache[str(f)]["status"] == "active"
+    assert cache[str(f)]["as_of"] == "2026-09-14"
+    assert cache[str(f)]["subject"] == "CLOV"
+
+    confirm_call = calls[-1]
+    assert confirm_call["sources"][0]["description"] == (
+        "CLOV wheel campaign tracker. [kind: dashboard; status: active; as_of: 2026-09-14; subject: CLOV]")
+
+
+def test_bad_writer_label_enum_coerced_to_unknown_never_crashes(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nSome content.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "Describes one.", "question": "What is one?",
+                  "kind": "spreadsheet", "status": "sort-of-active", "as_of": "soon", "subject": "One"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda claim, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+    monkeypatch.setattr(pb, "memory", lambda req: {"status": "should-not-matter"})
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-connect"]))
+    rc = pb.main()
+
+    assert rc == 0
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    assert cache[str(f)]["kind"] == "unknown"
+    assert cache[str(f)]["status"] == "unknown"
+    assert cache[str(f)]["as_of"] == "unknown"
+
+
+def test_list_filters_by_status_kind_subject_and_within_days_never_calls_writer_gate_memory(tmp_path, monkeypatch, capsys):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+
+    today = pb.date.today()
+    recent = (today - timedelta(days=5)).isoformat()
+    stale = "2020-01-01"
+    cache = {
+        "/a/clov.md": {"pass": True, "kind": "dashboard", "status": "active", "as_of": recent, "subject": "CLOV"},
+        "/a/bbai.md": {"pass": True, "kind": "dashboard", "status": "closed", "as_of": stale, "subject": "BBAI"},
+        "/a/unk.md": {"pass": True, "kind": "note", "status": "active", "as_of": "unknown", "subject": "CLOV notes"},
+        "/a/failed.md": {"pass": False, "kind": "dashboard", "status": "active", "as_of": recent, "subject": "CLOV"},
+    }
+    (cache_dir / "my-records.json").write_text(json.dumps(cache))
+
+    monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer should not run")))
+    monkeypatch.setattr(pb, "gate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("gate should not run")))
+    monkeypatch.setattr(pb, "memory", lambda *a, **k: (_ for _ in ()).throw(AssertionError("memory should not run")))
+
+    rows, excluded = pb.list_cmd("my-records", status="active", subject="CLOV")
+    paths = {r[4] for r in rows}
+    assert paths == {"/a/clov.md", "/a/unk.md"}  # failed.md excluded by pass=False
+
+    rows2, excluded2 = pb.list_cmd("my-records", within_days=30)
+    assert {r[4] for r in rows2} == {"/a/clov.md"}
+    assert excluded2 == 1  # unk.md's as_of is unknown
+
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--list", "--pointer", "my-records", "--status", "active"])
+    rc = pb.main()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "CLOV" in out and "clov.md" in out
+
+
+def test_list_merges_part_pointer_caches(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+
+    (cache_dir / "my-records.json").write_text(json.dumps({
+        "/a/one.md": {"pass": True, "kind": "dashboard", "status": "active", "as_of": "2026-01-01", "subject": "One"},
+    }))
+    (cache_dir / "my-records-2.json").write_text(json.dumps({
+        "/a/two.md": {"pass": True, "kind": "dashboard", "status": "active", "as_of": "2026-02-01", "subject": "Two"},
+    }))
+    # a differently-named pointer that merely starts with the same prefix must not be pulled in
+    (cache_dir / "my-records-extra.json").write_text(json.dumps({
+        "/a/three.md": {"pass": True, "kind": "note", "status": "active", "as_of": "2026-03-01", "subject": "Three"},
+    }))
+
+    rows, _ = pb.list_cmd("my-records")
+    paths = {r[4] for r in rows}
+    assert paths == {"/a/one.md", "/a/two.md"}
 
 
 def test_inventory_multiple_roots_union_in_order(tmp_path):

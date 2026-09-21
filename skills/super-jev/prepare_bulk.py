@@ -8,6 +8,12 @@ Usage:
                           [--writer-command 'COMMAND [ARG ...]'] [--no-connect] [--no-findability]
                           [--refresh]
 
+  python3 prepare_bulk.py --list --pointer NAME [--status active] [--kind dashboard]
+                          [--within-days 30] [--subject CLOV]
+    No-judge local list: reads the already-gated labels back out of prepare-cache/<pointer>.json (and any
+    <pointer>-N.json part caches) and prints them filtered, sorted by as_of desc. Never calls the writer,
+    the gate, or memory.
+
 Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md
@@ -20,19 +26,33 @@ Pipeline per run:
   2. Cache (prepare-cache/<pointer>.json) keyed by path: unchanged sha256 with a passing verdict skips steps 3-4.
      --refresh additionally drops any cached path that no longer exists on disk from the cache and the connect
      set, noting it in the report.
-  3. Writer (by default `claude -p --model <writer-model>`) drafts, per batch, one factual description plus one sample
-     question a user would ask that this file answers. Descriptions are drafts, never trusted.
-  4. Jev gate (connect_checked.gate) checks each description against the whole file. One rewrite retry on
-     failure, with the verdict fed back. Still failing -> EXCEPTION list for the agent.
+  3. Writer (by default `claude -p --model <writer-model>`, or `--writer-command` for another adapter that
+     reads the prompt on stdin and returns a JSON array on stdout) drafts, per batch, one factual description,
+     one sample question a user would ask that this file answers, and four gated labels: kind (dashboard,
+     playbook, ledger, record, index, pointer, research, note), status (active, closed, paper, done, unknown —
+     using only what the file itself states; NOT FILED/pending/open counts as active, nothing stated is
+     unknown), as_of (the date the file claims for that status, or unknown), and subject (1-4 words).
+     Descriptions and labels are drafts, never trusted until gated.
+  4. Jev gate (connect_checked.gate) checks ONE claim per file — the description plus a sentence built from
+     its labels ("This file is a <kind> about <subject>. Its status is <status>[ as of <as_of>].") — against
+     the whole file. One rewrite retry on failure, with the verdict fed back. Still failing -> EXCEPTION list.
+     A label outside its enum is coerced to "unknown" locally, before the claim is built, so a bad label from
+     the writer never crashes the run.
   5. Connect the passing set through the normal preview -> confirm path (replace:true, with a one-line warning,
-     if the pointer already exists). The harness accepts at most 50 files per connect request, so a set over
-     --limit (default 50, hard max 50) is split into parts named <pointer>, <pointer>-2, <pointer>-3, ... in
-     stable sorted-path order, each connected separately; the cache and report stay keyed by the base pointer.
+     if the pointer already exists). The description sent to the harness carries the labels in brackets
+     (`<description> [kind: ...; status: ...; as_of: ...; subject: ...]`) so ranking can see them. The harness
+     accepts at most 50 files per connect request, so a set over --limit (default 50, hard max 50) is split
+     into parts named <pointer>, <pointer>-2, <pointer>-3, ... in stable sorted-path order, each connected
+     separately; the cache and report stay keyed by the base pointer.
   6. Findability: each connected file's own sample question is navigated; the file must rank first or it is
      listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
+
+A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
+Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
 import argparse, hashlib, json, re, shlex, subprocess, sys, time
+from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -45,6 +65,44 @@ WORD_RE = re.compile(r"password|passwd|api[_-]?key", re.I)
 SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}", re.I)
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
+
+# Four gated labels drafted by the writer, validated locally, then folded into the one
+# claim gated per file. A value outside its own enum is coerced to "unknown" rather than
+# ever crashing the run on a bad writer response.
+KIND_VALUES = {"dashboard", "playbook", "ledger", "record", "index", "pointer", "research", "note"}
+STATUS_VALUES = {"active", "closed", "paper", "done", "unknown"}
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def validate_labels(d: dict) -> dict:
+    """Coerce a writer's draft labels to their enums. Never raises."""
+    kind = d.get("kind")
+    kind = kind if kind in KIND_VALUES else "unknown"
+    status = d.get("status")
+    status = status if status in STATUS_VALUES else "unknown"
+    as_of = d.get("as_of")
+    as_of = as_of if isinstance(as_of, str) and DATE_RE.match(as_of) else "unknown"
+    subject = d.get("subject")
+    subject = subject.strip() if isinstance(subject, str) and subject.strip() else "unknown"
+    return {"kind": kind, "status": status, "as_of": as_of, "subject": subject}
+
+
+def claim_sentence(labels: dict) -> str:
+    s = f"This file is a {labels['kind']} about {labels['subject']}. Its status is {labels['status']}"
+    if labels["as_of"] != "unknown":
+        s += f" as of {labels['as_of']}"
+    return s + "."
+
+
+def label_bracket(labels: dict) -> str:
+    return (f"[kind: {labels['kind']}; status: {labels['status']}; "
+            f"as_of: {labels['as_of']}; subject: {labels['subject']}]")
+
+
+def labeled_description(description: str, labels: dict) -> str:
+    """The connect description sent to the harness: the description plus labels in
+    brackets, so ranking sees them."""
+    return f"{description} {label_bracket(labels)}"
 
 
 def sha(p: Path) -> str:
@@ -142,11 +200,17 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
               "and do not claim anything not in it:\n" + json.dumps(feedback, indent=1))
     prompt = (
         "You write catalog descriptions for files. For EACH file below, return one JSON object with keys "
-        "path, description, question.\n"
+        "path, description, question, kind, status, as_of, subject.\n"
         "description: one factual sentence, at most 40 words, naming the main topics and purpose exactly as the file "
         "shows them; no praise, no guessing beyond the excerpt and headings; if the file is a stub or pointer, say so.\n"
         "question: one natural question a user would ask that THIS file answers better than any sibling file; mention a "
         "specific detail from it.\n"
+        "kind: one of dashboard (a status/tracker page for one campaign or case), playbook, ledger (dated rows), "
+        "record, index, pointer, research, note.\n"
+        "status: one of active, closed, paper, done, unknown. Use ONLY what the file itself states; 'NOT FILED', "
+        "'pending', or 'open' means active; if the file states nothing about status, use unknown.\n"
+        "as_of: the date the file itself claims for that status, as YYYY-MM-DD, or unknown if it states none.\n"
+        "subject: the ticker, person, case, or topic the file is about, 1 to 4 words.\n"
         "Return ONLY a JSON array, no prose." + fb + "\n\nFILES:\n" + json.dumps(items, indent=1)
     )
     argv = command or ["claude", "-p", "--model", model]
@@ -175,7 +239,13 @@ def navigate(pointer: str, principal: str, question: str) -> list:
 def connect_part(pointer: str, principal: str, part_files: list, cache: dict) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one)."""
     req = {"action": "connect", "pointer": pointer, "principals": [principal],
-           "sources": [{"path": str(p), "description": cache[str(p)]["description"]} for p in part_files]}
+           "sources": [{"path": str(p),
+                        "description": labeled_description(cache[str(p)]["description"], {
+                            "kind": cache[str(p)].get("kind", "unknown"),
+                            "status": cache[str(p)].get("status", "unknown"),
+                            "as_of": cache[str(p)].get("as_of", "unknown"),
+                            "subject": cache[str(p)].get("subject", "unknown"),
+                        })} for p in part_files]}
     known = memory({"action": "panel", "principal": principal})
     if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
         req["replace"] = True
@@ -196,10 +266,57 @@ def connect_part(pointer: str, principal: str, part_files: list, cache: dict) ->
     return {"connected": connected}
 
 
+def load_cache_files(pointer: str) -> dict:
+    """Merge prepare-cache/<pointer>.json with any <pointer>-N.json part caches. No provider calls."""
+    entries = {}
+    if not CACHE_DIR.is_dir():
+        return entries
+    pat = re.compile(rf"^{re.escape(pointer)}(-\d+)?\.json$")
+    for p in sorted(CACHE_DIR.glob(f"{pointer}*.json")):
+        if not pat.match(p.name):
+            continue
+        try:
+            entries.update(json.loads(p.read_text()))
+        except Exception:
+            continue
+    return entries
+
+
+def list_cmd(pointer: str, status: str = None, kind: str = None,
+             within_days: int = None, subject: str = None):
+    """No-judge local filter over already-gated labels. Returns (rows, excluded_unknown_date)."""
+    entries = load_cache_files(pointer)
+    today = date.today()
+    rows, excluded = [], 0
+    for path, c in entries.items():
+        if not c.get("pass"):
+            continue
+        c_kind = c.get("kind", "unknown"); c_status = c.get("status", "unknown")
+        c_as_of = c.get("as_of", "unknown"); c_subject = c.get("subject", "unknown")
+        if status and c_status != status:
+            continue
+        if kind and c_kind != kind:
+            continue
+        if subject and subject.lower() not in c_subject.lower():
+            continue
+        if within_days is not None:
+            try:
+                if c_as_of == "unknown" or (today - date.fromisoformat(c_as_of)).days > within_days:
+                    if c_as_of == "unknown":
+                        excluded += 1
+                    continue
+            except ValueError:
+                excluded += 1
+                continue
+        rows.append((c_subject, c_status, c_as_of, c_kind, path))
+    rows.sort(key=lambda r: (r[2] != "unknown", r[2]), reverse=True)
+    return rows, excluded
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", dest="roots", action="append", required=True)
-    ap.add_argument("--pointer", required=True); ap.add_argument("--principal", required=True)
+    ap.add_argument("--root", dest="roots", action="append")
+    ap.add_argument("--pointer", required=True); ap.add_argument("--principal")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
@@ -211,7 +328,25 @@ def main() -> int:
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--list", action="store_true",
+                    help="no-judge local list: read already-gated labels from prepare-cache and filter them; "
+                         "never calls the writer, the gate, or memory")
+    ap.add_argument("--status", default=None); ap.add_argument("--kind", default=None)
+    ap.add_argument("--subject", default=None)
+    ap.add_argument("--within-days", type=int, default=None)
     a = ap.parse_args()
+
+    if a.list:
+        rows, excluded = list_cmd(a.pointer, a.status, a.kind, a.within_days, a.subject)
+        print(f"{'subject':20} | {'status':8} | {'as_of':10} | {'kind':10} | path")
+        for subject, status, as_of, kind, path in rows:
+            print(f"{subject:20} | {status:8} | {as_of:10} | {kind:10} | {path}")
+        if a.within_days is not None:
+            print(f"\n{excluded} excluded (as_of unknown)")
+        return 0
+
+    if not a.roots or not a.principal:
+        print("REFUSED: --root and --principal are required unless --list is given"); return 2
     if a.limit > 50:
         print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
     try:
@@ -276,10 +411,12 @@ def main() -> int:
         d = drafts.get(str(p))
         if not d or not d.get("description"):
             exceptions.append((str(p), "writer returned no draft")); continue
-        v = gate(d["description"], str(p))
+        labels = validate_labels(d)
+        claim = f"{d['description'].strip()} {claim_sentence(labels)}"
+        v = gate(claim, str(p))
         ok = v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line
         if not ok:
-            fb = {str(p): {"draft": d["description"], "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
+            fb = {str(p): {"draft": claim, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
             try:
                 if writer_command:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
@@ -288,10 +425,14 @@ def main() -> int:
             except WriterError as e:
                 print(f"ERROR: description writer failed: {e}"); return 1
             if redo and redo.get("description"):
-                v2 = gate(redo["description"], str(p))
+                redo_labels = validate_labels(redo)
+                redo_claim = f"{redo['description'].strip()} {claim_sentence(redo_labels)}"
+                v2 = gate(redo_claim, str(p))
                 if v2["state"] == "SUPPORTED" and v2.get("confidence", 0) >= a.line:
-                    d, v, ok = redo, v2, True
+                    d, labels, v, ok = redo, redo_labels, v2, True
         cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
+                         "kind": labels["kind"], "status": labels["status"], "as_of": labels["as_of"],
+                         "subject": labels["subject"],
                          "verdict": v["state"], "confidence": v.get("confidence"), "pass": ok,
                          "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
         tag = "PASS" if ok else v["state"]
