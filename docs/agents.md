@@ -27,10 +27,11 @@ This release does not implement priority scoring, file moves, database writes, r
 
 `skills/super-jev/` is an installable [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: one Python file, `superjev.py`, giving an agent a single command for the checks this repo already runs elsewhere, instead of four separate tools to remember. It never re-implements a check — every judgement belongs to the tool it wraps.
 
-Install by symlink or copy:
+Install by symlink or copy. `skills/super-jev-connect/` is a second skill for onboarding and refresh — registering a connector, drafting and gating its labels with a confirmed cheap writer model, and refreshing a pointer after its files change; install both:
 
 ```bash
 ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
+ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 ```
 
 | subcommand | wraps | what it needs |

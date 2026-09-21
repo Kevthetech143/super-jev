@@ -5,8 +5,14 @@ Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT
                           [--exclude SUBPATH ...] [--no-recurse] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
-                          [--writer-command 'COMMAND [ARG ...]'] [--no-connect] [--no-findability]
-                          [--refresh]
+                          [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
+                          [--no-findability] [--refresh]
+
+  Prints a `writer: <command>` banner at the start of every run: the resolved --writer-command
+  (or the SUPERJEV_WRITER_COMMAND env var, checked when --writer-command is omitted), or the
+  default `claude -p --model <writer-model>`. When neither flag nor env var is set, a second
+  line recommends a cheap writer model -- bulk labeling should never run on a premium model --
+  and names the proven default (Claude Code CLI, Haiku).
 
   python3 prepare_bulk.py --list [--pointer NAME] [--principal AGENT] [--status active] [--kind dashboard]
                           [--within-days 30] [--subject CLOV]
@@ -25,7 +31,11 @@ Pipeline per run:
      card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
-     The whole run refuses above --max-files (default 250) total files, as a size guard.
+     The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
+     one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
+     a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
+     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. The whole run
+     refuses above --max-files (default 250) total files, as a size guard.
   2. Cache (prepare-cache/<pointer>.json) keyed by path: unchanged sha256 with a passing verdict skips steps 3-4.
      --refresh additionally drops any cached path that no longer exists on disk from the cache and the connect
      set, noting it in the report.
@@ -73,6 +83,12 @@ CACHE_DIR = HERE / "prepare-cache"
 CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
 WORD_RE = re.compile(r"password|passwd|api[_-]?key", re.I)
 SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}", re.I)
+# An ISO date or a URL can contain a run of digits that coincidentally matches the
+# card-number pattern (a long numeric id in a query string, a table of dates on one
+# line). Both are scrubbed out before the card check only; the keyword rule below
+# always runs against the original, unscrubbed text.
+ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+URL_RE = re.compile(r"https?://\S+")
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
 
@@ -134,9 +150,23 @@ def _excluded(rel_posix: str, excludes: list) -> bool:
     return any(rel_posix == ex or rel_posix.startswith(ex + "/") for ex in excludes)
 
 
-def inventory(roots: list, excludes: list = None, no_recurse: bool = False):
+def _scrub_dates_and_urls(text: str) -> str:
+    """Remove ISO-date and URL substrings before testing the card-number pattern, so a
+    long numeric id in a URL or a run of dates on one line cannot trigger a false hold."""
+    return ISO_DATE_RE.sub(" ", URL_RE.sub(" ", text))
+
+
+def has_secret(text: str) -> bool:
+    """Card-number check runs on the scrubbed text (dates/URLs removed); the
+    password/api-key keyword check always runs on the original text."""
+    return bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
+
+
+def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False):
     """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
-    even if reachable through more than one root."""
+    even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
+    hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
+    since an oversized file cannot be gated regardless."""
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen = [], [], set()
     for root in roots:
@@ -158,8 +188,11 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False):
             seen.add(rp)
             if len(b) > CEILING_BYTES:
                 held.append((str(p), "over size ceiling; split first")); continue
-            if SECRET_RE.search(b.decode("utf-8", "replace")):
-                held.append((str(p), "card/password-like text; review before onboarding")); continue
+            if has_secret(b.decode("utf-8", "replace")):
+                if allow_held:
+                    held.append((str(p), "card/password-like text; admitted by --allow-held"))
+                else:
+                    held.append((str(p), "card/password-like text; review before onboarding")); continue
             files.append(p)
     return files, held
 
@@ -172,7 +205,7 @@ def secret_detail(p: Path):
     except Exception:
         return None
     for i, line in enumerate(text.splitlines(), start=1):
-        if CARD_RE.search(line):
+        if CARD_RE.search(_scrub_dates_and_urls(line)):
             return {"type": "card-number-like digits", "line": i, "masked": re.sub(r"\d", "#", line)}
         if WORD_RE.search(line):
             return {"type": "password/api-key keyword", "line": i, "masked": re.sub(r"\d", "#", line)}
@@ -394,7 +427,11 @@ def main() -> int:
     ap.add_argument("--writer-model", default="haiku",
                     help="model passed to the default Claude writer")
     ap.add_argument("--writer-command", metavar="COMMAND",
-                    help="shell-style command for another writer; it receives the prompt on stdin and returns a JSON array on stdout")
+                    help="shell-style command for another writer; it receives the prompt on stdin and returns a JSON array on stdout. "
+                         "Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted")
+    ap.add_argument("--allow-held", action="store_true",
+                    help="admit files the secret scan would hold (still listed in the held file, noting the override); "
+                         "the size-ceiling hold is unaffected")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true")
     ap.add_argument("--refresh", action="store_true")
@@ -428,12 +465,20 @@ def main() -> int:
         print("REFUSED: --root, --pointer and --principal are required unless --list is given"); return 2
     if a.limit > 50:
         print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
+    writer_command_str = a.writer_command or os.environ.get("SUPERJEV_WRITER_COMMAND")
     try:
-        writer_command = shlex.split(a.writer_command) if a.writer_command else None
+        writer_command = shlex.split(writer_command_str) if writer_command_str else None
     except ValueError as e:
         print(f"REFUSED: invalid --writer-command: {e}"); return 2
-    if a.writer_command and not writer_command:
+    if writer_command_str and not writer_command:
         print("REFUSED: --writer-command must name a command"); return 2
+
+    banner_cmd = " ".join(writer_command) if writer_command else f"claude -p --model {a.writer_model}"
+    print(f"writer: {banner_cmd}")
+    if not writer_command:
+        print("tip: bulk labeling should run on a cheap writer model, never a premium one; the proven default "
+              "is claude -p --model haiku (the Claude Code Haiku command) -- set --writer-command or "
+              "SUPERJEV_WRITER_COMMAND for another adapter that reads the prompt on stdin and prints JSON")
 
     roots = [Path(r).resolve() for r in a.roots]
     CACHE_DIR.mkdir(exist_ok=True)
@@ -441,7 +486,7 @@ def main() -> int:
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     t0 = time.time()
 
-    files, held = inventory(roots, a.excludes, a.no_recurse)
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held)
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
