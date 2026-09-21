@@ -125,6 +125,23 @@ until every source passes. `--check-only` runs just the gate. It writes
 sha256. It does not watch for file changes after a connect and does not
 chunk or truncate oversized files — split or drop them and rerun.
 
+### Bulk prepare
+
+`python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME
+[--limit 50]` is the checked-connect workflow run over a whole folder instead
+of a hand-picked file list. It inventories `*.md` under `--root`, skipping
+hidden dirs, backups and vault-style subdirectories, and holds back any file
+that looks like it carries card/password text or sits over the gate's size
+ceiling. A cheap writer model drafts one description and one sample question
+per remaining file; the same claim gate used by `connect_checked.py` checks
+each description against its own file, with one rewrite retry on a failure.
+Only the passing set is connected, through the normal preview-then-confirm
+path. After connecting, it re-runs each file's own sample question through
+`navigate` and reports whether the file ranks first, as a soft findability
+check, not a pass/fail gate. Results and a cache keyed by file hash land
+under `prepare-cache/` next to the script, so an unchanged file is skipped on
+the next run. `--no-connect` stops after drafting and gating, for a dry run.
+
 ## Navigation structure
 
 Record how the connected view is organized at onboarding. Supported structures are `flat-files` (default) and `folder-tree`. These describe only the explicit reviewed source set, not the entire disk. The connector exposes stable node IDs, a root, and available navigation actions. A database or arbitrary graph is not silently treated as a tree; direct database ingestion and automatic index-link parsing remain unsupported.

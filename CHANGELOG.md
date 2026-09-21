@@ -4,6 +4,25 @@
 
 No version bump.
 
+- **Bulk prepare.** Added `skills/super-jev/prepare_bulk.py`, a folder-scale
+  front end to the checked connect flow. It inventories `*.md` files under a
+  root, skipping hidden directories, backups, and vault-style subdirectories,
+  and holds back any file with card/password-like text or over the gate's
+  size ceiling. A cheap writer model drafts one description and one sample
+  question per remaining file, in batches; each description is gated against
+  its own file the same way `connect_checked.py` gates a description, with
+  one rewrite retry on a failure and a feedback message carrying the
+  rejected verdict. Only the passing set is connected, through the same
+  preview-then-confirm path, replacing an existing pointer of the same name
+  when one is already registered. After connecting, each file's own sample
+  question is run through `navigate` and the file is expected to rank
+  first; a miss is reported, not retried. A cache keyed by file hash under
+  `prepare-cache/<pointer>.json` skips the writer and gate for a file that
+  has not changed since it last passed, and a run report lands next to it.
+  `--no-connect` stops after drafting and gating, for a dry run; `--limit`
+  refuses above the connect action's 50-file cap. See
+  `skills/super-jev/SKILL.md` and `skills/super-jev/references/connectors.md`.
+
 - **Checked connect wrapper.** Added `skills/super-jev/connect_checked.py`, a
   wrapper around the memory `connect` action that gates every source's
   description against its own file with the reply-kit claim gate
