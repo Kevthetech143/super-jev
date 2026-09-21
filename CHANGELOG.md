@@ -23,6 +23,27 @@ No version bump.
   refuses above the connect action's 50-file cap. See
   `skills/super-jev/SKILL.md` and `skills/super-jev/references/connectors.md`.
 
+- **Bulk prepare for a whole agent brain.** Extended `prepare_bulk.py` to
+  onboard scope spanning more than one folder and more than the connect
+  action's 50-file cap in a single run. `--root` is now repeatable and
+  inventories the union of the given roots, in the order given; `--exclude`
+  (repeatable) skips any file whose path relative to its root starts with
+  the given subpath, and `--no-recurse` limits a root to its direct
+  children. `--limit` now bounds each connected part instead of the whole
+  run: an approved set larger than the limit is split into parts named
+  after the base pointer, each connected separately through the same
+  preview-then-confirm path, with the cache and report staying keyed by the
+  base pointer. `--max-files` refuses an oversized run before any drafting
+  starts, replacing the old inventory truncation. A held file's reason is
+  now also written to a `prepare-cache/<pointer>-held.txt` review file,
+  including the matching pattern's type and line number with digits masked
+  for the card/password-like case, so a human can review without opening
+  the file. `--refresh` drops any cached file no longer present on disk
+  from the cache and the connect set and notes it in the report, and a
+  reconnect that replaces an existing pointer now prints a one-line warning
+  that the replacement rotates that pointer's approved answers. See
+  `skills/super-jev/SKILL.md` and `skills/super-jev/references/connectors.md`.
+
 - **Checked connect wrapper.** Added `skills/super-jev/connect_checked.py`, a
   wrapper around the memory `connect` action that gates every source's
   description against its own file with the reply-kit claim gate

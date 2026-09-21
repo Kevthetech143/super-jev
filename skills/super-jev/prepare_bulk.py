@@ -2,20 +2,33 @@
 """Bulk preparation: inventory -> cheap writer drafts descriptions -> Jev checks them -> connect the approved set.
 
 Usage:
-  python3 prepare_bulk.py --root DIR --pointer NAME --principal AGENT [--limit 50] [--batch 10]
-                          [--line 0.80] [--writer-model haiku] [--no-connect] [--no-findability]
+  python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT
+                          [--exclude SUBPATH ...] [--no-recurse] [--limit 50] [--max-files 250]
+                          [--batch 10] [--line 0.80] [--writer-model haiku]
+                          [--no-connect] [--no-findability] [--refresh]
 
 Pipeline per run:
-  1. Inventory *.md under --root (skips .bak*, profile/, documents/, logins.md, *-secret.md). Files matching
-     card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer.
+  1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
+     a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md
+     and hidden directories; --exclude SUBPATH (repeatable) also skips any file whose path relative to its
+     root starts with that subpath; --no-recurse limits each root to its direct children only. Files matching
+     card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
+     per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
+     all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
+     The whole run refuses above --max-files (default 250) total files, as a size guard.
   2. Cache (prepare-cache/<pointer>.json) keyed by path: unchanged sha256 with a passing verdict skips steps 3-4.
-  3. Writer (`claude -p --model <writer-model>`) drafts, per batch, one factual description plus one sample question
-     a user would ask that this file answers. Descriptions are drafts, never trusted.
-  4. Jev gate (connect_checked.gate) checks each description against the whole file. One rewrite retry on failure,
-     with the verdict fed back. Still failing -> EXCEPTION list for the agent.
-  5. Connect the passing set through the normal preview -> confirm path (replace:true if the pointer exists).
-  6. Findability: each connected file's own sample question is navigated; the file must rank first or it is listed
-     as a findability miss. Report only; no automatic loop beyond the one rewrite.
+     --refresh additionally drops any cached path that no longer exists on disk from the cache and the connect
+     set, noting it in the report.
+  3. Writer (`claude -p --model <writer-model>`) drafts, per batch, one factual description plus one sample
+     question a user would ask that this file answers. Descriptions are drafts, never trusted.
+  4. Jev gate (connect_checked.gate) checks each description against the whole file. One rewrite retry on
+     failure, with the verdict fed back. Still failing -> EXCEPTION list for the agent.
+  5. Connect the passing set through the normal preview -> confirm path (replace:true, with a one-line warning,
+     if the pointer already exists). The harness accepts at most 50 files per connect request, so a set over
+     --limit (default 50, hard max 50) is split into parts named <pointer>, <pointer>-2, <pointer>-3, ... in
+     stable sorted-path order, each connected separately; the cache and report stay keyed by the base pointer.
+  6. Findability: each connected file's own sample question is navigated; the file must rank first or it is
+     listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 """
 import argparse, hashlib, json, re, subprocess, sys, time
@@ -26,7 +39,9 @@ sys.path.insert(0, str(HERE))
 from connect_checked import gate, memory  # noqa: E402
 
 CACHE_DIR = HERE / "prepare-cache"
-SECRET_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}|password|passwd|api[_-]?key", re.I)
+CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
+WORD_RE = re.compile(r"password|passwd|api[_-]?key", re.I)
+SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}", re.I)
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
 
@@ -35,24 +50,77 @@ def sha(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def inventory(root: Path, limit: int):
-    files, held = [], []
-    for p in sorted(root.rglob("*.md")):
-        if ".bak" in p.name or p.name == "logins.md" or p.name.endswith("-secret.md"):
+def relstr(p, roots) -> str:
+    """Path relative to whichever --root contains it; falls back to the raw path."""
+    pr = Path(p).resolve()
+    for r in roots:
+        try:
+            return str(pr.relative_to(r))
+        except ValueError:
             continue
-        if any(part in SKIP_PARTS or part.startswith(".") for part in p.relative_to(root).parts):
-            continue
-        b = p.read_bytes()
-        if not b.strip():
-            continue
-        if len(b) > CEILING_BYTES:
-            held.append((str(p), "over size ceiling; split first")); continue
-        if SECRET_RE.search(b.decode("utf-8", "replace")):
-            held.append((str(p), "card/password-like text; review before onboarding")); continue
-        files.append(p)
-        if len(files) >= limit:
-            break
+    return str(p)
+
+
+def _excluded(rel_posix: str, excludes: list) -> bool:
+    return any(rel_posix == ex or rel_posix.startswith(ex + "/") for ex in excludes)
+
+
+def inventory(roots: list, excludes: list = None, no_recurse: bool = False):
+    """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
+    even if reachable through more than one root."""
+    excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
+    files, held, seen = [], [], set()
+    for root in roots:
+        glob_iter = sorted(root.glob("*.md")) if no_recurse else sorted(root.rglob("*.md"))
+        for p in glob_iter:
+            rp = p.resolve()
+            if rp in seen:
+                continue
+            if ".bak" in p.name or p.name == "logins.md" or p.name.endswith("-secret.md"):
+                continue
+            rel_parts = p.relative_to(root).parts
+            if any(part in SKIP_PARTS or part.startswith(".") for part in rel_parts):
+                continue
+            if _excluded(p.relative_to(root).as_posix(), excludes):
+                continue
+            b = p.read_bytes()
+            if not b.strip():
+                continue
+            seen.add(rp)
+            if len(b) > CEILING_BYTES:
+                held.append((str(p), "over size ceiling; split first")); continue
+            if SECRET_RE.search(b.decode("utf-8", "replace")):
+                held.append((str(p), "card/password-like text; review before onboarding")); continue
+            files.append(p)
     return files, held
+
+
+def secret_detail(p: Path):
+    """First matching line for a secret-pattern hold, with digits masked. Returns the pattern type and line
+    number for review; never returns the raw matched text."""
+    try:
+        text = p.read_text(errors="replace")
+    except Exception:
+        return None
+    for i, line in enumerate(text.splitlines(), start=1):
+        if CARD_RE.search(line):
+            return {"type": "card-number-like digits", "line": i, "masked": re.sub(r"\d", "#", line)}
+        if WORD_RE.search(line):
+            return {"type": "password/api-key keyword", "line": i, "masked": re.sub(r"\d", "#", line)}
+    return None
+
+
+def write_held_txt(pointer: str, held: list) -> None:
+    if not held:
+        return
+    lines = []
+    for p, why in held:
+        lines.append(f"{p}\t{why}")
+        if "card/password" in why:
+            d = secret_detail(Path(p))
+            if d:
+                lines.append(f"    pattern={d['type']}  line={d['line']}  masked={d['masked']}")
+    (CACHE_DIR / f"{pointer}-held.txt").write_text("\n".join(lines) + "\n")
 
 
 def excerpt(p: Path) -> dict:
@@ -92,27 +160,71 @@ def navigate(pointer: str, principal: str, question: str) -> list:
     return [c.get("originalPath") for c in out.get("candidates", [])]
 
 
+def connect_part(pointer: str, principal: str, part_files: list, cache: dict) -> dict:
+    """Preview -> confirm connect for one pointer (a whole pointer or one split part of one)."""
+    req = {"action": "connect", "pointer": pointer, "principals": [principal],
+           "sources": [{"path": str(p), "description": cache[str(p)]["description"]} for p in part_files]}
+    known = memory({"action": "panel", "principal": principal})
+    if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
+        req["replace"] = True
+        print(f"WARNING: replace:true on pointer {pointer} rotates that pointer's approved answers")
+    prev = memory(req)
+    if prev.get("status") != "preparation-required":
+        print(f"connect preview failed for {pointer}:", json.dumps(prev)[:300])
+        return {"connected": False}
+    hashes = {x["path"]: x["sha256"] for x in prev["sources"]}
+    for s in req["sources"]:
+        s["sha256"] = hashes[s["path"]]
+    req["reviewed"] = True
+    reg = memory(req)
+    connected = reg.get("status") == "registered"
+    print(f"connect: {reg.get('status')} pointer={reg.get('pointer')} sources={len(reg.get('sources', []))}")
+    if not connected:
+        print(json.dumps(reg)[:300])
+    return {"connected": connected}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True); ap.add_argument("--pointer", required=True)
-    ap.add_argument("--principal", required=True); ap.add_argument("--limit", type=int, default=50)
+    ap.add_argument("--root", dest="roots", action="append", required=True)
+    ap.add_argument("--pointer", required=True); ap.add_argument("--principal", required=True)
+    ap.add_argument("--exclude", dest="excludes", action="append", default=[])
+    ap.add_argument("--no-recurse", action="store_true")
+    ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
     ap.add_argument("--writer-model", default="haiku"); ap.add_argument("--no-connect", action="store_true")
-    ap.add_argument("--no-findability", action="store_true")
+    ap.add_argument("--no-findability", action="store_true"); ap.add_argument("--refresh", action="store_true")
     a = ap.parse_args()
     if a.limit > 50:
-        print("REFUSED: connect accepts at most 50 files per request; use --limit <= 50 or one pointer per folder"); return 2
+        print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
 
-    root = Path(a.root).resolve()
+    roots = [Path(r).resolve() for r in a.roots]
     CACHE_DIR.mkdir(exist_ok=True)
     cache_path = CACHE_DIR / f"{a.pointer}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     t0 = time.time()
 
-    files, held = inventory(root, a.limit)
+    files, held = inventory(roots, a.excludes, a.no_recurse)
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
-        print(f"  HELD  {Path(p).relative_to(root)}  ({why})")
+        print(f"  HELD  {relstr(p, roots)}  ({why})")
+    write_held_txt(a.pointer, held)
+
+    if len(files) > a.max_files:
+        print(f"REFUSED: {len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
+        return 2
+
+    removed = []
+    if a.refresh:
+        live = {str(p) for p in files}
+        for k in list(cache.keys()):
+            if k not in live and not Path(k).exists():
+                removed.append(k)
+                cache.pop(k, None)
+        if removed:
+            print(f"refresh: {len(removed)} cached files removed from disk, dropped from cache and connect set")
+            for k in removed:
+                print(f"  REMOVED  {relstr(k, roots)}")
 
     todo, reused = [], []
     for p in files:
@@ -148,7 +260,7 @@ def main() -> int:
                          "verdict": v["state"], "confidence": v.get("confidence"), "pass": ok,
                          "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
         tag = "PASS" if ok else v["state"]
-        print(f"  {tag:14}{v.get('confidence', ''):>5}  {p.relative_to(root)}")
+        print(f"  {tag:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
         if ok:
             passing.append(p)
         else:
@@ -158,50 +270,51 @@ def main() -> int:
     connect_set = reused + passing
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
     for p, why in exceptions:
-        print(f"  EXCEPTION  {Path(p).relative_to(root)}  ({why})")
+        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})")
 
-    report = {"pointer": a.pointer, "root": str(root), "approved": [str(p) for p in connect_set],
-              "exceptions": exceptions, "held": held, "findability": None, "connected": False}
+    report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "approved": [str(p) for p in connect_set],
+              "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
+              "connected": False, "parts": []}
     if a.no_connect or not connect_set:
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
         print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s"); return 0
 
-    req = {"action": "connect", "pointer": a.pointer, "principals": [a.principal],
-           "sources": [{"path": str(p), "description": cache[str(p)]["description"]} for p in connect_set]}
-    known = memory({"action": "panel", "principal": a.principal})
-    if any((x.get("pointer") if isinstance(x, dict) else x) == a.pointer for x in known.get("pointers", [])):
-        req["replace"] = True
-    prev = memory(req)
-    if prev.get("status") != "preparation-required":
-        print("connect preview failed:", json.dumps(prev)[:300]); return 1
-    hashes = {x["path"]: x["sha256"] for x in prev["sources"]}
-    for s in req["sources"]:
-        s["sha256"] = hashes[s["path"]]
-    req["reviewed"] = True
-    reg = memory(req)
-    report["connected"] = reg.get("status") == "registered"
-    print(f"connect: {reg.get('status')} pointer={reg.get('pointer')} sources={len(reg.get('sources', []))}")
-    if not report["connected"]:
-        print(json.dumps(reg)[:300]); return 1
+    ordered = sorted(connect_set, key=str)
+    parts = [ordered[i:i + a.limit] for i in range(0, len(ordered), a.limit)]
+    if len(parts) > 1:
+        print(f"splitting {len(ordered)} approved files into {len(parts)} parts of at most {a.limit}")
+
+    all_connected = True
+    hits, total, misses = 0, 0, []
+    for idx, part_files in enumerate(parts):
+        pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
+        result = connect_part(pname, a.principal, part_files, cache)
+        report["parts"].append({"pointer": pname, "count": len(part_files), "connected": result["connected"]})
+        if not result["connected"]:
+            all_connected = False
+            continue
+        if not a.no_findability:
+            for p in part_files:
+                q = cache[str(p)].get("question") or ""
+                total += 1
+                if not q:
+                    misses.append((str(p), "no question")); continue
+                top = navigate(pname, a.principal, q)
+                if top and top[0] == str(p):
+                    hits += 1
+                else:
+                    misses.append((str(p), f"ranked {'#' + str(top.index(str(p)) + 1) if str(p) in top else 'absent'}; top={Path(top[0]).name if top else 'none'}"))
+    report["connected"] = all_connected
 
     if not a.no_findability:
-        hits, misses = 0, []
-        for p in connect_set:
-            q = cache[str(p)].get("question") or ""
-            if not q:
-                misses.append((str(p), "no question")); continue
-            top = navigate(a.pointer, a.principal, q)
-            if top and top[0] == str(p):
-                hits += 1
-            else:
-                misses.append((str(p), f"ranked {'#' + str(top.index(str(p)) + 1) if str(p) in top else 'absent'}; top={Path(top[0]).name if top else 'none'}"))
-        report["findability"] = {"hits": hits, "total": len(connect_set), "misses": misses}
-        print(f"findability: {hits}/{len(connect_set)} files rank first on their own question")
+        report["findability"] = {"hits": hits, "total": total, "misses": misses}
+        print(f"findability: {hits}/{total} files rank first on their own question")
         for p, why in misses:
-            print(f"  MISS  {Path(p).relative_to(root)}  ({why})")
+            print(f"  MISS  {relstr(p, roots)}  ({why})")
+
     (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
-    return 0
+    return 0 if all_connected else 1
 
 
 if __name__ == "__main__":

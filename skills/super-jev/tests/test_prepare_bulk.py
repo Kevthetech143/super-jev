@@ -30,8 +30,11 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def base_argv(root, pointer="my-records", principal="agent", extra=None):
-    argv = ["prepare_bulk.py", "--root", str(root), "--pointer", pointer, "--principal", principal]
+def base_argv(root, pointer="my-records", principal="agent", extra=None, roots=None):
+    argv = ["prepare_bulk.py"]
+    for r in (roots if roots is not None else [root]):
+        argv += ["--root", str(r)]
+    argv += ["--pointer", pointer, "--principal", principal]
     if extra:
         argv += extra
     return argv
@@ -70,7 +73,7 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
 
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
 
-    files, held = pb.inventory(root, limit=50)
+    files, held = pb.inventory([root])
 
     assert {p.name for p in files} == {"normal.md"}
     held_by_name = {Path(p).name: why for p, why in held}
@@ -242,3 +245,175 @@ def test_no_connect_writes_report_and_never_calls_memory(tmp_path, monkeypatch, 
     assert report["approved"] == [str(f)]
     out = capsys.readouterr().out
     assert "no connect (--no-connect)" in out
+
+
+def test_inventory_multiple_roots_union_in_order(tmp_path):
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir(); root_b.mkdir()
+    (root_a / "z.md").write_text("# Z\nIn root a.\n")
+    (root_a / "m.md").write_text("# M\nIn root a.\n")
+    (root_b / "y.md").write_text("# Y\nIn root b.\n")
+
+    files, held = pb.inventory([root_a, root_b])
+
+    assert held == []
+    # root a (sorted) fully before root b (sorted): union in the order the roots were given
+    assert [p.name for p in files] == ["m.md", "z.md", "y.md"]
+
+
+def test_inventory_dedupes_file_reachable_via_two_roots(tmp_path):
+    root_a = tmp_path / "a"
+    root_a.mkdir()
+    (root_a / "one.md").write_text("# One\nShared file.\n")
+    nested = root_a / "sub"
+    nested.mkdir()
+    (nested / "two.md").write_text("# Two\nNested file.\n")
+
+    # root_a and its own subdirectory both passed as roots -> two.md reachable twice
+    files, held = pb.inventory([root_a, nested])
+
+    assert [p.name for p in files] == ["one.md", "two.md"]
+
+
+def test_inventory_exclude_skips_subpath(tmp_path):
+    root = tmp_path / "root"
+    (root / "campaigns").mkdir(parents=True)
+    (root / "companies").mkdir()
+    (root / "campaigns" / "one.md").write_text("# One\nCampaign file.\n")
+    (root / "companies" / "two.md").write_text("# Two\nCompany file.\n")
+    (root / "keep.md").write_text("# Keep\nStays.\n")
+
+    files, held = pb.inventory([root], excludes=["campaigns", "companies"])
+
+    assert {p.name for p in files} == {"keep.md"}
+
+
+def test_inventory_no_recurse_only_direct_children(tmp_path):
+    root = tmp_path / "root"
+    nested = root / "sub"
+    nested.mkdir(parents=True)
+    (root / "top.md").write_text("# Top\nDirect child.\n")
+    (nested / "deep.md").write_text("# Deep\nNested child.\n")
+
+    files, held = pb.inventory([root], no_recurse=True)
+
+    assert {p.name for p in files} == {"top.md"}
+
+
+def test_max_files_guard_refuses(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.md").write_text(f"# F{i}\nContent {i}.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--max-files", "2"]))
+    rc = pb.main()
+
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "REFUSED" in out and "max-files" in out
+
+
+def test_held_txt_written_with_masked_line_and_pattern_type(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
+
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    cache_dir.mkdir()
+
+    files, held = pb.inventory([root])
+    assert files == []
+    pb.write_held_txt("my-records", held)
+
+    held_txt = (cache_dir / "my-records-held.txt").read_text()
+    assert "pw.md" in held_txt
+    assert "card/password-like text" in held_txt
+    assert "pattern=password/api-key keyword" in held_txt
+    assert "line=2" in held_txt
+    assert "hunter2" not in held_txt   # the digit is masked
+    assert "hunter#" in held_txt
+
+
+def test_split_120_approved_files_into_3_parts_one_connect_per_part(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    paths = []
+    for i in range(120):
+        p = root / f"file{i:03}.md"
+        p.write_text(f"# File {i}\nContent {i}.\n")
+        paths.append(p)
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    cache = {
+        str(p): {"sha256": sha256_of(p), "description": f"Describes file {i}.", "question": f"What is file {i}?",
+                  "verdict": "SUPPORTED", "confidence": 0.9, "pass": True, "checkedAt": "2026-01-01T00:00:00"}
+        for i, p in enumerate(paths)
+    }
+    (cache_dir / "my-records.json").write_text(json.dumps(cache))
+
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: (_ for _ in ()).throw(AssertionError("writer should not run")))
+    monkeypatch.setattr(pb, "gate", lambda desc, path: (_ for _ in ()).throw(AssertionError("gate should not run")))
+
+    calls = []
+    monkeypatch.setattr(pb, "memory", fake_connect_memory(calls))
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
+    rc = pb.main()
+
+    assert rc == 0
+    # panel, connect(preview), connect(confirm) per part = 3 parts * 3 calls
+    pointers_used = [c["pointer"] for c in calls if c["action"] == "connect" and "reviewed" not in c]
+    assert pointers_used == ["my-records", "my-records-2", "my-records-3"]
+    confirm_calls = [c for c in calls if c.get("reviewed") is True]
+    assert [len(c["sources"]) for c in confirm_calls] == [50, 50, 20]
+
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["connected"] is True
+    assert [(part["pointer"], part["count"]) for part in report["parts"]] == \
+        [("my-records", 50), ("my-records-2", 50), ("my-records-3", 20)]
+    out = capsys.readouterr().out
+    assert "splitting 120 approved files into 3 parts" in out
+
+
+def test_refresh_drops_removed_file_from_cache_and_reports_it(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    kept = root / "kept.md"
+    kept.write_text("# Kept\nStill here.\n")
+    gone_path = str(root / "gone.md")  # never created on disk this run: simulates a prior file since deleted
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    cache = {
+        str(kept): {"sha256": sha256_of(kept), "description": "Describes kept.", "question": "What is kept?",
+                    "verdict": "SUPPORTED", "confidence": 0.9, "pass": True, "checkedAt": "2026-01-01T00:00:00"},
+        gone_path: {"sha256": "deadbeef", "description": "Describes gone.", "question": "What is gone?",
+                    "verdict": "SUPPORTED", "confidence": 0.9, "pass": True, "checkedAt": "2026-01-01T00:00:00"},
+    }
+    (cache_dir / "my-records.json").write_text(json.dumps(cache))
+
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: (_ for _ in ()).throw(AssertionError("writer should not run")))
+    monkeypatch.setattr(pb, "gate", lambda desc, path: (_ for _ in ()).throw(AssertionError("gate should not run")))
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--refresh", "--no-connect"]))
+    rc = pb.main()
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 cached files removed from disk" in out
+    assert "gone.md" in out
+
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["removed"] == [gone_path]
+    assert report["approved"] == [str(kept)]
+
+    saved_cache = json.loads((cache_dir / "my-records.json").read_text())
+    assert gone_path not in saved_cache
+    assert str(kept) in saved_cache
