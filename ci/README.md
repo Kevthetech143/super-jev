@@ -27,3 +27,23 @@ silently ignored. Both tools print a one-line summary and exit 0 on success,
 a single line naming the path/row, no traceback). Tests live in `ci/tests/`
 and use synthetic `decisions.tsv` fixtures in tmp dirs — no recorded fleet
 payload text.
+
+**Gated PR merge.** `ci/merge_gated.sh <pr-number> [--repo-dir <path>]` waits
+for a PR's CI checks to go green (`gh pr checks`, polled, with a positive
+pass gate — pending checks never merge), scrubs the PR title+body for
+performance numbers with `ci/scrub_numbers.py` and aborts before merging on
+a hit, then squash-merges. It never passes `gh`'s own `--delete-branch` flag
+(that makes `gh` check out the base branch locally, which fails whenever
+that branch is already checked out in another git worktree, even though the
+merge on GitHub succeeded); instead it deletes the head branch on the
+remote directly and ignores a failure there, since that's cleanup, not part
+of the merge gate. It confirms the merge by re-reading `gh pr view --json
+state` rather than trusting the merge command's exit code, and only
+`git pull --ff-only`s `--repo-dir` when that checkout is currently on the
+PR's base branch — `--repo-dir` may safely be any worktree of the repo
+(where `.git` is a file, not a directory) sitting on any branch. Prints
+exactly one final line, `PASS <sha>` or `FAIL: <step>`. Tests in
+`ci/tests/test_merge_gated.sh` drive it against a fake `gh` for the CI/merge
+scenarios, plus a real temporary git repo and `git worktree add` for the
+`--repo-dir` cases, with a `git` shim that only intercepts `push`/`pull` so
+no test ever touches a real remote.

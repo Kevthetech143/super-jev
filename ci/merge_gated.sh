@@ -20,10 +20,22 @@
 #   2. scrubs the PR title+body for performance numbers with
 #      ci/scrub_numbers.py; a hit prints the offending line and aborts
 #      BEFORE any merge happens
-#   3. runs `gh pr merge <n> --squash --delete-branch`
+#   3. runs `gh pr merge <n> --squash` (no `--delete-branch`: that flag makes
+#      gh check out the base branch locally to delete the head branch, which
+#      fails whenever the base branch is already checked out in another git
+#      worktree, even though GitHub merged fine). The head branch is instead
+#      deleted on the remote directly with `git push origin --delete
+#      <branch>`, a failure of which (already gone, no push access) is
+#      ignored -- it is cleanup, not part of the merge gate.
 #   4. confirms `gh pr view <n> --json state` == MERGED (never trusts the
-#      merge command exit code alone)
-#   5. `git pull --ff-only` in --repo-dir when given
+#      merge command exit code alone) -- this is the only thing that decides
+#      PASS vs FAIL for the merge step
+#   5. `git pull --ff-only` in --repo-dir, but ONLY when that checkout is
+#      currently on the PR's base branch; --repo-dir may be any worktree of
+#      the repo (`.git` there is a file, not a directory) and is otherwise
+#      left alone, since fast-forwarding a checkout that's on some other
+#      branch would be wrong (and isn't needed for the merge to have
+#      succeeded)
 #   6. prints exactly one final line: PASS <sha>  or  FAIL: <step>
 #      (a NOTE line about zero configured checks may precede it)
 
@@ -40,9 +52,9 @@ Usage: merge_gated.sh <pr-number> [--repo-dir <path>]
 
   1. waits for CI (gh pr checks) up to 25 min
   2. scrubs the PR title+body for performance numbers; aborts on a hit
-  3. squash-merges the PR and deletes the branch
+  3. squash-merges the PR, then deletes the head branch on the remote
   4. confirms the PR state is MERGED
-  5. git pull --ff-only in --repo-dir when given
+  5. git pull --ff-only in --repo-dir when it's checked out on the base branch
 EOF
 }
 
@@ -69,7 +81,9 @@ command -v gh >/dev/null 2>&1 || fail "gh-missing"
 command -v python3 >/dev/null 2>&1 || fail "python3-missing"
 [[ -f "$SCRUB" ]] || fail "scrub-missing"
 if [[ -n "$repo_dir" ]]; then
-  [[ -d "$repo_dir/.git" ]] || fail "repo-dir"
+  # A linked worktree's ".git" is a FILE (a gitdir pointer), not a directory,
+  # so this must ask git rather than stat the path directly.
+  git -C "$repo_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "repo-dir"
 fi
 
 # 1. wait for CI ----------------------------------------------------------
@@ -203,16 +217,34 @@ if ! printf '%s' "$pr_text" | python3 "$SCRUB"; then
   fail "scrub"
 fi
 
-# 3. merge ----------------------------------------------------------------
-gh pr merge "$pr_number" --squash --delete-branch >/dev/null || fail "merge"
+# head/base branch names, needed for remote cleanup and the repo-dir pull
+# below; fetched before the merge so a `pr-view` failure here aborts before
+# anything irreversible happens.
+head_branch="$(gh pr view "$pr_number" --json headRefName --jq '.headRefName')" || fail "pr-view"
+base_branch="$(gh pr view "$pr_number" --json baseRefName --jq '.baseRefName')" || fail "pr-view"
 
-# 4. confirm merged (never trust the merge exit code alone) ---------------
+# 3. merge ------------------------------------------------------------------
+# No --delete-branch: gh's local delete-branch step checks out the base
+# branch, which fails when that branch is checked out in another worktree
+# even though the merge itself succeeded on GitHub. Delete the remote branch
+# ourselves instead; a failure there (branch already gone, no push access)
+# is cleanup, not a merge failure, so it's ignored.
+gh pr merge "$pr_number" --squash >/dev/null || fail "merge"
+git -C "$SCRIPT_DIR/.." push origin --delete "$head_branch" >/dev/null 2>&1 || true
+
+# 4. confirm merged (never trust the merge exit code alone) -----------------
 state="$(gh pr view "$pr_number" --json state --jq '.state')" || fail "pr-view"
 [[ "$state" == "MERGED" ]] || fail "confirm"
 
-# 5. fast-forward the local checkout when asked ---------------------------
+# 5. fast-forward the local checkout when asked, but only when it's actually
+#    on the base branch -- --repo-dir may be a worktree sitting on some
+#    other branch, and pulling there would be wrong (and isn't required for
+#    the merge above to have succeeded).
 if [[ -n "$repo_dir" ]]; then
-  ( cd "$repo_dir" && git pull --ff-only >/dev/null ) || fail "pull"
+  current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [[ "$current_branch" == "$base_branch" ]]; then
+    git -C "$repo_dir" pull --ff-only >/dev/null || fail "pull"
+  fi
 fi
 
 # 6. final line ------------------------------------------------------------
