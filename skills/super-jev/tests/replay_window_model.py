@@ -47,9 +47,9 @@ child sets; it is not something a caller needs.
 
 Exits 0 iff every case is byte-identical and meta-identical, no line
 gained trust or changed kind, and the PR #53 child (when it runs) says
-the same. Prints the round-trip tally. Exits 0 with a skip note when no
-bench is on this machine (the benches live outside the repo, under
-~/super-jev-experiments).
+the same. Prints the round-trip tally. Exits 1 when no recorded bench
+is available; set SUPERJEV_BENCH_ROOT to the recorded inputs directory
+(default: ~/super-jev-experiments).
 """
 import importlib.util
 import json
