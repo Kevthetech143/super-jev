@@ -4,6 +4,23 @@
 
 No version bump.
 
+- **Checked connect wrapper.** Added `skills/super-jev/connect_checked.py`, a
+  wrapper around the memory `connect` action that gates every source's
+  description against its own file with the reply-kit claim gate
+  (`dispatch.py check --claim`) before doing anything else. A description
+  that comes back NOT_SUPPORTED, SUPPORTED under the 0.80 confidence line,
+  or over the gate's 32k-token ceiling refuses the whole connect; nothing
+  is registered until every source passes. Only on an all-pass does it run
+  the normal connect preview, copy the returned sha256 hashes back into the
+  request, set `reviewed: true`, and confirm. A `<name>.verdicts.json` file
+  is written next to the request with each source's state, confidence, and
+  sha256, so a later run can see which files changed since they were last
+  checked. `--check-only` runs the gate without connecting; `--line` moves
+  the confidence line. It does not auto-recheck files that changed after a
+  connect, and it does not chunk or truncate files over the token ceiling —
+  split or drop them instead. See `skills/super-jev/SKILL.md` and
+  `skills/super-jev/references/connectors.md`.
+
 - **Written-file fact wording (family 6).** The family-6 WRITTEN FILE
   fact no longer states a closed inventory. The old sentence ("the
   only file written in this window is ...") read to the judge as a
