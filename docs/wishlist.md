@@ -1,6 +1,6 @@
 # super-jev wishlist
 
-Seven items, no filler. super-jev is a Jev-tuned harness: one judge behind one
+Nine items, no filler. super-jev is a Jev-tuned harness: one judge behind one
 adapter, thresholds measured against Jev. Each module (batching, named
 records, coverage, evidence chains, outcomes, cost, sweep) stands alone and
 can be replaced or left out. A different judge is possible but means
@@ -130,3 +130,34 @@ Proof for all seven: the live bench (`bench/live-measure.ts`) reports
 accuracy, accepted-error rate, review rate, coverage, tokens and latency
 together. A feature ships only once measured, and the numbers live in the
 bench output, not in this document.
+
+8. **AUTO-CATCH** — a verified hit is kept for reuse without the agent
+   remembering to approve it, on any model, with or without harness hooks.
+   Closes: the approved-answer cache staying empty because approval is a
+   manual command nobody runs; the same lookup paid for again every day.
+   Harness: `ask` leaves a receipt (question, attempt, top files); `--done
+   "<answer>"` picks the opened evidence file, runs the claim gate on the
+   cited sentences, and approves the FILE'S QUOTES (never the agent's prose)
+   into both the exact lane and the searchable lane only when SUPPORTED at
+   the line, honest, not time-sensitive, and the top file clearly beats the
+   second. One config switch, default off; the Claude Code Stop hook is an
+   optional shortcut that calls the same `--done`. Every decision logged.
+   Status: PLANNED — build brief and tests in progress (feat/auto-catch).
+
+9. **RECIPES** — cache the HOW, not the answer: a live question ("any Back
+   Market orders today?") resolves to a registered read-only script the
+   agent already found once, and the harness runs it and returns fresh data.
+   Closes: agents re-hunting the same API or command every time a live
+   question repeats; the cache being useless for anything that changes.
+   Harness: a manual entry whose answer is `RECIPE: <path> sha256=<h>` with
+   the script as `--source`; `ask --run` executes it only when the path is
+   inside one allowlisted recipes folder, the hash still matches, argv is a
+   list (no shell), and the output is non-empty with exit 0 — otherwise it
+   hands the recipe to the agent instead. Read-only recipes only in v1; per
+   principal; `autoRun` switch default off; every run logged. Ties to item 5
+   (ACTION PERMIT) the day a recipe is allowed to change anything. Meant to
+   grow slowly: one recipe per proven lookup, never a generic executor.
+   Status: PROTOTYPE PASSED 2026-09-21 — exact hit ran live, a paraphrase
+   found and ran it via the search lane, a tampered script was withheld as
+   STALE by the existing source-hash check. Build after item 8.
+
