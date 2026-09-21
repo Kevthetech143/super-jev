@@ -11,6 +11,7 @@ import importlib.util
 import os
 import random
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -720,14 +721,19 @@ def _pr53_module():
     return mod
 
 
-def test_replay_refuses_to_pass_when_no_recorded_windows(tmp_path, monkeypatch, capsys):
-    import replay_window_model as replay
-    monkeypatch.setenv("SUPERJEV_BENCH_ROOT", str(tmp_path / "missing"))
+def test_replay_refuses_to_pass_when_no_recorded_windows(tmp_path):
+    # Run the replay entry point in a child process. Importing it here would
+    # replace sys.modules["superjev"] as part of its composer-isolation setup,
+    # contaminating every window-model test that follows in this process.
+    env = os.environ.copy()
+    env["SUPERJEV_BENCH_ROOT"] = str(tmp_path / "missing")
+    proc = subprocess.run(
+        [sys.executable, str(SKILL / "tests" / "replay_window_model.py")],
+        capture_output=True, text=True, env=env, timeout=30)
 
-    assert replay.main() == 1
-    out = capsys.readouterr().out
-    assert "FAIL — no recorded benches" in out
-    assert "SUPERJEV_BENCH_ROOT" in out
+    assert proc.returncode == 1
+    assert "FAIL — no recorded benches" in proc.stdout
+    assert "SUPERJEV_BENCH_ROOT" in proc.stdout
 
 
 #: `a_report_quoting_a_merge_receipt_never_allows` is the one case where
