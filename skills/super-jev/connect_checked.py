@@ -11,7 +11,8 @@ CONNECT.json is the normal memory connect request: {"action":"connect","pointer"
 
 Rules (deliberately strict):
   PASS      = gate says SUPPORTED at or above the line.
-  FAIL      = NOT_SUPPORTED at any confidence, or SUPPORTED under the line (the gate's own "read it" zone).
+  FAIL      = NOT_SUPPORTED or CONTRADICTED at any confidence, or SUPPORTED under the line (the gate's own
+              "read it" zone).
   UNCHECKED = file over the gate's 32k-token ceiling; the gate refuses to truncate, so we refuse to connect it.
 Any FAIL or UNCHECKED refuses the whole connect. Fix the description, split the file, or drop it, then rerun.
 Verdicts are written next to CONNECT.json as <name>.verdicts.json with each file's sha256, so a later run
@@ -24,6 +25,13 @@ HERE = Path(__file__).resolve().parent
 CEILING_MSG = "exceeds the 32,768-token ceiling"
 
 
+# The gate's c1 line can carry any verdict token the reply kit's claim question
+# supports: SUPPORTED, NOT_SUPPORTED, or CONTRADICTED. The old regex only matched
+# the first two, so a CONTRADICTED verdict fell through to "no match" and was
+# reported as ERROR instead of a real FAIL with its own confidence.
+KNOWN_VERDICTS = ("SUPPORTED", "NOT_SUPPORTED", "CONTRADICTED")
+
+
 def gate(description: str, path: str) -> dict:
     t = time.time()
     r = subprocess.run([sys.executable, str(HERE / "dispatch.py"), "check", "--claim", description, path],
@@ -32,10 +40,11 @@ def gate(description: str, path: str) -> dict:
     secs = round(time.time() - t, 1)
     if CEILING_MSG in txt:
         return {"state": "UNCHECKED", "reason": "over 32k-token ceiling; split the file", "secs": secs}
-    m = re.search(r"\bc1\s+(SUPPORTED|NOT_SUPPORTED)\s+([\d.]+)", txt)
-    if not m:
+    m = re.search(r"\bc1\s+(\S+)\s+([\d.]+)", txt)
+    if not m or m.group(1) not in KNOWN_VERDICTS:
         tail = txt.strip().splitlines()[-1:] or ["no output"]
-        return {"state": "ERROR", "reason": tail[0][:160], "secs": secs}
+        token = f" (c1 token: {m.group(1)})" if m else ""
+        return {"state": "ERROR", "reason": (tail[0][:160] + token)[:200], "secs": secs}
     return {"state": m.group(1), "confidence": float(m.group(2)), "secs": secs}
 
 

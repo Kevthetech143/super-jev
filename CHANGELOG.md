@@ -4,6 +4,20 @@
 
 No version bump.
 
+- **Bulk prepare: gated labels and a local list filter.** The writer now
+  drafts four labels per file alongside the description — `kind`, `status`,
+  `as_of`, `subject` — validated against a fixed enum locally (an
+  out-of-enum value is coerced to `unknown`, never crashes the run) and
+  folded into one claim gated per file, rather than a second, separate gate
+  call. The connect description carries the labels in brackets so ranking
+  sees them. `prepare_bulk.py --list --pointer NAME` filters the already-
+  gated labels back out of the cache by status, kind, subject, or recency,
+  with no writer, gate, or memory call — a label is only as true as the file
+  it was drafted from, and `as_of` shows staleness, not current truth. Also
+  fixed `connect_checked.gate()` to parse every verdict the gate's claim
+  question can return, including `CONTRADICTED`, which previously fell
+  through the verdict regex and was reported as a generic error instead of
+  a real fail.
 - **Ask: cache-first lookup loop.** Added `skills/super-jev/ask.py`, a front
   door that checks a new harness `cached` action before doing anything else,
   so a repeat question is answered with zero provider calls and without any
