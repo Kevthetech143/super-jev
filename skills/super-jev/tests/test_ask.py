@@ -478,6 +478,46 @@ def test_replace_entry_removes_old_pointer_and_record_then_adds_fresh(tmp_path, 
     assert connect_calls and all(c.get("replace") is True for c in connect_calls)
 
 
+def test_replace_entry_sets_replace_true_even_when_panel_no_longer_lists_the_pointer(tmp_path, monkeypatch):
+    """Live-discovered case: a pointer removed in an earlier run no longer shows up in
+    `panel`, but the harness's dataset registry still has it under that pointer name --
+    a connect without replace:true still fails as already-connected. --replace-entry
+    must send replace:true regardless of what panel currently reports."""
+    question = "duplicate wording, already removed from panel"
+    pointer = ask.manual_pointer_name("alice", question)
+    calls = []
+
+    def fake_memory(req):
+        calls.append(req)
+        if req["action"] == "panel":
+            return {"pointers": []}  # panel no longer lists it
+        if req["action"] == "connect" and not req.get("reviewed"):
+            if not req.get("replace"):
+                return {"status": "preparation-required", "reason": "already-connected"}
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            if not req.get("replace"):
+                return {"status": "preparation-required", "reason": "already-connected"}
+            return {"status": "registered",
+                     "sources": [{"id": "file:abc", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix",
+                     "passages": [{"sourceId": "s", "reviewedText": "fresh text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        if req["action"] == "remove":
+            raise AssertionError("panel never listed it; remove should not be called")
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.add_manual("alice", question, "fresh answer", None, tmp_path, replace=True)
+
+    assert rc == 0
+    remove_calls = [c for c in calls if c["action"] == "remove"]
+    assert remove_calls == []
+
+
 def test_add_without_replace_flag_still_refuses_when_pointer_exists(tmp_path, monkeypatch, capsys):
     question = "duplicate wording no replace"
     pointer = ask.manual_pointer_name("alice", question)
