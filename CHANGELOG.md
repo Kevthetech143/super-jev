@@ -4,6 +4,15 @@
 
 No version bump.
 
+- **Ask: hits print before pointer errors.** Fixed `ask.py` so a miss that
+  finds real candidates on some pointers, while another pointer errors, now
+  always shows those candidates first, followed by the per-pointer error
+  lines, then the unresolved summary. Previously an error on any pointer
+  printed the unresolved summary and returned before the merged candidates
+  from healthy pointers were ever shown, hiding a real hit behind an
+  unrelated pointer's failure. The exit code is unchanged: 1 whenever any
+  pointer errored, 0 otherwise, with the no-candidates hint reserved for the
+  case where every pointer answered cleanly and none had anything.
 - **Bulk prepare: gated labels and a local list filter.** The writer now
   drafts four labels per file alongside the description — `kind`, `status`,
   `as_of`, `subject` — validated against a fixed enum locally (an

@@ -97,6 +97,34 @@ def test_pointer_error_prints_status_line_and_is_not_folded_into_no_candidates(t
     assert "no-candidates across" not in out
 
 
+def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path, monkeypatch, capsys):
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": ["p1", "p2"]}
+        if req["action"] == "navigate" and req["pointer"] == "p1":
+            return {"status": "refresh-required"}
+        if req["action"] == "navigate" and req["pointer"] == "p2":
+            return {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": "/hit.md"}]}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.lookup("q", "alice", tmp_path)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "/hit.md" in out
+    assert "[p2]" in out
+    assert "[p1] refresh-required" in out
+    assert "unresolved: 1 of 2 pointers errored" in out
+    # the hit must appear before both the error line and the unresolved summary
+    hit_pos = out.index("/hit.md")
+    error_pos = out.index("[p1] refresh-required")
+    unresolved_pos = out.index("unresolved:")
+    assert hit_pos < error_pos < unresolved_pos
+
+
 def test_all_pointers_empty_gives_no_candidates_hint_naming_connectors_and_add(tmp_path, monkeypatch, capsys):
     def fake_memory(req):
         if req["action"] == "cached":
