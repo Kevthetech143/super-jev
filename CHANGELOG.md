@@ -4,6 +4,25 @@
 
 No version bump.
 
+- **Split the connect workflow into its own skill; bulk prepare gains `--allow-held`.**
+  `skills/super-jev-connect/` is a new, small skill covering onboarding and
+  refresh: what a connector is, the connector-kind table, the naming rule,
+  when to use `connect_checked.py` versus `prepare_bulk.py` versus
+  `ask.py --add`, and the label/held-file/refresh behavior that used to live
+  on the daily page. It requires confirming a cheap writer command with the
+  operator before the first bulk run, and names the proven default. The
+  daily `skills/super-jev/SKILL.md` page is trimmed down to the commands,
+  maturity, safeguards and banned patterns an agent needs on an ordinary
+  turn, pointing to the connect skill for setup instead of carrying that
+  detail itself. `prepare_bulk.py` also gains `--allow-held`, an explicit
+  operator override that admits a file the secret scan alone would hold (it
+  is still listed in the held file, noting the override); its secret scan
+  now ignores ISO dates and URLs when matching the card-number pattern,
+  keeping the password/api-key keyword rule as-is, so a long numeric id in a
+  URL or a run of dates on one line no longer triggers a false hold. Every
+  run now prints a `writer: <command>` banner and, when no writer command or
+  `SUPERJEV_WRITER_COMMAND` env var is set, a one-line reminder to use a
+  cheap model rather than a premium one.
 - **Ask: manual entries carry labels; list covers them; `--replace-entry`.**
   `ask.py --add` now takes the same `kind`/`status`/`as_of`/`subject` labels
   bulk prepare drafts and gates, defaulting to `record`/`active`/today/the

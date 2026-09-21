@@ -333,10 +333,11 @@ Why a margin on top of a floor: a confident-looking top-1 sitting in a crowded f
 
 `skills/super-jev/` is a small [Claude Code](https://docs.claude.com/en/docs/claude-code) skill: a single Python file, `superjev.py`, that gives an agent one command for every check in this repo instead of four things to remember. It is a thin wrapper — every judgement still belongs to the tool it wraps. New here? **[`docs/playbook.md`](docs/playbook.md)** is the fast path in: a job-to-door table, one worked example per door, and what real dogfooding says to trust today. **[`docs/lessons.md`](docs/lessons.md)** is what live use has taught us since: feed rules, hook lessons, and why a couple of promising-sounding changes did not pan out. **[`docs/coverage.md`](docs/coverage.md)** maps every door's claim types to its free checks, with an explicit list of what is not covered yet.
 
-Install it by symlink or copy:
+Install it by symlink or copy. `skills/super-jev-connect/` is a second, small skill covering onboarding and refresh — registering a new connector, drafting and gating its labels with a confirmed cheap writer model, and refreshing a pointer after its files change; install both:
 
 ```bash
 ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
+ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 ```
 
 | subcommand | what it does |
