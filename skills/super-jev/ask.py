@@ -291,10 +291,13 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
     record.write_text("\n".join(lines) + "\n")
     description = f"{question[:120]} {label_bracket(labels)}"
     req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": [{"path": str(record), "description": description}]}
-    if exists and replace:
-        # `remove` drops the pointer from this principal's approved-answer set but the
-        # harness keeps the dataset registered under that pointer name, so reconnecting
-        # it still needs the same replace:true a stale-source reconnect uses.
+    if replace:
+        # `remove` (called above when the panel still lists the pointer) drops it from
+        # this principal's approved-answer set, but the harness keeps the dataset
+        # registered under that pointer name -- independent of the panel listing, so a
+        # pointer already removed in an earlier run still needs replace:true here.
+        # --replace-entry is an explicit "this may already be registered" assertion,
+        # so always send it once the flag is given, not only when panel still shows it.
         req["replace"] = True
     preview = memory(req)
     if preview.get("status") != "preparation-required" or "sources" not in preview:
