@@ -81,6 +81,10 @@ if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then
       if [[ "$scenario" == "merge-not-confirmed" ]]; then printf 'OPEN\n'; else printf 'MERGED\n'; fi ;;
     mergeCommit)
       printf 'abc123def4567890\n' ;;
+    headRefName)
+      printf '%s\n' "${MERGE_GATED_HEAD_BRANCH:-feature-branch}" ;;
+    baseRefName)
+      printf '%s\n' "${MERGE_GATED_BASE_BRANCH:-main}" ;;
     *)
       echo "fake-gh: unhandled --json $json" >&2; exit 3 ;;
   esac
@@ -97,10 +101,39 @@ FAKEGH
   chmod +x "$1/gh"
 }
 
+write_fake_git() { # $1 = dir; writes $1/git -- intercepts push/pull (recorded
+                    # to files, never touches a real remote), forwards every
+                    # other subcommand (rev-parse, worktree setup, ...) to the
+                    # real git so worktree/branch behavior stays genuine.
+  local real_git; real_git="$(command -v git)"
+  cat > "$1/git" <<SHIM
+#!/usr/bin/env bash
+set -u
+REAL_GIT="$real_git"
+dir="\${MERGE_GATED_SHIM_DIR:?}"
+sub="\${1:-}"
+if [[ "\$sub" == "-C" ]]; then
+  sub="\${3:-}"
+fi
+case "\$sub" in
+  push)
+    printf '%s\n' "\$*" >> "\$dir/git_push_calls"
+    exit 0 ;;
+  pull)
+    printf '%s\n' "\$*" >> "\$dir/git_pull_calls"
+    exit 0 ;;
+esac
+exec "\$REAL_GIT" "\$@"
+SHIM
+  chmod +x "$1/git"
+}
+
 run_scenario() { # $1=scenario $2=expected last line $3=deadline seconds
   local scenario="$1" expected="$2" deadline_secs="$3"
   local tmp; tmp="$(mktemp -d)"
   write_fake_gh "$tmp"
+  write_fake_git "$tmp"   # scenarios that reach the merge step now also push
+                          # --delete; fake git keeps that off the real remote.
   local out rc last want_rc
   out="$(
     export PATH="$tmp:$PATH"
@@ -127,6 +160,87 @@ run_scenario() { # $1=scenario $2=expected last line $3=deadline seconds
   return 1
 }
 
+# --repo-dir worktree scenarios -------------------------------------------
+#
+# Reproduces the two bugs two workers hit merging from a git worktree:
+#   1. `[[ -d "$repo_dir/.git" ]]` used to reject a worktree outright,
+#      because a linked worktree's .git is a FILE, not a directory.
+#   2. `gh pr merge --delete-branch` used to try to check out the base
+#      branch locally, which fails when that branch is checked out
+#      elsewhere -- even though GitHub had already merged.
+# These use a REAL temporary git repo + a REAL `git worktree add` (not a
+# fake) for the repo-dir precondition and branch checks, so a regression
+# back to `-d "$repo_dir/.git"` would actually fail this test. `git push`
+# and `git pull` are still intercepted by write_fake_git so no real remote
+# is ever touched.
+run_worktree_scenario() { # $1=worktree branch $2=base branch $3=expect pull called (yes/no)
+  local wt_branch="$1" base_branch="$2" expect_pull="$3"
+  local src; src="$(mktemp -d)"
+  local wt; wt="$(mktemp -d)"
+  rmdir "$wt"   # `git worktree add` requires the target not exist yet
+
+  # "scratch" stays checked out in $src throughout, so $base_branch (and, for
+  # the same-branch case, $wt_branch) is always free for `worktree add` to
+  # check out -- git refuses to check out a branch that's checked out
+  # elsewhere already, which is the bug this whole scenario is guarding.
+  git init -q -b scratch "$src"
+  git -C "$src" config user.email test@example.com
+  git -C "$src" config user.name "Test"
+  echo one > "$src/f.txt"
+  git -C "$src" add f.txt
+  git -C "$src" commit -q -m init
+  git -C "$src" branch "$base_branch"
+
+  if [[ "$wt_branch" == "$base_branch" ]]; then
+    git -C "$src" worktree add -q "$wt" "$base_branch"
+  else
+    git -C "$src" worktree add -q -b "$wt_branch" "$wt" "$base_branch"
+  fi
+
+  local tmp; tmp="$(mktemp -d)"
+  write_fake_gh "$tmp"
+  write_fake_git "$tmp"
+
+  local label="repo-dir-worktree(branch=$wt_branch,base=$base_branch)"
+  local out rc last
+  out="$(
+    export PATH="$tmp:$PATH"
+    export MERGE_GATED_SHIM_DIR="$tmp"
+    export MERGE_GATED_SCENARIO="pending-then-pass"
+    export MERGE_GATED_POLL_SECS=0
+    export MERGE_GATED_DEADLINE_SECS=120
+    export MERGE_GATED_BASE_BRANCH="$base_branch"
+    export MERGE_GATED_HEAD_BRANCH="some-pr-branch"
+    bash "$MERGE_GATED" 42 --repo-dir "$wt" 2>&1
+  )"
+  rc=$?
+  last="$(printf '%s\n' "$out" | tail -n 1)"
+
+  local ok=1
+  if [[ "$last" != "PASS abc123def4567890" || "$rc" -ne 0 ]]; then
+    ok=0
+  fi
+  local pulled=no
+  [[ -f "$tmp/git_pull_calls" ]] && pulled=yes
+  if [[ "$pulled" != "$expect_pull" ]]; then
+    ok=0
+  fi
+  # the remote-branch cleanup push must always be attempted once merged
+  if [[ ! -f "$tmp/git_push_calls" ]]; then
+    ok=0
+  fi
+
+  if [[ "$ok" -eq 1 ]]; then
+    echo "ok: $label -> $last (pull-called=$pulled)"
+  else
+    echo "FAIL: $label: got [$last] rc=$rc pull-called=$pulled (expected pull-called=$expect_pull)"
+    printf '%s\n' "$out" | sed 's/^/    /'
+  fi
+  git -C "$src" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+  rm -rf "$src" "$tmp"
+  return $(( 1 - ok ))
+}
+
 fails=0
 run_scenario pending-then-pass    "PASS abc123def4567890" 120 || fails=$(( fails + 1 ))
 run_scenario failed               "FAIL: ci-failed"       120 || fails=$(( fails + 1 ))
@@ -134,6 +248,8 @@ run_scenario timeout              "FAIL: ci-timeout"       0 || fails=$(( fails 
 run_scenario scrub-hit            "FAIL: scrub"           120 || fails=$(( fails + 1 ))
 run_scenario merge-not-confirmed  "FAIL: confirm"         120 || fails=$(( fails + 1 ))
 run_scenario legacy-text-failed   "FAIL: ci-failed"       120 || fails=$(( fails + 1 ))
+run_worktree_scenario feature-x main no  || fails=$(( fails + 1 ))
+run_worktree_scenario main       main yes || fails=$(( fails + 1 ))
 
 if [[ "$fails" -eq 0 ]]; then
   echo "ALL SCENARIOS PASSED"
