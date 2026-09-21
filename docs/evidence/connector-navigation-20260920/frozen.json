@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "id": "rollback",
+      "question": "Where are the steps for undoing a bad deployment?",
+      "expected": "deploy-rollback"
+    },
+    {
+      "id": "keys",
+      "question": "Find the instructions for rotating the service API key.",
+      "expected": "key-rotation"
+    },
+    {
+      "id": "refund",
+      "question": "Which file explains how customer refunds are handled?",
+      "expected": "refund-policy"
+    },
+    {
+      "id": "oncall",
+      "question": "Where can I find the escalation procedure for an overnight outage?",
+      "expected": "oncall"
+    },
+    {
+      "id": "missing",
+      "question": "Find the office parking permit application.",
+      "expected": null
+    },
+    {
+      "id": "absent",
+      "question": "Where is the recipe for chocolate cake?",
+      "expected": null
+    }
+  ],
+  "sources": [
+    {
+      "id": "deploy-rollback",
+      "path": "sources/Engineering/Deployment/rollback.md",
+      "description": "Instructions for undoing a failed deployment and restoring the previous release."
+    },
+    {
+      "id": "key-rotation",
+      "path": "sources/Engineering/Security/keys.md",
+      "description": "How to rotate a service API key and revoke the previous key."
+    },
+    {
+      "id": "refund-policy",
+      "path": "sources/Business/Support/refunds.md",
+      "description": "Customer refund eligibility and processing instructions."
+    },
+    {
+      "id": "oncall",
+      "path": "sources/Engineering/Operations/oncall.md",
+      "description": "Escalation procedure for overnight service outages and on-call incidents."
+    },
+    {
+      "id": "invoice",
+      "path": "sources/Business/Finance/invoices.md",
+      "description": "Invoice payment schedules and accounting reconciliation."
+    },
+    {
+      "id": "release-notes",
+      "path": "sources/Engineering/Deployment/releases.md",
+      "description": "Historical release notes and shipped feature descriptions."
+    }
+  ],
+  "structures": [
+    "flat-files",
+    "folder-tree"
+  ],
+  "repeats": 2,
+  "limits": {
+    "beamWidth": 3,
+    "maxRounds": 6,
+    "maxResults": 3
+  },
+  "budget": 80,
+  "scoring": "Expected source in navigation shortlist; missing cases reported separately. Not answer accuracy or general reliability."
+}
