@@ -175,6 +175,21 @@
         "../SKILL.md",
         "verified-reuse.md"
       ]
+    },
+    {
+      "id": "navigation",
+      "label": "Navigate connected files",
+      "matchPhrases": [
+        "navigate",
+        "navigation",
+        "file tree",
+        "folder tree",
+        "find the right file"
+      ],
+      "answer": "At connection time choose flat-files or folder-tree and review the returned metadata along with source hashes. Then use memory --input with action navigate, pointer, principal and question. The harness and Jev explore the registered structure within bounded limits and return file candidates for the agent to inspect, not verified answers. Existing pointers support a flat view; no automatic crawling or database ingestion. See the connector reference for commands and limits.",
+      "sources": [
+        "connectors.md"
+      ]
     }
   ]
 }

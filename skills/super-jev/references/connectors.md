@@ -110,3 +110,32 @@ A successful `registered` response means preparation and registration finished. 
 Refresh uses the same pointer, dataset and exact principal scope with `replace: true` and newly reviewed source hashes. It invalidates that pointer's prior answers/tickets. Do not use replacement to widen an Iris connector to another person or to add audience members silently. If the old connector is shared or its scope is uncertain, keep it intact and create a separately named connector for the authorized scope.
 
 Initial support is explicit local nonempty UTF-8 text files on macOS/Linux, up to 50 files and 5 MiB per request. Folders, binary/PDF documents and remote URLs need prior authorized extraction or explicit file selection; there is no automatic crawl or live synchronization. The harness preserves originals. Connecting raw private material does not automatically sanitize it: if full text is not authorized for the provider, prepare a reviewed/redacted projection using the existing workflow instead.
+
+
+## Navigation structure
+
+Record how the connected view is organized at onboarding. Supported structures are `flat-files` (default) and `folder-tree`. These describe only the explicit reviewed source set, not the entire disk. The connector exposes stable node IDs, a root, and available navigation actions. A database or arbitrary graph is not silently treated as a tree; direct database ingestion and automatic index-link parsing remain unsupported.
+
+For an existing folder layout, preview the same explicit files with:
+
+```sh
+python3 dispatch.py memory --connect project-docs --structure folder-tree --file /project/docs/setup.md --file /project/docs/operations/release.md --principal YOUR_AGENT_NAME
+```
+
+Review the proposed navigation metadata as well as source scope and permission, then run the returned `confirmCommand`. It preserves the reviewed structure and metadata hash. No directory crawling occurs; only supplied files enter the view. A folder-tree derives groups from their parent directories. Source descriptions should explain what each file actually contains; structure alone does not establish relevance.
+
+For agent-authored groupings such as an index of brain records, the JSON `connect` workflow can supply each source's `navigationPath`, an array of group labels, with `structure:"folder-tree"`. For example a source may have `"navigationPath":["Projects","Super Jev"]`. This is an explicit reviewed projection, not permission to follow links or read additional files. Use the preview's navigation metadata hash when confirming. Originals stay unchanged. Refresh an existing structure with the normal reviewed `replace:true` flow.
+
+To locate candidate files, save this request in the caller repo's private working area and run `memory --input`:
+
+```json
+{"action":"navigate","pointer":"project-docs","principal":"YOUR_AGENT_NAME","question":"Where are deployment rollback instructions?","limits":{"beamWidth":3,"maxRounds":6,"maxResults":3}}
+```
+
+The harness presents the root's options to Jev, retains several promising routes, opens their registered children, and repeats within the limits. It tracks visited branches and limits exploration. Returned source locations remain bound to the registered reviewed snapshot and authorized pointer; stale sources must be refreshed. Existing pre-navigation pointers use a flat view of their already registered descriptions.
+
+`candidates` means inspect these files. `no-candidates` means no file was selected in this bounded run. `budget-exhausted` means the exploration limit was reached. None of these statuses approves an answer, proves that the answer is absent, or writes the answer cache. Keep `search` for passage retrieval and the existing explicit approval flow for verified reuse. Navigation is advisory even if a ranking score is high.
+
+Design reference: [TypeSafe hierarchical classification](https://docs.typesafe.ai/cookbooks/hierarchical_classification) keeps multiple paths instead of making a single irreversible branch choice. This implementation bounds traversal over registered local sources; it is not a general crawler or a claim of universal file-finding accuracy.
+
+For everyday file finding, start with `flat-files`. Folder-tree is experimental: pruning a folder can hide relevant files, especially when a question needs files in separate folders. After navigation, read candidate files before answering; suggestions do not establish support or absence. For an existing connector whose source bytes changed, refresh with the same pointer and scope plus `replace:true` (CLI `--replace`), review current hashes, and confirm before retrying.
