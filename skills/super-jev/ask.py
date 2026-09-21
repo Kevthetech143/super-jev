@@ -4,11 +4,14 @@
   ask.py --principal AGENT "question"
       Cache-first via the harness `cached` action (zero provider calls): a hit
       prints the answer + evidence and stops. A miss navigates every visible
-      pointer in parallel, classifying each candidates/no-candidates/error. A
-      non-candidate pointer prints its own status line (e.g. "[pointer]
-      refresh-required") -- errors never hide as "no-candidates". All-empty ->
-      a no-candidates hint naming references/connectors.md and --add. Any
-      error -> "unresolved: N of M pointers errored", exit 1.
+      pointer in parallel, classifying each candidates/no-candidates/error. Any
+      merged candidates from healthy pointers print first, always -- a pointer
+      error never buries a real hit. A non-candidate pointer prints its own
+      status line (e.g. "[pointer] refresh-required") after the candidates --
+      errors never hide as "no-candidates". All-empty (no candidates, no
+      errors) -> a no-candidates hint naming references/connectors.md and
+      --add. Any error -> "unresolved: N of M pointers errored" last, exit 1
+      (even when candidates printed above); exit 0 otherwise.
 
   ask.py --principal AGENT --approve "question" "answer"
       Re-searches the last lookup's top pointer and approves it, quotes taken
@@ -127,7 +130,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         return ptr, status or "error", []
 
     results = list(ThreadPoolExecutor(max_workers=8).map(nav, pointers)) if pointers else []
-    merged, errored, statuses = [], 0, {}
+    merged, errored, statuses, error_lines = [], 0, {}, []
     for ptr, kind, rows in results:
         if kind == "candidates":
             statuses[ptr] = "candidates"
@@ -137,19 +140,23 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             errored += 1
             statuses[ptr] = kind
-            print(f"[{ptr}] {kind}")
+            error_lines.append(f"[{ptr}] {kind}")
     merged.sort(reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
+    # Hits always print first: a pointer error must never bury a real candidate
+    # from a healthy pointer under the "unresolved" summary below it.
+    for s, p, ptr in top:
+        print(f"{s:5.2f}  {p}  [{ptr}]")
+    for line in error_lines:
+        print(line)
     if errored:
         print(f"unresolved: {errored} of {len(pointers)} pointers errored")
         return 1
     if not top:
         print(f"no-candidates across {len(pointers)} pointers. Connect sources (see references/connectors.md) or record a fact with --add.")
         return 0
-    for s, p, ptr in top:
-        print(f"{s:5.2f}  {p}  [{ptr}]")
     return 0
 
 def find_pointer(sdir: Path, question: str):
