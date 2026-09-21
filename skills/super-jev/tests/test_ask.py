@@ -471,6 +471,11 @@ def test_replace_entry_removes_old_pointer_and_record_then_adds_fresh(tmp_path, 
     new_text = old_record.read_text()
     assert "stale body" not in new_text
     assert "fresh answer" in new_text
+    # `remove` only drops principal access; the harness keeps the dataset registered
+    # under that pointer name, so the reconnect after an explicit remove still needs
+    # replace:true, exactly like a stale-source reconnect elsewhere in this codebase.
+    connect_calls = [c for c in calls if c["action"] == "connect"]
+    assert connect_calls and all(c.get("replace") is True for c in connect_calls)
 
 
 def test_add_without_replace_flag_still_refuses_when_pointer_exists(tmp_path, monkeypatch, capsys):
