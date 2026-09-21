@@ -4,6 +4,20 @@
 
 No version bump.
 
+- **Bulk prepare: labels gated separately; a label never drops a file.**
+  `prepare_bulk.py` now gates the description and the label sentence in two
+  separate passes instead of one combined claim. The description alone
+  decides whether a file connects at all, with the existing one rewrite
+  retry on a miss. Only after that passes does the label sentence get its
+  own gate call; a label problem there — under the confidence line,
+  `NOT_SUPPORTED`, `CONTRADICTED`, or an error — no longer costs the file its
+  place. It resets `kind`, `status`, `as_of`, and `subject` to `unknown`,
+  records the label verdict and confidence in the cache entry, and the file
+  still connects on its plain description. Only a file whose labels also
+  gate clean carries them in brackets in the connect description. This costs
+  a second judge call per file whose description passes, in exchange for
+  never refusing a file over a label a stricter combined claim would have
+  sunk along with a perfectly good description.
 - **Ask: hits print before pointer errors.** Fixed `ask.py` so a miss that
   finds real candidates on some pointers, while another pointer errors, now
   always shows those candidates first, followed by the per-pointer error

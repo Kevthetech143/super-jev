@@ -191,10 +191,19 @@ The writer also drafts four labels per file alongside the description: `kind`
 itself states; "NOT FILED"/pending/open counts as active), `as_of` (the date
 the file claims for that status, or unknown), and `subject` (1-4 words). A
 label outside its enum is coerced to `unknown` locally before anything is
-gated, so a bad writer response never crashes the run. The gate checks ONE
-claim per file — the description plus a sentence built from the labels — and
-the connect description carries the labels in brackets so ranking can see
-them. `python3 prepare_bulk.py --list --pointer NAME [--status active]
+gated, so a bad writer response never crashes the run. Labels are gated in a
+second pass, separate from the description: the description alone must pass
+first (that decides whether the file connects at all, with the one rewrite
+retry described above); only then is the label sentence ("This file is a
+`<kind>` about `<subject>`. Its status is `<status>`[ as of `<as_of>`].")
+gated on its own against the same file. A label problem — under the
+confidence line, `NOT_SUPPORTED`, `CONTRADICTED`, or `ERROR` — never drops
+the file; it resets all four labels to `unknown`, records `labels_verdict`
+and `labels_confidence` in the cache entry, and the file still connects on
+its plain description. Only a file whose labels also gated clean carries them
+in brackets in the connect description, so ranking sees them; this costs two
+judge calls per file whose description passes (one when it doesn't).
+`python3 prepare_bulk.py --list --pointer NAME [--status active]
 [--kind dashboard] [--within-days 30] [--subject NAME]` reads the labels back
 out of `prepare-cache/<pointer>.json` (and any `<pointer>-N.json` part
 caches), filters and sorts by `as_of` descending, and never calls the writer,

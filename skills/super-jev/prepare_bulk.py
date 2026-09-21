@@ -33,17 +33,24 @@ Pipeline per run:
      using only what the file itself states; NOT FILED/pending/open counts as active, nothing stated is
      unknown), as_of (the date the file claims for that status, or unknown), and subject (1-4 words).
      Descriptions and labels are drafts, never trusted until gated.
-  4. Jev gate (connect_checked.gate) checks ONE claim per file — the description plus a sentence built from
-     its labels ("This file is a <kind> about <subject>. Its status is <status>[ as of <as_of>].") — against
-     the whole file. One rewrite retry on failure, with the verdict fed back. Still failing -> EXCEPTION list.
-     A label outside its enum is coerced to "unknown" locally, before the claim is built, so a bad label from
-     the writer never crashes the run.
+  4. Jev gate (connect_checked.gate), two stages per file, never more than one label problem cost a file its
+     place in the set:
+       Stage 1 gates the description ALONE against the file, exactly the pre-labels claim. Fail -> one
+       rewrite retry, verdict fed back; still failing -> EXCEPTION list, file goes no further.
+       Stage 2 (only for a file that passed stage 1) gates the label sentence ALONE ("This file is a <kind>
+       about <subject>. Its status is <status>[ as of <as_of>].") against the file. SUPPORTED at or above
+       --line keeps the drafted labels; anything else (under the line, NOT_SUPPORTED, CONTRADICTED, ERROR)
+       resets kind/status/as_of/subject to "unknown" and records labels_verdict/labels_confidence in the
+       cache entry -- the file still connects on its description alone. A label outside its enum is coerced
+       to "unknown" locally, before the stage-2 claim is built, so a bad label from the writer never crashes
+       the run. Cost: two judge calls per file when stage 1 passes, one when it doesn't.
   5. Connect the passing set through the normal preview -> confirm path (replace:true, with a one-line warning,
      if the pointer already exists). The description sent to the harness carries the labels in brackets
-     (`<description> [kind: ...; status: ...; as_of: ...; subject: ...]`) so ranking can see them. The harness
-     accepts at most 50 files per connect request, so a set over --limit (default 50, hard max 50) is split
-     into parts named <pointer>, <pointer>-2, <pointer>-3, ... in stable sorted-path order, each connected
-     separately; the cache and report stay keyed by the base pointer.
+     (`<description> [kind: ...; status: ...; as_of: ...; subject: ...]`) only for a file whose stage-2 label
+     gate passed; every other connected file carries its plain description. The harness accepts at most 50
+     files per connect request, so a set over --limit (default 50, hard max 50) is split into parts named
+     <pointer>, <pointer>-2, <pointer>-3, ... in stable sorted-path order, each connected separately; the
+     cache and report stay keyed by the base pointer.
   6. Findability: each connected file's own sample question is navigated; the file must rank first or it is
      listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
@@ -237,15 +244,25 @@ def navigate(pointer: str, principal: str, question: str) -> list:
 
 
 def connect_part(pointer: str, principal: str, part_files: list, cache: dict) -> dict:
-    """Preview -> confirm connect for one pointer (a whole pointer or one split part of one)."""
-    req = {"action": "connect", "pointer": pointer, "principals": [principal],
-           "sources": [{"path": str(p),
-                        "description": labeled_description(cache[str(p)]["description"], {
-                            "kind": cache[str(p)].get("kind", "unknown"),
-                            "status": cache[str(p)].get("status", "unknown"),
-                            "as_of": cache[str(p)].get("as_of", "unknown"),
-                            "subject": cache[str(p)].get("subject", "unknown"),
-                        })} for p in part_files]}
+    """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
+    Labels ride in the bracketed description only for a file whose stage-2 label gate passed
+    (cache["labels_ok"]); a cache entry without that key (pre-two-stage cache) defaults to
+    carrying its labels, since it passed under the old single-claim gate. Everything else
+    connects on its plain description -- a label problem never drops a file."""
+    sources = []
+    for p in part_files:
+        c = cache[str(p)]
+        if c.get("labels_ok", True):
+            desc = labeled_description(c["description"], {
+                "kind": c.get("kind", "unknown"),
+                "status": c.get("status", "unknown"),
+                "as_of": c.get("as_of", "unknown"),
+                "subject": c.get("subject", "unknown"),
+            })
+        else:
+            desc = c["description"]
+        sources.append({"path": str(p), "description": desc})
+    req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": sources}
     known = memory({"action": "panel", "principal": principal})
     if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
         req["replace"] = True
@@ -406,17 +423,23 @@ def main() -> int:
         drafts.update(got)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")
 
+    def fmt_conf(verdict: dict) -> str:
+        c = verdict.get("confidence")
+        return f"{c:.2f}" if isinstance(c, (int, float)) else "n/a"
+
     exceptions, passing = [], []
     for p in todo:
         d = drafts.get(str(p))
         if not d or not d.get("description"):
             exceptions.append((str(p), "writer returned no draft")); continue
-        labels = validate_labels(d)
-        claim = f"{d['description'].strip()} {claim_sentence(labels)}"
-        v = gate(claim, str(p))
+
+        # Stage 1: gate the description alone -- exactly the pre-labels claim. A label
+        # problem must never cost a file its place; only a description problem does.
+        desc = d["description"].strip()
+        v = gate(desc, str(p))
         ok = v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line
         if not ok:
-            fb = {str(p): {"draft": claim, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
+            fb = {str(p): {"draft": desc, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
             try:
                 if writer_command:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
@@ -425,22 +448,41 @@ def main() -> int:
             except WriterError as e:
                 print(f"ERROR: description writer failed: {e}"); return 1
             if redo and redo.get("description"):
-                redo_labels = validate_labels(redo)
-                redo_claim = f"{redo['description'].strip()} {claim_sentence(redo_labels)}"
-                v2 = gate(redo_claim, str(p))
+                redo_desc = redo["description"].strip()
+                v2 = gate(redo_desc, str(p))
                 if v2["state"] == "SUPPORTED" and v2.get("confidence", 0) >= a.line:
-                    d, labels, v, ok = redo, redo_labels, v2, True
+                    d, desc, v, ok = redo, redo_desc, v2, True
+
+        if not ok:
+            cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
+                             "kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown",
+                             "verdict": v["state"], "confidence": v.get("confidence"), "pass": False,
+                             "labels_ok": False,
+                             "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+            print(f"  {v['state']:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
+            exceptions.append((str(p), f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip()))
+            continue
+
+        # Stage 2 (only reached on a stage-1 pass): gate the label sentence alone. A miss here
+        # never drops the file -- it connects on its plain description with labels unknown.
+        labels = validate_labels(d)
+        v_labels = gate(claim_sentence(labels), str(p))
+        labels_ok = v_labels["state"] == "SUPPORTED" and v_labels.get("confidence", 0) >= a.line
+        if not labels_ok:
+            labels = {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown"}
+
         cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
                          "kind": labels["kind"], "status": labels["status"], "as_of": labels["as_of"],
                          "subject": labels["subject"],
-                         "verdict": v["state"], "confidence": v.get("confidence"), "pass": ok,
+                         "verdict": v["state"], "confidence": v.get("confidence"), "pass": True,
+                         "labels_ok": labels_ok, "labels_verdict": v_labels["state"],
+                         "labels_confidence": v_labels.get("confidence"),
                          "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-        tag = "PASS" if ok else v["state"]
-        print(f"  {tag:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
-        if ok:
-            passing.append(p)
+        if labels_ok:
+            print(f"  PASS {fmt_conf(v)} | labels ok {fmt_conf(v_labels)}  {relstr(p, roots)}")
         else:
-            exceptions.append((str(p), f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip()))
+            print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {relstr(p, roots)}")
+        passing.append(p)
     cache_path.write_text(json.dumps(cache, indent=1))
 
     connect_set = reused + passing

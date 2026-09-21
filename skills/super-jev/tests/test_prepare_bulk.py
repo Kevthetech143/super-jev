@@ -335,7 +335,7 @@ def test_labeled_description_carries_brackets():
     assert out == ("CLOV campaign tracker. [kind: dashboard; status: active; as_of: 2026-09-14; subject: CLOV]")
 
 
-def test_labels_drafted_gated_once_cached_and_sent_to_connect(tmp_path, monkeypatch, capsys):
+def test_labels_drafted_gated_separately_both_pass_cached_and_sent_to_connect(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()
     f = root / "one.md"
@@ -362,20 +362,152 @@ def test_labels_drafted_gated_once_cached_and_sent_to_connect(tmp_path, monkeypa
     rc = pb.main()
 
     assert rc == 0
-    # exactly one gate call per file (no separate description-only call)
-    assert len(gate_calls) == 1
-    assert gate_calls[0] == ("CLOV wheel campaign tracker. This file is a dashboard about CLOV. "
-                              "Its status is active as of 2026-09-14.")
+    # two gate calls per file that passes stage 1: description alone, then the label sentence alone
+    assert gate_calls == [
+        "CLOV wheel campaign tracker.",
+        "This file is a dashboard about CLOV. Its status is active as of 2026-09-14.",
+    ]
 
     cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
     assert cache[str(f)]["kind"] == "dashboard"
     assert cache[str(f)]["status"] == "active"
     assert cache[str(f)]["as_of"] == "2026-09-14"
     assert cache[str(f)]["subject"] == "CLOV"
+    assert cache[str(f)]["pass"] is True
+    assert cache[str(f)]["labels_ok"] is True
+    assert cache[str(f)]["labels_verdict"] == "SUPPORTED"
+    assert cache[str(f)]["labels_confidence"] == 0.95
 
     confirm_call = calls[-1]
     assert confirm_call["sources"][0]["description"] == (
         "CLOV wheel campaign tracker. [kind: dashboard; status: active; as_of: 2026-09-14; subject: CLOV]")
+    out = capsys.readouterr().out
+    assert "PASS 0.95 | labels ok 0.95" in out
+
+
+def test_stage1_fail_drops_file_after_one_retry_labels_never_gated(tmp_path, monkeypatch, capsys):
+    """A description that never gates still gets exactly one rewrite retry, then the file is an
+    exception -- the label gate (stage 2) must never even run for a file that failed stage 1."""
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "bad.md"
+    f.write_text("# Bad\nContent that never gates.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    writer_calls = []
+
+    def fake_writer(items, model, feedback=None):
+        writer_calls.append((items, feedback))
+        return {str(f): {"path": str(f), "description": "A draft.", "question": "What is bad?",
+                          "kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "Bad"}}
+
+    monkeypatch.setattr(pb, "writer", fake_writer)
+
+    gate_calls = []
+
+    def fake_gate(claim, path):
+        gate_calls.append(claim)
+        return {"state": "NOT_SUPPORTED", "confidence": 0.4, "secs": 0.1}
+
+    monkeypatch.setattr(pb, "gate", fake_gate)
+
+    memory_calls = []
+    monkeypatch.setattr(pb, "memory", lambda req: memory_calls.append(req) or {"status": "should-not-be-called"})
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
+    rc = pb.main()
+
+    assert rc == 0
+    assert len(writer_calls) == 2       # initial batch draft + exactly one rewrite retry
+    assert len(gate_calls) == 2         # description gate on the draft, then on the retry -- never a labels call
+    assert memory_calls == []           # connect_set stayed empty; memory is never invoked
+
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    assert cache[str(f)]["pass"] is False
+    assert cache[str(f)]["kind"] == "unknown"
+    assert cache[str(f)]["labels_ok"] is False
+    assert "labels_verdict" not in cache[str(f)]
+
+
+def test_stage2_under_line_connects_file_with_labels_unknown(tmp_path, monkeypatch, capsys):
+    """Stage 1 (description) passes but stage 2 (labels) lands under the confidence line: the
+    file must still connect, with all four labels reset to unknown and the verdict recorded."""
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nCLOV campaign, not yet filed, as of 2026-09-14.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "CLOV wheel campaign tracker.", "question": "What is CLOV status?",
+                  "kind": "dashboard", "status": "active", "as_of": "2026-09-14", "subject": "CLOV"}
+    })
+
+    def fake_gate(claim, path):
+        if claim.startswith("This file is a"):
+            return {"state": "SUPPORTED", "confidence": 0.44, "secs": 0.1}  # under the 0.80 line
+        return {"state": "SUPPORTED", "confidence": 0.95, "secs": 0.1}
+
+    monkeypatch.setattr(pb, "gate", fake_gate)
+
+    calls = []
+    monkeypatch.setattr(pb, "memory", fake_connect_memory(calls))
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
+    rc = pb.main()
+
+    assert rc == 0
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    entry = cache[str(f)]
+    assert entry["pass"] is True
+    assert entry["kind"] == "unknown" and entry["status"] == "unknown"
+    assert entry["as_of"] == "unknown" and entry["subject"] == "unknown"
+    assert entry["labels_ok"] is False
+    assert entry["labels_verdict"] == "SUPPORTED"
+    assert entry["labels_confidence"] == 0.44
+
+    # the file still connects, on its plain description (no brackets)
+    confirm_call = calls[-1]
+    assert confirm_call["sources"][0]["description"] == "CLOV wheel campaign tracker."
+    out = capsys.readouterr().out
+    assert "PASS 0.95 | labels unknown (0.44)" in out
+
+
+def test_stage2_contradicted_connects_file_with_labels_unknown(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nCLOV campaign.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "CLOV wheel campaign tracker.", "question": "What is CLOV status?",
+                  "kind": "dashboard", "status": "closed", "as_of": "2026-09-14", "subject": "CLOV"}
+    })
+
+    def fake_gate(claim, path):
+        if claim.startswith("This file is a"):
+            return {"state": "CONTRADICTED", "confidence": 0.9, "secs": 0.1}
+        return {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1}
+
+    monkeypatch.setattr(pb, "gate", fake_gate)
+
+    calls = []
+    monkeypatch.setattr(pb, "memory", fake_connect_memory(calls))
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
+    rc = pb.main()
+
+    assert rc == 0
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    entry = cache[str(f)]
+    assert entry["pass"] is True
+    assert entry["status"] == "unknown"
+    assert entry["labels_ok"] is False
+    assert entry["labels_verdict"] == "CONTRADICTED"
+
+    confirm_call = calls[-1]
+    assert confirm_call["sources"][0]["description"] == "CLOV wheel campaign tracker."
 
 
 def test_bad_writer_label_enum_coerced_to_unknown_never_crashes(tmp_path, monkeypatch):
