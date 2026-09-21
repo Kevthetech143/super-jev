@@ -8,11 +8,14 @@ Usage:
                           [--writer-command 'COMMAND [ARG ...]'] [--no-connect] [--no-findability]
                           [--refresh]
 
-  python3 prepare_bulk.py --list --pointer NAME [--status active] [--kind dashboard]
+  python3 prepare_bulk.py --list [--pointer NAME] [--principal AGENT] [--status active] [--kind dashboard]
                           [--within-days 30] [--subject CLOV]
-    No-judge local list: reads the already-gated labels back out of prepare-cache/<pointer>.json (and any
-    <pointer>-N.json part caches) and prints them filtered, sorted by as_of desc. Never calls the writer,
-    the gate, or memory.
+    No-judge local list: with --pointer, reads the already-gated labels back out of prepare-cache/<pointer>.json
+    (and any <pointer>-N.json part caches); with --principal, also scans that principal's manual ask.py records
+    (state dir manual/*.md, labelled the same way ask.py --add writes them), shown with pointer name
+    <principal>-manual-* in the path column. At least one of --pointer/--principal is required; both may be
+    given together. Filters apply the same way to either source. Prints them merged, sorted by as_of desc.
+    Never calls the writer, the gate, or memory.
 
 Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
@@ -58,7 +61,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, hashlib, json, re, shlex, subprocess, sys, time
+import argparse, hashlib, json, os, re, shlex, subprocess, sys, time
 from datetime import date
 from pathlib import Path
 
@@ -299,6 +302,26 @@ def load_cache_files(pointer: str) -> dict:
     return entries
 
 
+def _label_match(c_kind: str, c_status: str, c_as_of: str, c_subject: str, today: date,
+                  status: str = None, kind: str = None, within_days: int = None, subject: str = None):
+    """Shared filter for one label set against --status/--kind/--subject/--within-days.
+    Returns (included, excluded_unknown_date) -- excluded_unknown_date is only meaningful
+    when within_days was given and the row was dropped for an unresolvable as_of."""
+    if status and c_status != status:
+        return False, False
+    if kind and c_kind != kind:
+        return False, False
+    if subject and subject.lower() not in c_subject.lower():
+        return False, False
+    if within_days is not None:
+        try:
+            if c_as_of == "unknown" or (today - date.fromisoformat(c_as_of)).days > within_days:
+                return False, c_as_of == "unknown"
+        except ValueError:
+            return False, True
+    return True, False
+
+
 def list_cmd(pointer: str, status: str = None, kind: str = None,
              within_days: int = None, subject: str = None):
     """No-judge local filter over already-gated labels. Returns (rows, excluded_unknown_date)."""
@@ -310,30 +333,60 @@ def list_cmd(pointer: str, status: str = None, kind: str = None,
             continue
         c_kind = c.get("kind", "unknown"); c_status = c.get("status", "unknown")
         c_as_of = c.get("as_of", "unknown"); c_subject = c.get("subject", "unknown")
-        if status and c_status != status:
+        ok, exc = _label_match(c_kind, c_status, c_as_of, c_subject, today, status, kind, within_days, subject)
+        if exc:
+            excluded += 1
+        if not ok:
             continue
-        if kind and c_kind != kind:
-            continue
-        if subject and subject.lower() not in c_subject.lower():
-            continue
-        if within_days is not None:
-            try:
-                if c_as_of == "unknown" or (today - date.fromisoformat(c_as_of)).days > within_days:
-                    if c_as_of == "unknown":
-                        excluded += 1
-                    continue
-            except ValueError:
-                excluded += 1
-                continue
         rows.append((c_subject, c_status, c_as_of, c_kind, path))
     rows.sort(key=lambda r: (r[2] != "unknown", r[2]), reverse=True)
+    return rows, excluded
+
+
+def _state_dir(principal: str) -> Path:
+    """Same state-dir resolution as ask.py's state_dir; kept local to avoid a circular
+    import (ask.py imports the label enums/helpers from this module)."""
+    root = os.environ.get("SUPERJEV_STATE_DIR")
+    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
+    return base / principal
+
+
+def manual_label_rows(principal: str, status: str = None, kind: str = None,
+                       within_days: int = None, subject: str = None):
+    """Scan a principal's ask.py manual records (state-dir manual/*.md) for the same
+    kind/status/as_of/subject header lines ask.py --add writes, filtered the same way
+    as list_cmd. Path column shows the manual pointer name (<principal>-manual-*), not
+    a filesystem path. Never calls the writer, the gate, or memory."""
+    manual_dir = _state_dir(principal) / "manual"
+    today = date.today()
+    rows, excluded = [], 0
+    if not manual_dir.is_dir():
+        return rows, excluded
+    for p in sorted(manual_dir.glob("*.md")):
+        labels = {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown"}
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            for key in labels:
+                prefix = f"{key}:"
+                if line.startswith(prefix):
+                    labels[key] = line.split(":", 1)[1].strip()
+        ok, exc = _label_match(labels["kind"], labels["status"], labels["as_of"], labels["subject"],
+                                today, status, kind, within_days, subject)
+        if exc:
+            excluded += 1
+        if not ok:
+            continue
+        rows.append((labels["subject"], labels["status"], labels["as_of"], labels["kind"], p.stem))
     return rows, excluded
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", dest="roots", action="append")
-    ap.add_argument("--pointer", required=True); ap.add_argument("--principal")
+    ap.add_argument("--pointer"); ap.add_argument("--principal")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
@@ -354,7 +407,16 @@ def main() -> int:
     a = ap.parse_args()
 
     if a.list:
-        rows, excluded = list_cmd(a.pointer, a.status, a.kind, a.within_days, a.subject)
+        if not a.pointer and not a.principal:
+            print("REFUSED: --list needs --pointer and/or --principal"); return 2
+        rows, excluded = [], 0
+        if a.pointer:
+            r, e = list_cmd(a.pointer, a.status, a.kind, a.within_days, a.subject)
+            rows += r; excluded += e
+        if a.principal:
+            r, e = manual_label_rows(a.principal, a.status, a.kind, a.within_days, a.subject)
+            rows += r; excluded += e
+        rows.sort(key=lambda r: (r[2] != "unknown", r[2]), reverse=True)
         print(f"{'subject':20} | {'status':8} | {'as_of':10} | {'kind':10} | path")
         for subject, status, as_of, kind, path in rows:
             print(f"{subject:20} | {status:8} | {as_of:10} | {kind:10} | {path}")
@@ -362,8 +424,8 @@ def main() -> int:
             print(f"\n{excluded} excluded (as_of unknown)")
         return 0
 
-    if not a.roots or not a.principal:
-        print("REFUSED: --root and --principal are required unless --list is given"); return 2
+    if not a.roots or not a.principal or not a.pointer:
+        print("REFUSED: --root, --pointer and --principal are required unless --list is given"); return 2
     if a.limit > 50:
         print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
     try:
