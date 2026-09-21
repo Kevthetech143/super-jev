@@ -1,0 +1,46 @@
+{
+  "_doc": "monolith split scheduled for 1.1 (see KNOWN-QUIRKS); fixtures and experiments are data tests/** allow-listed: long test files are data-heavy fixtures, not shipped code. size_ceiling 2000 / max_depth 4 for rc.1: existing structure debt is listed in docs/KNOWN-QUIRKS.md (Large files) and the per-door split is the first 1.1 job; new code must stay under 600 lines.",
+  "allow_paths": [
+    "docs/evidence/**",
+    "docs/experimental/**",
+    "examples/**",
+    "experiments/**",
+    "test/fixtures/**",
+    "skills/super-jev/tests/fixtures/**",
+    "skills/super-jev/superjev.py",
+    "skills/super-jev/arms/**",
+    "skills/super-jev/prepare_bulk.py",
+    "docs/playbook.md",
+    "skills/super-jev/tests/**"
+  ],
+  "fresh_clone_timeout_s": 300,
+  "max_depth": 4,
+  "placeholder_paths": [
+    "example",
+    "user",
+    "you"
+  ],
+  "placeholder_tokens": [
+    "TODO",
+    "FIXME",
+    "<your-key>",
+    "<YOUR_KEY>",
+    "CHANGEME",
+    "XXX"
+  ],
+  "private_names": [],
+  "size_ceiling_lines": 2000,
+  "stoplist": [
+    "__pycache__",
+    "node_modules",
+    ".DS_Store",
+    ".env",
+    "*.bak-*",
+    ".local/",
+    "target/",
+    "dist/",
+    "build/",
+    "*.pyc"
+  ],
+  "tests_timeout_s": 600
+}

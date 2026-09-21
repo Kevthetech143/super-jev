@@ -134,11 +134,11 @@ confidence 1.00, and never sent anywhere. Only what is left over needs a
 judge at all. `verify`'s own worker-verify door does this internally (see
 `~/.claude/skills/worker-verify/SKILL.md`, "HOW EVIDENCE IS FRAMED"); this
 repository carries the same pair of pure functions, `deriveFacts` and
-`preRules`, in `src/enhance/derive-facts.ts`, so any harness — not just
+`preRules`, in `src/experimental/derive-facts.ts`, so any harness — not just
 worker-verify — can read evidence the same way. `verify`'s door-absent
 fallback (no `worker-verify` installed and `SUPERJEV_VERIFY_CMD` unset) uses
 exactly this: it gathers a small git/test evidence set itself and runs it
-through `src/derive-facts-cli.ts` before it will settle anything, printing
+through `src/experimental/derive-facts-cli.ts` before it will settle anything, printing
 the DERIVED FACTS block first, then the pre-rule verdicts. It never calls a
 judge, so it can say `CONTRADICTED_BY_FACT`, but it can never say CLEAN — an
 unsettled claim there stays READ, unverified, not vouched for.

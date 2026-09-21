@@ -1,0 +1,4 @@
+# Synthetic test tokens in the evidence-guard scrub fixture (placeholder shapes like AKIAABCDEFG..., sk-abcde, ghp_ABCDE) — test/enhance/fixtures/evidence-guard-cases.json
+83739df80e517d88a5920f5f83293513287ef07e:test/enhance/fixtures/evidence-guard-cases.json:aws-access-token:28
+a676dbba3f7a4729dd2a06e81d10de99b63e45f8:test/enhance/fixtures/evidence-guard-cases.json:aws-access-token:28
+test/enhance/fixtures/evidence-guard-cases.json:aws-access-token:28

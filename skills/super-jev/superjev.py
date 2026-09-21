@@ -64,10 +64,10 @@ REPO_ROOT = SKILL_DIR.parent.parent  # skills/super-jev/superjev.py -> repo root
 FLEET_JEV_LIB = HOME / ".claude/skills/jev-check/lib/jev.py"
 FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 
-# The pure derive-facts/pre-rules pair (src/enhance/derive-facts.ts), reached
+# The pure derive-facts/pre-rules pair (src/experimental/derive-facts.ts), reached
 # through its own tiny CLI so a Python process can call it without an FFI.
 # Only used by `verify`'s door-absent fallback — see _derived_facts_fallback.
-DERIVE_FACTS_CLI = REPO_ROOT / "src" / "derive-facts-cli.ts"
+DERIVE_FACTS_CLI = REPO_ROOT / "src" / "experimental" / "derive-facts-cli.ts"
 
 # ================================================ EVIDENCE GUARD (blocklist + redactor)
 # The ONE place this file asks "may I open this path?" and "is this text safe
@@ -4464,7 +4464,7 @@ def _verify_timeout():
 # of by eye. This fallback runs ONLY when the real door is unreachable. It
 # gathers a small, best-effort evidence set itself (never as thorough as
 # worker-verify's own atom extraction), hands it to the pure
-# src/enhance/derive-facts.ts pair over its CLI, and prints the DERIVED FACTS
+# src/experimental/derive-facts.ts pair over its CLI, and prints the DERIVED FACTS
 # block plus the pre-rule verdicts it settles for free. It never calls a
 # judge — there is no evidence gathered here worth paying for a model call
 # over — so it can say CONTRADICTED_BY_FACT with confidence 1.00, but it can
@@ -4611,7 +4611,7 @@ def _gh_pr_evidence(report_text, worktree, commands_log):
     """Best-effort PR state + checks off `gh`, for the verify fallback's
     derived-facts pass — the fallback's only source of PR truth, since it
     has no worker-verify door to run `gh pr view` for it. Returns one
-    `evidence.prs[]` entry (the shape src/enhance/derive-facts.ts's
+    `evidence.prs[]` entry (the shape src/experimental/derive-facts.ts's
     `Evidence.prs` already expects) or None. Runs both `gh pr view N --json
     state,mergedAt,headRefName,baseRefName,statusCheckRollup` and `gh pr
     checks N` — the checks command is the primary source for the checks
@@ -4679,7 +4679,7 @@ def _gh_pr_evidence(report_text, worktree, commands_log):
 
 def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, guard=None):
     """Best-effort git/test/PR evidence, gathered read-only, in the shape
-    src/enhance/derive-facts.ts's `Evidence` type expects. Never raises;
+    src/experimental/derive-facts.ts's `Evidence` type expects. Never raises;
     a block this cannot gather is simply left out, same contract as
     worker-verify's own "not gathered" blocks. `commands_log`, if passed,
     collects every `gh` command this run attempted (see _gh_pr_evidence),
@@ -6287,8 +6287,8 @@ def _backfill_receipts_from_transcript(records, before_index=None, cap=None):
 # itself uses).
 #
 # This is a pure-Python MIRROR of the `windowFacts` half of
-# src/enhance/derive-facts.ts, deliberately duplicated rather than bridged:
-# the Stop hook runs on every turn, `node src/derive-facts-cli.ts` pays a
+# src/experimental/derive-facts.ts, deliberately duplicated rather than bridged:
+# the Stop hook runs on every turn, `node src/experimental/derive-facts-cli.ts` pays a
 # whole node process's startup per call, and REPO_ROOT does not resolve to
 # this repo at all on a fleet install (the skill lives at
 # ~/.claude/skills/super-jev/, whose parent is not a checkout), so the
