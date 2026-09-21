@@ -17,7 +17,7 @@ function runCli(args: string[], env: Record<string, string | undefined> = {}) {
 
 const CATALOG = JSON.stringify([
   { id: 'gate', text: 'Check a draft reply against its evidence before it is sent.' },
-  { id: 'pay-coned', text: 'Pay a Con Edison electric bill via the guest checkout flow.' },
+  { id: 'pay-utility', text: 'Pay an example utility electric bill via the guest checkout flow.' },
   { id: 'tweet', text: 'Post to X/Twitter on the fleet account.' }
 ]);
 
@@ -210,7 +210,7 @@ test('--help prints usage and exits 0', () => {
 
 const V2_CATALOG = JSON.stringify([
   { id: 'restart-agent', text: 'Restart one team agent.', utterances: ['restart it', 'restart the agent', 'kick it back on'] },
-  { id: 'pay-coned', text: 'Pay a Con Edison electric bill.', utterances: ['pay the electric bill', 'the power bill is due'] }
+  { id: 'pay-utility', text: 'Pay an example utility electric bill.', utterances: ['pay the electric bill', 'the power bill is due'] }
 ]);
 
 test('a v2 catalog (utterances/negatives/tags) is accepted, and a run still produces a ranked list', async () => {
@@ -332,14 +332,14 @@ test('--record appends {request, context, ranked, chosen, ts} to the ledger, and
     const ledgerPath = join(dir, 'ledger.jsonl');
     const first = runCli(['--catalog', catalogPath, '--request', 'gate my reply', '--stub', '--json', '--record', 'gate', '--ledger', ledgerPath]);
     assert.equal(first.code, 0, first.stderr);
-    const second = runCli(['--catalog', catalogPath, '--request', 'pay the bill', '--stub', '--json', '--record', 'pay-coned', '--ledger', ledgerPath]);
+    const second = runCli(['--catalog', catalogPath, '--request', 'pay the bill', '--stub', '--json', '--record', 'pay-utility', '--ledger', ledgerPath]);
     assert.equal(second.code, 0, second.stderr);
 
     const body = await readFile(ledgerPath, 'utf8');
     const lines = body.trim().split('\n').map(l => JSON.parse(l));
     assert.equal(lines.length, 2);
     assert.equal(lines[0].chosen, 'gate');
-    assert.equal(lines[1].chosen, 'pay-coned');
+    assert.equal(lines[1].chosen, 'pay-utility');
     for (const line of lines) {
       assert.equal(typeof line.request, 'string');
       assert.ok(Array.isArray(line.context));
@@ -363,8 +363,8 @@ test('--ledger without --record is a usage error, exit 1', async () => {
 
 const PRERULES_CATALOG = JSON.stringify([
   {
-    id: 'pay-coned', text: 'Pay a Con Edison electric bill via the guest checkout flow.',
-    utterances: ['pay the electric bill', 'pay my coned bill'], negatives: ['gas bill']
+    id: 'pay-utility', text: 'Pay an example utility electric bill via the guest checkout flow.',
+    utterances: ['pay the electric bill', 'pay my utility bill'], negatives: ['gas bill']
   },
   {
     id: 'pay-water', text: 'Pay the water utility bill.',
@@ -383,7 +383,7 @@ test('R1 serves a unique multi-word trigger directly: zero calls, manifest compl
     assert.equal(parsed.source, 'trigger');
     assert.equal(parsed.calls, 0);
     assert.equal(parsed.manifestComplete, true);
-    assert.equal(parsed.ranked[0].id, 'pay-coned');
+    assert.equal(parsed.ranked[0].id, 'pay-utility');
     assert.match(parsed.reason, /R1/);
   });
 });
@@ -392,7 +392,7 @@ test('R1 does not fire on a single-word utterance, and falls through to the judg
   await withTmp(async dir => {
     const catalogPath = join(dir, 'catalog.json');
     const catalog = JSON.stringify([
-      { id: 'pay-coned', text: 'Pay a Con Edison electric bill.', utterances: ['electric', 'pay the electric bill'], negatives: [] }
+      { id: 'pay-utility', text: 'Pay an example utility electric bill.', utterances: ['electric', 'pay the electric bill'], negatives: [] }
     ]);
     await writeFile(catalogPath, catalog, 'utf8');
     const result = runCli(['--catalog', catalogPath, '--request', 'electric', '--stub', '--json']);
@@ -436,7 +436,7 @@ test('R2 demotes the judge top-1 to review when it has a negative-phrase hit, an
   await withTmp(async dir => {
     const catalogPath = join(dir, 'catalog.json');
     await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
-    // "gas bill" is pay-coned's own negative and is not a trigger of any
+    // "gas bill" is pay-utility's own negative and is not a trigger of any
     // record, so R1 cannot fire and this exercises the judge + R2 path.
     const result = runCli(['--catalog', catalogPath, '--request', 'can you pay the gas bill this week', '--stub', '--json']);
     assert.equal(result.code, 0, result.stderr);
@@ -473,7 +473,7 @@ test('--explain prints the derived pre-rule facts before the plan', async () => 
     await writeFile(catalogPath, PRERULES_CATALOG, 'utf8');
     const result = runCli(['--catalog', catalogPath, '--request', 'please pay the electric bill', '--stub', '--json', '--explain']);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stderr, /trigger hit: record pay-coned/);
+    assert.match(result.stderr, /trigger hit: record pay-utility/);
     assert.match(result.stderr, /ambiguity guard:/);
   });
 });

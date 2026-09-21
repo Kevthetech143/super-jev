@@ -1,25 +1,25 @@
 {
   "blockedPaths": [
-    { "path": "/Users/admin/agents/global/profile/logins.md", "blocked": true, "why": "logins.md vault" },
+    { "path": "/Users/example/agents/global/profile/logins.md", "blocked": true, "why": "logins.md vault" },
     { "path": "~/agents/global/tools/typesafe-secret.md", "blocked": true, "why": "*-secret.md" },
-    { "path": "/Users/admin/super-jev/.env", "blocked": true, "why": ".env" },
-    { "path": "/Users/admin/super-jev/.env.production", "blocked": true, "why": ".env.*" },
-    { "path": "/Users/admin/agents/global/profile/notes.txt", "blocked": true, "why": "under profile/" },
-    { "path": "/Users/admin/agents/global/documents/passport.pdf", "blocked": true, "why": "under documents/" },
-    { "path": "/Users/admin/.config/pw-kelvin/state.json", "blocked": true, "why": "playwright session profile" },
-    { "path": "/Users/admin/Library/Cookies/cookies.sqlite", "blocked": true, "why": "cookies" },
-    { "path": "/Users/admin/.ssh/id_rsa", "blocked": true, "why": "id_rsa" },
-    { "path": "/Users/admin/.ssh/server.pem", "blocked": true, "why": "*.pem" },
-    { "path": "/Users/admin/.ssh/deploy.key", "blocked": true, "why": "*.key" },
-    { "path": "/Users/admin/.aws/credentials", "blocked": true, "why": "credentials" },
-    { "path": "/Users/admin/super-jev/tokens.json", "blocked": true, "why": "*token*" },
-    { "path": "/Users/admin/super-jev/src/enhance/evidence-guard.ts", "blocked": false, "why": "ordinary source file" },
-    { "path": "/Users/admin/super-jev/README.md", "blocked": false, "why": "ordinary doc" },
-    { "path": "/Users/admin/super-jev/skills/super-jev/tests/fixtures/lie_stop_stdout.txt", "blocked": false, "why": "ordinary fixture" }
+    { "path": "/Users/example/super-jev/.env", "blocked": true, "why": ".env" },
+    { "path": "/Users/example/super-jev/.env.production", "blocked": true, "why": ".env.*" },
+    { "path": "/Users/example/agents/global/profile/notes.txt", "blocked": true, "why": "under profile/" },
+    { "path": "/Users/example/agents/global/documents/passport.pdf", "blocked": true, "why": "under documents/" },
+    { "path": "/Users/example/.config/pw-example/state.json", "blocked": true, "why": "playwright session profile" },
+    { "path": "/Users/example/Library/Cookies/cookies.sqlite", "blocked": true, "why": "cookies" },
+    { "path": "/Users/example/.ssh/id_rsa", "blocked": true, "why": "id_rsa" },
+    { "path": "/Users/example/.ssh/server.pem", "blocked": true, "why": "*.pem" },
+    { "path": "/Users/example/.ssh/deploy.key", "blocked": true, "why": "*.key" },
+    { "path": "/Users/example/.aws/credentials", "blocked": true, "why": "credentials" },
+    { "path": "/Users/example/super-jev/tokens.json", "blocked": true, "why": "*token*" },
+    { "path": "/Users/example/super-jev/src/enhance/evidence-guard.ts", "blocked": false, "why": "ordinary source file" },
+    { "path": "/Users/example/super-jev/README.md", "blocked": false, "why": "ordinary doc" },
+    { "path": "/Users/example/super-jev/skills/super-jev/tests/fixtures/lie_stop_stdout.txt", "blocked": false, "why": "ordinary fixture" }
   ],
   "allowOverride": [
-    { "path": "/Users/admin/agents/global/profile/notes.txt", "allow": ["/Users/admin/agents/global/profile"], "blocked": false, "why": "explicit allow unblocks a prefix match" },
-    { "path": "/Users/admin/agents/global/profile/notes.txt", "allow": ["/Users/admin/agents/global/other"], "blocked": true, "why": "allow entry must actually prefix-match" }
+    { "path": "/Users/example/agents/global/profile/notes.txt", "allow": ["/Users/example/agents/global/profile"], "blocked": false, "why": "explicit allow unblocks a prefix match" },
+    { "path": "/Users/example/agents/global/profile/notes.txt", "allow": ["/Users/example/agents/global/other"], "blocked": true, "why": "allow entry must actually prefix-match" }
   ],
   "redactions": [
     { "text": "key is sk-abcdefghijklmnopqrstuvwxyz123456 in the log", "expect": "key is [REDACTED:openai-key] in the log", "count": 1 },
@@ -33,9 +33,9 @@
     { "text": "the dummy token PLACEHOLDER1234567890abcdEFGH99 is fake", "expect": "the dummy token [REDACTED:api-key] is fake", "count": 1, "why": "generic 30+ char key-shaped blob" },
     { "text": "path /var/folders/d9/txhm709177z296qsl9h4gsh00000gn/T/file.txt is fine", "expect": "path /var/folders/d9/txhm709177z296qsl9h4gsh00000gn/T/file.txt is fine", "count": 0, "why": "slash-delimited blob is a path segment, not a key" },
     { "text": "identifier measure_tests_doublerun_tests stays", "expect": "identifier measure_tests_doublerun_tests stays", "count": 0, "why": "underscore-split identifier, not key-shaped" },
-    { "text": "reach me at kelvin.example@example.com please", "expect": "reach me at kelvin.example@example.com please", "count": 0, "why": "emails untouched unless redactEmails is set" }
+    { "text": "reach me at user@example.com please", "expect": "reach me at user@example.com please", "count": 0, "why": "emails untouched unless redactEmails is set" }
   ],
   "redactionsWithEmails": [
-    { "text": "reach me at kelvin.example@example.com please", "expect": "reach me at [REDACTED:email] please", "count": 1 }
+    { "text": "reach me at user@example.com please", "expect": "reach me at [REDACTED:email] please", "count": 1 }
   ]
 }

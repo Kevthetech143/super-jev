@@ -44,17 +44,17 @@ function catalog(entries: [string, string][]): FetchCatalogEntry[] {
 
 test('runFetch ranks a high-relevance record above a low one, and a "none" record does not rank at all', async () => {
   const cat = catalog([
-    ['pay-coned', 'Pay a Con Edison electric bill via the guest checkout flow.'],
+    ['pay-utility', 'Pay an example utility electric bill via the guest checkout flow.'],
     ['gate', 'Check a draft against its evidence before it goes out; a gate step.'],
     ['tweet', 'Post a tweet to X/Twitter on the fleet account.']
   ]);
-  const { transport } = tableTransport({ gate: 'high', 'pay-coned': 'low', tweet: 'none' });
+  const { transport } = tableTransport({ gate: 'high', 'pay-utility': 'low', tweet: 'none' });
   const run = await runFetch(cat, 'gate my reply before I send it', { transport, k: 5 });
 
   assert.equal(run.ranked.length, 2);
   assert.equal(run.ranked[0].id, 'gate');
   assert.equal(run.ranked[0].score, 1);
-  assert.equal(run.ranked[1].id, 'pay-coned');
+  assert.equal(run.ranked[1].id, 'pay-utility');
   assert.ok(run.ranked[1].score > 0 && run.ranked[1].score < 1);
   assert.ok(!run.ranked.some(r => r.id === 'tweet'), 'a record that lost to "none of these" must not appear in the ranked list');
   assert.equal(run.noMatch, false);
@@ -135,12 +135,12 @@ function idsSeen(requests: Request[]): string[] {
 }
 
 test('prefilterCatalog keeps a record whose words match the request, and drops the ones that share nothing', () => {
-  const cat = bigCatalog(60, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
+  const cat = bigCatalog(60, [['pay-utility', 'Pay the example utility electric bill on utility.example']]);
   const out = prefilterCatalog(cat, 'pay my electric bill', 5);
   assert.equal(out.kept.length, 5);
-  assert.ok(out.kept.some(e => e.id === 'pay-coned'));
+  assert.ok(out.kept.some(e => e.id === 'pay-utility'));
   assert.equal(out.droppedIds.length, 56);
-  assert.ok(out.scores['pay-coned'] > 0);
+  assert.ok(out.scores['pay-utility'] > 0);
 });
 
 test('prefilterCatalog with n=0 keeps everything, and a catalog at or under n is untouched', () => {
@@ -163,28 +163,28 @@ test('tokenize lowercases, splits on non-alphanumerics, drops one-character toke
 });
 
 test('runFetch with the prefilter sends only the kept records to the judge, and the matching record is among them', async () => {
-  const cat = bigCatalog(100, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
-  const { transport, requests } = tableTransport({ 'pay-coned': 'high' });
+  const cat = bigCatalog(100, [['pay-utility', 'Pay the example utility electric bill on utility.example']]);
+  const { transport, requests } = tableTransport({ 'pay-utility': 'high' });
   const run = await runFetch(cat, 'pay my electric bill', { transport, k: 3, prefilter: 10 });
   const seen = idsSeen(requests);
   assert.equal(seen.length, 10);
-  assert.ok(seen.includes('pay-coned'));
-  assert.equal(run.ranked[0].id, 'pay-coned');
+  assert.ok(seen.includes('pay-utility'));
+  assert.equal(run.ranked[0].id, 'pay-utility');
   assert.equal(run.plan.prefilter.kept, 10);
   assert.equal(run.plan.prefilter.dropped, 91);
   assert.equal(run.plan.catalogSize, 101);
 });
 
 test('calls is 1 when prefilter <= records per call, and more than 1 when the prefilter is off', async () => {
-  const cat = bigCatalog(100, [['pay-coned', 'Pay the Con Edison electric bill on coned.com']]);
-  const on = tableTransport({ 'pay-coned': 'high' });
+  const cat = bigCatalog(100, [['pay-utility', 'Pay the example utility electric bill on utility.example']]);
+  const on = tableTransport({ 'pay-utility': 'high' });
   const withPrefilter = await runFetch(cat, 'pay my electric bill', { transport: on.transport });
   assert.equal(DEFAULT_PREFILTER, 8);
   assert.equal(withPrefilter.plan.prefilter.n, DEFAULT_PREFILTER);
   assert.equal(withPrefilter.calls, 1);
   assert.equal(on.requests.length, 1);
 
-  const off = tableTransport({ 'pay-coned': 'high' });
+  const off = tableTransport({ 'pay-utility': 'high' });
   const noPrefilter = await runFetch(cat, 'pay my electric bill', { transport: off.transport, prefilter: 0 });
   assert.equal(noPrefilter.plan.prefilter.n, 0);
   assert.equal(noPrefilter.plan.prefilter.dropped, 0);
@@ -193,7 +193,7 @@ test('calls is 1 when prefilter <= records per call, and more than 1 when the pr
 });
 
 test('the plan reports the prefilter before any call, and the dry-run call count reflects it', () => {
-  const cat = bigCatalog(100, [['pay-coned', 'Pay the electric bill']]);
+  const cat = bigCatalog(100, [['pay-utility', 'Pay the electric bill']]);
   const plan = planFetch(cat, 'pay my electric bill');
   assert.equal(plan.prefilter.kept, 8);
   assert.equal(plan.plan.plan.calls.length, 1);
@@ -372,7 +372,7 @@ test('prefilterCatalog subtracts a negative match from the score', () => {
 test('prefilterCatalog folds context turns into the query at a lower weight, so a referent inherits its subject', () => {
   const cat: FetchCatalogEntry[] = [
     { id: 'restart-agent', text: 'Restart one team agent through the control endpoint.' },
-    { id: 'pay-coned', text: 'Pay the Con Edison electric bill.' }
+    { id: 'pay-utility', text: 'Pay the example utility electric bill.' }
   ];
   // "restart it" alone shares no real vocabulary with either record beyond "restart".
   // With the prior turn "the agent is stuck" folded in as context, restart-agent should win clearly.

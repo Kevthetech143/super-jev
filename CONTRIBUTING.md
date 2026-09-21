@@ -8,7 +8,7 @@ Include a regression test for behavior changes. Never commit credentials, privat
 
 ## Maturity
 
-The `ask` front-door command and the harness `cached` action are proven in the businessfi pilot: cache-first lookup, parallel pointer navigation with visible per-pointer errors, and one-file manual pointers all ran there before landing here.
+The `ask` front-door command and the harness `cached` action are proven in a live pilot: cache-first lookup, parallel pointer navigation with visible per-pointer errors, and one-file manual pointers all ran there before landing here.
 
 This project uses Node's native TypeScript stripping. Avoid enums, parameter properties, and other TypeScript features that require code generation. No build toolchain is currently required.
 

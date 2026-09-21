@@ -95,7 +95,7 @@ Alternatively, save a request in your repo's private working area:
 ```json
 {
   "action": "connect",
-  "pointer": "iris-reviewed",
+  "pointer": "example-reviewed",
   "principals": ["YOUR_AGENT_NAME"],
   "sources": [{"path": "/absolute/path/to/authorized-record.md"}]
 }
@@ -107,7 +107,7 @@ The first call returns the preparation/review requirements without publishing a 
 
 A successful `registered` response means preparation and registration finished. Search using the returned pointer and your principal, check returned evidence, and approve answers only through the existing review flow. Test an actual question before describing the connector as working end to end. Do not call the first review response “connected” or “no matching records.”
 
-Refresh uses the same pointer, dataset and exact principal scope with `replace: true` and newly reviewed source hashes. It invalidates that pointer's prior answers/tickets. Do not use replacement to widen an Iris connector to another person or to add audience members silently. If the old connector is shared or its scope is uncertain, keep it intact and create a separately named connector for the authorized scope.
+Refresh uses the same pointer, dataset and exact principal scope with `replace: true` and newly reviewed source hashes. It invalidates that pointer's prior answers/tickets. Do not use replacement to widen a single-user connector to another person or to add audience members silently. If the old connector is shared or its scope is uncertain, keep it intact and create a separately named connector for the authorized scope.
 
 Initial support is explicit local nonempty UTF-8 text files on macOS/Linux, up to 50 files and 5 MiB per request. Folders, binary/PDF documents and remote URLs need prior authorized extraction or explicit file selection; there is no automatic crawl or live synchronization. The harness preserves originals. Connecting raw private material does not automatically sanitize it: if full text is not authorized for the provider, prepare a reviewed/redacted projection using the existing workflow instead.
 

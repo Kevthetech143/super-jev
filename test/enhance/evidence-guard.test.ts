@@ -44,19 +44,19 @@ for (const c of fixture.redactionsWithEmails) {
 // --------------------------------------------------------------- blockedPathFact
 
 test('blockedPathFact: ok is false and exists is null, never guessed missing', () => {
-  const fact = blockedPathFact('/Users/admin/agents/global/profile/logins.md');
+  const fact = blockedPathFact('/Users/example/agents/global/profile/logins.md');
   assert.equal(fact.ok, false);
   assert.equal(fact.exists, null);
   assert.equal(fact.blocked, true);
-  assert.equal(fact.cmd, `(${SKIPPED_FACT}: /Users/admin/agents/global/profile/logins.md)`);
+  assert.equal(fact.cmd, `(${SKIPPED_FACT}: /Users/example/agents/global/profile/logins.md)`);
 });
 
 // -------------------------------------------------------------------- tally
 
 test('GuardTally: counts paths skipped and redactions made across a call', () => {
   const tally = new GuardTally();
-  tally.checkPath('/Users/admin/agents/global/profile/logins.md');
-  tally.checkPath('/Users/admin/super-jev/README.md');
+  tally.checkPath('/Users/example/agents/global/profile/logins.md');
+  tally.checkPath('/Users/example/super-jev/README.md');
   tally.redact('key is sk-abcdefghijklmnopqrstuvwxyz123456 in the log');
   tally.redact('token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789');
   assert.equal(tally.pathsSkipped, 1);

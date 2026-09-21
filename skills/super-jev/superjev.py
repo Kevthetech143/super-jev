@@ -73,7 +73,7 @@ DERIVE_FACTS_CLI = REPO_ROOT / "src" / "derive-facts-cli.ts"
 # The ONE place this file asks "may I open this path?" and "is this text safe
 # to ship?" before it opens a path or lets text into an evidence pack that
 # reaches the judge. Pure-Python MIRROR of
-# /Users/admin/super-jev-experiments/areas-20260918/atoms/atoms.py (section 0)
+# the original evidence-atoms prototype (section 0)
 # and of src/enhance/evidence-guard.ts, deliberately duplicated rather than
 # bridged for the same reason as DERIVED_FACTS above: the Stop hook runs on
 # every turn and a node process's startup per call is too slow for it, and
@@ -2541,7 +2541,7 @@ def _ledger_lines():
 # above. The call ledger is "what ran, how long, what exit code" — every
 # door invocation. The catch ledger is narrower and purpose-built: one
 # record per gate/verify hook DECISION (allow/block/advisory/unchecked),
-# small enough that Kelvin can tag each one fair/false/miss by hand and
+# small enough that an operator can tag each one fair/false/miss by hand and
 # read the three-number scoreboard `catch report` prints. See docs/hooks.md,
 # "The catch ledger".
 
@@ -9623,7 +9623,7 @@ PROTECTED_REPO_ENV = "SUPERJEV_PROTECTED_REPO"
 # The fleet's own worker convention: one `git worktree add` folder per task
 # under this root. Configurable, because a hook shim or a CI runner has a
 # different layout; os.pathsep-separated, like PATH.
-DEFAULT_WORKTREE_ROOTS = ("/Users/admin/super-jev-wt/",)
+DEFAULT_WORKTREE_ROOTS = (str(Path.home() / "super-jev-wt"),)
 # The one reserved value of SUPERJEV_WORKTREE_ROOTS: it is not a path, it
 # means "no root is allowlisted", so every worktree derived from report
 # text is refused and the derived paths gather nothing and run no test
@@ -10639,7 +10639,7 @@ def _blob_ids_of_file(path):
 # therefore asking the attacker. So nothing below asks git anything about the
 # vouched-for content. Two things a worker cannot write are used instead:
 #
-#   1. the PROTECTED checkout's working tree. `/Users/admin/super-jev`'s own
+#   1. the PROTECTED checkout's working tree. The protected checkout's own
 #      `package.json` on disk — a worker gets a worktree, never the main
 #      checkout, and `_worktree_trust` refuses the main checkout outright.
 #      Its raw bytes are hashed in Python (see _blob_ids_of_file), so no
@@ -12565,7 +12565,7 @@ def cmd_ledger(a):
 
 # ---------------------------------------------------------------- feedback + calibration
 #
-# Kelvin's second ask: "every time I confirm a block was right or wrong,
+# The user request: "every time I confirm a block was right or wrong,
 # that should go into the calibration set automatically." This is the
 # write side of the learning loop — `feedback` turns a human verdict on
 # the LAST gate/verify hook decision into one calibration/cases.jsonl

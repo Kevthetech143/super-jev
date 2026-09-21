@@ -180,7 +180,7 @@ def test_add_writes_manual_record_connects_new_pointer_never_replace_then_approv
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    question = "which pointers hold the businessfi brain"
+    question = "which pointers hold the example agent brain"
     rc = ask.add_manual("alice", question, "The answer body.", str(src_file), tmp_path)
 
     assert rc == 0

@@ -135,7 +135,7 @@ python3 $S hook verify --from-file /path/to/worker-final-report.txt --worktree /
 super-jev verify <teammate_id>: CLEAN|READ|REJECT — <flags> (<derived flags used>)
 ```
 
-and writes one ledger line per report, `source: "teammate-message"`. **`prompt-verify` never blocks, under any circumstance, including an unexpected exception — always exit 0.** A `UserPromptSubmit` hook that blocks eats Kelvin's own next message along with the check result, so this is advisory-only by construction, not just by convention. A block with no report marker, a prompt with no teammate-message blocks at all, empty stdin, or non-JSON stdin all print nothing and log one skipped ledger line.
+and writes one ledger line per report, `source: "teammate-message"`. **`prompt-verify` never blocks, under any circumstance, including an unexpected exception — always exit 0.** A `UserPromptSubmit` hook that blocks eats the operator's own next message along with the check result, so this is advisory-only by construction, not just by convention. A block with no report marker, a prompt with no teammate-message blocks at all, empty stdin, or non-JSON stdin all print nothing and log one skipped ledger line.
 
 ```bash
 echo '{"prompt": "... <teammate-message teammate_id=\"X\">COMPLETE: ...</teammate-message> ..."}' \
