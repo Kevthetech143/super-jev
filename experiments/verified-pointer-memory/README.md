@@ -141,6 +141,17 @@ Read [the data lifecycle contract](DATA-LIFECYCLE.md) before onboarding or
 refreshing a dataset; it documents the supported controls and the responsibilities
 that this local harness cannot automate.
 
+### The `cached` action
+
+`{"action":"cached","principal":"worker","question":"Where is the policy?"}` checks
+for an already-approved answer without running retrieval. Omit `pointer` to check
+every pointer the principal can see; supply one to check just that pointer. A hit
+returns the exact same shape as a `search()` `verified-cache-hit`, validated the
+same way: principal scope, pointer generation/fingerprint, and source freshness. A
+miss returns `{"status":"cache-miss","checked":[pointer,...]}`. This action never
+calls the retrieval command or the navigation command, so it is free to call before
+falling back to `search` or `navigate`.
+
 ## Storage and lifecycle
 
 Originals stay in place. The existing registry/manifests own dataset preparation.
