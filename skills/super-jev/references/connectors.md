@@ -127,20 +127,37 @@ chunk or truncate oversized files — split or drop them and rerun.
 
 ### Bulk prepare
 
-`python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME
-[--limit 50]` is the checked-connect workflow run over a whole folder instead
-of a hand-picked file list. It inventories `*.md` under `--root`, skipping
-hidden dirs, backups and vault-style subdirectories, and holds back any file
-that looks like it carries card/password text or sits over the gate's size
-ceiling. A cheap writer model drafts one description and one sample question
-per remaining file; the same claim gate used by `connect_checked.py` checks
-each description against its own file, with one rewrite retry on a failure.
-Only the passing set is connected, through the normal preview-then-confirm
-path. After connecting, it re-runs each file's own sample question through
-`navigate` and reports whether the file ranks first, as a soft findability
-check, not a pass/fail gate. Results and a cache keyed by file hash land
-under `prepare-cache/` next to the script, so an unchanged file is skipped on
-the next run. `--no-connect` stops after drafting and gating, for a dry run.
+`python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME
+--principal YOUR_AGENT_NAME [--exclude SUBPATH ...] [--no-recurse] [--limit
+50] [--max-files 250] [--refresh]` is the checked-connect workflow run over a
+whole folder, or a whole agent brain spanning several folders, instead of a
+hand-picked file list. Repeat `--root` to inventory the union of multiple
+roots, in the order given; `--exclude` (repeatable) skips any file whose path
+relative to its root starts with that subpath, and `--no-recurse` limits each
+root to its direct children. It skips hidden dirs, backups and vault-style
+subdirectories, and holds back any file that looks like it carries
+card/password text or sits over the gate's size ceiling, writing a
+`prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
+secret-pattern case, the pattern type, line number and a digit-masked line so
+a human can review without opening the file. A cheap writer model drafts one
+description and one sample question per remaining file; the same claim gate
+used by `connect_checked.py` checks each description against its own file,
+with one rewrite retry on a failure. Only the passing set is connected,
+through the normal preview-then-confirm path; a set larger than `--limit`
+(default 50, the connector's hard per-request cap) is split into parts named
+`<pointer>`, `<pointer>-2`, `<pointer>-3`, ... in stable sorted-path order,
+each connected separately, with the cache and report staying keyed by the
+base pointer. After connecting, it re-runs each connected file's own sample
+question through `navigate` and reports whether the file ranks first, as a
+soft findability check, not a pass/fail gate. Results and a cache keyed by
+file hash land under `prepare-cache/` next to the script, so an unchanged
+file is skipped on the next run; `--refresh` additionally drops any cached
+file no longer present on disk from the cache and the connect set, noting it
+in the report, and a reconnect that hits an existing pointer with
+`replace:true` prints a one-line warning that it rotates that pointer's
+approved answers. `--max-files` (default 250) refuses an oversized run before
+any drafting starts. `--no-connect` stops after drafting and gating, for a
+dry run.
 
 ## Navigation structure
 
