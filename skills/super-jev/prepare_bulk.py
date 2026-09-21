@@ -5,7 +5,8 @@ Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT
                           [--exclude SUBPATH ...] [--no-recurse] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
-                          [--no-connect] [--no-findability] [--refresh]
+                          [--writer-command 'COMMAND [ARG ...]'] [--no-connect] [--no-findability]
+                          [--refresh]
 
 Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
@@ -19,7 +20,7 @@ Pipeline per run:
   2. Cache (prepare-cache/<pointer>.json) keyed by path: unchanged sha256 with a passing verdict skips steps 3-4.
      --refresh additionally drops any cached path that no longer exists on disk from the cache and the connect
      set, noting it in the report.
-  3. Writer (`claude -p --model <writer-model>`) drafts, per batch, one factual description plus one sample
+  3. Writer (by default `claude -p --model <writer-model>`) drafts, per batch, one factual description plus one sample
      question a user would ask that this file answers. Descriptions are drafts, never trusted.
   4. Jev gate (connect_checked.gate) checks each description against the whole file. One rewrite retry on
      failure, with the verdict fed back. Still failing -> EXCEPTION list for the agent.
@@ -31,7 +32,7 @@ Pipeline per run:
      listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 """
-import argparse, hashlib, json, re, subprocess, sys, time
+import argparse, hashlib, json, re, shlex, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -129,7 +130,12 @@ def excerpt(p: Path) -> dict:
     return {"path": str(p), "headings": heads, "start": text[:1200]}
 
 
-def writer(items: list, model: str, feedback: dict | None = None) -> dict:
+class WriterError(RuntimeError):
+    """The external description writer did not produce a usable response."""
+
+
+def writer(items: list, model: str, feedback: dict | None = None, command: list[str] | None = None) -> dict:
+    """Run a writer that reads the prompt from stdin and returns a JSON array on stdout."""
     fb = ""
     if feedback:
         fb = ("\nPrevious drafts were REJECTED by a fact checker for these paths; write more literally from the file "
@@ -143,8 +149,14 @@ def writer(items: list, model: str, feedback: dict | None = None) -> dict:
         "specific detail from it.\n"
         "Return ONLY a JSON array, no prose." + fb + "\n\nFILES:\n" + json.dumps(items, indent=1)
     )
+    argv = command or ["claude", "-p", "--model", model]
     for attempt in range(2):
-        r = subprocess.run(["claude", "-p", "--model", model], input=prompt, capture_output=True, text=True)
+        try:
+            r = subprocess.run(argv, input=prompt, capture_output=True, text=True)
+        except OSError as e:
+            raise WriterError(f"could not start writer: {e.strerror or e.__class__.__name__}") from e
+        if r.returncode:
+            raise WriterError(f"writer exited with status {r.returncode}")
         m = re.search(r"\[.*\]", r.stdout, re.S)
         if m:
             try:
@@ -152,7 +164,7 @@ def writer(items: list, model: str, feedback: dict | None = None) -> dict:
                 return {x["path"]: x for x in arr if isinstance(x, dict) and x.get("path")}
             except Exception:
                 pass
-    return {}
+    raise WriterError("writer returned invalid JSON after 2 attempts")
 
 
 def navigate(pointer: str, principal: str, question: str) -> list:
@@ -192,11 +204,22 @@ def main() -> int:
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
-    ap.add_argument("--writer-model", default="haiku"); ap.add_argument("--no-connect", action="store_true")
-    ap.add_argument("--no-findability", action="store_true"); ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--writer-model", default="haiku",
+                    help="model passed to the default Claude writer")
+    ap.add_argument("--writer-command", metavar="COMMAND",
+                    help="shell-style command for another writer; it receives the prompt on stdin and returns a JSON array on stdout")
+    ap.add_argument("--no-connect", action="store_true")
+    ap.add_argument("--no-findability", action="store_true")
+    ap.add_argument("--refresh", action="store_true")
     a = ap.parse_args()
     if a.limit > 50:
         print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
+    try:
+        writer_command = shlex.split(a.writer_command) if a.writer_command else None
+    except ValueError as e:
+        print(f"REFUSED: invalid --writer-command: {e}"); return 2
+    if a.writer_command and not writer_command:
+        print("REFUSED: --writer-command must name a command"); return 2
 
     roots = [Path(r).resolve() for r in a.roots]
     CACHE_DIR.mkdir(exist_ok=True)
@@ -238,7 +261,13 @@ def main() -> int:
     drafts = {}
     for i in range(0, len(todo), a.batch):
         batch = todo[i:i + a.batch]
-        got = writer([excerpt(p) for p in batch], a.writer_model)
+        try:
+            if writer_command:
+                got = writer([excerpt(p) for p in batch], a.writer_model, command=writer_command)
+            else:
+                got = writer([excerpt(p) for p in batch], a.writer_model)
+        except WriterError as e:
+            print(f"ERROR: description writer failed: {e}"); return 1
         drafts.update(got)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")
 
@@ -251,7 +280,13 @@ def main() -> int:
         ok = v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line
         if not ok:
             fb = {str(p): {"draft": d["description"], "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
-            redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
+            try:
+                if writer_command:
+                    redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
+                else:
+                    redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
+            except WriterError as e:
+                print(f"ERROR: description writer failed: {e}"); return 1
             if redo and redo.get("description"):
                 v2 = gate(redo["description"], str(p))
                 if v2["state"] == "SUPPORTED" and v2.get("confidence", 0) >= a.line:
