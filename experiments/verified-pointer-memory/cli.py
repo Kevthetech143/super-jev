@@ -20,6 +20,7 @@ NEXT = {
     'no-match': 'record-unresolved',
     'candidates': 'inspect-source-files',
     'no-candidates': 'record-unresolved-navigation',
+    'cache-miss': 'navigate-or-search',
     'budget-exhausted': 'inspect-candidates-and-unexplored-trace',
     'refused': 'record-refusal',
     'error': 'record-error',
@@ -33,6 +34,7 @@ ACTIONS = {
     'register': ['pointer', 'dataset', 'principals'], 'remove': ['pointer'],
     'search': ['pointer', 'question', 'principal'],
     'navigate': ['pointer', 'question', 'principal'],
+    'cached': ['principal', 'question'],
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
     'assist': ['attemptId', 'principal', 'reason', 'references'],
     'attempt': ['attemptId', 'principal'],
@@ -294,6 +296,9 @@ def run(request, config):
     if action == 'navigate':
         return service.navigate(request['pointer'], request['principal'],
                                 request['question'], request.get('limits'))
+    if action == 'cached':
+        return service.cached(request['principal'], request['question'],
+                              request.get('pointer'), request.get('context', ''))
     if action == 'register':
         service.register(request['pointer'], request['dataset'], request['principals'])
         return {'status': 'registered'}

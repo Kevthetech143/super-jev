@@ -6,6 +6,10 @@ Keep the core independent of business domains. Put domain rules and integrations
 
 Include a regression test for behavior changes. Never commit credentials, private traces, customer data, or generated run logs. Avoid claims about speed, accuracy, or profitability without reproducible measurements.
 
+## Maturity
+
+The `ask` front-door command and the harness `cached` action are proven in the businessfi pilot: cache-first lookup, parallel pointer navigation with visible per-pointer errors, and one-file manual pointers all ran there before landing here.
+
 This project uses Node's native TypeScript stripping. Avoid enums, parameter properties, and other TypeScript features that require code generation. No build toolchain is currently required.
 
 ## Merging with the gated merge script

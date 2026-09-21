@@ -7,6 +7,13 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 
 One front door: `python3 <this-skill-directory>/dispatch.py <tool> ...`. Use the user's original request and relevant context; keep backend names and setup mechanics out of ordinary replies.
 
+## Commands
+
+| Command | Example | What it does |
+|---|---|---|
+| `ask` | `python3 ask.py --principal YOUR_AGENT "question in your own words"` | The loop: harness cache first, then every pointer in parallel; open the top file; `--approve` a good hit so the next ask is instant; `--add` a fact with no file (one small pointer per entry, earlier answers untouched); `--miss` when grep found it elsewhere. Errors are printed per pointer and never hidden as no-candidates. |
+| `navigate` | `memory --input '{"action":"navigate","pointer":"POINTER_ID","principal":"YOUR_AGENT_NAME","question":"..."}'` | Lower-level call: `ask` wraps this to search one connected pointer's catalog for candidate files. |
+
 **Present setup help plainly:** When a response includes `message` and `setup`/`gettingStarted`, lead with that message and take the authorized next step. Do not tell a first-time user only “preparation required”; that is a machine status, not useful instructions. If they have no records yet, help create a factual collection from their supplied information before connecting it.
 
 **First use:** confirm the selected tool runs and the intended person's/project's records are prepared and connected. If records have only pointers or return `preparation-required`, use the memory `connect` action in [connector setup](references/connectors.md) to prepare authorized local text files. If other setup is missing, follow its hint; never treat a setup failure as “nothing found.” Existing working connections skip this step.

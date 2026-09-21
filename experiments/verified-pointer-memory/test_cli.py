@@ -135,6 +135,7 @@ class PublicCliTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["nextAction"], "choose-action")
         self.assertIn("register", result["actions"])
+        self.assertIn("cached", result["actions"])
         self.assertIn("cacheTtlSeconds", result["settings"])
         self.assertIn("Reviewed local dataset", result["requirements"])
 
@@ -198,6 +199,40 @@ class PublicCliTests(unittest.TestCase):
             cached = json.loads(connection.execute("SELECT body FROM cache").fetchone()[0])
         self.assertGreater(cached["expires"] - approval_started, 16)
         self.assertLess(cached["expires"] - approval_started, 18)
+
+    def test_cached_action_hits_without_a_provider_call_and_misses_are_structured(self):
+        registry, manifest = self.dataset()
+        source = json.loads(manifest.read_text())["sources"][0]
+        command, calls = self.provider(json.dumps({"status": "ready", "passages": [{
+            "sourceId": "policy", "path": source["path"], "contentSHA": source["contentSHA"],
+            "startLine": 1, "endLine": 1, "reviewedText": "The synthetic launch policy is blue.\n",
+        }]}))
+        config = self.config(registry, command)
+        self.register(config)
+
+        cached_request = self.write_json("cached-miss.json", {
+            "action": "cached", "principal": "alice", "question": "What is the launch policy?",
+        })
+        process, miss = self.cli("--config", str(config), "--input", str(cached_request))
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(miss["status"], "cache-miss")
+        self.assertEqual(miss["checked"], ["public-docs"])
+        self.assertFalse(calls.exists(), "cached() must never invoke retrieval")
+
+        search, ready = self.search(config)
+        self.assertEqual(ready["status"], "ready")
+        approval = self.write_json("cached-approve.json", {
+            "action": "approve", "ticket": ready["approvalTicket"], "principal": "alice", "approved": True,
+            "answer": "The launch policy is blue.", "evidence": [{"sourceId": "policy", "quote": "blue"}],
+        })
+        approved, saved = self.cli("--config", str(config), "--input", str(approval))
+        self.assertEqual(saved["status"], "saved")
+
+        process, hit = self.cli("--config", str(config), "--input", str(cached_request))
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(hit["status"], "verified-cache-hit")
+        self.assertEqual(hit["answer"], "The launch policy is blue.")
+        self.assertEqual(calls.read_text().splitlines(), ["call"], "only the earlier search() call, none from cached()")
 
     def test_bad_provider_outputs_become_structured_errors(self):
         for label, response, exit_code, reason in (
