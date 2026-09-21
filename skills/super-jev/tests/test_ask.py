@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -319,6 +320,175 @@ def test_add_refuses_when_pointer_already_exists_for_question(tmp_path, monkeypa
     out = capsys.readouterr().out
     assert "refused" in out
     assert expected_pointer in out
+
+
+def test_add_manual_default_labels_in_header_and_connect_description(tmp_path, monkeypatch):
+    """No --subject/--kind/--status/--as-of given: the record header and the connect
+    description both carry the defaults (record/active/today/derived subject)."""
+    calls = []
+
+    def fake_memory(req):
+        calls.append(req)
+        if req["action"] == "panel":
+            return {"pointers": []}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            return {"status": "registered",
+                     "sources": [{"id": "file:abc", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix",
+                     "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    question = "what is pending for the widget project rollout"
+    rc = ask.add_manual("alice", question, "The answer body.", None, tmp_path)
+
+    assert rc == 0
+    pointer = ask.manual_pointer_name("alice", question)
+    record = tmp_path / "manual" / f"{pointer}.md"
+    text = record.read_text()
+    assert "kind: record" in text
+    assert "status: active" in text
+    assert f"as_of: {time.strftime('%Y-%m-%d')}" in text
+    assert "subject: " in text
+    assert "project: alice" in text
+
+    connects = [c for c in calls if c["action"] == "connect"]
+    desc = connects[0]["sources"][0]["description"]
+    assert "[kind: record; status: active; as_of:" in desc
+    assert "subject:" in desc
+
+
+def test_add_manual_explicit_labels_override_defaults(tmp_path, monkeypatch):
+    def fake_memory(req):
+        if req["action"] == "panel":
+            return {"pointers": []}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            return {"status": "registered",
+                     "sources": [{"id": "file:abc", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix",
+                     "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    question = "where is the typesafe api key kept"
+    rc = ask.add_manual("alice", question, "answer", None, tmp_path,
+                         kind="pointer", status="done", as_of="2026-01-15", subject="typesafe api key")
+
+    assert rc == 0
+    pointer = ask.manual_pointer_name("alice", question)
+    text = (tmp_path / "manual" / f"{pointer}.md").read_text()
+    assert "kind: pointer" in text
+    assert "status: done" in text
+    assert "as_of: 2026-01-15" in text
+    assert "subject: typesafe api key" in text
+
+
+def test_do_add_invalid_kind_is_usage_error_exit_2(tmp_path, monkeypatch):
+    monkeypatch.setattr(ask, "memory", lambda req: (_ for _ in ()).throw(AssertionError("must not call memory")))
+    rc = ask.do_add("alice", ["q", "answer", "--kind", "not-a-kind"], tmp_path)
+    assert rc == 2
+
+
+def test_do_add_invalid_status_is_usage_error_exit_2(tmp_path, monkeypatch):
+    monkeypatch.setattr(ask, "memory", lambda req: (_ for _ in ()).throw(AssertionError("must not call memory")))
+    rc = ask.do_add("alice", ["q", "answer", "--status", "bogus"], tmp_path)
+    assert rc == 2
+
+
+def test_do_add_invalid_as_of_is_usage_error_exit_2(tmp_path, monkeypatch):
+    monkeypatch.setattr(ask, "memory", lambda req: (_ for _ in ()).throw(AssertionError("must not call memory")))
+    rc = ask.do_add("alice", ["q", "answer", "--as-of", "not-a-date"], tmp_path)
+    assert rc == 2
+
+
+def test_do_add_parses_flags_in_any_order_and_builds_answer_from_remaining_words(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_add_manual(principal, question, answer, source, sdir, **kw):
+        captured.update(kw); captured["principal"] = principal; captured["question"] = question
+        captured["answer"] = answer; captured["source"] = source
+        return 0
+
+    monkeypatch.setattr(ask, "add_manual", fake_add_manual)
+    rc = ask.do_add("alice", ["the question", "the", "--subject", "widgets", "answer", "--kind", "note",
+                               "words", "--status", "closed"], tmp_path)
+
+    assert rc == 0
+    assert captured["question"] == "the question"
+    assert captured["answer"] == "the answer words"
+    assert captured["subject"] == "widgets"
+    assert captured["kind"] == "note"
+    assert captured["status"] == "closed"
+
+
+def test_replace_entry_removes_old_pointer_and_record_then_adds_fresh(tmp_path, monkeypatch):
+    question = "duplicate wording to replace"
+    pointer = ask.manual_pointer_name("alice", question)
+    manual_dir = tmp_path / "manual"
+    manual_dir.mkdir(parents=True)
+    old_record = manual_dir / f"{pointer}.md"
+    old_record.write_text("# old\n\nstale body\n")
+    calls = []
+
+    def fake_memory(req):
+        calls.append(req)
+        if req["action"] == "panel":
+            return {"pointers": [pointer]}
+        if req["action"] == "remove":
+            return {"status": "removed"}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required",
+                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            return {"status": "registered",
+                     "sources": [{"id": "file:abc", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix",
+                     "passages": [{"sourceId": "s", "reviewedText": "fresh text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.add_manual("alice", question, "fresh answer", None, tmp_path, replace=True)
+
+    assert rc == 0
+    remove_calls = [c for c in calls if c["action"] == "remove"]
+    assert len(remove_calls) == 1
+    assert remove_calls[0]["pointer"] == pointer
+    new_text = old_record.read_text()
+    assert "stale body" not in new_text
+    assert "fresh answer" in new_text
+
+
+def test_add_without_replace_flag_still_refuses_when_pointer_exists(tmp_path, monkeypatch, capsys):
+    question = "duplicate wording no replace"
+    pointer = ask.manual_pointer_name("alice", question)
+
+    def fake_memory(req):
+        if req["action"] == "panel":
+            return {"pointers": [pointer]}
+        raise AssertionError("must refuse before ever calling connect or remove")
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.add_manual("alice", question, "answer", None, tmp_path)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "refused" in out
+    assert "--replace-entry" in out
 
 
 def test_second_manual_entry_leaves_first_pointer_untouched(tmp_path, monkeypatch):

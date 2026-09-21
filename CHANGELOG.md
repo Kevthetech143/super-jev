@@ -4,6 +4,23 @@
 
 No version bump.
 
+- **Ask: manual entries carry labels; list covers them; `--replace-entry`.**
+  `ask.py --add` now takes the same `kind`/`status`/`as_of`/`subject` labels
+  bulk prepare drafts and gates, defaulting to `record`/`active`/today/the
+  question's first four meaningful words, validated against the same enums
+  bulk prepare imports rather than a duplicated list; an invalid value is a
+  usage error, not a silent coercion. The manual record's header carries the
+  labels plus the owning principal, and the connect description carries them
+  in the same bracket format bulk prepare uses, so a manual entry gets the
+  same chance at a hit. `prepare_bulk.py --list` now also takes `--principal`
+  and, with it, reads a principal's manual records the same way it reads a
+  pointer's gated cache, showing them under their `<principal>-manual-*`
+  pointer name and filtering them by the same flags; `--pointer` and
+  `--principal` may be given together or separately, but at least one is
+  required. Re-adding an existing manual entry's exact wording still refuses
+  by default; the new `--replace-entry` flag removes the existing manual
+  pointer and its record first, then adds fresh, instead of requiring
+  different wording or a manual pointer removal outside the tool.
 - **Bulk prepare: labels gated separately; a label never drops a file.**
   `prepare_bulk.py` now gates the description and the label sentence in two
   separate passes instead of one combined claim. The description alone
