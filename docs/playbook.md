@@ -207,7 +207,7 @@ Spec `spec.json` (a ticket linking to an order linking to a policy):
   "cases": [{"id": "T1", "rootId": "T1", "question": "is this return eligible?"}]
 }
 ```
-Command and confirmed real output:
+Command and sanitized illustrative output:
 ```bash
 python3 $S chain --spec spec.json --stub --json
 ```
@@ -260,7 +260,7 @@ the gate on every question; a `for review` record did not, a person reads it.
 Catalog `catalog.json`:
 ```json
 [{"id":"amazon-return-authorize","text":"authorize an Amazon return"},
- {"id":"pay-coned","text":"pay the Con Edison electric bill"},
+ {"id":"pay-utility","text":"pay the example utility electric bill"},
  {"id":"stock-status-report","text":"per-ticker wheel campaign scoreboard"}]
 ```
 Command and confirmed real output:
@@ -274,11 +274,11 @@ python3 $S fetch "pay the electric bill" --catalog catalog.json --stub --json
   "exit_code": 0,
   "details": {
     "stdout": "fetch plan: 3 catalog record(s) ... prefilter: top 8 by local token overlap ...",
-    "stderr": "Top 3 of 3: amazon-return-authorize=0.67, stock-status-report=0.33, pay-coned=0.33\nGate: below floor 0.80 — Did you mean one of: amazon-return-authorize, stock-status-report, pay-coned?\ncalls: 1\n"
+    "stderr": "Top 3 of 3: amazon-return-authorize=0.67, stock-status-report=0.33, pay-utility=0.33\nGate: below floor 0.80 — Did you mean one of: amazon-return-authorize, stock-status-report, pay-utility?\ncalls: 1\n"
   }
 }
 ```
-Note this real run, captured under the old floor-only gate (`--floor 0.80`,
+This sanitized run illustrates the old floor-only gate (`--floor 0.80`,
 before this doc's margin rule existed): the top score (0.67) was below the
 0.80 none-gate floor, so the door flagged this as a `noMatch`-shaped result
 and offered a "did you mean" list instead of picking one — exactly the

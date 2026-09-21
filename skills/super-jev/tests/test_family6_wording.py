@@ -14,7 +14,7 @@ _spec.loader.exec_module(_sj)
 
 def _window(*receipts):
     return "[current turn]\n" + "".join(
-        "[from: Write %s @ /Users/admin/x]\n" % r for r in receipts
+        "[from: Write %s @ /Users/example/x]\n" % r for r in receipts
     )
 
 

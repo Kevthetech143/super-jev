@@ -4,7 +4,7 @@
  * evidence pack that goes to the judge.
  *
  * Ported from the read guard in
- * /Users/admin/super-jev-experiments/areas-20260918/atoms/atoms.py (section 0,
+ * the original evidence-atoms prototype (section 0,
  * added 2026-09-18 for AUDIT.md findings S1-S7: most verification doors had no
  * read blocklist and the one that did was name-only, so a grep or a file read
  * rooted anywhere near $HOME could put a private line into evidence that is

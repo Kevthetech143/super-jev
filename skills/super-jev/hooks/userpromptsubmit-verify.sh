@@ -40,7 +40,7 @@
 #     }
 #   }
 #
-# This shim ALWAYS exits 0 — UserPromptSubmit blocking would eat Kelvin's
+# This shim ALWAYS exits 0 — UserPromptSubmit blocking would eat the operator's
 # own message along with the check result, not just a verdict, so
 # `prompt-verify` is advisory-only by construction: it prints one line per
 # report it checked ("super-jev verify <teammate_id>: CLEAN|READ|REJECT —
