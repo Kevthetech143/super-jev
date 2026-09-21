@@ -1,0 +1,2251 @@
+{
+  "calls_reported": 44,
+  "results": [
+    {
+      "case": "rollback",
+      "repeat": 1,
+      "structure": "flat-files",
+      "expected": "deploy-rollback",
+      "outcome": "hit",
+      "seconds": 0.822,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "deploy-rollback",
+            "nodeId": "source:67546d93e80caf29732055a6",
+            "path": [
+              "root",
+              "source:67546d93e80caf29732055a6"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/rollback.md",
+            "contentSHA": "a0343f912afe8ccacd32cd785b2c7dfc846da8f2c6b9484ad013b5d93c598c44",
+            "description": "Instructions for undoing a failed deployment and restoring the previous release."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 1,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "rollback",
+      "repeat": 1,
+      "structure": "folder-tree",
+      "expected": "deploy-rollback",
+      "outcome": "hit",
+      "seconds": 1.492,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "deploy-rollback",
+            "nodeId": "source:67546d93e80caf29732055a6",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f",
+              "source:67546d93e80caf29732055a6"
+            ],
+            "score": 0.9290138697403959,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/rollback.md",
+            "contentSHA": "a0343f912afe8ccacd32cd785b2c7dfc846da8f2c6b9484ad013b5d93c598c44",
+            "description": "Instructions for undoing a failed deployment and restoring the previous release."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 1.5875912085211044e-108,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.91,
+                  "group:87524fde778bc9dd0bf75900": 0
+                },
+                "none": 0.09
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.08,
+                  "group:b6fb2dad3288f1410e4db21f": 0.89,
+                  "group:d40e2b454c5049e6661dc6d8": 0
+                },
+                "none": 0.03
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.82,
+                  "group:a74506d535582eacd3a15cd3": 0
+                },
+                "none": 0.18
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:b6fb2dad3288f1410e4db21f",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:67546d93e80caf29732055a6": 0.99
+                },
+                "none": 0.01
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.14
+                },
+                "none": 0.86
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:d40e2b454c5049e6661dc6d8"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:d40e2b454c5049e6661dc6d8",
+                "probabilities": {
+                  "source:e8d7517f1bf964e4040ea818": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "keys",
+      "repeat": 1,
+      "structure": "flat-files",
+      "expected": "key-rotation",
+      "outcome": "hit",
+      "seconds": 0.737,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "key-rotation",
+            "nodeId": "source:e8d7517f1bf964e4040ea818",
+            "path": [
+              "root",
+              "source:e8d7517f1bf964e4040ea818"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Engineering/Security/keys.md",
+            "contentSHA": "f5626b832c4407dddf495a667048365d0d80d4cfda5dddd00f6bd340f005d859",
+            "description": "How to rotate a service API key and revoke the previous key."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 1
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "keys",
+      "repeat": 1,
+      "structure": "folder-tree",
+      "expected": "key-rotation",
+      "outcome": "hit",
+      "seconds": 1.318,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "key-rotation",
+            "nodeId": "source:e8d7517f1bf964e4040ea818",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:d40e2b454c5049e6661dc6d8",
+              "source:e8d7517f1bf964e4040ea818"
+            ],
+            "score": 0.8800929653851716,
+            "originalPath": "<fixture>/sources/Engineering/Security/keys.md",
+            "contentSHA": "f5626b832c4407dddf495a667048365d0d80d4cfda5dddd00f6bd340f005d859",
+            "description": "How to rotate a service API key and revoke the previous key."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.74,
+                  "group:87524fde778bc9dd0bf75900": 0.04
+                },
+                "none": 0.22
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.04,
+                  "group:b6fb2dad3288f1410e4db21f": 0,
+                  "group:d40e2b454c5049e6661dc6d8": 0.94
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.74,
+                  "group:a74506d535582eacd3a15cd3": 0
+                },
+                "none": 0.26
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:d40e2b454c5049e6661dc6d8"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:d40e2b454c5049e6661dc6d8",
+                "probabilities": {
+                  "source:e8d7517f1bf964e4040ea818": 0.98
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 0,
+            "remaining": 1
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.02
+                },
+                "none": 0.98
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "refund",
+      "repeat": 1,
+      "structure": "flat-files",
+      "expected": "refund-policy",
+      "outcome": "hit",
+      "seconds": 0.757,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "refund-policy",
+            "nodeId": "source:d34ca0ab152ec59972e87627",
+            "path": [
+              "root",
+              "source:d34ca0ab152ec59972e87627"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Business/Support/refunds.md",
+            "contentSHA": "a16602d5ac993489279a8f034e6de61299b05ad4367766fa1fc800e61f677869",
+            "description": "Customer refund eligibility and processing instructions."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 1,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "refund",
+      "repeat": 1,
+      "structure": "folder-tree",
+      "expected": "refund-policy",
+      "outcome": "hit",
+      "seconds": 1.392,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "refund-policy",
+            "nodeId": "source:d34ca0ab152ec59972e87627",
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed",
+              "source:d34ca0ab152ec59972e87627"
+            ],
+            "score": 0.7395072200099583,
+            "originalPath": "<fixture>/sources/Business/Support/refunds.md",
+            "contentSHA": "a16602d5ac993489279a8f034e6de61299b05ad4367766fa1fc800e61f677869",
+            "description": "Customer refund eligibility and processing instructions."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0,
+                  "group:87524fde778bc9dd0bf75900": 0.95
+                },
+                "none": 0.05
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.43,
+                  "group:a74506d535582eacd3a15cd3": 0.49
+                },
+                "none": 0.08
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.79,
+                  "group:b6fb2dad3288f1410e4db21f": 0,
+                  "group:d40e2b454c5049e6661dc6d8": 0
+                },
+                "none": 0.21
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:a74506d535582eacd3a15cd3"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:a74506d535582eacd3a15cd3",
+                "probabilities": {
+                  "source:52d6e3de4fa0dcc29946695f": 0.16
+                },
+                "none": 0.84
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0.99
+                },
+                "none": 0.01
+              }
+            ],
+            "discarded": 0,
+            "remaining": 1
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "oncall",
+      "repeat": 1,
+      "structure": "flat-files",
+      "expected": "oncall",
+      "outcome": "hit",
+      "seconds": 0.74,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "oncall",
+            "nodeId": "source:776b17088dc5c42e637829df",
+            "path": [
+              "root",
+              "source:776b17088dc5c42e637829df"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Engineering/Operations/oncall.md",
+            "contentSHA": "1203c97f347228c5a74da0ed9d7bebd033ba3b8d5b2e169db46670de5a91b74c",
+            "description": "Escalation procedure for overnight service outages and on-call incidents."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 1,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "oncall",
+      "repeat": 1,
+      "structure": "folder-tree",
+      "expected": "oncall",
+      "outcome": "hit",
+      "seconds": 1.373,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "oncall",
+            "nodeId": "source:776b17088dc5c42e637829df",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2",
+              "source:776b17088dc5c42e637829df"
+            ],
+            "score": 0.9486688651474336,
+            "originalPath": "<fixture>/sources/Engineering/Operations/oncall.md",
+            "contentSHA": "1203c97f347228c5a74da0ed9d7bebd033ba3b8d5b2e169db46670de5a91b74c",
+            "description": "Escalation procedure for overnight service outages and on-call incidents."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.88,
+                  "group:87524fde778bc9dd0bf75900": 0.02
+                },
+                "none": 0.1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.98,
+                  "group:b6fb2dad3288f1410e4db21f": 0,
+                  "group:d40e2b454c5049e6661dc6d8": 0
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.97,
+                  "group:a74506d535582eacd3a15cd3": 0
+                },
+                "none": 0.03
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.99
+                },
+                "none": 0.01
+              }
+            ],
+            "discarded": 0,
+            "remaining": 1
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:b6fb2dad3288f1410e4db21f",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:67546d93e80caf29732055a6": 0.17
+                },
+                "none": 0.83
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "missing",
+      "repeat": 1,
+      "structure": "flat-files",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 0.717,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "missing",
+      "repeat": 1,
+      "structure": "folder-tree",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 1.398,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.01,
+                  "group:87524fde778bc9dd0bf75900": 0.76
+                },
+                "none": 0.23
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.62,
+                  "group:a74506d535582eacd3a15cd3": 0.02
+                },
+                "none": 0.36
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.57,
+                  "group:b6fb2dad3288f1410e4db21f": 0.01,
+                  "group:d40e2b454c5049e6661dc6d8": 0.01
+                },
+                "none": 0.41
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:a74506d535582eacd3a15cd3"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:a74506d535582eacd3a15cd3",
+                "probabilities": {
+                  "source:52d6e3de4fa0dcc29946695f": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "absent",
+      "repeat": 1,
+      "structure": "flat-files",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 1.469,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "absent",
+      "repeat": 1,
+      "structure": "folder-tree",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 1.359,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.07,
+                  "group:87524fde778bc9dd0bf75900": 0.05
+                },
+                "none": 0.88
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "rollback",
+      "repeat": 2,
+      "structure": "folder-tree",
+      "expected": "deploy-rollback",
+      "outcome": "hit",
+      "seconds": 1.954,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "deploy-rollback",
+            "nodeId": "source:67546d93e80caf29732055a6",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f",
+              "source:67546d93e80caf29732055a6"
+            ],
+            "score": 0.9290138697403959,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/rollback.md",
+            "contentSHA": "a0343f912afe8ccacd32cd785b2c7dfc846da8f2c6b9484ad013b5d93c598c44",
+            "description": "Instructions for undoing a failed deployment and restoring the previous release."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 1.5875912085211044e-108,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.89,
+                  "group:87524fde778bc9dd0bf75900": 0
+                },
+                "none": 0.11
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.06,
+                  "group:b6fb2dad3288f1410e4db21f": 0.91,
+                  "group:d40e2b454c5049e6661dc6d8": 0
+                },
+                "none": 0.03
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.84,
+                  "group:a74506d535582eacd3a15cd3": 0
+                },
+                "none": 0.16
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:b6fb2dad3288f1410e4db21f",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:67546d93e80caf29732055a6": 0.99
+                },
+                "none": 0.01
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.13
+                },
+                "none": 0.87
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:d40e2b454c5049e6661dc6d8"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:d40e2b454c5049e6661dc6d8",
+                "probabilities": {
+                  "source:e8d7517f1bf964e4040ea818": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "rollback",
+      "repeat": 2,
+      "structure": "flat-files",
+      "expected": "deploy-rollback",
+      "outcome": "hit",
+      "seconds": 1.113,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "deploy-rollback",
+            "nodeId": "source:67546d93e80caf29732055a6",
+            "path": [
+              "root",
+              "source:67546d93e80caf29732055a6"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/rollback.md",
+            "contentSHA": "a0343f912afe8ccacd32cd785b2c7dfc846da8f2c6b9484ad013b5d93c598c44",
+            "description": "Instructions for undoing a failed deployment and restoring the previous release."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 1,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "keys",
+      "repeat": 2,
+      "structure": "folder-tree",
+      "expected": "key-rotation",
+      "outcome": "hit",
+      "seconds": 1.63,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "key-rotation",
+            "nodeId": "source:e8d7517f1bf964e4040ea818",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:d40e2b454c5049e6661dc6d8",
+              "source:e8d7517f1bf964e4040ea818"
+            ],
+            "score": 0.8525881895792016,
+            "originalPath": "<fixture>/sources/Engineering/Security/keys.md",
+            "contentSHA": "f5626b832c4407dddf495a667048365d0d80d4cfda5dddd00f6bd340f005d859",
+            "description": "How to rotate a service API key and revoke the previous key."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.68,
+                  "group:87524fde778bc9dd0bf75900": 0.08
+                },
+                "none": 0.24
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.05,
+                  "group:b6fb2dad3288f1410e4db21f": 0,
+                  "group:d40e2b454c5049e6661dc6d8": 0.93
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.75,
+                  "group:a74506d535582eacd3a15cd3": 0
+                },
+                "none": 0.25
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:d40e2b454c5049e6661dc6d8"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:d40e2b454c5049e6661dc6d8",
+                "probabilities": {
+                  "source:e8d7517f1bf964e4040ea818": 0.98
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 0,
+            "remaining": 1
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "keys",
+      "repeat": 2,
+      "structure": "flat-files",
+      "expected": "key-rotation",
+      "outcome": "hit",
+      "seconds": 0.789,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "key-rotation",
+            "nodeId": "source:e8d7517f1bf964e4040ea818",
+            "path": [
+              "root",
+              "source:e8d7517f1bf964e4040ea818"
+            ],
+            "score": 0.99,
+            "originalPath": "<fixture>/sources/Engineering/Security/keys.md",
+            "contentSHA": "f5626b832c4407dddf495a667048365d0d80d4cfda5dddd00f6bd340f005d859",
+            "description": "How to rotate a service API key and revoke the previous key."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0.99
+                },
+                "none": 0.01
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "refund",
+      "repeat": 2,
+      "structure": "folder-tree",
+      "expected": "refund-policy",
+      "outcome": "hit",
+      "seconds": 1.502,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "refund-policy",
+            "nodeId": "source:d34ca0ab152ec59972e87627",
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed",
+              "source:d34ca0ab152ec59972e87627"
+            ],
+            "score": 0.7698071142203867,
+            "originalPath": "<fixture>/sources/Business/Support/refunds.md",
+            "contentSHA": "a16602d5ac993489279a8f034e6de61299b05ad4367766fa1fc800e61f677869",
+            "description": "Customer refund eligibility and processing instructions."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0,
+                  "group:87524fde778bc9dd0bf75900": 0.95
+                },
+                "none": 0.05
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.49,
+                  "group:a74506d535582eacd3a15cd3": 0.44
+                },
+                "none": 0.07
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.77,
+                  "group:b6fb2dad3288f1410e4db21f": 0.01,
+                  "group:d40e2b454c5049e6661dc6d8": 0
+                },
+                "none": 0.22
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0.98
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 0,
+            "remaining": 1
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:a74506d535582eacd3a15cd3"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:a74506d535582eacd3a15cd3",
+                "probabilities": {
+                  "source:52d6e3de4fa0dcc29946695f": 0.12
+                },
+                "none": 0.88
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "refund",
+      "repeat": 2,
+      "structure": "flat-files",
+      "expected": "refund-policy",
+      "outcome": "hit",
+      "seconds": 0.75,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "refund-policy",
+            "nodeId": "source:d34ca0ab152ec59972e87627",
+            "path": [
+              "root",
+              "source:d34ca0ab152ec59972e87627"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Business/Support/refunds.md",
+            "contentSHA": "a16602d5ac993489279a8f034e6de61299b05ad4367766fa1fc800e61f677869",
+            "description": "Customer refund eligibility and processing instructions."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 1,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "oncall",
+      "repeat": 2,
+      "structure": "folder-tree",
+      "expected": "oncall",
+      "outcome": "hit",
+      "seconds": 1.351,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "oncall",
+            "nodeId": "source:776b17088dc5c42e637829df",
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2",
+              "source:776b17088dc5c42e637829df"
+            ],
+            "score": 0.9486688651474336,
+            "originalPath": "<fixture>/sources/Engineering/Operations/oncall.md",
+            "contentSHA": "1203c97f347228c5a74da0ed9d7bebd033ba3b8d5b2e169db46670de5a91b74c",
+            "description": "Escalation procedure for overnight service outages and on-call incidents."
+          }
+        ],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.88,
+                  "group:87524fde778bc9dd0bf75900": 0.01
+                },
+                "none": 0.11
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.98,
+                  "group:b6fb2dad3288f1410e4db21f": 0,
+                  "group:d40e2b454c5049e6661dc6d8": 0
+                },
+                "none": 0.02
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.97,
+                  "group:a74506d535582eacd3a15cd3": 0
+                },
+                "none": 0.03
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.99
+                },
+                "none": 0.01
+              }
+            ],
+            "discarded": 0,
+            "remaining": 1
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:b6fb2dad3288f1410e4db21f"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:b6fb2dad3288f1410e4db21f",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:67546d93e80caf29732055a6": 0.19
+                },
+                "none": 0.81
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "oncall",
+      "repeat": 2,
+      "structure": "flat-files",
+      "expected": "oncall",
+      "outcome": "hit",
+      "seconds": 0.798,
+      "result": {
+        "message": "Source candidates are navigation leads only; they have not been read or verified.",
+        "status": "candidates",
+        "candidates": [
+          {
+            "sourceId": "oncall",
+            "nodeId": "source:776b17088dc5c42e637829df",
+            "path": [
+              "root",
+              "source:776b17088dc5c42e637829df"
+            ],
+            "score": 1,
+            "originalPath": "<fixture>/sources/Engineering/Operations/oncall.md",
+            "contentSHA": "1203c97f347228c5a74da0ed9d7bebd033ba3b8d5b2e169db46670de5a91b74c",
+            "description": "Escalation procedure for overnight service outages and on-call incidents."
+          },
+          {
+            "sourceId": "release-notes",
+            "nodeId": "source:4ae1eb667fb53609046cecfd",
+            "path": [
+              "root",
+              "source:4ae1eb667fb53609046cecfd"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Engineering/Deployment/releases.md",
+            "contentSHA": "6a078b26e761ec658d90453d806b45bc71930a4de523be7a98c25a2905ae9aab",
+            "description": "Historical release notes and shipped feature descriptions."
+          },
+          {
+            "sourceId": "invoice",
+            "nodeId": "source:52d6e3de4fa0dcc29946695f",
+            "path": [
+              "root",
+              "source:52d6e3de4fa0dcc29946695f"
+            ],
+            "score": 5e-324,
+            "originalPath": "<fixture>/sources/Business/Finance/invoices.md",
+            "contentSHA": "d8d2e7ee6be1821ea90e6febf0da2c0090f0ecace0342e9742870940862bddeb",
+            "description": "Invoice payment schedules and accounting reconciliation."
+          }
+        ],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 1,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 0
+              }
+            ],
+            "discarded": 3,
+            "remaining": 3
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "missing",
+      "repeat": 2,
+      "structure": "folder-tree",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 1.475,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 3,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.01,
+                  "group:87524fde778bc9dd0bf75900": 0.77
+                },
+                "none": 0.22
+              }
+            ],
+            "discarded": 0,
+            "remaining": 2
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:87524fde778bc9dd0bf75900",
+                "probabilities": {
+                  "group:9a3644b7a14b8f18569345ed": 0.56,
+                  "group:a74506d535582eacd3a15cd3": 0.03
+                },
+                "none": 0.41
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:297dcba7e684252487542f56",
+                "probabilities": {
+                  "group:10ead633731e1fceee9097a2": 0.6,
+                  "group:b6fb2dad3288f1410e4db21f": 0.01,
+                  "group:d40e2b454c5049e6661dc6d8": 0.01
+                },
+                "none": 0.38
+              }
+            ],
+            "discarded": 2,
+            "remaining": 3
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:9a3644b7a14b8f18569345ed"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:9a3644b7a14b8f18569345ed",
+                "probabilities": {
+                  "source:d34ca0ab152ec59972e87627": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:87524fde778bc9dd0bf75900",
+              "group:a74506d535582eacd3a15cd3"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:a74506d535582eacd3a15cd3",
+                "probabilities": {
+                  "source:52d6e3de4fa0dcc29946695f": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          },
+          {
+            "path": [
+              "root",
+              "group:297dcba7e684252487542f56",
+              "group:10ead633731e1fceee9097a2"
+            ],
+            "choices": [
+              {
+                "nodeId": "group:10ead633731e1fceee9097a2",
+                "probabilities": {
+                  "source:776b17088dc5c42e637829df": 0.01
+                },
+                "none": 0.99
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "missing",
+      "repeat": 2,
+      "structure": "flat-files",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 0.779,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "absent",
+      "repeat": 2,
+      "structure": "folder-tree",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 0.78,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "group:297dcba7e684252487542f56": 0.06,
+                  "group:87524fde778bc9dd0bf75900": 0.04
+                },
+                "none": 0.9
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    },
+    {
+      "case": "absent",
+      "repeat": 2,
+      "structure": "flat-files",
+      "expected": null,
+      "outcome": "empty",
+      "seconds": 0.708,
+      "result": {
+        "message": "No source candidates were reached; this is not proof that no source can answer the question.",
+        "status": "no-candidates",
+        "candidates": [],
+        "calls": 1,
+        "trace": [
+          {
+            "path": [
+              "root"
+            ],
+            "choices": [
+              {
+                "nodeId": "root",
+                "probabilities": {
+                  "source:4ae1eb667fb53609046cecfd": 0,
+                  "source:52d6e3de4fa0dcc29946695f": 0,
+                  "source:67546d93e80caf29732055a6": 0,
+                  "source:776b17088dc5c42e637829df": 0,
+                  "source:d34ca0ab152ec59972e87627": 0,
+                  "source:e8d7517f1bf964e4040ea818": 0
+                },
+                "none": 1
+              }
+            ],
+            "discarded": 0,
+            "remaining": 0
+          }
+        ],
+        "complete": false,
+        "nextAction": "record-unresolved"
+      }
+    }
+  ]
+}

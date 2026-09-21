@@ -24,7 +24,7 @@ def test_help_menu_lists_curated_topics_without_setup():
     result, body = response()
     assert result.returncode == 0
     assert body["kind"] == "builtin-help"
-    assert 8 <= len(body["topics"]) <= 10
+    assert 8 <= len(body["topics"]) <= 11
 
 
 def test_exact_topic_returns_curated_answer_and_sources():
@@ -100,3 +100,10 @@ def test_unmatched_help_returns_labelled_quick_start_not_a_data_answer():
     assert body['nextAction'] == 'read-quick-start'
     assert body['quickStart']['id'] == 'overview'
     assert 'answer' not in body
+
+
+def test_navigation_help_explains_candidates_not_answers():
+    result, body = response("--topic", "navigation")
+    assert result.returncode == 0
+    assert "not verified answers" in body["topic"]["answer"]
+    assert "folder-tree" in body["topic"]["answer"]

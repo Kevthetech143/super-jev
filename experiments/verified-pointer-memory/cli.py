@@ -18,6 +18,9 @@ NEXT = {
     'unknown-pointer': 'register-reviewed-dataset',
     'access-denied': 'stop-access-denied',
     'no-match': 'record-unresolved',
+    'candidates': 'inspect-source-files',
+    'no-candidates': 'record-unresolved-navigation',
+    'budget-exhausted': 'inspect-candidates-and-unexplored-trace',
     'refused': 'record-refusal',
     'error': 'record-error',
     'pointer-changed': 'resubmit-after-review',
@@ -29,6 +32,7 @@ ACTIONS = {
     'connect': ['pointer', 'sources', 'principals'],
     'register': ['pointer', 'dataset', 'principals'], 'remove': ['pointer'],
     'search': ['pointer', 'question', 'principal'],
+    'navigate': ['pointer', 'question', 'principal'],
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
     'assist': ['attemptId', 'principal', 'reason', 'references'],
     'attempt': ['attemptId', 'principal'],
@@ -71,10 +75,15 @@ def describe():
                               'confirmation': 'Review the files, then run the exact confirmCommand returned by the preview.',
                               'scope': 'Shortcut uses one principal and dataset equal to pointer; use JSON for shared/existing scopes.'},
         'connectOptions': {'sources': 'Explicit local UTF-8 files: path, optional description/id, reviewed sha256',
+                           'structure': 'flat-files (default) or folder-tree; optional per-source navigationPath in JSON',
                            'reviewed': 'true only after permission/content review for provider processing',
                            'replace': 'true to refresh the same dataset and principal scope; invalidates its cached answers',
                            'limitations': 'No recursive folders, PDF extraction, URL/DB fetching or automatic synchronization'},
         'settings': DEFAULTS, 'optionalSearchFields': ['context', 'freshness'],
+        'optionalNavigateFields': ['limits'],
+        'navigationLimits': {'beamWidth': {'default': 3, 'min': 1, 'max': 5},
+                             'maxRounds': {'default': 6, 'min': 1, 'max': 10},
+                             'maxResults': {'default': 3, 'min': 1, 'max': 10}},
         'optionalConfigDefaults': {'allowAgentAssist': False},
         'assistLimits': {'maxPreparations': 20, 'maxReviewedCharacters': 60000},
         'freshnessPolicies': {
@@ -89,7 +98,8 @@ def describe():
             'remove': 'Removes the pointer, cache and pending tickets only; it never removes originals.',
         },
         'requiredConfig': ['db', 'registry'],
-        'optionalConfig': ['retrievalCommand', 'allowAgentAssist', *DEFAULTS],
+        'optionalConfig': ['retrievalCommand', 'navigationCommand',
+                           'allowAgentAssist', *DEFAULTS],
         'resultActions': NEXT,
         'requirements': ['Python 3.10+', 'Node 24+ for bundled retrieval',
                          'Reviewed local dataset', 'TYPESAFE_API_KEY for live Jev calls'],
@@ -174,7 +184,7 @@ def load_config(path):
     config = json.loads(location.read_text())
     if not isinstance(config, dict):
         raise ValueError('Config must be an object.')
-    unknown = set(config) - {'db', 'registry', 'retrievalCommand',
+    unknown = set(config) - {'db', 'registry', 'retrievalCommand', 'navigationCommand',
                              'allowAgentAssist', *DEFAULTS}
     if unknown:
         raise ValueError('Unsupported configuration setting.')
@@ -188,6 +198,9 @@ def load_config(path):
     command = config.setdefault('retrievalCommand', ['node', str(Path(__file__).with_name('retrieve.ts').resolve())])
     if not isinstance(command, list) or not command or any(not isinstance(x, str) or not x for x in command):
         raise ValueError('retrievalCommand must be an administrator-provided argument array.')
+    navigation = config.setdefault('navigationCommand', ['node', str(Path(__file__).parents[2] / 'src' / 'navigation-cli.ts')])
+    if not isinstance(navigation, list) or not navigation or any(not isinstance(x, str) or not x for x in navigation):
+        raise ValueError('navigationCommand must be an administrator-provided argument array.')
     assist = config.setdefault('allowAgentAssist', False)
     if not isinstance(assist, bool):
         raise ValueError('allowAgentAssist must be a boolean.')
@@ -212,11 +225,26 @@ def run(request, config):
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return {'status': 'error', 'reason': 'Retrieval failed or returned invalid JSON.'}
 
+    def navigate_provider(question, catalog, limits):
+        payload = {'question': question, 'catalog': catalog}
+        if limits is not None:
+            payload['limits'] = limits
+        try:
+            process = subprocess.run(
+                config['navigationCommand'], input=json.dumps(payload), capture_output=True,
+                text=True, timeout=config['providerTimeoutSeconds'])
+            if process.returncode:
+                return {'status': 'error'}
+            return json.loads(process.stdout)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return {'status': 'error'}
+
     if request.get('action') == 'connect':
         from path_connect import connect
         return connect(request, config)
 
     service = Service(config['db'], config['registry'], retrieve,
+                      navigate_provider=navigate_provider,
                       cache_ttl_seconds=config['cacheTtlSeconds'],
                       review_ttl_seconds=config['reviewTtlSeconds'],
                       allow_agent_assist=config['allowAgentAssist'])
@@ -244,6 +272,9 @@ def run(request, config):
                 'datasetScope': entry.get('scope', entry.get('description', '')),
                 'snapshotStatus': error['status'] if error else 'available',
                 'status': error['status'] if error else 'available',
+                'structure': entry.get('structure',
+                                       binding.get('snapshot', {}).get('entry', {}).get('structure',
+                                                   'flat-files')),
                 'missingSourceDescriptions': sum(
                     1 for source in binding.get('snapshot', {}).get('sources', [])
                     if not isinstance(source.get('description'), str)
@@ -260,6 +291,9 @@ def run(request, config):
             raise ValueError('freshness must be an object when supplied.')
         return service.search(request['pointer'], request['question'], request['principal'],
                               request.get('context', ''), freshness=request.get('freshness'))
+    if action == 'navigate':
+        return service.navigate(request['pointer'], request['principal'],
+                                request['question'], request.get('limits'))
     if action == 'register':
         service.register(request['pointer'], request['dataset'], request['principals'])
         return {'status': 'registered'}
@@ -291,12 +325,14 @@ def main():
     parser.add_argument('--file', action='append', default=[], metavar='PATH', help='File to preview; repeat for more files.')
     parser.add_argument('--reviewed-file', action='append', nargs=2, default=[], metavar=('PATH', 'SHA256'), help='Confirm reviewed file bytes and permission for provider processing; repeat for more files.')
     parser.add_argument('--replace', action='store_true', help='Refresh an existing connector with the same scope.')
+    parser.add_argument('--structure', choices=('flat-files', 'folder-tree'), help='Navigation structure for this connector.')
+    parser.add_argument('--navigation-sha', help='Confirm the exact reviewed navigation catalog.')
     parser.add_argument('--principal', default='local', help='Local scope for the control panel, not authentication.')
     args = parser.parse_args()
     config = None
     try:
-        if (args.file or args.reviewed_file or args.replace) and not args.connect:
-            raise ValueError('--file, --reviewed-file and --replace require --connect.')
+        if (args.file or args.reviewed_file or args.replace or args.structure or args.navigation_sha) and not args.connect:
+            raise ValueError('--file, --reviewed-file, --replace, --structure and --navigation-sha require --connect.')
         if args.file and args.reviewed_file:
             raise ValueError('Use --file for preview OR --reviewed-file for confirmation, not both.')
         if args.describe:
@@ -308,7 +344,9 @@ def main():
                 request = {'action': 'connect', 'pointer': args.connect, 'principals': [args.principal],
                            'sources': ([{'path': path, 'sha256': sha} for path, sha in args.reviewed_file]
                                        if args.reviewed_file else [{'path': path} for path in args.file]),
-                           'reviewed': bool(args.reviewed_file), 'replace': args.replace}
+                           'reviewed': bool(args.reviewed_file), 'replace': args.replace,
+                           **({'structure': args.structure} if args.structure else {}),
+                           **({'navigationSHA': args.navigation_sha} if args.navigation_sha else {})}
             else:
                 request = json.loads(Path(args.input).read_text()) if args.input else {'action': 'panel', 'principal': args.principal}
             if not isinstance(request, dict):
@@ -322,6 +360,10 @@ def main():
                     confirm.extend(['--reviewed-file', source['path'], source['sha256']])
                 if args.replace:
                     confirm.append('--replace')
+                if args.structure:
+                    confirm.extend(['--structure', result['structure']])
+                if args.structure or result.get('navigationSHA'):
+                    confirm.extend(['--navigation-sha', result['navigationSHA']])
                 result['confirmCommand'] = shlex.join(confirm)
                 result['confirmWhen'] = 'Run only after reviewing these files and existing permission for their full text to be processed by the configured provider.'
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
