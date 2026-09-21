@@ -111,6 +111,19 @@ Refresh uses the same pointer, dataset and exact principal scope with `replace: 
 
 Initial support is explicit local nonempty UTF-8 text files on macOS/Linux, up to 50 files and 5 MiB per request. Folders, binary/PDF documents and remote URLs need prior authorized extraction or explicit file selection; there is no automatic crawl or live synchronization. The harness preserves originals. Connecting raw private material does not automatically sanitize it: if full text is not authorized for the provider, prepare a reviewed/redacted projection using the existing workflow instead.
 
+### Checked connect
+
+`python3 dispatch.py`'s connect flow trusts the description you write for
+each source; `connect_checked.py` checks that trust first. Given the same
+CONNECT.json, it runs the claim gate on every source's description against
+its own file, and only calls through to connect if every source comes back
+SUPPORTED at or above the confidence line (0.80 by default, `--line` to
+move it). A NOT_SUPPORTED or under-the-line description, or a file over the
+gate's 32k-token ceiling, refuses the whole connect; nothing is registered
+until every source passes. `--check-only` runs just the gate. It writes
+`<name>.verdicts.json` next to the request with each source's verdict and
+sha256. It does not watch for file changes after a connect and does not
+chunk or truncate oversized files — split or drop them and rerun.
 
 ## Navigation structure
 

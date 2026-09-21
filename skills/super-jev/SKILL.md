@@ -23,6 +23,8 @@ python3 dispatch.py memory --connect my-records --file /absolute/path/to/record.
 
 The connect command previews files without publishing them. Review their contents and existing provider permission, then run the exact `confirmCommand` it returns. Repeat `--file` for more files. This shortcut creates a single-principal connector; use the JSON guide for shared scopes.
 
+**Checked connect (preferred):** `python3 connect_checked.py CONNECT.json` gates every description against its file with Jev first (SUPPORTED at 0.80 or better), refuses the whole connect on any failure or any file over the 32k-token ceiling, and only then previews and confirms. Add `--check-only` to just check. Verdicts with file hashes land next to CONNECT.json.
+
 For configured memory, `python3 dispatch.py memory --principal YOUR_AGENT_NAME` lists your pointers. Save a search request in your repo's private working area, then run `python3 /path/to/skill/dispatch.py memory --input /path/to/request.json`:
 
 ```json
