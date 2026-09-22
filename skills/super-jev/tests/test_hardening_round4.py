@@ -130,7 +130,7 @@ def test_unfavorable_or_weak_main_verdict_still_blocks(monkeypatch, claim, side)
     assert _check(monkeypatch, claim, side) == 3
 
 
-# 4. the confirm label asks for the exact value for the exact event, floor 0.70
+# 4. the confirm label asks for the exact value for the exact event
 def test_confirm_label_asks_for_the_exact_value(tmp_path, monkeypatch):
     f = tmp_path / "trip.md"
     f.write_text("Return flight TP201 is on 2026-10-12.")

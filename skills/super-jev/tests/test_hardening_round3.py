@@ -38,7 +38,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("TYPESAFE_API_KEY", "sk-test")
-    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", [])
+    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", {})
     monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
     return tmp_path
 
@@ -125,8 +125,8 @@ def test_content_check_asks_for_the_answer_not_the_topic(tmp_path, monkeypatch):
     f = tmp_path / "a.md"
     f.write_text("x")
     calls = []
-    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": 0.73}]}, calls)
-    assert ask.confirm_one("What car do I have?", str(f))[0] == 0.73
+    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": 0.93}]}, calls)
+    assert ask.confirm_one("What car do I have?", str(f))[0] == 0.93
     assert "states the exact value asked for" in json.loads(calls[0])["catalog"]["nodes"][1]["label"]
 
 
