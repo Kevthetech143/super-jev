@@ -73,7 +73,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import argparse, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time
 from datetime import date
 from pathlib import Path
 
@@ -84,7 +84,19 @@ from connect_checked import gate, memory  # noqa: E402
 CACHE_DIR = HERE / "prepare-cache"
 CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
 WORD_RE = re.compile(r"password|passwd|api[_-]?key", re.I)
-SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}", re.I)
+# Token shapes, adapted from gitleaks' default rules (config/gitleaks.toml): provider
+# prefixes, private key blocks, a keyword followed by ":"/"=", and a generic
+# key/token/secret assignment whose value is long and high-entropy (tested below).
+TOKEN_RE = re.compile(
+    r"\b(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{10,}"
+    r"|\bsk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{32,}"
+    r"|\bgh[pousr]_[0-9a-zA-Z]{30,}|\bgithub_pat_[0-9a-zA-Z_]{22,}"
+    r"|\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b|aws_secret_access_key\s*[:=]"
+    r"|\bxox[abposr]-[0-9A-Za-z-]{10,}|\bBearer\s+[A-Za-z0-9._~+/-]{20,}"
+    r"|-----BEGIN[A-Z ]*PRIVATE KEY-----"
+    r"|\b(?:api|secret|access|auth|client|private)[\s_-]?(?:key|token|secret)\s*[:=]", re.I)
+GENERIC_RE = re.compile(r"(?:key|token|secret|passwd|pwd)[\w-]*[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_+/=.-]{20,})", re.I)
+SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
 # line). Both are scrubbed out before the card check only; the keyword rule below
@@ -158,10 +170,24 @@ def _scrub_dates_and_urls(text: str) -> str:
     return ISO_DATE_RE.sub(" ", URL_RE.sub(" ", text))
 
 
+def _entropy(s: str) -> float:
+    return -sum(s.count(c) / len(s) * math.log2(s.count(c) / len(s)) for c in set(s))
+
+
+def _token_hit(text: str) -> bool:
+    """A known token shape, or a key/token/secret assignment whose value looks random
+    (entropy >= 3.5 bits/char, the gitleaks generic-api-key threshold, and mixes letters with digits)."""
+    if TOKEN_RE.search(text):
+        return True
+    return any(_entropy(v) >= 3.5 and re.search(r"\d", v) and re.search(r"[A-Za-z]", v)
+               for v in GENERIC_RE.findall(text))
+
+
 def has_secret(text: str) -> bool:
     """Card-number check runs on the scrubbed text (dates/URLs removed); the
-    password/api-key keyword check always runs on the original text."""
-    return bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
+    keyword and token checks always run on the original text."""
+    return (bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
+            or _token_hit(text))
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False):
@@ -218,6 +244,8 @@ def secret_detail(p: Path):
             return {"type": "card-number-like digits", "line": i, "masked": re.sub(r"\d", "#", line)}
         if WORD_RE.search(line):
             return {"type": "password/api-key keyword", "line": i, "masked": re.sub(r"\d", "#", line)}
+        if _token_hit(line):
+            return {"type": "token/key-like text", "line": i, "masked": re.sub(r"[A-Za-z0-9]", "#", line)}
     return None
 
 
