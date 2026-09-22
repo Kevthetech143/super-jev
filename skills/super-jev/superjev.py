@@ -3901,6 +3901,18 @@ GATE_VERDICT[GATE_UNREADABLE_EXIT] = ("ERROR — the gate's output could not be 
 GATE_VERDICT_WORD[GATE_UNREADABLE_EXIT] = "ERROR"
 
 
+def gate_verdict_line(code, out="", err=""):
+    """The VERDICT text for `code`. An unreadable table whose door printed its
+    own cause (a `jev: ...` line -- missing key, HTTP 401, no network) names that
+    cause instead of the generic "could not be read"; still ERROR, never clean."""
+    if code == GATE_UNREADABLE_EXIT:
+        causes = [l.strip() for l in f"{out}\n{err}".splitlines() if l.strip().startswith("jev:")]
+        if causes:
+            return (f"ERROR — Jev could not check this: {causes[-1][4:].strip()}. "
+                    "Treated as NOT clean.")
+    return GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}")
+
+
 def gate_fail_closed(code, out, n_claims=0):
     """The exit code cmd_gate reports for a door run. Only ever tightens.
 
@@ -4435,7 +4447,7 @@ def cmd_gate(a):
                                       extra_ledger=extra_ledger)
             code = gate_fail_closed(code, out, n_claims)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
-                      GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
+                      gate_verdict_line(code, out, err),
                       {"stdout": out, "stderr": err, "claim_mode": mode}, cmd)
             return code
         if hook_mode:
@@ -4449,6 +4461,12 @@ def cmd_gate(a):
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
                                       hook_mode=True, timeout=timeout,
                                       extra_ledger=extra_ledger)
+            # Deliberately NOT gate_fail_closed here: the hook's door output is
+            # not always a claim table (a clean draft run can print no c<N> rows),
+            # so tightening it would turn every quiet allow into an advisory.
+            # cmd_hook fails closed itself on a non-zero code and on strong flags
+            # in `out` (_hook_block_reasons); it never reads exit 0 as a verdict
+            # beyond "no block".
             return code, out, err
         print("$ " + shlex.join(str(c) for c in cmd))
         sys.stdout.flush()
@@ -4457,7 +4475,7 @@ def cmd_gate(a):
         sys.stdout.write(out)
         sys.stderr.write(err)
         code = gate_fail_closed(code, out, n_claims)
-        print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
+        print(f"\nVERDICT: {gate_verdict_line(code, out, err)}")
         return code
     finally:
         if claims_tmp_path:

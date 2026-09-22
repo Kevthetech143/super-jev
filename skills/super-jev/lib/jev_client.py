@@ -201,7 +201,7 @@ def main(argv=None):
                     for f in a.evidence]
         claims = list(a.claim)
         if a.claims_file:
-            claims += [l.strip() for l in open(a.claims_file, encoding="utf-8") if l.strip()]
+            claims += [l.strip() for l in open(os.path.expanduser(a.claims_file), encoding="utf-8") if l.strip()]
         draft = open(a.draft, encoding="utf-8").read() if a.draft else ""
         if not claims:
             claims = split_claims(draft)
