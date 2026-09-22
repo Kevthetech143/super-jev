@@ -105,7 +105,9 @@ def ask(state, questions, timeout=120, attempts=4):
         raise JevError("evidence exceeds the 32,768-token ceiling -- split the file; "
                        "it is never truncated")
     body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    # The TypeSafe edge rejects the default "Python-urllib" user agent with 403.
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "User-Agent": "super-jev (+https://github.com/Kevthetech143/super-jev)"}
     delay, t0 = 1.0, time.monotonic()
     for attempt in range(attempts):
         try:

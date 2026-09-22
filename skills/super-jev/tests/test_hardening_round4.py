@@ -144,3 +144,21 @@ def test_confirm_label_asks_for_the_exact_value(tmp_path, monkeypatch):
     assert ask.confirm_one("What time does TP201 depart?", str(f))[0] is None
     label = json.loads(calls[0])["catalog"]["nodes"][1]["label"]
     assert "exact value asked for" in label and "another event" in label
+
+
+def test_client_sends_explicit_user_agent(monkeypatch):
+    """TypeSafe's edge answers 403 to the default Python-urllib user agent."""
+    import importlib, sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+    jc = importlib.import_module("jev_client")
+    seen = {}
+    def fake(url, body, headers, timeout):
+        seen.update(headers)
+        return {"answers": {}, "model": "jev-test"}
+    monkeypatch.setattr(jc, "transport", fake)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "sk-test")
+    try:
+        jc.ask("state", {"q": {"type": "choice", "question": "q?", "choice": {"criteria": {"a": "a", "b": "b"}}}})
+    except Exception:
+        pass
+    assert "User-Agent" in seen and "Python-urllib" not in seen["User-Agent"]
