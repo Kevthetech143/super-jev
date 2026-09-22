@@ -66,3 +66,13 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 **Symptom:** `superjev.py` reads `CLAW4MAC_SESSION_ID`, `CLAW4MAC_BOT_ID` and `CLAUDE_BOT_ID` to derive a principal name.
 **Cause:** compatibility with the harness Super Jev was built in. They are optional; unset, the principal comes from `--principal`.
 **Workaround:** pass `--principal` explicitly. 1.1 renames them to `SUPERJEV_*` with a fallback.
+
+## 12. Paraphrased claims can come back NOT_SUPPORTED
+**Symptom:** a true claim reworded in your own words (numbers spelled out, a different phrasing) is marked NOT_SUPPORTED.
+**Cause:** the judge matches the claim against the source wording and sometimes misses a paraphrase.
+**Workaround:** quote the source wording, or stay close to it, in the claim you check.
+
+## 13. ask can still rank a near-miss file
+**Symptom:** `ask` lists a file that is on the topic but lacks the exact value asked for (a flight's date for its departure time, another event's figure).
+**Cause:** the content check is a judge score, not a lookup. Measured 2026-09-22: near misses scored up to 0.64, present facts 0.91 and up, floor 0.70; rarer wordings may still cross it.
+**Workaround:** `ask` ranks files only. Open the top file and find the exact value yourself before answering.

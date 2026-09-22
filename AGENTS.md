@@ -50,7 +50,9 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 
    Success: ranked lines like `0.99  /path/to/file.md  [my-notes]`. This is
    where the answer is, not the answer itself: open the top file, read it, and
-   answer from what it says, naming that file.
+   answer from what it says, naming that file. `ask` only ranks files; it
+   never reads the value out for you. Find the exact value in the file
+   yourself; if the file only mentions the topic, the answer is not there.
 
 6. **Ask for a fact that is not in the files.** Success: `no-candidates across
    1 pointers: no connected file answers this.` Tell your human it is not in
