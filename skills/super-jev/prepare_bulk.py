@@ -187,7 +187,14 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                 continue
             seen.add(rp)
             if len(b) > CEILING_BYTES:
-                held.append((str(p), "over size ceiling; split first")); continue
+                held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
+                                      "split it into smaller .md files, e.g. one per ## section")); continue
+            if b"\x00" in b:
+                held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
+            try:
+                b.decode("utf-8")
+            except UnicodeDecodeError:
+                held.append((str(p), "not UTF-8 text; re-save it as UTF-8 to connect it")); continue
             if has_secret(b.decode("utf-8", "replace")):
                 if allow_held:
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
@@ -274,6 +281,9 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
     raise WriterError("writer returned invalid JSON after 2 attempts")
 
 
+BUILTIN_QUOTE_WORDS = 60
+
+
 def builtin_writer(items: list) -> dict:
     """No-model writer: a description quoted from the file's own headings and first words.
 
@@ -283,12 +293,16 @@ def builtin_writer(items: list) -> dict:
     for it in items:
         heads = [h.lstrip("#").strip() for h in it["headings"] if h.lstrip("#").strip()]
         body = [l.strip() for l in it["start"].splitlines() if l.strip() and not l.startswith("#")]
-        words = " ".join(body).split()[:30]
+        words = " ".join(body).split()[:BUILTIN_QUOTE_WORDS]
         if heads:
             desc = f'This file is titled "{heads[0]}"'
             if len(heads) > 1:
                 desc += " with sections " + ", ".join(f'"{h}"' for h in heads[1:5])
             desc += "."
+            # Navigation ranks files on their description alone; headings only let it guess
+            # (hits flipped to no-candidates, absent facts matched on topic). Quote the body too.
+            if words:
+                desc += f' It begins: "{" ".join(words)}"'
             question = f"What does {heads[0]} say?"
         else:
             desc = f'This file begins: "{" ".join(words)}"'
@@ -522,11 +536,17 @@ def main() -> int:
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     t0 = time.time()
 
+    missing = [str(r) for r in roots if not r.is_dir()]
+    if missing:
+        print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
     files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held)
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
+    if not files and not held:
+        print(f"ERROR: no .md files found under {', '.join(str(r) for r in roots)} "
+              "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
 
     if len(files) > a.max_files:
         print(f"REFUSED: {len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
@@ -648,7 +668,15 @@ def main() -> int:
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
-        print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s"); return 0
+        print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s")
+        if a.no_connect:
+            return 0
+        # Nothing connected is a failure, never a quiet success; name the shared cause when there is one.
+        reasons = sorted({why for _, why in exceptions})
+        cause = reasons[0] if len(reasons) == 1 else f"{len(reasons)} different reasons, listed above"
+        print(f"ERROR: all {len(exceptions) + len(held)} files failed or were held; nothing connected"
+              + (f" ({cause})" if exceptions else ""))
+        return 1
 
     ordered = sorted(connect_set, key=str)
     parts = [ordered[i:i + a.limit] for i in range(0, len(ordered), a.limit)]
