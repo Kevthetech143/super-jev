@@ -125,9 +125,9 @@ def test_content_check_asks_for_the_answer_not_the_topic(tmp_path, monkeypatch):
     f = tmp_path / "a.md"
     f.write_text("x")
     calls = []
-    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": 0.63}]}, calls)
-    assert ask.confirm_one("What car do I have?", str(f))[0] == 0.63
-    assert "states the answer itself" in json.loads(calls[0])["catalog"]["nodes"][1]["label"]
+    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": 0.73}]}, calls)
+    assert ask.confirm_one("What car do I have?", str(f))[0] == 0.73
+    assert "states the exact value asked for" in json.loads(calls[0])["catalog"]["nodes"][1]["label"]
 
 
 def test_files_past_the_checked_few_are_not_kept_unread(tmp_path, monkeypatch, capsys):

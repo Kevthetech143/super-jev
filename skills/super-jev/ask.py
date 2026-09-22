@@ -160,11 +160,14 @@ MAX_QUESTION = 8000
 # label, an on-topic file lacking the fact scored 0.64-0.69 (a present fact as low
 # as 0.62), so absent facts passed on some runs. The label now tells the judge to
 # pick a passage only if it states the answer: measured 2026-09-22, absent facts
-# 0 (one near-answer 0.55-0.56), present facts 0.63-0.97. The floor sits between.
+# 0 (one near-answer 0.55-0.56), present facts 0.63-0.97. Near misses still passed
+# (a flight's date for its departure time; another event's odometer figure), so the
+# label now asks for the exact value for the exact event: measured 2026-09-22 on 10
+# near-miss and 10 present questions x2, near misses 0-0.64, present 0.91-0.98.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
-ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.60
-CONFIRM_LABEL = ("Passage {n}, choose only if it states the answer itself "
-                 "(same topic without the asked detail is none)")
+ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.70
+CONFIRM_LABEL = ("Passage {n}, choose only if it states the exact value asked for, for the exact "
+                 "event asked about (a value for another event, or only the topic, is none)")
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
 
@@ -218,7 +221,9 @@ def confirm(question: str, paths: list):
     errors = [e for _, _, e, _ in results if e]
     scores = {p: sc for p, (sc, _, _, _) in zip(paths, results) if sc is not None}
     partial = {p for p, (_, part, _, _) in zip(paths, results) if part}
-    notes = {p: note for p, (_, _, _, note) in zip(paths, results) if note}
+    # A file whose check errored was not read: it stays INCONCLUSIVE on its routing
+    # score, and the other files are still filtered on their own results.
+    notes = {p: note or INCONCLUSIVE for p, (_, _, e, note) in zip(paths, results) if note or e}
     return scores, partial, (errors[0] if errors else None), notes
 
 def refresh_hint(ptr: str, principal: str, kind: str) -> str:
@@ -290,14 +295,13 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if check_error:
             errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
-        else:
-            # Only files the check actually read may stay: a file past the first
-            # CONFIRM_FILES was never read, so it is not evidence of anything.
-            checked = set(routed[:CONFIRM_FILES])
-            keep = [(scores.get(p, s), p, ptr) for s, p, ptr in merged
-                    if p in scores or p in partial or notes.get(p) == INCONCLUSIVE]
-            dropped = len(checked - {p for _, p, _ in keep} - {p for p, n in notes.items() if n == HELD_SECRET})
-            merged = sorted(keep, reverse=True)
+        # Only files the check actually read may stay: a file past the first
+        # CONFIRM_FILES was never read, so it is not evidence of anything.
+        checked = set(routed[:CONFIRM_FILES])
+        keep = [(scores.get(p, s), p, ptr) for s, p, ptr in merged
+                if p in scores or p in partial or notes.get(p) == INCONCLUSIVE]
+        dropped = len(checked - {p for _, p, _ in keep} - {p for p, n in notes.items() if n == HELD_SECRET})
+        merged = sorted(keep, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
