@@ -58,6 +58,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -216,6 +217,21 @@ def confirm(question: str, paths: list):
     notes = {p: note for p, (_, _, _, note) in zip(paths, results) if note}
     return scores, partial, (errors[0] if errors else None), notes
 
+def refresh_hint(ptr: str, principal: str, kind: str) -> str:
+    """A stale pointer's files changed since connect; say the exact command that re-prepares it."""
+    if not kind.startswith(("preparation-required", "refresh-required")):
+        return ""
+    if "-manual-" in ptr:
+        return "; its source changed: re-add it with ask.py --add ... --replace-entry"
+    try:
+        roots = json.loads((Path(__file__).resolve().parent / "prepare-cache" / f"{ptr}-report.json")
+                           .read_text()).get("roots") or []
+    except (OSError, ValueError):
+        roots = []
+    root_args = " ".join(f"--root {shlex.quote(r)}" for r in roots) or "--root /path/to/folder"
+    return (f"; its files changed since connect. Run: python3 skills/super-jev/prepare_bulk.py "
+            f"--refresh --pointer {ptr} --principal {principal} {root_args}")
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
         print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
@@ -261,7 +277,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             errored += 1
             statuses[ptr] = kind
-            error_lines.append(f"[{ptr}] {kind}")
+            error_lines.append(f"[{ptr}] {kind}" + refresh_hint(ptr, principal, kind))
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     dropped, check_error, notes = 0, None, {}

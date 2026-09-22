@@ -180,3 +180,12 @@ def test_summary_names_held_file_why_and_command(env, monkeypatch, capsys):
     summary = capsys.readouterr().out.split("approved:")[1]
     assert "HELD  keys.md  (card/password-like text" in summary
     assert f"prepare_bulk.py --root {root} --pointer x --principal me --writer builtin --no-findability --allow-held" in summary
+
+
+# 5. a stale pointer says how to refresh it
+def test_stale_pointer_line_names_the_refresh_command(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["x"]} if req["action"] == "panel" else
+                        {"status": "preparation-required"})
+    assert ask.lookup("q", "me", tmp_path / "s") == 1
+    assert "[x] preparation-required; its files changed since connect. Run: python3 skills/super-jev/" \
+           "prepare_bulk.py --refresh --pointer x --principal me --root" in capsys.readouterr().out
