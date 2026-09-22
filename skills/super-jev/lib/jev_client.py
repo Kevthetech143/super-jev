@@ -206,6 +206,12 @@ def main(argv=None):
             raise JevError("needs at least one evidence file")
         evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace").read())
                     for f in a.evidence]
+        # Evidence goes to the Jev API, so it gets the same secret scan connect uses.
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from prepare_bulk import has_secret
+        for f, text in evidence:
+            if has_secret(text):
+                raise JevError(f"evidence file {f} contains a secret; not sent")
         claims = list(a.claim)
         if a.claims_file:
             claims += [l.strip() for l in open(os.path.expanduser(a.claims_file), encoding="utf-8") if l.strip()]
