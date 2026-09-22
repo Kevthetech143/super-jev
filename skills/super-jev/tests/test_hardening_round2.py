@@ -95,8 +95,11 @@ def test_connect_all_files_failed_exits_nonzero_with_cause(env, monkeypatch, cap
     cause = "ERROR — Jev could not check this: 401 -- TypeSafe rejected the API key."
     monkeypatch.setattr(pb, "gate", lambda d, p: {"state": "ERROR", "reason": cause})
     monkeypatch.setattr(pb, "memory", lambda req: pytest.fail("must not connect"))
+    # a model writer's drafts go through the gate (built-in quotes are checked locally)
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None, command=None:
+                        {it["path"]: {"path": it["path"], "description": "d"} for it in items})
     monkeypatch.setattr(sys, "argv", ["p", "--root", str(root), "--pointer", "x", "--principal", "me",
-                                      "--writer", "builtin", "--no-findability"])
+                                      "--writer-command", "fake-writer", "--no-findability"])
     assert pb.main() == 1
     out = capsys.readouterr().out
     assert "all 2 files failed" in out and "401" in out

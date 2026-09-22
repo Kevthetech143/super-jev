@@ -50,6 +50,8 @@ Pipeline per run:
      place in the set:
        Stage 1 gates the description ALONE against the file, exactly the pre-labels claim. Fail -> one
        rewrite retry, verdict fed back; still failing -> EXCEPTION list, file goes no further.
+       A --writer builtin description is only the file's own words quoted, so stage 1 checks it
+       locally (rebuilt from the file, must match exactly: verdict QUOTED) with no judge call.
        Stage 2 (only for a file that passed stage 1) gates the label sentence ALONE ("This file is a <kind>
        about <subject>. Its status is <status>[ as of <as_of>].") against the file. SUPPORTED at or above
        --line keeps the drafted labels; anything else (under the line, NOT_SUPPORTED, CONTRADICTED, ERROR)
@@ -593,6 +595,8 @@ def main() -> int:
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")
 
     def fmt_conf(verdict: dict) -> str:
+        if verdict.get("state") == "QUOTED":
+            return "quoted"
         c = verdict.get("confidence")
         return f"{c:.2f}" if isinstance(c, (int, float)) else "n/a"
 
@@ -605,8 +609,14 @@ def main() -> int:
         # Stage 1: gate the description alone -- exactly the pre-labels claim. A label
         # problem must never cost a file its place; only a description problem does.
         desc = d["description"].strip()
-        v = gate(desc, str(p))
-        ok = v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line
+        if use_builtin and d["description"] == builtin_writer([excerpt(p)])[str(p)]["description"]:
+            # A built-in description is only the file's own headings and words, quoted; rebuilding
+            # it from the file proves that exactly. The judge scored such quotes 0.29-0.89, so a
+            # plain note could fall under the line and be set aside for no real reason.
+            v = {"state": "QUOTED", "confidence": None}
+        else:
+            v = gate(desc, str(p))
+        ok = v["state"] == "QUOTED" or (v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line)
         if not ok:
             fb = {str(p): {"draft": desc, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
             try:
@@ -660,8 +670,20 @@ def main() -> int:
 
     connect_set = reused + passing
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
+    rerun = "python3 " + shlex.join(sys.argv)
     for p, why in exceptions:
-        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})")
+        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})\n"
+              f"      to include it: check the file says what it should, then run: {rerun}"
+              + ("" if use_builtin else " --writer builtin"))
+    for p, why in held:
+        if "admitted by --allow-held" in why:
+            continue
+        print(f"  HELD  {relstr(p, roots)}  ({why})")
+        if "review before onboarding" in why:
+            print(f"      to include it (and any other held secret-looking file) after checking it: "
+                  f"{rerun} --allow-held")
+        elif "binary" not in why:
+            print(f"      then run: {rerun}")
 
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
