@@ -203,7 +203,7 @@ def test_failing_draft_gets_one_retry_then_lands_in_exceptions_not_connected(tmp
     monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
     rc = pb.main()
 
-    assert rc == 0
+    assert rc == 1  # nothing connected is a failure
     assert len(writer_calls) == 2  # initial batch draft + exactly one rewrite retry
     assert memory_calls == []      # connect_set stayed empty; memory is never invoked
     out = capsys.readouterr().out
@@ -417,7 +417,7 @@ def test_stage1_fail_drops_file_after_one_retry_labels_never_gated(tmp_path, mon
     monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
     rc = pb.main()
 
-    assert rc == 0
+    assert rc == 1  # nothing connected is a failure
     assert len(writer_calls) == 2       # initial batch draft + exactly one rewrite retry
     assert len(gate_calls) == 2         # description gate on the draft, then on the retry -- never a labels call
     assert memory_calls == []           # connect_set stayed empty; memory is never invoked

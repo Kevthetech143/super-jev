@@ -146,7 +146,7 @@ dates and URLs first, so a long numeric id in a URL or a run of dates on one
 line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
-operator decision; it never lifts the size-ceiling hold. A cheap writer model drafts one
+operator decision; it never lifts the size-ceiling hold. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,
