@@ -155,7 +155,19 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
         return rc
-    pointers = my_pointers(principal)
+    panel = memory({"action": "panel", "principal": principal})
+    if panel.get("reason") == "not-set-up":
+        print("Super Jev is not set up yet. Run: python3 skills/super-jev/setup.py")
+        return 1
+    pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
+                            for p in panel.get("pointers", [])) if n]
+    if not pointers:
+        print(f"nothing connected yet for principal '{principal}' -- run connect first:\n"
+              f"  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
+              f"--pointer my-notes --principal {principal}")
+        log(sdir, "lookup", question=question, pointers=0, result="nothing-connected",
+            secs=round(time.time() - t0, 1))
+        return 1
 
     def nav(ptr):
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})

@@ -71,7 +71,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, hashlib, json, os, re, shlex, subprocess, sys, time
+import argparse, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from datetime import date
 from pathlib import Path
 
@@ -274,6 +274,32 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
     raise WriterError("writer returned invalid JSON after 2 attempts")
 
 
+def builtin_writer(items: list) -> dict:
+    """No-model writer: a description quoted from the file's own headings and first words.
+
+    Used when no claude CLI is installed or with --writer builtin, so the TypeSafe key alone is
+    enough to connect. Labels are left unknown; the gate still checks every description."""
+    out = {}
+    for it in items:
+        heads = [h.lstrip("#").strip() for h in it["headings"] if h.lstrip("#").strip()]
+        body = [l.strip() for l in it["start"].splitlines() if l.strip() and not l.startswith("#")]
+        words = " ".join(body).split()[:30]
+        if heads:
+            desc = f'This file is titled "{heads[0]}"'
+            if len(heads) > 1:
+                desc += " with sections " + ", ".join(f'"{h}"' for h in heads[1:5])
+            desc += "."
+            question = f"What does {heads[0]} say?"
+        else:
+            desc = f'This file begins: "{" ".join(words)}"'
+            question = f"Which file says {' '.join(words[:8])}?"
+        subject = " ".join((heads[0] if heads else Path(it["path"]).stem).split()[:4])
+        out[it["path"]] = {"path": it["path"], "description": desc, "question": question,
+                           "kind": "unknown", "status": "unknown", "as_of": "unknown",
+                           "subject": subject}
+    return out
+
+
 def navigate(pointer: str, principal: str, question: str) -> list:
     out = memory({"action": "navigate", "pointer": pointer, "principal": principal, "question": question})
     return [c.get("originalPath") for c in out.get("candidates", [])]
@@ -424,6 +450,10 @@ def main() -> int:
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
+    ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
+                    help="builtin: no model call, descriptions quoted from each file's headings (needs only the "
+                         "TypeSafe key). auto (default): --writer-command if given, else the claude CLI if it is "
+                         "installed, else builtin")
     ap.add_argument("--writer-model", default="haiku",
                     help="model passed to the default Claude writer")
     ap.add_argument("--writer-command", metavar="COMMAND",
@@ -473,9 +503,15 @@ def main() -> int:
     if writer_command_str and not writer_command:
         print("REFUSED: --writer-command must name a command"); return 2
 
-    banner_cmd = " ".join(writer_command) if writer_command else f"claude -p --model {a.writer_model}"
-    print(f"writer: {banner_cmd}")
-    if not writer_command:
+    use_builtin = a.writer == "builtin" or (a.writer == "auto" and not writer_command
+                                              and not shutil.which("claude"))
+    if use_builtin:
+        why = "" if a.writer == "builtin" else " (no claude CLI found)"
+        print(f"writer: builtin{why} -- descriptions quoted from each file's headings, no model call")
+    else:
+        banner_cmd = " ".join(writer_command) if writer_command else f"claude -p --model {a.writer_model}"
+        print(f"writer: {banner_cmd}")
+    if not writer_command and not use_builtin:
         print("tip: bulk labeling should run on a cheap writer model, never a premium one; the proven default "
               "is claude -p --model haiku (the Claude Code Haiku command) -- set --writer-command or "
               "SUPERJEV_WRITER_COMMAND for another adapter that reads the prompt on stdin and prints JSON")
@@ -521,12 +557,18 @@ def main() -> int:
     for i in range(0, len(todo), a.batch):
         batch = todo[i:i + a.batch]
         try:
-            if writer_command:
+            if use_builtin:
+                got = builtin_writer([excerpt(p) for p in batch])
+            elif writer_command:
                 got = writer([excerpt(p) for p in batch], a.writer_model, command=writer_command)
             else:
                 got = writer([excerpt(p) for p in batch], a.writer_model)
         except WriterError as e:
-            print(f"ERROR: description writer failed: {e}"); return 1
+            print(f"ERROR: description writer failed: {e}")
+            if not writer_command:
+                print("  The claude CLI must be installed and logged in for this writer. Or re-run with "
+                      "--writer builtin (no model call; needs only TYPESAFE_API_KEY).")
+            return 1
         drafts.update(got)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")
 
@@ -548,7 +590,9 @@ def main() -> int:
         if not ok:
             fb = {str(p): {"draft": desc, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
             try:
-                if writer_command:
+                if use_builtin:
+                    redo = None  # a quoted description has nothing to rewrite
+                elif writer_command:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
                 else:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
