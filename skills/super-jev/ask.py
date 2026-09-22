@@ -148,7 +148,63 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
         print("  evidence:", e.get("sourceId", ""), "|", str(e.get("quote", ""))[:120])
     return 0
 
+# navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
+MAX_QUESTION = 8000
+# Content check: routing picks files from their one-line descriptions only, so it
+# can match an absent fact on topic alone and miss a present one. Each top routed
+# file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
+# must beat "none of these" on its own merits, not merely out-rank weaker siblings;
+# it survives only with a content score >= CONFIRM_FLOOR. One Jev call per file.
+CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
+ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.10
+
+def navigation_command() -> list:
+    repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
+    return ["node", str(repo / "src" / "navigation-cli.ts")]
+
+def confirm_one(question: str, path: str):
+    """(content score or None, whether the file was too long to read whole, error or None)."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError as e:
+        return None, False, f"cannot read {path}: {e.strerror or e}"
+    chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+    partial = len(chunks) > CONFIRM_CHUNKS_PER_FILE
+    leaves = [{"id": f"c{i}", "label": f"{Path(path).name} part {i + 1}", "description": chunk,
+               "sourceId": str(i)} for i, chunk in enumerate(chunks[:CONFIRM_CHUNKS_PER_FILE])]
+    payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
+               "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
+                           "nodes": [{"id": "root", "label": "Sources",
+                                      "description": "Full text of candidate files",
+                                      "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
+    try:
+        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
+                           text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, partial, f"content check could not run: {e.__class__.__name__}"
+    if r.returncode:
+        return None, partial, (r.stderr.strip().splitlines()[-1:] or ["content check failed"])[0][:200]
+    try:
+        cands = json.loads(r.stdout).get("candidates", [])
+    except ValueError:
+        return None, partial, "content check returned invalid JSON"
+    best = max((c["score"] for c in cands), default=0)
+    return (best if best >= CONFIRM_FLOOR else None), partial, None
+
+def confirm(question: str, paths: list):
+    """Check each path alone, in parallel. Returns ({path: score} for kept files,
+    set of paths too long to read whole, first error or None)."""
+    paths = paths[:CONFIRM_FILES]
+    results = list(ThreadPoolExecutor(max_workers=CONFIRM_FILES).map(lambda p: confirm_one(question, p), paths))
+    errors = [e for _, _, e in results if e]
+    scores = {p: sc for p, (sc, _, _) in zip(paths, results) if sc is not None}
+    partial = {p for p, (_, part, _) in zip(paths, results) if part}
+    return scores, partial, (errors[0] if errors else None)
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
+    if len(question) > MAX_QUESTION:
+        print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
+        return 2
     t0 = time.time()
     cache = memory({"action": "cached", "principal": principal, "question": question})
     if cache.get("status") == "verified-cache-hit":
@@ -176,7 +232,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             return ptr, "candidates", out["candidates"]
         if status in ("candidates", "no-candidates"):
             return ptr, "no-candidates", []
-        return ptr, status or "error", []
+        kind = status or "error"
+        return ptr, f"{kind}: {out['reason']}" if out.get("reason") else kind, []
 
     results = list(ThreadPoolExecutor(max_workers=8).map(nav, pointers)) if pointers else []
     merged, errored, statuses, error_lines = [], 0, {}, []
@@ -190,7 +247,20 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             errored += 1
             statuses[ptr] = kind
             error_lines.append(f"[{ptr}] {kind}")
-    merged.sort(reverse=True)
+    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
+    routed = list(dict.fromkeys(p for _, p, _ in merged))
+    dropped, check_error = 0, None
+    if merged:
+        scores, partial, check_error = confirm(question, routed)
+        if check_error:
+            errored += 1
+            error_lines.append(f"[content-check] error: {check_error}")
+        else:
+            checked = set(routed[:CONFIRM_FILES])
+            keep = [(scores.get(p, s), p, ptr) for s, p, ptr in merged
+                    if p not in checked or p in scores or p in partial]
+            dropped = len(checked) - len({p for _, p, _ in keep} & checked)
+            merged = sorted(keep, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
@@ -204,6 +274,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(f"unresolved: {errored} of {len(pointers)} pointers errored")
         return 1
     if not top:
+        if dropped:
+            print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
         print(f"no-candidates across {len(pointers)} pointers: no connected file answers this. "
               "Tell your human it is not in their files; do not guess. To fill the gap, connect more "
               "files or record a fact with --add (see references/connectors.md).")

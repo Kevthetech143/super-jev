@@ -47,10 +47,20 @@ export class NavigationError extends Error {}
 type CheckedCatalog = { nodes: Map<string, NavigationNode> };
 type Candidate = { nodeId: string; path: string[]; logTotal: number; decisions: number; score: number; trace: NavigationTrace[] };
 
+/** A short, content-free cause for a provider failure: HTTP status, missing key or no network. */
+export function providerFailureReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : '';
+  const http = /Jev HTTP (\d{3})/.exec(message);
+  if (http) return `Jev HTTP ${http[1]}${http[1] === '401' ? ' (TypeSafe rejected the API key)' : ''}`;
+  if (message.startsWith('Set TYPESAFE_API_KEY')) return 'TYPESAFE_API_KEY is not set';
+  if (error instanceof TypeError) return 'could not reach TypeSafe (network)';
+  return 'unknown cause';
+}
+
 function cleanError(error: unknown): NavigationError {
   if (error instanceof NavigationError) return error;
   if (error instanceof Error && error.name === 'AbortError') return new NavigationError('Navigation provider timed out');
-  return new NavigationError('Navigation provider failed');
+  return new NavigationError(`Navigation provider failed: ${providerFailureReason(error)}`);
 }
 
 function positiveInteger(value: unknown, name: string, min: number, max: number, fallback: number): number {
