@@ -3887,7 +3887,7 @@ def not_built(sub, json_mode=False):
 
 GATE_VERDICT = {
     0: "CLEAN — every claim is carried by the evidence at or above 0.80. Send it.",
-    3: "READ — a claim is red or under 0.80. A human reads the source before you send.",
+    3: "READ (blocked) — a claim is red or under 0.80. Do not send it; a human reads the source first.",
     2: "REJECT — a quoted span is not in the evidence. The citation is fabricated.",
 }
 GATE_VERDICT_WORD = {0: "CLEAN", 3: "READ", 2: "REJECT"}

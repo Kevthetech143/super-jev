@@ -617,7 +617,9 @@ def main() -> int:
         # Stage 2 (only reached on a stage-1 pass): gate the label sentence alone. A miss here
         # never drops the file -- it connects on its plain description with labels unknown.
         labels = validate_labels(d)
-        v_labels = gate(claim_sentence(labels), str(p))
+        # the built-in writer drafts no labels, so there is nothing worth a judge call
+        v_labels = ({"state": "SKIPPED"} if use_builtin
+                    else gate(claim_sentence(labels), str(p)))
         labels_ok = v_labels["state"] == "SUPPORTED" and v_labels.get("confidence", 0) >= a.line
         if not labels_ok:
             labels = {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown"}
