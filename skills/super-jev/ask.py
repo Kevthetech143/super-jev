@@ -164,8 +164,11 @@ MAX_QUESTION = 8000
 # (a flight's date for its departure time; another event's odometer figure), so the
 # label now asks for the exact value for the exact event: measured 2026-09-22 on 10
 # near-miss and 10 present questions x2, near misses 0-0.64, present 0.91-0.98.
+# A later breaker set still passed near misses at 0.70-0.83, so the floor is 0.85:
+# re-measured 2026-09-22 on 8 near-miss and 8 present x2, near misses 0-0.87 (one,
+# "current APY after the rate change", 0.86-0.87 still passes), present 0.90-0.96.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
-ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.70
+ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.85
 CONFIRM_LABEL = ("Passage {n}, choose only if it states the exact value asked for, for the exact "
                  "event asked about (a value for another event, or only the topic, is none)")
 HELD_SECRET = "contains a secret; not sent"

@@ -74,5 +74,5 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 
 ## 13. ask can still rank a near-miss file
 **Symptom:** `ask` lists a file that is on the topic but lacks the exact value asked for (a flight's date for its departure time, another event's figure).
-**Cause:** the content check is a judge score, not a lookup. Measured 2026-09-22: near misses scored up to 0.64, present facts 0.91 and up, floor 0.70; rarer wordings may still cross it.
+**Cause:** the content check is a judge score, not a lookup. Measured 2026-09-22: floor 0.85; near misses scored up to 0.87 (a "current value after a change" question on a file holding only the older value), present facts 0.90 and up. Such wordings can still cross it.
 **Workaround:** `ask` ranks files only. Open the top file and find the exact value yourself before answering.
