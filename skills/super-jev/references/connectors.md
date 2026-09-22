@@ -166,9 +166,12 @@ approved answers. `--max-files` (default 250) refuses an oversized run before
 any drafting starts. `--no-connect` stops after drafting and gating, for a
 dry run.
 
-By default the writer is `claude -p --model haiku` (change the model with
-`--writer-model`) — a proven cheap default; bulk labeling should never run on
-a premium model. Every run prints a `writer: <command>` banner naming
+By default the writer is `claude -p --model haiku` when the `claude` CLI is
+installed (change the model with `--writer-model`) — a proven cheap default;
+bulk labeling should never run on a premium model. With no `claude` CLI, or
+with `--writer builtin`, a no-model writer quotes each file's own headings as
+its description and leaves the labels unknown, so the TypeSafe key alone is
+enough. Every run prints a `writer: <command>` banner naming
 whichever command actually runs, and, when neither `--writer-command` nor the
 `SUPERJEV_WRITER_COMMAND` env var is set, a second line recommending a cheap
 writer and naming that default. Systems without Claude Code can supply
