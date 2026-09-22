@@ -180,7 +180,7 @@ def test_typesafe_availability_tracks_the_door(monkeypatch):
     monkeypatch.setenv("SUPERJEV_GATE_CMD", f"{sys.executable} {FAKE_DOOR}")
     assert judges.TypeSafeJudge().available() is True
     monkeypatch.delenv("SUPERJEV_GATE_CMD", raising=False)
-    monkeypatch.setattr(sj, "FLEET_JEV_LIB", Path("/nonexistent/jev.py"))
+    monkeypatch.setattr(sj, "JEV_LIB", Path("/nonexistent/jev.py"))
     assert judges.TypeSafeJudge().available() is False
 
 

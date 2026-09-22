@@ -3,7 +3,7 @@
 
 test_superjev.py mostly monkeypatches subprocess.run before a door is
 actually invoked, so this script's body normally never executes — its
-main job is to *exist on disk* at a path FLEET_JEV_LIB / FLEET_VERIFY_PY
+main job is to *exist on disk* at a path JEV_LIB / FLEET_VERIFY_PY
 can be pointed at in tests, standing in for the fleet-local doors that
 are real on the machine this skill was authored on but absent on a
 fresh checkout (like a CI runner). Run with no env vars set, it just
