@@ -63,6 +63,9 @@ DRAFT_QUESTIONS = {
                      "OVERCLAIMS": "the draft claims more certainty than the evidence carries"}},
 }
 
+# The good label of each draft-level question; any other side label (or none) blocks.
+FAVORABLE = {k for q in DRAFT_QUESTIONS.values() for k in q["criteria"] if k not in {
+    "HAS_LEAKS", "TIME_SENSITIVE", "SELF_CONTRADICTORY", "OVERCLAIMS"}}
 RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
        "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
@@ -151,8 +154,10 @@ def questions_for(claims):
     return qs
 
 
-def row(key, answer, subject=""):
-    """A missing or malformed answer is NO_ANSWER at 0.00 -- it always needs a human."""
+def row(key, answer, subject="", side=False):
+    """A missing or malformed answer is NO_ANSWER at 0.00 -- it always needs a human.
+    A side (draft-level) row only blocks on a red label: a favorable label at low
+    confidence is not evidence of a problem, so the 0.80 line applies to claims."""
     answer = answer if isinstance(answer, dict) else {}
     verdict = answer.get("choice") if isinstance(answer.get("choice"), str) else "NO_ANSWER"
     try:
@@ -160,7 +165,7 @@ def row(key, answer, subject=""):
     except (TypeError, ValueError):
         conf = 0.0
     return {"key": key, "subject": subject, "verdict": verdict, "confidence": conf,
-            "flag": verdict in RED or verdict == "NO_ANSWER" or conf < LINE}
+            "flag": (verdict not in FAVORABLE) if side else (verdict != "SUPPORTED" or conf < LINE)}
 
 
 def check(evidence, claims, draft=""):
@@ -169,7 +174,7 @@ def check(evidence, claims, draft=""):
              + f"\n\nDRAFT:\n{draft.strip()}")
     res = ask(state, questions_for(claims))
     rows = [row(f"c{i}", res["answers"].get(f"c{i}"), c) for i, c in enumerate(claims, 1)]
-    rows += [row(k, res["answers"].get(k)) for k in DRAFT_QUESTIONS]
+    rows += [row(k, res["answers"].get(k), side=True) for k in DRAFT_QUESTIONS]
     return rows, res, (3 if any(r["flag"] for r in rows) else 0)
 
 
