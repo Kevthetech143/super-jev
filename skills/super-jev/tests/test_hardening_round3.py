@@ -152,3 +152,31 @@ def test_budget_exhausted_is_inconclusive_and_keeps_the_file(tmp_path, monkeypat
     assert ask.lookup("q", "me", tmp_path / "s") == 0
     out = capsys.readouterr().out
     assert str(f) in out and "inconclusive" in out and "no-candidates" not in out
+
+
+# 4. the built-in writer connects plain notes; set-aside files come with a way back in
+def test_builtin_small_note_connects_without_a_judge_call(env, monkeypatch, capsys):
+    root = env / "r"
+    root.mkdir()
+    (root / "coffee.md").write_text("# Coffee\n\n## Beans\nBlue Door, Ethiopia.\n\n## Brew\nV60, 1:16.\n")
+    monkeypatch.setattr(pb, "gate", lambda d, p: pytest.fail("quoted description needs no judge"))
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": True})
+    monkeypatch.setattr(sys, "argv", ["p", "--root", str(root), "--pointer", "x", "--principal", "me",
+                                      "--writer", "builtin", "--no-findability"])
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "PASS quoted" in out and "approved: 1  exceptions: 0" in out
+
+
+def test_summary_names_held_file_why_and_command(env, monkeypatch, capsys):
+    root = env / "r"
+    root.mkdir()
+    (root / "ok.md").write_text("# Ok\nfine\n")
+    (root / "keys.md").write_text("# Keys\npassword: hunter2\n")
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": True})
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--root", str(root), "--pointer", "x",
+                                      "--principal", "me", "--writer", "builtin", "--no-findability"])
+    assert pb.main() == 0
+    summary = capsys.readouterr().out.split("approved:")[1]
+    assert "HELD  keys.md  (card/password-like text" in summary
+    assert f"prepare_bulk.py --root {root} --pointer x --principal me --writer builtin --no-findability --allow-held" in summary
