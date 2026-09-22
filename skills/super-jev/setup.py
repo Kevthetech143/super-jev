@@ -116,8 +116,16 @@ def uninstall() -> int:
     for link in _links_into_repo():
         link.unlink()
         removed.append(str(link))
-    for cache in SKILL_DIR.rglob("__pycache__"):
-        shutil.rmtree(cache, ignore_errors=True)
+    # empty parents setup made (~/.local/state, ~/.local); never a folder with anything in it
+    if not os.environ.get("SUPERJEV_STATE_DIR"):
+        for parent in (Path.home() / ".local/state", Path.home() / ".local"):
+            if not parent.is_dir() or any(parent.iterdir()):
+                break
+            parent.rmdir()
+            removed.append(str(parent))
+    for sub in ("skills", "experiments"):
+        for cache in (REPO / sub).rglob("__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
     if removed:
         print("removed:\n  " + "\n  ".join(removed))
     print("Super Jev is uninstalled. Your original files were not touched. "
