@@ -7,6 +7,7 @@
 - `prepare_bulk.py --writer builtin`: a no-model description writer, used automatically when no `claude` CLI is installed.
 - `ask.py` says "nothing connected yet" / "not set up yet" instead of an empty result, and tells the agent not to guess on no-candidates.
 - AGENTS.md opens with a numbered self-setup path; README quick start and GETTING-STARTED corrected.
+- Round 2: `--uninstall` refuses a state folder without setup's `_memory/config.json` marker; connect holds binary/non-UTF-8 files and exits 1 on an empty folder or when every file failed (naming the cause); `check`, `ask` and connect name the real cause (missing key, HTTP 401, network) instead of a generic error; `ask` refuses questions over 8,000 characters and re-reads its top files so a topic-only match is dropped (one extra Jev call per uncached ask); the built-in writer quotes each file's first 60 words so routing sees the facts.
 
 ## 1.0.0-rc.1 — 2026-09-21
 - Clean cut for 1.0: experimental doors moved to `src/experimental/` and `docs/experimental/`; onboarding docs (`docs/GETTING-STARTED.md`, `docs/wire-into-claude-code.md`, `docs/KNOWN-QUIRKS.md`, `docs/AGENT-GUIDE.md`); new `skills/skill-search` for local-only skill discovery; community files (`SECURITY.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `LICENSE`, issue/PR templates); new README. Version `1.0.0-rc.1`.
