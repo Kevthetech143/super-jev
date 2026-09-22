@@ -199,7 +199,7 @@ def test_uninstall_removes_state_caches_and_links_into_the_checkout(env, monkeyp
     for d in (fake_cache, fake_ledger):
         d.mkdir()
         (d / "x.json").write_text("{}")
-    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", [fake_cache, fake_ledger])
+    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", {fake_cache: ("*.json",), fake_ledger: ("*.json",)})
     skills = Path(os.environ["HOME"]) / ".claude" / "skills"
     skills.mkdir(parents=True)
     (skills / "super-jev").symlink_to(SKILL)

@@ -24,7 +24,10 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO = SKILL_DIR.parent.parent
-IN_REPO_LEFTOVERS = [SKILL_DIR / "prepare-cache", SKILL_DIR / "ledger"]
+# In-repo folders Super Jev writes to, with the file-name patterns it writes there.
+# Uninstall deletes only matching files; anything else is left in place.
+IN_REPO_LEFTOVERS = {SKILL_DIR / "prepare-cache": ("*.json", "*-held.txt"),
+                     SKILL_DIR / "ledger": ("calls.jsonl",)}
 # what ask.py writes under <state>/<principal>/
 PRINCIPAL_FILES = {"lookups.jsonl", "manual"}
 
@@ -126,11 +129,19 @@ def uninstall() -> int:
               "writes), so it may not be a Super Jev state folder. Nothing was deleted; "
               "check SUPERJEV_STATE_DIR, or delete that folder yourself if it is Super Jev's.")
         return 1
-    for d in IN_REPO_LEFTOVERS:
-        if d.exists():
-            shutil.rmtree(d)
+    kept, repo_kept = [], []
+    for d, patterns in IN_REPO_LEFTOVERS.items():
+        if not d.is_dir() or d.is_symlink():
+            continue
+        for f in sorted(d.iterdir()):
+            if f.is_file() and not f.is_symlink() and any(f.match(g) for g in patterns):
+                f.unlink()
+                removed.append(str(f))
+            else:
+                repo_kept.append(str(f))
+        if not any(d.iterdir()):
+            d.rmdir()
             removed.append(str(d))
-    kept = []
     if root.is_dir():
         # Delete only what setup, connect and ask make: _memory/ and per-principal folders
         # holding nothing but lookups.jsonl and manual/. Anything else stays, and so does
@@ -162,6 +173,8 @@ def uninstall() -> int:
             shutil.rmtree(cache, ignore_errors=True)
     if removed:
         print("removed:\n  " + "\n  ".join(removed))
+    if repo_kept:
+        print("left in place (not made by Super Jev):\n  " + "\n  ".join(repo_kept))
     if kept:
         print(f"left in place (not made by Super Jev), so {root} was kept:\n  " + "\n  ".join(kept))
     print("Super Jev is uninstalled. Your original files were not touched. "
