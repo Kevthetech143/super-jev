@@ -22,19 +22,23 @@ This copy lives in `skills/super-jev/` in the [super-jev](../../../README.md) re
 ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev   # or copy the directory
 ```
 
-Point `gate` and `verify` at your own tools with two env vars, each a full shell command:
+`gate` works out of the box: it runs the judge client shipped in this repo
+(`lib/jev_client.py`), which needs only `TYPESAFE_API_KEY`. Two env vars, each
+a full shell command, swap in your own tools:
 
 ```bash
-export SUPERJEV_GATE_CMD="python3 /path/to/your/claim-gate.py"
-export SUPERJEV_VERIFY_CMD="python3 /path/to/your/report-verify.py"
+export SUPERJEV_GATE_CMD="python3 /path/to/your/claim-gate.py"      # optional: replaces the built-in client
+export SUPERJEV_VERIFY_CMD="python3 /path/to/your/report-verify.py"  # verify has no shipped tool
 ```
 
-Without them, `gate` and `verify` fall back to a fixed local path
-(`~/.claude/skills/jev-check/lib/jev.py` and `~/.claude/skills/worker-verify/verify.py`)
-that is real on the machine this skill was authored on and almost certainly
-absent anywhere else — in that case the door names the missing path and the
-env var that replaces it, instead of failing inside a subprocess. `status`
-reports which of the two is live.
+Without `SUPERJEV_VERIFY_CMD`, `verify` looks for a fixed local path
+(`~/.claude/skills/worker-verify/verify.py`) that is almost certainly absent
+on your machine, and falls back to a best-effort local check that never says
+CLEAN. `status` reports which doors are live.
+
+A gate door that exits 0 but prints no readable claim table, fewer rows than
+claims, a red verdict, or a claim under 0.80 is never reported CLEAN: the
+verdict becomes ERROR (exit 1) or READ (exit 3).
 
 `SUPERJEV_REPO` points `sweep`, `fetch` and `bench` at a super-jev checkout
 carrying those npm scripts; it defaults to this repo's own root, so those
@@ -44,7 +48,7 @@ three doors need no env at all when the skill is used from inside a clone.
 
 | door | what it answers | state | who actually runs it |
 |---|---|---|---|
-| `gate <evidence...> --draft <file>` or `--claim "..."` | does my draft actually follow from the files I read | **LIVE**, needs a claim-gate tool | `SUPERJEV_GATE_CMD` |
+| `gate <evidence...> --draft <file>` or `--claim "..."` | does my draft actually follow from the files I read | **LIVE** | built-in `lib/jev_client.py`, or `SUPERJEV_GATE_CMD` |
 | `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | is this worker's "done" true | **LIVE**, needs a report-verify tool | `SUPERJEV_VERIFY_CMD` |
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | every question of every record, with proof nothing was skipped | **LIVE** | `npm run sweep` in the harness |
 | `fetch "<request>" --catalog <catalog.json> [--prefilter N]` | which few entries in the catalog actually serve this request; `noMatch: true` when none does | **LIVE** (experimental) | `npm run fetch` in the harness |
@@ -267,6 +271,6 @@ Also runnable as `npm run test:skill` from the repo root. Fully offline: every d
 
 ## Related doors
 
-- The claim-gate tool behind `SUPERJEV_GATE_CMD` — the check itself, the question batteries, and the owner of the 0.80 line. Not shipped in this repo; see **Install** above.
+- The claim-gate client, `lib/jev_client.py` — the check itself, the question battery, and the owner of the 0.80 line. `SUPERJEV_GATE_CMD` replaces it; see **Install** above.
 - The report-verify tool behind `SUPERJEV_VERIFY_CMD` — the evidence collectors and the CLEAN/READ/REJECT rule for a report. Not shipped in this repo; see **Install** above.
 - [`docs/wishlist.md`](../../docs/wishlist.md) — the seven items. Items 4, 5 and 6 (`chain`, `permit`, `fetch`) are built; `fetch` is experimental until its own admission gate is met.

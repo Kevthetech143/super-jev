@@ -1,4 +1,93 @@
-# Using super-jev from an LLM agent
+# Super Jev for agents: start here
+
+You are an agent. Your human wants you to find facts in their own files and to
+check what you say before you say it. Follow the steps below in order, from the
+repo root. You need no private files and no help. Budget about 10 minutes; the
+connect step makes live TypeSafe calls (well under a cent for a small folder at the published input rate).
+
+## Set yourself up (numbered path)
+
+1. **Check the tools.** `node --version` must print `v24` or newer, and
+   `python3 --version` must print `3.10` or newer.
+
+2. **Load the TypeSafe key into this shell. Do not skip this.** Every check and
+   every connect needs it. Ask your human where the key file is, then:
+
+   ```bash
+   export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"
+   ```
+
+   Never print the key, paste it into a command line, or write it into this repo.
+   Each new shell needs the export again.
+
+3. **Run setup.** It is safe to run again at any time.
+
+   ```bash
+   python3 skills/super-jev/setup.py
+   ```
+
+   Success: the last block starts with `READY.` If it says `NOT READY`, fix each
+   listed item and run it again.
+
+4. **Connect a folder of `.md` files** (only files your human said you may send
+   to TypeSafe):
+
+   ```bash
+   python3 skills/super-jev/prepare_bulk.py --root /path/to/folder \
+     --pointer my-notes --principal me --writer builtin
+   ```
+
+   Success: `connect: registered pointer=my-notes` and a `findability:` line.
+   `--writer builtin` writes each file's description from its own headings, so
+   the TypeSafe key is all you need. If the `claude` CLI is installed and logged
+   in, you can drop that flag to get model-written descriptions instead.
+
+5. **Ask a question you know the answer to.**
+
+   ```bash
+   python3 skills/super-jev/ask.py --principal me "your question in plain words"
+   ```
+
+   Success: ranked lines like `0.99  /path/to/file.md  [my-notes]`. This is
+   where the answer is, not the answer itself: open the top file, read it, and
+   answer from what it says, naming that file.
+
+6. **Ask for a fact that is not in the files.** Success: `no-candidates across
+   1 pointers: no connected file answers this.` Tell your human it is not in
+   their files. Do not guess.
+
+7. **Check a claim before you send it.** Give it a claim you know is false:
+
+   ```bash
+   python3 skills/super-jev/dispatch.py check --claim "the claim" /path/to/file-you-read.md
+   ```
+
+   Exit 0 and `VERDICT: CLEAN` means send it. Exit 3 and `VERDICT: READ (blocked)`
+   means do not send it: the file does not support the claim (`NOT_SUPPORTED`)
+   or disproves it (`CONTRADICTED`). Any other exit means the check itself
+   failed; treat it as blocked too.
+
+8. **Uninstall when your human asks** (removes everything setup and connect made;
+   their files are never touched):
+
+   ```bash
+   python3 skills/super-jev/setup.py --uninstall
+   ```
+
+## How to drive it for your human
+
+- Before you state a fact from their files: run `ask`, open the top file, read it.
+- Before you send an answer: run `check` with each claim and the file you read.
+  Only exit 0 is a pass.
+- Nothing found means say "not in your files", never a guess.
+- When their files change, run step 4 again with `--refresh`.
+- `ask.py --approve`, `--miss` and `--add` save good answers and log misses; see
+  [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) step 7.
+- If something breaks: [docs/KNOWN-QUIRKS.md](docs/KNOWN-QUIRKS.md).
+
+---
+
+# Reference: using super-jev from an LLM agent
 
 This is primarily a terminal interface, not an MCP server. Any agent with authorized file/terminal access and Node 24+ can follow these instructions. Reading them does not grant permission to transmit private records. One installable Claude Code skill does exist, covering the checks below (`gate`, `verify`, `sweep`, `bench`) — see [Agent front door (Claude Code skill)](#agent-front-door-claude-code-skill) at the end of this file. `organize`, below, has no skill wrapper yet; call it directly.
 
@@ -36,7 +125,7 @@ ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 
 | subcommand | wraps | what it needs |
 | --- | --- | --- |
-| `gate <evidence...> --draft <file>` / `--claim "..."` | a claim-gate tool | `SUPERJEV_GATE_CMD` (env), your own tool |
+| `gate <evidence...> --draft <file>` / `--claim "..."` | the built-in judge client (`skills/super-jev/lib/jev_client.py`) | `TYPESAFE_API_KEY`; `SUPERJEV_GATE_CMD` (env) replaces the client with your own tool |
 | `verify <report> [--worktree P] [--test-cmd C] [--paths ...]` | a report-verify tool | `SUPERJEV_VERIFY_CMD` (env), your own tool |
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | `npm run sweep` | nothing — `SUPERJEV_REPO` defaults to this checkout |
 | `bench [--dry-run] [--stub]` | `npm run bench:live` | nothing to plan; `TYPESAFE_API_KEY` for a live run |
@@ -44,7 +133,7 @@ ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 | `ask "<one plain sentence>"` | the table above | a keyword router, no model call, no env |
 | `status` | — | reports which subcommands are live in this checkout |
 
-`gate` and `verify` are the two doors this repo does not ship a tool for. Point `SUPERJEV_GATE_CMD` and `SUPERJEV_VERIFY_CMD` at whatever claim-gate and report-verify tools you use; without either one, the matching subcommand names the missing path and the env var that replaces it, rather than failing inside a subprocess.
+`gate` uses the judge client shipped in this repo and needs only `TYPESAFE_API_KEY`; set `SUPERJEV_GATE_CMD` to use your own claim-gate tool instead. `verify` is the one door this repo does not ship a tool for: point `SUPERJEV_VERIFY_CMD` at your report-verify tool; without it, `verify` falls back to a best-effort local check that can never say CLEAN.
 
 Full reference, the exit-code table, and the `ask` routing keywords: [`skills/super-jev/SKILL.md`](skills/super-jev/SKILL.md).
 

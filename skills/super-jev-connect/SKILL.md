@@ -39,7 +39,7 @@ python3 dispatch.py memory --principal NAME
 
 ## 5. Cheap writer model — required
 
-Bulk labeling drafts descriptions, sample questions and labels with a cheap writer model, via `--writer-command` (or the `SUPERJEV_WRITER_COMMAND` env var). Before the first bulk run on any project, confirm the writer command and its cost with the operator once, and record the choice. A proven example: `claude -p --model haiku` (Claude Code CLI, Haiku) — this is `prepare_bulk.py`'s own default when neither flag nor env var is set, and it prints a `writer:` banner naming whichever command actually runs. Any command that reads the prompt on stdin and prints a JSON array works. Never run bulk labeling on a premium model.
+Bulk labeling drafts descriptions, sample questions and labels with a cheap writer model, via `--writer-command` (or the `SUPERJEV_WRITER_COMMAND` env var). Before the first bulk run on any project, confirm the writer command and its cost with the operator once, and record the choice. A proven example: `claude -p --model haiku` (Claude Code CLI, Haiku) — this is `prepare_bulk.py`'s own default when neither flag nor env var is set and the `claude` CLI is installed, and it prints a `writer:` banner naming whichever command actually runs. With no `claude` CLI, or with `--writer builtin`, a no-model writer quotes each file's headings instead (labels stay unknown). Any command that reads the prompt on stdin and prints a JSON array works. Never run bulk labeling on a premium model.
 
 ## 6. Labels
 

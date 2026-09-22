@@ -4,9 +4,9 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 
 ## 1. "Preparation required" is setup, not a no-match
 
-- **Symptom:** a lookup returns "preparation required".
+- **Symptom:** a lookup returns "preparation required" or `ask.py` prints "nothing connected yet".
 - **Cause:** the connector for that source has not been onboarded yet — a setup state, not a failed search.
-- **Workaround:** run the connect flow for the source, then ask again.
+- **Workaround:** run the connect flow for the source (AGENTS.md step 4), then ask again. "Not set up yet" means run `python3 skills/super-jev/setup.py` first.
 
 ## 2. Cache hits are exact wording only
 
@@ -14,17 +14,17 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 - **Cause:** the cache matches exact wording; paraphrases go through the search lane.
 - **Workaround:** approve the new wording once with `--approve`, or let it search.
 
-## 3. The check gate needs verbatim quotes
+## 3. A true claim can still come back READ
 
-- **Symptom:** a claim you know is true fails the check gate.
-- **Cause:** the gate matches verbatim quotes from the source, not paraphrases.
-- **Workaround:** quote the source text exactly.
+- **Symptom:** a claim you know is true gets `VERDICT: READ (blocked)`.
+- **Cause:** Jev judges the claim against only the evidence files you passed. If the file states it indirectly, or the fact is in a file you did not pass, the claim lands as `NOT_SUPPORTED` or under the 0.80 line.
+- **Workaround:** pass the file that states the fact, and word the claim the way the file does.
 
 ## 4. A second checkout sees 0 pointers
 
 - **Symptom:** a fresh worktree or second checkout shows no pointers.
-- **Cause:** registry resolution does not follow the second checkout; root cause still under investigation. The `memory.sh` wrapper is also untracked — it is generated locally at install time, so a fresh checkout may not have one at all.
-- **Workaround:** work from the original checkout, or re-onboard the folder there. For `dispatch.py memory`, pass `--config /path/to/your-config.json` explicitly so it does not depend on the untracked wrapper.
+- **Cause:** registry resolution does not follow the second checkout; root cause still under investigation. 
+- **Workaround:** every checkout shares the config `setup.py` writes under `~/.local/state/super-jev/_memory/`, so run `setup.py` once and connect from any checkout. To use a different store, pass `--config /path/to/your-config.json` to `dispatch.py memory`.
 
 ## 5. Hidden form inputs fool naive "already filled" checks
 

@@ -204,7 +204,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(f"unresolved: {errored} of {len(pointers)} pointers errored")
         return 1
     if not top:
-        print(f"no-candidates across {len(pointers)} pointers. Connect sources (see references/connectors.md) or record a fact with --add.")
+        print(f"no-candidates across {len(pointers)} pointers: no connected file answers this. "
+              "Tell your human it is not in their files; do not guess. To fill the gap, connect more "
+              "files or record a fact with --add (see references/connectors.md).")
         return 0
     return 0
 
@@ -242,9 +244,9 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
     return send_approval(principal, question, answer, pointer, out, sdir)
 
 ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
-                        "persistent experiment config (the config.json passed via memory.sh / "
-                        "--config; see LOCAL-MEMORY.md) before --add can approve a manual entry "
-                        "that retrieval does not match on its own.")
+                        "memory config (the one setup.py wrote, ~/.local/state/super-jev/_memory/"
+                        "config.json, or the file passed with --config) before --add can approve a "
+                        "manual entry that retrieval does not match on its own.")
 
 def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path) -> int:
     """Approve a just-registered manual pointer, falling back to assisted review on a retrieval miss."""
