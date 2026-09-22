@@ -240,5 +240,6 @@ def test_builtin_writer_quotes_the_file_and_needs_no_model(tmp_path):
     f = tmp_path / "a.md"
     f.write_text("# Dentist visit\n\n## Follow-up\n\nCleaning booked for March.\n")
     got = prepare_bulk.builtin_writer([prepare_bulk.excerpt(f)])[str(f)]
-    assert got["description"] == 'This file is titled "Dentist visit" with sections "Follow-up".'
+    assert got["description"] == ('This file is titled "Dentist visit" with sections "Follow-up". '
+                                  'It begins: "Cleaning booked for March."')
     assert got["kind"] == "unknown" and got["question"]
