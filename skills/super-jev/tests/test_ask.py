@@ -31,7 +31,7 @@ def no_content_check(monkeypatch):
     """These tests cover routing/merging; the content check (one live Jev call per
     file) is covered in test_hardening_round2.py. Here it passes every file through
     with its routing score."""
-    monkeypatch.setattr(ask, "confirm", lambda question, paths: ({}, set(paths), None))
+    monkeypatch.setattr(ask, "confirm", lambda question, paths: ({}, set(paths), None, {}))
 
 
 def test_cache_hit_prints_answer_and_never_navigates(tmp_path, monkeypatch, capsys):

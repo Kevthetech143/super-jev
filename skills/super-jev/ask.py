@@ -65,7 +65,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket  # noqa: E402
+from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -155,19 +155,29 @@ MAX_QUESTION = 8000
 # file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
 # must beat "none of these" on its own merits, not merely out-rank weaker siblings;
 # it survives only with a content score >= CONFIRM_FLOOR. One Jev call per file.
+# A lone file only needs to out-score "none" to come back at all, so a file on the
+# right topic that lacks the fact lands around 0.5-0.7 and wobbles run to run;
+# files holding the fact score 0.9+. The floor sits in that gap.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
-ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.10
+ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.80
+HELD_SECRET = "contains a secret; not sent"
+INCONCLUSIVE = "inconclusive"
 
 def navigation_command() -> list:
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
     return ["node", str(repo / "src" / "navigation-cli.ts")]
 
 def confirm_one(question: str, path: str):
-    """(content score or None, whether the file was too long to read whole, error or None)."""
+    """(content score or None, whether the file was too long to read whole, error or None,
+    note or None). note is HELD_SECRET (file not sent, not kept) or INCONCLUSIVE (the
+    check did not finish; the file is kept on its routing score)."""
     try:
         text = Path(path).read_text(errors="replace")
     except OSError as e:
-        return None, False, f"cannot read {path}: {e.strerror or e}"
+        return None, False, f"cannot read {path}: {e.strerror or e}", None
+    # The file may have changed since connect scanned it; never ship a secret to Jev.
+    if has_secret(text):
+        return None, False, None, HELD_SECRET
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     partial = len(chunks) > CONFIRM_CHUNKS_PER_FILE
     leaves = [{"id": f"c{i}", "label": f"{Path(path).name} part {i + 1}", "description": chunk,
@@ -181,25 +191,30 @@ def confirm_one(question: str, path: str):
         r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
                            text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as e:
-        return None, partial, f"content check could not run: {e.__class__.__name__}"
+        return None, partial, f"content check could not run: {e.__class__.__name__}", None
     if r.returncode:
-        return None, partial, (r.stderr.strip().splitlines()[-1:] or ["content check failed"])[0][:200]
+        return None, partial, (r.stderr.strip().splitlines()[-1:] or ["content check failed"])[0][:200], None
     try:
-        cands = json.loads(r.stdout).get("candidates", [])
+        body = json.loads(r.stdout)
     except ValueError:
-        return None, partial, "content check returned invalid JSON"
-    best = max((c["score"] for c in cands), default=0)
-    return (best if best >= CONFIRM_FLOOR else None), partial, None
+        return None, partial, "content check returned invalid JSON", None
+    if not isinstance(body, dict) or body.get("status") not in ("candidates", "no-candidates"):
+        # e.g. budget-exhausted: the read did not finish, so "not in file" would be a guess
+        return None, partial, None, INCONCLUSIVE
+    scores = [c.get("score") for c in body.get("candidates") or [] if isinstance(c, dict)]
+    best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
+    return (best if best >= CONFIRM_FLOOR else None), partial, None, None
 
 def confirm(question: str, paths: list):
     """Check each path alone, in parallel. Returns ({path: score} for kept files,
-    set of paths too long to read whole, first error or None)."""
+    set of paths too long to read whole, first error or None, {path: note})."""
     paths = paths[:CONFIRM_FILES]
     results = list(ThreadPoolExecutor(max_workers=CONFIRM_FILES).map(lambda p: confirm_one(question, p), paths))
-    errors = [e for _, _, e in results if e]
-    scores = {p: sc for p, (sc, _, _) in zip(paths, results) if sc is not None}
-    partial = {p for p, (_, part, _) in zip(paths, results) if part}
-    return scores, partial, (errors[0] if errors else None)
+    errors = [e for _, _, e, _ in results if e]
+    scores = {p: sc for p, (sc, _, _, _) in zip(paths, results) if sc is not None}
+    partial = {p for p, (_, part, _, _) in zip(paths, results) if part}
+    notes = {p: note for p, (_, _, _, note) in zip(paths, results) if note}
+    return scores, partial, (errors[0] if errors else None), notes
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
@@ -249,17 +264,19 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             error_lines.append(f"[{ptr}] {kind}")
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
-    dropped, check_error = 0, None
+    dropped, check_error, notes = 0, None, {}
     if merged:
-        scores, partial, check_error = confirm(question, routed)
+        scores, partial, check_error, notes = confirm(question, routed)
         if check_error:
             errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
         else:
+            # Only files the check actually read may stay: a file past the first
+            # CONFIRM_FILES was never read, so it is not evidence of anything.
             checked = set(routed[:CONFIRM_FILES])
             keep = [(scores.get(p, s), p, ptr) for s, p, ptr in merged
-                    if p not in checked or p in scores or p in partial]
-            dropped = len(checked) - len({p for _, p, _ in keep} & checked)
+                    if p in scores or p in partial or notes.get(p) == INCONCLUSIVE]
+            dropped = len(checked - {p for _, p, _ in keep} - {p for p, n in notes.items() if n == HELD_SECRET})
             merged = sorted(keep, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
@@ -267,7 +284,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for s, p, ptr in top:
-        print(f"{s:5.2f}  {p}  [{ptr}]")
+        note = "  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE else ""
+        print(f"{s:5.2f}  {p}  [{ptr}]{note}")
+    for p, note in notes.items():
+        if note == HELD_SECRET:
+            print(f"HELD  {p}  ({HELD_SECRET})")
     for line in error_lines:
         print(line)
     if errored:

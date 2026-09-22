@@ -81,3 +81,74 @@ def test_uninstall_removes_the_folder_when_only_its_own_things_were_there(env):
     (env / "state" / "me" / "lookups.jsonl").write_text("{}\n")
     assert setup.main(["--uninstall"]) == 0
     assert not (env / "state").exists()
+
+
+# 2/3/6. the content check: secret scan, a real bar, odd output
+def _fake_nav(monkeypatch, body, calls=None):
+    def fake_run(cmd, input, **kw):
+        if calls is not None:
+            calls.append(input)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+
+
+def test_content_check_never_sends_a_file_that_now_holds_a_secret(tmp_path, monkeypatch):
+    f = tmp_path / "notes.md"
+    f.write_text("vet is Dr Lee\npassword: hunter2\n")
+    calls = []
+    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": 0.99}]}, calls)
+    scores, partial, err, notes = ask.confirm("vet?", [str(f)])
+    assert calls == [] and scores == {} and err is None
+    assert notes == {str(f): ask.HELD_SECRET}
+
+
+def test_held_file_is_named_in_ask_output(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "notes.md"
+    f.write_text("x")
+    monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["p1"]} if req["action"] == "panel" else
+                        {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": str(f)}]})
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None, {str(f): ask.HELD_SECRET}))
+    assert ask.lookup("vet?", "me", tmp_path / "s") == 0
+    out = capsys.readouterr().out
+    assert f"HELD  {f}  (contains a secret; not sent)" in out and "did not contain" not in out
+
+
+@pytest.mark.parametrize("score", [0.51, 0.69])
+def test_a_near_tie_with_none_is_not_a_match(tmp_path, monkeypatch, score):
+    f = tmp_path / "dentist.md"
+    f.write_text("Dr. Alvarez cleaned Maria's teeth on 2026-03-04.")
+    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": score}]})
+    assert ask.confirm_one("How much did the cleaning cost?", str(f))[0] is None
+
+
+def test_files_past_the_checked_few_are_not_kept_unread(tmp_path, monkeypatch, capsys):
+    paths = []
+    for i in range(ask.CONFIRM_FILES + 1):
+        paths.append(tmp_path / f"f{i}.md")
+        paths[-1].write_text("x")
+    cands = [{"score": 0.9 - i / 100, "originalPath": str(p)} for i, p in enumerate(paths)]
+    monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["p1"]} if req["action"] == "panel" else
+                        {"status": "candidates", "candidates": cands})
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
+    ask.lookup("absent?", "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert "no-candidates" in out and "f5.md" not in out
+
+
+def test_odd_candidate_does_not_crash(tmp_path, monkeypatch):
+    f = tmp_path / "a.md"
+    f.write_text("x")
+    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"sourceId": "0"}, "junk", {"score": 0.95}]})
+    assert ask.confirm_one("q", str(f))[0] == 0.95
+
+
+def test_budget_exhausted_is_inconclusive_and_keeps_the_file(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "a.md"
+    f.write_text("x")
+    _fake_nav(monkeypatch, {"status": "budget-exhausted", "candidates": []})
+    assert ask.confirm_one("q", str(f))[3] == ask.INCONCLUSIVE
+    monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["p1"]} if req["action"] == "panel" else
+                        {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": str(f)}]})
+    assert ask.lookup("q", "me", tmp_path / "s") == 0
+    out = capsys.readouterr().out
+    assert str(f) in out and "inconclusive" in out and "no-candidates" not in out

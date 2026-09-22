@@ -154,7 +154,7 @@ def _nav_with(tmp_path, monkeypatch):
 
 def test_content_check_drops_a_topic_only_match(env, monkeypatch, capsys):
     _nav_with(env, monkeypatch)
-    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None))
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None, {}))
     assert ask.lookup("collar color?", "me", env / "state" / "me") == 0
     out = capsys.readouterr().out
     assert "no-candidates" in out and "did not contain the answer" in out
@@ -162,14 +162,14 @@ def test_content_check_drops_a_topic_only_match(env, monkeypatch, capsys):
 
 def test_content_check_keeps_a_file_with_the_fact(env, monkeypatch, capsys):
     f = _nav_with(env, monkeypatch)
-    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({str(f): 0.97}, set(), None))
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({str(f): 0.97}, set(), None, {}))
     assert ask.lookup("vet?", "me", env / "state" / "me") == 0
     assert f" 0.97  {f}  [p1]" in capsys.readouterr().out
 
 
 def test_content_check_failure_is_an_error_with_reason(env, monkeypatch, capsys):
     _nav_with(env, monkeypatch)
-    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), "Jev HTTP 401"))
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), "Jev HTTP 401", {}))
     assert ask.lookup("vet?", "me", env / "state" / "me") == 1
     assert "[content-check] error: Jev HTTP 401" in capsys.readouterr().out
 
@@ -185,11 +185,11 @@ def test_confirm_checks_each_file_alone_and_applies_the_floor(tmp_path, monkeypa
         leaves = payload["catalog"]["nodes"][1:]
         seen.append([leaf["description"] for leaf in leaves])
         score = 0.9 if leaves[0]["description"] == "alpha" else 0.05
-        body = {"candidates": [{"sourceId": "0", "score": score}]}
+        body = {"status": "candidates", "candidates": [{"sourceId": "0", "score": score}]}
         return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
 
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
-    scores, partial, err = ask.confirm("q", [str(a), str(b)])
+    scores, partial, err, _ = ask.confirm("q", [str(a), str(b)])
     assert err is None and scores == {str(a): 0.9} and not partial
     assert sorted(seen) == [["alpha"], ["beta"]]  # one catalog per file
 
@@ -201,7 +201,7 @@ def test_ask_ignores_near_zero_routing_tail(env, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", _panel_nav({"status": "candidates", "candidates": [
         {"score": 0.8, "originalPath": str(f)}, {"score": 5e-324, "originalPath": str(junk)}]}))
     checked = []
-    monkeypatch.setattr(ask, "confirm", lambda q, paths: checked.extend(paths) or ({str(f): 0.9}, set(), None))
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: checked.extend(paths) or ({str(f): 0.9}, set(), None, {}))
     assert ask.lookup("vet?", "me", env / "state" / "me") == 0
     assert checked == [str(f)] and "junk.md" not in capsys.readouterr().out
 
