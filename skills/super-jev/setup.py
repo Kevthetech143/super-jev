@@ -109,7 +109,15 @@ def _links_into_repo():
 
 def uninstall() -> int:
     removed = []
-    for d in [state_root(), *IN_REPO_LEFTOVERS]:
+    root = state_root()
+    if root.exists() and not config_path().is_file():
+        # Only a folder setup made (it holds setup's _memory/config.json) is ours to
+        # delete; SUPERJEV_STATE_DIR may point at a folder of the user's own files.
+        print(f"REFUSED: {root} has no {config_path().relative_to(root)} (the marker setup "
+              "writes), so it may not be a Super Jev state folder. Nothing was deleted; "
+              "check SUPERJEV_STATE_DIR, or delete that folder yourself if it is Super Jev's.")
+        return 1
+    for d in [root, *IN_REPO_LEFTOVERS]:
         if d.exists():
             shutil.rmtree(d)
             removed.append(str(d))
