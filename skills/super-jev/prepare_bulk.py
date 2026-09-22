@@ -83,7 +83,8 @@ from connect_checked import gate, memory  # noqa: E402
 
 CACHE_DIR = HERE / "prepare-cache"
 CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
-WORD_RE = re.compile(r"password|passwd|api[_-]?key", re.I)
+# "1Password" (the app) is not a password; the digit lookbehind keeps it from holding a file.
+WORD_RE = re.compile(r"(?<![0-9])password|passwd|api[_-]?key", re.I)
 # Token shapes, adapted from gitleaks' default rules (config/gitleaks.toml): provider
 # prefixes, private key blocks, a keyword followed by ":"/"=", and a generic
 # key/token/secret assignment whose value is long and high-entropy (tested below).
@@ -94,8 +95,13 @@ TOKEN_RE = re.compile(
     r"|\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b|aws_secret_access_key\s*[:=]"
     r"|\bxox[abposr]-[0-9A-Za-z-]{10,}|\bBearer\s+[A-Za-z0-9._~+/-]{20,}"
     r"|-----BEGIN[A-Z ]*PRIVATE KEY-----"
+    r"|\bAIza[0-9A-Za-z_-]{35}|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
+    r"|\b\d{8,10}:AA[\w-]{30,}|\bSG\.[\w-]{16,}\.[\w-]{16,}|\bhf_[A-Za-z0-9]{30,}"
+    r"|\b[MN][A-Za-z0-9]{23,25}\.[\w-]{6}\.[\w-]{27,}|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}"
     r"|\b(?:api|secret|access|auth|client|private)[\s_-]?(?:key|token|secret)\s*[:=]", re.I)
-GENERIC_RE = re.compile(r"(?:key|token|secret|passwd|pwd)[\w-]*[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_+/=.-]{20,})", re.I)
+# The keyword starts a word (or follows _ / -) and its tail is capped, so one long
+# line cannot make the scan quadratic.
+GENERIC_RE = re.compile(r"(?<![A-Za-z0-9])(?:key|token|secret|passwd|pwd)[\w-]{0,40}[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_+/=.-]{20,})", re.I)
 SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
