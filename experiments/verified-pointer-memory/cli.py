@@ -236,10 +236,14 @@ def run(request, config):
                 config['navigationCommand'], input=json.dumps(payload), capture_output=True,
                 text=True, timeout=config['providerTimeoutSeconds'])
             if process.returncode:
-                return {'status': 'error'}
+                # navigation-cli prints one content-free cause line (HTTP code, missing key, network)
+                cause = (process.stderr or '').strip().splitlines()[-1:] or ['Navigation failed']
+                return {'status': 'error', 'reason': cause[0][:200]}
             return json.loads(process.stdout)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return {'status': 'error'}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'reason': 'Navigation timed out.'}
+        except (OSError, ValueError):
+            return {'status': 'error', 'reason': 'Navigation failed or returned invalid JSON.'}
 
     if request.get('action') == 'connect':
         from path_connect import connect
