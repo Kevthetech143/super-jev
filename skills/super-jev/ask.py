@@ -156,11 +156,15 @@ MAX_QUESTION = 8000
 # file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
 # must beat "none of these" on its own merits, not merely out-rank weaker siblings;
 # it survives only with a content score >= CONFIRM_FLOOR. One Jev call per file.
-# A lone file only needs to out-score "none" to come back at all, so a file on the
-# right topic that lacks the fact lands around 0.5-0.7 and wobbles run to run;
-# files holding the fact score 0.9+. The floor sits in that gap.
+# A lone file only needs to out-score "none" to come back at all. With a plain file
+# label, an on-topic file lacking the fact scored 0.64-0.69 (a present fact as low
+# as 0.62), so absent facts passed on some runs. The label now tells the judge to
+# pick a passage only if it states the answer: measured 2026-09-22, absent facts
+# 0 (one near-answer 0.55-0.56), present facts 0.63-0.97. The floor sits between.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
-ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.80
+ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.60
+CONFIRM_LABEL = ("Passage {n}, choose only if it states the answer itself "
+                 "(same topic without the asked detail is none)")
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
 
@@ -181,7 +185,7 @@ def confirm_one(question: str, path: str):
         return None, False, None, HELD_SECRET
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     partial = len(chunks) > CONFIRM_CHUNKS_PER_FILE
-    leaves = [{"id": f"c{i}", "label": f"{Path(path).name} part {i + 1}", "description": chunk,
+    leaves = [{"id": f"c{i}", "label": CONFIRM_LABEL.format(n=i + 1), "description": chunk,
                "sourceId": str(i)} for i, chunk in enumerate(chunks[:CONFIRM_CHUNKS_PER_FILE])]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
                "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
