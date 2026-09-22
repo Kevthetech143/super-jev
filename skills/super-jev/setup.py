@@ -73,8 +73,8 @@ def setup() -> int:
                         "        export TYPESAFE_API_KEY=\"$(cat /path/to/your/typesafe-key-file)\"")
 
     if shutil.which("claude"):
-        print("ok    description writer: claude CLI found (used by connect; add --writer builtin "
-              "to skip it)")
+        print("ok    description writer: claude CLI found (connect uses it only if it is logged in; "
+              "--writer builtin needs no login)")
     else:
         print("ok    description writer: no claude CLI, so connect uses the built-in writer "
               "(no extra login needed)")
@@ -85,9 +85,9 @@ def setup() -> int:
             print("  - " + p)
         print("\nFix the above, then run setup again.")
         return 1
-    print("\nREADY. Next step: connect a folder of .md files (AGENTS.md step 3):\n"
+    print("\nREADY. Next step: connect a folder of .md files (AGENTS.md step 4):\n"
           "  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
-          "--pointer my-notes --principal me")
+          "--pointer my-notes --principal me --writer builtin")
     return 0
 
 
