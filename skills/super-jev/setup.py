@@ -25,6 +25,8 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parent
 REPO = SKILL_DIR.parent.parent
 IN_REPO_LEFTOVERS = [SKILL_DIR / "prepare-cache", SKILL_DIR / "ledger"]
+# what ask.py writes under <state>/<principal>/
+PRINCIPAL_FILES = {"lookups.jsonl", "manual"}
 
 
 def state_root() -> Path:
@@ -54,6 +56,13 @@ def setup() -> int:
         problems.append("Python 3.10 or newer is required.")
 
     cfg = config_path()
+    root = state_root()
+    if root.exists() and not cfg.is_file() and (not root.is_dir() or any(root.iterdir())):
+        # A folder setup did not make, with something already in it, may be the user's own
+        # files; planting a config there would later let --uninstall claim it.
+        print(f"REFUSED: {root} already exists and is not empty, and setup did not make it. "
+              "Point SUPERJEV_STATE_DIR at a new or empty folder, then run setup again.")
+        return 1
     cfg.parent.mkdir(parents=True, exist_ok=True)
     for d in (state_root(), cfg.parent):
         os.chmod(d, 0o700)
@@ -117,10 +126,27 @@ def uninstall() -> int:
               "writes), so it may not be a Super Jev state folder. Nothing was deleted; "
               "check SUPERJEV_STATE_DIR, or delete that folder yourself if it is Super Jev's.")
         return 1
-    for d in [root, *IN_REPO_LEFTOVERS]:
+    for d in IN_REPO_LEFTOVERS:
         if d.exists():
             shutil.rmtree(d)
             removed.append(str(d))
+    kept = []
+    if root.is_dir():
+        # Delete only what setup, connect and ask make: _memory/ and per-principal folders
+        # holding nothing but lookups.jsonl and manual/. Anything else stays, and so does
+        # the folder unless it is then empty.
+        for child in sorted(root.iterdir()):
+            ours = child.name == "_memory" or (
+                child.is_dir() and not child.is_symlink()
+                and all(c.name in PRINCIPAL_FILES for c in child.iterdir()))
+            if ours:
+                shutil.rmtree(child)
+                removed.append(str(child))
+            else:
+                kept.append(str(child))
+        if not kept:
+            root.rmdir()
+            removed.append(str(root))
     for link in _links_into_repo():
         link.unlink()
         removed.append(str(link))
@@ -136,6 +162,8 @@ def uninstall() -> int:
             shutil.rmtree(cache, ignore_errors=True)
     if removed:
         print("removed:\n  " + "\n  ".join(removed))
+    if kept:
+        print(f"left in place (not made by Super Jev), so {root} was kept:\n  " + "\n  ".join(kept))
     print("Super Jev is uninstalled. Your original files were not touched. "
           "Delete this checkout folder to remove the code too.")
     return 0
