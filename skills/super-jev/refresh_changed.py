@@ -11,7 +11,9 @@ Usage:
   python3 refresh_changed.py [--dry-run] [--pointer NAME ...] [--skip NAME ...] [--writer builtin]
 
 Reports written before prepare_bulk recorded its principal are skipped with a note; re-run
-prepare_bulk once by hand for those. Exit 1 if any refresh failed.
+prepare_bulk once by hand for those. A pointer with a prepare-cache/<pointer>.json but no
+matching <pointer>-report.json is listed as NEEDS MANUAL PREPARE, not skipped silently.
+Exit 1 if any refresh failed.
 """
 import argparse, hashlib, json, subprocess, sys
 from pathlib import Path
@@ -35,7 +37,11 @@ def changed_files(report: dict, cache: dict) -> list[str]:
 
 
 def prepare_args(report: dict) -> list[str] | None:
-    if not report.get("principal") or not report.get("roots"):
+    # "principals" is the current field (every principal the pointer is registered for, so a
+    # --refresh repeats them all and never narrows the pointer's scope); "principal" is the
+    # older single-value field, still read for reports written before this field existed.
+    principals = report.get("principals") or ([report["principal"]] if report.get("principal") else [])
+    if not principals or not report.get("roots"):
         return None
     args = []
     for r in report["roots"]:
@@ -44,7 +50,10 @@ def prepare_args(report: dict) -> list[str] | None:
         args += ["--exclude", e]
     if report.get("noRecurse"):
         args.append("--no-recurse")
-    return args + ["--pointer", report["pointer"], "--principal", report["principal"], "--refresh"]
+    args += ["--pointer", report["pointer"]]
+    for p in principals:
+        args += ["--principal", p]
+    return args + ["--refresh"]
 
 
 def main(argv=None) -> int:
@@ -55,12 +64,14 @@ def main(argv=None) -> int:
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"])
     a = ap.parse_args(argv)
     failures = 0
+    reported = set()
     for rp in sorted(CACHE_DIR.glob("*-report.json")):
         try:
             report = json.loads(rp.read_text())
             name = report["pointer"]
         except (OSError, ValueError, KeyError, TypeError):
             continue
+        reported.add(name)
         if (a.pointer and name not in a.pointer) or name in a.skip:
             continue
         cp = CACHE_DIR / f"{name}.json"
@@ -80,6 +91,18 @@ def main(argv=None) -> int:
         r = subprocess.run([sys.executable, str(HERE / "prepare_bulk.py"), *args], cwd=HERE)
         print(f"{'OK   ' if r.returncode == 0 else 'FAIL '} {name}: prepare_bulk exit {r.returncode}")
         failures += r.returncode != 0
+
+    # A pointer whose cache (prepare-cache/<pointer>.json) exists with no matching
+    # <pointer>-report.json (a run that crashed after caching but before the report, or a
+    # cache dropped in by hand) has no recorded roots/principal to refresh from -- it was
+    # previously skipped in total silence. List it instead, so it is not mistaken for "up
+    # to date".
+    for cp in sorted(CACHE_DIR.glob("*.json")):
+        name = cp.stem
+        if name.endswith("-report") or name in reported:
+            continue
+        print(f"NEEDS MANUAL PREPARE  {name}: prepare-cache/{name}.json exists with no {name}-report.json "
+              f"(no recorded roots/principal to refresh from); run prepare_bulk.py for it by hand")
     return 1 if failures else 0
 
 
