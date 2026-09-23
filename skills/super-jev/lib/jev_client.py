@@ -215,9 +215,14 @@ def main(argv=None):
         claims = list(a.claim)
         if a.claims_file:
             claims += [l.strip() for l in open(os.path.expanduser(a.claims_file), encoding="utf-8") if l.strip()]
-        draft = open(a.draft, encoding="utf-8").read() if a.draft else ""
+        draft = open(os.path.expanduser(a.draft), encoding="utf-8").read() if a.draft else ""
         if not claims:
             claims = split_claims(draft)
+        # The draft and every claim go into the request too, so they get the same scan.
+        if has_secret(draft):
+            raise JevError("the draft contains a secret; not sent")
+        if any(has_secret(c) for c in claims):
+            raise JevError("a claim contains a secret; not sent")
         rows, meta, code = check(evidence, claims, draft)
     except (JevError, OSError) as e:
         print(f"jev: {e}", file=sys.stderr)
