@@ -2,7 +2,7 @@
 """Bulk preparation: inventory -> cheap writer drafts descriptions -> Jev checks them -> connect the approved set.
 
 Usage:
-  python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT
+  python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT [--principal AGENT2 ...]
                           [--exclude SUBPATH ...] [--no-recurse] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
                           [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
@@ -38,7 +38,9 @@ Pipeline per run:
      refuses above --max-files (default 250) total files, as a size guard.
   2. Cache (prepare-cache/<pointer>.json) keyed by path: unchanged sha256 with a passing verdict skips steps 3-4.
      --refresh additionally drops any cached path that no longer exists on disk from the cache and the connect
-     set, noting it in the report.
+     set, noting it in the report. A pointer connected under several principals must repeat --principal for
+     every one of them on --refresh (once each) -- naming only a subset narrows the pointer's registered
+     scope and the harness refuses the reconnect with "scope-change".
   3. Writer (by default `claude -p --model <writer-model>`, or `--writer-command` for another adapter that
      reads the prompt on stdin and returns a JSON array on stdout) drafts, per batch, one factual description,
      one sample question a user would ask that this file answers, and four gated labels: kind (dashboard,
@@ -417,12 +419,17 @@ def navigate(pointer: str, principal: str, question: str) -> list:
     return [c.get("originalPath") for c in out.get("candidates", [])]
 
 
-def connect_part(pointer: str, principal: str, part_files: list, cache: dict) -> dict:
+def connect_part(pointer: str, principals: list, part_files: list, cache: dict) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
     Labels ride in the bracketed description only for a file whose stage-2 label gate passed
     (cache["labels_ok"]); a cache entry without that key (pre-two-stage cache) defaults to
     carrying its labels, since it passed under the old single-claim gate. Everything else
-    connects on its plain description -- a label problem never drops a file."""
+    connects on its plain description -- a label problem never drops a file.
+
+    `principals` carries every principal this pointer must stay registered for -- a pointer
+    connected under several principals (e.g. primary + primary-helper) must repeat all of
+    them on every reconnect, or the harness sees the request as narrowing its scope and
+    refuses with "scope-change"."""
     sources = []
     for p in part_files:
         c = cache[str(p)]
@@ -440,8 +447,8 @@ def connect_part(pointer: str, principal: str, part_files: list, cache: dict) ->
     if held:
         print(f"connect held for {pointer}: secret-like text in {', '.join(held)}; not sent")
         return {"connected": False}
-    req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": sources}
-    known = memory({"action": "panel", "principal": principal})
+    req = {"action": "connect", "pointer": pointer, "principals": list(principals), "sources": sources}
+    known = memory({"action": "panel", "principal": principals[0]})
     if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
         req["replace"] = True
         print(f"WARNING: replace:true on pointer {pointer} rotates that pointer's approved answers")
@@ -561,7 +568,11 @@ def manual_label_rows(principal: str, status: str = None, kind: str = None,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", dest="roots", action="append")
-    ap.add_argument("--pointer"); ap.add_argument("--principal")
+    ap.add_argument("--pointer")
+    ap.add_argument("--principal", dest="principals", action="append", default=[],
+                    help="repeatable. On --refresh, a pointer registered for several principals "
+                         "(e.g. primary + primary-helper) must repeat --principal for each one it "
+                         "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
@@ -590,14 +601,14 @@ def main() -> int:
     a = ap.parse_args()
 
     if a.list:
-        if not a.pointer and not a.principal:
+        if not a.pointer and not a.principals:
             print("REFUSED: --list needs --pointer and/or --principal"); return 2
         rows, excluded = [], 0
         if a.pointer:
             r, e = list_cmd(a.pointer, a.status, a.kind, a.within_days, a.subject)
             rows += r; excluded += e
-        if a.principal:
-            r, e = manual_label_rows(a.principal, a.status, a.kind, a.within_days, a.subject)
+        for principal in a.principals:
+            r, e = manual_label_rows(principal, a.status, a.kind, a.within_days, a.subject)
             rows += r; excluded += e
         rows.sort(key=lambda r: (r[2] != "unknown", r[2]), reverse=True)
         print(f"{'subject':20} | {'status':8} | {'as_of':10} | {'kind':10} | path")
@@ -607,7 +618,7 @@ def main() -> int:
             print(f"\n{excluded} excluded (as_of unknown)")
         return 0
 
-    if not a.roots or not a.principal or not a.pointer:
+    if not a.roots or not a.principals or not a.pointer:
         print("REFUSED: --root, --pointer and --principal are required unless --list is given"); return 2
     if a.limit > 50:
         print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
@@ -787,7 +798,8 @@ def main() -> int:
             print(f"      then run: {rerun}")
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
-    report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principal,
+    report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
+              "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
@@ -813,7 +825,7 @@ def main() -> int:
     hits, total, misses = 0, 0, []
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
-        result = connect_part(pname, a.principal, part_files, cache)
+        result = connect_part(pname, a.principals, part_files, cache)
         report["parts"].append({"pointer": pname, "count": len(part_files), "connected": result["connected"]})
         if not result["connected"]:
             all_connected = False
@@ -824,7 +836,7 @@ def main() -> int:
                 total += 1
                 if not q:
                     misses.append((str(p), "no question")); continue
-                top = navigate(pname, a.principal, q)
+                top = navigate(pname, a.principals[0], q)
                 if top and top[0] == str(p):
                     hits += 1
                 else:
