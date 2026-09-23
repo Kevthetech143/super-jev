@@ -210,3 +210,45 @@ def test_tie_prefers_named_file_then_brain_copy_over_reuse(tmp_path, monkeypatch
     ask.lookup("does sendmessage revive a stopped teammate?", "me", tmp_path / "s")
     rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
     assert rows == [str(local), str(reuse), str(other)]
+
+
+# 5. round 3: routing counts in the final order, strong routes survive opinion asks,
+# and the word search sees headings and a few synonyms
+def test_routing_score_breaks_near_ties(tmp_path, monkeypatch, capsys):
+    right, sibling = _files(tmp_path, 2)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(right)},
+                                                 {"score": 0.5, "originalPath": str(sibling)}]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(right): 0.88, str(sibling): 0.9}, set(), None, {}))
+    ask.lookup("q?", "me", tmp_path / "s")
+    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert rows == [str(right), str(sibling)]
+
+
+@pytest.mark.parametrize("q,route,kept", [("should I invest in PLUG?", 0.99, True),
+                                          ("should I invest in PLUG?", 0.7, False),
+                                          ("when is the PLUG meeting", 0.99, False),
+                                          ("should I sell, how much is it right now", 0.99, False)])
+def test_strong_route_kept_as_possible_on_opinion_asks(tmp_path, monkeypatch, capsys, q, route, kept):
+    (a,) = _files(tmp_path, 1)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": route, "originalPath": str(a)}]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
+    ask.lookup(q, "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert (f"{ask.POSSIBLE_FLOOR:5.2f}  {a}  [p1]  (possible:" in out) is kept
+    assert ("no-candidates" in out) is not kept
+
+
+def test_strong_route_not_kept_when_the_check_did_not_read_it(tmp_path, monkeypatch, capsys):
+    (a,) = _files(tmp_path, 1)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.99, "originalPath": str(a)}]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {str(a): ask.HELD_SECRET}))
+    ask.lookup("should I invest in PLUG?", "me", tmp_path / "s")
+    assert "(possible:" not in capsys.readouterr().out
+
+
+def test_word_search_uses_heading_and_synonyms(tmp_path, monkeypatch):
+    wl, other = tmp_path / "watchlist.md", tmp_path / "other.md"
+    wl.write_text("# Watchlist\nTickers: CLOV, SNAP.")
+    other.write_text("# Notes\nGroceries.")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([wl, other]))
+    assert [p for _, p, _ in ask.word_search("time to rebalance?", ["p1"])] == [str(wl)]
