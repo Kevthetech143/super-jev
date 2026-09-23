@@ -52,6 +52,7 @@ export function providerFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : '';
   const http = /Jev HTTP (\d{3})/.exec(message);
   if (http) return `Jev HTTP ${http[1]}${http[1] === '401' ? ' (TypeSafe rejected the API key)' : ''}`;
+  if (message.endsWith('contains a secret; not sent')) return 'request contains a secret; not sent';
   if (message.startsWith('Set TYPESAFE_API_KEY')) return 'TYPESAFE_API_KEY is not set';
   if (error instanceof TypeError) return 'could not reach TypeSafe (network)';
   return 'unknown cause';

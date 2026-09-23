@@ -92,36 +92,23 @@ def _record_written(path: Path) -> None:
     if path.name not in names:
         with m.open("a") as fh:
             fh.write(path.name + "\n")
-CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
-# "1Password" (the app) is not a password; the digit lookbehind keeps it from holding a file.
-WORD_RE = re.compile(r"(?<![0-9])password|passwd|api[_-]?key", re.I)
-# Token shapes, adapted from gitleaks' default rules (config/gitleaks.toml): provider
-# prefixes, private key blocks, a keyword followed by ":"/"=", and a generic
-# key/token/secret assignment whose value is long and high-entropy (tested below).
-TOKEN_RE = re.compile(
-    r"\b(?=[0-9abceghmnprsx])(?:(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{10,}"
-    r"|sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}"
-    r"|gh[pousr]_[0-9a-zA-Z]{30,}|github_pat_[0-9a-zA-Z_]{22,}"
-    r"|(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"
-    r"|xox[abposr]-[0-9A-Za-z-]{10,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}"
-    r"|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
-    r"|\d{8,10}:AA[\w-]{30,}|SG\.[\w-]{16,}\.[\w-]{16,}|hf_[A-Za-z0-9]{30,}"
-    r"|[MN][A-Za-z0-9]{23,25}\.[\w-]{6}\.[\w-]{27,}"
-    r"|(?:api|secret|access|auth|client|private)[\s_-]?(?:key|token|secret)\s*[:=])"
-    r"|aws_secret_access_key\s*[:=]|-----BEGIN[A-Z ]*PRIVATE KEY-----"
-    r"|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}", re.I)
-# The keyword starts a word (or follows _ / -) and its tail is capped. Each run is
-# matched atomically ((?=(x))\1 never gives characters back), so a long line of
-# repeated keywords fails in one pass instead of backtracking at every keyword.
-GENERIC_RE = re.compile(r"(?<![A-Za-z0-9])(?:key|token|secret|passwd|pwd)(?=([\w-]{0,40}))\1[\"']?(?=(\s*))\2[:=]"
-                        r"(?=(\s*))\3[\"']?(?=([A-Za-z0-9_+/=.-]{20,}))\4", re.I)
+
+
+# One pattern source shared with Node (src/secret-scan.ts): secret_patterns.json.
+# Token shapes are adapted from gitleaks' default rules; "1Password" (the app) is not
+# a password (digit lookbehind). GENERIC keywords start a word and their tail is capped.
+_PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").read_text())
+CARD_RE = re.compile(_PAT["card"])
+WORD_RE = re.compile(_PAT["word"], re.I)
+TOKEN_RE = re.compile(_PAT["token"], re.I)
+GENERIC_RE = re.compile(_PAT["generic"], re.I)
 SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
 # line). Both are scrubbed out before the card check only; the keyword rule below
 # always runs against the original, unscrubbed text.
-ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
-URL_RE = re.compile(r"https?://\S+")
+ISO_DATE_RE = re.compile(_PAT["iso_date"])
+URL_RE = re.compile(_PAT["url"])
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
 
