@@ -29,10 +29,10 @@ async function main(): Promise<void> {
   // SUPERJEV_NAV_TIMEOUT_MS raises the per-navigate provider timeout above navigate()'s
   // 5_000ms default (that default was too short for a busy provider under concurrent
   // navigate calls, surfacing as "Navigation provider timed out"). navigate() itself
-  // still rejects anything outside [1, 120_000], so an out-of-range or non-numeric
-  // value here just falls through to that default rather than being silently clamped.
+  // rejects anything outside [1, 120_000], so an out-of-range or non-numeric value
+  // here falls back to 15_000 instead of failing every navigate call.
   const envTimeout = process.env.SUPERJEV_NAV_TIMEOUT_MS ? Number(process.env.SUPERJEV_NAV_TIMEOUT_MS) : undefined;
-  const timeoutMs = Number.isInteger(envTimeout) ? envTimeout : 15_000;
+  const timeoutMs = Number.isInteger(envTimeout) && (envTimeout as number) >= 1 && (envTimeout as number) <= 120_000 ? envTimeout : 15_000;
   const result = await navigate(value.catalog, value.question, { ...(value.limits as object | undefined), timeoutMs, transport: new Jev() });
   process.stdout.write(JSON.stringify(result) + '\n');
 }
