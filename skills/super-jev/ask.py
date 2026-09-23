@@ -162,6 +162,16 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
 
 # navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
 MAX_QUESTION = 8000
+# How many navigate() calls run at once (each is its own remote provider call).
+# Default 6 keeps a many-pointer lookup off the provider's queue; override for a
+# faster/slower provider. Falls back to the default on a non-positive-int value.
+def _nav_concurrency() -> int:
+    try:
+        n = int(os.environ.get("SUPERJEV_NAV_CONCURRENCY", "6"))
+        return n if n > 0 else 6
+    except ValueError:
+        return 6
+NAV_CONCURRENCY = _nav_concurrency()
 # Content check: routing picks files from their one-line descriptions only, so it
 # can match an absent fact on topic alone and miss a present one. Each top routed
 # file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
@@ -449,9 +459,14 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         kind = status or "error"
         return ptr, f"{kind}: {out['reason']}" if out.get("reason") else kind, []
 
-    # All pointers at once: each navigate is a short subprocess chain waiting on one
-    # provider call, so batches of 8 only added waves to a single lookup.
-    results = list(ThreadPoolExecutor(max_workers=min(len(pointers), 32)).map(nav, pointers)) if pointers else []
+    # Bounded fan-out: firing every pointer's navigate at once (formerly
+    # min(len(pointers), 32)) meant an N-pointer lookup fired N concurrent remote
+    # provider calls, and each one waiting on a shared provider queued behind the
+    # others past its own timeout ("Navigation provider timed out" on 51 of 87 asks
+    # with businessfi's 22 pointers). SUPERJEV_NAV_CONCURRENCY caps how many navigate
+    # calls run at once; SUPERJEV_NAV_TIMEOUT_MS (read by navigation-cli itself) raises
+    # how long each one is allowed to wait.
+    results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     merged, errored, statuses, error_lines = [], 0, {}, []
     for ptr, kind, rows in results:
         if kind == "candidates":
