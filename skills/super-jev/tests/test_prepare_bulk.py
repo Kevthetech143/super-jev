@@ -28,6 +28,15 @@ pb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pb)
 
 
+@pytest.fixture(autouse=True)
+def _claude_cli_present(monkeypatch):
+    # --writer auto falls back to builtin when no claude CLI is on PATH (as on CI);
+    # these tests exercise the model-writer path, so pretend the CLI is installed.
+    real_which = pb.shutil.which
+    monkeypatch.setattr(pb.shutil, "which",
+                        lambda name, *a, **k: "/usr/bin/claude" if name == "claude" else real_which(name, *a, **k))
+
+
 def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
