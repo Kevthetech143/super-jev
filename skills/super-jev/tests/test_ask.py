@@ -134,6 +134,49 @@ def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path
     assert hit_pos < error_pos < unresolved_pos
 
 
+def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache(tmp_path, monkeypatch, capsys):
+    """Bug report: after a pointer errors (preparation-required), `ask.py --answer` for the
+    same question said "not saved: no prior lookup with candidates". Confirmed here: lookup()
+    already logs `top` from whichever pointers DID answer, independent of a sibling pointer's
+    error, so find_top() (what --answer reads) still finds the healthy candidate. The reported
+    symptom traced back to the multi-principal refresh bug (prepare_bulk.py connect_part),
+    which left every pointer perpetually preparation-required with nothing left to answer from
+    -- not a gap in this recording path."""
+    note = tmp_path / "hit.md"
+    note.write_text("The car is blue.\n")
+
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": ["broken", "healthy"]}
+        if req["action"] == "navigate" and req["pointer"] == "broken":
+            return {"status": "preparation-required", "reason": "scope-change"}
+        if req["action"] == "navigate" and req["pointer"] == "healthy":
+            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(note)}]}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    sdir = tmp_path / "state"
+    rc = ask.lookup("what color is the car?", "alice", sdir)
+
+    assert rc == 1  # the broken pointer still counts as unresolved
+    top = ask.find_top(sdir, "what color is the car?")
+    assert top == {"score": 0.9, "path": str(note), "pointer": "healthy", "possible": False}
+
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path: ("CLEAN", 0.93))
+    monkeypatch.setattr(ask, "memory", lambda req: (
+        {"status": "ok", "sources": [{"sourceId": "s1", "originalPath": str(note),
+                                       "contentSHA": ask.sha256_file(note)}]} if req["action"] == "sources" else
+        {"status": "ready", "approvalTicket": "t1", "passages": [{"sourceId": "s1", "reviewedText": "blue"}]}
+        if req["action"] == "search" else
+        {"status": "saved"} if req["action"] == "approve" else
+        (_ for _ in ()).throw(AssertionError(req))
+    ))
+    assert ask.auto_approve("alice", "what color is the car?", "The car is blue.", sdir) == 0
+    assert "not saved" not in capsys.readouterr().out
+
+
 def test_all_pointers_empty_gives_no_candidates_hint_naming_connectors_and_add(tmp_path, monkeypatch, capsys):
     def fake_memory(req):
         if req["action"] == "cached":
