@@ -405,7 +405,10 @@ def find_top(sdir: Path, question: str):
     if not path.is_file():
         return None
     for line in reversed(path.read_text().splitlines()):
-        rec = json.loads(line)
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
         if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
             return rec["top"][0]
     return None
@@ -454,15 +457,23 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path) -> int:
     row = next((s for s in listed.get("sources") or [] if s.get("originalPath") == evidence_file), None)
     if not row or row.get("contentSHA") != sha256_file(Path(evidence_file)):
         return not_saved(sdir, question, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
+    gated_source_id = row.get("sourceId")
     verdict, score = run_gate(f"Question: {question} Answer: {answer}", evidence_file)
     if verdict != "CLEAN" or score is None:
         return not_saved(sdir, question, f"check gate verdict {verdict} (only CLEAN saves)")
+    if score < 0.80:
+        return not_saved(sdir, question, f"check gate score {score:.2f} is below the 0.80 auto-save floor")
     out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
     if out.get("status") == "verified-cache-hit":
         print("already cached")
         return 0
     if out.get("status") != "ready":
         return not_saved(sdir, question, f"search returned {out.get('status')} on {pointer}")
+    top_source_id = next((p.get("sourceId") for p in out.get("passages") or []), None)
+    if top_source_id != gated_source_id:
+        return not_saved(sdir, question,
+                          f"search's top source {top_source_id!r} differs from the gated file's source "
+                          f"{gated_source_id!r} ({evidence_file}); refusing to save mismatched evidence")
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
     return send_approval(principal, question, answer, pointer, out, sdir,
                          approved_by="auto-check", evidence_file=evidence_file, score=score)
