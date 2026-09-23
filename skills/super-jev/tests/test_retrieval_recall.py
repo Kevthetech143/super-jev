@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Offline tests for the retrieval-recall fixes from businessfi's stress test 2
+(2026-09-23): long files are judged on chosen passages instead of kept unread, a
+top-routed file scoring just under the floor is kept as "possible", and a local
+word search backs up routing when nothing survives.
+
+No network and no real key.
+
+    python3 -m pytest skills/super-jev/tests/test_retrieval_recall.py -q
+"""
+import hashlib
+import importlib.util
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+SKILL = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SKILL))
+spec = importlib.util.spec_from_file_location("ask_recall", SKILL / "ask.py")
+ask = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ask)
+
+
+@pytest.fixture(autouse=True)
+def no_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
+
+
+def _memory(cands):
+    def fake(req):
+        if req["action"] == "cached":
+            return {"status": "miss"}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": "p1"}]}
+        return {"status": "candidates", "candidates": cands} if cands else {"status": "no-candidates"}
+    return fake
+
+
+def _files(tmp_path, n):
+    out = []
+    for i in range(n):
+        out.append(tmp_path / f"f{i}.md")
+        out[-1].write_text(f"file {i}")
+    return out
+
+
+# 1. long files: chunk 0 plus the chunks sharing the question's words, never a pass-through
+def test_long_file_reads_first_chunk_plus_matching_chunks(tmp_path, monkeypatch):
+    chunks = ["intro " * 580] + ["filler " * 500] * 5 + ["the shareholder meeting is in June " * 100] + ["filler " * 500]
+    f = tmp_path / "long.md"
+    f.write_text("".join(c[:ask.CONFIRM_CHUNK].ljust(ask.CONFIRM_CHUNK) for c in chunks))
+    sent = []
+
+    def fake_run(cmd, input, **kw):
+        sent.append(json.loads(input))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": 0.0}]}), "")
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    score, partial, err, note = ask.confirm_one("when is the shareholder meeting", str(f))
+    ids = [n["sourceId"] for n in sent[0]["catalog"]["nodes"][1:]]
+    assert ids[0] == "0" and "6" in ids and len(ids) == ask.CONFIRM_CHUNKS_PER_FILE
+    assert score is None and partial is False and err is None and note is None
+
+
+def test_long_file_failing_the_check_is_not_kept(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "CLOV.md"
+    f.write_text("x" * ask.CONFIRM_CHUNK * 6)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(f)}]))
+    monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
+        cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), ""))
+    ask.lookup("whens the CLOV annual shareholder meeting", "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert "CLOV.md" not in out and "no-candidates" in out
+
+
+# 2. the possible tier: only the top routed files, only between the two floors
+@pytest.mark.parametrize("rank,score,shown", [(0, 0.72, True), (1, 0.61, True), (2, 0.8, False),
+                                              (0, 0.55, False)])
+def test_possible_tier(tmp_path, monkeypatch, capsys, rank, score, shown):
+    files = _files(tmp_path, 3)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9 - i / 10, "originalPath": str(p)} for i, p in enumerate(files)]))
+    target = str(files[rank])
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({target: score} if score >= ask.POSSIBLE_FLOOR else {}, set(), None, {}))
+    ask.lookup("how is it doing?", "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert (f"{score:5.2f}  {target}  [p1]  (possible:" in out) is shown
+    assert ("no-candidates" in out) is not shown
+
+
+def test_confirmed_file_ranks_above_a_possible_one(tmp_path, monkeypatch, capsys):
+    a, b = _files(tmp_path, 2)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.99, "originalPath": str(a)}, {"score": 0.5, "originalPath": str(b)}]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(a): 0.7, str(b): 0.9}, set(), None, {}))
+    ask.lookup("q?", "me", tmp_path / "s")
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert lines[0].startswith(" 0.90") and "possible" not in lines[0]
+    assert lines[1].startswith(" 0.70") and "(possible:" in lines[1]
+
+
+# 3. word-search fallback
+def _cache(files, **over):
+    return {str(p): {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "pass": True,
+                     "description": over.get(p.name, ""), "question": ""} for p in files}
+
+
+def test_word_search_tolerates_typos_and_skips_changed_or_unpassed_files(tmp_path, monkeypatch):
+    toll, parking, changed, failed = (tmp_path / n for n in ("toll.md", "parking.md", "changed.md", "failed.md"))
+    toll.write_text("E-ZPass vehicle account balance owed: $42.")
+    parking.write_text("Parking ticket paid.")
+    changed.write_text("vehicle account balance")
+    failed.write_text("vehicle account balance")
+    cache = _cache([toll, parking, changed, failed])
+    changed.write_text("vehicle account balance, edited after review")
+    cache[str(failed)]["pass"] = False
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache)
+    found = ask.word_search("how much do i owe on my vehicel acount", ["p1"])
+    assert [p for _, p, _ in found] == [str(toll)]
+
+
+def test_word_search_needs_the_question_words(tmp_path, monkeypatch):
+    f = tmp_path / "garden.md"
+    f.write_text("Tomatoes planted in May.")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([f]))
+    assert ask.word_search("how do i change a bike tire", ["p1"]) == []
+    assert ask.word_search("what is it", ["p1"]) == []
+
+
+def test_fallback_runs_the_content_check_and_marks_matches_possible(tmp_path, monkeypatch, capsys):
+    toll, other = tmp_path / "toll.md", tmp_path / "other.md"
+    toll.write_text("E-ZPass vehicle account balance owed: $42.")
+    other.write_text("vehicle notes")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll, other]))
+    monkeypatch.setattr(ask, "memory", _memory([]))
+    checked = []
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.9}, set(), None, {}))
+    assert ask.lookup("vehicle account balance owed", "me", tmp_path / "s") == 0
+    out = capsys.readouterr().out
+    assert str(toll) in checked
+    assert f" 0.90  {toll}  [p1]  (possible: word-search match" in out and str(other) not in out
+
+
+def test_fallback_that_reads_nothing_still_says_not_in_files(tmp_path, monkeypatch, capsys):
+    toll = tmp_path / "toll.md"
+    toll.write_text("E-ZPass vehicle account balance owed: $42.")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll]))
+    monkeypatch.setattr(ask, "memory", _memory([]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
+    ask.lookup("vehicle account balance owed", "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert "no-candidates" in out and str(toll) not in out
+
+
+def test_fallback_skips_files_the_content_check_already_rejected(tmp_path, monkeypatch):
+    toll = tmp_path / "toll.md"
+    toll.write_text("E-ZPass vehicle account balance owed: $42.")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll]))
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(toll)}]))
+    calls = []
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: calls.append(list(ps)) or ({}, set(), None, {}))
+    ask.lookup("vehicle account balance owed", "me", tmp_path / "s")
+    assert calls == [[str(toll)]]

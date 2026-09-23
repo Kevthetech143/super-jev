@@ -141,7 +141,8 @@ def test_confirm_label_asks_for_the_exact_value(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, json.dumps(
             {"status": "candidates", "candidates": [{"score": 0.64}]}), "")
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
-    assert ask.confirm_one("What time does TP201 depart?", str(f))[0] is None
+    # 0.64 is not confirmed (it may only show as "possible", see test_retrieval_recall.py)
+    assert ask.confirm_one("What time does TP201 depart?", str(f))[0] < ask.CONFIRM_FLOOR
     label = json.loads(calls[0])["catalog"]["nodes"][1]["label"]
     assert "exact value asked for" in label and "another event" in label
 

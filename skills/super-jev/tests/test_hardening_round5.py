@@ -93,11 +93,12 @@ def test_uninstall_leaves_a_user_folder_in_prepare_cache(tmp_path, monkeypatch, 
     assert "left in place" in out and str(cache / "mine") in out
 
 
-# 4. the confirm floor is 0.85: a 0.83 near miss is dropped, a 0.90 hit kept
-@pytest.mark.parametrize("score,kept", [(0.83, False), (0.90, True)])
-def test_confirm_floor_is_085(tmp_path, monkeypatch, score, kept):
+# 4. the confirm floor is 0.85: a 0.83 near miss is not confirmed (the lookup may
+# still show it as "possible", see test_retrieval_recall.py), a 0.90 hit is
+@pytest.mark.parametrize("score,confirmed", [(0.83, False), (0.90, True)])
+def test_confirm_floor_is_085(tmp_path, monkeypatch, score, confirmed):
     f = tmp_path / "garden.md"
     f.write_text("Fertilized once in May.")
     monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
         cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": score}]}), ""))
-    assert (ask.confirm_one("What date did I fertilize in May?", str(f))[0] is not None) is kept
+    assert (ask.confirm_one("What date did I fertilize in May?", str(f))[0] >= ask.CONFIRM_FLOOR) is confirmed
