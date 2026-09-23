@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1 — 2026-09-22
+- Connect no longer fails at random with "Request contains a secret; not sent": the secret scan (Python and Node) skips tool-made fields (sha256, ids, pointer names), and a card-number match must stand alone and pass the Luhn check, so hex hashes can't trip it. A held connect now names the file.
+- README quick start and AGENTS.md show the exact `ask.py --approve "question" "answer"` usage.
+
 ## 1.0.0 — 2026-09-22
 - Rounds 4-9 hardening: every outbound call (Python and Node) runs one shared secret scan before sending and refuses with "not sent"; Python and Node normalize Unicode the same way; uninstall deletes only files Super Jev recorded writing; `ask` content floor 0.85; explicit User-Agent (TypeSafe's edge blocks the default one).
 
