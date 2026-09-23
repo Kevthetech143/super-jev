@@ -211,20 +211,44 @@ def _token_hit(text: str) -> bool:
                for v in (m.group(4) for m in GENERIC_RE.finditer(text)))
 
 
+NON_ASCII_DIGIT_RE = re.compile(r"(?![0-9])\d")
+
+
+def _luhn(digits: str) -> bool:
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        n = int(d) * (2 if i % 2 else 1)
+        total += n - 9 if n > 9 else n
+    return total % 10 == 0
+
+
+def card_hit(text: str, luhn: bool = True) -> bool:
+    """A standalone 16-digit run (dates/URLs scrubbed) that passes the Luhn check. luhn=False when the
+    raw text had non-ASCII digits: normalizing folds them to 0, so their true value is lost."""
+    return any(not luhn or _luhn(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(_scrub_dates_and_urls(text)))
+
+
 def has_secret(text: str) -> bool:
     """Scans normalize_for_scan(text). Card-number check runs on the scrubbed text
     (dates/URLs removed); the keyword and token checks run on the unscrubbed text."""
+    luhn = not NON_ASCII_DIGIT_RE.search(text)
     text = normalize_for_scan(text)
-    return (bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
+    return (card_hit(text, luhn) or bool(WORD_RE.search(text))
             or _token_hit(text))
 
 
+# Fields the tool builds itself (hashes, ids, pointer names); never user text, so never scanned.
+MACHINE_KEYS = frozenset({"sha256", "id", "sourceId", "rootId", "children", "pointer", "principals"})
+
+
 def payload_has_secret(obj) -> bool:
-    """has_secret over every string inside a request payload (dicts, lists, tuples)."""
+    """has_secret over every user-text string inside a request payload (dicts, lists, tuples);
+    values under MACHINE_KEYS are skipped."""
     if isinstance(obj, str):
         return has_secret(obj)
     if isinstance(obj, dict):
-        return any(payload_has_secret(k) or payload_has_secret(v) for k, v in obj.items())
+        return any(payload_has_secret(k) or (k not in MACHINE_KEYS and payload_has_secret(v))
+                   for k, v in obj.items())
     if isinstance(obj, (list, tuple)):
         return any(payload_has_secret(v) for v in obj)
     return False
@@ -280,7 +304,7 @@ def secret_detail(p: Path):
     except Exception:
         return None
     for i, line in enumerate(text.splitlines(), start=1):
-        if CARD_RE.search(_scrub_dates_and_urls(line)):
+        if card_hit(line):
             return {"type": "card-number-like digits", "line": i, "masked": re.sub(r"\d", "#", line)}
         if WORD_RE.search(line):
             return {"type": "password/api-key keyword", "line": i, "masked": re.sub(r"\d", "#", line)}
@@ -412,6 +436,10 @@ def connect_part(pointer: str, principal: str, part_files: list, cache: dict) ->
         else:
             desc = c["description"]
         sources.append({"path": str(p), "description": desc})
+    held = [s["path"] for s in sources if payload_has_secret(s)]
+    if held:
+        print(f"connect held for {pointer}: secret-like text in {', '.join(held)}; not sent")
+        return {"connected": False}
     req = {"action": "connect", "pointer": pointer, "principals": [principal], "sources": sources}
     known = memory({"action": "panel", "principal": principal})
     if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
