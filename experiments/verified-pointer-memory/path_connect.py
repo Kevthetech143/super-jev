@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from service import Service
+from cli import has_secret
 
 MAX_FILES = 50
 MAX_BYTES = 5 * 1024 * 1024
@@ -134,6 +135,8 @@ def _connect(request, config):
             return _problem('unsupported-source', 'Export non-UTF-8 or binary files into reviewed UTF-8 text first. No partial connection was created.')
         if not text.strip() or any(ord(c) < 32 and c not in '\n\r\t' for c in text):
             return _problem('unsupported-source', 'Empty or binary/control-character content cannot be connected. Supply nonempty reviewed UTF-8 text.')
+        if has_secret(text):
+            return _problem('secret-held', 'A source contains a secret (key, token, password or card number); remove it first. No partial connection was created.')
         source_id = item.get('id', 'file:' + _hash(str(path).encode())[:24])
         if not isinstance(source_id, str) or not source_id or len(source_id) > 256 or source_id in seen_ids or path in seen_paths:
             return _problem('duplicate-source', 'Each source needs a unique path and nonempty unique id of at most 256 characters.')

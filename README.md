@@ -12,22 +12,25 @@ One judge (Jev) between your agent and your data: the agent asks in its own word
 - 1.0 promises the proven core: skill search, file navigate, connect + bulk prepare, check gate, permit gate, the harness loop. The core works well when it works; edges still want an agent in the seat — see KNOWN-QUIRKS.md and AGENT-GUIDE.md.
 - 1.0 does not promise unattended answering, semantic cache matching, automatic sync, or live browsing. Next: auto-catch, recipes, a Jev-decided browser driver — each ships only after its own live bench.
 
-## 60-second quick start
+## Quick start
 
-Fresh clone, Node 24:
+**Agents: read [AGENTS.md](AGENTS.md) first.** It is a numbered path from a
+fresh clone to a working ask and check, about 10 minutes with a TypeSafe key.
 
 ```bash
-npm run demo                                        # watch the loop run once
-npm test                                            # node suite, all green
-printf '["%s/skills"]' "$PWD" > /tmp/ROOTS.json
-printf '{"request":"look up a saved fact","context":[]}' > /tmp/REQUEST.json
-npm run skill-search -- --roots-file /tmp/ROOTS.json \
-  --request-file /tmp/REQUEST.json --local-only     # skill search, no network
-python3 -m pytest skills/super-jev/tests -q          # python suite
+export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"   # needed for connect, ask and check
+python3 skills/super-jev/setup.py                              # safe to rerun; prints the next step
+python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal me --writer builtin
+python3 skills/super-jev/ask.py --principal me "your question"
+python3 skills/super-jev/dispatch.py check --claim "a claim" /path/to/file-you-read.md
 ```
 
+No key yet? `npm run demo` runs the loop once offline. The test suites also
+need no key: `npm test` (under a minute) and
+`python3 -m pytest skills/super-jev/tests -q` (about 4 to 6 minutes).
+
 Next: [GETTING-STARTED](docs/GETTING-STARTED.md) — the full operating manual
-(one path: prerequisites → install → key → connect → ask → approve/miss/add → check → refresh).
+(prerequisites → key → setup → connect → ask → approve/miss/add → check → refresh → uninstall).
 For agents: [wire-into-claude-code](docs/wire-into-claude-code.md) (the retrieval rule card
 and Stop-hook claim gate), [AGENT-GUIDE](docs/AGENT-GUIDE.md) (the daily loop), and
 [KNOWN-QUIRKS](docs/KNOWN-QUIRKS.md) (what breaks and the workaround).
@@ -81,20 +84,22 @@ Tested on macOS and Linux. Windows is untested.
 | Scope | Detail |
 |---|---|
 | Reads | Your connected folders and configured skill roots. |
-| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/<principal>/` (`skills/super-jev/ask.py:90-92`) — plus the pointer memory config and local caches. |
-| Leaves the machine | Prepared file descriptions and sample questions sent to the TypeSafe provider. |
-| Provider receives | Those descriptions; never raw secret files — files the secret scan holds stay local. |
+| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/` and `skills/super-jev/ledger/` in the checkout. |
+| Leaves the machine | Sent to the TypeSafe provider: connected file text (to check each description), descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. |
+| Provider receives | The above; never files the secret scan holds — those stay local. |
 | Never leaves | Files the secret scan holds, and vault-style folders the inventory skips. |
 
 ## Uninstall
 
 ```bash
-# 1. skill symlinks (see AGENTS.md)
-rm ~/.claude/skills/super-jev ~/.claude/skills/super-jev-connect
-# 2. state directory (skills/super-jev/ask.py:90-92)
-rm -r "${SUPERJEV_STATE_DIR:-$HOME/.local/state/super-jev}"
-# 3. pointer memory: delete the config.json you created for the memory wrapper (skills/super-jev/ask.py:233-234)
+python3 skills/super-jev/setup.py --uninstall
 ```
+
+Removes the state directory (`$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`,
+including the memory config setup wrote, connected pointers and cached answers),
+`skills/super-jev/prepare-cache/` and `skills/super-jev/ledger/` in this checkout,
+and any `~/.claude/skills` links that point into this checkout. Your own files are
+never touched. Delete the checkout folder to remove the code.
 
 ## Doors
 
