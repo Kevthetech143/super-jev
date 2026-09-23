@@ -1,6 +1,9 @@
 # Changelog
 
-## Unreleased (rc.1 self-boot fixes)
+## 1.0.0 — 2026-09-22
+- Rounds 4-9 hardening: every outbound call (Python and Node) runs one shared secret scan before sending and refuses with "not sent"; Python and Node normalize Unicode the same way; uninstall deletes only files Super Jev recorded writing; `ask` content floor 0.85; explicit User-Agent (TypeSafe's edge blocks the default one).
+
+### Earlier rc.1 self-boot fixes
 - A fresh clone now sets itself up with no private files: `gate`/`check` and connect use the judge client shipped in `skills/super-jev/lib/jev_client.py` (needs only `TYPESAFE_API_KEY`); `SUPERJEV_GATE_CMD` still overrides it.
 - The gate fails closed: a door that exits 0 without a readable, clean claim table is ERROR (exit 1) or READ (exit 3), never CLEAN. The READ line now says "(blocked)".
 - `python3 skills/super-jev/setup.py` creates the state folder and memory config (idempotent); `--uninstall` removes state, `prepare-cache/`, `ledger/` and skill links.
