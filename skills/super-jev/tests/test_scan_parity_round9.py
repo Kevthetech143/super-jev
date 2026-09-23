@@ -30,7 +30,8 @@ CASES = json.loads((Path(__file__).parent / "data" / "unicode_scan_cases.json").
 # spellings (Cyrillic or accented letters become the placeholder x, so they no longer spell
 # the keyword - both sides agree they pass).
 NOT_SECRET = {"The box is blue.", "1password", "١password", "https://x.com/4111111111111111",
-              "сk_live_9fQ2xZ7pL0aB3cD8eF", "pаssword", "PÄSSWORD"}
+              "сk_live_9fQ2xZ7pL0aB3cD8eF", "pаssword", "PÄSSWORD",
+              "PASSWORD"}  # a bare keyword is prose; only a keyword with a value is held
 
 # Secret shapes, built by concatenation so this file never holds one, and Unicode disguises
 # that normalizing must see through.
