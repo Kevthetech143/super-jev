@@ -77,7 +77,7 @@ def test_long_file_failing_the_check_is_not_kept(tmp_path, monkeypatch, capsys):
 
 
 # 2. the possible tier: only the top routed files, only between the two floors
-@pytest.mark.parametrize("rank,score,shown", [(0, 0.72, True), (1, 0.61, True), (2, 0.8, False),
+@pytest.mark.parametrize("rank,score,shown", [(0, 0.72, True), (1, 0.61, True), (2, 0.8, True),
                                               (0, 0.55, False)])
 def test_possible_tier(tmp_path, monkeypatch, capsys, rank, score, shown):
     files = _files(tmp_path, 3)
@@ -135,11 +135,11 @@ def test_fallback_runs_the_content_check_and_marks_matches_possible(tmp_path, mo
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll, other]))
     monkeypatch.setattr(ask, "memory", _memory([]))
     checked = []
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.9}, set(), None, {}))
-    assert ask.lookup("vehicle account balance owed", "me", tmp_path / "s") == 0
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.7}, set(), None, {}))
+    assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 0
     out = capsys.readouterr().out
     assert str(toll) in checked
-    assert f" 0.90  {toll}  [p1]  (possible: word-search match" in out and str(other) not in out
+    assert f" 0.70  {toll}  [p1]  (possible: word-search match" in out and str(other) not in out
 
 
 def test_fallback_that_reads_nothing_still_says_not_in_files(tmp_path, monkeypatch, capsys):
@@ -162,3 +162,51 @@ def test_fallback_skips_files_the_content_check_already_rejected(tmp_path, monke
     monkeypatch.setattr(ask, "confirm", lambda q, ps: calls.append(list(ps)) or ({}, set(), None, {}))
     ask.lookup("vehicle account balance owed", "me", tmp_path / "s")
     assert calls == [[str(toll)]]
+
+
+# 4. round 2: open questions ask "does it answer", value questions get no possible tier,
+# the word search always runs, and ties go to the file named for the question
+@pytest.mark.parametrize("q,value", [("how much is in my roth right now", True),
+                                     ("whats my tesla covered call breakeven", True),
+                                     ("should I sell puts on SNAP before earnings?", False),
+                                     ("when do we roll the LUMN call", False)])
+def test_label_by_question_kind(q, value):
+    assert ask.is_value_question(q) is value
+    assert (ask.confirm_label(q) == ask.CONFIRM_LABEL) is value
+
+
+def test_value_question_has_no_possible_tier(tmp_path, monkeypatch, capsys):
+    (a,) = _files(tmp_path, 1)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(a)}]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(a): 0.82}, set(), None, {}))
+    ask.lookup("how much is in my roth ira right now", "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert str(a) not in out and "no-candidates" in out
+
+
+def test_word_search_runs_even_when_routing_has_hits(tmp_path, monkeypatch, capsys):
+    routed, fb = tmp_path / "routed.md", tmp_path / "feedback.md"
+    routed.write_text("unrelated")
+    fb.write_text("verify information before using it: read the source")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([fb]))
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(routed)}]))
+    checked = []
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(fb): 0.9, str(routed): 0.7}, set(), None, {}))
+    ask.lookup("how should I verify information before using it", "me", tmp_path / "s")
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert checked == [str(routed), str(fb)]
+    assert lines[0] == f" 0.90  {fb}  [p1]" and "(possible:" in lines[1]
+
+
+def test_tie_prefers_named_file_then_brain_copy_over_reuse(tmp_path, monkeypatch, capsys):
+    reuse = tmp_path / "global" / "reuse" / "sendmessage-revives-teammate.md"
+    local = tmp_path / "brain" / "notebook" / "sendmessage-revives-teammate.md"
+    other = tmp_path / "brain" / "notes.md"
+    for f in (reuse, local, other):
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x")
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(p)} for p in (other, reuse, local)]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(p): 0.9 for p in ps}, set(), None, {}))
+    ask.lookup("does sendmessage revive a stopped teammate?", "me", tmp_path / "s")
+    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert rows == [str(local), str(reuse), str(other)]
