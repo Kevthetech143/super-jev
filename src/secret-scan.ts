@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 
 const PAT = JSON.parse(readFileSync(new URL('../skills/super-jev/secret_patterns.json', import.meta.url), 'utf8'));
 // No 'u' flag: \w, \d and \b stay ASCII-only, the twin of Python's re.ASCII. The text is ASCII after normalizing.
-const CARD = new RegExp(PAT.card);
+const CARD = new RegExp(PAT.card, 'g');
 const WORD = new RegExp(PAT.word, 'i');
 const TOKEN = new RegExp(PAT.token, 'i');
 const GENERIC = new RegExp(PAT.generic, 'gi');
@@ -38,9 +38,26 @@ export function normalizeForScan(text: string): string {
   return text.normalize('NFKC').toLowerCase().replace(NON_ASCII, foldChar).replace(CTRL, ' ');
 }
 
+function luhn(digits: string): boolean {
+  let total = 0;
+  for (let i = 0; i < digits.length; i++) {
+    let n = Number(digits[digits.length - 1 - i]) * (i % 2 ? 2 : 1);
+    total += n > 9 ? n - 9 : n;
+  }
+  return total % 10 === 0;
+}
+
+/** Twin of Python card_hit: a standalone 16-digit run (dates/URLs scrubbed) that passes Luhn. */
+function cardHit(text: string, checkLuhn: boolean): boolean {
+  for (const m of text.replace(URL_RE, ' ').replace(ISO_DATE, ' ').matchAll(CARD)) if (!checkLuhn || luhn(m[0].replace(/\D/g, ''))) return true;
+  return false;
+}
+
 export function hasSecret(text: string): boolean {
+  // Normalizing folds non-ASCII digits to 0, losing their value; such a run is held without Luhn.
+  const checkLuhn = !/(?![0-9])\p{Nd}/u.test(text);
   text = normalizeForScan(text);
-  if (CARD.test(text.replace(URL_RE, ' ').replace(ISO_DATE, ' '))) return true;
+  if (cardHit(text, checkLuhn)) return true;
   if (WORD.test(text) || TOKEN.test(text)) return true;
   for (const m of text.matchAll(GENERIC)) {
     const v = m[4];
@@ -49,10 +66,13 @@ export function hasSecret(text: string): boolean {
   return false;
 }
 
-/** hasSecret over every string (keys and values) inside a request payload. */
+// Twin of Python MACHINE_KEYS: tool-built fields (hashes, ids, pointer names), never user text.
+const MACHINE_KEYS = new Set(['sha256', 'id', 'sourceId', 'rootId', 'children', 'pointer', 'principals']);
+
+/** hasSecret over every user-text string (keys and values) inside a request payload; MACHINE_KEYS values skipped. */
 export function payloadHasSecret(obj: unknown): boolean {
   if (typeof obj === 'string') return hasSecret(obj);
   if (Array.isArray(obj)) return obj.some(payloadHasSecret);
-  if (obj && typeof obj === 'object') return Object.entries(obj).some(([k, v]) => hasSecret(k) || payloadHasSecret(v));
+  if (obj && typeof obj === 'object') return Object.entries(obj).some(([k, v]) => hasSecret(k) || (!MACHINE_KEYS.has(k) && payloadHasSecret(v)));
   return false;
 }

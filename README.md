@@ -22,6 +22,7 @@ export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"   # needed for conne
 python3 skills/super-jev/setup.py                              # safe to rerun; prints the next step
 python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal me --writer builtin
 python3 skills/super-jev/ask.py --principal me "your question"
+python3 skills/super-jev/ask.py --principal me --approve "your question" "the answer you gave"   # after a good hit
 python3 skills/super-jev/dispatch.py check --claim "a claim" /path/to/file-you-read.md
 ```
 

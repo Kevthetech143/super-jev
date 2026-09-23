@@ -84,7 +84,8 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 - Nothing found means say "not in your files", never a guess.
 - When their files change, run step 4 again with `--refresh`.
 - `ask.py --approve`, `--miss` and `--add` save good answers and log misses; see
-  [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) step 7.
+  [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) step 7. Approve takes the
+  question and your answer: `python3 skills/super-jev/ask.py --principal me --approve "question" "answer"`.
 - If something breaks: [docs/KNOWN-QUIRKS.md](docs/KNOWN-QUIRKS.md).
 
 ---
