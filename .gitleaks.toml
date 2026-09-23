@@ -1,0 +1,10 @@
+# gitleaks config for super-jev. Extends the default rules.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic token shapes in the evidence-guard test fixture, and private local work folders that are git-ignored and never shipped."
+paths = [
+  '''test/enhance/fixtures/evidence-guard-cases\.json''',
+  '''^\.local/''',
+]

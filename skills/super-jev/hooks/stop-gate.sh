@@ -57,7 +57,7 @@
 #     fires for those, so `hook prompt-verify` alone never sees a real
 #     one) and runs `verify` against each — advisory only, never touching
 #     this script's own exit code.
-#     See SKILL.md's "Correction, 2026-09-17" paragraph and docs/hooks.md.
+#     See SKILL.md's "Correction, 2026-09-17" paragraph and docs/wire-into-claude-code.md.
 #   - as of 2026-09-18, the whole Stop event is bounded, because that scan
 #     is what used to keep the user waiting. SUPERJEV_GATE_MAX_CALLS
 #     (default 1) is the event's live-call allowance and the gate's own
@@ -82,7 +82,7 @@
 #     (git, gh, the derive-facts bridge, and above all a test command
 #     derived from a worker's report and then run twice) belongs to the
 #     verify path, and all of them are now clamped to the event budget.
-#     See docs/hooks.md, "The latency budget".
+#     See docs/wire-into-claude-code.md, "The latency budget".
 #
 # This script is NOT installed into ~/.claude/settings.json by this skill —
 # copy the snippet below into your own settings.json to wire it in.

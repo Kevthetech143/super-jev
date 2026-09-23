@@ -859,7 +859,7 @@ def test_judge_advisory_weak_demote_runs_the_whole_hook_path(
     # does not exist, and `door_missing()` refuses before `subprocess.run`
     # is reached whether or not it is mocked), and a scratch ledger, so
     # this test never writes into the checkout's own ledger/ directory.
-    monkeypatch.setattr(sj, "FLEET_JEV_LIB", FAKE_DOOR)
+    monkeypatch.setattr(sj, "JEV_LIB", FAKE_DOOR)
     monkeypatch.setattr(sj, "LEDGER_PATH", tmp_path / "ledger" / "calls.jsonl")
     monkeypatch.setattr(sj, "CATCH_LEDGER_PATH",
                         tmp_path / "ledger" / "catches.jsonl")

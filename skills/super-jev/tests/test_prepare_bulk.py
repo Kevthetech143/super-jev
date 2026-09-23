@@ -28,6 +28,15 @@ pb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pb)
 
 
+@pytest.fixture(autouse=True)
+def _claude_cli_present(monkeypatch):
+    # --writer auto falls back to builtin when no claude CLI is on PATH (as on CI);
+    # these tests exercise the model-writer path, so pretend the CLI is installed.
+    real_which = pb.shutil.which
+    monkeypatch.setattr(pb.shutil, "which",
+                        lambda name, *a, **k: "/usr/bin/claude" if name == "claude" else real_which(name, *a, **k))
+
+
 def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -203,7 +212,7 @@ def test_failing_draft_gets_one_retry_then_lands_in_exceptions_not_connected(tmp
     monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
     rc = pb.main()
 
-    assert rc == 0
+    assert rc == 1  # nothing connected is a failure
     assert len(writer_calls) == 2  # initial batch draft + exactly one rewrite retry
     assert memory_calls == []      # connect_set stayed empty; memory is never invoked
     out = capsys.readouterr().out
@@ -417,7 +426,7 @@ def test_stage1_fail_drops_file_after_one_retry_labels_never_gated(tmp_path, mon
     monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--no-findability"]))
     rc = pb.main()
 
-    assert rc == 0
+    assert rc == 1  # nothing connected is a failure
     assert len(writer_calls) == 2       # initial batch draft + exactly one rewrite retry
     assert len(gate_calls) == 2         # description gate on the draft, then on the retry -- never a labels call
     assert memory_calls == []           # connect_set stayed empty; memory is never invoked

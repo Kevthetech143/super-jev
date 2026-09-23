@@ -126,7 +126,7 @@ class TypeSafeJudge(Judge):
 
     def available(self):
         sj = self._sj()
-        return sj.door_missing(sj.GATE_CMD_ENV, sj.FLEET_JEV_LIB) is None
+        return sj.door_missing(sj.GATE_CMD_ENV, sj.JEV_LIB) is None
 
     def classify(self, draft, window):
         import argparse                                   # noqa: PLC0415

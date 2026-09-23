@@ -1,6 +1,6 @@
 {
   "name": "super-jev",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "private": true,
   "description": "A small, extensible decision-to-action harness for TypeSafe Jev",
   "type": "module",
@@ -15,7 +15,7 @@
     "organize": "node src/cli.ts organize",
     "sweep": "node src/sweep-cli.ts",
     "permit": "node src/permit-cli.ts",
-    "chain": "node src/chain-cli.ts",
+    "chain": "node src/experimental/chain-cli.ts",
     "fetch": "node src/fetch-cli.ts",
     "skill-search": "node src/skill-search-cli.ts",
     "catalog": "node src/catalog-cli.ts",
