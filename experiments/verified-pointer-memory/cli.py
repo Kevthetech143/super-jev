@@ -10,6 +10,9 @@ import subprocess
 from pathlib import Path
 from service import Service
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'super-jev'))
+from prepare_bulk import has_secret, payload_has_secret  # noqa: E402
+
 NEXT = {
     'ready': 'verify-evidence-then-approve',
     'verified-cache-hit': 'use-cited-answer',
@@ -211,6 +214,8 @@ def load_config(path):
 
 def run(request, config):
     """Execute one explicit action; no implicit fallback or approval."""
+    if payload_has_secret(request):
+        raise ValueError('Request contains a secret; not sent.')
     def retrieve(dataset, question):
         payload = {'registry': config['registry'], 'dataset': dataset, 'question': question}
         try:
