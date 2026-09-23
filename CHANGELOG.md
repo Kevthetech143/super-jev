@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.4 — 2026-09-23
+- Better recall for casual questions: word search over each pointer's own cache (this principal's pointers only), long files are content-checked instead of kept on routing score, and near-misses print as "possible" (never for value questions, never approvable).
+- Navigate runs at most 6 pointers at once (SUPERJEV_NAV_CONCURRENCY) with a 15s provider timeout (SUPERJEV_NAV_TIMEOUT_MS). Fixes most "Navigation provider timed out" misses.
+- Bench (businessfi, 60 casual + 15 no-answer): right file first 35/60 (was 25/60), top 3 45/60, false hits 2/15 (was 3/15), median 8.3s.
+
 ## 1.0.3 — 2026-09-23
 - Refresh keeps every principal a pointer serves (`--principal` is repeatable), so shared pointers no longer fail with scope-change. `refresh_changed.py` lists pointers with no report as NEEDS MANUAL PREPARE instead of skipping them silently.
 
