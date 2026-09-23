@@ -576,6 +576,7 @@ class Service:
             rows.append({
                 'sourceId': source['id'], 'contentSHA': source['contentSHA'],
                 'path': source['path'],
+                **({'originalPath': source['originalPath']} if source.get('originalPath') else {}),
                 'description': source.get('description', ''),
                 'lineCount': line_count,
             })
@@ -835,6 +836,25 @@ class Service:
                 return hit
             checked.append(name)
         return {'status': 'cache-miss', 'checked': checked}
+
+    def forget(self, principal: str, question: str, context: str = '') -> dict[str, Any]:
+        """Un-save this principal's approved answer for this exact question, on every
+        pointer it can see. Only the cache row goes; the pointer and its data stay."""
+        require_text('principal', principal)
+        require_text('question', question)
+        require_text('context', context, allow_empty=True)
+        policy = normalize_freshness(None)
+        removed = []
+        for name in self._visible_pointers(principal):
+            bound, error = self.pointer(name, principal)
+            if error:
+                continue
+            with self.connect() as c:
+                c.execute('BEGIN IMMEDIATE')
+                if c.execute('DELETE FROM cache WHERE k=? AND pointer=?',
+                             (self.key(bound, question, principal, context, policy), name)).rowcount:
+                    removed.append(name)
+        return {'status': 'forgotten' if removed else 'not-cached', 'pointers': removed}
 
     def approve(
         self,
