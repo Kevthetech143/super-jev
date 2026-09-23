@@ -82,6 +82,16 @@ sys.path.insert(0, str(HERE))
 from connect_checked import gate, memory  # noqa: E402
 
 CACHE_DIR = HERE / "prepare-cache"
+# Names of the files written into CACHE_DIR, one per line; uninstall deletes only these.
+WRITTEN_MANIFEST = ".superjev-written"
+
+
+def _record_written(path: Path) -> None:
+    m = CACHE_DIR / WRITTEN_MANIFEST
+    names = set(m.read_text().split("\n")) if m.is_file() else set()
+    if path.name not in names:
+        with m.open("a") as fh:
+            fh.write(path.name + "\n")
 CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
 # "1Password" (the app) is not a password; the digit lookbehind keeps it from holding a file.
 WORD_RE = re.compile(r"(?<![0-9])password|passwd|api[_-]?key", re.I)
@@ -89,19 +99,22 @@ WORD_RE = re.compile(r"(?<![0-9])password|passwd|api[_-]?key", re.I)
 # prefixes, private key blocks, a keyword followed by ":"/"=", and a generic
 # key/token/secret assignment whose value is long and high-entropy (tested below).
 TOKEN_RE = re.compile(
-    r"\b(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{10,}"
-    r"|\bsk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{32,}"
-    r"|\bgh[pousr]_[0-9a-zA-Z]{30,}|\bgithub_pat_[0-9a-zA-Z_]{22,}"
-    r"|\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b|aws_secret_access_key\s*[:=]"
-    r"|\bxox[abposr]-[0-9A-Za-z-]{10,}|\bBearer\s+[A-Za-z0-9._~+/-]{20,}"
-    r"|-----BEGIN[A-Z ]*PRIVATE KEY-----"
-    r"|\bAIza[0-9A-Za-z_-]{35}|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
-    r"|\b\d{8,10}:AA[\w-]{30,}|\bSG\.[\w-]{16,}\.[\w-]{16,}|\bhf_[A-Za-z0-9]{30,}"
-    r"|\b[MN][A-Za-z0-9]{23,25}\.[\w-]{6}\.[\w-]{27,}|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}"
-    r"|\b(?:api|secret|access|auth|client|private)[\s_-]?(?:key|token|secret)\s*[:=]", re.I)
-# The keyword starts a word (or follows _ / -) and its tail is capped, so one long
-# line cannot make the scan quadratic.
-GENERIC_RE = re.compile(r"(?<![A-Za-z0-9])(?:key|token|secret|passwd|pwd)[\w-]{0,40}[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_+/=.-]{20,})", re.I)
+    r"\b(?=[0-9abceghmnprsx])(?:(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{10,}"
+    r"|sk-(?:proj|svcacct|ant)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,}"
+    r"|gh[pousr]_[0-9a-zA-Z]{30,}|github_pat_[0-9a-zA-Z_]{22,}"
+    r"|(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"
+    r"|xox[abposr]-[0-9A-Za-z-]{10,}|Bearer\s+[A-Za-z0-9._~+/-]{20,}"
+    r"|AIza[0-9A-Za-z_-]{35}|eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}"
+    r"|\d{8,10}:AA[\w-]{30,}|SG\.[\w-]{16,}\.[\w-]{16,}|hf_[A-Za-z0-9]{30,}"
+    r"|[MN][A-Za-z0-9]{23,25}\.[\w-]{6}\.[\w-]{27,}"
+    r"|(?:api|secret|access|auth|client|private)[\s_-]?(?:key|token|secret)\s*[:=])"
+    r"|aws_secret_access_key\s*[:=]|-----BEGIN[A-Z ]*PRIVATE KEY-----"
+    r"|Authorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}", re.I)
+# The keyword starts a word (or follows _ / -) and its tail is capped. Each run is
+# matched atomically ((?=(x))\1 never gives characters back), so a long line of
+# repeated keywords fails in one pass instead of backtracking at every keyword.
+GENERIC_RE = re.compile(r"(?<![A-Za-z0-9])(?:key|token|secret|passwd|pwd)(?=([\w-]{0,40}))\1[\"']?(?=(\s*))\2[:=]"
+                        r"(?=(\s*))\3[\"']?(?=([A-Za-z0-9_+/=.-]{20,}))\4", re.I)
 SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
@@ -186,7 +199,7 @@ def _token_hit(text: str) -> bool:
     if TOKEN_RE.search(text):
         return True
     return any(_entropy(v) >= 3.5 and re.search(r"\d", v) and re.search(r"[A-Za-z]", v)
-               for v in GENERIC_RE.findall(text))
+               for v in (m.group(4) for m in GENERIC_RE.finditer(text)))
 
 
 def has_secret(text: str) -> bool:
@@ -266,6 +279,7 @@ def write_held_txt(pointer: str, held: list) -> None:
             if d:
                 lines.append(f"    pattern={d['type']}  line={d['line']}  masked={d['masked']}")
     (CACHE_DIR / f"{pointer}-held.txt").write_text("\n".join(lines) + "\n")
+    _record_written(CACHE_DIR / f"{pointer}-held.txt")
 
 
 def excerpt(p: Path) -> dict:
@@ -701,6 +715,7 @@ def main() -> int:
             print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {relstr(p, roots)}")
         passing.append(p)
     cache_path.write_text(json.dumps(cache, indent=1))
+    _record_written(cache_path)
 
     connect_set = reused + passing
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
@@ -724,6 +739,7 @@ def main() -> int:
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
+        _record_written(CACHE_DIR / f"{a.pointer}-report.json")
         print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s")
         if a.no_connect:
             return 0
@@ -768,6 +784,7 @@ def main() -> int:
             print(f"  MISS  {relstr(p, roots)}  ({why})")
 
     (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
+    _record_written(CACHE_DIR / f"{a.pointer}-report.json")
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
     return 0 if all_connected else 1
 

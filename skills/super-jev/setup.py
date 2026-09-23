@@ -15,8 +15,10 @@ lookup logs, manual records), this skill's prepare-cache/ and ledger/
 folders, and any ~/.claude/skills links that point into this checkout.
 Your original files are never touched.
 """
+import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,10 +26,11 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO = SKILL_DIR.parent.parent
-# In-repo folders Super Jev writes to, with the file-name patterns it writes there.
-# Uninstall deletes only matching files; anything else is left in place.
-IN_REPO_LEFTOVERS = {SKILL_DIR / "prepare-cache": ("*.json", "*-held.txt"),
-                     SKILL_DIR / "ledger": ("calls.jsonl",)}
+# prepare_bulk.py lists every file it writes into prepare-cache/ here.
+WRITTEN_MANIFEST = ".superjev-written"
+# In-repo folders Super Jev writes to. Uninstall deletes only files it can prove it
+# wrote (see _ours_in); anything else is left in place.
+IN_REPO_LEFTOVERS = (SKILL_DIR / "prepare-cache", SKILL_DIR / "ledger")
 # what ask.py writes under <state>/<principal>/
 PRINCIPAL_FILES = {"lookups.jsonl", "manual"}
 
@@ -119,6 +122,27 @@ def _links_into_repo():
     return out
 
 
+def _registered_pointers() -> list:
+    try:
+        return list(json.loads((state_root() / "_memory" / "registry.json").read_text())["datasets"])
+    except Exception:
+        return []
+
+
+def _ours_in(d: Path) -> set:
+    """Files in d Super Jev can prove it wrote: the ledger, names listed in d's manifest,
+    and names derived from registered pointers (installs from before the manifest)."""
+    ours = {d / "calls.jsonl"}
+    m = d / WRITTEN_MANIFEST
+    if m.is_file() and not m.is_symlink():
+        ours |= {d / n for n in m.read_text().split("\n") if n and "/" not in n and n not in (".", "..")}
+        ours.add(m)
+    for p in _registered_pointers():
+        ours |= {d / f"{p}.json", d / f"{p}-held.txt", d / f"{p}-report.json"}
+        ours |= {f for f in d.glob(f"{glob.escape(p)}-*.json") if re.fullmatch(rf"{re.escape(p)}-\d+\.json", f.name)}
+    return ours
+
+
 def uninstall() -> int:
     removed = []
     root = state_root()
@@ -130,11 +154,12 @@ def uninstall() -> int:
               "check SUPERJEV_STATE_DIR, or delete that folder yourself if it is Super Jev's.")
         return 1
     kept, repo_kept = [], []
-    for d, patterns in IN_REPO_LEFTOVERS.items():
+    for d in IN_REPO_LEFTOVERS:
         if not d.is_dir() or d.is_symlink():
             continue
+        ours = _ours_in(d)
         for f in sorted(d.iterdir()):
-            if f.is_file() and not f.is_symlink() and any(f.match(g) for g in patterns):
+            if f.is_file() and not f.is_symlink() and f in ours:
                 f.unlink()
                 removed.append(str(f))
             else:
