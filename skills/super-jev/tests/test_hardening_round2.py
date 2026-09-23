@@ -40,7 +40,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("TYPESAFE_API_KEY", "sk-test")
-    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", {})
+    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", ())
     monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
     return tmp_path
 
