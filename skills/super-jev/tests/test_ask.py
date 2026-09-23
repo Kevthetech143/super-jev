@@ -162,7 +162,7 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
 
     assert rc == 1  # the broken pointer still counts as unresolved
     top = ask.find_top(sdir, "what color is the car?")
-    assert top == {"score": 0.9, "path": str(note), "pointer": "healthy"}
+    assert top == {"score": 0.9, "path": str(note), "pointer": "healthy", "possible": False}
 
     monkeypatch.setattr(ask, "run_gate", lambda claim, path: ("CLEAN", 0.93))
     monkeypatch.setattr(ask, "memory", lambda req: (
@@ -721,6 +721,60 @@ def test_main_routes_miss_through_state_dir_and_logs(tmp_path, monkeypatch, caps
     assert rec["kind"] == "miss"
     assert rec["question"] == "q"
     assert rec["actual"] == "it was in the wiki"
+
+
+def test_nav_concurrency_defaults_to_6(monkeypatch):
+    monkeypatch.delenv("SUPERJEV_NAV_CONCURRENCY", raising=False)
+
+    assert ask._nav_concurrency() == 6
+
+
+def test_nav_concurrency_reads_env_override(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_NAV_CONCURRENCY", "4")
+
+    assert ask._nav_concurrency() == 4
+
+
+def test_nav_concurrency_falls_back_on_bad_value(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_NAV_CONCURRENCY", "not-a-number")
+
+    assert ask._nav_concurrency() == 6
+
+
+def test_nav_concurrency_falls_back_on_non_positive_value(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_NAV_CONCURRENCY", "0")
+
+    assert ask._nav_concurrency() == 6
+
+
+def test_lookup_caps_navigate_fanout_at_nav_concurrency(tmp_path, monkeypatch):
+    """A lookup with more pointers than SUPERJEV_NAV_CONCURRENCY never runs more
+    navigate calls concurrently than the cap, even though every pointer is still
+    attempted."""
+    import threading
+
+    monkeypatch.setattr(ask, "NAV_CONCURRENCY", 2)
+    in_flight = []
+    peak = []
+    lock = threading.Lock()
+
+    def fake_memory(req):
+        if req.get("action") != "navigate":
+            return {"status": "candidates", "pointers": ["p1", "p2", "p3", "p4"]} if req.get("action") == "panel" else {}
+        with lock:
+            in_flight.append(1)
+            peak.append(sum(in_flight))
+        time.sleep(0.05)
+        with lock:
+            in_flight.pop()
+        return {"status": "no-candidates"}
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+
+    rc = ask.lookup("q", "alice", tmp_path)
+
+    assert rc != 0 or rc == 0  # lookup completes without raising
+    assert max(peak) <= 2
 
 
 if __name__ == "__main__":

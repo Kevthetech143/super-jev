@@ -67,7 +67,9 @@ or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
 AGENT can also come from SUPERJEV_PRINCIPAL. State lives under
 $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo.
 """
+import difflib
 import hashlib
+import math
 import json
 import os
 import re
@@ -75,10 +77,12 @@ import shlex
 import subprocess
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import prepare_bulk  # noqa: E402
 from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
@@ -174,6 +178,16 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
 
 # navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
 MAX_QUESTION = 8000
+# How many navigate() calls run at once (each is its own remote provider call).
+# Default 6 keeps a many-pointer lookup off the provider's queue; override for a
+# faster/slower provider. Falls back to the default on a non-positive-int value.
+def _nav_concurrency() -> int:
+    try:
+        n = int(os.environ.get("SUPERJEV_NAV_CONCURRENCY", "6"))
+        return n if n > 0 else 6
+    except ValueError:
+        return 6
+NAV_CONCURRENCY = _nav_concurrency()
 # Content check: routing picks files from their one-line descriptions only, so it
 # can match an absent fact on topic alone and miss a present one. Each top routed
 # file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
@@ -190,10 +204,78 @@ MAX_QUESTION = 8000
 # A later breaker set still passed near misses at 0.70-0.83, so the floor is 0.85:
 # re-measured 2026-09-22 on 8 near-miss and 8 present x2, near misses 0-0.87 (one,
 # "current APY after the rate change", 0.86-0.87 still passes), present 0.90-0.96.
+# A file too long to send whole (more than CONFIRM_CHUNKS_PER_FILE chunks) is judged on
+# its first chunk plus the chunks sharing the most words with the question, never
+# kept on its routing score alone: that bypass returned CLOV.md at 0.97 for a
+# meeting it does not mention (businessfi stress test 2, 2026-09-23).
+#
+# Two tiers. >= CONFIRM_FLOOR is a confirmed match. The same stress test found owner
+# questions (how/why/should/status) scoring 0.60-0.84 on the right file, so any
+# checked file scoring >= POSSIBLE_FLOOR is kept as "possible"
+# (printed with that note, the caller reads the file before answering) instead of
+# being reported as not in the files. Replayed on the test's 196 traced asks: the
+# near-miss negatives' top-routed files scored 0-0.55, so no negative gained a hit.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
 ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.85
+POSSIBLE_FLOOR = 0.6
+# Round 2 (same stress test, 17 bad results): any file the check read scoring
+# >= POSSIBLE_FLOOR may be possible, not just the top 2; open questions (how/should/
+# why/when) are judged on "does it answer" instead of "does it state the exact
+# value" (VALUE_RE picks the exact-value wording); live-number questions (LIVE_RE)
+# get no possible tier at all, since on-topic files at 0.81 gave two false hits.
+VALUE_RE = re.compile(r"\b(how much|how many|balance|breakeven|break even|right now|"
+                      r"worth|owe|owed|price|cost|total)\b", re.I)
+POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file before answering)"
+# Word search: on every lookup the
+# principal's reviewed files (prepare-cache entries whose sha256 still matches) are
+# searched locally for the question's words (typo-tolerant), and the best
+# FALLBACK_FILES get the same content check (kept below CONFIRM_FLOOR as possible).
+FALLBACK_FILES, FALLBACK_MIN_COVERAGE = 3, 0.5
+FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
+WORD_RE = re.compile(r"[a-z0-9]+")
+QUERY_STOPWORDS = SUBJECT_STOPWORDS | {
+    "i", "me", "we", "our", "us", "you", "can", "could", "should", "would", "will", "get",
+    "got", "much", "many", "any", "now", "still", "need", "there", "about", "into", "out",
+    "whats", "hows", "whens", "wheres", "whos", "im", "ive", "dont", "not", "no", "yes",
+    "all", "some", "just", "so", "if", "than", "then", "up", "tell", "know", "right",
+}
 CONFIRM_LABEL = ("Passage {n}, choose only if it states the exact value asked for, for the exact "
                  "event asked about (a value for another event, or only the topic, is none)")
+ANSWER_LABEL = ("Passage {n}, choose only if it answers the question: a rule, plan, reason, "
+                "date, status or view on what is asked (a passage that only shares a word "
+                "with the question is none)")
+# Live-number asks: no possible tier, a file must confirm at CONFIRM_FLOOR.
+LIVE_RE = re.compile(r"\b(how much|balance|breakeven|break even|right now)\b", re.I)
+
+# Routing score at/above which a read file stays "possible" even when the content
+# check finds no answer (opinion asks like "should I invest" rarely read as answered).
+ROUTE_KEEP = 0.8
+# Final order blends content and routing so a strong route is not thrown away.
+CONTENT_WEIGHT, ROUTE_WEIGHT = 0.6, 0.4
+# Word search only: vague words that name a file's topic in other words.
+SYNONYMS = {"verify": ["check", "feedback"], "rebalance": ["watchlist", "allocation"],
+            "holdings": ["positions", "watchlist"], "money": ["funding", "revenue", "cash"]}
+
+# Opinion asks ("should I invest", "who is winning", "can I sell calls") rarely read
+# as answered; only these get the route-keep.
+OPINION_RE = re.compile(r"\b(should|can i|could i|who is winning|whos winning|worth it|good idea)\b", re.I)
+
+def rank_score(content: float, route: float) -> float:
+    return CONTENT_WEIGHT * content + ROUTE_WEIGHT * route
+
+def is_value_question(question: str) -> bool:
+    return bool(VALUE_RE.search(question))
+
+def is_live_value_question(question: str) -> bool:
+    return bool(LIVE_RE.search(question))
+
+OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|are)\b", re.I)
+
+def confirm_label(question: str) -> str:
+    """Open how/should/why/when questions ask "does it answer"; the rest (and any
+    value question) ask for the exact value."""
+    open_q = OPEN_RE.match(question) and not is_value_question(question)
+    return ANSWER_LABEL if open_q else CONFIRM_LABEL
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
 
@@ -213,9 +295,10 @@ def confirm_one(question: str, path: str):
     if has_secret(text):
         return None, False, None, HELD_SECRET
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
-    partial = len(chunks) > CONFIRM_CHUNKS_PER_FILE
-    leaves = [{"id": f"c{i}", "label": CONFIRM_LABEL.format(n=i + 1), "description": chunk,
-               "sourceId": str(i)} for i, chunk in enumerate(chunks[:CONFIRM_CHUNKS_PER_FILE])]
+    partial = False  # long files are judged on chosen passages, never passed through unread
+    label = confirm_label(question)
+    leaves = [{"id": f"c{i}", "label": label.format(n=i + 1), "description": chunks[i],
+               "sourceId": str(i)} for i in pick_chunks(question, chunks)]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
                "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
                            "nodes": [{"id": "root", "label": "Sources",
@@ -239,13 +322,95 @@ def confirm_one(question: str, path: str):
         return None, partial, None, INCONCLUSIVE
     scores = [c.get("score") for c in body.get("candidates") or [] if isinstance(c, dict)]
     best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
-    return (best if best >= CONFIRM_FLOOR else None), partial, None, None
+    return (best if best >= POSSIBLE_FLOOR else None), partial, None, None
+
+def query_terms(question: str) -> list:
+    words = WORD_RE.findall(question.lower().replace("'", ""))
+    return list(dict.fromkeys(w for w in words if len(w) > 2 and w not in QUERY_STOPWORDS))
+
+def term_hits(terms: list, text: str) -> int:
+    """How many terms appear in text, a term also matching by its first five letters."""
+    low = text.lower()
+    return sum(1 for t in terms if t in low or (len(t) > 5 and t[:5] in low))
+
+def pick_chunks(question: str, chunks: list) -> list:
+    """Indexes to read: all chunks if they fit, else chunk 0 plus the chunks sharing
+    the most question words, in file order."""
+    if len(chunks) <= CONFIRM_CHUNKS_PER_FILE:
+        return list(range(len(chunks)))
+    terms = query_terms(question)
+    ranked = sorted(range(1, len(chunks)), key=lambda i: (-term_hits(terms, chunks[i]), i))
+    return sorted([0] + ranked[:CONFIRM_CHUNKS_PER_FILE - 1])
+
+def load_cache_files(pointer: str) -> dict:
+    """Only prepare-cache/<pointer>.json. Part caches are registered as their own
+    pointers (<pointer>-N) and arrive in the principal's pointer list when owned, so
+    matching <pointer>-N.json here could read another principal's pointer."""
+    p = prepare_bulk.CACHE_DIR / f"{pointer}.json"
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> list:
+    """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
+    files best matching the question's words (BM25; a file's path, description and
+    stored question count triple). Typos match a close word (difflib). A file must
+    cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered."""
+    terms = query_terms(question)
+    if not terms:
+        return []
+    docs = {}
+    for ptr in pointers:
+        for path, entry in load_cache_files(ptr).items():
+            if path in docs or not isinstance(entry, dict) or not entry.get("pass"):
+                continue
+            try:
+                raw = Path(path).read_bytes()
+            except OSError:
+                continue
+            if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+                continue  # changed since review: not reviewed text any more
+            text = raw.decode("utf-8", "replace")
+            heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
+            head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
+                             str(entry.get("description") or ""), str(entry.get("question") or "")])
+            counts = Counter(WORD_RE.findall(text.lower()))
+            for w in WORD_RE.findall(head.lower()):
+                counts[w] += 3
+            docs[path] = (ptr, counts, sum(counts.values()))
+    if not docs:
+        return []
+    vocab = sorted(set().union(*(c.keys() for _, c, _ in docs.values())))
+    variants = {}
+    for t in terms:
+        near = set(difflib.get_close_matches(t, vocab, n=3, cutoff=0.8)) if len(t) > 3 else set()
+        stem = t[:5] if len(t) > 5 else t  # long words by stem, short ones plus an ending (owe/owed)
+        variants[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
+        # A synonym counts as a match for its source word, not as an extra word.
+        variants[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
+    tf = {path: {t: sum(c.get(v, 0) for v in variants[t]) for t in terms} for path, (_, c, _) in docs.items()}
+    n, avg = len(docs), sum(size for _, _, size in docs.values()) / len(docs)
+    idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
+           for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
+    # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
+    # them out of the coverage total so they do not sink every file.
+    total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
+    scored = []
+    for path, (ptr, _, size) in docs.items():
+        f = tf[path]
+        if sum(idf[t] for t in terms if f[t]) / total < FALLBACK_MIN_COVERAGE:
+            continue
+        bm25 = sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
+        scored.append((round(bm25, 3), path, ptr))
+    return sorted(scored, key=lambda x: (-x[0], x[1]))[:limit]
 
 def confirm(question: str, paths: list):
     """Check each path alone, in parallel. Returns ({path: score} for kept files,
     set of paths too long to read whole, first error or None, {path: note})."""
-    paths = paths[:CONFIRM_FILES]
-    results = list(ThreadPoolExecutor(max_workers=CONFIRM_FILES).map(lambda p: confirm_one(question, p), paths))
+    paths = paths[:CONFIRM_FILES + FALLBACK_FILES]
+    results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
     errors = [e for _, _, e, _ in results if e]
     scores = {p: sc for p, (sc, _, _, _) in zip(paths, results) if sc is not None}
     partial = {p for p, (_, part, _, _) in zip(paths, results) if part}
@@ -268,6 +433,13 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
     root_args = " ".join(f"--root {shlex.quote(r)}" for r in roots) or "--root /path/to/folder"
     return (f"; its files changed since connect. Run: python3 skills/super-jev/prepare_bulk.py "
             f"--refresh --pointer {ptr} --principal {principal} {root_args}")
+
+def path_rank(question: str, path: str) -> tuple:
+    """Tie-break for equal scores: more question words in the file's name or folder
+    first, and a brain-local file before its ~/agents/global/reuse copy."""
+    parts = Path(path).parts
+    name = " ".join(parts[-2:]).replace("-", " ").replace("_", " ")
+    return (term_hits(query_terms(question), name), "/global/reuse/" not in path)
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
@@ -303,7 +475,14 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         kind = status or "error"
         return ptr, f"{kind}: {out['reason']}" if out.get("reason") else kind, []
 
-    results = list(ThreadPoolExecutor(max_workers=8).map(nav, pointers)) if pointers else []
+    # Bounded fan-out: firing every pointer's navigate at once (formerly
+    # min(len(pointers), 32)) meant an N-pointer lookup fired N concurrent remote
+    # provider calls, and each one waiting on a shared provider queued behind the
+    # others past its own timeout ("Navigation provider timed out" on 51 of 87 asks
+    # with businessfi's 22 pointers). SUPERJEV_NAV_CONCURRENCY caps how many navigate
+    # calls run at once; SUPERJEV_NAV_TIMEOUT_MS (read by navigation-cli itself) raises
+    # how long each one is allowed to wait.
+    results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     merged, errored, statuses, error_lines = [], 0, {}, []
     for ptr, kind, rows in results:
         if kind == "candidates":
@@ -317,26 +496,53 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             error_lines.append(f"[{ptr}] {kind}" + refresh_hint(ptr, principal, kind))
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
-    dropped, check_error, notes = 0, None, {}
-    if merged:
-        scores, partial, check_error, notes = confirm(question, routed)
+    route = {}
+    for s, p, _ in merged:
+        route.setdefault(p, s)
+    dropped, check_error, notes, possible = 0, None, {}, {}
+    # Always add the word search's best few: routing alone missed 7 of 30 right files.
+    found = [f for f in word_search(question, pointers) if f[1] not in routed[:CONFIRM_FILES]]
+    wpaths = {p: ptr for _, p, ptr in found}
+    to_check = routed[:CONFIRM_FILES] + list(wpaths)
+    checked = set(to_check)
+    if to_check:
+        scores, partial, check_error, notes = confirm(question, to_check)
         if check_error:
             errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
-        checked = set(routed[:CONFIRM_FILES])
-        keep = [(scores.get(p, s), p, ptr) for s, p, ptr in merged
-                if p in scores or p in partial or notes.get(p) == INCONCLUSIVE]
-        dropped = len(checked - {p for _, p, _ in keep} - {p for p, n in notes.items() if n == HELD_SECRET})
-        merged = sorted(keep, reverse=True)
+        # Value questions need a confirmed score; no possible tier.
+        if not is_value_question(question):
+            possible = {p: (FALLBACK_NOTE if p in wpaths else POSSIBLE_NOTE) for p in to_check
+                        if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
+            # A strongly routed file that was read keeps a possible slot even if the
+            # answer check found nothing (opinion asks); never for live-value asks.
+            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question) else []):
+                if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
+                        and scores.get(p, 0) < CONFIRM_FLOOR:
+                    possible[p] = POSSIBLE_NOTE
+        cands = merged + [(0, p, ptr) for p, ptr in wpaths.items()]
+        keep = {}
+        for s, p, ptr in cands:
+            if p in keep:
+                continue
+            if (scores.get(p, 0) >= CONFIRM_FLOOR or p in possible or p in partial
+                    or (notes.get(p) == INCONCLUSIVE and p not in wpaths)):
+                # A route-kept file shows no content score above the possible floor.
+                keep[p] = (scores.get(p, POSSIBLE_FLOOR if p in possible else s), p, ptr)
+        dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
+        # Confirmed files first, then the content/routing blend, then the name tie-break.
+        merged = sorted(keep.values(), key=lambda m: (m[1] not in possible, round(rank_score(m[0], route.get(m[1], 0)), 2),
+                                                      path_rank(question, m[1])), reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
-        top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
+        top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for s, p, ptr in top:
-        note = "  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE else ""
+        note = ("  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE
+                else possible.get(p, ""))
         print(f"{s:5.2f}  {p}  [{ptr}]{note}")
     for p, note in notes.items():
         if note == HELD_SECRET:
@@ -362,7 +568,8 @@ def find_pointer(sdir: Path, question: str):
     for line in reversed(path.read_text().splitlines()):
         rec = json.loads(line)
         if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
-            return rec["top"][0]["pointer"]
+            # A possible-only hit is not a confirmed source: never approve from it.
+            return None if rec["top"][0].get("possible") else rec["top"][0]["pointer"]
     return None
 
 def record_approver(sdir: Path, question: str, approved_by, **fields) -> None:
