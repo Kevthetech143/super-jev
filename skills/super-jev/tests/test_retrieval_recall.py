@@ -136,7 +136,7 @@ def test_fallback_runs_the_content_check_and_marks_matches_possible(tmp_path, mo
     monkeypatch.setattr(ask, "memory", _memory([]))
     checked = []
     monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.7}, set(), None, {}))
-    assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 0
+    assert ask.lookup("what about the vehicle account toll", "me", tmp_path / "s") == 0
     out = capsys.readouterr().out
     assert str(toll) in checked
     assert f" 0.70  {toll}  [p1]  (possible: word-search match" in out and str(other) not in out
@@ -252,3 +252,13 @@ def test_word_search_uses_heading_and_synonyms(tmp_path, monkeypatch):
     other.write_text("# Notes\nGroceries.")
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([wl, other]))
     assert [p for _, p, _ in ask.word_search("time to rebalance?", ["p1"])] == [str(wl)]
+
+
+def test_value_question_owed_gets_no_possible_tier(tmp_path, monkeypatch, capsys):
+    toll = tmp_path / "toll.md"
+    toll.write_text("E-ZPass vehicle account balance owed: $42.")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll]))
+    monkeypatch.setattr(ask, "memory", _memory([]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(toll): 0.7}, set(), None, {}))
+    assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 0
+    assert "no-candidates" in capsys.readouterr().out

@@ -69,7 +69,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret, load_cache_files  # noqa: E402
+import prepare_bulk  # noqa: E402
+from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -315,13 +316,23 @@ def pick_chunks(question: str, chunks: list) -> list:
     ranked = sorted(range(1, len(chunks)), key=lambda i: (-term_hits(terms, chunks[i]), i))
     return sorted([0] + ranked[:CONFIRM_CHUNKS_PER_FILE - 1])
 
+def load_cache_files(pointer: str) -> dict:
+    """Only prepare-cache/<pointer>.json. Part caches are registered as their own
+    pointers (<pointer>-N) and arrive in the principal's pointer list when owned, so
+    matching <pointer>-N.json here could read another principal's pointer."""
+    p = prepare_bulk.CACHE_DIR / f"{pointer}.json"
+    try:
+        data = json.loads(p.read_text())
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25; a file's path, description and
     stored question count triple). Typos match a close word (difflib). A file must
     cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered."""
     terms = query_terms(question)
-    terms += [x for t in list(terms) for x in SYNONYMS.get(t, []) if x not in terms]
     if not terms:
         return []
     docs = {}
@@ -351,11 +362,15 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> l
         near = set(difflib.get_close_matches(t, vocab, n=3, cutoff=0.8)) if len(t) > 3 else set()
         stem = t[:5] if len(t) > 5 else t  # long words by stem, short ones plus an ending (owe/owed)
         variants[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
+        # A synonym counts as a match for its source word, not as an extra word.
+        variants[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
     tf = {path: {t: sum(c.get(v, 0) for v in variants[t]) for t in terms} for path, (_, c, _) in docs.items()}
     n, avg = len(docs), sum(size for _, _, size in docs.values()) / len(docs)
     idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
            for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
-    total = sum(idf.values()) or 1
+    # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
+    # them out of the coverage total so they do not sink every file.
+    total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
     scored = []
     for path, (ptr, _, size) in docs.items():
         f = tf[path]
@@ -467,7 +482,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
         # Value questions need a confirmed score; no possible tier.
-        if not is_live_value_question(question):
+        if not is_value_question(question):
             possible = {p: (FALLBACK_NOTE if p in wpaths else POSSIBLE_NOTE) for p in to_check
                         if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
             # A strongly routed file that was read keeps a possible slot even if the
@@ -491,7 +506,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                                                       path_rank(question, m[1])), reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
-        top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
+        top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for s, p, ptr in top:
@@ -522,7 +537,8 @@ def find_pointer(sdir: Path, question: str):
     for line in reversed(path.read_text().splitlines()):
         rec = json.loads(line)
         if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
-            return rec["top"][0]["pointer"]
+            # A possible-only hit is not a confirmed source: never approve from it.
+            return None if rec["top"][0].get("possible") else rec["top"][0]["pointer"]
     return None
 
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path) -> int:
