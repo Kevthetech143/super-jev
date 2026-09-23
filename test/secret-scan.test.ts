@@ -24,7 +24,8 @@ test('Node scan matches the Python has_secret cases from the shared pattern file
   assert.equal(hasSecret('dated 2024-01-02 2024-01-03 2024-01-04'), false);
   assert.equal(hasSecret('see https://x.test/?id=1234123412341234'), false);
   assert.equal(hasSecret('token: Zx9Qp2Lm8Rt4Vb6Nc1Hs3Kd7'), true);
-  assert.equal(payloadHasSecret({ a: [{ b: 'passwd here' }] }), true);
+  assert.equal(payloadHasSecret({ a: [{ b: 'passwd: hunter2' }] }), true);
+  assert.equal(payloadHasSecret({ a: [{ b: 'reset the password in settings' }] }), false);
   assert.equal(payloadHasSecret({ a: ['fine'] }), false);
 });
 
