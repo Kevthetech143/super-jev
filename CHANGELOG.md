@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## 1.0.2 — 2026-09-23
+- Secret scan: the bare word "password" in prose no longer holds a file; real password assignments still do. New `refresh_changed.py` re-prepares only pointers whose files changed.
 - Auto-cache: `ask.py --answer "question" "answer"` saves an answer only when the check gate verdict is CLEAN against the last lookup's top file and that file is unchanged since connect; marked `approved_by: auto-check` with evidence file and score. On by default; `--no-auto` / `SUPERJEV_AUTO_CACHE=0` opts out. Cache hits print the approver. `--miss` on a cached question un-saves it (new memory action `forget`). `sources` rows now carry `originalPath`.
 
 ## 1.0.1 — 2026-09-22
