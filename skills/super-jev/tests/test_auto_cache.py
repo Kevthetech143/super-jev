@@ -96,6 +96,40 @@ def test_no_auto_saves_nothing(world, monkeypatch, capsys):
     assert "auto-cache is off" in capsys.readouterr().out
 
 
+def test_search_source_mismatch_does_not_save(world, monkeypatch, capsys):
+    """The gate checked `one` (car.md); if search's top passage points at a different
+    source, the saved evidence would not be what the gate actually cleared."""
+    orig_memory = ask.memory
+
+    def mismatched_memory(req):
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "t1",
+                    "passages": [{"sourceId": "OTHER", "reviewedText": "unrelated text"}]}
+        return orig_memory(req)
+
+    monkeypatch.setattr(ask, "memory", mismatched_memory)
+    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert not world["cache"]
+    out = capsys.readouterr().out
+    assert "not saved" in out and "differs from the gated file's source" in out
+
+
+def test_low_gate_score_does_not_save(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path: ("CLEAN", 0.79))
+    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert not world["cache"]
+    assert "not saved: check gate score 0.79 is below the 0.80 auto-save floor" in capsys.readouterr().out
+
+
+def test_find_top_skips_malformed_lines(tmp_path):
+    sdir = tmp_path / "state"
+    sdir.mkdir(parents=True)
+    lookups = sdir / "lookups.jsonl"
+    good = json.dumps({"kind": "lookup", "question": Q, "top": [{"score": 0.9, "path": "/x", "pointer": "p1"}]})
+    lookups.write_text("not json at all\n" + good + "\n{truncated\n")
+    assert ask.find_top(sdir, Q) == {"score": 0.9, "path": "/x", "pointer": "p1"}
+
+
 def test_miss_removes_saved_answer(world, capsys):
     ask.auto_approve("alice", Q, A, world["sdir"])
     assert ask.miss("alice", Q, "it was in the garage log", world["sdir"]) == 0
