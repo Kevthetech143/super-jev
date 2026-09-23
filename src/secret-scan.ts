@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 
 const PAT = JSON.parse(readFileSync(new URL('../skills/super-jev/secret_patterns.json', import.meta.url), 'utf8'));
+// No 'u' flag: \w, \d and \b stay ASCII-only, the twin of Python's re.ASCII. The text is ASCII after normalizing.
 const CARD = new RegExp(PAT.card);
 const WORD = new RegExp(PAT.word, 'i');
 const TOKEN = new RegExp(PAT.token, 'i');
@@ -16,7 +17,29 @@ function entropy(s: string): number {
   return h;
 }
 
+const NON_ASCII = /[^\x00-\x7f]/gu;
+const CTRL = /[\x00-\x09\x0b-\x1f\x7f]/g;
+const LETTER = /^[\p{L}\p{M}\p{Cn}]$/u;
+const DIGIT = /^\p{Nd}$/u;
+
+const FOLD = new Map<string, string>();
+const foldOne = (c: string) => c.charCodeAt(0) < 0x80 ? c : LETTER.test(c) ? 'x' : DIGIT.test(c) ? '0' : ' ';
+function foldChar(c: string): string {
+  let f = FOLD.get(c);
+  if (f === undefined) FOLD.set(c, f = Array.from(c === 'ı' ? c : c.toUpperCase().toLowerCase(), foldOne).join(''));
+  return f;
+}
+
+/** Twin of Python normalize_for_scan: NFKC, casefold, every control or whitespace char but newline to a
+ * space, any remaining non-ASCII letter/mark/unassigned to "x" and digit to "0", anything else non-ASCII to a space.
+ * JS has no casefold; upper-then-lower of each non-ASCII char matches it (dotless ı excepted) for every code point
+ * both Unicode versions assign - checked once over all code points against Python 3.12. */
+export function normalizeForScan(text: string): string {
+  return text.normalize('NFKC').toLowerCase().replace(NON_ASCII, foldChar).replace(CTRL, ' ');
+}
+
 export function hasSecret(text: string): boolean {
+  text = normalizeForScan(text);
   if (CARD.test(text.replace(URL_RE, ' ').replace(ISO_DATE, ' '))) return true;
   if (WORD.test(text) || TOKEN.test(text)) return true;
   for (const m of text.matchAll(GENERIC)) {
