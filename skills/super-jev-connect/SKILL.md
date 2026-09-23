@@ -51,7 +51,7 @@ The secret scan holds a file that looks like it carries card/password text, and 
 
 ## 8. Refresh
 
-`--refresh` re-runs a pointer against current disk state and drops any cached file no longer present. A changed file stales its whole pointer until refreshed. Reconnecting an existing pointer sends `replace:true`, which rotates that pointer's approved answers — so keep cached/approved answers on small, stable pointers (manual entries), and refresh larger, more volatile pointers deliberately. A hash-watch job that refreshes automatically on file change is not built yet.
+`--refresh` re-runs a pointer against current disk state and drops any cached file no longer present. A changed file stales its whole pointer until refreshed. Reconnecting an existing pointer sends `replace:true`, which rotates that pointer's approved answers — so keep cached/approved answers on small, stable pointers (manual entries), and refresh larger, more volatile pointers deliberately. `python3 ../super-jev/refresh_changed.py [--dry-run] [--skip NAME]` re-prepares only the pointers whose connected files changed, with each pointer's recorded roots, principal, excludes and --no-recurse (reports from before this recorded a principal are skipped with a note); schedule it yourself if you want it periodic. Keep auto-rebuilt files (links.md, INDEX.md) out of a pointer with --exclude so they do not stale it daily.
 
 ## 9. Safeguards
 

@@ -190,6 +190,69 @@ def test_passing_draft_is_gated_connected_and_cached(tmp_path, monkeypatch, caps
     assert "registered" in capsys.readouterr().out
 
 
+def test_refresh_repeats_every_principal_so_the_harness_never_sees_scope_change(tmp_path, monkeypatch, capsys):
+    """A pointer registered for several principals (e.g. primary + primary-helper) must keep
+    all of them on --refresh: naming only one would look like narrowing the pointer's scope,
+    which the harness refuses with scope-change."""
+    root = tmp_path / "root"
+    root.mkdir()
+    f = root / "one.md"
+    f.write_text("# One\nContent about one.\n")
+
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(f): {"path": str(f), "description": "Describes one.", "question": "What is one?"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+
+    calls = []
+    monkeypatch.setattr(pb, "memory", fake_connect_memory(calls))
+
+    monkeypatch.setattr(sys, "argv", base_argv(
+        root, extra=["--no-findability", "--refresh", "--principal", "primary-helper"]))
+    rc = pb.main()
+
+    assert rc == 0
+    connect_calls = [c for c in calls if c["action"] == "connect"]
+    assert connect_calls and all(c["principals"] == ["agent", "primary-helper"] for c in connect_calls)
+
+
+def test_refresh_drops_a_removed_file_without_dropping_a_principal(tmp_path, monkeypatch, capsys):
+    """--refresh removes cached paths that no longer exist on disk from the cache and connect
+    set -- that file-level cleanup must not also drop a principal from the pointer's scope."""
+    root = tmp_path / "root"
+    root.mkdir()
+    kept = root / "kept.md"
+    kept.write_text("# Kept\nStill here.\n")
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    gone = root / "gone.md"
+    (cache_dir / "my-records.json").write_text(json.dumps(
+        {str(gone): {"sha256": "old-hash", "description": "Gone.", "question": "Where is gone?",
+                     "kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown",
+                     "pass": True, "labels_ok": True}}))
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
+        str(kept): {"path": str(kept), "description": "Describes kept.", "question": "What is kept?"}
+    })
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+
+    calls = []
+    monkeypatch.setattr(pb, "memory", fake_connect_memory(calls))
+
+    monkeypatch.setattr(sys, "argv", base_argv(
+        root, extra=["--no-findability", "--refresh", "--principal", "primary-helper"]))
+    rc = pb.main()
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1 cached files removed from disk" in out
+    connect_calls = [c for c in calls if c["action"] == "connect"]
+    assert connect_calls and all(c["principals"] == ["agent", "primary-helper"] for c in connect_calls)
+    assert all(str(gone) not in [s["path"] for s in c["sources"]] for c in connect_calls)
+
+
 def test_failing_draft_gets_one_retry_then_lands_in_exceptions_not_connected(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()
