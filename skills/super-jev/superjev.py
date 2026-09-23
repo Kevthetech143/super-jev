@@ -58,10 +58,11 @@ HOME = Path(os.path.expanduser("~"))
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent  # skills/super-jev/superjev.py -> repo root
 
-# Fleet-local fallbacks. Real on the machine this skill was authored on;
-# almost certainly absent on a fresh clone, where SUPERJEV_GATE_CMD and
-# SUPERJEV_VERIFY_CMD take over instead.
-FLEET_JEV_LIB = HOME / ".claude/skills/jev-check/lib/jev.py"
+# The default claim-gate door: the judge client shipped in this repo. It needs
+# only TYPESAFE_API_KEY. SUPERJEV_GATE_CMD, when set, replaces it.
+JEV_LIB = SKILL_DIR / "lib" / "jev_client.py"
+# Fleet-local fallback for `verify`. Real on the machine this skill was
+# authored on; absent on a fresh clone, where SUPERJEV_VERIFY_CMD takes over.
 FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 
 # The pure derive-facts/pre-rules pair (src/experimental/derive-facts.ts), reached
@@ -3593,6 +3594,8 @@ def _run_gh_issue_create(repo, title, body):
     or one containing shell-special characters is never mangled or
     truncated by argv limits."""
     tmp_path = None
+    if _has_secret(title) or _has_secret(body):
+        return False, "issue contains a secret; not sent"
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
                                          encoding="utf-8") as f:
@@ -3886,10 +3889,51 @@ def not_built(sub, json_mode=False):
 
 GATE_VERDICT = {
     0: "CLEAN — every claim is carried by the evidence at or above 0.80. Send it.",
-    3: "READ — a claim is red or under 0.80. A human reads the source before you send.",
+    3: "READ (blocked) — a claim is red or under 0.80. Do not send it; a human reads the source first.",
     2: "REJECT — a quoted span is not in the evidence. The citation is fabricated.",
 }
 GATE_VERDICT_WORD = {0: "CLEAN", 3: "READ", 2: "REJECT"}
+
+# Fail closed: a door that exits 0 has only earned CLEAN if its table says so.
+# Exit 0 with no readable claim row, a missing claim row, a red verdict, or a
+# claim under the 0.80 line is never CLEAN.
+GATE_UNREADABLE_EXIT = 1
+GATE_VERDICT[GATE_UNREADABLE_EXIT] = ("ERROR — the gate's output could not be read as a "
+                                      "verdict table. Treated as NOT clean.")
+GATE_VERDICT_WORD[GATE_UNREADABLE_EXIT] = "ERROR"
+
+
+def gate_verdict_line(code, out="", err=""):
+    """The VERDICT text for `code`. An unreadable table whose door printed its
+    own cause (a `jev: ...` line -- missing key, HTTP 401, no network) names that
+    cause instead of the generic "could not be read"; still ERROR, never clean."""
+    if code == GATE_UNREADABLE_EXIT:
+        causes = [l.strip() for l in f"{out}\n{err}".splitlines() if l.strip().startswith("jev:")]
+        if causes:
+            return (f"ERROR — Jev could not check this: {causes[-1][4:].strip()}. "
+                    "Treated as NOT clean.")
+    return GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}")
+
+
+def gate_fail_closed(code, out, n_claims=0):
+    """The exit code cmd_gate reports for a door run. Only ever tightens.
+
+    `n_claims` is the number of explicit --claim values sent (0 for a draft,
+    where the door splits the claims itself and the count is not known).
+    """
+    if code != 0:
+        return code
+    rows = [m for m in _FLAG_LINE_RE.finditer(out or "")]
+    claim_rows = [m for m in rows if m.group("key").startswith("c")]
+    if not claim_rows or len({m.group("key") for m in claim_rows}) < n_claims:
+        return GATE_UNREADABLE_EXIT
+    for m in rows:
+        if m.group("verdict") in NOTABLE_VERDICTS:
+            return 3
+    for m in claim_rows:
+        if m.group("verdict") != "SUPPORTED" or float(m.group("score")) < 0.80:
+            return 3
+    return 0
 
 
 def _gate_timeout():
@@ -4142,12 +4186,19 @@ def pattern_claim_answer(claim, evidence_text):
 
 
 def _load_jev_lib():
-    """Import the fleet jev lib (FLEET_JEV_LIB) for its ask()."""
+    """Import the judge client (JEV_LIB, built in by default) for its ask()."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("fleet_jev", str(FLEET_JEV_LIB))
+    spec = importlib.util.spec_from_file_location("fleet_jev", str(JEV_LIB))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _has_secret(text):
+    """prepare_bulk.has_secret, loaded from this skill directory."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prepare_bulk import has_secret
+    return has_secret(text)
 
 
 def _code_ask(state, questions):
@@ -4159,7 +4210,7 @@ _code_ask_live = _code_ask  # identity of the real judge; tests replace sj._code
 
 
 class _CodeLibMissing(Exception):
-    """FLEET_JEV_LIB is absent while the live code-mode judge needs it."""
+    """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
 def run_code_gate(evidence_items, claims, ask_fn=None):
@@ -4192,10 +4243,10 @@ def run_code_gate(evidence_items, claims, ask_fn=None):
     if pending:
         questions = {"c%d" % i: noul_code_question(c) for i, c in pending}
         ask = ask_fn if ask_fn is not None else _code_ask
-        if ask is _code_ask_live and not FLEET_JEV_LIB.exists():
+        if ask is _code_ask_live and not JEV_LIB.exists():
             raise _CodeLibMissing(
-                "no fleet jev lib at %s — install the jev-check skill "
-                "or inject a judge" % FLEET_JEV_LIB)
+                "no judge client at %s — restore lib/jev_client.py "
+                "or inject a judge" % JEV_LIB)
         res = ask(code_state(evidence_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
@@ -4296,7 +4347,7 @@ def cmd_gate(a):
     # The door subprocess is an evidence-mode requirement only: code mode
     # must not refuse (exit 5) for a lib file the CI runner does not have.
     if mode != "code":
-        bad = door_missing(GATE_CMD_ENV, FLEET_JEV_LIB)
+        bad = door_missing(GATE_CMD_ENV, JEV_LIB)
         if bad is not None:
             return door_refuse(json_mode, "gate", bad)
     if not a.draft and not a.claim:
@@ -4341,6 +4392,15 @@ def cmd_gate(a):
                 print(reason)
                 return 3
             except Exception as exc:
+                if "contains a secret; not sent" in str(exc):
+                    reason = "gate: %s" % exc
+                    if hook_mode:
+                        return 1, reason, ""
+                    if json_mode:
+                        emit_json("gate", "ERROR", 1, reason, {"claim_mode": mode}, [])
+                        return 1
+                    print(reason, file=sys.stderr)
+                    return 1
                 if not hook_mode:
                     raise
                 # the in-process lib call must never escape the hook:
@@ -4366,7 +4426,7 @@ def cmd_gate(a):
         print(text, end="")
         return code
 
-    cmd = [*door_cmd(GATE_CMD_ENV, FLEET_JEV_LIB), *evidence_paths, "--kit", "reply"]
+    cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), *evidence_paths, "--kit", "reply"]
     claims_tmp_path = None
     if a.claim:
         for claim in a.claim:
@@ -4398,12 +4458,14 @@ def cmd_gate(a):
         # exactly one object on stdout, and hook mode must never let the child's
         # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
         # inherit straight from this process regardless of contextlib redirects.
+        n_claims = len(a.claim or [])
         if json_mode:
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
                                       hook_mode=hook_mode, timeout=timeout,
                                       extra_ledger=extra_ledger)
+            code = gate_fail_closed(code, out, n_claims)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
-                      GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
+                      gate_verdict_line(code, out, err),
                       {"stdout": out, "stderr": err, "claim_mode": mode}, cmd)
             return code
         if hook_mode:
@@ -4417,10 +4479,21 @@ def cmd_gate(a):
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
                                       hook_mode=True, timeout=timeout,
                                       extra_ledger=extra_ledger)
+            # Deliberately NOT gate_fail_closed here: the hook's door output is
+            # not always a claim table (a clean draft run can print no c<N> rows),
+            # so tightening it would turn every quiet allow into an advisory.
+            # cmd_hook fails closed itself on a non-zero code and on strong flags
+            # in `out` (_hook_block_reasons); it never reads exit 0 as a verdict
+            # beyond "no block".
             return code, out, err
-        code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout,
-                        extra_ledger=extra_ledger)
-        print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
+        print("$ " + shlex.join(str(c) for c in cmd))
+        sys.stdout.flush()
+        code, out, err = run_door(cmd, capture=True, door="gate", hook_mode=hook_mode,
+                                  timeout=timeout, extra_ledger=extra_ledger)
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        code = gate_fail_closed(code, out, n_claims)
+        print(f"\nVERDICT: {gate_verdict_line(code, out, err)}")
         return code
     finally:
         if claims_tmp_path:
@@ -13004,11 +13077,11 @@ def cmd_status(a):
     json_mode = getattr(a, "json", False)
     repo = repo_path()
     scripts = npm_scripts(repo) or {}
-    live_gate = door_missing(GATE_CMD_ENV, FLEET_JEV_LIB) is None
+    live_gate = door_missing(GATE_CMD_ENV, JEV_LIB) is None
     live_verify = door_missing(VERIFY_CMD_ENV, FLEET_VERIFY_PY) is None
     npm_ok = resolve_npm() is not None
     gate_what = (f"${GATE_CMD_ENV}" if os.environ.get(GATE_CMD_ENV)
-                else f"claim-gate ({FLEET_JEV_LIB})")
+                else f"claim-gate ({JEV_LIB})")
     verify_what = (f"${VERIFY_CMD_ENV}" if os.environ.get(VERIFY_CMD_ENV)
                   else f"report-verify ({FLEET_VERIFY_PY})")
 

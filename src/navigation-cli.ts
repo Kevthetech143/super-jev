@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { Jev } from './jev.ts';
-import { navigate, NavigationError } from './enhance/navigation.ts';
+import { navigate, NavigationError, providerFailureReason } from './enhance/navigation.ts';
 
 async function stdin(): Promise<string> {
   const chunks: Buffer[] = [];
@@ -30,4 +30,4 @@ async function main(): Promise<void> {
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 
-main().catch(error => { process.stderr.write(`${error instanceof NavigationError ? error.message : 'Navigation failed'}\n`); process.exitCode = 2; });
+main().catch(error => { process.stderr.write(`${error instanceof NavigationError ? error.message : `Navigation failed: ${providerFailureReason(error)}`}\n`); process.exitCode = 2; });

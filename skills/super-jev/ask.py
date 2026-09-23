@@ -58,6 +58,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -65,7 +66,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket  # noqa: E402
+from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -92,7 +93,14 @@ def state_dir(principal: str) -> Path:
     base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
     return base / principal
 
+class SecretHeld(RuntimeError):
+    """A request carried a secret, so it was never sent. main() exits 1."""
+
+
 def memory(req: dict) -> dict:
+    # Every memory request (navigate, search, cached, add ...) goes through here: one scan.
+    if payload_has_secret(req):
+        raise SecretHeld("memory request contains a secret; not sent")
     r = subprocess.run([sys.executable, str(SKILL), "memory", "--input", "/dev/stdin"], input=json.dumps(req), capture_output=True, text=True)
     try:
         return json.loads(r.stdout)
@@ -148,14 +156,126 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
         print("  evidence:", e.get("sourceId", ""), "|", str(e.get("quote", ""))[:120])
     return 0
 
+# navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
+MAX_QUESTION = 8000
+# Content check: routing picks files from their one-line descriptions only, so it
+# can match an absent fact on topic alone and miss a present one. Each top routed
+# file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
+# must beat "none of these" on its own merits, not merely out-rank weaker siblings;
+# it survives only with a content score >= CONFIRM_FLOOR. One Jev call per file.
+# A lone file only needs to out-score "none" to come back at all. With a plain file
+# label, an on-topic file lacking the fact scored 0.64-0.69 (a present fact as low
+# as 0.62), so absent facts passed on some runs. The label now tells the judge to
+# pick a passage only if it states the answer: measured 2026-09-22, absent facts
+# 0 (one near-answer 0.55-0.56), present facts 0.63-0.97. Near misses still passed
+# (a flight's date for its departure time; another event's odometer figure), so the
+# label now asks for the exact value for the exact event: measured 2026-09-22 on 10
+# near-miss and 10 present questions x2, near misses 0-0.64, present 0.91-0.98.
+# A later breaker set still passed near misses at 0.70-0.83, so the floor is 0.85:
+# re-measured 2026-09-22 on 8 near-miss and 8 present x2, near misses 0-0.87 (one,
+# "current APY after the rate change", 0.86-0.87 still passes), present 0.90-0.96.
+CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
+ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.85
+CONFIRM_LABEL = ("Passage {n}, choose only if it states the exact value asked for, for the exact "
+                 "event asked about (a value for another event, or only the topic, is none)")
+HELD_SECRET = "contains a secret; not sent"
+INCONCLUSIVE = "inconclusive"
+
+def navigation_command() -> list:
+    repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
+    return ["node", str(repo / "src" / "navigation-cli.ts")]
+
+def confirm_one(question: str, path: str):
+    """(content score or None, whether the file was too long to read whole, error or None,
+    note or None). note is HELD_SECRET (file not sent, not kept) or INCONCLUSIVE (the
+    check did not finish; the file is kept on its routing score)."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError as e:
+        return None, False, f"cannot read {path}: {e.strerror or e}", None
+    # The file may have changed since connect scanned it; never ship a secret to Jev.
+    if has_secret(text):
+        return None, False, None, HELD_SECRET
+    chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+    partial = len(chunks) > CONFIRM_CHUNKS_PER_FILE
+    leaves = [{"id": f"c{i}", "label": CONFIRM_LABEL.format(n=i + 1), "description": chunk,
+               "sourceId": str(i)} for i, chunk in enumerate(chunks[:CONFIRM_CHUNKS_PER_FILE])]
+    payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
+               "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
+                           "nodes": [{"id": "root", "label": "Sources",
+                                      "description": "Full text of candidate files",
+                                      "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
+    if payload_has_secret(payload):  # the question rides in the payload too
+        return None, partial, None, HELD_SECRET
+    try:
+        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
+                           text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, partial, f"content check could not run: {e.__class__.__name__}", None
+    if r.returncode:
+        return None, partial, (r.stderr.strip().splitlines()[-1:] or ["content check failed"])[0][:200], None
+    try:
+        body = json.loads(r.stdout)
+    except ValueError:
+        return None, partial, "content check returned invalid JSON", None
+    if not isinstance(body, dict) or body.get("status") not in ("candidates", "no-candidates"):
+        # e.g. budget-exhausted: the read did not finish, so "not in file" would be a guess
+        return None, partial, None, INCONCLUSIVE
+    scores = [c.get("score") for c in body.get("candidates") or [] if isinstance(c, dict)]
+    best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
+    return (best if best >= CONFIRM_FLOOR else None), partial, None, None
+
+def confirm(question: str, paths: list):
+    """Check each path alone, in parallel. Returns ({path: score} for kept files,
+    set of paths too long to read whole, first error or None, {path: note})."""
+    paths = paths[:CONFIRM_FILES]
+    results = list(ThreadPoolExecutor(max_workers=CONFIRM_FILES).map(lambda p: confirm_one(question, p), paths))
+    errors = [e for _, _, e, _ in results if e]
+    scores = {p: sc for p, (sc, _, _, _) in zip(paths, results) if sc is not None}
+    partial = {p for p, (_, part, _, _) in zip(paths, results) if part}
+    # A file whose check errored was not read: it stays INCONCLUSIVE on its routing
+    # score, and the other files are still filtered on their own results.
+    notes = {p: note or INCONCLUSIVE for p, (_, _, e, note) in zip(paths, results) if note or e}
+    return scores, partial, (errors[0] if errors else None), notes
+
+def refresh_hint(ptr: str, principal: str, kind: str) -> str:
+    """A stale pointer's files changed since connect; say the exact command that re-prepares it."""
+    if not kind.startswith(("preparation-required", "refresh-required")):
+        return ""
+    if "-manual-" in ptr:
+        return "; its source changed: re-add it with ask.py --add ... --replace-entry"
+    try:
+        roots = json.loads((Path(__file__).resolve().parent / "prepare-cache" / f"{ptr}-report.json")
+                           .read_text()).get("roots") or []
+    except (OSError, ValueError):
+        roots = []
+    root_args = " ".join(f"--root {shlex.quote(r)}" for r in roots) or "--root /path/to/folder"
+    return (f"; its files changed since connect. Run: python3 skills/super-jev/prepare_bulk.py "
+            f"--refresh --pointer {ptr} --principal {principal} {root_args}")
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
+    if len(question) > MAX_QUESTION:
+        print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
+        return 2
     t0 = time.time()
     cache = memory({"action": "cached", "principal": principal, "question": question})
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
         return rc
-    pointers = my_pointers(principal)
+    panel = memory({"action": "panel", "principal": principal})
+    if panel.get("reason") == "not-set-up":
+        print("Super Jev is not set up yet. Run: python3 skills/super-jev/setup.py")
+        return 1
+    pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
+                            for p in panel.get("pointers", [])) if n]
+    if not pointers:
+        print(f"nothing connected yet for principal '{principal}' -- run connect first:\n"
+              f"  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
+              f"--pointer my-notes --principal {principal}")
+        log(sdir, "lookup", question=question, pointers=0, result="nothing-connected",
+            secs=round(time.time() - t0, 1))
+        return 1
 
     def nav(ptr):
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
@@ -164,7 +284,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             return ptr, "candidates", out["candidates"]
         if status in ("candidates", "no-candidates"):
             return ptr, "no-candidates", []
-        return ptr, status or "error", []
+        kind = status or "error"
+        return ptr, f"{kind}: {out['reason']}" if out.get("reason") else kind, []
 
     results = list(ThreadPoolExecutor(max_workers=8).map(nav, pointers)) if pointers else []
     merged, errored, statuses, error_lines = [], 0, {}, []
@@ -177,22 +298,44 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             errored += 1
             statuses[ptr] = kind
-            error_lines.append(f"[{ptr}] {kind}")
-    merged.sort(reverse=True)
+            error_lines.append(f"[{ptr}] {kind}" + refresh_hint(ptr, principal, kind))
+    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
+    routed = list(dict.fromkeys(p for _, p, _ in merged))
+    dropped, check_error, notes = 0, None, {}
+    if merged:
+        scores, partial, check_error, notes = confirm(question, routed)
+        if check_error:
+            errored += 1
+            error_lines.append(f"[content-check] error: {check_error}")
+        # Only files the check actually read may stay: a file past the first
+        # CONFIRM_FILES was never read, so it is not evidence of anything.
+        checked = set(routed[:CONFIRM_FILES])
+        keep = [(scores.get(p, s), p, ptr) for s, p, ptr in merged
+                if p in scores or p in partial or notes.get(p) == INCONCLUSIVE]
+        dropped = len(checked - {p for _, p, _ in keep} - {p for p, n in notes.items() if n == HELD_SECRET})
+        merged = sorted(keep, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for s, p, ptr in top:
-        print(f"{s:5.2f}  {p}  [{ptr}]")
+        note = "  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE else ""
+        print(f"{s:5.2f}  {p}  [{ptr}]{note}")
+    for p, note in notes.items():
+        if note == HELD_SECRET:
+            print(f"HELD  {p}  ({HELD_SECRET})")
     for line in error_lines:
         print(line)
     if errored:
         print(f"unresolved: {errored} of {len(pointers)} pointers errored")
         return 1
     if not top:
-        print(f"no-candidates across {len(pointers)} pointers. Connect sources (see references/connectors.md) or record a fact with --add.")
+        if dropped:
+            print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
+        print(f"no-candidates across {len(pointers)} pointers: no connected file answers this. "
+              "Tell your human it is not in their files; do not guess. To fill the gap, connect more "
+              "files or record a fact with --add (see references/connectors.md).")
         return 0
     return 0
 
@@ -230,9 +373,9 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
     return send_approval(principal, question, answer, pointer, out, sdir)
 
 ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
-                        "persistent experiment config (the config.json passed via memory.sh / "
-                        "--config; see LOCAL-MEMORY.md) before --add can approve a manual entry "
-                        "that retrieval does not match on its own.")
+                        "memory config (the one setup.py wrote, ~/.local/state/super-jev/_memory/"
+                        "config.json, or the file passed with --config) before --add can approve a "
+                        "manual entry that retrieval does not match on its own.")
 
 def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path) -> int:
     """Approve a just-registered manual pointer, falling back to assisted review on a retrieval miss."""
@@ -322,6 +465,13 @@ def resolve_principal(args: list) -> tuple[str, list]:
     return os.environ.get("SUPERJEV_PRINCIPAL", ""), args
 
 def main() -> int:
+    try:
+        return _main()
+    except SecretHeld as e:
+        print(f"ask: {e}", file=sys.stderr)
+        return 1
+
+def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
     if not principal or not a:
         print(__doc__)

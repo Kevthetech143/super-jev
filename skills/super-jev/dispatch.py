@@ -21,6 +21,17 @@ class MissingDependency(FileNotFoundError):
     """Raised when an optional dispatcher backend is unavailable."""
 
 
+def config_path() -> Path:
+    """The memory config setup.py writes (kept in step with setup.config_path)."""
+    root = os.environ.get("SUPERJEV_STATE_DIR")
+    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
+    return base / "_memory" / "config.json"
+
+
+class NotSetUp(FileNotFoundError):
+    """Raised when memory is used before setup.py has written its config."""
+
+
 def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
     root = skill_dir.parent
     if tool == "skills":
@@ -43,6 +54,12 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
         repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
         entry = repo / "experiments/verified-pointer-memory/cli.py"
         cmd = [sys.executable, str(entry), *args]
+        # No explicit config and no wrapper: use the one setup.py writes.
+        if ("--config" not in args and not any(arg.startswith("--config=") for arg in args)
+                and "--describe" not in args):
+            if not config_path().is_file():
+                raise NotSetUp(str(config_path()))
+            cmd += ["--config", str(config_path())]
     else:
         entry = skill_dir / "superjev"
         if entry.is_file():
@@ -111,6 +128,11 @@ def main(args: list[str]) -> int:
             sys.stdout.buffer.write(output)
             return result.returncode
         return subprocess.run(cmd, env=env).returncode
+    except NotSetUp as exc:
+        print(json.dumps({"status": "error", "reason": "not-set-up",
+                          "message": "Super Jev is not set up yet. Run: python3 skills/super-jev/setup.py",
+                          "missingConfig": str(exc)}))
+        return 2
     except MissingDependency as exc:
         print(json.dumps({"status": "error", "reason": "missing-dependency", "dependency": str(exc),
                           "nextAction": "configure-memory-runtime",

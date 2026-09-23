@@ -1,4 +1,5 @@
 import type { Evaluator, Request, Evaluation, Answer } from './types.ts';
+import { payloadHasSecret } from './secret-scan.ts';
 
 // Every rule below is sourced in docs/provider-contract.md, which labels each
 // claim DOCUMENTED (stated by TypeSafe), OBSERVED (measured from recorded
@@ -205,10 +206,13 @@ export class Jev implements Evaluator {
     this.transport = options.fetch ?? fetch;
   }
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
+    const payload = { model: this.model, ...pin, ...request };
+    // The one choke point for every TypeSafe send: scan the whole body first.
+    if (payloadHasSecret(payload)) throw new Error('Jev request contains a secret; not sent');
     return this.transport('https://api.typesafe.ai/v1/systemone', {
       method: 'POST', signal,
       headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: this.model, ...pin, ...request })
+      body: JSON.stringify(payload)
     });
   }
   private async _peekBody(response: Response): Promise<string> {

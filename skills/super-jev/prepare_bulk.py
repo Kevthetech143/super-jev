@@ -50,6 +50,8 @@ Pipeline per run:
      place in the set:
        Stage 1 gates the description ALONE against the file, exactly the pre-labels claim. Fail -> one
        rewrite retry, verdict fed back; still failing -> EXCEPTION list, file goes no further.
+       A --writer builtin description is only the file's own words quoted, so stage 1 checks it
+       locally (rebuilt from the file, must match exactly: verdict QUOTED) with no judge call.
        Stage 2 (only for a file that passed stage 1) gates the label sentence ALONE ("This file is a <kind>
        about <subject>. Its status is <status>[ as of <as_of>].") against the file. SUPPORTED at or above
        --line keeps the drafted labels; anything else (under the line, NOT_SUPPORTED, CONTRADICTED, ERROR)
@@ -71,7 +73,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, hashlib, json, os, re, shlex, subprocess, sys, time
+import argparse, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -80,15 +82,55 @@ sys.path.insert(0, str(HERE))
 from connect_checked import gate, memory  # noqa: E402
 
 CACHE_DIR = HERE / "prepare-cache"
-CARD_RE = re.compile(r"[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}")
-WORD_RE = re.compile(r"password|passwd|api[_-]?key", re.I)
-SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}", re.I)
+# Names of the files written into CACHE_DIR, one per line; uninstall deletes only these.
+WRITTEN_MANIFEST = ".superjev-written"
+
+
+def _record_written(path: Path) -> None:
+    m = CACHE_DIR / WRITTEN_MANIFEST
+    names = set(m.read_text().split("\n")) if m.is_file() else set()
+    if path.name not in names:
+        with m.open("a") as fh:
+            fh.write(path.name + "\n")
+
+
+# One pattern source shared with Node (src/secret-scan.ts): secret_patterns.json.
+# Token shapes are adapted from gitleaks' default rules; "1Password" (the app) is not
+# a password (digit lookbehind). GENERIC keywords start a word and their tail is capped.
+_PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").read_text())
+CARD_RE = re.compile(_PAT["card"], re.A)
+WORD_RE = re.compile(_PAT["word"], re.I | re.A)
+TOKEN_RE = re.compile(_PAT["token"], re.I | re.A)
+GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
+SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I | re.A)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
 # line). Both are scrubbed out before the card check only; the keyword rule below
 # always runs against the original, unscrubbed text.
-ISO_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
-URL_RE = re.compile(r"https?://\S+")
+ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
+URL_RE = re.compile(_PAT["url"], re.A)
+_CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
+_FOLD = {}
+
+
+def _fold_char(c: str) -> str:
+    if c not in _FOLD:
+        cat = unicodedata.category(c)
+        _FOLD[c] = "x" if cat[0] in "LM" or cat == "Cn" else "0" if cat == "Nd" else " "
+    return _FOLD[c]
+
+
+def _fold_run(m) -> str:
+    return "".join(map(_fold_char, m.group()))
+
+
+def normalize_for_scan(text: str) -> str:
+    """The one normalization both scanners apply (twin: normalizeForScan in src/secret-scan.ts):
+    NFKC, casefold, every control or whitespace char but newline to a space, any remaining
+    non-ASCII letter/mark/unassigned to "x" and digit to "0", anything else non-ASCII to a space."""
+    s = text.casefold() if text.isascii() else unicodedata.normalize("NFKC", text).casefold()
+    return _CTRL_RE.sub(" ", _NON_ASCII_RE.sub(_fold_run, s))
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
 
@@ -156,10 +198,36 @@ def _scrub_dates_and_urls(text: str) -> str:
     return ISO_DATE_RE.sub(" ", URL_RE.sub(" ", text))
 
 
+def _entropy(s: str) -> float:
+    return -sum(s.count(c) / len(s) * math.log2(s.count(c) / len(s)) for c in set(s))
+
+
+def _token_hit(text: str) -> bool:
+    """A known token shape, or a key/token/secret assignment whose value looks random
+    (entropy >= 3.5 bits/char, the gitleaks generic-api-key threshold, and mixes letters with digits)."""
+    if TOKEN_RE.search(text):
+        return True
+    return any(_entropy(v) >= 3.5 and re.search(r"\d", v) and re.search(r"[A-Za-z]", v)
+               for v in (m.group(4) for m in GENERIC_RE.finditer(text)))
+
+
 def has_secret(text: str) -> bool:
-    """Card-number check runs on the scrubbed text (dates/URLs removed); the
-    password/api-key keyword check always runs on the original text."""
-    return bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
+    """Scans normalize_for_scan(text). Card-number check runs on the scrubbed text
+    (dates/URLs removed); the keyword and token checks run on the unscrubbed text."""
+    text = normalize_for_scan(text)
+    return (bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
+            or _token_hit(text))
+
+
+def payload_has_secret(obj) -> bool:
+    """has_secret over every string inside a request payload (dicts, lists, tuples)."""
+    if isinstance(obj, str):
+        return has_secret(obj)
+    if isinstance(obj, dict):
+        return any(payload_has_secret(k) or payload_has_secret(v) for k, v in obj.items())
+    if isinstance(obj, (list, tuple)):
+        return any(payload_has_secret(v) for v in obj)
+    return False
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False):
@@ -187,7 +255,14 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                 continue
             seen.add(rp)
             if len(b) > CEILING_BYTES:
-                held.append((str(p), "over size ceiling; split first")); continue
+                held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
+                                      "split it into smaller .md files, e.g. one per ## section")); continue
+            if b"\x00" in b:
+                held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
+            try:
+                b.decode("utf-8")
+            except UnicodeDecodeError:
+                held.append((str(p), "not UTF-8 text; re-save it as UTF-8 to connect it")); continue
             if has_secret(b.decode("utf-8", "replace")):
                 if allow_held:
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
@@ -209,6 +284,8 @@ def secret_detail(p: Path):
             return {"type": "card-number-like digits", "line": i, "masked": re.sub(r"\d", "#", line)}
         if WORD_RE.search(line):
             return {"type": "password/api-key keyword", "line": i, "masked": re.sub(r"\d", "#", line)}
+        if _token_hit(line):
+            return {"type": "token/key-like text", "line": i, "masked": re.sub(r"[A-Za-z0-9]", "#", line)}
     return None
 
 
@@ -223,6 +300,7 @@ def write_held_txt(pointer: str, held: list) -> None:
             if d:
                 lines.append(f"    pattern={d['type']}  line={d['line']}  masked={d['masked']}")
     (CACHE_DIR / f"{pointer}-held.txt").write_text("\n".join(lines) + "\n")
+    _record_written(CACHE_DIR / f"{pointer}-held.txt")
 
 
 def excerpt(p: Path) -> dict:
@@ -256,6 +334,9 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
         "subject: the ticker, person, case, or topic the file is about, 1 to 4 words.\n"
         "Return ONLY a JSON array, no prose." + fb + "\n\nFILES:\n" + json.dumps(items, indent=1)
     )
+    # The one place the writer prompt leaves this machine: scan it here, whoever called.
+    if has_secret(prompt):
+        raise WriterError("the writer prompt contains a secret; not sent")
     argv = command or ["claude", "-p", "--model", model]
     for attempt in range(2):
         try:
@@ -272,6 +353,39 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
             except Exception:
                 pass
     raise WriterError("writer returned invalid JSON after 2 attempts")
+
+
+BUILTIN_QUOTE_WORDS = 60
+
+
+def builtin_writer(items: list) -> dict:
+    """No-model writer: a description quoted from the file's own headings and first words.
+
+    Used when no claude CLI is installed or with --writer builtin, so the TypeSafe key alone is
+    enough to connect. Labels are left unknown; the gate still checks every description."""
+    out = {}
+    for it in items:
+        heads = [h.lstrip("#").strip() for h in it["headings"] if h.lstrip("#").strip()]
+        body = [l.strip() for l in it["start"].splitlines() if l.strip() and not l.startswith("#")]
+        words = " ".join(body).split()[:BUILTIN_QUOTE_WORDS]
+        if heads:
+            desc = f'This file is titled "{heads[0]}"'
+            if len(heads) > 1:
+                desc += " with sections " + ", ".join(f'"{h}"' for h in heads[1:5])
+            desc += "."
+            # Navigation ranks files on their description alone; headings only let it guess
+            # (hits flipped to no-candidates, absent facts matched on topic). Quote the body too.
+            if words:
+                desc += f' It begins: "{" ".join(words)}"'
+            question = f"What does {heads[0]} say?"
+        else:
+            desc = f'This file begins: "{" ".join(words)}"'
+            question = f"Which file says {' '.join(words[:8])}?"
+        subject = " ".join((heads[0] if heads else Path(it["path"]).stem).split()[:4])
+        out[it["path"]] = {"path": it["path"], "description": desc, "question": question,
+                           "kind": "unknown", "status": "unknown", "as_of": "unknown",
+                           "subject": subject}
+    return out
 
 
 def navigate(pointer: str, principal: str, question: str) -> list:
@@ -424,6 +538,10 @@ def main() -> int:
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
+    ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
+                    help="builtin: no model call, descriptions quoted from each file's headings (needs only the "
+                         "TypeSafe key). auto (default): --writer-command if given, else the claude CLI if it is "
+                         "installed, else builtin")
     ap.add_argument("--writer-model", default="haiku",
                     help="model passed to the default Claude writer")
     ap.add_argument("--writer-command", metavar="COMMAND",
@@ -473,9 +591,15 @@ def main() -> int:
     if writer_command_str and not writer_command:
         print("REFUSED: --writer-command must name a command"); return 2
 
-    banner_cmd = " ".join(writer_command) if writer_command else f"claude -p --model {a.writer_model}"
-    print(f"writer: {banner_cmd}")
-    if not writer_command:
+    use_builtin = a.writer == "builtin" or (a.writer == "auto" and not writer_command
+                                              and not shutil.which("claude"))
+    if use_builtin:
+        why = "" if a.writer == "builtin" else " (no claude CLI found)"
+        print(f"writer: builtin{why} -- descriptions quoted from each file's headings, no model call")
+    else:
+        banner_cmd = " ".join(writer_command) if writer_command else f"claude -p --model {a.writer_model}"
+        print(f"writer: {banner_cmd}")
+    if not writer_command and not use_builtin:
         print("tip: bulk labeling should run on a cheap writer model, never a premium one; the proven default "
               "is claude -p --model haiku (the Claude Code Haiku command) -- set --writer-command or "
               "SUPERJEV_WRITER_COMMAND for another adapter that reads the prompt on stdin and prints JSON")
@@ -486,11 +610,17 @@ def main() -> int:
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     t0 = time.time()
 
+    missing = [str(r) for r in roots if not r.is_dir()]
+    if missing:
+        print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
     files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held)
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
+    if not files and not held:
+        print(f"ERROR: no .md files found under {', '.join(str(r) for r in roots)} "
+              "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
 
     if len(files) > a.max_files:
         print(f"REFUSED: {len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
@@ -521,16 +651,24 @@ def main() -> int:
     for i in range(0, len(todo), a.batch):
         batch = todo[i:i + a.batch]
         try:
-            if writer_command:
+            if use_builtin:
+                got = builtin_writer([excerpt(p) for p in batch])
+            elif writer_command:
                 got = writer([excerpt(p) for p in batch], a.writer_model, command=writer_command)
             else:
                 got = writer([excerpt(p) for p in batch], a.writer_model)
         except WriterError as e:
-            print(f"ERROR: description writer failed: {e}"); return 1
+            print(f"ERROR: description writer failed: {e}")
+            if not writer_command:
+                print("  The claude CLI must be installed and logged in for this writer. Or re-run with "
+                      "--writer builtin (no model call; needs only TYPESAFE_API_KEY).")
+            return 1
         drafts.update(got)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")
 
     def fmt_conf(verdict: dict) -> str:
+        if verdict.get("state") == "QUOTED":
+            return "quoted"
         c = verdict.get("confidence")
         return f"{c:.2f}" if isinstance(c, (int, float)) else "n/a"
 
@@ -543,12 +681,20 @@ def main() -> int:
         # Stage 1: gate the description alone -- exactly the pre-labels claim. A label
         # problem must never cost a file its place; only a description problem does.
         desc = d["description"].strip()
-        v = gate(desc, str(p))
-        ok = v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line
+        if use_builtin and d["description"] == builtin_writer([excerpt(p)])[str(p)]["description"]:
+            # A built-in description is only the file's own headings and words, quoted; rebuilding
+            # it from the file proves that exactly. The judge scored such quotes 0.29-0.89, so a
+            # plain note could fall under the line and be set aside for no real reason.
+            v = {"state": "QUOTED", "confidence": None}
+        else:
+            v = gate(desc, str(p))
+        ok = v["state"] == "QUOTED" or (v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line)
         if not ok:
             fb = {str(p): {"draft": desc, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
             try:
-                if writer_command:
+                if use_builtin:
+                    redo = None  # a quoted description has nothing to rewrite
+                elif writer_command:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
                 else:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
@@ -573,7 +719,9 @@ def main() -> int:
         # Stage 2 (only reached on a stage-1 pass): gate the label sentence alone. A miss here
         # never drops the file -- it connects on its plain description with labels unknown.
         labels = validate_labels(d)
-        v_labels = gate(claim_sentence(labels), str(p))
+        # the built-in writer drafts no labels, so there is nothing worth a judge call
+        v_labels = ({"state": "SKIPPED"} if use_builtin
+                    else gate(claim_sentence(labels), str(p)))
         labels_ok = v_labels["state"] == "SUPPORTED" and v_labels.get("confidence", 0) >= a.line
         if not labels_ok:
             labels = {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown"}
@@ -591,18 +739,40 @@ def main() -> int:
             print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {relstr(p, roots)}")
         passing.append(p)
     cache_path.write_text(json.dumps(cache, indent=1))
+    _record_written(cache_path)
 
     connect_set = reused + passing
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
+    rerun = "python3 " + shlex.join(sys.argv)
     for p, why in exceptions:
-        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})")
+        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})\n"
+              f"      to include it: check the file says what it should, then run: {rerun}"
+              + ("" if use_builtin else " --writer builtin"))
+    for p, why in held:
+        if "admitted by --allow-held" in why:
+            continue
+        print(f"  HELD  {relstr(p, roots)}  ({why})")
+        if "review before onboarding" in why:
+            print(f"      to include it (and any other held secret-looking file) after checking it: "
+                  f"{rerun} --allow-held")
+        elif "binary" not in why:
+            print(f"      then run: {rerun}")
 
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
-        print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s"); return 0
+        _record_written(CACHE_DIR / f"{a.pointer}-report.json")
+        print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s")
+        if a.no_connect:
+            return 0
+        # Nothing connected is a failure, never a quiet success; name the shared cause when there is one.
+        reasons = sorted({why for _, why in exceptions})
+        cause = reasons[0] if len(reasons) == 1 else f"{len(reasons)} different reasons, listed above"
+        print(f"ERROR: all {len(exceptions) + len(held)} files failed or were held; nothing connected"
+              + (f" ({cause})" if exceptions else ""))
+        return 1
 
     ordered = sorted(connect_set, key=str)
     parts = [ordered[i:i + a.limit] for i in range(0, len(ordered), a.limit)]
@@ -638,6 +808,7 @@ def main() -> int:
             print(f"  MISS  {relstr(p, roots)}  ({why})")
 
     (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
+    _record_written(CACHE_DIR / f"{a.pointer}-report.json")
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
     return 0 if all_connected else 1
 

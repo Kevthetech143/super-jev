@@ -10,6 +10,9 @@ import subprocess
 from pathlib import Path
 from service import Service
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'super-jev'))
+from prepare_bulk import has_secret, payload_has_secret  # noqa: E402
+
 NEXT = {
     'ready': 'verify-evidence-then-approve',
     'verified-cache-hit': 'use-cited-answer',
@@ -211,6 +214,8 @@ def load_config(path):
 
 def run(request, config):
     """Execute one explicit action; no implicit fallback or approval."""
+    if payload_has_secret(request):
+        raise ValueError('Request contains a secret; not sent.')
     def retrieve(dataset, question):
         payload = {'registry': config['registry'], 'dataset': dataset, 'question': question}
         try:
@@ -236,10 +241,14 @@ def run(request, config):
                 config['navigationCommand'], input=json.dumps(payload), capture_output=True,
                 text=True, timeout=config['providerTimeoutSeconds'])
             if process.returncode:
-                return {'status': 'error'}
+                # navigation-cli prints one content-free cause line (HTTP code, missing key, network)
+                cause = (process.stderr or '').strip().splitlines()[-1:] or ['Navigation failed']
+                return {'status': 'error', 'reason': cause[0][:200]}
             return json.loads(process.stdout)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            return {'status': 'error'}
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'reason': 'Navigation timed out.'}
+        except (OSError, ValueError):
+            return {'status': 'error', 'reason': 'Navigation failed or returned invalid JSON.'}
 
     if request.get('action') == 'connect':
         from path_connect import connect
