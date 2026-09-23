@@ -66,7 +66,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret  # noqa: E402
+from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -93,7 +93,14 @@ def state_dir(principal: str) -> Path:
     base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
     return base / principal
 
+class SecretHeld(RuntimeError):
+    """A request carried a secret, so it was never sent. main() exits 1."""
+
+
 def memory(req: dict) -> dict:
+    # Every memory request (navigate, search, cached, add ...) goes through here: one scan.
+    if payload_has_secret(req):
+        raise SecretHeld("memory request contains a secret; not sent")
     r = subprocess.run([sys.executable, str(SKILL), "memory", "--input", "/dev/stdin"], input=json.dumps(req), capture_output=True, text=True)
     try:
         return json.loads(r.stdout)
@@ -198,6 +205,8 @@ def confirm_one(question: str, path: str):
                            "nodes": [{"id": "root", "label": "Sources",
                                       "description": "Full text of candidate files",
                                       "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
+    if payload_has_secret(payload):  # the question rides in the payload too
+        return None, partial, None, HELD_SECRET
     try:
         r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
                            text=True, timeout=120)
@@ -456,6 +465,13 @@ def resolve_principal(args: list) -> tuple[str, list]:
     return os.environ.get("SUPERJEV_PRINCIPAL", ""), args
 
 def main() -> int:
+    try:
+        return _main()
+    except SecretHeld as e:
+        print(f"ask: {e}", file=sys.stderr)
+        return 1
+
+def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
     if not principal or not a:
         print(__doc__)

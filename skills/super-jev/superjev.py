@@ -3594,6 +3594,8 @@ def _run_gh_issue_create(repo, title, body):
     or one containing shell-special characters is never mangled or
     truncated by argv limits."""
     tmp_path = None
+    if _has_secret(title) or _has_secret(body):
+        return False, "issue contains a secret; not sent"
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
                                          encoding="utf-8") as f:
@@ -4192,6 +4194,13 @@ def _load_jev_lib():
     return mod
 
 
+def _has_secret(text):
+    """prepare_bulk.has_secret, loaded from this skill directory."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prepare_bulk import has_secret
+    return has_secret(text)
+
+
 def _code_ask(state, questions):
     """The live call code mode makes. Monkeypatched in tests — no network."""
     return _load_jev_lib().ask(state, questions)
@@ -4383,6 +4392,15 @@ def cmd_gate(a):
                 print(reason)
                 return 3
             except Exception as exc:
+                if "contains a secret; not sent" in str(exc):
+                    reason = "gate: %s" % exc
+                    if hook_mode:
+                        return 1, reason, ""
+                    if json_mode:
+                        emit_json("gate", "ERROR", 1, reason, {"claim_mode": mode}, [])
+                        return 1
+                    print(reason, file=sys.stderr)
+                    return 1
                 if not hook_mode:
                     raise
                 # the in-process lib call must never escape the hook:

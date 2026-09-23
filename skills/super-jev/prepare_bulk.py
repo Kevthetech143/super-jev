@@ -209,6 +209,17 @@ def has_secret(text: str) -> bool:
             or _token_hit(text))
 
 
+def payload_has_secret(obj) -> bool:
+    """has_secret over every string inside a request payload (dicts, lists, tuples)."""
+    if isinstance(obj, str):
+        return has_secret(obj)
+    if isinstance(obj, dict):
+        return any(payload_has_secret(k) or payload_has_secret(v) for k, v in obj.items())
+    if isinstance(obj, (list, tuple)):
+        return any(payload_has_secret(v) for v in obj)
+    return False
+
+
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False):
     """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
@@ -313,6 +324,9 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
         "subject: the ticker, person, case, or topic the file is about, 1 to 4 words.\n"
         "Return ONLY a JSON array, no prose." + fb + "\n\nFILES:\n" + json.dumps(items, indent=1)
     )
+    # The one place the writer prompt leaves this machine: scan it here, whoever called.
+    if has_secret(prompt):
+        raise WriterError("the writer prompt contains a secret; not sent")
     argv = command or ["claude", "-p", "--model", model]
     for attempt in range(2):
         try:

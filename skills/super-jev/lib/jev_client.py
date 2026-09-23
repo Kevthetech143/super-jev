@@ -97,6 +97,12 @@ transport = _http_post
 
 def ask(state, questions, timeout=120, attempts=4):
     """One Jev call for every question. Returns answers plus model/usage metadata."""
+    # The one place a request leaves for TypeSafe: scan the state and every question's
+    # instructions and criteria here, so no caller can skip it.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from prepare_bulk import payload_has_secret
+    if payload_has_secret(state) or payload_has_secret(questions):
+        raise JevError("the request contains a secret; not sent")
     key = os.environ.get("TYPESAFE_API_KEY", "").strip()
     if not key:
         raise JevError("TYPESAFE_API_KEY is not set -- export it first "
