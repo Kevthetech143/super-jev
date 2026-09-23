@@ -220,6 +220,22 @@ ANSWER_LABEL = ("Passage {n}, choose only if it answers the question: a rule, pl
 # Live-number asks: no possible tier, a file must confirm at CONFIRM_FLOOR.
 LIVE_RE = re.compile(r"\b(how much|balance|breakeven|break even|right now)\b", re.I)
 
+# Routing score at/above which a read file stays "possible" even when the content
+# check finds no answer (opinion asks like "should I invest" rarely read as answered).
+ROUTE_KEEP = 0.8
+# Final order blends content and routing so a strong route is not thrown away.
+CONTENT_WEIGHT, ROUTE_WEIGHT = 0.6, 0.4
+# Word search only: vague words that name a file's topic in other words.
+SYNONYMS = {"verify": ["check", "feedback"], "rebalance": ["watchlist", "allocation"],
+            "holdings": ["positions", "watchlist"], "money": ["funding", "revenue", "cash"]}
+
+# Opinion asks ("should I invest", "who is winning", "can I sell calls") rarely read
+# as answered; only these get the route-keep.
+OPINION_RE = re.compile(r"\b(should|can i|could i|who is winning|whos winning|worth it|good idea)\b", re.I)
+
+def rank_score(content: float, route: float) -> float:
+    return CONTENT_WEIGHT * content + ROUTE_WEIGHT * route
+
 def is_value_question(question: str) -> bool:
     return bool(VALUE_RE.search(question))
 
@@ -305,6 +321,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> l
     stored question count triple). Typos match a close word (difflib). A file must
     cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered."""
     terms = query_terms(question)
+    terms += [x for t in list(terms) for x in SYNONYMS.get(t, []) if x not in terms]
     if not terms:
         return []
     docs = {}
@@ -318,9 +335,11 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> l
                 continue
             if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
                 continue  # changed since review: not reviewed text any more
-            head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "),
+            text = raw.decode("utf-8", "replace")
+            heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
+            head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                              str(entry.get("description") or ""), str(entry.get("question") or "")])
-            counts = Counter(WORD_RE.findall(raw.decode("utf-8", "replace").lower()))
+            counts = Counter(WORD_RE.findall(text.lower()))
             for w in WORD_RE.findall(head.lower()):
                 counts[w] += 3
             docs[path] = (ptr, counts, sum(counts.values()))
@@ -431,6 +450,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             error_lines.append(f"[{ptr}] {kind}" + refresh_hint(ptr, principal, kind))
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
+    route = {}
+    for s, p, _ in merged:
+        route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
     found = [f for f in word_search(question, pointers) if f[1] not in routed[:CONFIRM_FILES]]
@@ -448,6 +470,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if not is_live_value_question(question):
             possible = {p: (FALLBACK_NOTE if p in wpaths else POSSIBLE_NOTE) for p in to_check
                         if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
+            # A strongly routed file that was read keeps a possible slot even if the
+            # answer check found nothing (opinion asks); never for live-value asks.
+            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question) else []):
+                if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
+                        and scores.get(p, 0) < CONFIRM_FLOOR:
+                    possible[p] = POSSIBLE_NOTE
         cands = merged + [(0, p, ptr) for p, ptr in wpaths.items()]
         keep = {}
         for s, p, ptr in cands:
@@ -455,9 +483,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 continue
             if (scores.get(p, 0) >= CONFIRM_FLOOR or p in possible or p in partial
                     or (notes.get(p) == INCONCLUSIVE and p not in wpaths)):
-                keep[p] = (scores.get(p, s), p, ptr)
+                # A route-kept file shows no content score above the possible floor.
+                keep[p] = (scores.get(p, POSSIBLE_FLOOR if p in possible else s), p, ptr)
         dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
-        merged = sorted(keep.values(), key=lambda m: (round(m[0], 2), path_rank(question, m[1])), reverse=True)
+        # Confirmed files first, then the content/routing blend, then the name tie-break.
+        merged = sorted(keep.values(), key=lambda m: (m[1] not in possible, round(rank_score(m[0], route.get(m[1], 0)), 2),
+                                                      path_rank(question, m[1])), reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top])
