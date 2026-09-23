@@ -83,6 +83,10 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
   Only exit 0 is a pass.
 - Nothing found means say "not in your files", never a guess.
 - When their files change, run step 4 again with `--refresh`.
+- After you answer, run `ask.py --principal me --answer "question" "your answer"`: it
+  saves the answer only if the check gate calls it CLEAN against the fresh top file
+  (auto-cache, default on; `--no-auto` or `SUPERJEV_AUTO_CACHE=0` to opt out).
+  `--miss` on a cached question un-saves it; hits print `approved_by: human|auto-check`.
 - `ask.py --approve`, `--miss` and `--add` save good answers and log misses; see
   [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) step 7. Approve takes the
   question and your answer: `python3 skills/super-jev/ask.py --principal me --approve "question" "answer"`.
