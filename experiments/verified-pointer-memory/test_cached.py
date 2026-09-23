@@ -102,3 +102,16 @@ class CachedActionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ForgetActionTests(unittest.TestCase):
+
+    def test_forget_unsaves_only_that_question_and_keeps_the_pointer(self):
+        fixture = Fixture()
+        self.addCleanup(fixture.temp.cleanup)
+        fixture.approve(fixture.ticket())
+        self.assertEqual(fixture.service.forget('bob', 'color?'), {'status': 'not-cached', 'pointers': []})
+        self.assertEqual(fixture.service.forget('alice', 'color?'), {'status': 'forgotten', 'pointers': ['docs']})
+        self.assertEqual(fixture.service.cached('alice', 'color?')['status'], 'cache-miss')
+        self.assertEqual(fixture.service.forget('alice', 'color?')['status'], 'not-cached')
+        self.assertIn('docs', fixture.service._visible_pointers('alice'))

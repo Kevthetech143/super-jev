@@ -48,8 +48,21 @@
       the connect description in the same bracket format bulk prepare uses
       and `prepare_bulk.py --list --principal AGENT` reads them back.
 
+  ask.py --principal AGENT --answer "question" "answer" [--no-auto]
+      Auto-cache: a machine approval that needs evidence. Runs the check gate
+      (superjev.py gate) on the answer against the last lookup's top file. Only
+      a CLEAN verdict (every claim SUPPORTED at or above 0.80) on a file that is
+      unchanged since connect saves it, exactly like --approve, recorded as
+      approved_by=auto-check with the evidence file and score. READ, REJECT,
+      ERROR, a stale file, or a secret in the file or answer saves nothing and
+      prints why. On by default; off with --no-auto or SUPERJEV_AUTO_CACHE=0.
+
   ask.py --principal AGENT --miss "question" "where it actually was"
-      Log-only: the answer was found somewhere ask.py didn't reach.
+      Logs the miss. If that exact question is a cache hit, the saved answer
+      (human or auto-check) is un-saved so the next ask looks it up fresh.
+
+Cache hits print who approved them: "approved_by: human" (--approve, --add)
+or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
 
 AGENT can also come from SUPERJEV_PRINCIPAL. State lives under
 $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo.
@@ -152,6 +165,9 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
             return 1
     print("CACHE HIT")
     print("answer:", hit.get("answer") or "")
+    who = approver(sdir, question)
+    print("approved_by:", who.get("approved_by", "human") + (
+        f" (evidence {who['evidence_file']}, score {who['score']:.2f})" if who.get("evidence_file") else ""))
     for e in (hit.get("evidence") or [])[:3]:
         print("  evidence:", e.get("sourceId", ""), "|", str(e.get("quote", ""))[:120])
     return 0
@@ -349,13 +365,128 @@ def find_pointer(sdir: Path, question: str):
             return rec["top"][0]["pointer"]
     return None
 
-def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path) -> int:
+def record_approver(sdir: Path, question: str, approved_by, **fields) -> None:
+    """Who approved the saved answer for this exact question; the last line wins.
+    approved_by None means un-saved."""
+    sdir.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "question": question, "approved_by": approved_by, **fields}
+    (sdir / "approvals.jsonl").open("a").write(json.dumps(entry) + "\n")
+
+def approver(sdir: Path, question: str) -> dict:
+    """The last approvals.jsonl entry for this question. No entry means a save from
+    before auto-cache existed, when only humans could approve."""
+    path = sdir / "approvals.jsonl"
+    if path.is_file():
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("question") == question and rec.get("approved_by"):
+                return rec
+            if rec.get("question") == question:
+                break
+    return {"approved_by": "human"}
+
+def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
+                  approved_by: str = "human", **fields) -> int:
     evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
     res = memory({"action": "approve", "ticket": ticket_result["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
     ok = res.get("status") in ("approved", "saved", "ok")
     print("approve:", res.get("status"), "" if ok else json.dumps(res)[:200])
-    log(sdir, "approve", question=question, pointer=pointer, result=res.get("status"))
+    log(sdir, "approve", question=question, pointer=pointer, result=res.get("status"), approved_by=approved_by)
+    if ok:
+        record_approver(sdir, question, approved_by, pointer=pointer, **fields)
     return 0 if ok else 1
+
+def find_top(sdir: Path, question: str):
+    """The last lookup's top row {score, path, pointer} for this exact question."""
+    path = sdir / "lookups.jsonl"
+    if not path.is_file():
+        return None
+    for line in reversed(path.read_text().splitlines()):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
+            return rec["top"][0]
+    return None
+
+def auto_cache_on() -> bool:
+    """Fleet default ON; SUPERJEV_AUTO_CACHE=0/off/false/no turns it off."""
+    return os.environ.get("SUPERJEV_AUTO_CACHE", "1").strip().lower() not in ("0", "off", "false", "no")
+
+def gate_command(claim: str, path: str) -> list:
+    return [sys.executable, str(Path(__file__).resolve().parent / "superjev.py"), "gate", "--json",
+            "--claim-mode", "evidence", "--claim", claim, path]
+
+def run_gate(claim: str, path: str):
+    """(verdict word, lowest claim score or None) from the existing check gate."""
+    try:
+        r = subprocess.run(gate_command(claim, path), capture_output=True, text=True, timeout=300)
+        body = json.loads(r.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return "ERROR", None
+    rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", (body.get("details") or {}).get("stdout") or "", re.M)
+    return body.get("verdict") or "ERROR", (min(float(x) for x in rows) if rows else None)
+
+def not_saved(sdir: Path, question: str, why: str) -> int:
+    print(f"not saved: {why}")
+    log(sdir, "auto-approve", question=question, result="not-saved", why=why)
+    return 1
+
+def auto_approve(principal: str, question: str, answer: str, sdir: Path) -> int:
+    """--answer: save the answer only if the check gate calls it CLEAN against a fresh top file."""
+    if not auto_cache_on():
+        print("not saved: auto-cache is off (--no-auto or SUPERJEV_AUTO_CACHE=0); a human can still --approve")
+        return 0
+    top = find_top(sdir, question)
+    if not top or not top.get("path"):
+        return not_saved(sdir, question, "no prior lookup with candidates for that exact question; run ask first")
+    pointer, evidence_file = top["pointer"], top["path"]
+    try:
+        text = Path(evidence_file).read_text(errors="replace")
+    except OSError as e:
+        return not_saved(sdir, question, f"cannot read {evidence_file}: {e.strerror or e}")
+    if has_secret(text) or has_secret(question) or has_secret(answer):
+        return not_saved(sdir, question, f"secret-held: {HELD_SECRET}")
+    listed = memory({"action": "sources", "pointer": pointer, "principal": principal, "limit": 100})
+    if listed.get("status") != "ok":
+        return not_saved(sdir, question, f"stale: pointer {pointer} is {listed.get('status')}")
+    row = next((s for s in listed.get("sources") or [] if s.get("originalPath") == evidence_file), None)
+    if not row or row.get("contentSHA") != sha256_file(Path(evidence_file)):
+        return not_saved(sdir, question, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
+    gated_source_id = row.get("sourceId")
+    verdict, score = run_gate(f"Question: {question} Answer: {answer}", evidence_file)
+    if verdict != "CLEAN" or score is None:
+        return not_saved(sdir, question, f"check gate verdict {verdict} (only CLEAN saves)")
+    if score < 0.80:
+        return not_saved(sdir, question, f"check gate score {score:.2f} is below the 0.80 auto-save floor")
+    out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
+    if out.get("status") == "verified-cache-hit":
+        print("already cached")
+        return 0
+    if out.get("status") != "ready":
+        return not_saved(sdir, question, f"search returned {out.get('status')} on {pointer}")
+    top_source_id = next((p.get("sourceId") for p in out.get("passages") or []), None)
+    if top_source_id != gated_source_id:
+        return not_saved(sdir, question,
+                          f"search's top source {top_source_id!r} differs from the gated file's source "
+                          f"{gated_source_id!r} ({evidence_file}); refusing to save mismatched evidence")
+    print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
+    return send_approval(principal, question, answer, pointer, out, sdir,
+                         approved_by="auto-check", evidence_file=evidence_file, score=score)
+
+def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
+    log(sdir, "miss", question=question, actual=actual)
+    print("miss recorded")
+    res = memory({"action": "forget", "principal": principal, "question": question})
+    if res.get("status") == "forgotten":
+        who = approver(sdir, question).get("approved_by", "human")
+        record_approver(sdir, question, None, removed_by="miss", was=who)
+        print(f"un-saved: the cached answer (approved_by: {who}) was removed from {', '.join(res.get('pointers') or [])}")
+    return 0
 
 def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None) -> int:
     pointer = pointer or find_pointer(sdir, question)
@@ -477,10 +608,19 @@ def _main() -> int:
         print(__doc__)
         return 2
     sdir = state_dir(principal)
+    if "--no-auto" in a:
+        os.environ["SUPERJEV_AUTO_CACHE"] = "0"
+        a = [x for x in a if x != "--no-auto"]
+        if not a:
+            print(__doc__)
+            return 2
     if a[0] == "--miss":
-        log(sdir, "miss", question=a[1], actual=" ".join(a[2:]))
-        print("miss recorded")
-        return 0
+        return miss(principal, a[1], " ".join(a[2:]), sdir)
+    if a[0] == "--answer":
+        if len(a) < 3:
+            print('usage: --answer "question" "answer"')
+            return 2
+        return auto_approve(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--approve":
         return approve(principal, a[1], a[2], sdir)
     if a[0] == "--add":

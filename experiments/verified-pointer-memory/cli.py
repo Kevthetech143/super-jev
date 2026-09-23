@@ -38,6 +38,7 @@ ACTIONS = {
     'search': ['pointer', 'question', 'principal'],
     'navigate': ['pointer', 'question', 'principal'],
     'cached': ['principal', 'question'],
+    'forget': ['principal', 'question'],
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
     'assist': ['attemptId', 'principal', 'reason', 'references'],
     'attempt': ['attemptId', 'principal'],
@@ -308,6 +309,8 @@ def run(request, config):
     if action == 'cached':
         return service.cached(request['principal'], request['question'],
                               request.get('pointer'), request.get('context', ''))
+    if action == 'forget':
+        return service.forget(request['principal'], request['question'], request.get('context', ''))
     if action == 'register':
         service.register(request['pointer'], request['dataset'], request['principals'])
         return {'status': 'registered'}

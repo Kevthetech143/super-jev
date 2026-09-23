@@ -38,7 +38,9 @@ and Stop-hook claim gate), [AGENT-GUIDE](docs/AGENT-GUIDE.md) (the daily loop), 
 
 ## The loop
 
-`ask` → read the top file yourself → answer → `--approve` a good hit, `--miss` a bad one, `--add` a fact that has no file. Connectors are how data gets in: onboard a folder once, and it stays answerable.
+`ask` → read the top file yourself → answer → `--answer "question" "your answer"` so a good answer saves itself → `--miss` a bad one, `--add` a fact that has no file.
+
+`--answer` is auto-cache: it runs the check gate on your answer against the top file `ask` returned, and saves it (like `--approve`, marked `approved_by: auto-check` with the evidence file and score) only when the verdict is CLEAN and the file is unchanged since connect. READ, blocked, stale or secret-held answers are not saved, and it says why. On by default; opt out with `--no-auto` or `SUPERJEV_AUTO_CACHE=0`. Human `--approve` still works (`approved_by: human`). Every cache hit prints who approved it, and `--miss` on a cached question un-saves it. Matching is exact wording only. Connectors are how data gets in: onboard a folder once, and it stays answerable.
 
 ## Maturity
 
