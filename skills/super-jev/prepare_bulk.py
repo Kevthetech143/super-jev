@@ -73,7 +73,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time
+import argparse, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -98,17 +98,39 @@ def _record_written(path: Path) -> None:
 # Token shapes are adapted from gitleaks' default rules; "1Password" (the app) is not
 # a password (digit lookbehind). GENERIC keywords start a word and their tail is capped.
 _PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").read_text())
-CARD_RE = re.compile(_PAT["card"])
-WORD_RE = re.compile(_PAT["word"], re.I)
-TOKEN_RE = re.compile(_PAT["token"], re.I)
-GENERIC_RE = re.compile(_PAT["generic"], re.I)
-SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I)
+CARD_RE = re.compile(_PAT["card"], re.A)
+WORD_RE = re.compile(_PAT["word"], re.I | re.A)
+TOKEN_RE = re.compile(_PAT["token"], re.I | re.A)
+GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
+SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I | re.A)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
 # line). Both are scrubbed out before the card check only; the keyword rule below
 # always runs against the original, unscrubbed text.
-ISO_DATE_RE = re.compile(_PAT["iso_date"])
-URL_RE = re.compile(_PAT["url"])
+ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
+URL_RE = re.compile(_PAT["url"], re.A)
+_CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+_NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
+_FOLD = {}
+
+
+def _fold_char(c: str) -> str:
+    if c not in _FOLD:
+        cat = unicodedata.category(c)
+        _FOLD[c] = "x" if cat[0] in "LM" or cat == "Cn" else "0" if cat == "Nd" else " "
+    return _FOLD[c]
+
+
+def _fold_run(m) -> str:
+    return "".join(map(_fold_char, m.group()))
+
+
+def normalize_for_scan(text: str) -> str:
+    """The one normalization both scanners apply (twin: normalizeForScan in src/secret-scan.ts):
+    NFKC, casefold, every control or whitespace char but newline to a space, any remaining
+    non-ASCII letter/mark/unassigned to "x" and digit to "0", anything else non-ASCII to a space."""
+    s = text.casefold() if text.isascii() else unicodedata.normalize("NFKC", text).casefold()
+    return _CTRL_RE.sub(" ", _NON_ASCII_RE.sub(_fold_run, s))
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
 
@@ -190,8 +212,9 @@ def _token_hit(text: str) -> bool:
 
 
 def has_secret(text: str) -> bool:
-    """Card-number check runs on the scrubbed text (dates/URLs removed); the
-    keyword and token checks always run on the original text."""
+    """Scans normalize_for_scan(text). Card-number check runs on the scrubbed text
+    (dates/URLs removed); the keyword and token checks run on the unscrubbed text."""
+    text = normalize_for_scan(text)
     return (bool(CARD_RE.search(_scrub_dates_and_urls(text))) or bool(WORD_RE.search(text))
             or _token_hit(text))
 
