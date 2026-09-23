@@ -64,10 +64,10 @@ def test_1password_prose_is_not_held_but_a_password_is():
 
 @pytest.mark.parametrize("line", ["key" * 150000, "key_" * 112500, "a" + "-key" * 112000 + "=",
                                   "secret-" * 64000 + ":"])
-def test_pathological_line_scans_in_under_a_second(line):
+def test_pathological_line_scans_quickly(line):
     t = time.monotonic()
     pb.has_secret(line)
-    assert time.monotonic() - t < 1.0
+    assert time.monotonic() - t < 0.3
 
 
 # 3. uninstall deletes only files Super Jev writes in its in-repo folders
@@ -81,10 +81,10 @@ def test_uninstall_leaves_a_user_folder_in_prepare_cache(tmp_path, monkeypatch, 
     (cache / "mine" / "keep.txt").write_text("user file")
     (cache / "notes.json").write_text("{}")
     (cache / "notes-held.txt").write_text("x")
+    (cache / setup.WRITTEN_MANIFEST).write_text("notes.json\nnotes-held.txt\n")
     ledger.mkdir()
     (ledger / "calls.jsonl").write_text("{}\n")
-    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", {cache: ("*.json", "*-held.txt"),
-                                                     ledger: ("calls.jsonl",)})
+    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", (cache, ledger))
     assert setup.main(["--uninstall"]) == 0
     assert (cache / "mine" / "keep.txt").read_text() == "user file"
     assert not (cache / "notes.json").exists() and not (cache / "notes-held.txt").exists()
