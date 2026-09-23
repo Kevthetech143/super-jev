@@ -818,7 +818,7 @@ def test_secret_scan_ignores_url_digits_but_still_holds_real_card_number(tmp_pat
     (root / "url.md").write_text(
         "# Report\nSee https://example.com/file/1234567890123456 for details.\n"
     )
-    (root / "card.md").write_text("# Card\nCard on file: 1234 5678 9012 3456\n")
+    (root / "card.md").write_text("# Card\nCard on file: 4111 1111 1111 1111\n")
 
     files, held = pb.inventory([root])
 

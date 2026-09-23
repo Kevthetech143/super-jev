@@ -27,3 +27,12 @@ test('Node scan matches the Python has_secret cases from the shared pattern file
   assert.equal(payloadHasSecret({ a: [{ b: 'passwd here' }] }), true);
   assert.equal(payloadHasSecret({ a: ['fine'] }), false);
 });
+
+test('2000 random sha256 digests never trip the scan; real cards and keys still held', async () => {
+  const { createHash, randomBytes } = await import('node:crypto');
+  const digests = Array.from({ length: 2000 }, () => createHash('sha256').update(randomBytes(32)).digest('hex'));
+  assert.deepEqual(digests.filter(hasSecret), []);
+  assert.equal(payloadHasSecret({ sources: digests.map((sha256) => ({ path: '/x/a.md', description: 'notes', sha256 })) }), false);
+  for (const t of ['card 4111 1111 1111 1111', '4111111111111111', '5500-0000-0000-0004', 'api_key = x', 'ghp_' + 'a1'.repeat(18)]) assert.equal(hasSecret(t), true, t);
+  assert.equal(payloadHasSecret({ sources: [{ description: 'card 4111111111111111', sha256: 'ab' }] }), true);
+});
