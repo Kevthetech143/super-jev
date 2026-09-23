@@ -616,6 +616,9 @@ class Service:
         if self.navigate_provider is None:
             return {'status': 'error', 'reason': 'Navigation is unavailable.'}
         result = self.navigate_provider(question, catalog, limits)
+        if (isinstance(result, dict) and result.get('status') == 'error'
+                and isinstance(result.get('reason'), str) and result['reason']):
+            return {'status': 'error', 'reason': result['reason']}
         if (not isinstance(result, dict)
                 or result.get('status') not in {'candidates', 'no-candidates',
                                                 'budget-exhausted'}

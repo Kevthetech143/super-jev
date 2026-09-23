@@ -16,8 +16,6 @@ export type { SourceDoc, EvidenceRole, EvidenceSpec, TraversalReport, RoleAssign
 export { StubEvaluator, scriptFromTable, choiceAnswer } from './stub.ts';
 export { planEnhancedRun, runEnhancedClassification, DEFAULT_PASSES } from './classify.ts';
 export type { ClassifyConfig, PassSpec, PassRecord, EnhancedRun } from './classify.ts';
-export { planInvestigation, runInvestigation } from './investigate.ts';
-export type { InvestigateConfig, InvestigateRun, InvestigationCase } from './investigate.ts';
 export { planSweep, runSweep, formatSweepPlan, formatSweepReport, buildQuestion, buildSweepRequest, cellsFor,
   validateQuestions, validateCells, questionCostFor, foldRecordKind, MAX_QUESTIONS_PER_CALL, DEFAULT_SWEEP_GATE } from './sweep.ts';
 export type { SweepQuestion, SweepInputRecord, SweepConfig, SweepCell, CellResult, RecordResult, SweepPlan, SweepRun } from './sweep.ts';

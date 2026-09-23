@@ -16,7 +16,7 @@ pretends it can.
 
 What this script CAN do: for a catch case that carries a `payload_path`
 (only present when `SUPERJEV_CATCH_KEEP_PAYLOAD=1` was set at decision
-time — see docs/hooks.md, "The catch ledger"), the saved (redacted) hook
+time — see docs/wire-into-claude-code.md, "The catch ledger"), the saved (redacted) hook
 payload IS a real payload this same door (`gate` or `verify`) can be
 re-run against. This script loads that payload and calls `hook <door>`
 again, offline, through whatever SUPERJEV_GATE_CMD/SUPERJEV_VERIFY_CMD the

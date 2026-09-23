@@ -34,8 +34,11 @@ KNOWN_VERDICTS = ("SUPPORTED", "NOT_SUPPORTED", "CONTRADICTED")
 
 def gate(description: str, path: str) -> dict:
     t = time.time()
-    r = subprocess.run([sys.executable, str(HERE / "dispatch.py"), "check", "--claim", description, path],
-                       capture_output=True, text=True)
+    try:
+        r = subprocess.run([sys.executable, str(HERE / "dispatch.py"), "check", "--claim", description, path],
+                           capture_output=True, text=True)
+    except ValueError as e:  # e.g. a null byte in the description; one bad file must not stop the rest
+        return {"state": "ERROR", "reason": f"cannot check this file: {e}", "secs": round(time.time() - t, 1)}
     txt = r.stdout + r.stderr
     secs = round(time.time() - t, 1)
     if CEILING_MSG in txt:

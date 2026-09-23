@@ -5,7 +5,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const cli = new URL('../src/chain-cli.ts', import.meta.url).pathname;
+const cli = new URL('../src/experimental/chain-cli.ts', import.meta.url).pathname;
 
 async function runCli(args: string[], timeoutMs = 5_000) {
   const child = spawn(process.execPath, [cli, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });

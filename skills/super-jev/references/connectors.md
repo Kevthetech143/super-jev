@@ -146,7 +146,7 @@ dates and URLs first, so a long numeric id in a URL or a run of dates on one
 line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
-operator decision; it never lifts the size-ceiling hold. A cheap writer model drafts one
+operator decision; it never lifts the size-ceiling hold. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,
@@ -166,9 +166,12 @@ approved answers. `--max-files` (default 250) refuses an oversized run before
 any drafting starts. `--no-connect` stops after drafting and gating, for a
 dry run.
 
-By default the writer is `claude -p --model haiku` (change the model with
-`--writer-model`) — a proven cheap default; bulk labeling should never run on
-a premium model. Every run prints a `writer: <command>` banner naming
+By default the writer is `claude -p --model haiku` when the `claude` CLI is
+installed (change the model with `--writer-model`) — a proven cheap default;
+bulk labeling should never run on a premium model. With no `claude` CLI, or
+with `--writer builtin`, a no-model writer quotes each file's own headings as
+its description and leaves the labels unknown, so the TypeSafe key alone is
+enough. Every run prints a `writer: <command>` banner naming
 whichever command actually runs, and, when neither `--writer-command` nor the
 `SUPERJEV_WRITER_COMMAND` env var is set, a second line recommending a cheap
 writer and naming that default. Systems without Claude Code can supply

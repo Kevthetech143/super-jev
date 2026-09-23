@@ -13,11 +13,11 @@
  */
 import { stat, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { Jev } from './jev.ts';
-import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
-import { planInvestigation, runInvestigation, type InvestigateConfig, type InvestigationCase } from './enhance/investigate.ts';
-import type { EvidenceRole, EvidenceSpec, SourceDoc } from './enhance/evidence.ts';
-import type { Evaluator } from './types.ts';
+import { Jev } from '../jev.ts';
+import { StubEvaluator, choiceAnswer } from '../enhance/stub.ts';
+import { planInvestigation, runInvestigation, type InvestigateConfig, type InvestigationCase } from './investigate.ts';
+import type { EvidenceRole, EvidenceSpec, SourceDoc } from '../enhance/evidence.ts';
+import type { Evaluator } from '../types.ts';
 
 class CliError extends Error {}
 

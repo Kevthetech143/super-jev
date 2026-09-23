@@ -38,7 +38,7 @@ their npm scripts without any env var).
 | Build/validate a catalog | `fetch` + hand-editing | build `catalog.json` as `{id, text, utterances?, negatives?, tags?}` per entry, then `python3 $S fetch "<a request you know the right answer to>" --catalog catalog.json --dry-run --json` to see the call plan and cost before spending anything | the dry-run plan: record count, call count, estimated tokens | use this to sanity-check a catalog's size and cost before a live run; there is no separate "validate" door — dry-run is the check | **advisory only** — a plan, not a correctness check |
 | Run the benches | `bench` | `python3 $S bench --dry-run --json` (plan and cost, no network) or `--stub` (offline synthetic run) or live (needs `TYPESAFE_API_KEY`) | the run plan (call count, token estimate) or, live, the harness's own accuracy/coverage/cost report | `--dry-run` never touches the network and always exits 5 without a key so nothing downstream reads it as a completed bench. A live bench is the only source of a real number for any door above | **the plan is trusted (pure arithmetic); a live number is only as good as the fixtures it was measured against** |
 | Read the ledger | `ledger` | `python3 $S ledger -n 20` | the last N calls (door, argv, exit code, timing) and a per-door count | this is the only record that tells you a door actually ran versus failed open silently — read it before trusting any claim a door made, including this page's own claims | **trusted as a factual log of what ran; it is not a judgment about correctness** |
-| Install the hooks | none — this is config, not a door | copy the snippet in `docs/hooks.md` into `~/.claude/settings.json`, pointing `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` at your own claim-gate/report-verify tools | nothing prints until a hook fires; then `gate`/`verify` output appears inline in the session, and a line lands in the ledger | start with `PostToolUse` only — it is advisory, cannot interrupt a turn, and has the clearest payoff. Add `Stop` once you trust it not to loop (a `stop_hook_active` guard exists but read the loop-guard section of `docs/hooks.md` first) | **advisory-only rollout recommended; not proven safe to block on yet** — see §4 |
+| Install the hooks | none — this is config, not a door | copy the snippet in `docs/wire-into-claude-code.md` into `~/.claude/settings.json`, pointing `SUPERJEV_GATE_CMD`/`SUPERJEV_VERIFY_CMD` at your own claim-gate/report-verify tools | nothing prints until a hook fires; then `gate`/`verify` output appears inline in the session, and a line lands in the ledger | start with `PostToolUse` only — it is advisory, cannot interrupt a turn, and has the clearest payoff. Add `Stop` once you trust it not to loop (a `stop_hook_active` guard exists but read the loop-guard section of `docs/wire-into-claude-code.md` first) | **advisory-only rollout recommended; not proven safe to block on yet** — see §4 |
 
 ## 2. One worked example per door
 
@@ -134,11 +134,11 @@ confidence 1.00, and never sent anywhere. Only what is left over needs a
 judge at all. `verify`'s own worker-verify door does this internally (see
 `~/.claude/skills/worker-verify/SKILL.md`, "HOW EVIDENCE IS FRAMED"); this
 repository carries the same pair of pure functions, `deriveFacts` and
-`preRules`, in `src/enhance/derive-facts.ts`, so any harness — not just
+`preRules`, in `src/experimental/derive-facts.ts`, so any harness — not just
 worker-verify — can read evidence the same way. `verify`'s door-absent
 fallback (no `worker-verify` installed and `SUPERJEV_VERIFY_CMD` unset) uses
 exactly this: it gathers a small git/test evidence set itself and runs it
-through `src/derive-facts-cli.ts` before it will settle anything, printing
+through `src/experimental/derive-facts-cli.ts` before it will settle anything, printing
 the DERIVED FACTS block first, then the pre-rule verdicts. It never calls a
 judge, so it can say `CONTRADICTED_BY_FACT`, but it can never say CLEAN — an
 unsettled claim there stays READ, unverified, not vouched for.
@@ -620,7 +620,7 @@ ever has to do the judging.
 - [`skills/super-jev/SKILL.md`](../skills/super-jev/SKILL.md) — the full
   reference: every flag, every exit code, the `ask` routing table, the hook
   contract in detail.
-- [`docs/hooks.md`](hooks.md) — the three Claude Code hooks, the wiring
+- [`docs/wire-into-claude-code.md`](wire-into-claude-code.md) — the three Claude Code hooks, the wiring
   snippet, block-versus-advisory, the loop guard, and the measured failure
   modes behind §4 above.
 - [`docs/harnesses.md`](harnesses.md) — where these hooks could attach on

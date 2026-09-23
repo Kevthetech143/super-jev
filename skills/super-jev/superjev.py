@@ -58,16 +58,17 @@ HOME = Path(os.path.expanduser("~"))
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent  # skills/super-jev/superjev.py -> repo root
 
-# Fleet-local fallbacks. Real on the machine this skill was authored on;
-# almost certainly absent on a fresh clone, where SUPERJEV_GATE_CMD and
-# SUPERJEV_VERIFY_CMD take over instead.
-FLEET_JEV_LIB = HOME / ".claude/skills/jev-check/lib/jev.py"
+# The default claim-gate door: the judge client shipped in this repo. It needs
+# only TYPESAFE_API_KEY. SUPERJEV_GATE_CMD, when set, replaces it.
+JEV_LIB = SKILL_DIR / "lib" / "jev_client.py"
+# Fleet-local fallback for `verify`. Real on the machine this skill was
+# authored on; absent on a fresh clone, where SUPERJEV_VERIFY_CMD takes over.
 FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 
-# The pure derive-facts/pre-rules pair (src/enhance/derive-facts.ts), reached
+# The pure derive-facts/pre-rules pair (src/experimental/derive-facts.ts), reached
 # through its own tiny CLI so a Python process can call it without an FFI.
 # Only used by `verify`'s door-absent fallback — see _derived_facts_fallback.
-DERIVE_FACTS_CLI = REPO_ROOT / "src" / "derive-facts-cli.ts"
+DERIVE_FACTS_CLI = REPO_ROOT / "src" / "experimental" / "derive-facts-cli.ts"
 
 # ================================================ EVIDENCE GUARD (blocklist + redactor)
 # The ONE place this file asks "may I open this path?" and "is this text safe
@@ -387,7 +388,7 @@ DEFAULT_HOOK_EVIDENCE_MAX_BYTES = 50_000
 # surrounding text dilutes it) but SHARPENS the draft-level OVERCLAIMS
 # flag — it stops being a symptom of a thin gather and starts reading as a
 # real "the draft claims more than the wide evidence carries" signal. See
-# docs/hooks.md ("gate v3 — wide window") for the full write-up, including
+# docs/wire-into-claude-code.md ("gate v3 — wide window") for the full write-up, including
 # the cliff: 0.85 over-blocks truths on this bench (t01 sits at 0.85 on
 # the wide read), 0.90 is the measured line.
 PREV_TURNS_ENV = "SUPERJEV_PREV_TURNS"
@@ -1127,7 +1128,7 @@ def _count_mismatch_reason(draft_text, evidence_text):
     the evidence counts.
 
     Never fires when the evidence carries no count for that label — that is
-    an evidence gap (see docs/hooks.md), not a contradiction, and firing on
+    an evidence gap (see docs/wire-into-claude-code.md), not a contradiction, and firing on
     it would turn "we could not look" into "you lied", the exact bug this
     file already guards against for OVERCLAIMS. Never pairs numbers across
     labels, and never pairs a bare number with anything."""
@@ -1211,7 +1212,7 @@ def _fact_block_reasons(facts):
 
     `SUPPORTED` (and any other non-CONTRADICTED_BY_FACT verdict — CHECKED,
     RESIDUE, advisory-only lines) never appears here and so never blocks
-    and never vetoes another arm; see docs/hooks.md."""
+    and never vetoes another arm; see docs/wire-into-claude-code.md."""
     return [f for f in (facts or []) if "CONTRADICTED_BY_FACT" in f]
 
 
@@ -1415,7 +1416,7 @@ _REPORT_MARKER_RE = re.compile(
 # block reason when the judge said it with HIGH confidence, at or above the
 # line, never at or below it. (Decided 2026-09-17, PR #18's open decision —
 # the earlier "blocks at or below the line" direction is gone; see
-# docs/hooks.md.)
+# docs/wire-into-claude-code.md.)
 #
 # A gate/verify run that comes back READ (exit 3, "advisory") can still
 # carry a claim-level or draft-level flag strong enough that letting it
@@ -1441,7 +1442,7 @@ _REPORT_MARKER_RE = re.compile(
 # SELF_CONTRADICTORY is never a block reason, alone or in company — a
 # calmer rewrite of a reply still reads as mildly self-contradictory to
 # jev's own scoring (hedging language does), and blocking on it was what
-# looped the Stop gate on 2026-09-17 (see docs/hooks.md, The loop guard).
+# looped the Stop gate on 2026-09-17 (see docs/wire-into-claude-code.md, The loop guard).
 # It still prints in the table as an advisory.
 #
 # A fabricated quote is already exit 2 from jev.py itself and already maps
@@ -1911,14 +1912,14 @@ def _hook_block_decision(flags, claim_rows=None, evidence=None):
 
 def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
     """gate v3 (wide evidence window; default rule). Calibrated on the
-    40-case gate-bench-20260917 wide read (see docs/hooks.md, "gate v3 —
+    40-case gate-bench-20260917 wide read (see docs/wire-into-claude-code.md, "gate v3 —
     wide window"):
 
       1. OVERCLAIMS at or above SUPERJEV_BLOCK_OVERCLAIM (default 0.90)
          blocks ON ITS OWN — no companion claim required. This supersedes
          v2/PR #20's "0.50 companion" rule (kept as SUPERJEV_RULE=v2 for
          A/B): the wide window sharpens OVERCLAIMS enough (see
-         docs/hooks.md, "gate v3 — wide window") that a confident reading
+         docs/wire-into-claude-code.md, "gate v3 — wide window") that a confident reading
          of it no longer needs a second claim to corroborate it. It is
          STILL gated on `_gather_healthy`, same as every other flag here
          — the wide window fixes the companion requirement, not the
@@ -1927,7 +1928,7 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
       2. A claim-level NOT_SUPPORTED/CONTRADICTED at or above
          SUPERJEV_BLOCK_CONF (default 0.80) is a SECONDARY trigger —
          2026-09-18, demoted from blocking to ADVISORY-ONLY (see
-         docs/hooks.md, "gate v4 — secondary arm demoted"): across both
+         docs/wire-into-claude-code.md, "gate v4 — secondary arm demoted"): across both
          gate-bench sets (70 cases) this arm never once was the sole
          reason a real lie got caught, and on the untuned set-2 replies it
          was the sole reason 5 true replies got blocked (longer,
@@ -1952,7 +1953,7 @@ def _hook_block_decision_v3(flags, claim_rows=None, evidence=None):
     no tools, as long as the gather is otherwise healthy. A reply is not
     made safe by the fact that this turn ran no tools; suppressing the
     primary arm on an empty current turn was worth three caught lies
-    against zero blocked truths on the 40-case bench (docs/hooks.md). The
+    against zero blocked truths on the 40-case bench (docs/wire-into-claude-code.md). The
     empty-current-turn health gate itself is otherwise unchanged by the
     2026-09-18 demotion — it still governs whether the secondary arm's
     advisory calls out the empty-turn caveat, same wording as before.
@@ -2542,7 +2543,7 @@ def _ledger_lines():
 # door invocation. The catch ledger is narrower and purpose-built: one
 # record per gate/verify hook DECISION (allow/block/advisory/unchecked),
 # small enough that an operator can tag each one fair/false/miss by hand and
-# read the three-number scoreboard `catch report` prints. See docs/hooks.md,
+# read the three-number scoreboard `catch report` prints. See docs/wire-into-claude-code.md,
 # "The catch ledger".
 
 def _default_catch_ledger_path():
@@ -2590,7 +2591,7 @@ def _catch_excerpt(text):
     through _catch_redact — secrets/credentials, emails, US phone numbers,
     SSN-shaped digit strings, and card numbers (an ungrouped 13+ digit run,
     or a grouped 4-4-4-4/4-6-5 run using one consistent separator, each
-    with its own narrow exception — see _catch_redact and docs/hooks.md) —
+    with its own narrow exception — see _catch_redact and docs/wire-into-claude-code.md) —
     and finally sliced to the 240 chars actually kept. No secret,
     credential, email, phone number, SSN-shaped string or card number ever
     lands in the catch ledger, because this excerpt is the only piece of
@@ -2606,7 +2607,7 @@ def catch_log(door, decision, reasons=None, draft_text=None, window_bytes=None,
     decision. `decision` is one of "block", "allow", "advisory", "unchecked",
     "advisory-forced" (the stop_hook_active re-run failsafe), or
     "advisory-judge" (the SUPERJEV_GATE_JUDGE_ADVISORY=1 failsafe — see
-    docs/hooks.md). `reasons` is the same strings --explain shows for
+    docs/wire-into-claude-code.md). `reasons` is the same strings --explain shows for
     this run (block_reasons/block_notes), never the raw evidence. `ms` is
     left as None (not guessed) when `start_time` was not captured.
 
@@ -3113,7 +3114,7 @@ def _cmd_catch_report(a):
     miss = sum(1 for r in records if r.get("tag") == "miss")
     untagged = sum(1 for r in records if r.get("tag") is None)
     # "advisory-forced" is a would-have-blocked stop_hook_active second pass
-    # (see docs/hooks.md) — reported here as its own line, "blocks
+    # (see docs/wire-into-claude-code.md) — reported here as its own line, "blocks
     # suppressed", never folded into "false stops" or "misses" by ITSELF,
     # because being demoted to advisory is neither: nothing was judged
     # right or wrong yet, a real block was just held back by the retry.
@@ -3144,7 +3145,7 @@ def _cmd_catch_report(a):
     if suppressed_and_tagged:
         print(f"  ({suppressed_and_tagged} of the above blocks-suppressed record(s) is "
               "also tagged fair/false and counted on that line too — suppressed and "
-              "fair/false answer different questions, see docs/hooks.md)")
+              "fair/false answer different questions, see docs/wire-into-claude-code.md)")
     if since:
         print(f"undated: {undated}")
     if not bot_filter:
@@ -3491,7 +3492,7 @@ def _catch_signal_body(signal):
         "",
         "Run `superjev catch list --id <id>` locally for the redacted detail "
         "behind any record id above — this issue body never carries "
-        "draft-derived text (see docs/hooks.md, \"Turning a repeat pattern "
+        "draft-derived text (see docs/wire-into-claude-code.md, \"Turning a repeat pattern "
         "into a fix PR\").",
         "",
         "---",
@@ -3593,6 +3594,8 @@ def _run_gh_issue_create(repo, title, body):
     or one containing shell-special characters is never mangled or
     truncated by argv limits."""
     tmp_path = None
+    if _has_secret(title) or _has_secret(body):
+        return False, "issue contains a secret; not sent"
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
                                          encoding="utf-8") as f:
@@ -3886,10 +3889,51 @@ def not_built(sub, json_mode=False):
 
 GATE_VERDICT = {
     0: "CLEAN — every claim is carried by the evidence at or above 0.80. Send it.",
-    3: "READ — a claim is red or under 0.80. A human reads the source before you send.",
+    3: "READ (blocked) — a claim is red or under 0.80. Do not send it; a human reads the source first.",
     2: "REJECT — a quoted span is not in the evidence. The citation is fabricated.",
 }
 GATE_VERDICT_WORD = {0: "CLEAN", 3: "READ", 2: "REJECT"}
+
+# Fail closed: a door that exits 0 has only earned CLEAN if its table says so.
+# Exit 0 with no readable claim row, a missing claim row, a red verdict, or a
+# claim under the 0.80 line is never CLEAN.
+GATE_UNREADABLE_EXIT = 1
+GATE_VERDICT[GATE_UNREADABLE_EXIT] = ("ERROR — the gate's output could not be read as a "
+                                      "verdict table. Treated as NOT clean.")
+GATE_VERDICT_WORD[GATE_UNREADABLE_EXIT] = "ERROR"
+
+
+def gate_verdict_line(code, out="", err=""):
+    """The VERDICT text for `code`. An unreadable table whose door printed its
+    own cause (a `jev: ...` line -- missing key, HTTP 401, no network) names that
+    cause instead of the generic "could not be read"; still ERROR, never clean."""
+    if code == GATE_UNREADABLE_EXIT:
+        causes = [l.strip() for l in f"{out}\n{err}".splitlines() if l.strip().startswith("jev:")]
+        if causes:
+            return (f"ERROR — Jev could not check this: {causes[-1][4:].strip()}. "
+                    "Treated as NOT clean.")
+    return GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}")
+
+
+def gate_fail_closed(code, out, n_claims=0):
+    """The exit code cmd_gate reports for a door run. Only ever tightens.
+
+    `n_claims` is the number of explicit --claim values sent (0 for a draft,
+    where the door splits the claims itself and the count is not known).
+    """
+    if code != 0:
+        return code
+    rows = [m for m in _FLAG_LINE_RE.finditer(out or "")]
+    claim_rows = [m for m in rows if m.group("key").startswith("c")]
+    if not claim_rows or len({m.group("key") for m in claim_rows}) < n_claims:
+        return GATE_UNREADABLE_EXIT
+    for m in rows:
+        if m.group("verdict") in NOTABLE_VERDICTS:
+            return 3
+    for m in claim_rows:
+        if m.group("verdict") != "SUPPORTED" or float(m.group("score")) < 0.80:
+            return 3
+    return 0
 
 
 def _gate_timeout():
@@ -4142,12 +4186,19 @@ def pattern_claim_answer(claim, evidence_text):
 
 
 def _load_jev_lib():
-    """Import the fleet jev lib (FLEET_JEV_LIB) for its ask()."""
+    """Import the judge client (JEV_LIB, built in by default) for its ask()."""
     import importlib.util
-    spec = importlib.util.spec_from_file_location("fleet_jev", str(FLEET_JEV_LIB))
+    spec = importlib.util.spec_from_file_location("fleet_jev", str(JEV_LIB))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _has_secret(text):
+    """prepare_bulk.has_secret, loaded from this skill directory."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prepare_bulk import has_secret
+    return has_secret(text)
 
 
 def _code_ask(state, questions):
@@ -4159,7 +4210,7 @@ _code_ask_live = _code_ask  # identity of the real judge; tests replace sj._code
 
 
 class _CodeLibMissing(Exception):
-    """FLEET_JEV_LIB is absent while the live code-mode judge needs it."""
+    """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
 def run_code_gate(evidence_items, claims, ask_fn=None):
@@ -4192,10 +4243,10 @@ def run_code_gate(evidence_items, claims, ask_fn=None):
     if pending:
         questions = {"c%d" % i: noul_code_question(c) for i, c in pending}
         ask = ask_fn if ask_fn is not None else _code_ask
-        if ask is _code_ask_live and not FLEET_JEV_LIB.exists():
+        if ask is _code_ask_live and not JEV_LIB.exists():
             raise _CodeLibMissing(
-                "no fleet jev lib at %s — install the jev-check skill "
-                "or inject a judge" % FLEET_JEV_LIB)
+                "no judge client at %s — restore lib/jev_client.py "
+                "or inject a judge" % JEV_LIB)
         res = ask(code_state(evidence_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
@@ -4296,7 +4347,7 @@ def cmd_gate(a):
     # The door subprocess is an evidence-mode requirement only: code mode
     # must not refuse (exit 5) for a lib file the CI runner does not have.
     if mode != "code":
-        bad = door_missing(GATE_CMD_ENV, FLEET_JEV_LIB)
+        bad = door_missing(GATE_CMD_ENV, JEV_LIB)
         if bad is not None:
             return door_refuse(json_mode, "gate", bad)
     if not a.draft and not a.claim:
@@ -4341,6 +4392,15 @@ def cmd_gate(a):
                 print(reason)
                 return 3
             except Exception as exc:
+                if "contains a secret; not sent" in str(exc):
+                    reason = "gate: %s" % exc
+                    if hook_mode:
+                        return 1, reason, ""
+                    if json_mode:
+                        emit_json("gate", "ERROR", 1, reason, {"claim_mode": mode}, [])
+                        return 1
+                    print(reason, file=sys.stderr)
+                    return 1
                 if not hook_mode:
                     raise
                 # the in-process lib call must never escape the hook:
@@ -4366,7 +4426,7 @@ def cmd_gate(a):
         print(text, end="")
         return code
 
-    cmd = [*door_cmd(GATE_CMD_ENV, FLEET_JEV_LIB), *evidence_paths, "--kit", "reply"]
+    cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), *evidence_paths, "--kit", "reply"]
     claims_tmp_path = None
     if a.claim:
         for claim in a.claim:
@@ -4398,12 +4458,14 @@ def cmd_gate(a):
         # exactly one object on stdout, and hook mode must never let the child's
         # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
         # inherit straight from this process regardless of contextlib redirects.
+        n_claims = len(a.claim or [])
         if json_mode:
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
                                       hook_mode=hook_mode, timeout=timeout,
                                       extra_ledger=extra_ledger)
+            code = gate_fail_closed(code, out, n_claims)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
-                      GATE_VERDICT.get(code, f"ERROR — jev-check exited {code}"),
+                      gate_verdict_line(code, out, err),
                       {"stdout": out, "stderr": err, "claim_mode": mode}, cmd)
             return code
         if hook_mode:
@@ -4417,10 +4479,21 @@ def cmd_gate(a):
             code, out, err = run_door(cmd, capture=True, door="gate", json_mode=False,
                                       hook_mode=True, timeout=timeout,
                                       extra_ledger=extra_ledger)
+            # Deliberately NOT gate_fail_closed here: the hook's door output is
+            # not always a claim table (a clean draft run can print no c<N> rows),
+            # so tightening it would turn every quiet allow into an advisory.
+            # cmd_hook fails closed itself on a non-zero code and on strong flags
+            # in `out` (_hook_block_reasons); it never reads exit 0 as a verdict
+            # beyond "no block".
             return code, out, err
-        code = run_door(cmd, door="gate", hook_mode=hook_mode, timeout=timeout,
-                        extra_ledger=extra_ledger)
-        print(f"\nVERDICT: {GATE_VERDICT.get(code, f'ERROR — jev-check exited {code}')}")
+        print("$ " + shlex.join(str(c) for c in cmd))
+        sys.stdout.flush()
+        code, out, err = run_door(cmd, capture=True, door="gate", hook_mode=hook_mode,
+                                  timeout=timeout, extra_ledger=extra_ledger)
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+        code = gate_fail_closed(code, out, n_claims)
+        print(f"\nVERDICT: {gate_verdict_line(code, out, err)}")
         return code
     finally:
         if claims_tmp_path:
@@ -4464,7 +4537,7 @@ def _verify_timeout():
 # of by eye. This fallback runs ONLY when the real door is unreachable. It
 # gathers a small, best-effort evidence set itself (never as thorough as
 # worker-verify's own atom extraction), hands it to the pure
-# src/enhance/derive-facts.ts pair over its CLI, and prints the DERIVED FACTS
+# src/experimental/derive-facts.ts pair over its CLI, and prints the DERIVED FACTS
 # block plus the pre-rule verdicts it settles for free. It never calls a
 # judge — there is no evidence gathered here worth paying for a model call
 # over — so it can say CONTRADICTED_BY_FACT with confidence 1.00, but it can
@@ -4611,7 +4684,7 @@ def _gh_pr_evidence(report_text, worktree, commands_log):
     """Best-effort PR state + checks off `gh`, for the verify fallback's
     derived-facts pass — the fallback's only source of PR truth, since it
     has no worker-verify door to run `gh pr view` for it. Returns one
-    `evidence.prs[]` entry (the shape src/enhance/derive-facts.ts's
+    `evidence.prs[]` entry (the shape src/experimental/derive-facts.ts's
     `Evidence.prs` already expects) or None. Runs both `gh pr view N --json
     state,mergedAt,headRefName,baseRefName,statusCheckRollup` and `gh pr
     checks N` — the checks command is the primary source for the checks
@@ -4679,7 +4752,7 @@ def _gh_pr_evidence(report_text, worktree, commands_log):
 
 def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, guard=None):
     """Best-effort git/test/PR evidence, gathered read-only, in the shape
-    src/enhance/derive-facts.ts's `Evidence` type expects. Never raises;
+    src/experimental/derive-facts.ts's `Evidence` type expects. Never raises;
     a block this cannot gather is simply left out, same contract as
     worker-verify's own "not gathered" blocks. `commands_log`, if passed,
     collects every `gh` command this run attempted (see _gh_pr_evidence),
@@ -6076,7 +6149,7 @@ def _build_receipts_block(receipts, budget, draft_text=None):
 # prints `success`. On the 2026-09-17 bench the proof for t08/t10/t12/t13
 # ("PR #7 merged", "PR #8 landed with CI green", "PRs 8, 9, 10, 11 merged")
 # was exactly those lines, and the shim's window carried none of them while
-# the offline bench's did — see docs/hooks.md, "gate v3 — receipts".
+# the offline bench's did — see docs/wire-into-claude-code.md, "gate v3 — receipts".
 _RECEIPT_WORTHY_RE = re.compile(
     r'gh pr merge'
     r'|gh pr checks'
@@ -6287,8 +6360,8 @@ def _backfill_receipts_from_transcript(records, before_index=None, cap=None):
 # itself uses).
 #
 # This is a pure-Python MIRROR of the `windowFacts` half of
-# src/enhance/derive-facts.ts, deliberately duplicated rather than bridged:
-# the Stop hook runs on every turn, `node src/derive-facts-cli.ts` pays a
+# src/experimental/derive-facts.ts, deliberately duplicated rather than bridged:
+# the Stop hook runs on every turn, `node src/experimental/derive-facts-cli.ts` pays a
 # whole node process's startup per call, and REPO_ROOT does not resolve to
 # this repo at all on a fleet install (the skill lives at
 # ~/.claude/skills/super-jev/, whose parent is not a checkout), so the
@@ -9178,7 +9251,7 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
          (`_backfill_receipts_from_transcript`) covering every turn the
          Stop hook never ran on. The store alone left the live shim with
          zero receipts on all 40 cases of the 2026-09-17 bench while the
-         transcripts carried 1 to 15 lines each — see docs/hooks.md,
+         transcripts carried 1 to 15 lines each — see docs/wire-into-claude-code.md,
          "gate v3 — receipts backfill and the labelled count arm". This
          layer takes at most RECEIPTS_BUDGET_SHARE of the cap (see
          `_build_receipts_block`); uncapped, it grew on a long session
@@ -9237,7 +9310,7 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
 
     `meta["current_turn_empty"]` is True whenever the CURRENT turn
     contributed no tool_result content, regardless of whether previous-turn
-    or receipt material exists (2026-09-17, see docs/hooks.md, "gate v3 —
+    or receipt material exists (2026-09-17, see docs/wire-into-claude-code.md, "gate v3 —
     empty current turn"). Before this, a tool-free current turn made this
     function return None outright — even with 10 KB of previous-turn
     evidence sitting right there — which routed `cmd_hook` to the
@@ -9333,7 +9406,7 @@ def _derive_evidence_text_from_transcript(transcript_path, n=None, max_bytes=Non
         # previous-turn/receipts material wholesale. That stopped stale
         # evidence from silently BACKING a tool-free reply, but it also
         # stopped that same evidence from BLOCKING one, and those two are
-        # not symmetric (see docs/hooks.md, "gate v3 — empty current
+        # not symmetric (see docs/wire-into-claude-code.md, "gate v3 — empty current
         # turn"). Now we keep going and let the previous-turn/receipts
         # sections below fill the window; `current_turn_empty` (set above)
         # is how cmd_hook tells the block decision this window's current
@@ -9482,7 +9555,7 @@ def derive_evidence_window(transcript_path, n=None, max_bytes=None, session_id=N
     exact wide-evidence-window assembler `hook gate` judges a draft
     against, exposed under a stable, non-underscore name for a bench or
     any other external caller to import directly rather than
-    reimplementing turn-boundary logic of its own (see docs/hooks.md,
+    reimplementing turn-boundary logic of its own (see docs/wire-into-claude-code.md,
     "gate v3 — empty current turn": a second implementation of the window
     is why the 2026-09-17 bench and the live shim ever disagreed in the
     first place). Same arguments, same return shape — a text string or
@@ -11824,7 +11897,7 @@ def cmd_hook(a):
         # drops — without them the OVERCLAIMS-alone gate could never see
         # that every claim was in fact supported. A hook-driven verify gets
         # no --test-cmd/--pr (see the hardcoded test_cmd="" above), so it
-        # can NEVER prove a test-count claim — docs/hooks.md says so in
+        # can NEVER prove a test-count claim — docs/wire-into-claude-code.md says so in
         # plain words — but it DOES know whether it had a worktree to look
         # at, which is exactly what gather_health below checks.
         flags = _parse_strong_flags(door_out)
@@ -13004,11 +13077,11 @@ def cmd_status(a):
     json_mode = getattr(a, "json", False)
     repo = repo_path()
     scripts = npm_scripts(repo) or {}
-    live_gate = door_missing(GATE_CMD_ENV, FLEET_JEV_LIB) is None
+    live_gate = door_missing(GATE_CMD_ENV, JEV_LIB) is None
     live_verify = door_missing(VERIFY_CMD_ENV, FLEET_VERIFY_PY) is None
     npm_ok = resolve_npm() is not None
     gate_what = (f"${GATE_CMD_ENV}" if os.environ.get(GATE_CMD_ENV)
-                else f"claim-gate ({FLEET_JEV_LIB})")
+                else f"claim-gate ({JEV_LIB})")
     verify_what = (f"${VERIFY_CMD_ENV}" if os.environ.get(VERIFY_CMD_ENV)
                   else f"report-verify ({FLEET_VERIFY_PY})")
 
