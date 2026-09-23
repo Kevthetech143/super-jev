@@ -101,3 +101,18 @@ def test_confirm_floor_is_085(tmp_path, monkeypatch, score, kept):
     monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
         cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": score}]}), ""))
     assert (ask.confirm_one("What date did I fertilize in May?", str(f))[0] is not None) is kept
+
+
+# A note that only mentions the word is prose; a keyword followed by a value is still held.
+@pytest.mark.parametrize("text", ["reset your password in settings", "the password reset flow is broken",
+                                  "password manager notes", "passwords live in the vault",
+                                  "Remember to get an API key from the dashboard", "PASSWORD"])
+def test_bare_password_word_is_not_held(text):
+    assert not pb.has_secret(text)
+
+
+@pytest.mark.parametrize("text", ["password: hunter2", "password=" + "hunter2hunter2", "the password is hunter2",
+                                  "the password for the router is hunter2", "api_key = abc123",
+                                  "PASSWORD=\"Tr0ub4dor\"", "passwd: x"])
+def test_password_with_a_value_is_still_held(text):
+    assert pb.has_secret(text)

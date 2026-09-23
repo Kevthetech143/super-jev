@@ -786,7 +786,9 @@ def main() -> int:
         elif "binary" not in why:
             print(f"      then run: {rerun}")
 
-    report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "approved": [str(p) for p in connect_set],
+    # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
+    report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principal,
+              "excludes": a.excludes, "noRecurse": a.no_recurse, "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
