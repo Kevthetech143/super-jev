@@ -140,6 +140,37 @@ def test_run_filters_by_principal(tmp_path):
     assert list(result["principals"].keys()) == ["health-fitness"]
 
 
+def test_run_with_config_resolves_relative_registry_and_db(tmp_path):
+    """--config points at a memory config.json ({"db": ..., "registry": ...})
+    like the real one memory.sh/ask.py use; relative paths resolve against
+    the config file's own directory, the same way cli.py resolves them --
+    never the unrelated ~/.local/state/super-jev/_memory test store."""
+    registry = make_registry(tmp_path, {
+        "health-reviewed": dataset_entry(["health-fitness"]),
+    })
+    db = make_pointers_db(tmp_path, {
+        "health-reviewed": {"dataset": "health-reviewed", "principals": ["health-fitness"]},
+    })
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"db": db.name, "registry": registry.name}))
+
+    code, result = av.run(["--config", str(config)])
+    assert code == 0
+    assert result["status"] == "clean"
+
+
+def test_run_without_config_or_registry_and_db_errors(tmp_path):
+    code, result = av.run([])
+    assert code == 2
+    assert result["status"] == "error"
+
+
+def test_run_config_missing_file_errors(tmp_path):
+    code, result = av.run(["--config", str(tmp_path / "no-config.json")])
+    assert code == 2
+    assert result["status"] == "error"
+
+
 def test_run_clean_status_when_no_flags(tmp_path):
     registry = make_registry(tmp_path, {
         "health-reviewed": dataset_entry(["health-fitness"]),

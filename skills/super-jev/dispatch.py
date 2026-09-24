@@ -14,7 +14,7 @@ TOOLS = {
     "check": "Check a claim against evidence",
     "verify": "Verify an agent's work",
     "memory": "Use the opt-in experimental verified-reuse pointer/cache",
-    "audit-visibility": "Read-only: compare who can see a pointer against who connected it",
+    "audit-visibility": "Read-only: compare who can see a pointer against who connected it (--config PATH to the real pointer-memory config.json memory.sh/ask.py use, or explicit --registry/--db)",
 }
 
 
