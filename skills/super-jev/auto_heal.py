@@ -22,6 +22,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -85,33 +86,50 @@ def _lock_holder_alive(lock: Path) -> bool:
     return True
 
 
+def _publish_lock(lock: Path, payload: bytes) -> bool:
+    """Atomically create `lock` with `payload` already fully written.
+
+    Write the payload to a private per-thread temp file first, then publish it with
+    os.link(), which -- like O_CREAT|O_EXCL -- fails with FileExistsError if the target
+    already exists, so only one racing thread/process can win. Publishing this way means
+    any racer that successfully sees the lock file always sees the *complete* payload:
+    there is no window where the file exists but is still empty/partial. A plain
+    O_CREAT|O_EXCL open followed by a separate write() left exactly that window open --
+    on a busy/loaded box (observed on Linux CI, not on a quiet Mac) a second thread could
+    os.open() -> FileExistsError -> read an empty file -> json.loads fails -> treated as a
+    dead/stale lock -> unlink + recreate, letting several racers each "win" their own lock.
+    """
+    tmp = lock.parent / f".{lock.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        tmp.write_bytes(payload)
+        try:
+            os.link(str(tmp), str(lock))
+            return True
+        except FileExistsError:
+            return False
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _acquire_lock(principal: str, pointer: str) -> bool:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = _lock_path(principal)
     payload = json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer}).encode()
-    # O_CREAT|O_EXCL is atomic (single syscall): when the lock file does not yet exist, only
-    # one racing process can win the create. This closes the check-then-write gap a separate
-    # is_file() check followed by write_text() would leave open, which let concurrent lookups
-    # (same principal, same tick) each see "no lock" and all start their own refresh.
+    if _publish_lock(lock, payload):
+        return True
+    if _lock_holder_alive(lock):
+        return False
+    # Dead/stale lock: clear it and retry once. This retry still has a narrow race with
+    # another racer doing the same thing, but that only matters for the rare dead-holder
+    # case; the common contended case above is race-free.
     try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        if _lock_holder_alive(lock):
-            return False
-        # Dead/stale lock: clear it and retry once. This retry still has a narrow race with
-        # another racer doing the same thing, but that only matters for the rare dead-holder
-        # case; the common contended case above is race-free.
-        try:
-            lock.unlink()
-        except OSError:
-            pass
-        try:
-            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            return False
-    with os.fdopen(fd, "wb") as f:
-        f.write(payload)
-    return True
+        lock.unlink()
+    except OSError:
+        pass
+    return _publish_lock(lock, payload)
 
 
 def _release_lock(principal: str) -> None:
