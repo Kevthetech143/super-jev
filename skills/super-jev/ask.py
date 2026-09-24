@@ -396,6 +396,26 @@ def _is_overloaded(text: str) -> bool:
     t = (text or "").lower()
     return "529" in t or "overload" in t
 
+# preparation-required / refresh-required is a STALE pointer (needs a refresh run),
+# not a live failure of the provider -- benching it hides its real, current facts
+# behind a generic "benched" message instead of the honest "still preparing" one
+# (post-#133 regression: amazon's amazon-bm-fb-brain-root sat preparation-required
+# on 451 files > the 250-file cap and got benched, turning its real facts into
+# "no candidates" every call). Only a real error (5xx/timeout/provider failure)
+# should count toward the circuit breaker. Same rule auto_heal.py already uses to
+# decide what is worth auto-refreshing -- reuse it so the two never drift apart.
+_is_stale_kind = auto_heal.is_stale_kind
+
+_ROOT_PTR_RE = re.compile(r"^(?P<principal>.+)-brain-root(-\d+)?$")
+
+def is_principal_brain_root(ptr: str, principal: str) -> bool:
+    """The principal's own brain root pointer(s) (`<principal>-brain-root`,
+    `-root-2`, ...) are never benched: a bot's own brain is its primary source of
+    truth, so hiding it behind a cool-off (even a deserved one) is worse than a
+    slower call. It still shows its real status (including stale) every time."""
+    m = _ROOT_PTR_RE.match(ptr)
+    return bool(m) and m.group("principal") == principal
+
 def health_path(sdir: Path) -> Path:
     return sdir / "pointer_health.json"
 
@@ -412,21 +432,31 @@ def save_pointer_health(sdir: Path, health: dict) -> None:
     except Exception:
         pass  # health tracking is best-effort; never block a lookup on it
 
-def record_pointer_outcome(health: dict, ptr: str, ok: bool, elapsed: float) -> None:
-    rec = health.setdefault(ptr, {"fails": 0, "last_fail_ts": 0.0, "avg_latency": 0.0, "calls": 0})
+def record_pointer_outcome(health: dict, ptr: str, ok: bool, elapsed: float, stale: bool = False) -> None:
+    rec = health.setdefault(ptr, {"fails": 0, "last_fail_ts": 0.0, "avg_latency": 0.0, "calls": 0, "stale": False})
     rec["calls"] = rec.get("calls", 0) + 1
     prev_avg = rec.get("avg_latency", 0.0)
     rec["avg_latency"] = prev_avg + (elapsed - prev_avg) / rec["calls"]
+    rec["stale"] = stale
+    # preparation-required/refresh-required is not a live failure -- it never
+    # feeds the fail counter (up or down): it neither trips the breaker nor
+    # papers over a real streak of errors that happened right before it.
+    if stale:
+        return
     if ok:
         rec["fails"] = 0
     else:
         rec["fails"] = rec.get("fails", 0) + 1
         rec["last_fail_ts"] = time.time()
 
-def pointer_benched(health: dict, ptr: str):
-    """(is_benched, seconds_remaining, fail_count) -- N consecutive failures
-    benches a pointer for a short cool-off instead of hitting it (and waiting
-    on it) again every call."""
+def pointer_benched(health: dict, ptr: str, principal: str = ""):
+    """(is_benched, seconds_remaining, fail_count) -- N consecutive real errors
+    benches a pointer for a short cool-off instead of hitting it (and waiting on
+    it) again every call. Never benches the principal's own brain root: that is
+    the bot's primary source of truth, and a stale (preparation-required) root
+    is not a failure -- see record_pointer_outcome."""
+    if is_principal_brain_root(ptr, principal):
+        return False, 0, (health.get(ptr) or {}).get("fails", 0)
     rec = health.get(ptr)
     fails = rec.get("fails", 0) if rec else 0
     if fails < BENCH_FAIL_THRESHOLD:
@@ -878,7 +908,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     original_pointers = pointers
     active_pointers, error_lines = [], []
     for ptr in original_pointers:
-        benched, remaining, fails = pointer_benched(health, ptr)
+        benched, remaining, fails = pointer_benched(health, ptr, principal)
         if benched:
             error_lines.append(f"[{ptr}] benched ({fails} consecutive failures, cooling off {int(remaining)}s more)")
         else:
@@ -913,7 +943,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     merged, errored, statuses = [], 0, {}
     for ptr, kind, rows, elapsed, ok in results:
-        record_pointer_outcome(health, ptr, ok, elapsed)
+        record_pointer_outcome(health, ptr, ok, elapsed, stale=_is_stale_kind(kind))
         if kind == "candidates":
             statuses[ptr] = "candidates"
             merged += [(c.get("score", 0), c.get("originalPath", ""), ptr) for c in rows]
@@ -930,7 +960,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # and never changes what this lookup reports for the pointer that triggered it;
             # it only means the *next* lookup may no longer hit it.
             heal_note = ""
-            if auto_heal.is_stale_kind(kind):
+            stale = auto_heal.is_stale_kind(kind)
+            if stale:
                 result = auto_heal.maybe_heal(ptr, principal)
                 if result == "started":
                     heal_note = " (auto-heal: refresh started in background)"
@@ -940,7 +971,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                     heal_note = " (auto-heal: refreshed recently, cooling down)"
                 elif result == "rate-limited":
                     heal_note = " (auto-heal: hourly refresh limit reached)"
-            error_lines.append(f"[{ptr}] {kind}" + hint + heal_note)
+            # [STALE] marks a pointer that is just waiting on its own refresh (not
+            # a live error, never benched) so it reads differently at a glance from
+            # a real provider error -- appended after the existing kind/hint/heal
+            # text so it never changes what those already say.
+            error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
