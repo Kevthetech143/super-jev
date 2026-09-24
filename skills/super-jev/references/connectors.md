@@ -163,8 +163,13 @@ file is skipped on the next run; `--refresh` additionally drops any cached
 file no longer present on disk from the cache and the connect set, noting it
 in the report, and a reconnect that hits an existing pointer with
 `replace:true` prints a one-line warning that it rotates that pointer's
-approved answers. `--max-files` (default 250) refuses an oversized run before
-any drafting starts. `--no-connect` stops after drafting and gating, for a
+approved answers. `--max-files` (default 250) refuses an oversized first
+connect (no cache yet) before any drafting starts. A `--refresh` of an
+already-cached pointer instead guards on the files that actually need a
+writer call this run — unchanged cached files are free and reused, so a
+folder that grew past `--max-files` can still refresh as long as what
+actually changed stays under the cap; raise `--max-files` to opt into a
+larger writer cost. `--no-connect` stops after drafting and gating, for a
 dry run.
 
 By default the writer is `claude -p --model haiku` when the `claude` CLI is

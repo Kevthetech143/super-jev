@@ -11,7 +11,7 @@ Run from this skill directory: `python3 dispatch.py <tool> ...` (or `ask.py` dir
 
 | Command | Example | What it does |
 |---|---|---|
-| `ask` | `python3 ask.py --principal YOUR_AGENT "question in your own words"` | Cache first, then every connected pointer in parallel; open the top file before answering. `--approve` a good hit so the next ask is instant; `--add` a fact with no file; `--miss` when found elsewhere. Errors print per pointer, never hidden as no-candidates. |
+| `ask` | `python3 ask.py --principal YOUR_AGENT "question in your own words"` | Cache first, then every connected pointer in parallel; open the top file before answering. `--approve` a good hit so the next ask is instant (add `--rank N` or `--file PATH` to approve a different listed candidate than the top one, possible-tier included, from that candidate's own pointer); `--add` a fact with no file; `--miss` when found elsewhere. Errors print per pointer, never hidden as no-candidates. |
 | `navigate` | `memory --input '{"action":"navigate","pointer":"POINTER_ID","principal":"YOUR_AGENT_NAME","question":"..."}'` | Lower-level call `ask` wraps: searches one connected pointer's catalog for candidate files. Open the top file; a high score never proves it's in scope. |
 | `skills` | `python3 dispatch.py skills --request "..."` | Skills connector: discover candidate skills from configured trusted local roots; suggestions never execute them. |
 | `check` | `python3 dispatch.py check --claim "..." FILE` | Check a claim or draft against evidence. |
@@ -45,6 +45,10 @@ Proven in current use: skill search, file-level `navigate`, checked connect, bul
 ## Safeguards
 
 `ready` is evidence, not an answer guarantee; review full support and original provenance before approval, and reuse an exact verified hit only within its returned scope. Preserve actual errors, uncertainty and missing preparation — a pointer error must never be hidden inside a "no candidates" reply. Connected means registered, not automatically synced; never invent a checked date or treat cache approval time as source freshness. No new access, privacy approval, execution permission, automatic syncing, or autonomous scheduler is granted here.
+
+A pointer stuck `preparation-required`/`refresh-required` is just waiting on its own refresh, not a live failure — it's marked `[STALE]` in the error line, never counts toward the sick-pointer circuit breaker, and never gets benched. A principal's own `<principal>-brain-root` pointer (its own brain) is never benched either, even after real repeated failures — it still shows its true status every call rather than a generic "benched" message.
+
+`ask.py --principal YOUR_AGENT --followup` re-tries pending misses and proposes a fresh top file for one-step `--approve` only when it's confirmed, isn't the exact file already named wrong, and actually shares subject terms with the question — a same-topic neighbor file (e.g. a different date's report in the same folder) can out-score everything on routing alone without being about what was asked, so it's never proposed.
 
 ## Banned patterns
 
