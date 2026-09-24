@@ -158,7 +158,9 @@ def memory(req: dict) -> dict:
 
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
-    entry = _redact({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields})
+    # Not redacted/truncated: lookups.jsonl is the working index find_pointer/find_top
+    # read back by exact question, pointer and on-disk path (--approve, --answer).
+    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
 
 # --- Live decision traces (traces.jsonl, next to lookups.jsonl) ------------------
@@ -196,7 +198,7 @@ def _rotate_if_needed(path: Path, cap_bytes: int = TRACE_CAP_BYTES) -> None:
 def traces_enabled() -> bool:
     """SUPERJEV_TRACES=0 (or any falsy-looking value) turns tracing off, e.g. to
     measure the overhead traces.jsonl writes add to a hot path."""
-    return os.environ.get("SUPERJEV_TRACES", "1") not in ("0", "false", "False", "")
+    return os.environ.get("SUPERJEV_TRACES", "1").strip().lower() not in ("0", "off", "false", "no", "")
 
 def write_trace(sdir: Path, **fields) -> None:
     if not traces_enabled():

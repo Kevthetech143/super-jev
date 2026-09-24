@@ -213,12 +213,29 @@ def test_trace_leaves_prose_secret_words_in_paths_untouched(tmp_path):
     assert rec["file"] == path
 
 
-def test_log_lookups_jsonl_also_redacts_secret_looking_paths(tmp_path):
-    ask.log(tmp_path, "outcome", file="/tmp/notes/api_key_prod789-dump.md")
+def test_lookups_jsonl_stays_raw_so_find_top_still_matches(tmp_path):
+    """lookups.jsonl is the working index --answer/--approve read back by exact
+    question and on-disk path; redacting or truncating it breaks auto-cache."""
+    q = "where is my token-2fa setup? " + "x" * 600
+    path = "/notes/password_2024_notes.md"
+    ask.log(tmp_path, "lookup", question=q, top=[{"score": 0.9, "path": path, "pointer": "p1", "possible": False}])
 
-    rec = read_jsonl(tmp_path / "lookups.jsonl")[0]
-    assert "prod789" not in json.dumps(rec)
-    assert "[REDACTED]" in rec["file"]
+    top = ask.find_top(tmp_path, q)
+    assert top and top["path"] == path
+    assert ask.find_pointer(tmp_path, q) == "p1"
+
+
+@pytest.mark.parametrize("val", ["0", "off", "OFF", "no", "False", " 0 "])
+def test_superjev_traces_off_spellings(tmp_path, monkeypatch, val):
+    monkeypatch.setenv("SUPERJEV_TRACES", val)
+    ask.write_trace(tmp_path, kind="trace", lookup_id="x", question="q")
+    ask.write_outcome(tmp_path, "x", "q", "right")
+    assert not (tmp_path / "traces.jsonl").exists()
+
+
+def test_path_secret_unicode_dash_and_case():
+    assert ask.path_has_secret("PASSWORD\u2011hunter2.md")
+    assert not ask.path_has_secret("password-reset-guide.md")
 
 
 def test_superjev_traces_env_switch_disables_tracing(tmp_path, monkeypatch):
