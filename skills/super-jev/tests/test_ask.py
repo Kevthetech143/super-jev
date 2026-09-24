@@ -121,7 +121,9 @@ def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path
     monkeypatch.setattr(ask, "memory", fake_memory)
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 1
+    # A healthy pointer answering the question is a real result: the sibling
+    # pointer's error stays visible (below), but no longer fails the whole lookup.
+    assert rc == 0
     out = capsys.readouterr().out
     assert "/hit.md" in out
     assert "[p2]" in out
@@ -160,7 +162,7 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
     sdir = tmp_path / "state"
     rc = ask.lookup("what color is the car?", "alice", sdir)
 
-    assert rc == 1  # the broken pointer still counts as unresolved
+    assert rc == 0  # the broken pointer stays visible, but the healthy hit still succeeds
     top = ask.find_top(sdir, "what color is the car?")
     assert top == {"score": 0.9, "path": str(note), "pointer": "healthy", "possible": False}
 
