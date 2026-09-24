@@ -56,6 +56,10 @@ WRITE_BASH_PATTERNS = [
 ]
 
 
+# Write sinks that are never a file on disk; `2>/dev/null` must not trip the leash.
+HARMLESS_BASH_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
+
+
 def _glob_to_regex(pattern):
     """Turn a simple '*'-glob into an anchored regex. No other glob syntax."""
     return "^" + re.escape(pattern).replace(r"\*", ".*") + "$"
@@ -109,24 +113,27 @@ def get_allowlist(data, config):
     return []
 
 
-def _resolve(path):
+def _resolve(path, cwd=None):
     """Normalize a path safely: expand ~, resolve relative-to-cwd and '..'
     (abspath), then resolve symlinks (realpath). macOS's default filesystem
     is case-insensitive, so callers that compare resolved paths should
     casefold them too (see _resolve_ci)."""
-    return os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    path = os.path.expanduser(path)
+    if cwd and not os.path.isabs(path):
+        path = os.path.join(os.path.expanduser(cwd), path)
+    return os.path.realpath(os.path.abspath(path))
 
 
-def _resolve_ci(path):
+def _resolve_ci(path, cwd=None):
     """_resolve, then casefolded for a case-insensitive compare — macOS's
     default (HFS+/APFS case-insensitive) filesystem treats /Foo and /foo as
     the same path; a case-sensitive compare here would let a worker dodge
     the leash by changing case."""
-    return _resolve(path).casefold()
+    return _resolve(path, cwd).casefold()
 
 
-def path_is_denied_always(path, deny_list):
-    norm = _resolve_ci(path)
+def path_is_denied_always(path, deny_list, cwd=None):
+    norm = _resolve_ci(path, cwd)
     for pat in deny_list:
         pat_norm = pat.casefold()
         if "*" in pat_norm:
@@ -137,10 +144,10 @@ def path_is_denied_always(path, deny_list):
     return False
 
 
-def path_is_allowed(path, allowlist):
+def path_is_allowed(path, allowlist, cwd=None):
     if not allowlist:
         return False
-    norm = _resolve_ci(path)
+    norm = _resolve_ci(path, cwd)
     for allowed in allowlist:
         allowed_norm = _resolve_ci(allowed)
         if norm == allowed_norm or norm.startswith(allowed_norm.rstrip("/") + "/"):
@@ -156,7 +163,9 @@ def extract_bash_write_targets(cmd):
     targets = []
     for pat in WRITE_BASH_PATTERNS:
         for m in re.finditer(pat, cmd):
-            targets.append(m.group(1))
+            t = m.group(1).strip("'\"")
+            if t and t not in HARMLESS_BASH_TARGETS and not t.startswith("/dev/fd/"):
+                targets.append(t)
     return targets
 
 
@@ -170,22 +179,24 @@ def decide(data, config):
     deny_list = get_always_deny(config)
     allowlist = get_allowlist(data, config)
 
-    if tool_name in ("Write", "Edit", "NotebookEdit"):
+    cwd = data.get("cwd") or None
+
+    if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
         if not path:
             return "allow", "no path in tool_input"
-        if path_is_denied_always(path, deny_list):
+        if path_is_denied_always(path, deny_list, cwd):
             return "deny", f"leash: denied path (always-deny list): {path}"
-        if not path_is_allowed(path, allowlist):
+        if not path_is_allowed(path, allowlist, cwd):
             return "deny", f"leash: path not in worker allow-list: {path}"
         return "allow", "path in allow-list"
 
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
         for target in extract_bash_write_targets(cmd):
-            if path_is_denied_always(target, deny_list):
+            if path_is_denied_always(target, deny_list, cwd):
                 return "deny", f"leash: bash write target on always-deny list: {target}"
-            if not path_is_allowed(target, allowlist):
+            if not path_is_allowed(target, allowlist, cwd):
                 return "deny", (
                     "leash: bash write target not in worker allow-list "
                     f"(best-effort parse): {target}"

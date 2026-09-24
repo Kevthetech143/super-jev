@@ -258,3 +258,50 @@ def test_main_allows_lead_write_via_cli(tmp_path):
         env={"PATH": "/usr/bin:/bin"},
     )
     assert result.returncode == 0
+
+
+# --- adversarial review additions ---
+
+def _bash(cmd, allowed, cwd=None):
+    data = {"agent_id": "a1", "tool_name": "Bash", "tool_input": {"command": cmd}}
+    if cwd:
+        data["cwd"] = str(cwd)
+    return leash.decide(data, {"default": [str(allowed)], "always_deny": [".env"]})
+
+
+def test_bash_dev_null_redirect_not_blocked(tmp_path):
+    # False positive: every `2>/dev/null` from a worker was denied.
+    assert _bash("ls missing 2>/dev/null", tmp_path)[0] == "allow"
+    assert _bash("echo hi >/dev/stderr", tmp_path)[0] == "allow"
+
+
+def test_bash_quoted_target_outside_allowlist_denied(tmp_path):
+    # Bypass: quotes stayed in the target, so it resolved under the (allowed) cwd.
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside" / "f.txt"
+    action, _ = _bash(f"echo x > '{outside}'", allowed, cwd=allowed)
+    assert action == "deny"
+    action, _ = _bash(f'echo x > "{outside}"', allowed, cwd=allowed)
+    assert action == "deny"
+
+
+def test_bash_relative_target_resolved_against_payload_cwd(tmp_path, monkeypatch):
+    # Relative targets must resolve against the agent's cwd from the payload,
+    # not wherever the hook process happens to run.
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(allowed)
+    assert _bash("echo x > f.txt", allowed, cwd=other)[0] == "deny"
+    monkeypatch.chdir(other)
+    assert _bash("echo x > f.txt", allowed, cwd=allowed)[0] == "allow"
+
+
+def test_multiedit_outside_allowlist_denied(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    data = {"agent_id": "a1", "tool_name": "MultiEdit",
+            "tool_input": {"file_path": str(tmp_path / "outside.py"), "edits": []}}
+    assert leash.decide(data, {"default": [str(allowed)]})[0] == "deny"

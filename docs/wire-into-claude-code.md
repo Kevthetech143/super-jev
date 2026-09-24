@@ -40,7 +40,7 @@ reply/trace files on 2026-09-21 (block case and pass case both behaved).
 ## 3. Worker Leash — PreToolUse hook (fourth hook)
 
 `skills/super-jev/leash.py` (wired by `skills/super-jev/hooks/pretooluse-leash.sh`)
-is a fourth hook, on the `PreToolUse` event, matching `Write|Edit|NotebookEdit|Bash`.
+is a fourth hook, on the `PreToolUse` event, matching `Write|Edit|MultiEdit|NotebookEdit|Bash`.
 It is **not installed by default** — copy the snippet below into your own
 `settings.json` to turn it on, and remove it the same way.
 
@@ -87,7 +87,7 @@ occasionally missing a write it should have caught.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           { "type": "command", "command": "/absolute/path/to/skills/super-jev/hooks/pretooluse-leash.sh" }
         ]
