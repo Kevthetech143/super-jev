@@ -167,6 +167,94 @@ def test_partial_pointer_failure_still_returns_healthy_results_rc0(tmp_path, mon
     assert "unresolved: 1 of 2 pointers errored" in out
 
 
+def test_preparation_required_never_counts_toward_the_fail_streak():
+    health = {}
+    for _ in range(ask.BENCH_FAIL_THRESHOLD * 2):
+        ask.record_pointer_outcome(health, "stuck", ok=False, elapsed=1.0, stale=True)
+    benched, _, fails = ask.pointer_benched(health, "stuck")
+    assert benched is False
+    assert fails == 0
+
+
+def test_preparation_required_does_not_erase_a_real_prior_fail_streak():
+    health = {}
+    for _ in range(ask.BENCH_FAIL_THRESHOLD - 1):
+        ask.record_pointer_outcome(health, "flaky", ok=False, elapsed=1.0)
+    # A stale reading in between real errors must not reset the streak either.
+    ask.record_pointer_outcome(health, "flaky", ok=False, elapsed=1.0, stale=True)
+    ask.record_pointer_outcome(health, "flaky", ok=False, elapsed=1.0)
+    benched, _, fails = ask.pointer_benched(health, "flaky")
+    assert benched is True
+    assert fails == ask.BENCH_FAIL_THRESHOLD
+
+
+def test_principals_own_brain_root_is_never_benched():
+    health = {}
+    for _ in range(ask.BENCH_FAIL_THRESHOLD * 5):
+        ask.record_pointer_outcome(health, "testbot-brain-root", ok=False, elapsed=1.0)
+    benched, _, _ = ask.pointer_benched(health, "testbot-brain-root", "testbot")
+    assert benched is False
+    # A split root (root-2, root-3, ...) is covered the same way.
+    for _ in range(ask.BENCH_FAIL_THRESHOLD * 5):
+        ask.record_pointer_outcome(health, "testbot-brain-root-2", ok=False, elapsed=1.0)
+    benched2, _, _ = ask.pointer_benched(health, "testbot-brain-root-2", "testbot")
+    assert benched2 is False
+    # Another principal's root pointer is a different bot's brain and still benches normally.
+    for _ in range(ask.BENCH_FAIL_THRESHOLD):
+        ask.record_pointer_outcome(health, "testbot-brain-root", ok=False, elapsed=1.0)
+    benched3, _, _ = ask.pointer_benched(health, "testbot-brain-root", "other-bot")
+    assert benched3 is True
+
+
+def test_lookup_never_benches_or_skips_the_principals_own_brain_root(tmp_path, monkeypatch, capsys):
+    sdir = tmp_path / "state"
+    health = {}
+    for _ in range(ask.BENCH_FAIL_THRESHOLD * 3):
+        ask.record_pointer_outcome(health, "testbot-brain-root", ok=False, elapsed=1.0)
+    ask.save_pointer_health(sdir, health)
+
+    calls = []
+
+    def fake_memory(req):
+        calls.append((req["action"], req.get("pointer")))
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": ["testbot-brain-root"]}
+        if req["action"] == "navigate":
+            return {"status": "preparation-required"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.lookup("q", "testbot", sdir)
+
+    assert ("navigate", "testbot-brain-root") in calls
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "[testbot-brain-root]" in out
+    assert "[STALE]" in out
+    assert "benched" not in out
+
+
+def test_stale_error_line_is_marked_stale(tmp_path, monkeypatch, capsys):
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": ["p1"]}
+        if req["action"] == "navigate":
+            return {"status": "preparation-required"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.lookup("q", "alice", tmp_path)
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "[p1] preparation-required" in out
+    assert "[STALE]" in out
+
+
 def test_all_pointers_failing_still_exits_1_with_no_healthy_result(tmp_path, monkeypatch, capsys):
     sdir = tmp_path / "state"
 
