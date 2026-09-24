@@ -110,6 +110,35 @@ export function askLookupArgs(principal: string, question: string): string[] {
 
 export const MISS_LINE = "Super Jev: I didn't have this. Want me to find it by hand and save it for next time?";
 
+// ---------------------------------------------------------------------------
+// Miss-with-candidates parsing -- ask.py's `cached` action can miss (no
+// approved answer) while still surfacing ranked candidate files, printed as
+// lines like " 0.85  /path/to/file.md  [pointer-name]  possible-note". The
+// chat CLI must not dump that raw line to the user: it turns it into a real
+// short reply (top file name + one-line why).
+// ---------------------------------------------------------------------------
+export type MissCandidate = { score: number; path: string; pointer: string };
+
+const CANDIDATE_LINE = /^\s*([\d.]+)\s+(\S+)\s+\[([^\]]+)\]/;
+
+/** Top ranked candidate from a miss (no CACHE HIT) ask.py run, or null when
+ * there truly are none (no-candidates, all pointers errored, etc). Never
+ * called on a cache hit -- callers check parseHit first. */
+export function parseMissCandidate(stdout: string): MissCandidate | null {
+  if (stdout.startsWith('CACHE HIT')) return null;
+  for (const line of stdout.split('\n')) {
+    const m = line.match(CANDIDATE_LINE);
+    if (m) return { score: Number(m[1]), path: m[2], pointer: m[3] };
+  }
+  return null;
+}
+
+/** Short human reply for a miss-with-candidates: top file name + one-line why
+ * -- never the raw score/pointer line. */
+export function formatMissCandidateReply(candidate: MissCandidate): string {
+  return `Top file: ${candidate.path} -- closest match we found (score ${candidate.score.toFixed(2)}), but no approved answer is saved for this yet.`;
+}
+
 export const HELP_TEXT = `Super Jev commands:
   /help     show this help
   /setup    re-run first-time setup (API key, principal, folders)
