@@ -26,6 +26,18 @@ A `preparation-required` result, an unknown pointer, or onboarding a new person/
 python3 dispatch.py memory --principal YOUR_AGENT_NAME
 ```
 
+## Live decision traces and Jev's voice
+
+Every lookup (cache hits too, tier `cache`/`stale`) appends one redacted JSON line to `$STATE/traces.jsonl`: id, question, routing, content-check scores, final ranking, tier, timings, errors — never file contents or secrets. Rotates at ~20MB (one `.1` kept). `--approve` marks the last lookup for that question "right", `--miss` "wrong", `--add` after a miss "wrong, added". `ask.py --principal YOUR_AGENT --trace-report [--days 7]` reports right/wrong/unlabeled and top wrong questions.
+
+When a lookup returns no usable answer, the last line `ask.py` prints is exactly:
+
+```
+Super Jev: I didn't have this. Want me to find it by hand and save it for next time?
+```
+
+**A harness relaying `ask.py` output to a human must pass that line on verbatim.**
+
 ## Maturity
 
 Proven in current use: skill search, file-level `navigate`, checked connect, bulk prepare, `check` as a description gate, dataset and pointer listing, and the not-connected path. Experimental: passage-level `search`, saved-answer reuse (`approve`), and `verify` — treat their results as leads and read the evidence twice.
