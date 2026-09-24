@@ -608,6 +608,18 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
         return top
     if not is_near_twin(cluster[0][1], cluster[1][1]):
         return top
+    # A hub file (README/index/etc, see is_hub_file) in the cluster means the
+    # sort already made a deliberate hub-demotion call -- see sort_metric --
+    # to rank a real topic file above it, or (rarer) left the hub at the top
+    # because nothing else beat it. Either way that ordering reflects a real
+    # content-vs-navigation-hub judgment the sort already made; re-judging a
+    # hub against a low-confidence sibling on short snippets alone (2026-09-24
+    # regression: "how should I organize my stock campaigns" fell from rank 1
+    # to 2 when a new marginal candidate formed a near-twin with the hub
+    # README that answered the question) is more likely to override a correct
+    # call than fix a wrong one, so hub files sit out the tie-break entirely.
+    if any(is_hub_file(p) for _, p, _ in cluster):
+        return top
     winner = judge_near_twin(question, cluster)
     if not winner:
         return top
