@@ -245,7 +245,16 @@ ANSWER_LABEL = ("Passage {n}, choose only if it answers the question: a rule, pl
                 "date, status or view on what is asked (a passage that only shares a word "
                 "with the question is none)")
 # Live-number asks: no possible tier, a file must confirm at CONFIRM_FLOOR.
-LIVE_RE = re.compile(r"\b(how much|balance|breakeven|break even|right now)\b", re.I)
+# "how much" alone used to be enough (any bare "how much X" counted as live),
+# but that caught non-money asks like "how much cheaper and faster is this"
+# (EXPLORE.md, recall80 bench, dropped at 0.80 with no possible tier). "how
+# much" now only counts as live when it names a money word too; the plain
+# live markers (balance/breakeven/right now) still gate on their own.
+LIVE_RE = re.compile(r"\b(balance|breakeven|break even|right now)\b", re.I)
+LIVE_HOWMUCH_RE = re.compile(
+    r"\bhow much\b.{0,40}\b(balance|owe|owed|worth|cost|price|due|total|left|"
+    r"remaining|money|cash|pay|paid|spend|spent|charge|charged|fee|fees|bill|"
+    r"dollars?|bucks)\b", re.I)
 
 # Routing score at/above which a read file stays "possible" even when the content
 # check finds no answer (opinion asks like "should I invest" rarely read as answered).
@@ -267,14 +276,37 @@ def is_value_question(question: str) -> bool:
     return bool(VALUE_RE.search(question))
 
 def is_live_value_question(question: str) -> bool:
-    return bool(LIVE_RE.search(question))
+    return bool(LIVE_RE.search(question)) or bool(LIVE_HOWMUCH_RE.search(question))
 
-OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|are)\b", re.I)
+# The narrower slice of VALUE_RE this round loosens for the possible tier: "how
+# many" and "how much" only. worth/owe/owed/price/cost/total stay excluded --
+# those are exactly the near-miss shapes ("what is owed", "what price did we
+# pay") the 0.85 confirm floor was raised to block, per test_retrieval_recall
+# and test_review_recall_holes.
+HOWCOUNT_RE = re.compile(r"\b(how many|how much)\b", re.I)
+
+def is_howcount_question(question: str) -> bool:
+    return bool(HOWCOUNT_RE.search(question))
+
+OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|are|"
+                     r"which|where)\b", re.I)
+# "what" is not in OPEN_RE outright: "what car do I have" and "what time does it
+# depart" are "what" questions that DO want one exact value, and treating every
+# "what" as open reintroduced the near-miss false hits the exact-value label was
+# built to stop (test_hardening_round3/4). Only "what ... <answer verb>" -- a
+# casual ask about what a file says/covers/means, not a fact lookup -- gets the
+# open treatment (idea B, 2026-09-23, recall80 bench: tools-audit's "what swap
+# path services did we discover" was one of the 7 rejections this targets).
+WHAT_ANSWER_RE = re.compile(
+    r"\bwhat\b.{0,40}\b(say|says|said|cover|covers|mean|means|discover|discovered|"
+    r"discuss|discusses|find|found|include|includes|show|shows|about)\b", re.I)
 
 def confirm_label(question: str) -> str:
-    """Open how/should/why/when questions ask "does it answer"; the rest (and any
-    value question) ask for the exact value."""
-    open_q = OPEN_RE.match(question) and not is_value_question(question)
+    """Open how/should/why/when/which/where questions, and "what ... say/cover/mean"
+    style casual asks, ask "does it answer"; the rest (and any value question) ask
+    for the exact value."""
+    open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)) \
+        and not is_value_question(question)
     return ANSWER_LABEL if open_q else CONFIRM_LABEL
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
@@ -441,6 +473,21 @@ def path_rank(question: str, path: str) -> tuple:
     name = " ".join(parts[-2:]).replace("-", " ").replace("_", " ")
     return (term_hits(query_terms(question), name), "/global/reuse/" not in path)
 
+# Navigation hubs: a table of contents, not a topic file. Its own content/routing
+# score often ties or beats a real note that answers the question, so it is moved
+# into the possible group (see lookup()) and sorts by content there like any other
+# possible file -- the real note that passed the content check outranks the index
+# that merely points to it.
+HUB_STEMS = {"index", "catalog", "tools-used", "handoff", "readme"}
+
+def is_hub_file(path: str) -> bool:
+    stem = Path(path).stem.lower()
+    if stem in HUB_STEMS:
+        return True
+    # A file whose name is a template (e.g. "_TEMPLATE-report", "campaign-template")
+    # is a shape to copy, not a topic file; treat it like a navigation hub.
+    return "template" in stem
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
         print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
@@ -512,13 +559,23 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             error_lines.append(f"[content-check] error: {check_error}")
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
-        # Value questions need a confirmed score; no possible tier.
-        if not is_value_question(question):
+        # Value questions need a confirmed score; no possible tier -- except
+        # "how many" / non-live "how much" (is_howcount_question), which get the
+        # possible tier back same as any other question. wheel-radar (0.67, "how
+        # many put opportunities") and EXPLORE (0.80, "how much cheaper and
+        # faster") were both dropped here even though neither is a live-money ask
+        # (idea A, 2026-09-23, recall80 bench). Other value words (worth/owe/
+        # owed/price/cost/total) and any live figure stay gated: those are the
+        # near-miss shapes the 0.85 confirm floor exists to block.
+        if not is_value_question(question) or (is_howcount_question(question)
+                                                 and not is_live_value_question(question)):
             possible = {p: (FALLBACK_NOTE if p in wpaths else POSSIBLE_NOTE) for p in to_check
                         if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
             # A strongly routed file that was read keeps a possible slot even if the
             # answer check found nothing (opinion asks); never for live-value asks.
-            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question) else []):
+            # Never for any value question (count or money) -- only plain opinion asks.
+            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question)
+                      and not is_value_question(question) else []):
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
                         and scores.get(p, 0) < CONFIRM_FLOOR:
                     possible[p] = POSSIBLE_NOTE
@@ -531,10 +588,56 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                     or (notes.get(p) == INCONCLUSIVE and p not in wpaths)):
                 # A route-kept file shows no content score above the possible floor.
                 keep[p] = (scores.get(p, POSSIBLE_FLOOR if p in possible else s), p, ptr)
+            # An index/catalog/handoff file is a table of contents, not evidence
+            # itself; move it into the possible group so the real note it points
+            # to (which has a real content score) always outranks it.
+            if p in keep and p not in possible and is_hub_file(p):
+                possible[p] = POSSIBLE_NOTE
         dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
-        # Confirmed files first, then the content/routing blend, then the name tie-break.
-        merged = sorted(keep.values(), key=lambda m: (m[1] not in possible, round(rank_score(m[0], route.get(m[1], 0)), 2),
-                                                      path_rank(question, m[1])), reverse=True)
+
+        def metric_of(p: str) -> tuple:
+            """(has_content, content_or_0, route) for a kept path. A route-kept
+            path that was never given a real content score (scores has no entry
+            for it) reports has_content=False so it never outranks a path that
+            does have one, no matter how high its routing score is."""
+            c = scores.get(p)
+            return (c is not None, c if c is not None else 0.0, route.get(p, 0))
+
+        def better(a: str, b: str) -> bool:
+            """True if path a should rank above path b within the possible
+            group: any real content score beats route-only; between two real
+            scores the higher one wins unless they round to a near-tie, in
+            which case routing breaks it; two route-only paths fall back to
+            routing alone."""
+            ha, ca, ra = metric_of(a)
+            hb, cb, rb = metric_of(b)
+            if ha != hb:
+                return ha
+            if not ha:
+                return ra > rb
+            if round(ca, 2) == round(cb, 2):
+                return ra > rb
+            return ca > cb
+
+        def sort_metric(m: tuple) -> tuple:
+            """Sort key for every kept file, confirmed or possible alike:
+            content score first (rounded to 2 decimals, so a near-tie falls
+            through to the route component), then routing only to break that
+            near-tie, then the name tie-break. A hub-type file (see
+            is_hub_file) ranks below every other kept file regardless of its
+            content score, since it is a table of contents, not evidence."""
+            s, p, ptr = m
+            if p in possible:
+                has_content, content, r = metric_of(p)
+            else:
+                c = scores.get(p)
+                has_content, content, r = (c is not None, c if c is not None else s, route.get(p, 0))
+            return (not is_hub_file(p), has_content, round(content, 2), r, path_rank(question, p))
+
+        # Non-hub files first (sort_metric's leading True), then content score
+        # alone with routing only as a near-tie breaker (see metric_of/better/
+        # sort_metric above), then the name tie-break.
+        merged = sorted(keep.values(), key=sort_metric, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
