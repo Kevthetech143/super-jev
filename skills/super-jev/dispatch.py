@@ -6,6 +6,7 @@ import shlex
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 TOOLS = {
     "help": "Quick Start for New Agents and focused setup answers",
@@ -133,6 +134,19 @@ def main(args: list[str]) -> int:
                 output = (json.dumps(body) + "\n").encode()
             sys.stdout.buffer.write(output)
             return result.returncode
+        if tool == "skills" and "--request" in cmd:
+            # The launcher only reads --request-file; turn an inline --request into one.
+            i = cmd.index("--request")
+            if i + 1 >= len(cmd):
+                print(json.dumps({"status": "error", "reason": "--request needs a value"}))
+                return 2
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump({"request": cmd[i + 1]}, f)
+            cmd[i:i + 2] = ["--request-file", f.name]
+            try:
+                return subprocess.run(cmd, env=env).returncode
+            finally:
+                os.unlink(f.name)
         return subprocess.run(cmd, env=env).returncode
     except NotSetUp as exc:
         print(json.dumps({"status": "error", "reason": "not-set-up",
