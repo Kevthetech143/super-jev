@@ -17,16 +17,25 @@ def test_secret_in_dict_key_path_is_redacted(tmp_path):
     assert "hunter2" not in (tmp_path / "traces.jsonl").read_text()
 
 
-def test_stale_cache_hit_prints_voice_line(tmp_path, monkeypatch, capsys):
-    # Cache hit whose source changed -> answer withheld (rc 1) = no usable answer.
+def test_stale_cache_hit_withholds_and_falls_through_to_live_search(tmp_path, monkeypatch, capsys):
+    # Cache hit whose source changed -> stale answer withheld, then a fresh live search.
     src = tmp_path / "src.txt"; src.write_text("new")
     rec = ask.manual_record_path(tmp_path, "alice", "q")
     rec.parent.mkdir(parents=True)
     rec.write_text(f"source_path: {src}\nsource_sha256: {'0'*64}\n")
-    monkeypatch.setattr(ask, "memory", lambda r: {"status": "verified-cache-hit", "answer": "a"})
+    calls = []
+    def fake(r):
+        calls.append(r["action"])
+        if r["action"] == "cached":
+            return {"status": "verified-cache-hit", "answer": "OLD-ANSWER"}
+        return {"status": "ok", "pointers": []}
+    monkeypatch.setattr(ask, "memory", fake)
     rc = ask.lookup("q", "alice", tmp_path)
+    out = capsys.readouterr().out
     assert rc == 1
-    assert capsys.readouterr().out.rstrip("\n").splitlines()[-1] == ask.VOICE_LINE
+    assert "panel" in calls  # live search ran
+    assert "OLD-ANSWER" not in out
+    assert out.rstrip("\n").splitlines()[-1] == ask.VOICE_LINE
 
 
 def test_miss_after_cache_hit_does_not_relabel_an_older_live_lookup(tmp_path, monkeypatch):

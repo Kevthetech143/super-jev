@@ -197,4 +197,4 @@ def test_stale_pointer_line_names_the_refresh_command(tmp_path, monkeypatch, cap
                         {"status": "preparation-required"})
     assert ask.lookup("q", "me", tmp_path / "s") == 1
     assert "[x] preparation-required; its files changed since connect. Run: python3 skills/super-jev/" \
-           "prepare_bulk.py --refresh --pointer x --principal me --root" in capsys.readouterr().out
+           "prepare_bulk.py --refresh --pointer x --principal me" in capsys.readouterr().out

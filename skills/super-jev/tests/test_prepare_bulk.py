@@ -869,6 +869,28 @@ def test_refresh_without_cache_keeps_first_connect_refusal(tmp_path, monkeypatch
     assert "REFUSED: 3 files exceed --max-files 2" in out
 
 
+def test_refresh_replays_recorded_no_recurse_and_excludes(tmp_path, monkeypatch, capsys):
+    # Fleet 2026-09-24: a hand --refresh without --no-recurse grew tools/ to 634 files.
+    root = _big_root(tmp_path, 2)
+    (root / "sub").mkdir(); (root / "sub" / "deep.md").write_text("# Deep\n")
+    (root / "INDEX.md").write_text("# Index\n")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 2)
+    (cache_dir / "my-records-report.json").write_text(json.dumps(
+        {"pointer": "my-records", "roots": [str(root)], "principals": ["alice"],
+         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20}))
+    monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
+                                      "--refresh", "--no-connect", "--no-findability"])
+    rc = pb.main()
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "inventory: 2 files to prepare" in out
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["noRecurse"] is True and report["excludes"] == ["INDEX.md"] and report["limit"] == 20
+
+
 def test_held_txt_written_with_masked_line_and_pattern_type(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()

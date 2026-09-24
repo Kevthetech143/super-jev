@@ -604,6 +604,26 @@ def manual_label_rows(principal: str, status: str = None, kind: str = None,
     return rows, excluded
 
 
+def replay_recipe(a) -> None:
+    """--refresh replays the pointer's recorded recipe for anything not given on the command line,
+    so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
+    try:
+        rep = json.loads((CACHE_DIR / f"{a.pointer}-report.json").read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(rep, dict):
+        return
+    a.roots = a.roots or rep.get("roots") or None
+    a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
+    a.excludes = a.excludes or rep.get("excludes") or []
+    a.no_recurse = a.no_recurse or bool(rep.get("noRecurse"))
+    a.allow_held = a.allow_held or bool(rep.get("allowHeld"))
+    if a.limit is None and isinstance(rep.get("limit"), int):
+        a.limit = rep["limit"]
+    print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
+          f"no-recurse {a.no_recurse}, limit {a.limit or 50}, allow-held {a.allow_held})")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", dest="roots", action="append")
@@ -614,7 +634,7 @@ def main() -> int:
                          "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
-    ap.add_argument("--limit", type=int, default=50); ap.add_argument("--max-files", type=int, default=250)
+    ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
                     help="builtin: no model call, descriptions quoted from each file's headings (needs only the "
@@ -657,6 +677,10 @@ def main() -> int:
             print(f"\n{excluded} excluded (as_of unknown)")
         return 0
 
+    if a.refresh and a.pointer:
+        replay_recipe(a)
+    if a.limit is None:
+        a.limit = 50
     if not a.roots or not a.principals or not a.pointer:
         print("REFUSED: --root, --pointer and --principal are required unless --list is given"); return 2
     if a.limit > 50:
@@ -853,7 +877,8 @@ def main() -> int:
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
-              "excludes": a.excludes, "noRecurse": a.no_recurse, "approved": [str(p) for p in connect_set],
+              "excludes": a.excludes, "noRecurse": a.no_recurse, "limit": a.limit,
+              "allowHeld": a.allow_held, "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:

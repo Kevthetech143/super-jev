@@ -39,6 +39,14 @@ def test_skills_preserves_arguments_and_seat_roots(tmp_path, family):
     assert result.stdout.splitlines() == expected
 
 
+def test_skills_inline_request_becomes_request_file(tmp_path):
+    root, skill = installed(tmp_path)
+    stub(root / 'skill-search/search.sh', 'shift; cat "$1"\n')
+    result = run(skill, 'skills', '--request', 'print a return label')
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == {'request': 'print a return label'}
+
+
 def test_find_preserves_backend_json_and_nonzero_status(tmp_path):
     root, skill = installed(tmp_path)
     stub(root / 'fleet-retrieval-experiment/run.sh', 'echo \'{"status":"preparation-required"}\'\nexit 4\n')
