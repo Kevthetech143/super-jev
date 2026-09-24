@@ -694,6 +694,8 @@ def test_cache_hit_on_manual_pointer_with_changed_source_is_invalidated_not_serv
                      "evidence": [{"sourceId": "s", "quote": "The answer.",
                                   "path": "/registry/.prepared-xyz/0.txt", "contentSHA": "x"}],
                      "freshness": {"mode": "snapshot"}, "resolution": "retrieval"}
+        if req["action"] == "panel":  # stale answer withheld; live search runs instead
+            return {"pointers": []}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
