@@ -1,0 +1,11 @@
+{
+  "_comment": "Example leash.json for skills/super-jev/leash.py. Not loaded by default — copy to leash.json next to leash.py, or point LEASH_CONFIG at it. Keys are agent_id or agent_type values; 'default' applies when no more specific key matches. Each value is a list of directories a sub-agent with that key may write inside.",
+  "default": [
+    "/Users/admin/some-worktree/worker-a"
+  ],
+  "always_deny": [
+    ".env",
+    "*secret*",
+    "/tmp/ai-wrapper"
+  ]
+}
