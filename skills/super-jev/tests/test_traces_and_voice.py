@@ -181,6 +181,60 @@ def test_trace_redacts_secret_shaped_fields_and_truncates_long_ones(tmp_path):
     assert len(rec["notes"]) < 900
 
 
+def test_trace_redacts_secret_looking_filename_not_in_key_value_shape(tmp_path):
+    """A path/filename carrying a secret keyword glued to other characters (no
+    key=value/key:value/'is' shape) must still be masked, e.g.
+    password-hunter2xyz-notes.md -> password-[REDACTED].md."""
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc124", question="q",
+                    file="/tmp/notes/password-hunter2xyz-notes.md")
+
+    rec = read_jsonl(tmp_path / "traces.jsonl")[0]
+    assert rec["file"] == "/tmp/notes/password-[REDACTED].md"
+    assert "hunter2xyz" not in json.dumps(rec)
+
+
+def test_trace_leaves_normal_paths_untouched(tmp_path):
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc125", question="q",
+                    file="/Users/alice/projects/notes/tokenizer.md")
+
+    rec = read_jsonl(tmp_path / "traces.jsonl")[0]
+    assert rec["file"] == "/Users/alice/projects/notes/tokenizer.md"
+
+
+def test_trace_leaves_prose_secret_words_in_paths_untouched(tmp_path):
+    """A path segment that merely contains a secret keyword glued to a plain word
+    (no digit, no real value shape) is prose, not a leaked secret -- e.g. a
+    pytest tmp dir literally named after a test called test_secret_held_...
+    must never get mangled by the path-redaction heuristic."""
+    path = "/tmp/pytest-535/test_secret_held_does_not_save0/car.md"
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc128", question="q", file=path)
+
+    rec = read_jsonl(tmp_path / "traces.jsonl")[0]
+    assert rec["file"] == path
+
+
+def test_log_lookups_jsonl_also_redacts_secret_looking_paths(tmp_path):
+    ask.log(tmp_path, "outcome", file="/tmp/notes/api_key_prod789-dump.md")
+
+    rec = read_jsonl(tmp_path / "lookups.jsonl")[0]
+    assert "prod789" not in json.dumps(rec)
+    assert "[REDACTED]" in rec["file"]
+
+
+def test_superjev_traces_env_switch_disables_tracing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_TRACES", "0")
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc126", question="q")
+
+    assert not (tmp_path / "traces.jsonl").exists()
+
+
+def test_superjev_traces_env_switch_defaults_on(tmp_path, monkeypatch):
+    monkeypatch.delenv("SUPERJEV_TRACES", raising=False)
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc127", question="q")
+
+    assert (tmp_path / "traces.jsonl").is_file()
+
+
 def test_trace_rotation_caps_file_and_keeps_one_old_generation(tmp_path):
     path = tmp_path / "traces.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
