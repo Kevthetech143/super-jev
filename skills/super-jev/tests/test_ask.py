@@ -824,3 +824,65 @@ def test_lookup_caps_navigate_fanout_at_nav_concurrency(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def _three_candidate_lookup(sdir):
+    ask.log(sdir, "lookup", question="q", top=[
+        {"score": 0.9, "path": "/r1/a.md", "pointer": "p1", "possible": False},
+        {"score": 0.8, "path": "/r2/b.md", "pointer": "p2", "possible": False},
+        {"score": 0.6, "path": "/r3/c.md", "pointer": "p3", "possible": True}])
+
+
+def _ready_memory(calls):
+    def fake_memory(req):
+        calls.append(req)
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix-" + req["pointer"],
+                    "passages": [{"sourceId": "s", "reviewedText": "text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        raise AssertionError(req)
+    return fake_memory
+
+
+@pytest.mark.parametrize("kw,pointer,path", [
+    ({"rank": 2}, "p2", "/r2/b.md"),
+    ({"rank": 3}, "p3", "/r3/c.md"),            # possible tier, picked by the lead
+    ({"file": "/r2/b.md"}, "p2", "/r2/b.md"),
+    ({"file": "c.md"}, "p3", "/r3/c.md"),       # bare file name, unique
+])
+def test_approve_any_listed_candidate_uses_its_own_pointer(tmp_path, monkeypatch, kw, pointer, path):
+    _three_candidate_lookup(tmp_path)
+    calls = []
+    monkeypatch.setattr(ask, "memory", _ready_memory(calls))
+    assert ask.approve("alice", "q", "ans", tmp_path, **kw) == 0
+    assert [c["pointer"] for c in calls if c["action"] == "search"] == [pointer]
+    assert next(c for c in calls if c["action"] == "approve")["ticket"] == "tix-" + pointer
+    rec = json.loads((tmp_path / "approvals.jsonl").read_text().splitlines()[-1])
+    assert rec["pointer"] == pointer and rec["file"] == path
+
+
+def test_approve_default_still_uses_rank_1(tmp_path, monkeypatch):
+    _three_candidate_lookup(tmp_path)
+    calls = []
+    monkeypatch.setattr(ask, "memory", _ready_memory(calls))
+    assert ask.approve("alice", "q", "ans", tmp_path) == 0
+    assert [c["pointer"] for c in calls if c["action"] == "search"] == ["p1"]
+
+
+@pytest.mark.parametrize("kw,needle", [({"rank": 4}, "out of range"), ({"rank": 0}, "out of range"),
+                                       ({"file": "/nope.md"}, "matches 0")])
+def test_approve_bad_pick_refuses_without_calling_memory(tmp_path, monkeypatch, capsys, kw, needle):
+    _three_candidate_lookup(tmp_path)
+    monkeypatch.setattr(ask, "memory", lambda req: (_ for _ in ()).throw(AssertionError(req)))
+    assert ask.approve("alice", "q", "ans", tmp_path, **kw) == 1
+    assert needle in capsys.readouterr().out
+
+
+def test_approve_cli_parses_rank_flag(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(ask, "approve", lambda p, q, a, s, **kw: seen.update(q=q, a=a, **kw) or 0)
+    monkeypatch.setattr(ask, "state_dir", lambda p: tmp_path)
+    monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "alice", "--approve", "q", "ans", "--rank", "2"])
+    assert ask.main() == 0
+    assert seen == {"q": "q", "a": "ans", "rank": 2, "file": None}
