@@ -1,0 +1,21 @@
+# HOL AI Plugin Scanner config.
+# See: https://github.com/hashgraph-online/awesome-ai-plugins/blob/main/SCANNER_GUIDE.md
+#
+# ignore_paths below are scoped to specific test fixture files that
+# intentionally contain fake secret-shaped strings used to exercise our own
+# secret-detection guard (see skills/super-jev/gate/*, test/secret-scan.test.ts).
+# No real credentials are present in this repository. Each path is a single
+# fixture file, not a directory glob, so a real secret added anywhere else
+# still fails the scan.
+[scanner]
+ignore_paths = [
+  "experiments/verified-pointer-memory/test_secret_guard.py",
+  "skills/super-jev/ask.py",
+  "skills/super-jev/tests/test_hardening_round6.py",
+  "skills/super-jev/tests/test_hardening_round7.py",
+  "skills/super-jev/tests/test_hash_false_hold.py",
+  "skills/super-jev/tests/data/unicode_scan_cases.json",
+  "test/secret-scan.test.ts",
+  "test/skill-search-cli.test.ts",
+  "test/enhance/fixtures/evidence-guard-cases.json",
+]
