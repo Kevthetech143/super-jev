@@ -84,6 +84,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prepare_bulk  # noqa: E402
 from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret  # noqa: E402
+import auto_heal  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -540,7 +541,25 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             errored += 1
             statuses[ptr] = kind
-            error_lines.append(f"[{ptr}] {kind}" + refresh_hint(ptr, principal, kind))
+            hint = refresh_hint(ptr, principal, kind)
+            # A stale pointer never has to wait on a human to run the refresh hint above by
+            # hand: this starts the exact same prepare_bulk.py --refresh in the background,
+            # bounded (one in flight per principal, per-pointer cooldown, hourly cap -- see
+            # auto_heal.py), and returns immediately either way. It never blocks this lookup
+            # and never changes what this lookup reports for the pointer that triggered it;
+            # it only means the *next* lookup may no longer hit it.
+            heal_note = ""
+            if auto_heal.is_stale_kind(kind):
+                result = auto_heal.maybe_heal(ptr, principal)
+                if result == "started":
+                    heal_note = " (auto-heal: refresh started in background)"
+                elif result == "in-progress":
+                    heal_note = " (auto-heal: refresh already in progress)"
+                elif result == "cooldown":
+                    heal_note = " (auto-heal: refreshed recently, cooling down)"
+                elif result == "rate-limited":
+                    heal_note = " (auto-heal: hourly refresh limit reached)"
+            error_lines.append(f"[{ptr}] {kind}" + hint + heal_note)
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}
