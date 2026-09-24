@@ -127,10 +127,35 @@ def audit(registry_path: Path, db_path: Path) -> dict[str, Any]:
     return {"principals": principals}
 
 
+def _resolve_from_config(config_path: Path) -> tuple[Path, Path]:
+    """Read a pointer-memory config.json ({"db": ..., "registry": ...}) and
+    resolve its db/registry the same way the live service does (cli.py):
+    relative paths are relative to the config file's own directory. This is
+    the real, working pointer list any principal's `ask.py` actually reads
+    (e.g. /Users/admin/super-jev/.local/pointer-memory/config.json) -- not
+    the ~/.local/state/super-jev/_memory test-fixture store, which is a
+    different, unrelated config and should never be used for a live audit."""
+    location = config_path.resolve()
+    config = json.loads(location.read_text())
+    base = location.parent
+
+    def resolved(name: str) -> Path:
+        p = Path(config[name])
+        return p if p.is_absolute() else (base / p)
+
+    return resolved("registry"), resolved("db")
+
+
 def run(args: list[str]) -> tuple[int, dict[str, Any]]:
-    """CLI entry: --registry PATH --db PATH [--principal NAME]."""
+    """CLI entry: --config PATH, or --registry PATH --db PATH, [--principal NAME].
+
+    --config points at a pointer-memory config.json (the same file
+    memory.sh/ask.py resolve their registry+db from); its relative paths
+    are resolved the same way the live service resolves them. --registry/
+    --db remain for pointing at exact files directly (e.g. tests)."""
     registry_path = None
     db_path = None
+    config_path = None
     only_principal = None
     it = iter(args)
     for arg in it:
@@ -138,19 +163,38 @@ def run(args: list[str]) -> tuple[int, dict[str, Any]]:
             registry_path = Path(next(it))
         elif arg == "--db":
             db_path = Path(next(it))
+        elif arg == "--config":
+            config_path = Path(next(it))
         elif arg == "--principal":
             only_principal = next(it)
         elif arg.startswith("--registry="):
             registry_path = Path(arg.split("=", 1)[1])
         elif arg.startswith("--db="):
             db_path = Path(arg.split("=", 1)[1])
+        elif arg.startswith("--config="):
+            config_path = Path(arg.split("=", 1)[1])
         elif arg.startswith("--principal="):
             only_principal = arg.split("=", 1)[1]
+
+    if config_path is not None and (registry_path is None or db_path is None):
+        try:
+            cfg_registry, cfg_db = _resolve_from_config(config_path)
+        except (OSError, ValueError, KeyError) as exc:
+            return 2, {
+                "status": "error",
+                "reason": f"could not read --config {config_path}: {exc}",
+            }
+        registry_path = registry_path or cfg_registry
+        db_path = db_path or cfg_db
 
     if registry_path is None or db_path is None:
         return 2, {
             "status": "error",
-            "reason": "audit-visibility requires --registry PATH and --db PATH",
+            "reason": (
+                "audit-visibility requires --config PATH (a pointer-memory "
+                "config.json, e.g. the one memory.sh/ask.py use) or explicit "
+                "--registry PATH --db PATH"
+            ),
         }
 
     result = audit(registry_path, db_path)
