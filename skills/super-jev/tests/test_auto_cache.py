@@ -146,3 +146,16 @@ def test_hit_shows_approver_auto_and_human(world, capsys):
     ask.record_approver(world["sdir"], Q, "human")
     ask.lookup(Q, "alice", world["sdir"])
     assert "approved_by: human" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("side, want", [("TIME_SENSITIVE", "TIME_SENSITIVE"),
+                                        ("NOT_TIME_SENSITIVE", "CLEAN")])
+def test_run_gate_blocks_a_time_sensitive_answer(monkeypatch, side, want):
+    """check --claim leaves time_sensitive advisory, but a dated fact (price,
+    breakeven) must never auto-cache: run_gate turns that CLEAN into a refusal."""
+    import subprocess
+    out = f"  c1   SUPPORTED      1.00  x\n\n  time_sensitive     {side:20s} 0.90\n"
+    body = json.dumps({"verdict": "CLEAN", "details": {"stdout": out}})
+    monkeypatch.setattr(ask.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, body, ""))
+    assert ask.run_gate("Q A", "/x.md") == (want, 1.0)

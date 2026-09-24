@@ -57,7 +57,8 @@
       decide, HAS_LEAKS/SELF_CONTRADICTORY rows are advisory) on a file that is
       unchanged since connect saves it, exactly like --approve, recorded as
       approved_by=auto-check with the evidence file and score. READ, REJECT,
-      ERROR, a stale file, or a secret in the file or answer saves nothing and
+      ERROR, a TIME_SENSITIVE flag (a dated fact such as a price
+      or breakeven; advisory in check --claim, blocking here), a stale file, or a secret in the file or answer saves nothing and
       prints why. On by default; off with --no-auto or SUPERJEV_AUTO_CACHE=0.
 
   ask.py --principal AGENT --followup [--max-tries N]
@@ -1238,8 +1239,14 @@ def run_gate(claim: str, path: str):
         body = json.loads(r.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return "ERROR", None
-    rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", (body.get("details") or {}).get("stdout") or "", re.M)
-    return body.get("verdict") or "ERROR", (min(float(x) for x in rows) if rows else None)
+    out = (body.get("details") or {}).get("stdout") or ""
+    rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", out, re.M)
+    verdict = body.get("verdict") or "ERROR"
+    # check --claim treats time_sensitive as advisory, but a dated fact (a price,
+    # a breakeven) must never auto-cache: it goes stale silently.
+    if verdict == "CLEAN" and re.search(r"^\s*time_sensitive\s+TIME_SENSITIVE\b", out, re.M):
+        verdict = "TIME_SENSITIVE"
+    return verdict, (min(float(x) for x in rows) if rows else None)
 
 def not_saved(sdir: Path, question: str, why: str) -> int:
     print(f"not saved: {why}")
