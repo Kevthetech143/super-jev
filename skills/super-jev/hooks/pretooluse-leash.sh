@@ -15,7 +15,7 @@
 #     "hooks": {
 #       "PreToolUse": [
 #         {
-#           "matcher": "Write|Edit|NotebookEdit|Bash",
+#           "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
 #           "hooks": [
 #             { "type": "command", "command": "/absolute/path/to/skills/super-jev/hooks/pretooluse-leash.sh" }
 #           ]
