@@ -235,6 +235,45 @@ def test_followup_never_falls_back_to_a_stale_prior_hit_on_a_failed_fresh_search
     assert "PROPOSED" not in out
 
 
+def test_followup_never_proposes_a_confirmed_file_off_the_question_subject(tmp_path, monkeypatch, capsys):
+    """A confirmed-tier, not-the-original-wrong-file hit is still not enough --
+    v1.0.6 amazon-bm-fb: a price-ceiling question ('max bid ceiling') proposed a
+    same-folder-but-different-date snapshot report that never mentions bids or
+    ceilings at all. subject_matches must catch this even when the tier and
+    wrong-file checks both pass."""
+    off_subject = tmp_path / "unrelated-report.md"
+    off_subject.write_text("weekly shipping volume summary, nothing about pricing")
+    ask.log(tmp_path, "miss", question="what's our max bid ceiling on a macbook air trade-in",
+            actual="bm-price-ceilings.json")
+    monkeypatch.setattr(ask, "memory", confident_memory(
+        question="what's our max bid ceiling on a macbook air trade-in", path=str(off_subject)))
+
+    rc = ask.followup("alice", tmp_path, max_tries=5)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PROPOSED" not in out
+    assert "off-subject" in out
+    assert "what's our max bid ceiling on a macbook air trade-in" in ask.pending_misses(tmp_path)
+
+
+def test_followup_proposes_a_confirmed_file_that_matches_the_question_subject(tmp_path, monkeypatch, capsys):
+    """The counterpart to the off-subject test: a confirmed file whose content
+    actually shares terms with the question is still proposed."""
+    on_subject = tmp_path / "bm-price-ceilings.md"
+    on_subject.write_text("max bid ceiling for a macbook air trade-in is $310")
+    ask.log(tmp_path, "miss", question="what's our max bid ceiling on a macbook air trade-in",
+            actual="bm-price-ceilings.json")
+    monkeypatch.setattr(ask, "memory", confident_memory(
+        question="what's our max bid ceiling on a macbook air trade-in", path=str(on_subject)))
+
+    rc = ask.followup("alice", tmp_path, max_tries=5)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PROPOSED" in out
+
+
 def test_main_followup_bad_max_tries_is_a_usage_error(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "alice", "--followup", "--max-tries", "not-a-number"])
 
