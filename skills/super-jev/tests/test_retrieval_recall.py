@@ -214,11 +214,27 @@ def test_tie_prefers_named_file_then_brain_copy_over_reuse(tmp_path, monkeypatch
 
 # 5. round 3: routing counts in the final order, strong routes survive opinion asks,
 # and the word search sees headings and a few synonyms
-def test_routing_score_breaks_near_ties(tmp_path, monkeypatch, capsys):
+def test_content_score_wins_over_routing_when_not_a_true_tie(tmp_path, monkeypatch, capsys):
+    """recall80-r3a: confirmed files rank by content score first. 0.88 vs 0.90
+    round to different 2-decimal values, so this is not a tie -- the higher
+    content score wins even though its routing score is far lower. (Previously
+    this used the 0.6/0.4 rank_score blend, which let routing override a real
+    content difference; that blend is gone for the confirmed group.)"""
+    lower_content, higher_content = _files(tmp_path, 2)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(lower_content)},
+                                                 {"score": 0.5, "originalPath": str(higher_content)}]))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(lower_content): 0.88, str(higher_content): 0.9}, set(), None, {}))
+    ask.lookup("q?", "me", tmp_path / "s")
+    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
+    assert rows == [str(higher_content), str(lower_content)]
+
+
+def test_routing_score_breaks_true_content_tie(tmp_path, monkeypatch, capsys):
+    """Equal (rounded to 2dp) confirmed content scores fall back to routing."""
     right, sibling = _files(tmp_path, 2)
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(right)},
                                                  {"score": 0.5, "originalPath": str(sibling)}]))
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(right): 0.88, str(sibling): 0.9}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(right): 0.9, str(sibling): 0.9}, set(), None, {}))
     ask.lookup("q?", "me", tmp_path / "s")
     rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
     assert rows == [str(right), str(sibling)]

@@ -449,7 +449,12 @@ def path_rank(question: str, path: str) -> tuple:
 HUB_STEMS = {"index", "catalog", "tools-used", "handoff", "readme"}
 
 def is_hub_file(path: str) -> bool:
-    return Path(path).stem.lower() in HUB_STEMS
+    stem = Path(path).stem.lower()
+    if stem in HUB_STEMS:
+        return True
+    # A file whose name is a template (e.g. "_TEMPLATE-report", "campaign-template")
+    # is a shape to copy, not a topic file; treat it like a navigation hub.
+    return "template" in stem
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
@@ -573,19 +578,23 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             return ca > cb
 
         def sort_metric(m: tuple) -> tuple:
-            """Sort key for the possible group: content score alone (rounded,
-            so a near-tie falls through to the route component), then routing
-            only to break that near-tie, then the confirmed group's blend for
-            everything not in the possible group."""
+            """Sort key for every kept file, confirmed or possible alike:
+            content score first (rounded to 2 decimals, so a near-tie falls
+            through to the route component), then routing only to break that
+            near-tie, then the name tie-break. A hub-type file (see
+            is_hub_file) ranks below every other kept file regardless of its
+            content score, since it is a table of contents, not evidence."""
             s, p, ptr = m
-            if p not in possible:
-                return (True, round(rank_score(s, route.get(p, 0)), 2), 0.0, 0, path_rank(question, p))
-            has_content, content, r = metric_of(p)
-            return (False, has_content, round(content, 2), r, path_rank(question, p))
+            if p in possible:
+                has_content, content, r = metric_of(p)
+            else:
+                c = scores.get(p)
+                has_content, content, r = (c is not None, c if c is not None else s, route.get(p, 0))
+            return (not is_hub_file(p), has_content, round(content, 2), r, path_rank(question, p))
 
-        # Confirmed files first (sort_metric's leading True), then within the
-        # possible group content score alone with routing only as a near-tie
-        # breaker (see metric_of/better/sort_metric above), then the name tie-break.
+        # Non-hub files first (sort_metric's leading True), then content score
+        # alone with routing only as a near-tie breaker (see metric_of/better/
+        # sort_metric above), then the name tie-break.
         merged = sorted(keep.values(), key=sort_metric, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
