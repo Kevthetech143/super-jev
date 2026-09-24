@@ -90,3 +90,49 @@ test('isKnownSlashCommand', () => {
 test('MISS_LINE is the exact Jev voice line', () => {
   assert.equal(MISS_LINE, "Super Jev: I didn't have this. Want me to find it by hand and save it for next time?");
 });
+
+// --- adversarial review regressions ---
+import { askLookupArgs } from '../src/jev-chat-config.ts';
+import { chmodSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+test('canned replies do not hijack real questions that merely contain small talk', () => {
+  for (const q of [
+    'who are you going to call about my taxes?',
+    'what are you seeing in the Q3 report',
+    'what can you do about the leaking roof',
+    'help me find the lease file',
+  ]) assert.equal(cannedReply(q), null, q);
+  assert.ok(cannedReply('who are you?'));
+  assert.ok(cannedReply('What can you do'));
+});
+
+test('askLookupArgs never lets user text become an ask.py flag', () => {
+  for (const q of ['--miss', '--add x y', '--approve a b', '--principal evil', '--no-auto', '-x']) {
+    const args = askLookupArgs('kelvin', q);
+    assert.deepEqual(args.slice(0, 2), ['--principal', 'kelvin']);
+    const rest = args.slice(2);
+    assert.ok(rest.every((a) => !a.startsWith('-')), JSON.stringify(rest));
+  }
+  assert.deepEqual(askLookupArgs('k', 'what is x'), ['--principal', 'k', 'what is x']);
+});
+
+test('saveConfig re-locks a pre-existing loose dir and file', () => {
+  withTempConfig((path) => {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
+    chmodSync(dirname(path), 0o755);
+    writeFileSync(path, '{}', { mode: 0o644 });
+    chmodSync(path, 0o644);
+    saveConfig({ typesafeApiKey: 'sk-fake' }, path);
+    assert.equal(statSync(dirname(path)).mode & 0o777, 0o700);
+    assert.equal(configFileMode(path), 0o600);
+  });
+});
+
+test('loadConfig treats a JSON array as no config', () => {
+  withTempConfig((path) => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '["x"]');
+    assert.deepEqual(loadConfig(path), {});
+  });
+});

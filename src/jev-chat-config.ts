@@ -27,7 +27,7 @@ export function loadConfig(path: string = configPath()): SuperJevConfig {
     if (!existsSync(path)) return {};
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -38,8 +38,12 @@ export function loadConfig(path: string = configPath()): SuperJevConfig {
 export function saveConfig(config: SuperJevConfig, path: string = configPath()): void {
   const dir = join(path, '..');
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // mkdir's mode only applies on create; lock a pre-existing dir too.
+  chmodSync(dir, 0o700);
+  // writeFileSync's mode only applies on create; lock an existing file BEFORE
+  // the key is written into it, not after.
+  if (existsSync(path)) chmodSync(path, 0o600);
   writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
-  // writeFileSync's mode only applies on create; force it on an existing file too.
   chmodSync(path, 0o600);
 }
 
@@ -57,8 +61,8 @@ export function hasApiKey(config: SuperJevConfig): boolean {
 // ---------------------------------------------------------------------------
 const CANNED: Array<{ patterns: RegExp[]; reply: string }> = [
   { patterns: [/^hi$/i, /^hey$/i, /^hello$/i, /^yo$/i], reply: 'Hey, I\'m Super Jev. Ask me anything and I\'ll check what we already know first.' },
-  { patterns: [/who are you/i, /what are you/i], reply: 'I\'m Super Jev -- a cache-first lookup chat over your connected notes and files. Fast answers when we\'ve seen the question before, honest misses when we haven\'t.' },
-  { patterns: [/^help$/i, /what can you do/i], reply: 'Ask a question and I\'ll look it up. Slash commands: /help /setup /folders /quit.' },
+  { patterns: [/^who are you$/i, /^what are you$/i], reply: 'I\'m Super Jev -- a cache-first lookup chat over your connected notes and files. Fast answers when we\'ve seen the question before, honest misses when we haven\'t.' },
+  { patterns: [/^help$/i, /^what can you do$/i], reply: 'Ask a question and I\'ll look it up. Slash commands: /help /setup /folders /quit.' },
   { patterns: [/^thanks$/i, /^thank you$/i, /^thx$/i], reply: 'Anytime.' },
 ];
 
@@ -94,6 +98,14 @@ export function parseSlashCommand(input: string): { command: string; args: strin
 
 export function isKnownSlashCommand(command: string): command is SlashCommand['command'] {
   return (SLASH_COMMANDS as string[]).includes(command);
+}
+
+/** argv for an ask.py lookup. ask.py dispatches on a leading `--miss`/`--add`/
+ * `--approve`/`--principal`/`--no-auto` token, so user text that starts with a
+ * dash is stripped of its leading dashes to stay a plain question. */
+export function askLookupArgs(principal: string, question: string): string[] {
+  const q = question.replace(/^[\s-]+/, '') || '?';
+  return ['--principal', principal, q];
 }
 
 export const MISS_LINE = "Super Jev: I didn't have this. Want me to find it by hand and save it for next time?";

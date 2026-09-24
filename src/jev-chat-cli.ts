@@ -12,7 +12,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadConfig, saveConfig, configPath, hasApiKey,
-  cannedReply, parseSlashCommand, isKnownSlashCommand,
+  cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
   MISS_LINE, HELP_TEXT,
   type SuperJevConfig,
 } from './jev-chat-config.ts';
@@ -89,10 +89,10 @@ async function runSetup(existing: SuperJevConfig): Promise<SuperJevConfig> {
   return next;
 }
 
-async function handleQuestion(question: string, principal: string) {
+async function handleQuestion(question: string, principal: string, apiKey?: string) {
   const s = spinner();
   s.start('Super Jev is thinking');
-  const hit = runAskPy(['--principal', principal, question]);
+  const hit = runAskPy(askLookupArgs(principal, question));
   const parsed = parseHit(hit.stdout);
   if (parsed) {
     s.stop('Found it.');
@@ -104,10 +104,11 @@ async function handleQuestion(question: string, principal: string) {
   // Miss (or ask.py/network unavailable): try one live call, then cache it.
   s.message('No cache hit, trying a live lookup');
   let liveAnswer: string | null = null;
-  if (process.env.TYPESAFE_API_KEY) {
+  const key = apiKey || process.env.TYPESAFE_API_KEY;
+  if (key) {
     try {
       const { Jev } = await import('./jev.ts');
-      const jev = new Jev({});
+      const jev = new Jev({ apiKey: key });
       const evaluation = await jev.evaluate(
         { model: 'jev-latest', question, answers: [{ id: 'a', text: question }] } as any,
         new AbortController().signal,
@@ -120,9 +121,9 @@ async function handleQuestion(question: string, principal: string) {
   s.stop('Done.');
 
   if (liveAnswer) {
+    // Not cached: this is a raw Jev evaluation (a grade), not an answer, and
+    // writing it with --add would poison the approved-answer cache.
     console.log(pc.bold('Answer (live): ') + liveAnswer);
-    runAskPy(['--principal', principal, '--add', question, liveAnswer]);
-    log.info('Cached for next time.');
     return;
   }
 
@@ -136,18 +137,18 @@ async function main() {
   let config = loadConfig();
   printBanner(config.principal ? 'super-jev cache + live' : 'not configured');
 
+  // Non-interactive / non-TTY environments (CI, pipes): don't prompt at all.
+  if (!process.stdin.isTTY) {
+    console.log('No TTY detected. Run superjev in a terminal to set up and chat.');
+    return;
+  }
+
   if (!hasApiKey(config) || !config.principal) {
     config = await runSetup(config);
   }
 
   intro(pc.cyan('Super Jev chat'));
   const principal = config.principal || 'me';
-
-  // Non-interactive / non-TTY environments (CI, pipes): don't hang on prompts.
-  if (!process.stdin.isTTY) {
-    outro('No TTY detected; exiting after setup. Run again in a terminal to chat.');
-    return;
-  }
 
   for (;;) {
     const input = await text({ message: 'you' });
@@ -180,7 +181,7 @@ async function main() {
     const canned = cannedReply(line);
     if (canned) { console.log(pc.bold('Super Jev: ') + canned); continue; }
 
-    await handleQuestion(line, principal);
+    await handleQuestion(line, principal, config.typesafeApiKey);
   }
 }
 

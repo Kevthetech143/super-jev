@@ -28,7 +28,9 @@ mkdir -p "$BIN_DIR"
 if [ -d "$INSTALL_DIR/.git" ]; then
   info "Updating existing install in $INSTALL_DIR"
   git -C "$INSTALL_DIR" fetch --quiet origin
-  git -C "$INSTALL_DIR" reset --quiet --hard origin/HEAD 2>/dev/null || true
+  git -C "$INSTALL_DIR" merge --quiet --ff-only '@{u}' \
+    || fail "Could not fast-forward $INSTALL_DIR (local changes?). Fix or remove it and re-run."
+
 else
   info "Cloning super-jev into $INSTALL_DIR"
   mkdir -p "$(dirname "$INSTALL_DIR")"
@@ -39,8 +41,12 @@ info "Installing dependencies"
 (cd "$INSTALL_DIR" && npm install --omit=dev --no-fund --no-audit --silent)
 
 info "Linking superjev to $BIN_DIR"
+if [ -e "$BIN_DIR/superjev" ] && ! grep -qE 'super-jev-installer|jev-chat-cli\.ts' "$BIN_DIR/superjev" 2>/dev/null; then
+  fail "$BIN_DIR/superjev exists and was not made by this installer; not overwriting it."
+fi
 cat > "$BIN_DIR/superjev" <<EOF
 #!/usr/bin/env bash
+# super-jev-installer
 exec node "$INSTALL_DIR/src/jev-chat-cli.ts" "\$@"
 EOF
 chmod +x "$BIN_DIR/superjev"
