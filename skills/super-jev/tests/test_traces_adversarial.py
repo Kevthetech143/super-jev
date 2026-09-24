@@ -66,3 +66,24 @@ def test_trace_write_failure_does_not_crash(tmp_path):
 def test_trace_report_rejects_nonpositive_days(tmp_path, capsys):
     assert ask.trace_report(tmp_path, 0) == 2
     assert ask.trace_report(tmp_path, -3) == 2
+
+
+def test_stale_cache_hit_live_search_skips_its_own_manual_pointer(tmp_path, monkeypatch, capsys):
+    # The manual record's text is the stale answer; the fallthrough must not navigate it.
+    src = tmp_path / "src.txt"; src.write_text("new")
+    rec = ask.manual_record_path(tmp_path, "alice", "q")
+    rec.parent.mkdir(parents=True)
+    rec.write_text(f"source_path: {src}\nsource_sha256: {'0'*64}\nOLD-ANSWER\n")
+    stale_ptr = ask.manual_pointer_name("alice", "q")
+    navigated = []
+    def fake(r):
+        if r["action"] == "cached":
+            return {"status": "verified-cache-hit", "answer": "OLD-ANSWER"}
+        if r["action"] == "panel":
+            return {"status": "ok", "pointers": [{"pointer": stale_ptr}]}
+        navigated.append(r.get("pointer"))
+        return {"status": "no-candidates"}
+    monkeypatch.setattr(ask, "memory", fake)
+    ask.lookup("q", "alice", tmp_path)
+    assert stale_ptr not in navigated
+    assert "OLD-ANSWER" not in capsys.readouterr().out
