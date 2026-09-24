@@ -130,3 +130,12 @@ Proof for all seven: the live bench (`bench/live-measure.ts`) reports
 accuracy, accepted-error rate, review rate, coverage, tokens and latency
 together. A feature ships only once measured, and the numbers live in the
 bench output, not in this document.
+
+8. **WORKER LEASH LIVE PROOF** — the `PreToolUse` worker leash
+   (`skills/super-jev/leash.py`, docs in `docs/wire-into-claude-code.md` #3)
+   is unit-tested (`skills/super-jev/tests/test_leash.py`, stdlib +
+   pytest, no live session) but has not run against a real multi-agent
+   Claude Code session under load. Closes: confidence that the fail-open
+   path, the sub-agent/lead split (`agent_id`/`agent_type` presence), and
+   the Bash best-effort regexes hold up outside a synthetic payload.
+   Status: NOT LIVE — not installed by default, per its own doc.
