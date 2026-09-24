@@ -181,6 +181,77 @@ def test_trace_redacts_secret_shaped_fields_and_truncates_long_ones(tmp_path):
     assert len(rec["notes"]) < 900
 
 
+def test_trace_redacts_secret_looking_filename_not_in_key_value_shape(tmp_path):
+    """A path/filename carrying a secret keyword glued to other characters (no
+    key=value/key:value/'is' shape) must still be masked, e.g.
+    password-hunter2xyz-notes.md -> password-[REDACTED].md."""
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc124", question="q",
+                    file="/tmp/notes/password-hunter2xyz-notes.md")
+
+    rec = read_jsonl(tmp_path / "traces.jsonl")[0]
+    assert rec["file"] == "/tmp/notes/password-[REDACTED].md"
+    assert "hunter2xyz" not in json.dumps(rec)
+
+
+def test_trace_leaves_normal_paths_untouched(tmp_path):
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc125", question="q",
+                    file="/Users/alice/projects/notes/tokenizer.md")
+
+    rec = read_jsonl(tmp_path / "traces.jsonl")[0]
+    assert rec["file"] == "/Users/alice/projects/notes/tokenizer.md"
+
+
+def test_trace_leaves_prose_secret_words_in_paths_untouched(tmp_path):
+    """A path segment that merely contains a secret keyword glued to a plain word
+    (no digit, no real value shape) is prose, not a leaked secret -- e.g. a
+    pytest tmp dir literally named after a test called test_secret_held_...
+    must never get mangled by the path-redaction heuristic."""
+    path = "/tmp/pytest-535/test_secret_held_does_not_save0/car.md"
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc128", question="q", file=path)
+
+    rec = read_jsonl(tmp_path / "traces.jsonl")[0]
+    assert rec["file"] == path
+
+
+def test_lookups_jsonl_stays_raw_so_find_top_still_matches(tmp_path):
+    """lookups.jsonl is the working index --answer/--approve read back by exact
+    question and on-disk path; redacting or truncating it breaks auto-cache."""
+    q = "where is my token-2fa setup? " + "x" * 600
+    path = "/notes/password_2024_notes.md"
+    ask.log(tmp_path, "lookup", question=q, top=[{"score": 0.9, "path": path, "pointer": "p1", "possible": False}])
+
+    top = ask.find_top(tmp_path, q)
+    assert top and top["path"] == path
+    assert ask.find_pointer(tmp_path, q) == "p1"
+
+
+@pytest.mark.parametrize("val", ["0", "off", "OFF", "no", "False", " 0 "])
+def test_superjev_traces_off_spellings(tmp_path, monkeypatch, val):
+    monkeypatch.setenv("SUPERJEV_TRACES", val)
+    ask.write_trace(tmp_path, kind="trace", lookup_id="x", question="q")
+    ask.write_outcome(tmp_path, "x", "q", "right")
+    assert not (tmp_path / "traces.jsonl").exists()
+
+
+def test_path_secret_unicode_dash_and_case():
+    assert ask.path_has_secret("PASSWORD\u2011hunter2.md")
+    assert not ask.path_has_secret("password-reset-guide.md")
+
+
+def test_superjev_traces_env_switch_disables_tracing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_TRACES", "0")
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc126", question="q")
+
+    assert not (tmp_path / "traces.jsonl").exists()
+
+
+def test_superjev_traces_env_switch_defaults_on(tmp_path, monkeypatch):
+    monkeypatch.delenv("SUPERJEV_TRACES", raising=False)
+    ask.write_trace(tmp_path, kind="trace", lookup_id="abc127", question="q")
+
+    assert (tmp_path / "traces.jsonl").is_file()
+
+
 def test_trace_rotation_caps_file_and_keeps_one_old_generation(tmp_path):
     path = tmp_path / "traces.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)

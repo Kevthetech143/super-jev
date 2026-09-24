@@ -280,6 +280,49 @@ def test_add_writes_manual_record_connects_new_pointer_never_replace_then_approv
     assert assist_calls == []
 
 
+def test_add_manual_matches_hash_when_memory_backend_returns_realpath(tmp_path, monkeypatch):
+    """Bug: on a host where the state dir (or the source file) lives under a
+    symlinked directory -- e.g. macOS /tmp -> /private/tmp -- the memory backend
+    normalizes paths to realpath before echoing them back in the connect preview.
+    add_manual used to look the sha256 up by the literal path string it sent and
+    KeyError'd on the mismatch. Compare on os.path.realpath everywhere."""
+    real_root = tmp_path / "real_root"
+    real_root.mkdir()
+    link_root = tmp_path / "link_root"
+    link_root.symlink_to(real_root)
+
+    sdir = link_root / "state"
+    src_file = link_root / "src.txt"
+    src_file.write_text("hello source\n")
+
+    def fake_memory(req):
+        if req["action"] == "panel":
+            return {"pointers": []}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            # Simulate a backend that canonicalizes the path before echoing it back.
+            import os
+            canon = os.path.realpath(req["sources"][0]["path"])
+            return {"status": "preparation-required", "sources": [{"path": canon, "sha256": "deadbeef"}]}
+        if req["action"] == "connect" and req.get("reviewed"):
+            return {"status": "registered",
+                     "sources": [{"id": "file:abc123", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix",
+                     "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
+        if req["action"] == "approve":
+            return {"status": "saved"}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    question = "which pointers hold the symlinked example brain"
+    rc = ask.add_manual("alice", question, "The answer body.", str(src_file), sdir)
+
+    assert rc == 0
+    pointer = ask.manual_pointer_name("alice", question)
+    record = sdir / "manual" / f"{pointer}.md"
+    assert record.is_file()
+
+
 def test_add_falls_back_to_assist_on_no_match_then_approves_with_returned_ticket(tmp_path, monkeypatch):
     src_file = tmp_path / "src.txt"
     src_file.write_text("hello source\n")

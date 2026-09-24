@@ -239,6 +239,38 @@ def has_secret(text: str) -> bool:
             or _token_hit(text))
 
 
+# The WORD_RE/GENERIC_RE keyword checks above only fire in a key=value, key:value,
+# or "key is value" shape -- prose or a plain word is not a secret. A file NAME or
+# PATH is different: nobody writes "password: hunter2xyz" as a filename, they write
+# password-hunter2xyz-notes.md, so the same keywords glued to other characters with
+# a "-"/"_" joiner are treated as secret-shaped there. Requires a non-alnum (or
+# start-of-segment) boundary before the keyword (so "tokenizer.py" does not
+# false-positive) AND the token immediately glued on after the joiner to carry a
+# digit, the way an actual secret value does ("hunter2xyz", "prod789") -- a plain
+# word after the joiner ("secret_held_does_not_save", a test's own tmp dir name,
+# "token_metrics") is prose, not a leaked value, and must not be flagged.
+PATH_SECRET_KEYWORDS = r"(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)"
+PATH_SECRET_RE = re.compile(
+    rf"(?<![0-9A-Za-z]){PATH_SECRET_KEYWORDS}[-_\u2010-\u2015](?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*",
+    re.I)
+
+
+def path_has_secret(text: str) -> bool:
+    """True when any segment of a path/filename string looks like it carries a
+    secret keyword glued to a value, e.g. 'password-hunter2xyz-notes.md'."""
+    return bool(PATH_SECRET_RE.search(text or ""))
+
+
+def redact_path_secrets(text: str) -> str:
+    """Replace every secret-keyword-shaped run in a path/filename string with
+    '<keyword>-[REDACTED]', leaving the rest of the path (directories, extension)
+    intact. No-op when nothing matches."""
+    def _sub(m):
+        kw = re.match(PATH_SECRET_KEYWORDS, m.group(0), re.I).group(0).lower()
+        return f"{kw}-[REDACTED]"
+    return PATH_SECRET_RE.sub(_sub, text or "")
+
+
 # Fields the tool builds itself (hashes, ids, pointer names); never user text, so never scanned.
 MACHINE_KEYS = frozenset({"sha256", "id", "sourceId", "rootId", "children", "pointer", "principals"})
 
@@ -294,6 +326,11 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
                 else:
                     held.append((str(p), "card/password-like text; review before onboarding")); continue
+            if path_has_secret(p.name):
+                if allow_held:
+                    held.append((str(p), "secret-keyword-like file name; admitted by --allow-held"))
+                else:
+                    held.append((str(p), "secret-keyword-like file name; review before onboarding")); continue
             files.append(p)
     return files, held
 
