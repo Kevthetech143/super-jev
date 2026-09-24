@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   loadConfig, saveConfig, configPath, hasApiKey,
   cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
+  parseMissCandidate, formatMissCandidateReply,
   MISS_LINE, HELP_TEXT,
   type SuperJevConfig,
 } from './jev-chat-config.ts';
@@ -101,7 +102,18 @@ async function handleQuestion(question: string, principal: string, apiKey?: stri
     return;
   }
 
-  // Miss (or ask.py/network unavailable): try one live call, then cache it.
+  // Miss, but ask.py still ranked candidate files (no approved answer yet):
+  // a real short reply -- top file + one-line why -- never the raw score/
+  // pointer line, and no live call needed since we already have a lead.
+  const candidate = parseMissCandidate(hit.stdout);
+  if (candidate) {
+    s.stop('No saved answer yet.');
+    console.log(pc.bold('Super Jev: ') + formatMissCandidateReply(candidate));
+    return;
+  }
+
+  // True miss (no candidates at all, or ask.py/network unavailable): try one
+  // live call, then cache it.
   s.message('No cache hit, trying a live lookup');
   let liveAnswer: string | null = null;
   const key = apiKey || process.env.TYPESAFE_API_KEY;

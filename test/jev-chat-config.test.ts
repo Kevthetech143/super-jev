@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   loadConfig, saveConfig, configFileMode, hasApiKey,
   cannedReply, parseSlashCommand, isKnownSlashCommand,
+  parseMissCandidate, formatMissCandidateReply,
   MISS_LINE,
 } from '../src/jev-chat-config.ts';
 
@@ -135,4 +136,26 @@ test('loadConfig treats a JSON array as no config', () => {
     writeFileSync(path, '["x"]');
     assert.deepEqual(loadConfig(path), {});
   });
+});
+
+test('parseMissCandidate returns null on a cache hit', () => {
+  assert.equal(parseMissCandidate('CACHE HIT\nanswer: foo\n'), null);
+});
+
+test('parseMissCandidate picks the top-ranked candidate line', () => {
+  const stdout = ' 0.85  /notes/pricing.md  [kelvin-notes]  possible\n 0.40  /notes/other.md  [kelvin-notes]\n';
+  const c = parseMissCandidate(stdout);
+  assert.deepEqual(c, { score: 0.85, path: '/notes/pricing.md', pointer: 'kelvin-notes' });
+});
+
+test('parseMissCandidate returns null on true no-candidates output', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n';
+  assert.equal(parseMissCandidate(stdout), null);
+});
+
+test('formatMissCandidateReply names the top file and gives a one-line why, not raw data', () => {
+  const reply = formatMissCandidateReply({ score: 0.85, path: '/notes/pricing.md', pointer: 'kelvin-notes' });
+  assert.match(reply, /\/notes\/pricing\.md/);
+  assert.match(reply, /no approved answer/);
+  assert.doesNotMatch(reply, /\[kelvin-notes\]/);
 });
