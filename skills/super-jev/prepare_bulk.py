@@ -613,6 +613,10 @@ def replay_recipe(a) -> None:
         return
     if not isinstance(rep, dict):
         return
+    # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
+    # refresh_changed.py re-passes the recorded roots, which must not unpin it.
+    rescoped = bool(a.excludes or a.no_recurse or (a.roots and
+                    sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or [])))
     a.roots = a.roots or rep.get("roots") or None
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []
@@ -621,7 +625,20 @@ def replay_recipe(a) -> None:
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, limit {a.limit or 50}; --allow-held is never replayed)")
+          f"no-recurse {a.no_recurse}, part size {a.limit or 50}; --allow-held is never replayed)")
+    # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
+    # the whole (possibly grown) folder, so its recorded file list is the scope instead.
+    # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
+    if rescoped:
+        return
+    if isinstance(rep.get("scopeFiles"), list):
+        a.legacy_scope = set(rep["scopeFiles"])
+    elif "noRecurse" not in rep:
+        a.legacy_scope = {str(e[0] if isinstance(e, list) else e)
+                          for k in ("approved", "exceptions", "held") for e in rep.get(k) or []}
+    if getattr(a, "legacy_scope", None) is not None:
+        print(f"refresh: legacy report without a recorded recipe; keeping its {len(a.legacy_scope)} recorded files "
+              "(pass --root/--exclude/--no-recurse to rescope)")
 
 
 def main() -> int:
@@ -716,6 +733,10 @@ def main() -> int:
     if missing:
         print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
     files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held)
+    scope = getattr(a, "legacy_scope", None)
+    if scope is not None:
+        files = [p for p in files if str(p) in scope]
+        held = [(p, why) for p, why in held if str(p) in scope]
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
@@ -878,6 +899,7 @@ def main() -> int:
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "limit": a.limit,
+              **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
               "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}

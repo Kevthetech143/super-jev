@@ -892,6 +892,34 @@ def test_refresh_replays_recorded_no_recurse_and_excludes(tmp_path, monkeypatch,
     assert report["noRecurse"] is True and report["excludes"] == ["INDEX.md"] and report["limit"] == 20
 
 
+def test_refresh_of_legacy_report_keeps_recorded_file_set(tmp_path, monkeypatch, capsys):
+    # Fleet 2026-09-24 (health-fitness-reuse): a report written before recipes were recorded has
+    # no excludes/noRecurse/limit, so the replay printed the default "limit 50" (part size, not a cap)
+    # and inventoried the whole grown root -- 505 new drafts, REFUSED over --max-files. The recorded
+    # file list is the pointer's scope; refresh must not widen it.
+    root = _big_root(tmp_path, 6)
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 2)
+    (cache_dir / "my-records-report.json").write_text(json.dumps(
+        {"pointer": "my-records", "roots": [str(root)], "principal": "alice",
+         "approved": [str(root / "f0.md"), str(root / "f1.md")], "exceptions": [], "held": []}))
+    monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
+                                      "--refresh", "--max-files", "1", "--no-connect", "--no-findability"])
+    rc = pb.main()
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "inventory: 2 files to prepare" in out
+    assert "REFUSED" not in out
+    # The rewritten report now carries a recipe; the pinned list must survive into the next refresh,
+    # including refresh_changed.py's form that re-passes the recorded root.
+    monkeypatch.setattr(sys, "argv", sys.argv + ["--root", str(root)])
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "inventory: 2 files to prepare" in out and "REFUSED" not in out
+
+
 def test_held_txt_written_with_masked_line_and_pattern_type(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
