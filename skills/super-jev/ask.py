@@ -80,7 +80,7 @@ with their ranked lists -- the input for weekly tuning.
 
 JEV'S VOICE: when a lookup returns no usable answer (no confirmed or possible
 file, or only errors), the very last line printed is exactly:
-    Jev: I didn't have this. Want me to find it by hand and save it for next time?
+    Super Jev: I didn't have this. Want me to find it by hand and save it for next time?
 A hit prints nothing extra. Any harness relaying ask.py's output to a human
 should relay that line to them verbatim, unedited.
 
@@ -150,7 +150,7 @@ def log(sdir: Path, kind: str, **fields) -> None:
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
 
 # --- Live decision traces (traces.jsonl, next to lookups.jsonl) ------------------
-VOICE_LINE = "Jev: I didn't have this. Want me to find it by hand and save it for next time?"
+VOICE_LINE = "Super Jev: I didn't have this. Want me to find it by hand and save it for next time?"
 TRACE_CAP_BYTES = 20 * 1024 * 1024  # rotate at ~20MB
 TRACE_FIELD_MAX_CHARS = 500
 

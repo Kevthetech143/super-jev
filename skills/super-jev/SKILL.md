@@ -33,7 +33,7 @@ Every lookup (cache hits too, tier `cache`/`stale`) appends one redacted JSON li
 When a lookup returns no usable answer, the last line `ask.py` prints is exactly:
 
 ```
-Jev: I didn't have this. Want me to find it by hand and save it for next time?
+Super Jev: I didn't have this. Want me to find it by hand and save it for next time?
 ```
 
 **A harness relaying `ask.py` output to a human must pass that line on verbatim.**
