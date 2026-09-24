@@ -368,6 +368,34 @@ def _nav_concurrency() -> int:
         return 6
 NAV_CONCURRENCY = _nav_concurrency()
 
+# Folder pre-filter: before Jev navigation, a free local word match (word_search)
+# scores each pointer and only the top-K go to navigation. 0 disables. The
+# caller's own brain root always stays; flat or empty scores fall back to all.
+def _prefilter_k() -> int:
+    try:
+        n = int(os.environ.get("SUPERJEV_PREFILTER_K", "6"))
+        return n if n >= 0 else 6
+    except ValueError:
+        return 6
+
+PREFILTER_FLAT_RATIO = 0.9  # (K+1)-th best within 90% of the best: scores cannot tell folders apart
+
+def prefilter_pointers(pointers: list, principal: str, found: list, k: int) -> tuple:
+    """(kept pointers in original order, reason). found is word_search output
+    [(score, path, pointer)] over all pointers."""
+    if k <= 0 or len(pointers) <= k:
+        return pointers, "off" if k <= 0 else "few"
+    best = {}
+    for score, _, ptr in found:
+        best[ptr] = max(best.get(ptr, 0), score)
+    ranked = sorted((p for p in pointers if best.get(p, 0) > 0), key=lambda p: (-best[p], pointers.index(p)))
+    if not ranked:
+        return pointers, "no-scores"
+    if len(ranked) > k and best[ranked[k]] >= PREFILTER_FLAT_RATIO * best[ranked[0]]:
+        return pointers, "flat"
+    keep = set(ranked[:k]) | {p for p in pointers if is_principal_brain_root(p, principal)}
+    return [p for p in pointers if p in keep], "top-k"
+
 # Sick-pointer circuit breaker: a pointer that fails N times in a row is benched
 # for a short cool-off instead of being retried (and waited on) every single call.
 # Health is per-principal, persisted in state so it survives across processes.
@@ -914,6 +942,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             active_pointers.append(ptr)
     pointers = active_pointers
+    # One local word search over every active pointer: feeds the folder pre-filter
+    # and, later, the word-search files added to the content check (unchanged set).
+    all_found = word_search(question, pointers, limit=10**9)
+    pointers, prefilter_reason = prefilter_pointers(pointers, principal, all_found, _prefilter_k())
 
     def nav(ptr):
         t_start = time.time()
@@ -984,7 +1016,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
-    found = [f for f in word_search(question, pointers) if f[1] not in routed[:CONFIRM_FILES]]
+    found = [f for f in all_found[:FALLBACK_FILES] if f[1] not in routed[:CONFIRM_FILES]]
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
@@ -1076,7 +1108,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         merged = sorted(keep.values(), key=sort_metric, reverse=True)
     top = merged[:5]
     top = apply_near_twin_tiebreak(question, top)
-    log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
+    log(sdir, "lookup", question=question, pointers=len(pointers), prefilter=prefilter_reason, statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
