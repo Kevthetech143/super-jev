@@ -13,10 +13,12 @@
       --add. Any error -> "unresolved: N of M pointers errored" last, exit 1
       (even when candidates printed above); exit 0 otherwise.
 
-  ask.py --principal AGENT --approve "question" "answer"
+  ask.py --principal AGENT --approve "question" "answer" [--rank N | --file PATH]
       Re-searches the last lookup's top pointer and approves it, quotes taken
       verbatim from reviewedText. Next ask of the same question is a cache
-      hit. Nothing ready -> hints --add.
+      hit. Nothing ready -> hints --add. --rank N (1-based, as printed) or
+      --file PATH approves any listed candidate instead, possible tier
+      included, from that candidate's own pointer.
 
   ask.py --principal AGENT --add "question" "answer" [--source /path]
                                  [--subject TEXT] [--kind KIND] [--status STATUS]
@@ -1133,6 +1135,34 @@ def find_pointer(sdir: Path, question: str):
             return None if rec["top"][0].get("possible") else rec["top"][0]["pointer"]
     return None
 
+def find_candidate(sdir: Path, question: str, rank=None, file=None):
+    """The row {score, path, pointer, possible} the lead picked from the last lookup's
+    printed list: by 1-based rank, or by path (full path or unique file name).
+    Returns (row, None) or (None, reason)."""
+    path = sdir / "lookups.jsonl"
+    top = None
+    if path.is_file():
+        for line in reversed(path.read_text().splitlines()):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
+                top = rec["top"]
+                break
+    if not top:
+        return None, "no prior lookup with candidates for that question; run ask first, or use --add"
+    if rank is not None:
+        if not 1 <= rank <= len(top):
+            return None, f"--rank {rank} is out of range: the last lookup listed {len(top)} candidate(s)"
+        return top[rank - 1], None
+    hits = [r for r in top if r.get("path") == file] or \
+           [r for r in top if Path(r.get("path", "")).name == Path(file).name]
+    if len(hits) != 1:
+        return None, (f"--file {file!r} matches {len(hits)} of the last lookup's candidates; "
+                      "pass the full path as printed, or use --rank N")
+    return hits[0], None
+
 def record_approver(sdir: Path, question: str, approved_by, **fields) -> None:
     """Who approved the saved answer for this exact question; the last line wins.
     approved_by None means un-saved."""
@@ -1393,10 +1423,20 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
     print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
     return 0
 
-def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None) -> int:
+def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None, rank=None, file=None) -> int:
+    chosen = None
+    if rank is not None or file is not None:
+        # The lead picked a listed candidate by hand (any rank, possible tier
+        # included): that pick IS the review, so approve from its own pointer.
+        chosen, why = find_candidate(sdir, question, rank=rank, file=file)
+        if not chosen:
+            print(why)
+            return 1
+        pointer = chosen["pointer"]
     pointer = pointer or find_pointer(sdir, question)
     if not pointer:
-        print("no prior lookup with candidates for that question; run ask first, or use --add")
+        print("no confirmed top candidate for that question; run ask first, pick a listed "
+              "file with --rank N or --file PATH, or use --add")
         return 1
     out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
     if out.get("status") == "verified-cache-hit":
@@ -1406,9 +1446,10 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
         print(f"cannot approve: search returned {out.get('status')} on {pointer}. Use --add to record it manually.")
         log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
         return 1
-    rc = send_approval(principal, question, answer, pointer, out, sdir)
+    extra = {"file": chosen["path"]} if chosen else {}
+    rc = send_approval(principal, question, answer, pointer, out, sdir, **extra)
     if rc == 0:
-        top = find_top(sdir, question)
+        top = chosen or find_top(sdir, question)
         write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=(top or {}).get("path"))
     return rc
 
@@ -1564,7 +1605,18 @@ def _main() -> int:
             return 2
         return auto_approve(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--approve":
-        return approve(principal, a[1], a[2], sdir)
+        rest, rank, file = a[1:], None, None
+        try:
+            while "--rank" in rest:
+                i = rest.index("--rank"); rank = int(rest[i + 1]); del rest[i:i + 2]
+            while "--file" in rest:
+                i = rest.index("--file"); file = rest[i + 1]; del rest[i:i + 2]
+        except (IndexError, ValueError):
+            rest = []
+        if len(rest) != 2 or (rank is not None and file is not None):
+            print('usage: --approve "question" "answer" [--rank N | --file PATH]')
+            return 2
+        return approve(principal, rest[0], rest[1], sdir, rank=rank, file=file)
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
     return lookup(" ".join(a), principal, sdir)
