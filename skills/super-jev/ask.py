@@ -245,7 +245,15 @@ ANSWER_LABEL = ("Passage {n}, choose only if it answers the question: a rule, pl
                 "date, status or view on what is asked (a passage that only shares a word "
                 "with the question is none)")
 # Live-number asks: no possible tier, a file must confirm at CONFIRM_FLOOR.
-LIVE_RE = re.compile(r"\b(how much|balance|breakeven|break even|right now)\b", re.I)
+# "how much" alone used to be enough (any bare "how much X" counted as live),
+# but that caught non-money asks like "how much cheaper and faster is this"
+# (EXPLORE.md, recall80 bench, dropped at 0.80 with no possible tier). "how
+# much" now only counts as live when it names a money word too; the plain
+# live markers (balance/breakeven/right now) still gate on their own.
+LIVE_RE = re.compile(r"\b(balance|breakeven|break even|right now)\b", re.I)
+LIVE_HOWMUCH_RE = re.compile(
+    r"\bhow much\b.{0,40}\b(balance|owe|owed|worth|cost|price|due|total|left|"
+    r"remaining)\b", re.I)
 
 # Routing score at/above which a read file stays "possible" even when the content
 # check finds no answer (opinion asks like "should I invest" rarely read as answered).
@@ -267,14 +275,37 @@ def is_value_question(question: str) -> bool:
     return bool(VALUE_RE.search(question))
 
 def is_live_value_question(question: str) -> bool:
-    return bool(LIVE_RE.search(question))
+    return bool(LIVE_RE.search(question)) or bool(LIVE_HOWMUCH_RE.search(question))
 
-OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|are)\b", re.I)
+# The narrower slice of VALUE_RE this round loosens for the possible tier: "how
+# many" and "how much" only. worth/owe/owed/price/cost/total stay excluded --
+# those are exactly the near-miss shapes ("what is owed", "what price did we
+# pay") the 0.85 confirm floor was raised to block, per test_retrieval_recall
+# and test_review_recall_holes.
+HOWCOUNT_RE = re.compile(r"\b(how many|how much)\b", re.I)
+
+def is_howcount_question(question: str) -> bool:
+    return bool(HOWCOUNT_RE.search(question))
+
+OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|are|"
+                     r"which|where)\b", re.I)
+# "what" is not in OPEN_RE outright: "what car do I have" and "what time does it
+# depart" are "what" questions that DO want one exact value, and treating every
+# "what" as open reintroduced the near-miss false hits the exact-value label was
+# built to stop (test_hardening_round3/4). Only "what ... <answer verb>" -- a
+# casual ask about what a file says/covers/means, not a fact lookup -- gets the
+# open treatment (idea B, 2026-09-23, recall80 bench: tools-audit's "what swap
+# path services did we discover" was one of the 7 rejections this targets).
+WHAT_ANSWER_RE = re.compile(
+    r"\bwhat\b.{0,40}\b(say|says|said|cover|covers|mean|means|discover|discovered|"
+    r"discuss|discusses|find|found|include|includes|show|shows|about)\b", re.I)
 
 def confirm_label(question: str) -> str:
-    """Open how/should/why/when questions ask "does it answer"; the rest (and any
-    value question) ask for the exact value."""
-    open_q = OPEN_RE.match(question) and not is_value_question(question)
+    """Open how/should/why/when/which/where questions, and "what ... say/cover/mean"
+    style casual asks, ask "does it answer"; the rest (and any value question) ask
+    for the exact value."""
+    open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)) \
+        and not is_value_question(question)
     return ANSWER_LABEL if open_q else CONFIRM_LABEL
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
@@ -527,8 +558,16 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             error_lines.append(f"[content-check] error: {check_error}")
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
-        # Value questions need a confirmed score; no possible tier.
-        if not is_value_question(question):
+        # Value questions need a confirmed score; no possible tier -- except
+        # "how many" / non-live "how much" (is_howcount_question), which get the
+        # possible tier back same as any other question. wheel-radar (0.67, "how
+        # many put opportunities") and EXPLORE (0.80, "how much cheaper and
+        # faster") were both dropped here even though neither is a live-money ask
+        # (idea A, 2026-09-23, recall80 bench). Other value words (worth/owe/
+        # owed/price/cost/total) and any live figure stay gated: those are the
+        # near-miss shapes the 0.85 confirm floor exists to block.
+        if not is_value_question(question) or (is_howcount_question(question)
+                                                 and not is_live_value_question(question)):
             possible = {p: (FALLBACK_NOTE if p in wpaths else POSSIBLE_NOTE) for p in to_check
                         if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
             # A strongly routed file that was read keeps a possible slot even if the
