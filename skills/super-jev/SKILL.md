@@ -26,31 +26,17 @@ A `preparation-required` result, an unknown pointer, or onboarding a new person/
 python3 dispatch.py memory --principal YOUR_AGENT_NAME
 ```
 
-## Live decision traces and weekly tuning
+## Live decision traces and Jev's voice
 
-Every live lookup (a real navigate/content-check pass, never a cache hit) appends one JSON line to
-`$STATE/traces.jsonl` (next to `lookups.jsonl`): timestamp, lookup id, question, each pointer's
-routing candidates with scores, the content-check scores/labels, the final ranked list, a tier
-(confirmed/possible/none), timings and errors — never file contents or secrets (same secret scan
-`prepare_bulk.py` runs; long fields truncated). The file rotates at ~20MB, keeping one old
-generation (`traces.jsonl.1`). Outcomes link to the last trace for that principal+question:
-`--approve` marks it "right" (with the evidence file), `--miss` marks it "wrong" (with the actual
-path), and `--add` run right after a miss marks it "wrong, added". `python3 ask.py --principal
-YOUR_AGENT --trace-report [--days 7]` is a read-only report: counts of right/wrong/unlabeled and the
-top wrong questions with their ranked lists — the input for a weekly tuning pass.
+Every lookup (cache hits too, tier `cache`/`stale`) appends one redacted JSON line to `$STATE/traces.jsonl`: id, question, routing, content-check scores, final ranking, tier, timings, errors — never file contents or secrets. Rotates at ~20MB (one `.1` kept). `--approve` marks the last lookup for that question "right", `--miss` "wrong", `--add` after a miss "wrong, added". `ask.py --principal YOUR_AGENT --trace-report [--days 7]` reports right/wrong/unlabeled and top wrong questions.
 
-## Jev's voice
-
-When a lookup returns no usable answer (no confirmed or possible file, or only errors), the very
-last line `ask.py` prints is exactly:
+When a lookup returns no usable answer, the last line `ask.py` prints is exactly:
 
 ```
 Jev: I didn't have this. Want me to find it by hand and save it for next time?
 ```
 
-A hit prints nothing extra. **Any harness relaying `ask.py`'s output to a human should relay that
-line to them verbatim, unedited** — it is Jev speaking in his own voice, not a status message to
-summarize or reword.
+**A harness relaying `ask.py` output to a human must pass that line on verbatim.**
 
 ## Maturity
 

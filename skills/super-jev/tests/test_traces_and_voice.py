@@ -108,7 +108,7 @@ def test_hit_lookup_prints_no_voice_line(tmp_path, monkeypatch, capsys):
     assert ask.VOICE_LINE not in out
 
 
-def test_cache_hit_prints_no_voice_line_and_writes_no_trace(tmp_path, monkeypatch, capsys):
+def test_cache_hit_prints_no_voice_line_and_writes_cache_trace(tmp_path, monkeypatch, capsys):
     def fake_memory(req):
         if req["action"] == "cached":
             return {"status": "verified-cache-hit", "answer": "Blue.",
@@ -121,7 +121,8 @@ def test_cache_hit_prints_no_voice_line_and_writes_no_trace(tmp_path, monkeypatc
     assert rc == 0
     out = capsys.readouterr().out
     assert ask.VOICE_LINE not in out
-    assert not (tmp_path / "traces.jsonl").is_file()
+    rec = json.loads((tmp_path / "traces.jsonl").read_text().splitlines()[-1])
+    assert rec["tier"] == "cache"
 
 
 # -------------------------------------------------------------------- traces

@@ -165,7 +165,7 @@ def _redact(value):
             return value[:TRACE_FIELD_MAX_CHARS] + "...[truncated]"
         return value
     if isinstance(value, dict):
-        return {k: _redact(v) for k, v in value.items()}
+        return {_redact(k) if isinstance(k, str) else k: _redact(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_redact(v) for v in value]
     return value
@@ -182,9 +182,13 @@ def _rotate_if_needed(path: Path, cap_bytes: int = TRACE_CAP_BYTES) -> None:
 def write_trace(sdir: Path, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
     path = sdir / "traces.jsonl"
-    _rotate_if_needed(path)
-    entry = _redact({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **fields})
-    path.open("a").write(json.dumps(entry) + "\n")
+    try:
+        _rotate_if_needed(path)
+        entry = _redact({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **fields})
+        with path.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass  # a trace is best-effort; never break the lookup over it
 
 def new_lookup_id(principal: str, question: str, t0: float) -> str:
     return hashlib.sha1(f"{principal}|{question}|{t0}".encode()).hexdigest()[:12]
@@ -192,10 +196,12 @@ def new_lookup_id(principal: str, question: str, t0: float) -> str:
 def last_lookup_id(sdir: Path, question: str):
     """The most recent trace's lookup id for this exact question. sdir is
     already scoped to one principal, so no principal filter is needed."""
-    path = sdir / "traces.jsonl"
-    if not path.is_file():
-        return None
-    for line in reversed(path.read_text().splitlines()):
+    lines = []
+    for name in ("traces.jsonl.1", "traces.jsonl"):
+        p = sdir / name
+        if p.is_file():
+            lines += p.read_text().splitlines()
+    for line in reversed(lines):
         try:
             rec = json.loads(line)
         except ValueError:
@@ -233,6 +239,9 @@ def trace_report(sdir: Path, days=None) -> int:
         p = sdir / name
         if p.is_file():
             lines += p.read_text().splitlines()
+    if days is not None and days <= 0:
+        print("--days must be a positive number")
+        return 2
     cutoff = time.time() - days * 86400 if days else None
     traces, outcomes = {}, {}
     for line in lines:
@@ -645,6 +654,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
+        write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
+                    content_check={}, final_ranked=[], tier="cache" if rc == 0 else "stale",
+                    timings={"total_secs": round(time.time() - t0, 2)})
+        if rc != 0:
+            print(VOICE_LINE)
         return rc
     panel = memory({"action": "panel", "principal": principal})
     if panel.get("reason") == "not-set-up":
