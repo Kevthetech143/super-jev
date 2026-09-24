@@ -128,3 +128,30 @@ def test_is_hub_file_still_recognizes_original_stems(tmp_path):
 
 def test_is_hub_file_false_for_a_real_note(tmp_path):
     assert ask.is_hub_file(str(tmp_path / "watchlist.md")) is False
+
+
+def test_confirmed_readme_dashboard_outranks_lower_note(tmp_path):
+    """businessfi hand test 2026-09-24: campaigns/clov/README.md (0.93, holds the
+    $3.94 breakeven) ranked 3rd behind notes without the number because every
+    README was demoted as a hub. A README whose own check confirmed is evidence."""
+    readme = str(tmp_path / "clov" / "README.md")
+    note = str(tmp_path / "read-campaign-numbers-live-not-memory.md")
+    top = _run(
+        tmp_path, "what's our all-in breakeven on the CLOV wheel right now",
+        {readme: "all-in breakeven $3.94 / share", note: "read campaign numbers live"},
+        [{"score": 0.5, "originalPath": readme}, {"score": 0.9, "originalPath": note}],
+        {readme: 0.93, note: 0.91},
+    )
+    assert top[0] == readme
+
+
+def test_unconfirmed_readme_still_ranks_below_note(tmp_path):
+    readme = str(tmp_path / "clov" / "README.md")
+    note = str(tmp_path / "clov-plan.md")
+    top = _run(
+        tmp_path, "what is the clov plan",
+        {readme: "clov", note: "clov plan"},
+        [{"score": 0.9, "originalPath": readme}, {"score": 0.5, "originalPath": note}],
+        {readme: 0.80, note: 0.70},
+    )
+    assert top.index(note) < top.index(readme)
