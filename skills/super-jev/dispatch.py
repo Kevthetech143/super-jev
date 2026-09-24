@@ -14,6 +14,7 @@ TOOLS = {
     "check": "Check a claim against evidence",
     "verify": "Verify an agent's work",
     "memory": "Use the opt-in experimental verified-reuse pointer/cache",
+    "audit-visibility": "Read-only: compare who can see a pointer against who connected it (--config PATH to the real pointer-memory config.json memory.sh/ask.py use, or explicit --registry/--db)",
 }
 
 
@@ -78,6 +79,11 @@ def main(args: list[str]) -> int:
     if args and args[0] == "help":
         from setup_help import run as setup_help
         code, result = setup_help(args[1:])
+        print(json.dumps(result))
+        return code
+    if args and args[0] == "audit-visibility":
+        from audit_visibility import run as audit_visibility
+        code, result = audit_visibility(args[1:])
         print(json.dumps(result))
         return code
     if not args or args[0] in ("tools", "--help", "-h"):
