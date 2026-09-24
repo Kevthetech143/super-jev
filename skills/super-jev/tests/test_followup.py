@@ -191,6 +191,50 @@ def test_main_followup_respects_max_tries_flag(tmp_path, monkeypatch, capsys):
     assert "dropped after 1 tries" in capsys.readouterr().out
 
 
+def test_followup_never_reproposes_the_file_the_miss_named_as_wrong(tmp_path, monkeypatch, capsys):
+    """A fresh retry that lands on the exact same file SJ was already wrong
+    about at miss-time must never be proposed again -- it's still the wrong
+    file, even though the miss's "actual" (correct answer) is a different
+    path entirely."""
+    ask.log(tmp_path, "lookup", question="where is it?",
+            top=[{"score": 0.9, "path": "/wrong.md", "pointer": "p1", "possible": False}])
+    ask.log(tmp_path, "miss", question="where is it?", actual="/the-real-file.md")
+    assert ask.pending_misses(tmp_path)["where is it?"]["wrong"] == "/wrong.md"
+    monkeypatch.setattr(ask, "memory", confident_memory(question="where is it?", path="/wrong.md"))
+
+    rc = ask.followup("alice", tmp_path, max_tries=5)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PROPOSED" not in out
+    assert "where is it?" in ask.pending_misses(tmp_path)
+
+
+def test_followup_never_falls_back_to_a_stale_prior_hit_on_a_failed_fresh_search(tmp_path, monkeypatch, capsys):
+    """A prior lookup (e.g. the original miss's own confident-looking log line)
+    must never leak into a followup proposal when the FRESH retry itself
+    errors out or finds nothing -- only the just-run lookup counts."""
+    ask.log(tmp_path, "lookup", question="where is it?",
+            top=[{"score": 0.95, "path": "/old-hit.md", "pointer": "p1", "possible": False}])
+    ask.log(tmp_path, "miss", question="where is it?", actual="/old-hit.md")
+
+    def erroring_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": "p1"}]}
+        if req["action"] == "navigate":
+            return {"status": "error", "reason": "boom"}
+        raise AssertionError(req)
+    monkeypatch.setattr(ask, "memory", erroring_memory)
+
+    rc = ask.followup("alice", tmp_path, max_tries=5)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PROPOSED" not in out
+
+
 def test_main_followup_bad_max_tries_is_a_usage_error(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "alice", "--followup", "--max-tries", "not-a-number"])
 
