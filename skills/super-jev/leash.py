@@ -2,13 +2,13 @@
 """Worker Leash: a PreToolUse hook that keeps a sub-agent's writes inside an
 allow-list, and leaves the lead session alone.
 
-See docs/hooks.md for the full writeup (what it does, costs, gaps, install
+See docs/wire-into-claude-code.md for the full writeup (what it does, costs, gaps, install
 snippet). Short version:
 
 - Reads a Claude Code PreToolUse hook payload on stdin.
 - If the call is not a sub-agent call (no "agent_id" on the payload — the
   field a real lead-session call never carries; verified against a live
-  hook_input_log.jsonl capture, see docs/hooks.md), it allows and does
+  hook_input_log.jsonl capture, see docs/wire-into-claude-code.md), it allows and does
   nothing else. Lead calls are never touched.
 - If it IS a sub-agent call, and the tool is Write/Edit/NotebookEdit, the
   target path is checked against an always-deny list first, then an
@@ -23,7 +23,7 @@ snippet). Short version:
   allow and log. This hook does NOT fail closed. A crashing PreToolUse
   hook blocks every tool call in the session, for every agent, lead
   included — that is a worse outcome than the leash occasionally missing
-  a write it should have caught. See docs/hooks.md "Gaps".
+  a write it should have caught. See docs/wire-into-claude-code.md "Gaps".
 
 stdlib only. No network, no dependency on the rest of this skill.
 """
@@ -159,7 +159,7 @@ def extract_bash_write_targets(cmd):
     """Best-effort only. Does not parse shell syntax — a target hidden
     behind a variable, a subshell, quoting tricks, or a command this list
     doesn't know about (e.g. sed -i, dd, sqlite3 writes) is invisible to
-    this hook. See docs/hooks.md "Gaps"."""
+    this hook. See docs/wire-into-claude-code.md "Gaps"."""
     targets = []
     for pat in WRITE_BASH_PATTERNS:
         for m in re.finditer(pat, cmd):
