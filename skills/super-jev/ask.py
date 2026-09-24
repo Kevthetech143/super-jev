@@ -113,7 +113,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prepare_bulk  # noqa: E402
-from prepare_bulk import KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret, payload_has_secret  # noqa: E402
+from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret,  # noqa: E402
+                          payload_has_secret, path_has_secret, redact_path_secrets)
 import auto_heal  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
@@ -157,7 +158,7 @@ def memory(req: dict) -> dict:
 
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
-    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
+    entry = _redact({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields})
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
 
 # --- Live decision traces (traces.jsonl, next to lookups.jsonl) ------------------
@@ -172,6 +173,8 @@ def _redact(value):
     if isinstance(value, str):
         if has_secret(value):
             return "[redacted]"
+        if path_has_secret(value):
+            value = redact_path_secrets(value)
         if len(value) > TRACE_FIELD_MAX_CHARS:
             return value[:TRACE_FIELD_MAX_CHARS] + "...[truncated]"
         return value
@@ -190,7 +193,14 @@ def _rotate_if_needed(path: Path, cap_bytes: int = TRACE_CAP_BYTES) -> None:
             old.unlink()
         path.rename(old)
 
+def traces_enabled() -> bool:
+    """SUPERJEV_TRACES=0 (or any falsy-looking value) turns tracing off, e.g. to
+    measure the overhead traces.jsonl writes add to a hot path."""
+    return os.environ.get("SUPERJEV_TRACES", "1") not in ("0", "false", "False", "")
+
 def write_trace(sdir: Path, **fields) -> None:
+    if not traces_enabled():
+        return
     sdir.mkdir(parents=True, exist_ok=True)
     path = sdir / "traces.jsonl"
     try:
@@ -1204,9 +1214,17 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
     if preview.get("status") != "preparation-required" or "sources" not in preview:
         print("connect preview failed:", json.dumps(preview)[:300])
         return 1
-    hashes = {x["path"]: x["sha256"] for x in preview["sources"]}
+    # The memory backend may echo back a canonicalized (realpath) form of the
+    # path we sent -- e.g. on macOS /tmp is itself a symlink to /private/tmp,
+    # so a caller whose state dir or source lives under /tmp gets a literal
+    # mismatch here even though it's the same file. Compare on realpath.
+    hashes = {os.path.realpath(x["path"]): x["sha256"] for x in preview["sources"]}
     for s in req["sources"]:
-        s["sha256"] = hashes[s["path"]]
+        real = os.path.realpath(s["path"])
+        if s["path"] in hashes:
+            s["sha256"] = hashes[s["path"]]
+        else:
+            s["sha256"] = hashes[real]
     req["reviewed"] = True
     reg = memory(req)
     if reg.get("status") != "registered" or not reg.get("sources"):
