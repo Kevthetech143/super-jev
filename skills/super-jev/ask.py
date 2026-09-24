@@ -995,14 +995,20 @@ def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
 FOLLOWUP_MAX_TRIES = 5
 
 def pending_misses(sdir: Path) -> dict:
-    """question -> {"actual": str, "tries": int} for every --miss not yet resolved
-    (approved since the miss) or dropped (followup-drop, after FOLLOWUP_MAX_TRIES
-    retries with no confident file). Read straight off lookups.jsonl -- no new
-    state file, reusing the log --miss/--approve already write."""
+    """question -> {"actual": str, "wrong": str|None, "tries": int} for every
+    --miss not yet resolved (approved since the miss) or dropped
+    (followup-drop, after FOLLOWUP_MAX_TRIES retries with no confident file).
+    Read straight off lookups.jsonl -- no new state file, reusing the log
+    --miss/--approve already write. "wrong" is the top path of the lookup
+    that immediately preceded the miss -- the file SJ actually got wrong --
+    tracked separately from "actual" (the --miss docstring's "where it
+    actually was", i.e. the CORRECT location): the two are not the same
+    thing, and a followup must never re-propose "wrong"."""
     path = sdir / "lookups.jsonl"
     pending: dict = {}
     if not path.is_file():
         return pending
+    last_top = {}
     for line in path.read_text().splitlines():
         try:
             rec = json.loads(line)
@@ -1012,8 +1018,11 @@ def pending_misses(sdir: Path) -> dict:
         if not q:
             continue
         kind = rec.get("kind")
-        if kind == "miss":
-            pending[q] = {"actual": rec.get("actual"), "tries": 0}
+        if kind == "lookup":
+            top = rec.get("top")
+            last_top[q] = top[0]["path"] if top else None
+        elif kind == "miss":
+            pending[q] = {"actual": rec.get("actual"), "wrong": last_top.get(q), "tries": 0}
         elif kind == "followup-try" and q in pending:
             pending[q]["tries"] = rec.get("tries", pending[q]["tries"])
         elif kind == "followup-drop":
@@ -1021,6 +1030,31 @@ def pending_misses(sdir: Path) -> dict:
         elif kind == "approve" and rec.get("result") in ("approved", "saved", "ok") and q in pending:
             pending.pop(q, None)
     return pending
+
+def fresh_top(sdir: Path, question: str):
+    """The top row from the MOST RECENT lookups.jsonl line, only if it is a
+    'lookup' record for this exact question with a non-empty, non-possible
+    top. Unlike find_top/find_pointer (which scan backward through history
+    and can surface an OLD lookup's result), this never falls back past the
+    single fresh lookup just run: a failed or empty fresh search (top=[], or
+    an early-return path that logs nothing at all) yields None here instead
+    of silently reusing a stale prior hit."""
+    path = sdir / "lookups.jsonl"
+    if not path.is_file():
+        return None
+    lines = path.read_text().splitlines()
+    if not lines:
+        return None
+    try:
+        rec = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if rec.get("kind") != "lookup" or rec.get("question") != question:
+        return None
+    top = rec.get("top")
+    if not top or top[0].get("possible"):
+        return None
+    return top[0]
 
 def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) -> int:
     """Re-try every pending miss: re-run the normal lookup (pointers may have
@@ -1037,8 +1071,14 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
         tries = info["tries"] + 1
         print(f"retrying miss: {question!r} (try {tries}/{max_tries}; originally found at: {info['actual']})")
         lookup(question, principal, sdir)
-        pointer = find_pointer(sdir, question)
-        top = find_top(sdir, question)
+        top = fresh_top(sdir, question)
+        wrong = (info.get("wrong") or "").strip()
+        if top and wrong and top["path"].strip() == wrong:
+            # The fresh search found exactly the file SJ was already wrong
+            # about at miss-time -- never re-propose it. Treat as still-miss.
+            print(f"still wrong file for {question!r} -> {top['path']} (miss already named this)")
+            top = None
+        pointer = top["pointer"] if top else None
         if pointer and top:
             proposed += 1
             print(f"PROPOSED: confident file found for {question!r} -> {top['path']} [{pointer}]")
