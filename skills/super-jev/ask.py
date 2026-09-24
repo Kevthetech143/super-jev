@@ -64,6 +64,26 @@
 Cache hits print who approved them: "approved_by: human" (--approve, --add)
 or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
 
+LIVE DECISION TRACES: every live lookup (a real navigate/content-check pass,
+never a cache hit) appends one JSON line to $STATE/traces.jsonl -- timestamp,
+lookup id, question, each pointer's routing candidates with scores, the
+content-check scores/labels, the final ranked list, a tier (confirmed/
+possible/none), timings and errors. No file contents or secrets ride in a
+trace line (scanned with the same secret scan prepare_bulk uses; long fields
+are truncated). The file rotates at ~20MB, keeping one old generation
+(traces.jsonl.1). OUTCOMES link to the last trace for that principal+question:
+--approve marks it "right" (with the evidence file); --miss marks it "wrong"
+(with the path it was actually found at); --add run right after a miss marks
+it "wrong, added". `ask.py --principal AGENT --trace-report [--days N]`
+prints read-only counts of right/wrong/unlabeled and the top wrong questions
+with their ranked lists -- the input for weekly tuning.
+
+JEV'S VOICE: when a lookup returns no usable answer (no confirmed or possible
+file, or only errors), the very last line printed is exactly:
+    Jev: I didn't have this. Want me to find it by hand and save it for next time?
+A hit prints nothing extra. Any harness relaying ask.py's output to a human
+should relay that line to them verbatim, unedited.
+
 AGENT can also come from SUPERJEV_PRINCIPAL. State lives under
 $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo.
 """
@@ -128,6 +148,133 @@ def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
     entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
+
+# --- Live decision traces (traces.jsonl, next to lookups.jsonl) ------------------
+VOICE_LINE = "Jev: I didn't have this. Want me to find it by hand and save it for next time?"
+TRACE_CAP_BYTES = 20 * 1024 * 1024  # rotate at ~20MB
+TRACE_FIELD_MAX_CHARS = 500
+
+def _redact(value):
+    """Recursively hold back secret-shaped strings and truncate long fields --
+    a trace line never carries file contents or secrets. Reuses the same
+    card/password-key scan prepare_bulk.py runs before onboarding a file."""
+    if isinstance(value, str):
+        if has_secret(value):
+            return "[redacted]"
+        if len(value) > TRACE_FIELD_MAX_CHARS:
+            return value[:TRACE_FIELD_MAX_CHARS] + "...[truncated]"
+        return value
+    if isinstance(value, dict):
+        return {k: _redact(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+def _rotate_if_needed(path: Path, cap_bytes: int = TRACE_CAP_BYTES) -> None:
+    """Once path reaches cap_bytes, move it to path + '.1' (overwriting any
+    older .1), keeping exactly one prior generation."""
+    if path.is_file() and path.stat().st_size >= cap_bytes:
+        old = path.with_suffix(path.suffix + ".1")
+        if old.is_file():
+            old.unlink()
+        path.rename(old)
+
+def write_trace(sdir: Path, **fields) -> None:
+    sdir.mkdir(parents=True, exist_ok=True)
+    path = sdir / "traces.jsonl"
+    _rotate_if_needed(path)
+    entry = _redact({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **fields})
+    path.open("a").write(json.dumps(entry) + "\n")
+
+def new_lookup_id(principal: str, question: str, t0: float) -> str:
+    return hashlib.sha1(f"{principal}|{question}|{t0}".encode()).hexdigest()[:12]
+
+def last_lookup_id(sdir: Path, question: str):
+    """The most recent trace's lookup id for this exact question. sdir is
+    already scoped to one principal, so no principal filter is needed."""
+    path = sdir / "traces.jsonl"
+    if not path.is_file():
+        return None
+    for line in reversed(path.read_text().splitlines()):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("kind") == "trace" and rec.get("question") == question:
+            return rec.get("lookup_id")
+    return None
+
+def last_outcome(sdir: Path, lookup_id: str):
+    """The most recently recorded outcome for a lookup id, or None."""
+    path = sdir / "traces.jsonl"
+    if not lookup_id or not path.is_file():
+        return None
+    for line in reversed(path.read_text().splitlines()):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if rec.get("kind") == "outcome" and rec.get("lookup_id") == lookup_id:
+            return rec
+    return None
+
+def write_outcome(sdir: Path, lookup_id, question: str, result: str, file: str = None) -> None:
+    """Record right/wrong/wrong-added against a lookup id. No-op when there is
+    no lookup id to link to (e.g. --approve/--miss with no prior live lookup)."""
+    if not lookup_id:
+        return
+    write_trace(sdir, kind="outcome", lookup_id=lookup_id, question=question, result=result, file=file)
+
+def trace_report(sdir: Path, days=None) -> int:
+    """Read-only: counts of right/wrong/unlabeled traces, and the top wrong
+    questions with their ranked list -- the weekly-tuning input."""
+    lines = []
+    for name in ("traces.jsonl.1", "traces.jsonl"):
+        p = sdir / name
+        if p.is_file():
+            lines += p.read_text().splitlines()
+    cutoff = time.time() - days * 86400 if days else None
+    traces, outcomes = {}, {}
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if cutoff is not None:
+            try:
+                ts = time.mktime(time.strptime(rec.get("ts", "")[:19], "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                ts = None
+            if ts is not None and ts < cutoff:
+                continue
+        lid = rec.get("lookup_id")
+        if not lid:
+            continue
+        if rec.get("kind") == "trace":
+            traces[lid] = rec
+        elif rec.get("kind") == "outcome":
+            outcomes[lid] = rec  # last one for this lid wins (file is append-only)
+    right = wrong = unlabeled = 0
+    wrong_questions = Counter()
+    for lid, tr in traces.items():
+        oc = outcomes.get(lid)
+        if not oc:
+            unlabeled += 1
+        elif oc.get("result") == "right":
+            right += 1
+        else:
+            wrong += 1
+            wrong_questions[tr.get("question", "")] += 1
+    print(f"right: {right}  wrong: {wrong}  unlabeled: {unlabeled}")
+    if wrong_questions:
+        print("\ntop wrong questions:")
+        for q, n in wrong_questions.most_common(10):
+            print(f"  ({n}) {q}")
+            lid = next((l for l, tr in traces.items()
+                       if tr.get("question") == q and outcomes.get(l, {}).get("result") != "right"), None)
+            for row in (traces.get(lid) or {}).get("final_ranked", [])[:5]:
+                print(f"      {row.get('score', 0):5.2f}  {row.get('path', '')}  [{row.get('pointer', '')}]")
+    return 0
 
 def my_pointers(principal: str) -> list:
     panel = memory({"action": "panel", "principal": principal})
@@ -493,6 +640,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
         return 2
     t0 = time.time()
+    lookup_id = new_lookup_id(principal, question, t0)
     cache = memory({"action": "cached", "principal": principal, "question": question})
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
@@ -510,6 +658,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
               f"--pointer my-notes --principal {principal}")
         log(sdir, "lookup", question=question, pointers=0, result="nothing-connected",
             secs=round(time.time() - t0, 1))
+        write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
+                    content_check={}, final_ranked=[], tier="none",
+                    timings={"total_secs": round(time.time() - t0, 2)}, errors=["nothing-connected"])
+        print(VOICE_LINE)
         return 1
 
     def nav(ptr):
@@ -641,6 +793,20 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
+    routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
+              for ptr, kind, rows in results}
+    content_check = {p: {"score": scores.get(p),
+                         "label": ("held-secret" if notes.get(p) == HELD_SECRET
+                                   else "inconclusive" if notes.get(p) == INCONCLUSIVE
+                                   else "possible" if p in possible
+                                   else "confirmed" if scores.get(p, 0) >= CONFIRM_FLOOR
+                                   else "dropped")}
+                     for p in checked}
+    tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed")
+    write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing=routing,
+                content_check=content_check,
+                final_ranked=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top],
+                tier=tier, timings={"total_secs": round(time.time() - t0, 2)}, errors=error_lines)
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for s, p, ptr in top:
@@ -654,6 +820,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(line)
     if errored:
         print(f"unresolved: {errored} of {len(pointers)} pointers errored")
+        if not top:
+            print(VOICE_LINE)
         return 1
     if not top:
         if dropped:
@@ -661,6 +829,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(f"no-candidates across {len(pointers)} pointers: no connected file answers this. "
               "Tell your human it is not in their files; do not guess. To fill the gap, connect more "
               "files or record a fact with --add (see references/connectors.md).")
+        print(VOICE_LINE)
         return 0
     return 0
 
@@ -791,6 +960,7 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path) -> int:
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
     log(sdir, "miss", question=question, actual=actual)
     print("miss recorded")
+    write_outcome(sdir, last_lookup_id(sdir, question), question, "wrong", file=actual)
     res = memory({"action": "forget", "principal": principal, "question": question})
     if res.get("status") == "forgotten":
         who = approver(sdir, question).get("approved_by", "human")
@@ -811,7 +981,11 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
         print(f"cannot approve: search returned {out.get('status')} on {pointer}. Use --add to record it manually.")
         log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
         return 1
-    return send_approval(principal, question, answer, pointer, out, sdir)
+    rc = send_approval(principal, question, answer, pointer, out, sdir)
+    if rc == 0:
+        top = find_top(sdir, question)
+        write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=(top or {}).get("path"))
+    return rc
 
 ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
                         "memory config (the one setup.py wrote, ~/.local/state/super-jev/_memory/"
@@ -897,7 +1071,14 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
         return 1
     print(f"manual entry written: {record.name}; pointer {pointer} registered")
     source_id = reg["sources"][0]["id"]
-    return approve_manual(principal, question, answer, pointer, source_id, record, sdir)
+    rc = approve_manual(principal, question, answer, pointer, source_id, record, sdir)
+    if rc == 0:
+        lid = last_lookup_id(sdir, question)
+        prior = last_outcome(sdir, lid) if lid else None
+        if prior and prior.get("result") == "wrong":
+            added_file = str(Path(source).resolve()) if source and Path(source).is_file() else str(record)
+            write_outcome(sdir, lid, question, "wrong-added", file=added_file)
+    return rc
 
 def resolve_principal(args: list) -> tuple[str, list]:
     if "--principal" in args:
@@ -924,6 +1105,15 @@ def _main() -> int:
         if not a:
             print(__doc__)
             return 2
+    if a[0] == "--trace-report":
+        days = None
+        if len(a) >= 3 and a[1] == "--days":
+            try:
+                days = int(a[2])
+            except ValueError:
+                print("usage: --trace-report [--days N]")
+                return 2
+        return trace_report(sdir, days)
     if a[0] == "--miss":
         return miss(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--answer":
