@@ -251,7 +251,7 @@ def has_secret(text: str) -> bool:
 # "token_metrics") is prose, not a leaked value, and must not be flagged.
 PATH_SECRET_KEYWORDS = r"(?:password|passwd|secret|token|api[_-]?key|private[_-]?key)"
 PATH_SECRET_RE = re.compile(
-    rf"(?<![0-9A-Za-z]){PATH_SECRET_KEYWORDS}[-_](?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*",
+    rf"(?<![0-9A-Za-z]){PATH_SECRET_KEYWORDS}[-_\u2010-\u2015](?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*",
     re.I)
 
 
