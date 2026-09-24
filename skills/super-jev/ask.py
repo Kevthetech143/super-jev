@@ -367,6 +367,74 @@ def _nav_concurrency() -> int:
     except ValueError:
         return 6
 NAV_CONCURRENCY = _nav_concurrency()
+
+# Sick-pointer circuit breaker: a pointer that fails N times in a row is benched
+# for a short cool-off instead of being retried (and waited on) every single call.
+# Health is per-principal, persisted in state so it survives across processes.
+# Real pain (2026-09-24): 3-4 of 22 pointers erroring every call ("Navigation
+# provider failed") turned an 8s median lookup into 59.5s, and rc=1 on every
+# call even though most pointers were fine.
+def _bench_threshold() -> int:
+    try:
+        n = int(os.environ.get("SUPERJEV_BENCH_THRESHOLD", "3"))
+        return n if n > 0 else 3
+    except ValueError:
+        return 3
+def _bench_cooldown_secs() -> float:
+    try:
+        n = float(os.environ.get("SUPERJEV_BENCH_COOLDOWN_SECS", "120"))
+        return n if n > 0 else 120.0
+    except ValueError:
+        return 120.0
+BENCH_FAIL_THRESHOLD = _bench_threshold()
+BENCH_COOLDOWN_SECS = _bench_cooldown_secs()
+# A 529/"overloaded" navigate gets exactly one retry after a short backoff,
+# rather than being counted as a failure on the first try.
+OVERLOAD_BACKOFF_SECS = 1.0
+
+def _is_overloaded(text: str) -> bool:
+    t = (text or "").lower()
+    return "529" in t or "overload" in t
+
+def health_path(sdir: Path) -> Path:
+    return sdir / "pointer_health.json"
+
+def load_pointer_health(sdir: Path) -> dict:
+    try:
+        return json.loads(health_path(sdir).read_text())
+    except Exception:
+        return {}
+
+def save_pointer_health(sdir: Path, health: dict) -> None:
+    sdir.mkdir(parents=True, exist_ok=True)
+    try:
+        health_path(sdir).write_text(json.dumps(health))
+    except Exception:
+        pass  # health tracking is best-effort; never block a lookup on it
+
+def record_pointer_outcome(health: dict, ptr: str, ok: bool, elapsed: float) -> None:
+    rec = health.setdefault(ptr, {"fails": 0, "last_fail_ts": 0.0, "avg_latency": 0.0, "calls": 0})
+    rec["calls"] = rec.get("calls", 0) + 1
+    prev_avg = rec.get("avg_latency", 0.0)
+    rec["avg_latency"] = prev_avg + (elapsed - prev_avg) / rec["calls"]
+    if ok:
+        rec["fails"] = 0
+    else:
+        rec["fails"] = rec.get("fails", 0) + 1
+        rec["last_fail_ts"] = time.time()
+
+def pointer_benched(health: dict, ptr: str):
+    """(is_benched, seconds_remaining, fail_count) -- N consecutive failures
+    benches a pointer for a short cool-off instead of hitting it (and waiting
+    on it) again every call."""
+    rec = health.get(ptr)
+    fails = rec.get("fails", 0) if rec else 0
+    if fails < BENCH_FAIL_THRESHOLD:
+        return False, 0, fails
+    remaining = BENCH_COOLDOWN_SECS - (time.time() - rec.get("last_fail_ts", 0))
+    if remaining <= 0:
+        return False, 0, fails
+    return True, remaining, fails
 # Content check: routing picks files from their one-line descriptions only, so it
 # can match an absent fact on topic alone and miss a present one. Each top routed
 # file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
@@ -701,15 +769,36 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(VOICE_LINE)
         return 1
 
+    # Sick-pointer circuit breaker: skip pointers already benched from repeated
+    # recent failures instead of waiting on them (and re-erroring) again this call.
+    health = load_pointer_health(sdir)
+    original_pointers = pointers
+    active_pointers, error_lines = [], []
+    for ptr in original_pointers:
+        benched, remaining, fails = pointer_benched(health, ptr)
+        if benched:
+            error_lines.append(f"[{ptr}] benched ({fails} consecutive failures, cooling off {int(remaining)}s more)")
+        else:
+            active_pointers.append(ptr)
+    pointers = active_pointers
+
     def nav(ptr):
+        t_start = time.time()
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
-        status = out.get("status")
+        status, reason = out.get("status"), out.get("reason", "")
+        # One backoff retry for an overloaded provider (HTTP 529) -- not counted
+        # as a failure unless the retry also fails.
+        if status not in ("candidates", "no-candidates") and _is_overloaded(f"{status} {reason}"):
+            time.sleep(OVERLOAD_BACKOFF_SECS)
+            out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
+            status, reason = out.get("status"), out.get("reason", "")
+        elapsed = time.time() - t_start
         if status == "candidates" and out.get("candidates"):
-            return ptr, "candidates", out["candidates"]
+            return ptr, "candidates", out["candidates"], elapsed, True
         if status in ("candidates", "no-candidates"):
-            return ptr, "no-candidates", []
+            return ptr, "no-candidates", [], elapsed, True
         kind = status or "error"
-        return ptr, f"{kind}: {out['reason']}" if out.get("reason") else kind, []
+        return ptr, f"{kind}: {reason}" if reason else kind, [], elapsed, False
 
     # Bounded fan-out: firing every pointer's navigate at once (formerly
     # min(len(pointers), 32)) meant an N-pointer lookup fired N concurrent remote
@@ -719,8 +808,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # calls run at once; SUPERJEV_NAV_TIMEOUT_MS (read by navigation-cli itself) raises
     # how long each one is allowed to wait.
     results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
-    merged, errored, statuses, error_lines = [], 0, {}, []
-    for ptr, kind, rows in results:
+    merged, errored, statuses = [], 0, {}
+    for ptr, kind, rows, elapsed, ok in results:
+        record_pointer_outcome(health, ptr, ok, elapsed)
         if kind == "candidates":
             statuses[ptr] = "candidates"
             merged += [(c.get("score", 0), c.get("originalPath", ""), ptr) for c in rows]
@@ -748,6 +838,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 elif result == "rate-limited":
                     heal_note = " (auto-heal: hourly refresh limit reached)"
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note)
+    save_pointer_health(sdir, health)
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}
@@ -849,7 +940,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
-              for ptr, kind, rows in results}
+              for ptr, kind, rows, _elapsed, _ok in results}
     content_check = {p: {"score": scores.get(p),
                          "label": ("held-secret" if notes.get(p) == HELD_SECRET
                                    else "inconclusive" if notes.get(p) == INCONCLUSIVE
@@ -874,14 +965,18 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     for line in error_lines:
         print(line)
     if errored:
-        print(f"unresolved: {errored} of {len(pointers)} pointers errored")
+        print(f"unresolved: {errored} of {len(original_pointers)} pointers errored")
         if not top:
             print(VOICE_LINE)
-        return 1
+            return 1
+        # Partial failure: some pointers errored or are benched, but healthy
+        # pointers still answered -- the failure stays visible above, it just
+        # does not fail a lookup that actually has a real result.
+        return 0
     if not top:
         if dropped:
             print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
-        print(f"no-candidates across {len(pointers)} pointers: no connected file answers this. "
+        print(f"no-candidates across {len(original_pointers)} pointers: no connected file answers this. "
               "Tell your human it is not in their files; do not guess. To fill the gap, connect more "
               "files or record a fact with --add (see references/connectors.md).")
         print(VOICE_LINE)
