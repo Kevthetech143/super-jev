@@ -523,6 +523,97 @@ def confirm_one(question: str, path: str):
     best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
     return (best if best >= POSSIBLE_FLOOR else None), partial, None, None
 
+# --- Near-twin tie-break -----------------------------------------------
+# When the top 2-3 ranked files are near-twins -- scores within a small gap,
+# and either the same folder or similar file names (e.g. a note and its own
+# summary sibling) -- ranking alone is often a coin flip: businessfi stress
+# test 4 put the right file at rank 2-4 behind a close sibling/summary about
+# half the time. One bounded Jev call over the short snippets of just those
+# 2-3 files picks the one that best answers the question; anything else
+# (no near-twin gap, an errored/inconclusive judge call) leaves ranking
+# unchanged. Reuses the same navigation-cli judge path as confirm_one/
+# judge_subject -- one extra call, only when it might actually change the
+# answer.
+NEAR_TWIN_FILES = 3
+NEAR_TWIN_GAP = 0.05
+NEAR_TWIN_NAME_SIM = 0.5
+NEAR_TWIN_SNIPPET = 2000
+NEAR_TWIN_LABEL = "Passage {n}, choose only if this is the single best answer to the question"
+
+def is_near_twin(path_a: str, path_b: str) -> bool:
+    """Same folder, or similar-enough file names (e.g. "notes.md" vs
+    "notes-summary.md"), to be worth one judge call instead of trusting the
+    score gap alone."""
+    if Path(path_a).parent == Path(path_b).parent:
+        return True
+    return difflib.SequenceMatcher(None, Path(path_a).stem.lower(),
+                                   Path(path_b).stem.lower()).ratio() >= NEAR_TWIN_NAME_SIM
+
+def judge_near_twin(question: str, candidates: list):
+    """One Jev call over up to NEAR_TWIN_FILES candidates' short snippets, asking
+    which single file best answers the question. Returns the winning path, or
+    None if fewer than 2 files could be read/sent, or the call errored or was
+    inconclusive -- callers must leave ranking unchanged in that case."""
+    texts = {}
+    for _, p, _ in candidates[:NEAR_TWIN_FILES]:
+        try:
+            text = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        if has_secret(text):
+            continue
+        texts[p] = text[:NEAR_TWIN_SNIPPET]
+    if len(texts) < 2:
+        return None
+    ordered = list(texts)
+    leaves = [{"id": f"t{i}", "label": NEAR_TWIN_LABEL.format(n=i + 1),
+               "description": texts[p], "sourceId": p} for i, p in enumerate(ordered)]
+    payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
+               "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
+                           "nodes": [{"id": "root", "label": "Sources",
+                                      "description": "Candidate files", "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
+    if payload_has_secret(payload):
+        return None
+    try:
+        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode:
+        return None
+    try:
+        body = json.loads(r.stdout)
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("status") != "candidates" or not body.get("candidates"):
+        return None
+    best = max((c for c in body["candidates"] if isinstance(c, dict) and isinstance(c.get("score"), (int, float))),
+               key=lambda c: c["score"], default=None)
+    return best.get("sourceId") if best else None
+
+def apply_near_twin_tiebreak(question: str, top: list) -> list:
+    """If the top NEAR_TWIN_FILES results are a near-twin cluster (small score
+    gap, same folder or similar names), judge just that cluster and put the
+    winner first, preserving relative order of everything else. Any other
+    case -- not enough candidates, gap too wide, not a near-twin pair, an
+    inconclusive/errored judge call -- returns top unchanged."""
+    if len(top) < 2:
+        return top
+    head = top[:NEAR_TWIN_FILES]
+    # Only files within NEAR_TWIN_GAP of the top score form the cluster: a
+    # third result far behind (e.g. 0.9, 0.87, 0.3) is not a near-twin of
+    # either just because it made the top 3.
+    cluster = [head[0]] + [m for m in head[1:] if head[0][0] - m[0] <= NEAR_TWIN_GAP]
+    if len(cluster) < 2:
+        return top
+    if not is_near_twin(cluster[0][1], cluster[1][1]):
+        return top
+    winner = judge_near_twin(question, cluster)
+    if not winner:
+        return top
+    cluster = sorted(cluster, key=lambda m: m[1] != winner)
+    return cluster + top[len(cluster):]
+
 def query_terms(question: str) -> list:
     words = WORD_RE.findall(question.lower().replace("'", ""))
     return list(dict.fromkeys(w for w in words if len(w) > 2 and w not in QUERY_STOPWORDS))
@@ -834,6 +925,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         # sort_metric above), then the name tie-break.
         merged = sorted(keep.values(), key=sort_metric, reverse=True)
     top = merged[:5]
+    top = apply_near_twin_tiebreak(question, top)
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
