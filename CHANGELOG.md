@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6 — 2026-09-24
+- #126 live decision traces + Super Jev voice.
+- #128 auto-heal stale pointers.
+- #129 superjev terminal chat app.
+- #130 v1.0.6 blocker fixes (symlink --add crash, secret-shaped filenames redacted/held, SUPERJEV_TRACES switch).
+- #131 --followup miss queue.
+- #132 audit-visibility.
+- #133 failing-pointer circuit breaker.
+- #134 near-twin tie-break.
+
 ## 1.0.5 — 2026-09-23
 - Retrieval recall toward 80%: businessfi bench top-3 50/60 (83%, was 46/60), top-1 36/60, false hits 1/15.
 - Review found and fixed 3 false-hit holes.
