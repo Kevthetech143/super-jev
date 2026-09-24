@@ -242,7 +242,7 @@ Every door here inherits it from the claim-gate tool it wraps, unchanged. This s
 | verdict | exit | what it means |
 |---|---|---|
 | CLEAN | 0 | every claim is carried by the evidence at or above 0.80 |
-| READ | 3 | something is red or under the line — a human reads the source |
+| READ | 3 | something is red or under the line — a human reads the source. For a `gate --claim` check only the claim rows and OVERCLAIMS count; HAS_LEAKS, TIME_SENSITIVE and SELF_CONTRADICTORY judge an outbound draft and are advisory there. A `--draft` check still blocks on them |
 | REJECT | 4 (`verify`) / 2 (`gate`, fabricated quote) | the evidence disproves a claim, or the cited span is not in the file |
 
 **Exit codes come from the wrapped door, untouched.** `5` is this wrapper refusing (missing input, missing door). `6` is NOT BUILT. Gate on the number, not on the prose.

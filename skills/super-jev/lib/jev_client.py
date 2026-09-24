@@ -63,6 +63,12 @@ DRAFT_QUESTIONS = {
                      "OVERCLAIMS": "the draft claims more certainty than the evidence carries"}},
 }
 
+# An explicit --claim check (no draft) is decided by its claim rows plus overclaim.
+# These draft-level rows judge an outbound letter; against a bare claim on an
+# internal note they misfire (HAS_LEAKS / SELF_CONTRADICTORY on a plain note blocked
+# SUPPORTED 1.00 claims, fleet hand tests 2026-09-24), so there they are advisory.
+CLAIM_ADVISORY = {"leaked_internal", "time_sensitive", "self_contradictory"}
+
 # The good label of each draft-level question; any other side label (or none) blocks.
 FAVORABLE = {k for q in DRAFT_QUESTIONS.values() for k in q["criteria"] if k not in {
     "HAS_LEAKS", "TIME_SENSITIVE", "SELF_CONTRADICTORY", "OVERCLAIMS"}}
@@ -186,7 +192,7 @@ def check(evidence, claims, draft=""):
     return rows, res, (3 if any(r["flag"] for r in rows) else 0)
 
 
-def print_table(rows, meta, n_claims):
+def print_table(rows, meta, n_claims, side_advisory=False):
     print(f"\njev {meta.get('model')} \xb7 {meta.get('chunks', 1)} chunk(s) \xb7 "
           f"{meta.get('input_tokens', 0)} in_tok \xb7 {meta.get('latency_ms', 0)}ms\n")
     for r in rows[:n_claims]:
@@ -194,7 +200,9 @@ def print_table(rows, meta, n_claims):
     print()
     for r in rows[n_claims:]:
         print(f"  {r['key']:18s} {r['verdict']:20s} {r['confidence']:.2f}")
-    need = [r["key"] for r in rows if r["flag"]]
+    if side_advisory:
+        print("  (leaked_internal, time_sensitive, self_contradictory are advisory on a --claim check)")
+    need = [r["key"] for r in rows if r["flag"] and not (side_advisory and r["key"] in CLAIM_ADVISORY)]
     print(f"\n  {len(need)} of {len(rows)} need a human: {', '.join(need) or 'none'}")
     print(f"  the line is {LINE:.2f} -- under it, read the source before you speak.\n")
 
@@ -230,10 +238,13 @@ def main(argv=None):
         if any(has_secret(c) for c in claims):
             raise JevError("a claim contains a secret; not sent")
         rows, meta, code = check(evidence, claims, draft)
+        side_advisory = bool(a.claim) and not a.claims_file and not a.draft
+        if side_advisory and code == 3:
+            code = 3 if any(r["flag"] for r in rows if r["key"] not in CLAIM_ADVISORY) else 0
     except (JevError, OSError) as e:
         print(f"jev: {e}", file=sys.stderr)
         return 1
-    print_table(rows, meta, len(claims))
+    print_table(rows, meta, len(claims), side_advisory)
     return code
 
 

@@ -11,11 +11,11 @@ Run from this skill directory: `python3 dispatch.py <tool> ...` (or `ask.py` dir
 
 | Command | Example | What it does |
 |---|---|---|
-| `ask` | `python3 ask.py --principal YOUR_AGENT "question in your own words"` | Cache first, then every connected pointer in parallel; open the top file before answering. `--approve` a good hit so the next ask is instant (add `--rank N` or `--file PATH` to approve a different listed candidate than the top one, possible-tier included, from that candidate's own pointer); `--add` a fact with no file; `--miss` when found elsewhere. Errors print per pointer, never hidden as no-candidates. |
+| `ask` | `python3 ask.py --principal YOUR_AGENT "question in your own words"` | Cache first, then every connected pointer in parallel; open the top file before answering. `--approve` a good hit so the next ask is instant (add `--rank N` or `--file PATH` to approve a different listed candidate than the top one, possible-tier included, from that candidate's own pointer); `--add` a fact with no file; `--miss` when found elsewhere. Errors print per pointer, never hidden as no-candidates. Index-type files (INDEX, CATALOG, handoff, templates) rank below real notes; a README ranks as a note once its own content check confirms the answer (a folder dashboard). |
 | `navigate` | `memory --input '{"action":"navigate","pointer":"POINTER_ID","principal":"YOUR_AGENT_NAME","question":"..."}'` | Lower-level call `ask` wraps: searches one connected pointer's catalog for candidate files. Open the top file; a high score never proves it's in scope. |
 | `skills` | `python3 dispatch.py skills --request "..."` | Skills connector: discover candidate skills from configured trusted local roots; suggestions never execute them. |
-| `check` | `python3 dispatch.py check --claim "..." FILE` | Check a claim or draft against evidence. |
-| `verify` | `python3 dispatch.py verify REPORT` | Verify an agent's report against evidence. |
+| `check` | `python3 dispatch.py check --claim "..." FILE` | Check a claim or draft against evidence. A `--claim` check is decided by its claim rows only; HAS_LEAKS, TIME_SENSITIVE and SELF_CONTRADICTORY print as advisory (OVERCLAIMS still blocks), since they judge an outbound letter, not a note. |
+| `verify` | `python3 dispatch.py verify REPORT` | Verify an agent's work report (git, tests, PRs, whether cited paths exist). It does not read cited files' contents, so a fact claim about a note comes back unchecked; use `check --claim "..." FILE` for facts. |
 | `help` | `python3 dispatch.py help --topic overview` | Quick Start and focused setup answers; no data, key, or Jev call needed. |
 
 ## Not connected yet?
