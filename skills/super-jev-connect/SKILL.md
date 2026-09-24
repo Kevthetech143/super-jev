@@ -35,6 +35,7 @@ python3 dispatch.py memory --principal NAME
 
 - A handful of hand-picked files → `python3 connect_checked.py CONNECT.json`
 - A whole folder, or an agent's whole brain across several folders → `python3 prepare_bulk.py --root DIR --pointer NAME --principal NAME`
+- A GitHub repo's history (PRs with reviews, issues, commit messages, release notes) → `python3 connect_github.py OWNER/REPO --pointer NAME --principal NAME` (or `superjev connect-github ...`); add `--refresh` after each merge to fetch only what changed. Uses your signed-in `gh`; secret-looking lines are dropped. See [connectors.md](../super-jev/references/connectors.md#github-repo-history).
 - A fact with no backing file → `python3 ask.py --principal NAME --add "question" "answer"`
 
 ## 5. Cheap writer model — required

@@ -13362,6 +13362,10 @@ def build_parser():
     _add_json_flag(dr)
     dr.set_defaults(func=cmd_doctor)
 
+    subs.add_parser("connect-github", add_help=False,
+                    help="export a GitHub repo's PRs/issues/commits/releases and connect them "
+                         "(see connect_github.py --help)")
+
     st = subs.add_parser("status", help="which doors are live, which are not built")
     st.add_argument("--window", type=int, default=DEFAULT_LEDGER_WINDOW,
                     help=f"ledger health: how many recent hook runs to look at "
@@ -13407,6 +13411,11 @@ def main(argv=None):
     # fail-open (exit 0, advisory, ledger-logged) instead of propagating
     # argparse's exit 2. Every other subcommand's usage errors are
     # untouched — they are not bound by the hook contract.
+    if argv and argv[0] == "connect-github":
+        # Its own parser: export a GitHub repo's history, then prepare_bulk it.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import connect_github
+        return connect_github.main(argv[1:])
     is_hook_argv = bool(argv) and argv[0] == "hook"
     p = build_parser()
     try:
