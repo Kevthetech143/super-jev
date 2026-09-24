@@ -918,6 +918,44 @@ def test_secret_scan_keyword_rule_unaffected_by_date_or_url_scrub(tmp_path):
     assert "card/password" in held_by_name["pw.md"]
 
 
+def test_secret_looking_filename_is_held_even_with_clean_content(tmp_path):
+    """A file name like password-hunter2xyz-notes.md never lands in key=value/
+    key:value/'is' shape, so the content-only WORD_RE keyword scan misses it --
+    but the file name itself should still hold the file at connect time."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "password-hunter2xyz-notes.md").write_text("# Notes\nNothing secret in here.\n")
+
+    files, held = pb.inventory([root])
+
+    assert files == []
+    held_by_name = {Path(p).name: why for p, why in held}
+    assert "secret-keyword-like file name" in held_by_name["password-hunter2xyz-notes.md"]
+
+
+def test_secret_looking_filename_admitted_by_allow_held(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "api_key_prod789-dump.md").write_text("# Notes\nNothing secret in here.\n")
+
+    files, held = pb.inventory([root], allow_held=True)
+
+    assert {p.name for p in files} == {"api_key_prod789-dump.md"}
+    held_by_name = {Path(p).name: why for p, why in held}
+    assert "admitted by --allow-held" in held_by_name["api_key_prod789-dump.md"]
+
+
+def test_normal_filename_not_held(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "tokenizer-notes.md").write_text("# Notes\nNothing secret in here.\n")
+
+    files, held = pb.inventory([root])
+
+    assert {p.name for p in files} == {"tokenizer-notes.md"}
+    assert held == []
+
+
 def test_allow_held_admits_secret_file_with_override_reason(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
