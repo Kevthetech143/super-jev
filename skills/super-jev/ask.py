@@ -57,6 +57,16 @@
       ERROR, a stale file, or a secret in the file or answer saves nothing and
       prints why. On by default; off with --no-auto or SUPERJEV_AUTO_CACHE=0.
 
+  ask.py --principal AGENT --followup [--max-tries N]
+      Re-tries every pending --miss (one not yet --approve'd or already
+      dropped) by re-running its lookup, in case pointers refreshed since the
+      miss. A CONFIRMED top file (never a possible-only hit) is printed as a
+      proposal with the --approve command to run -- it never approves on its
+      own, a human still supplies the answer text. A miss that stays
+      unconfirmed for --max-tries retries (default 5) is dropped and printed
+      as such. Read-only otherwise: no state beyond the usual lookups.jsonl
+      log lines (followup-try/followup-drop).
+
   ask.py --principal AGENT --miss "question" "where it actually was"
       Logs the miss. If that exact question is a cache hit, the saved answer
       (human or auto-check) is un-saved so the next ask looks it up fresh.
@@ -1001,6 +1011,106 @@ def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
         print(f"un-saved: the cached answer (approved_by: {who}) was removed from {', '.join(res.get('pointers') or [])}")
     return 0
 
+FOLLOWUP_MAX_TRIES = 5
+
+def pending_misses(sdir: Path) -> dict:
+    """question -> {"actual": str, "wrong": str|None, "tries": int} for every
+    --miss not yet resolved (approved since the miss) or dropped
+    (followup-drop, after FOLLOWUP_MAX_TRIES retries with no confident file).
+    Read straight off lookups.jsonl -- no new state file, reusing the log
+    --miss/--approve already write. "wrong" is the top path of the lookup
+    that immediately preceded the miss -- the file SJ actually got wrong --
+    tracked separately from "actual" (the --miss docstring's "where it
+    actually was", i.e. the CORRECT location): the two are not the same
+    thing, and a followup must never re-propose "wrong"."""
+    path = sdir / "lookups.jsonl"
+    pending: dict = {}
+    if not path.is_file():
+        return pending
+    last_top = {}
+    for line in path.read_text().splitlines():
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        q = rec.get("question")
+        if not q:
+            continue
+        kind = rec.get("kind")
+        if kind == "lookup":
+            top = rec.get("top")
+            last_top[q] = top[0]["path"] if top else None
+        elif kind == "miss":
+            pending[q] = {"actual": rec.get("actual"), "wrong": last_top.get(q), "tries": 0}
+        elif kind == "followup-try" and q in pending:
+            pending[q]["tries"] = rec.get("tries", pending[q]["tries"])
+        elif kind == "followup-drop":
+            pending.pop(q, None)
+        elif kind == "approve" and rec.get("result") in ("approved", "saved", "ok") and q in pending:
+            pending.pop(q, None)
+    return pending
+
+def fresh_top(sdir: Path, question: str):
+    """The top row from the MOST RECENT lookups.jsonl line, only if it is a
+    'lookup' record for this exact question with a non-empty, non-possible
+    top. Unlike find_top/find_pointer (which scan backward through history
+    and can surface an OLD lookup's result), this never falls back past the
+    single fresh lookup just run: a failed or empty fresh search (top=[], or
+    an early-return path that logs nothing at all) yields None here instead
+    of silently reusing a stale prior hit."""
+    path = sdir / "lookups.jsonl"
+    if not path.is_file():
+        return None
+    lines = path.read_text().splitlines()
+    if not lines:
+        return None
+    try:
+        rec = json.loads(lines[-1])
+    except ValueError:
+        return None
+    if rec.get("kind") != "lookup" or rec.get("question") != question:
+        return None
+    top = rec.get("top")
+    if not top or top[0].get("possible"):
+        return None
+    return top[0]
+
+def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) -> int:
+    """Re-try every pending miss: re-run the normal lookup (pointers may have
+    refreshed since the miss) and, only on a CONFIRMED top file (find_pointer
+    refuses a possible-only hit), propose it for one-step --approve. Never
+    approves on its own -- a human still runs --approve with the answer text.
+    A miss that stays unconfirmed for max_tries retries is dropped."""
+    pending = pending_misses(sdir)
+    if not pending:
+        print("no pending misses")
+        return 0
+    proposed = 0
+    for question, info in pending.items():
+        tries = info["tries"] + 1
+        print(f"retrying miss: {question!r} (try {tries}/{max_tries}; originally found at: {info['actual']})")
+        lookup(question, principal, sdir)
+        top = fresh_top(sdir, question)
+        wrong = (info.get("wrong") or "").strip()
+        if top and wrong and top["path"].strip() == wrong:
+            # The fresh search found exactly the file SJ was already wrong
+            # about at miss-time -- never re-propose it. Treat as still-miss.
+            print(f"still wrong file for {question!r} -> {top['path']} (miss already named this)")
+            top = None
+        pointer = top["pointer"] if top else None
+        if pointer and top:
+            proposed += 1
+            print(f"PROPOSED: confident file found for {question!r} -> {top['path']} [{pointer}]")
+            print(f"  approve with: ask.py --principal {principal} --approve {question!r} \"<answer text>\"")
+            log(sdir, "followup-try", question=question, tries=tries, result="proposed", pointer=pointer)
+        elif tries >= max_tries:
+            log(sdir, "followup-drop", question=question, tries=tries)
+            print(f"dropped after {tries} tries with no confident file: {question!r}")
+        else:
+            log(sdir, "followup-try", question=question, tries=tries, result="still-miss")
+    print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
+    return 0
+
 def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None) -> int:
     pointer = pointer or find_pointer(sdir, question)
     if not pointer:
@@ -1149,6 +1259,15 @@ def _main() -> int:
         return trace_report(sdir, days)
     if a[0] == "--miss":
         return miss(principal, a[1], " ".join(a[2:]), sdir)
+    if a[0] == "--followup":
+        max_tries = FOLLOWUP_MAX_TRIES
+        if len(a) >= 3 and a[1] == "--max-tries":
+            try:
+                max_tries = int(a[2])
+            except ValueError:
+                print("usage: --followup [--max-tries N]")
+                return 2
+        return followup(principal, sdir, max_tries)
     if a[0] == "--answer":
         if len(a) < 3:
             print('usage: --answer "question" "answer"')
