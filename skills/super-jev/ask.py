@@ -1286,12 +1286,41 @@ def fresh_top(sdir: Path, question: str):
         return None
     return top[0]
 
+# A same-domain neighbor file shares SOME vocabulary with almost any in-domain
+# question (a buyback report mentions "macbook"/"bid" on every page); a single
+# shared word proves nothing. Real subject matches share most of the question's
+# terms, not one -- the v1.0.6 amazon-bm-fb miss (a price-ceiling question
+# proposing a different-date snapshot report) hit 4/8 terms by vocabulary
+# alone, while the actually-correct file hit 6/8. 0.6 sits between the two.
+SUBJECT_MATCH_FLOOR = 0.6
+
+def subject_matches(question: str, path: str) -> bool:
+    """True if the proposed file's own content actually shares subject with the
+    question: at least SUBJECT_MATCH_FLOOR of the question's meaningful terms
+    show up in the file, using the same term_hits check the routing/content
+    layer uses elsewhere. A file can out-score everything else on routing
+    score and still be about a different subject -- this is the
+    belt-and-suspenders check the confidence tier alone doesn't give us.
+    Unreadable file -> no match, never a free pass."""
+    terms = query_terms(question)
+    if not terms:
+        return True  # nothing meaningful to check against; don't block on this alone
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return False
+    return term_hits(terms, text) / len(terms) >= SUBJECT_MATCH_FLOOR
+
 def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) -> int:
     """Re-try every pending miss: re-run the normal lookup (pointers may have
-    refreshed since the miss) and, only on a CONFIRMED top file (find_pointer
-    refuses a possible-only hit), propose it for one-step --approve. Never
-    approves on its own -- a human still runs --approve with the answer text.
-    A miss that stays unconfirmed for max_tries retries is dropped."""
+    refreshed since the miss) and propose the fresh top file for one-step
+    --approve only when ALL of: (1) it's a CONFIRMED top file (fresh_top
+    refuses a possible-only hit), (2) it's not the exact file the original
+    miss already named wrong, and (3) its own content actually shares subject
+    with the question (subject_matches) -- confidence tier alone isn't proof
+    the file is even about the right thing. Never approves on its own -- a
+    human still runs --approve with the answer text. A miss that stays
+    unconfirmed for max_tries retries is dropped."""
     pending = pending_misses(sdir)
     if not pending:
         print("no pending misses")
@@ -1307,6 +1336,13 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
             # The fresh search found exactly the file SJ was already wrong
             # about at miss-time -- never re-propose it. Treat as still-miss.
             print(f"still wrong file for {question!r} -> {top['path']} (miss already named this)")
+            top = None
+        elif top and not subject_matches(question, top["path"]):
+            # Confirmed tier is not proof of subject match -- a same-topic
+            # neighbor file (e.g. a different date's snapshot in the same
+            # folder) can out-score everything else while never mentioning
+            # what was actually asked. Never propose it.
+            print(f"confirmed but off-subject for {question!r} -> {top['path']} (no shared terms; not proposed)")
             top = None
         pointer = top["pointer"] if top else None
         if pointer and top:
