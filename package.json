@@ -8,7 +8,11 @@
   "engines": {
     "node": ">=24"
   },
+  "bin": {
+    "superjev": "src/jev-chat-cli.ts"
+  },
   "scripts": {
+    "jev": "node src/jev-chat-cli.ts",
     "demo": "node examples/demo.ts",
     "test": "node --test test/*.test.ts test/enhance/*.test.ts test/bench/*.test.ts",
     "replay": "node src/replay.ts",
@@ -24,5 +28,9 @@
     "bench:live": "node bench/live-measure.ts",
     "bench:fetch": "node bench/fetch-bench.ts",
     "test:skill": "python3 -m pytest skills/super-jev/tests -q"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.8.1",
+    "picocolors": "^1.1.1"
   }
 }
