@@ -34,8 +34,10 @@ Pipeline per run:
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
      one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
      a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
-     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. The whole run
-     refuses above --max-files (default 250) total files, as a size guard.
+     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. A first connect
+     (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
+     already-cached pointer instead guards on files that actually need a writer call this run (unchanged
+     cached files are free and reused); raise --max-files to opt into a larger writer cost.
   2. Cache (prepare-cache/<pointer>.json) keyed by path: unchanged sha256 with a passing verdict skips steps 3-4.
      --refresh additionally drops any cached path that no longer exists on disk from the cache and the connect
      set, noting it in the report. A pointer connected under several principals must repeat --principal for
@@ -698,9 +700,15 @@ def main() -> int:
         print(f"ERROR: no .md files found under {', '.join(str(r) for r in roots)} "
               "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
 
-    if len(files) > a.max_files:
-        print(f"REFUSED: {len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
-        return 2
+    # First connect (no cache yet) has no way to know how many files would actually need a
+    # writer call, so the guard is on the raw inventory. A refresh already has a cache: most
+    # files are unchanged and cost nothing to keep serving, so a big folder must not be blocked
+    # from refreshing just because it once grew past --max-files. There, the guard moves to the
+    # files that would actually need a writer call (below), and total size is reported, not refused.
+    if not (a.refresh and cache):
+        if len(files) > a.max_files:
+            print(f"REFUSED: {len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
+            return 2
 
     removed = []
     if a.refresh:
@@ -722,6 +730,14 @@ def main() -> int:
         else:
             todo.append(p)
     print(f"cache: {len(reused)} unchanged and already passing, {len(todo)} to draft")
+
+    if a.refresh and cache and len(files) > a.max_files:
+        print(f"refresh: {len(files)} files total (over --max-files {a.max_files}), "
+              f"but only {len(todo)} need a writer call this run (cost); the rest are unchanged and reused for free")
+        if len(todo) > a.max_files:
+            print(f"REFUSED: {len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
+                  "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
+            return 2
 
     drafts = {}
     for i in range(0, len(todo), a.batch):
