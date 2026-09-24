@@ -53,10 +53,12 @@
   ask.py --principal AGENT --answer "question" "answer" [--no-auto]
       Auto-cache: a machine approval that needs evidence. Runs the check gate
       (superjev.py gate) on the answer against the last lookup's top file. Only
-      a CLEAN verdict (every claim SUPPORTED at or above 0.80) on a file that is
+      a CLEAN verdict (every claim SUPPORTED at or above 0.80; the claim rows
+      decide, HAS_LEAKS/SELF_CONTRADICTORY rows are advisory) on a file that is
       unchanged since connect saves it, exactly like --approve, recorded as
       approved_by=auto-check with the evidence file and score. READ, REJECT,
-      ERROR, a stale file, or a secret in the file or answer saves nothing and
+      ERROR, a TIME_SENSITIVE flag (a dated fact such as a price
+      or breakeven; advisory in check --claim, blocking here), a stale file, or a secret in the file or answer saves nothing and
       prints why. On by default; off with --no-auto or SUPERJEV_AUTO_CACHE=0.
 
   ask.py --principal AGENT --followup [--max-tries N]
@@ -1016,6 +1018,17 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
                         and scores.get(p, 0) < CONFIRM_FLOOR:
                     possible[p] = POSSIBLE_NOTE
+        def demoted(p: str) -> bool:
+            """A hub file (is_hub_file) ranks as a table of contents -- except a
+            README whose own content check CONFIRMED the answer: that README is
+            the folder's dashboard (campaigns/clov/README.md holds the $3.94
+            breakeven and was ranked 3rd behind notes without it, businessfi
+            hand test 2026-09-24). INDEX/catalog/tools-used/handoff/template stay
+            demoted at any score: replaying the fleet's 199 traces, promoting
+            those would flip correct top notes (PeakMonsters, TD SMS codes)."""
+            return is_hub_file(p) and not (Path(p).stem.lower() == "readme"
+                                           and scores.get(p, 0) >= CONFIRM_FLOOR)
+
         cands = merged + [(0, p, ptr) for p, ptr in wpaths.items()]
         keep = {}
         for s, p, ptr in cands:
@@ -1028,7 +1041,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # An index/catalog/handoff file is a table of contents, not evidence
             # itself; move it into the possible group so the real note it points
             # to (which has a real content score) always outranks it.
-            if p in keep and p not in possible and is_hub_file(p):
+            if p in keep and p not in possible and demoted(p):
                 possible[p] = POSSIBLE_NOTE
         dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
 
@@ -1069,7 +1082,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             else:
                 c = scores.get(p)
                 has_content, content, r = (c is not None, c if c is not None else s, route.get(p, 0))
-            return (not is_hub_file(p), has_content, round(content, 2), r, path_rank(question, p))
+            return (not demoted(p), has_content, round(content, 2), r, path_rank(question, p))
 
         # Non-hub files first (sort_metric's leading True), then content score
         # alone with routing only as a near-tie breaker (see metric_of/better/
@@ -1225,8 +1238,14 @@ def run_gate(claim: str, path: str):
         body = json.loads(r.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return "ERROR", None
-    rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", (body.get("details") or {}).get("stdout") or "", re.M)
-    return body.get("verdict") or "ERROR", (min(float(x) for x in rows) if rows else None)
+    out = (body.get("details") or {}).get("stdout") or ""
+    rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", out, re.M)
+    verdict = body.get("verdict") or "ERROR"
+    # check --claim treats time_sensitive as advisory, but a dated fact (a price,
+    # a breakeven) must never auto-cache: it goes stale silently.
+    if verdict == "CLEAN" and re.search(r"^\s*time_sensitive\s+TIME_SENSITIVE\b", out, re.M):
+        verdict = "TIME_SENSITIVE"
+    return verdict, (min(float(x) for x in rows) if rows else None)
 
 def not_saved(sdir: Path, question: str, why: str) -> int:
     print(f"not saved: {why}")

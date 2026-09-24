@@ -1843,6 +1843,7 @@ _FLAG_LINE_RE = re.compile(
 
 # The red verdicts worth carrying into the ledger and checking against a
 # block line. Mirrors jev.py's own RED_VERDICTS.
+_CLAIM_ADVISORY_KEYS = {"leaked_internal", "time_sensitive", "self_contradictory"}
 NOTABLE_VERDICTS = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
                     "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
@@ -3927,7 +3928,13 @@ def gate_fail_closed(code, out, n_claims=0):
     claim_rows = [m for m in rows if m.group("key").startswith("c")]
     if not claim_rows or len({m.group("key") for m in claim_rows}) < n_claims:
         return GATE_UNREADABLE_EXIT
+    # An explicit --claim check (n_claims > 0) is decided by its claim rows
+    # and overclaim: leaked_internal/time_sensitive/self_contradictory judge an
+    # outbound letter, and on a bare claim against an internal note they
+    # misfire (HAS_LEAKS / SELF_CONTRADICTORY blocked SUPPORTED 1.00 claims).
     for m in rows:
+        if n_claims and m.group("key") in _CLAIM_ADVISORY_KEYS:
+            continue
         if m.group("verdict") in NOTABLE_VERDICTS:
             return 3
     for m in claim_rows:
