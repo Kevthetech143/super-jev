@@ -10,6 +10,7 @@ A connector is the source-specific way an agent connects data to Super Jev. Use 
 | Brain | Reviewed local records from a specified brain/person/project | `find` for reviewed datasets; configured `memory` for registered pointers and verified reuse. Scope is the listed records, not the whole brain. |
 | Documents | Reviewed local text documents | Same reviewed dataset and optional memory workflow as Brain. Extraction of arbitrary PDFs or other formats is not automatic. |
 | Repo | A reviewed snapshot of local checked-out repository files | Same local-file preparation workflow. Record the revision and included files. Remote cloning/fetching, merge-triggered refresh and repo watching are not bundled connectors yet. |
+| GitHub repo history | PRs (body, reviews, inline review comments, comments), issues, commit messages and release notes of one repo | `connect_github.py OWNER/REPO` / `superjev connect-github`: exports one markdown file per item via the signed-in `gh` CLI, then runs `prepare_bulk.py`. `--refresh` fetches only items updated since the last run. Not a live sync; run refresh after merges. |
 | Database | Proposed | No direct database ingestion connector. SQLite answer storage is not a database-source connector. An authorized reviewed export can use Documents, but say it is an export. |
 | Website/links | Proposed | No direct URL ingestion/refresh connector. An authorized reviewed local copy can use Documents, but say it is a copy, not a live connection. |
 
@@ -286,3 +287,20 @@ The harness presents the root's options to Jev, retains several promising routes
 Design reference: [TypeSafe hierarchical classification](https://docs.typesafe.ai/cookbooks/hierarchical_classification) keeps multiple paths instead of making a single irreversible branch choice. This implementation bounds traversal over registered local sources; it is not a general crawler or a claim of universal file-finding accuracy.
 
 For everyday file finding, start with `flat-files`. Folder-tree is experimental: pruning a folder can hide relevant files, especially when a question needs files in separate folders. After navigation, read candidate files before answering; suggestions do not establish support or absence. For an existing connector whose source bytes changed, refresh with the same pointer and scope plus `replace:true` (CLI `--replace`), review current hashes, and confirm before retrying.
+
+## GitHub repo history
+
+Use this as "have we tried this before?" memory for a repo.
+
+```sh
+python3 connect_github.py OWNER/REPO --pointer myrepo-history --principal YOUR_AGENT_NAME
+python3 connect_github.py OWNER/REPO --pointer myrepo-history --principal YOUR_AGENT_NAME --refresh   # after each merge
+```
+
+`superjev connect-github ...` is the same command. It needs the `gh` CLI signed in to an account that can read the repo; it never reads or prints the token itself.
+
+- Export: one file per item under `$SUPERJEV_STATE_DIR/<principal>/github/<owner>-<repo>/` (`--out DIR` to choose): `prs/pr-N.md`, `issues/issue-N.md`, `commits/commit-SHA7.md`, `releases/release-TAG.md`. The title line leads each file so the item is findable by its title.
+- Secrets: every line that trips the shared secret scan (`secret_patterns.json`) is dropped before writing, and `prepare_bulk.py` scans again. The count of dropped lines is printed. Private-repo text still goes to the configured Jev provider; connect only repos you are allowed to send.
+- Connect: the folder goes through the normal `prepare_bulk.py` path (writer, gates, parts of 50, findability). Writer flags pass through.
+- Refresh: `.github-sync.json` in the export folder records the last export time; `--refresh` asks `gh` only for PRs/issues updated since then, commits since then, and newer releases, rewrites those files, and re-prepares the pointer with `--refresh`. Nothing changed means nothing is re-prepared. A first `--refresh` does a full export. Deleted or transferred items are not removed automatically.
+- `--no-connect` exports only, for review before connecting.
