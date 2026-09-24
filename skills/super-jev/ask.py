@@ -253,7 +253,8 @@ ANSWER_LABEL = ("Passage {n}, choose only if it answers the question: a rule, pl
 LIVE_RE = re.compile(r"\b(balance|breakeven|break even|right now)\b", re.I)
 LIVE_HOWMUCH_RE = re.compile(
     r"\bhow much\b.{0,40}\b(balance|owe|owed|worth|cost|price|due|total|left|"
-    r"remaining)\b", re.I)
+    r"remaining|money|cash|pay|paid|spend|spent|charge|charged|fee|fees|bill|"
+    r"dollars?|bucks)\b", re.I)
 
 # Routing score at/above which a read file stays "possible" even when the content
 # check finds no answer (opinion asks like "should I invest" rarely read as answered).
@@ -572,7 +573,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                         if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
             # A strongly routed file that was read keeps a possible slot even if the
             # answer check found nothing (opinion asks); never for live-value asks.
-            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question) else []):
+            # Never for any value question (count or money) -- only plain opinion asks.
+            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question)
+                      and not is_value_question(question) else []):
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
                         and scores.get(p, 0) < CONFIRM_FLOOR:
                     possible[p] = POSSIBLE_NOTE
