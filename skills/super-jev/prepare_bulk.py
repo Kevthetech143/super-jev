@@ -617,11 +617,11 @@ def replay_recipe(a) -> None:
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []
     a.no_recurse = a.no_recurse or bool(rep.get("noRecurse"))
-    a.allow_held = a.allow_held or bool(rep.get("allowHeld"))
+    # --allow-held is never replayed: it would admit NEW secret-looking files without review.
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, limit {a.limit or 50}, allow-held {a.allow_held})")
+          f"no-recurse {a.no_recurse}, limit {a.limit or 50}; --allow-held is never replayed)")
 
 
 def main() -> int:
@@ -878,7 +878,7 @@ def main() -> int:
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "limit": a.limit,
-              "allowHeld": a.allow_held, "approved": [str(p) for p in connect_set],
+              "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:

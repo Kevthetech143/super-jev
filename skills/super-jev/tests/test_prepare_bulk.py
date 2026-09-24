@@ -874,19 +874,20 @@ def test_refresh_replays_recorded_no_recurse_and_excludes(tmp_path, monkeypatch,
     root = _big_root(tmp_path, 2)
     (root / "sub").mkdir(); (root / "sub" / "deep.md").write_text("# Deep\n")
     (root / "INDEX.md").write_text("# Index\n")
+    (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
     cache_dir = tmp_path / "cache"
     monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
     _seed_cache(root, cache_dir, 2)
     (cache_dir / "my-records-report.json").write_text(json.dumps(
         {"pointer": "my-records", "roots": [str(root)], "principals": ["alice"],
-         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20}))
+         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20, "allowHeld": True}))
     monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
                                       "--refresh", "--no-connect", "--no-findability"])
     rc = pb.main()
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "inventory: 2 files to prepare" in out
+    assert "inventory: 2 files to prepare, 1 held" in out  # allow-held is never replayed
     report = json.loads((cache_dir / "my-records-report.json").read_text())
     assert report["noRecurse"] is True and report["excludes"] == ["INDEX.md"] and report["limit"] == 20
 
