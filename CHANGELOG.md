@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5 — 2026-09-23
+- Retrieval recall toward 80%: businessfi bench top-3 50/60 (83%, was 46/60), top-1 36/60, false hits 1/15.
+- Review found and fixed 3 false-hit holes.
+
 ## 1.0.4 — 2026-09-23
 - Better recall for casual questions: word search over each pointer's own cache (this principal's pointers only), long files are content-checked instead of kept on routing score, and near-misses print as "possible" (never for value questions, never approvable).
 - Navigate runs at most 6 pointers at once (SUPERJEV_NAV_CONCURRENCY) with a 15s provider timeout (SUPERJEV_NAV_TIMEOUT_MS). Fixes most "Navigation provider timed out" misses.
