@@ -441,6 +441,16 @@ def path_rank(question: str, path: str) -> tuple:
     name = " ".join(parts[-2:]).replace("-", " ").replace("_", " ")
     return (term_hits(query_terms(question), name), "/global/reuse/" not in path)
 
+# Navigation hubs: a table of contents, not a topic file. Its own content/routing
+# score often ties or beats a real note that answers the question, so it is moved
+# into the possible group (see lookup()) and sorts by content there like any other
+# possible file -- the real note that passed the content check outranks the index
+# that merely points to it.
+HUB_STEMS = {"index", "catalog", "tools-used", "handoff", "readme"}
+
+def is_hub_file(path: str) -> bool:
+    return Path(path).stem.lower() in HUB_STEMS
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
         print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
@@ -531,10 +541,52 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                     or (notes.get(p) == INCONCLUSIVE and p not in wpaths)):
                 # A route-kept file shows no content score above the possible floor.
                 keep[p] = (scores.get(p, POSSIBLE_FLOOR if p in possible else s), p, ptr)
+            # An index/catalog/handoff file is a table of contents, not evidence
+            # itself; move it into the possible group so the real note it points
+            # to (which has a real content score) always outranks it.
+            if p in keep and p not in possible and is_hub_file(p):
+                possible[p] = POSSIBLE_NOTE
         dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
-        # Confirmed files first, then the content/routing blend, then the name tie-break.
-        merged = sorted(keep.values(), key=lambda m: (m[1] not in possible, round(rank_score(m[0], route.get(m[1], 0)), 2),
-                                                      path_rank(question, m[1])), reverse=True)
+
+        def metric_of(p: str) -> tuple:
+            """(has_content, content_or_0, route) for a kept path. A route-kept
+            path that was never given a real content score (scores has no entry
+            for it) reports has_content=False so it never outranks a path that
+            does have one, no matter how high its routing score is."""
+            c = scores.get(p)
+            return (c is not None, c if c is not None else 0.0, route.get(p, 0))
+
+        def better(a: str, b: str) -> bool:
+            """True if path a should rank above path b within the possible
+            group: any real content score beats route-only; between two real
+            scores the higher one wins unless they round to a near-tie, in
+            which case routing breaks it; two route-only paths fall back to
+            routing alone."""
+            ha, ca, ra = metric_of(a)
+            hb, cb, rb = metric_of(b)
+            if ha != hb:
+                return ha
+            if not ha:
+                return ra > rb
+            if round(ca, 2) == round(cb, 2):
+                return ra > rb
+            return ca > cb
+
+        def sort_metric(m: tuple) -> tuple:
+            """Sort key for the possible group: content score alone (rounded,
+            so a near-tie falls through to the route component), then routing
+            only to break that near-tie, then the confirmed group's blend for
+            everything not in the possible group."""
+            s, p, ptr = m
+            if p not in possible:
+                return (True, round(rank_score(s, route.get(p, 0)), 2), 0.0, 0, path_rank(question, p))
+            has_content, content, r = metric_of(p)
+            return (False, has_content, round(content, 2), r, path_rank(question, p))
+
+        # Confirmed files first (sort_metric's leading True), then within the
+        # possible group content score alone with routing only as a near-tie
+        # breaker (see metric_of/better/sort_metric above), then the name tie-break.
+        merged = sorted(keep.values(), key=sort_metric, reverse=True)
     top = merged[:5]
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
