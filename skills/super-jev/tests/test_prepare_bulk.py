@@ -810,6 +810,65 @@ def test_max_files_guard_refuses(tmp_path, monkeypatch, capsys):
     assert "REFUSED" in out and "max-files" in out
 
 
+def _seed_cache(root, cache_dir, n, pointer="my-records"):
+    cache_dir.mkdir(exist_ok=True)
+    entries = {}
+    for i in range(n):
+        f = root / f"f{i}.md"
+        entries[str(f)] = {"sha256": sha256_of(f), "description": f"Describes f{i}.", "question": f"What is f{i}?",
+                           "verdict": "SUPPORTED", "confidence": 0.95, "pass": True, "checkedAt": "2026-01-01T00:00:00"}
+    (cache_dir / f"{pointer}.json").write_text(json.dumps(entries))
+
+
+def _big_root(tmp_path, n):
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(n):
+        (root / f"f{i}.md").write_text(f"# F{i}\nContent {i}.\n")
+    return root
+
+
+def test_refresh_over_max_files_passes_when_cache_covers_unchanged_files(tmp_path, monkeypatch, capsys):
+    root = _big_root(tmp_path, 5)
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 5)
+    writer_calls = []
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: writer_calls.append(items) or {})
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--max-files", "2", "--refresh", "--no-connect"]))
+    rc = pb.main()
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "REFUSED" not in out
+    assert "refresh: 5 files total (over --max-files 2), but only 0 need a writer call" in out
+    assert writer_calls == []
+
+
+def test_refresh_over_max_files_refuses_when_changed_files_exceed_cap(tmp_path, monkeypatch, capsys):
+    root = _big_root(tmp_path, 5)
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 5)
+    for i in range(3):  # 3 changed files > cap 2
+        (root / f"f{i}.md").write_text(f"# F{i}\nChanged {i}.\n")
+    monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--max-files", "2", "--refresh", "--no-connect"]))
+    rc = pb.main()
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "REFUSED: 3 files need drafting" in out
+
+
+def test_refresh_without_cache_keeps_first_connect_refusal(tmp_path, monkeypatch, capsys):
+    root = _big_root(tmp_path, 3)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--max-files", "2", "--refresh", "--no-connect"]))
+    rc = pb.main()
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert "REFUSED: 3 files exceed --max-files 2" in out
+
+
 def test_held_txt_written_with_masked_line_and_pattern_type(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
