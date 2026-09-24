@@ -126,7 +126,33 @@ provider's preview terms restrict publishing performance numbers here.
    earned.
    Status: LIVE — this is the `skills/super-jev` skill in this repo.
 
-Proof for all seven: the live bench (`bench/live-measure.ts`) reports
+8. **JEV'S VOICE** — on a miss, Super Jev prints one fixed line ("Super Jev: I
+   didn't have this. Want me to find it by hand and save it for next time?"); a pre-reply
+   check re-adds it if the agent drops it; on yes, the agent finds the
+   answer and runs `--add` with `--source`. Hits stay silent.
+   Status: LIVE in v1.0.6 (#126).
+
+9. **JEV TERMINAL AGENT** — a terminal app like Hermes: one-line install,
+   boots to a prompt, set an API key, pick the classifier brain (Jev today,
+   others later), ask questions and get answers back through the harness;
+   agents can point at it.
+   Status: LIVE in v1.0.6 (#129) with Jev as the brain; picking other
+   brains is item 11.
+
+10. **JEV-ASSISTED LEASH** — when the Worker Leash's plain rule can't tell
+    whether a tricky shell command writes outside the allowed folders, ask
+    Jev one yes/no question; clear cases stay rule-only, free and instant.
+    Status: pending.
+
+11. **BRAIN SWAP** — let Super Jev run on other Jev-like models (first
+    candidate CLM-8B, Apache 2.0, needs Linux + NVIDIA GPU host). Plan: a
+    small ClmEvaluator adapter behind the existing Evaluator interface plus
+    an env switch; benchmark vs Jev on the businessfi set (right-first,
+    top-3, false hits, speed, cost). Needs GPU rental (Kelvin's OK).
+    Research done 2026-09-24 (kept in the lead agent's notes).
+    Status: later — not yet ("not yet, put it in the wishlist").
+
+Proof for the first seven: the live bench (`bench/live-measure.ts`) reports
 accuracy, accepted-error rate, review rate, coverage, tokens and latency
 together. A feature ships only once measured, and the numbers live in the
 bench output, not in this document.
