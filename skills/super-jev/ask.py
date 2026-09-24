@@ -36,8 +36,8 @@
       --replace-entry is given, which removes the existing manual pointer
       for that exact wording first, then adds fresh. --source records that
       file's path+sha256; a later cache hit on this pointer re-hashes it
-      and, if changed, WITHHOLDS the answer (STALE, exit 1) instead of
-      serving stale evidence.
+      and, if changed, WITHHOLDS the answer (STALE) and falls through to a
+      fresh live search instead of serving stale evidence.
 
       The record carries the same kind/status/as_of/subject labels
       prepare_bulk.py's bulk pipeline drafts and gates for onboarded files,
@@ -348,7 +348,7 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     if record.is_file():
         stale_source = changed_source(record)
         if stale_source:
-            print(f"STALE: source changed since this answer was recorded ({stale_source}); answer withheld. Re-add with --add after verifying.")
+            print(f"STALE: source changed since this answer was recorded ({stale_source}); answer withheld. Re-add with --add --replace-entry after verifying.")
             return 1
     print("CACHE HIT")
     print("answer:", hit.get("answer") or "")
@@ -841,14 +841,9 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
         return ""
     if "-manual-" in ptr:
         return "; its source changed: re-add it with ask.py --add ... --replace-entry"
-    try:
-        roots = json.loads((Path(__file__).resolve().parent / "prepare-cache" / f"{ptr}-report.json")
-                           .read_text()).get("roots") or []
-    except (OSError, ValueError):
-        roots = []
-    root_args = " ".join(f"--root {shlex.quote(r)}" for r in roots) or "--root /path/to/folder"
+    # prepare_bulk --refresh replays the pointer's recorded roots/excludes/no-recurse/limit itself.
     return (f"; its files changed since connect. Run: python3 skills/super-jev/prepare_bulk.py "
-            f"--refresh --pointer {ptr} --principal {principal} {root_args}")
+            f"--refresh --pointer {ptr} --principal {principal}")
 
 def path_rank(question: str, path: str) -> tuple:
     """Tie-break for equal scores: more question words in the file's name or folder
@@ -879,21 +874,25 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     cache = memory({"action": "cached", "principal": principal, "question": question})
+    withheld = None
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
                     content_check={}, final_ranked=[], tier="cache" if rc == 0 else "stale",
                     timings={"total_secs": round(time.time() - t0, 2)})
-        if rc != 0:
-            print(VOICE_LINE)
-        return rc
+        if rc == 0:
+            return rc
+        # The stale answer stays withheld, but the question still gets a fresh live search.
+        # Its manual pointer's record text IS the stale answer, so keep it out of the live search.
+        withheld = manual_pointer_name(principal, question)
+        print("Searching live instead...")
     panel = memory({"action": "panel", "principal": principal})
     if panel.get("reason") == "not-set-up":
         print("Super Jev is not set up yet. Run: python3 skills/super-jev/setup.py")
         return 1
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
-                            for p in panel.get("pointers", [])) if n]
+                            for p in panel.get("pointers", [])) if n and n != withheld]
     if not pointers:
         print(f"nothing connected yet for principal '{principal}' -- run connect first:\n"
               f"  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
