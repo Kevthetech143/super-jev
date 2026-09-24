@@ -614,9 +614,10 @@ def replay_recipe(a) -> None:
     if not isinstance(rep, dict):
         return
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
-    # refresh_changed.py re-passes the recorded roots, which must not unpin it.
-    rescoped = bool(a.excludes or a.no_recurse or (a.roots and
-                    sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or [])))
+    # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
+    rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
+                    or (a.no_recurse and not rep.get("noRecurse"))
+                    or (a.roots and sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or [])))
     a.roots = a.roots or rep.get("roots") or None
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []

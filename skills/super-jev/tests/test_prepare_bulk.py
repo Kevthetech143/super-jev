@@ -918,6 +918,14 @@ def test_refresh_of_legacy_report_keeps_recorded_file_set(tmp_path, monkeypatch,
     assert pb.main() == 0
     out = capsys.readouterr().out
     assert "inventory: 2 files to prepare" in out and "REFUSED" not in out
+    # refresh_changed.py also re-passes recorded excludes; an unchanged exclude list must not unpin.
+    rep = json.loads((cache_dir / "my-records-report.json").read_text())
+    rep["excludes"] = ["INDEX.md"]
+    (cache_dir / "my-records-report.json").write_text(json.dumps(rep))
+    monkeypatch.setattr(sys, "argv", sys.argv + ["--exclude", "INDEX.md"])
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "inventory: 2 files to prepare" in out and "REFUSED" not in out
 
 
 def test_held_txt_written_with_masked_line_and_pattern_type(tmp_path, monkeypatch):
