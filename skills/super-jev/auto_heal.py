@@ -86,13 +86,31 @@ def _lock_holder_alive(lock: Path) -> bool:
 
 
 def _acquire_lock(principal: str, pointer: str) -> bool:
-    lock = _lock_path(principal)
-    if lock.is_file() and _lock_holder_alive(lock):
-        return False
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # Not atomic across processes (best-effort single-machine lock, same as the rest of the
-    # harness's file-based state); the cooldown + hourly cap below bound the damage of a race.
-    lock.write_text(json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer}))
+    lock = _lock_path(principal)
+    payload = json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer}).encode()
+    # O_CREAT|O_EXCL is atomic (single syscall): when the lock file does not yet exist, only
+    # one racing process can win the create. This closes the check-then-write gap a separate
+    # is_file() check followed by write_text() would leave open, which let concurrent lookups
+    # (same principal, same tick) each see "no lock" and all start their own refresh.
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if _lock_holder_alive(lock):
+            return False
+        # Dead/stale lock: clear it and retry once. This retry still has a narrow race with
+        # another racer doing the same thing, but that only matters for the rare dead-holder
+        # case; the common contended case above is race-free.
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+    with os.fdopen(fd, "wb") as f:
+        f.write(payload)
     return True
 
 

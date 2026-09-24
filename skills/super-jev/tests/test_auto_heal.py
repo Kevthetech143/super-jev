@@ -75,6 +75,36 @@ def test_second_refresh_for_same_principal_is_blocked_while_one_is_in_flight(tmp
     assert len(calls) == 1
 
 
+def test_concurrent_lookups_for_the_same_stale_pointer_start_only_one_heal(tmp_path, monkeypatch):
+    # Regression: _acquire_lock used to check lock.is_file() and then write_text() as two
+    # separate steps, leaving a gap where several racing threads/processes could all see "no
+    # lock" before any of them wrote one, each starting its own refresh. Real Popen is faked
+    # (see _setup), but the lock file itself is real, so this exercises the actual race.
+    import threading
+    calls, _ = _setup(tmp_path, monkeypatch)
+    barrier = threading.Barrier(8)
+    results = []
+    lock = threading.Lock()
+
+    def worker():
+        barrier.wait()
+        r = ah.maybe_heal("moving", "agent")
+        with lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # Exactly one racer wins the lock and starts a refresh; the rest must see either
+    # "in-progress" (lock already held) or "cooldown" (state file already recorded the
+    # attempt) -- never a second "started".
+    assert results.count("started") == 1
+    assert results.count("in-progress") + results.count("cooldown") == 7
+    assert len(calls) == 1
+
+
 def test_a_stale_lock_from_a_dead_pid_does_not_wedge_the_principal_forever(tmp_path, monkeypatch):
     calls, _ = _setup(tmp_path, monkeypatch)
     ah.STATE_DIR.mkdir(parents=True, exist_ok=True)
