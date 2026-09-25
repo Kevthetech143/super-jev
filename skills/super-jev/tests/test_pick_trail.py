@@ -124,7 +124,7 @@ def test_bad_rank_and_unknown_trace(world, capsys):
     assert ask.load_picks(world["sdir"]) == []
 
 
-def _approve_world(tmp_path, monkeypatch, search_passages):
+def _approve_world(tmp_path, monkeypatch, search_passages, answer="The car is blue.", assisted="The car is blue."):
     """--approve --file car.md with a fake harness; returns the evidence list it sent."""
     car = tmp_path / "car.md"
     car.write_text("# Car\nSeparate play: earnings overnight.\nThe car is blue.\n")
@@ -142,14 +142,14 @@ def _approve_world(tmp_path, monkeypatch, search_passages):
             [ref] = req["references"]
             assert ref == {"sourceId": "car", "startLine": 3, "endLine": 3}
             return {"status": "ready", "approvalTicket": "t2",
-                    "passages": [{"sourceId": "car", "reviewedText": "The car is blue."}]}
+                    "passages": [{"sourceId": "car", "reviewedText": assisted}]}
         if act == "approve":
             sent["evidence"] = req["evidence"]
             return {"status": "saved"}
         raise AssertionError(act)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.approve("alice", Q, "The car is blue.", sdir, file=str(car))
+    rc = ask.approve("alice", Q, answer, sdir, file=str(car))
     return rc, sent.get("evidence")
 
 
@@ -166,3 +166,15 @@ def test_approve_quotes_the_passage_that_supports_the_answer_first(tmp_path, mon
         {"sourceId": "car", "reviewedText": "Separate play: earnings overnight."},
         {"sourceId": "car", "reviewedText": "The car is blue."}])
     assert rc == 0 and evidence[0]["quote"] == "The car is blue."
+
+
+def test_approve_refuses_when_no_line_matches_the_answer(tmp_path, monkeypatch):
+    rc, evidence = _approve_world(tmp_path, monkeypatch, [{"sourceId": "other", "reviewedText": "x"}],
+                                  answer="Purple zeppelin")
+    assert rc == 1 and evidence is None
+
+
+def test_approve_refuses_when_assisted_text_no_longer_supports_the_answer(tmp_path, monkeypatch):
+    rc, evidence = _approve_world(tmp_path, monkeypatch, [{"sourceId": "other", "reviewedText": "x"}],
+                                  assisted="Changed since connect.")
+    assert rc == 1 and evidence is None
