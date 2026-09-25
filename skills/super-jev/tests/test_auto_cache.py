@@ -161,3 +161,16 @@ def test_run_gate_blocks_a_time_sensitive_answer(monkeypatch, side, want):
     monkeypatch.setattr(ask.subprocess, "run",
                         lambda *a, **k: subprocess.CompletedProcess(a, 0, body, ""))
     assert ask.run_gate("Q A", "/x.md") == (want, 1.0)
+
+
+def test_run_gate_ignores_a_low_confidence_time_sensitive_label(monkeypatch):
+    """Regression for the health-fitness test #7 bug (2026-09-25): jev's reply
+    table prints whichever label won the choice even at low confidence, so a
+    near coin-flip TIME_SENSITIVE call (0.05-0.10) must not block a correct,
+    fully-supported answer the way a confident one (>=0.80) does."""
+    import subprocess
+    out = "  c1   SUPPORTED      1.00  x\n\n  time_sensitive     TIME_SENSITIVE       0.05\n"
+    body = json.dumps({"verdict": "CLEAN", "details": {"stdout": out}})
+    monkeypatch.setattr(ask.subprocess, "run",
+                        lambda *a, **k: subprocess.CompletedProcess(a, 0, body, ""))
+    assert ask.run_gate("Q A", "/x.md") == ("CLEAN", 1.0)
