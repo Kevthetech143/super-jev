@@ -278,3 +278,61 @@ def test_value_question_owed_gets_no_possible_tier(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(toll): 0.7}, set(), None, {}))
     assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 0
     assert "no-candidates" in capsys.readouterr().out
+
+
+# 4. big notes: a strongly routed file too long to read whole stays possible (2026-09-24)
+def _big_pending(tmp_path):
+    f = tmp_path / "pending.md"
+    f.write_text("".join(("## Section %d\n" % i + "item " * 700)[:ask.CONFIRM_CHUNK - 1] + "\n"
+                         for i in range(24)))
+    return f
+
+
+@pytest.mark.parametrize("route,judge,kept", [(0.96, 0.57, True), (0.7, 0.57, False),
+                                              (0.96, 0.3, False)])
+def test_big_strongly_routed_file_kept_possible(tmp_path, monkeypatch, capsys, route, judge, kept):
+    f = _big_pending(tmp_path)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": route, "originalPath": str(f)}]))
+    monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
+        cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": judge, "sourceId": "5"}]}), ""))
+    ask.lookup("what is on the health-fitness pending to-do list", "me", tmp_path / "s")
+    out = capsys.readouterr().out
+    assert (str(f) in out) is kept
+    if kept:
+        assert "start at section: Section 5" in out
+
+
+def test_big_file_not_kept_for_live_value_ask(tmp_path, monkeypatch, capsys):
+    f = _big_pending(tmp_path)
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(f)}]))
+    monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
+        cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": 0.57, "sourceId": "1"}]}), ""))
+    ask.lookup("what is the balance right now", "me", tmp_path / "s")
+    assert str(f) not in capsys.readouterr().out
+
+
+# 5. list asks get the open "does it answer" wording, not exact-value
+@pytest.mark.parametrize("q,label", [
+    ("what is on the health-fitness pending to-do list", "ANSWER_LABEL"),
+    ("what's on my todo list", "ANSWER_LABEL"),
+    ("what car do I have", "CONFIRM_LABEL"),
+    ("what is the list price", "CONFIRM_LABEL"),
+    ("what is the phone number for NYP ENT on Kelvin's referral options list", "CONFIRM_LABEL")])
+def test_list_questions_use_open_wording(q, label):
+    assert ask.confirm_label(q) == getattr(ask, label)
+
+
+def test_big_kept_file_never_outranks_a_content_scored_possible(tmp_path, monkeypatch, capsys):
+    big, small = _big_pending(tmp_path), tmp_path / "small.md"
+    small.write_text("to-do: call the clinic")
+    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.98, "originalPath": str(big)},
+                                                {"score": 0.3, "originalPath": str(small)}]))
+
+    def fake_run(cmd, input, **kw):
+        big_file = len(json.loads(input)["catalog"]["nodes"]) > 2
+        sc = {"score": 0.57, "sourceId": "2"} if big_file else {"score": 0.7, "sourceId": "0"}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "candidates", "candidates": [sc]}), "")
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    ask.lookup("what is on the pending to-do list", "me", tmp_path / "s")
+    lines = [l for l in capsys.readouterr().out.splitlines() if "(possible:" in l]
+    assert str(small) in lines[0] and str(big) in lines[1]
