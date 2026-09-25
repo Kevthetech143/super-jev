@@ -141,6 +141,29 @@ def test_failed_call_keeps_todays_order(tmp_path):
     assert [t["path"] for t in top] == [str(a), str(b)]
 
 
+def test_hub_winner_never_promotes_past_a_confirmed_source_note(tmp_path):
+    """h22, 2026-09-25: a folder README (0.98) outranked a CONFIRMED real
+    source note (0.91) beside it, because prefer_sources() correctly moved
+    the README below the note, but listwise then picked the README (Jev's
+    single-best-answer judgment landed on the index, not the note) and moved
+    it right back to #1 with no hub exemption -- unlike the near-twin
+    tiebreak, which already sits hub files out of its re-judging. A hub/copy
+    winner must never promote past a non-hub file already ranked ahead of it."""
+    readme = tmp_path / "esteban/medical/README.md"
+    panel = tmp_path / "esteban/medical/2026-04-09-panel.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("index of esteban's medical folder")
+    panel.write_text("April 2026 blood panel results")
+    top = _run_lookup(
+        tmp_path, "what were Esteban's April 2026 blood panel results",
+        [{"score": 0.9, "originalPath": str(readme)},
+         {"score": 0.8, "originalPath": str(panel)}],
+        {str(readme): 0.98, str(panel): 0.91},
+        listwise_winner_prob=(str(readme), 0.95),
+    )
+    assert top[0]["path"] == str(panel)
+
+
 def test_off_switch_skips_the_call_entirely(tmp_path, monkeypatch):
     """SUPERJEV_LISTWISE=0 (here via listwise_enabled() patched False) never
     calls judge_listwise and leaves ranking unchanged."""
