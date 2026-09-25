@@ -82,12 +82,21 @@ class PathConnectTests(unittest.TestCase):
             db.execute('INSERT INTO pending VALUES (?,?,?,?,?)', ('ticket', 'records', pointer['generation'], pointer['fingerprint'], '{}'))
         self.assertEqual(connect(request, self.config)['reason'], 'already-connected')
         self.assertEqual(connect({**request, 'replace': True, 'principals': ['other']}, self.config)['reason'], 'scope-change')
+        self.assertNotIn('registeredPrincipals', connect({**request, 'replace': True, 'principals': ['other']}, self.config))
         self.assertEqual(connect({**request, 'replace': True}, self.config)['status'], 'registered')
         fresh, _ = service.pointer('records', 'owner')
         self.assertNotEqual(pointer['generation'], fresh['generation'])
         with service.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM pending').fetchone()[0], 0)
+
+    def test_narrowed_refresh_names_the_registered_scope(self):
+        wide = {**self.reviewed(), 'principals': ['owner', 'helper']}
+        self.assertEqual(connect(wide, self.config)['status'], 'registered')
+        narrowed = connect({**wide, 'replace': True, 'principals': ['owner']}, self.config)
+        self.assertEqual((narrowed['reason'], narrowed['registeredPrincipals']), ('scope-change', ['helper', 'owner']))
+        empty = connect({**wide, 'replace': True, 'principals': []}, self.config)
+        self.assertNotIn('registeredPrincipals', empty)
 
     def test_partial_publication_fails_closed(self):
         request = self.reviewed()

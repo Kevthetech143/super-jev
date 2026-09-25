@@ -2,7 +2,9 @@
 
 ## Unreleased
 - Pick trail: `--used last --rank N --answer "..."` logs which listed file an agent used; every 5 picks the claim checker auto-saves CLEAN ones as `agent-pick+check`, unsure ones wait in `--pending-picks`. (#155)
-- `--approve --rank N` / `--file PATH` saves evidence only from the picked file (matched by full path); a same-name file in the same tree (clov/analysis/README.md vs clov/README.md) can no longer supply the quote. If the search has no passage from the picked file, approve refuses.
+- `--approve --rank N` / `--file PATH` saves evidence only from the picked file (matched by full path); a same-name file in the same tree (clov/analysis/README.md vs clov/README.md) can no longer supply the quote. If the search has no passage from the picked file, approve cites the file's own reviewed lines that best match the answer (assisted review, needs `allowAgentAssist`); the pick trail uses the same evidence path. The saved quote is the picked file's passage that best matches the answer, not its first section.
+- Bench datasets under `.local/retrieval-datasets/` (e.g. health-selected-passages) are never connected by prepare_bulk and never listed in ask results (routing or word search).
+- Stale pointer hint prints a command that runs as-is: absolute prepare_bulk.py path plus the pointer's recorded roots and every recorded principal (v1.0.12 printed a bare `--refresh` that was refused for want of `--root`). A refresh that names only some of a pointer's registered principals now reconnects with all of them instead of failing with scope-change and leaving the pointer STALE.
 - No-candidates wording no longer claims absence: "Super Jev couldn't find it in the connected files. It may still exist" plus an offer to search by hand.
 - Possible tier: a README with a real content score ranks above route-only files (was printed last below 0.60 route-only files), still below any note with a content score (#149). Other hubs still rank last; confirmed-tier rules unchanged. Replay of 558 fleet traces: 1 reorder, 0 top-file flips.
 

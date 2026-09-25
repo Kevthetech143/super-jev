@@ -201,6 +201,15 @@ def is_test_material(path: str) -> bool:
     return bool(TEST_MATERIAL_RE.search(Path(path).as_posix()))
 
 
+# Super Jev's own bench/eval datasets (e.g. health-selected-passages): copies of passages,
+# never a real note, so they must not be connected or show up in real ask results.
+BENCH_DATASET_RE = re.compile(r"/\.local/retrieval-datasets/")
+
+
+def is_bench_dataset(path: str) -> bool:
+    return bool(BENCH_DATASET_RE.search(Path(path).as_posix()))
+
+
 def _excluded(rel_posix: str, excludes: list) -> bool:
     return any(rel_posix == ex or rel_posix.startswith(ex + "/") for ex in excludes)
 
@@ -317,7 +326,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             rel_parts = p.relative_to(root).parts
             if any(part in SKIP_PARTS or part.startswith(".") for part in rel_parts):
                 continue
-            if _excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix()):
+            if (_excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix())
+                    or is_bench_dataset(str(rp))):
                 continue
             b = p.read_bytes()
             if not b.strip():
@@ -509,6 +519,14 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict) 
         s["sha256"] = hashes[s["path"]]
     req["reviewed"] = True
     reg = memory(req)
+    wider = reg.get("registeredPrincipals") if reg.get("reason") == "scope-change" else None
+    if req.get("replace") and wider:
+        # A refresh naming only some of the pointer's principals would narrow it; the harness
+        # refuses that, which left the pointer stale. Keep its registered scope instead.
+        print(f"refresh: {pointer} is registered for {', '.join(wider)}; reconnecting with all of them")
+        principals[:] = wider
+        req["principals"] = list(wider)
+        reg = memory(req)
     connected = reg.get("status") == "registered"
     print(f"connect: {reg.get('status')} pointer={reg.get('pointer')} sources={len(reg.get('sources', []))}")
     if not connected:

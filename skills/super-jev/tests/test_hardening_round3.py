@@ -191,10 +191,21 @@ def test_summary_names_held_file_why_and_command(env, monkeypatch, capsys):
     assert f"prepare_bulk.py --root {root} --pointer x --principal me --writer builtin --no-findability --allow-held" in summary
 
 
-# 5. a stale pointer says how to refresh it
+# 5. a stale pointer says how to refresh it -- a command that runs as printed
 def test_stale_pointer_line_names_the_refresh_command(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["x"]} if req["action"] == "panel" else
                         {"status": "preparation-required"})
+    monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
+    (tmp_path / "x-report.json").write_text(json.dumps(
+        {"pointer": "x", "roots": ["/r"], "principals": ["me", "helper"]}))
     assert ask.lookup("q", "me", tmp_path / "s") == 1
-    assert "[x] preparation-required; its files changed since connect. Run: python3 skills/super-jev/" \
-           "prepare_bulk.py --refresh --pointer x --principal me" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    script = Path(ask.__file__).resolve().parent / "prepare_bulk.py"
+    assert (f"[x] preparation-required; its files changed since connect. Run: python3 {script} "
+            "--root /r --pointer x --principal me --principal helper --refresh") in out
+
+
+def test_stale_pointer_without_report_says_root_is_needed(tmp_path, monkeypatch, capsys):
+    """v1.0.12 printed a bare --refresh that prepare_bulk refused (needs --root)."""
+    monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
+    assert "--root DIR --pointer x --principal me --refresh" in ask.refresh_hint("x", "me", "preparation-required")
