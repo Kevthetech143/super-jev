@@ -120,6 +120,7 @@ class Service:
         retrieve: Callable[[str, str], dict[str, Any]],
         *,
         navigate_provider: Callable[[str, dict[str, Any], Any], dict[str, Any]] | None = None,
+        navigate_many_provider: Callable[[str, list, Any], Any] | None = None,
         cache_ttl_seconds: float = 86400,
         review_ttl_seconds: float = 600,
         allow_agent_assist: bool = False,
@@ -136,6 +137,7 @@ class Service:
         self.registry = Path(registry)
         self.retrieve = retrieve
         self.navigate_provider = navigate_provider
+        self.navigate_many_provider = navigate_many_provider
         self.cache_ttl_seconds = float(cache_ttl_seconds)
         self.review_ttl_seconds = float(review_ttl_seconds)
         if not isinstance(allow_agent_assist, bool):
@@ -591,6 +593,44 @@ class Service:
         self, name: str, principal: str, question: str, limits: Any = None,
     ) -> dict[str, Any]:
         """Return source candidates only after checking pointer state around navigation."""
+        begun = self._navigate_begin(name, principal, question, limits)
+        if 'status' in begun:
+            return begun
+        if self.navigate_provider is None:
+            return {'status': 'error', 'reason': 'Navigation is unavailable.'}
+        result = self.navigate_provider(question, begun['catalog'], limits)
+        return self._navigate_end(name, principal, begun, result)
+
+    def navigate_many(
+        self, names: list[str], principal: str, question: str, limits: Any = None,
+    ) -> dict[str, Any]:
+        """navigate() for several pointers whose Jev questions share provider calls.
+        Each pointer gets its own result, exactly as navigate() would return it."""
+        if (not isinstance(names, list) or not names or len(names) > 200
+                or any(not isinstance(n, str) or not n for n in names) or len(set(names)) != len(names)):
+            raise ValueError('pointers must be a list of 1 to 200 distinct names')
+        begun = {name: self._navigate_begin(name, principal, question, limits) for name in names}
+        ready = [name for name in names if 'status' not in begun[name]]
+        results = {name: begun[name] for name in names if name not in ready}
+        if ready:
+            if self.navigate_many_provider is None:
+                raw = [self.navigate_provider(question, begun[n]['catalog'], limits)
+                       if self.navigate_provider else None for n in ready]
+            else:
+                raw = self.navigate_many_provider(question, [begun[n]['catalog'] for n in ready], limits)
+            if isinstance(raw, dict):  # the whole batch failed: every pointer gets that error
+                raw = [raw] * len(ready)
+            if not isinstance(raw, list) or len(raw) != len(ready):
+                raw = [None] * len(ready)
+            for name, result in zip(ready, raw):
+                results[name] = (self._navigate_end(name, principal, begun[name], result) if result is not None
+                                 else {'status': 'error', 'reason': 'Navigation is unavailable.'})
+        return {'status': 'ok', 'results': results}
+
+    def _navigate_begin(
+        self, name: str, principal: str, question: str, limits: Any,
+    ) -> dict[str, Any]:
+        """The pointer check and catalog for one navigation, or its error status."""
         require_text('pointer', name)
         require_text('principal', principal)
         require_text('question', question)
@@ -614,9 +654,13 @@ class Service:
                          for source_id, source in sorted(sources.items()))
             catalog = {'version': 1, 'structure': 'flat-files',
                        'rootId': 'root', 'nodes': nodes}
-        if self.navigate_provider is None:
-            return {'status': 'error', 'reason': 'Navigation is unavailable.'}
-        result = self.navigate_provider(question, catalog, limits)
+        return {'pointer': pointer, 'sources': sources, 'catalog': catalog}
+
+    def _navigate_end(
+        self, name: str, principal: str, begun: dict[str, Any], result: Any,
+    ) -> dict[str, Any]:
+        """Validate one navigation result against its catalog and re-check the pointer."""
+        pointer, sources, catalog = begun['pointer'], begun['sources'], begun['catalog']
         if (isinstance(result, dict) and result.get('status') == 'error'
                 and isinstance(result.get('reason'), str) and result['reason']):
             return {'status': 'error', 'reason': result['reason']}

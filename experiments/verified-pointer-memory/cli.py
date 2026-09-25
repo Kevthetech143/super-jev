@@ -37,6 +37,7 @@ ACTIONS = {
     'register': ['pointer', 'dataset', 'principals'], 'remove': ['pointer'],
     'search': ['pointer', 'question', 'principal'],
     'navigate': ['pointer', 'question', 'principal'],
+    'navigate-many': ['pointers', 'question', 'principal'],
     'cached': ['principal', 'question'],
     'forget': ['principal', 'question'],
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
@@ -251,12 +252,30 @@ def run(request, config):
         except (OSError, ValueError):
             return {'status': 'error', 'reason': 'Navigation failed or returned invalid JSON.'}
 
+    def navigate_many_provider(question, catalogs, limits):
+        batch = [{'question': question, 'catalog': catalog, **({'limits': limits} if limits is not None else {})}
+                 for catalog in catalogs]
+        try:
+            process = subprocess.run(
+                config['navigationCommand'], input=json.dumps({'batch': batch}), capture_output=True,
+                text=True, timeout=config['providerTimeoutSeconds'])
+            if process.returncode:
+                cause = (process.stderr or '').strip().splitlines()[-1:] or ['Navigation failed']
+                return {'status': 'error', 'reason': cause[0][:200]}
+            out = json.loads(process.stdout)
+            return out.get('results') if isinstance(out, dict) else None
+        except subprocess.TimeoutExpired:
+            return {'status': 'error', 'reason': 'Navigation timed out.'}
+        except (OSError, ValueError):
+            return {'status': 'error', 'reason': 'Navigation failed or returned invalid JSON.'}
+
     if request.get('action') == 'connect':
         from path_connect import connect
         return connect(request, config)
 
     service = Service(config['db'], config['registry'], retrieve,
                       navigate_provider=navigate_provider,
+                      navigate_many_provider=navigate_many_provider,
                       cache_ttl_seconds=config['cacheTtlSeconds'],
                       review_ttl_seconds=config['reviewTtlSeconds'],
                       allow_agent_assist=config['allowAgentAssist'])
@@ -306,6 +325,9 @@ def run(request, config):
     if action == 'navigate':
         return service.navigate(request['pointer'], request['principal'],
                                 request['question'], request.get('limits'))
+    if action == 'navigate-many':
+        return service.navigate_many(request['pointers'], request['principal'],
+                                     request['question'], request.get('limits'))
     if action == 'cached':
         return service.cached(request['principal'], request['question'],
                               request.get('pointer'), request.get('context', ''))
