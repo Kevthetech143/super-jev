@@ -21,7 +21,7 @@ def _memory(cands):
 def _run(tmp_path, monkeypatch, capsys, q, route, content, name="notes.md"):
     f = tmp_path / name
     f.write_text("stale note")
-    monkeypatch.setattr(ask, "word_search", lambda q, p: [])
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
     monkeypatch.setattr(ask, "memory", _memory([{"score": route, "originalPath": str(f)}]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(f): content}, set(), None, {}))
     ask.lookup(q, "me", tmp_path / "s")

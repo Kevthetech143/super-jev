@@ -25,8 +25,8 @@ Usage:
 
 Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
-     a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md
-     and hidden directories; --exclude SUBPATH (repeatable) also skips any file whose path relative to its
+     a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
+     hidden directories and test/scratch output (ops/sj*/, *superjev-test*, *-hand-test-*, *-sample*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only. Files matching
      card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
@@ -192,6 +192,15 @@ def relstr(p, roots) -> str:
     return str(p)
 
 
+# Test/scratch output (e.g. a Super Jev test report that repeats the test questions) outranks the real
+# answer in word search, so it is never connected or searched. Kept narrow: real ops notes stay.
+TEST_MATERIAL_RE = re.compile(r"(^|/)ops/sj[^/]*/|superjev-test|-hand-test-|-sample", re.I)
+
+
+def is_test_material(path: str) -> bool:
+    return bool(TEST_MATERIAL_RE.search(Path(path).as_posix()))
+
+
 def _excluded(rel_posix: str, excludes: list) -> bool:
     return any(rel_posix == ex or rel_posix.startswith(ex + "/") for ex in excludes)
 
@@ -308,7 +317,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             rel_parts = p.relative_to(root).parts
             if any(part in SKIP_PARTS or part.startswith(".") for part in rel_parts):
                 continue
-            if _excluded(p.relative_to(root).as_posix(), excludes):
+            if _excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix()):
                 continue
             b = p.read_bytes()
             if not b.strip():

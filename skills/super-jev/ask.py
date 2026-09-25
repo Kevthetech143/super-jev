@@ -866,18 +866,20 @@ def load_cache_files(pointer: str) -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
-def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> list:
+def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25; a file's path, description and
     stored question count triple). Typos match a close word (difflib). A file must
-    cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered."""
+    cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered. Test/scratch
+    output is never searched; `skip` paths (already routed) are dropped before the top `limit`."""
     terms = query_terms(question)
     if not terms:
         return []
     docs = {}
     for ptr in pointers:
         for path, entry in load_cache_files(ptr).items():
-            if path in docs or not isinstance(entry, dict) or not entry.get("pass"):
+            if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
+                    or prepare_bulk.is_test_material(path)):
                 continue
             try:
                 raw = Path(path).read_bytes()
@@ -920,7 +922,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> l
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP]}
-    return ranked[:limit]
+    return [r for r in ranked if r[1] not in skip][:limit]
 
 def confirm(question: str, paths: list):
     """Check each path alone, in parallel. Returns ({path: score} for kept files,
@@ -1094,7 +1096,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
-    found = [f for f in word_search(question, pointers) if f[1] not in routed[:CONFIRM_FILES]]
+    found = word_search(question, pointers, skip=set(routed[:CONFIRM_FILES]))
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
@@ -1223,10 +1225,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
                             "passed_coverage": wsearch.get("passed_coverage"),
                             "top": [{"score": sc, "path": p,
-                                     "fate": fates.get(p) or ("already routed (used a slot)" if i < FALLBACK_FILES
-                                                              and p in routed[:CONFIRM_FILES]
+                                     "fate": fates.get(p) or ("already routed" if p in routed[:CONFIRM_FILES]
                                                               else "not read: past top %d" % FALLBACK_FILES)}
-                                    for i, (sc, p, _ptr) in enumerate(wsearch.get("ranked", []))]},
+                                    for sc, p, _ptr in wsearch.get("ranked", [])]},
             "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
                               for p, v in content_check.items()},
