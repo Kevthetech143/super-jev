@@ -116,7 +116,9 @@ should relay that line to them verbatim, unedited.
 AGENT can also come from SUPERJEV_PRINCIPAL. State lives under
 $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo.
 """
+import contextlib
 import difflib
+import fcntl
 import hashlib
 import math
 import json
@@ -1784,9 +1786,21 @@ def load_picks(sdir: Path) -> list:
             continue
     return out
 
+PICK_MAX = 200  # queue cap: oldest picks fall off so unsure ones cannot pile up forever
+
+@contextlib.contextmanager
+def picks_lock(sdir: Path):
+    """Serialize read-modify-write of pending_picks.jsonl across agents sharing a principal."""
+    sdir.mkdir(parents=True, exist_ok=True)
+    with open(sdir / "pending_picks.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
 def save_picks(sdir: Path, picks: list) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
-    picks_path(sdir).write_text("".join(json.dumps(r) + "\n" for r in picks))
+    tmp = picks_path(sdir).with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in picks[-PICK_MAX:]))
+    tmp.replace(picks_path(sdir))
 
 def record_pick(principal: str, sdir: Path, which: str, rank=None, file=None, answer=None) -> int:
     """--used: queue "agent used choice N of trace <which>"; flush once the queue is full."""
@@ -1811,8 +1825,9 @@ def record_pick(principal: str, sdir: Path, which: str, rank=None, file=None, an
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "lookup_id": rec.get("lookup_id"),
             "question": rec.get("question"), "rank": rank, "file": row.get("path"),
             "pointer": row.get("pointer"), "answer": answer}
-    picks = load_picks(sdir) + [pick]
-    save_picks(sdir, picks)
+    with picks_lock(sdir):
+        picks = load_picks(sdir) + [pick]
+        save_picks(sdir, picks)
     write_trace(sdir, kind="pick", lookup_id=pick["lookup_id"], question=pick["question"],
                 rank=rank, file=pick["file"])
     print(f"pick {pick['id']} queued: rank {rank} {pick['file']}")
@@ -1826,6 +1841,10 @@ def flush_picks(principal: str, sdir: Path) -> int:
     if not auto_cache_on():
         print("picks kept: auto-cache is off (SUPERJEV_AUTO_CACHE=0)")
         return 0
+    with picks_lock(sdir):
+        return _flush_picks(principal, sdir)
+
+def _flush_picks(principal: str, sdir: Path) -> int:
     keep = []
     for pick in load_picks(sdir):
         if "why" in pick:
@@ -1860,6 +1879,10 @@ def pending_picks(sdir: Path) -> int:
     return 0
 
 def settle_pick(principal: str, sdir: Path, pid: str, answer=None, drop=False) -> int:
+    with picks_lock(sdir):
+        return _settle_pick(principal, sdir, pid, answer, drop)
+
+def _settle_pick(principal: str, sdir: Path, pid: str, answer, drop) -> int:
     picks = load_picks(sdir)
     pick = next((r for r in picks if r["id"] == pid), None)
     if not pick:
