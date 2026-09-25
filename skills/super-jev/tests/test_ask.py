@@ -166,12 +166,14 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
     top = ask.find_top(sdir, "what color is the car?")
     assert top == {"score": 0.9, "path": str(note), "pointer": "healthy", "possible": False}
 
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path: ("CLEAN", 0.93))
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
     monkeypatch.setattr(ask, "memory", lambda req: (
         {"status": "ok", "sources": [{"sourceId": "s1", "originalPath": str(note),
                                        "contentSHA": ask.sha256_file(note)}]} if req["action"] == "sources" else
-        {"status": "ready", "approvalTicket": "t1", "passages": [{"sourceId": "s1", "reviewedText": "blue"}]}
-        if req["action"] == "search" else
+        {"status": "ok", "attemptId": "a1"} if req["action"] == "open" else
+        {"status": "cache-miss"} if req["action"] == "cached" else
+        {"status": "ready", "approvalTicket": "t1", "passages": [{"sourceId": "s1", "reviewedText": "The car is blue."}]}
+        if req["action"] == "assist" else
         {"status": "saved"} if req["action"] == "approve" else
         (_ for _ in ()).throw(AssertionError(req))
     ))
@@ -213,7 +215,7 @@ def test_approve_ready_search_sends_ticket_approved_answer_and_reviewedtext_quot
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.approve("alice", "q", "The answer.", tmp_path)
+    rc = ask.approve("alice", "q", "The answer.", tmp_path, pointer="p1")  # no file known: search fallback
 
     assert rc == 0
     approve_req = next(c for c in calls if c["action"] == "approve")
@@ -232,7 +234,7 @@ def test_approve_on_no_match_hints_add_and_exits_1(tmp_path, monkeypatch, capsys
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.approve("alice", "q", "answer", tmp_path)
+    rc = ask.approve("alice", "q", "answer", tmp_path, pointer="p1")
 
     assert rc == 1
     out = capsys.readouterr().out
@@ -829,50 +831,60 @@ if __name__ == "__main__":
 
 
 def _three_candidate_lookup(sdir):
+    for rel in ("r1/a.md", "r2/b.md", "r3/c.md"):
+        (sdir / rel).parent.mkdir(parents=True, exist_ok=True)
+        (sdir / rel).write_text("the ans is here\n")
     ask.log(sdir, "lookup", question="q", top=[
-        {"score": 0.9, "path": "/r1/a.md", "pointer": "p1", "possible": False},
-        {"score": 0.8, "path": "/r2/b.md", "pointer": "p2", "possible": False},
-        {"score": 0.6, "path": "/r3/c.md", "pointer": "p3", "possible": True}])
+        {"score": 0.9, "path": str(sdir / "r1/a.md"), "pointer": "p1", "possible": False},
+        {"score": 0.8, "path": str(sdir / "r2/b.md"), "pointer": "p2", "possible": False},
+        {"score": 0.6, "path": str(sdir / "r3/c.md"), "pointer": "p3", "possible": True}])
 
 
-def _ready_memory(calls):
+def _ready_memory(calls, sdir):
     def fake_memory(req):
         calls.append(req)
         if req["action"] == "search":
-            return {"status": "ready", "approvalTicket": "tix-" + req["pointer"],
-                    "passages": [{"sourceId": "s", "reviewedText": "text"}]}
+            raise AssertionError("a file ask() ranked never goes back through search")
+        if req["action"] == "cached":
+            return {"status": "cache-miss"}
+        if req["action"] == "open":
+            return {"status": "ok", "attemptId": "a-" + req["pointer"]}
+        if req["action"] == "assist":
+            return {"status": "ready", "approvalTicket": "tix-" + req["attemptId"][2:],
+                    "passages": [{"sourceId": "s", "reviewedText": "the ans is here"}]}
         if req["action"] == "approve":
             return {"status": "saved"}
         if req["action"] == "sources":
-            path = {"p1": "/r1/a.md", "p2": "/r2/b.md", "p3": "/r3/c.md"}[req["pointer"]]
-            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": path}]}
+            path = {"p1": "r1/a.md", "p2": "r2/b.md", "p3": "r3/c.md"}[req["pointer"]]
+            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": str(sdir / path)}]}
         raise AssertionError(req)
     return fake_memory
 
 
 @pytest.mark.parametrize("kw,pointer,path", [
-    ({"rank": 2}, "p2", "/r2/b.md"),
-    ({"rank": 3}, "p3", "/r3/c.md"),            # possible tier, picked by the lead
-    ({"file": "/r2/b.md"}, "p2", "/r2/b.md"),
-    ({"file": "c.md"}, "p3", "/r3/c.md"),       # bare file name, unique
+    ({"rank": 2}, "p2", "r2/b.md"),
+    ({"rank": 3}, "p3", "r3/c.md"),            # possible tier, picked by the lead
+    ({"file": "r2/b.md"}, "p2", "r2/b.md"),
+    ({"file": "c.md"}, "p3", "r3/c.md"),       # bare file name, unique
 ])
 def test_approve_any_listed_candidate_uses_its_own_pointer(tmp_path, monkeypatch, kw, pointer, path):
     _three_candidate_lookup(tmp_path)
+    kw = {k: str(tmp_path / v) if str(v).startswith("r") else v for k, v in kw.items()}
     calls = []
-    monkeypatch.setattr(ask, "memory", _ready_memory(calls))
+    monkeypatch.setattr(ask, "memory", _ready_memory(calls, tmp_path))
     assert ask.approve("alice", "q", "ans", tmp_path, **kw) == 0
-    assert [c["pointer"] for c in calls if c["action"] == "search"] == [pointer]
+    assert [c["pointer"] for c in calls if c["action"] == "open"] == [pointer]
     assert next(c for c in calls if c["action"] == "approve")["ticket"] == "tix-" + pointer
     rec = json.loads((tmp_path / "approvals.jsonl").read_text().splitlines()[-1])
-    assert rec["pointer"] == pointer and rec["file"] == path
+    assert rec["pointer"] == pointer and rec["file"] == str(tmp_path / path)
 
 
 def test_approve_default_still_uses_rank_1(tmp_path, monkeypatch):
     _three_candidate_lookup(tmp_path)
     calls = []
-    monkeypatch.setattr(ask, "memory", _ready_memory(calls))
+    monkeypatch.setattr(ask, "memory", _ready_memory(calls, tmp_path))
     assert ask.approve("alice", "q", "ans", tmp_path) == 0
-    assert [c["pointer"] for c in calls if c["action"] == "search"] == ["p1"]
+    assert [c["pointer"] for c in calls if c["action"] == "open"] == ["p1"]
 
 
 @pytest.mark.parametrize("kw,needle", [({"rank": 4}, "out of range"), ({"rank": 0}, "out of range"),
@@ -893,43 +905,57 @@ def test_approve_cli_parses_rank_flag(tmp_path, monkeypatch):
     assert seen == {"q": "q", "a": "ans", "rank": 2, "file": None}
 
 
-def _same_name_memory(calls):
-    """Two README.md files in one pointer: the search ranks the analysis/ one first."""
+def _same_name_memory(calls, main, analysis):
+    """Two README.md files in one pointer; assist cites whichever source it is asked for."""
     def fake_memory(req):
         calls.append(req)
-        if req["action"] == "search":
+        if req["action"] == "cached":
+            return {"status": "cache-miss"}
+        if req["action"] == "open":
+            return {"status": "ok", "attemptId": "a1"}
+        if req["action"] == "assist":
+            ref = req["references"][-1]
+            text = {"s-main": "weekly range 2.10-2.40 ans", "s-analysis": "# CLOV - Analysis Log"}
             return {"status": "ready", "approvalTicket": "tix",
-                    "passages": [{"sourceId": "s-analysis", "reviewedText": "# CLOV - Analysis Log"},
-                                 {"sourceId": "s-main", "reviewedText": "weekly range 2.10-2.40"}]}
+                    "passages": [{"sourceId": ref["sourceId"], "reviewedText": text[ref["sourceId"]]}]}
         if req["action"] == "sources":
             return {"status": "ok", "sources": [
-                {"sourceId": "s-analysis", "originalPath": "/c/clov/analysis/README.md"},
-                {"sourceId": "s-main", "originalPath": "/c/clov/README.md"}]}
+                {"sourceId": "s-analysis", "originalPath": str(analysis)},
+                {"sourceId": "s-main", "originalPath": str(main)}]}
         if req["action"] == "approve":
             return {"status": "saved"}
         raise AssertionError(req)
     return fake_memory
 
 
-@pytest.mark.parametrize("kw", [{"rank": 1}, {"file": "/c/clov/README.md"}])
-def test_approve_same_name_file_saves_picked_files_evidence(tmp_path, monkeypatch, kw):
+def _same_name_files(tmp_path):
+    main, analysis = tmp_path / "clov/README.md", tmp_path / "clov/analysis/README.md"
+    analysis.parent.mkdir(parents=True)
+    main.write_text("weekly range 2.10-2.40 ans\n")
+    analysis.write_text("# CLOV - Analysis Log\n")
+    return main, analysis
+
+
+@pytest.mark.parametrize("by_file", [False, True])
+def test_approve_same_name_file_saves_picked_files_evidence(tmp_path, monkeypatch, by_file):
+    main, analysis = _same_name_files(tmp_path)
     ask.log(tmp_path, "lookup", question="q", top=[
-        {"score": 0.9, "path": "/c/clov/README.md", "pointer": "p", "possible": False},
-        {"score": 0.7, "path": "/c/clov/analysis/README.md", "pointer": "p", "possible": True}])
+        {"score": 0.9, "path": str(main), "pointer": "p", "possible": False},
+        {"score": 0.7, "path": str(analysis), "pointer": "p", "possible": True}])
     calls = []
-    monkeypatch.setattr(ask, "memory", _same_name_memory(calls))
+    monkeypatch.setattr(ask, "memory", _same_name_memory(calls, main, analysis))
+    kw = {"file": str(main)} if by_file else {"rank": 1}
     assert ask.approve("alice", "q", "ans", tmp_path, **kw) == 0
     ev = next(c for c in calls if c["action"] == "approve")["evidence"]
     assert [e["sourceId"] for e in ev] == ["s-main"]
 
 
-def test_approve_refuses_when_search_has_no_passage_from_picked_file(tmp_path, monkeypatch, capsys):
+def test_approve_refuses_when_picked_file_has_no_line_for_the_answer(tmp_path, monkeypatch, capsys):
+    main, analysis = _same_name_files(tmp_path)
     ask.log(tmp_path, "lookup", question="q", top=[
-        {"score": 0.9, "path": "/c/clov/README.md", "pointer": "p", "possible": False}])
+        {"score": 0.9, "path": str(main), "pointer": "p", "possible": False}])
     calls = []
-    fake = _same_name_memory(calls)
-    monkeypatch.setattr(ask, "memory", lambda r: {"status": "ready", "approvalTicket": "tix", "passages": [
-        {"sourceId": "s-analysis", "reviewedText": "x"}]} if r["action"] == "search" else fake(r))
-    assert ask.approve("alice", "q", "ans", tmp_path, rank=1) == 1
+    monkeypatch.setattr(ask, "memory", _same_name_memory(calls, main, analysis))
+    assert ask.approve("alice", "q", "zeppelin", tmp_path, rank=1) == 1
     assert not any(c["action"] == "approve" for c in calls)
-    assert "no passage from /c/clov/README.md" in capsys.readouterr().out
+    assert f"no line in {main} shares a word with the answer" in capsys.readouterr().out

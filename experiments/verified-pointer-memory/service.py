@@ -464,6 +464,28 @@ class Service:
                 'resolution': resolution,
                 'originatingAttemptId': originating_attempt}
 
+    def open_attempt(
+        self, name: str, question: str, principal: str, context: str = '',
+    ) -> dict[str, Any]:
+        """Record an attempt without running retrieval, for assist to cite a file the
+        caller's own ranking already chose. assist still checks the reviewed preparation."""
+        if not self.allow_agent_assist:
+            raise ValueError('agent assist is disabled')
+        require_text('pointer', name)
+        require_text('question', question)
+        require_text('principal', principal)
+        require_text('context', context, allow_empty=True)
+        policy = normalize_freshness(None)
+        pointer, error = self.pointer(name, principal)
+        if error:
+            return error
+        _, error = self.freshness(pointer, policy, time.time())
+        if error:
+            return error
+        attempt = self._record_attempt(name, question, principal, context, policy,
+                                       'caller-ranked', {'trace': []}, pointer)
+        return {'status': 'ok', 'attemptId': attempt}
+
     def assist(
         self, attempt_id: str, principal: str, reason: str,
         references: list[dict[str, Any]], now: float | None = None,
@@ -473,7 +495,7 @@ class Service:
             raise ValueError('agent assist is disabled')
         require_text('reason', reason)
         inspected = self.attempt(attempt_id, principal)
-        if inspected['retrievalStatus'] not in {'ready', 'no-match', 'refused'}:
+        if inspected['retrievalStatus'] not in {'ready', 'no-match', 'refused', 'caller-ranked'}:
             raise ValueError('attempt is not eligible for assistance')
         if (not isinstance(references, list) or not references or
                 len(references) > 20 or any(not isinstance(r, dict) for r in references)):

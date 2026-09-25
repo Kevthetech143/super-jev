@@ -33,6 +33,26 @@ class AssistedMemoryTests(unittest.TestCase):
         inspected = fixture.service.attempt(original['attemptId'], 'alice')
         self.assertEqual(inspected['retrievalStatus'], 'no-match')
 
+    def test_open_cites_a_caller_ranked_file_without_retrieval(self):
+        fixture = self.fixture(allow_agent_assist=True)
+        fixture.service.retrieve = lambda *a: self.fail('open must not run retrieval')
+        opened = fixture.service.open_attempt('docs', 'color?', 'alice')
+        assisted = fixture.service.assist(
+            opened['attemptId'], 'alice', 'ask() ranked this file first.',
+            [{'sourceId': 'one', 'startLine': 1, 'endLine': 1}], now=100)
+        fixture.service.approve(assisted['approvalTicket'], 'alice', 'Blue.',
+                                [{'evidenceId': assisted['passages'][0]['evidenceId']}],
+                                approved=True, now=100)
+        del fixture.service.retrieve
+        self.assertEqual(fixture.service.search('docs', 'color?', 'alice', now=101)['status'],
+                         'verified-cache-hit')
+        with self.assertRaisesRegex(ValueError, 'unauthorized'):
+            fixture.service.assist(opened['attemptId'], 'bob', 'r',
+                                   [{'sourceId': 'one', 'startLine': 1, 'endLine': 1}])
+        disabled = self.fixture(allow_agent_assist=False)
+        with self.assertRaisesRegex(ValueError, 'assist is disabled'):
+            disabled.service.open_attempt('docs', 'color?', 'alice')
+
     def test_attempt_survives_remove_but_is_not_exposed(self):
         fixture = self.fixture(allow_agent_assist=True)
         result = fixture.service.search('docs', 'color?', 'alice')

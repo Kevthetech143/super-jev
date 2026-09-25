@@ -126,6 +126,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -1855,16 +1856,55 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
         if best is not None and term_hits(terms, lines[best]) == 0:
             return None, f"no line in {path} shares a word with the answer"
         if best is not None:
+            # Like ask()'s content check (pick_chunks always reads chunk 0), the file's
+            # opening lines ride along so the passage keeps its subject (a bare table row
+            # "Trash | Monday..." never says which address it is for).
+            refs = [{"sourceId": sid, "startLine": n, "endLine": n} for n in sorted({1, best + 1})]
             out = memory({"action": "assist", "attemptId": out["attemptId"], "principal": principal,
                           "reason": f"reviewer picked {path}; citing its own lines that state the answer.",
-                          "references": [{"sourceId": sid, "startLine": best + 1, "endLine": best + 1}]})
+                          "references": refs})
             if out.get("status") == "error" and out.get("reason") == "agent assist is disabled":
                 return None, ASSIST_DISABLED_HINT
             # The file may have changed since connect: the cited reviewed text must still support the answer.
-            passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid and support(p)]
+            passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid]
+            if not any(support(p) for p in passages):
+                passages = []
     if not any(p.get("reviewedText") for p in passages):
         return None, f"no passage from {path} itself could be cited"
     return {**out, "passages": sorted(passages, key=support, reverse=True)}, None
+
+def source_row(principal: str, pointer: str, path: str):
+    """(the pointer's sources row for path or None, sources status); pages past 100."""
+    offset = 0
+    while True:
+        listed = memory({"action": "sources", "pointer": pointer, "principal": principal,
+                         "offset": offset, "limit": 100})
+        if listed.get("status") != "ok":
+            return None, listed.get("status")
+        row = next((s for s in listed.get("sources") or [] if s.get("originalPath") == path), None)
+        if row or listed.get("nextOffset") is None:
+            return row, "ok"
+        offset = listed["nextOffset"]
+
+def ask_evidence(principal: str, pointer: str, question: str, answer: str, path: str, sid) -> tuple:
+    """(ticket result citing only `path`, None) or (None, why). The file is the one ask()
+    already ranked, so its own passage is cited through assist; memory's separate
+    retrieval (description-only ranking) never decides whether it can be saved. An older
+    runtime without the open action falls back to search only to get an attempt id."""
+    hit = memory({"action": "cached", "principal": principal, "question": question})
+    if hit.get("status") == "verified-cache-hit":
+        return hit, None
+    out = memory({"action": "open", "pointer": pointer, "principal": principal, "question": question})
+    if out.get("reason") == "agent assist is disabled":
+        return None, ASSIST_DISABLED_HINT
+    if out.get("status") != "ok":
+        out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
+        if out.get("status") == "verified-cache-hit":
+            return out, None
+        if out.get("status") not in ("ready", "no-match", "refused") or not out.get("attemptId"):
+            return None, f"cannot open {pointer}: {out.get('status')}"
+    return file_evidence(principal, pointer, question, answer, path, sid,
+                         {"attemptId": out["attemptId"]})
 
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
                   approved_by: str = "human", **fields) -> int:
@@ -1899,13 +1939,28 @@ def gate_command(claim: str, path: str) -> list:
     return [sys.executable, str(Path(__file__).resolve().parent / "superjev.py"), "gate", "--json",
             "--claim-mode", "evidence", "--claim", claim, path]
 
-def run_gate(claim: str, path: str):
-    """(verdict word, lowest claim score or None) from the existing check gate."""
+def evidence_text(ticket_result: dict) -> str:
+    """The reviewed passages send_approval saves as evidence, joined."""
+    return "\n\n".join(p["reviewedText"] for p in ticket_result.get("passages", [])[:3]
+                       if p.get("reviewedText"))
+
+def run_gate(claim: str, path: str, passage=None):
+    """(verdict word, lowest claim score or None) from the existing check gate, run on
+    path, or on passage (text from path) when given."""
+    tmp = None
     try:
+        if passage is not None:
+            with tempfile.NamedTemporaryFile("w", suffix=Path(path).suffix or ".txt",
+                                             prefix="evidence-", delete=False) as fh:
+                fh.write(passage)
+            tmp = path = fh.name
         r = subprocess.run(gate_command(claim, path), capture_output=True, text=True, timeout=300)
         body = json.loads(r.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return "ERROR", None
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
     out = (body.get("details") or {}).get("stdout") or ""
     rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", out, re.M)
     verdict = body.get("verdict") or "ERROR"
@@ -1950,27 +2005,24 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path,
         return not_saved(sdir, question, f"cannot read {evidence_file}: {e.strerror or e}")
     if has_secret(text) or has_secret(question) or has_secret(answer):
         return not_saved(sdir, question, f"secret-held: {HELD_SECRET}")
-    listed = memory({"action": "sources", "pointer": pointer, "principal": principal, "limit": 100})
-    if listed.get("status") != "ok":
-        return not_saved(sdir, question, f"stale: pointer {pointer} is {listed.get('status')}")
-    row = next((s for s in listed.get("sources") or [] if s.get("originalPath") == evidence_file), None)
+    row, status = source_row(principal, pointer, evidence_file)
+    if status != "ok":
+        return not_saved(sdir, question, f"stale: pointer {pointer} is {status}")
     if not row or row.get("contentSHA") != sha256_file(Path(evidence_file)):
         return not_saved(sdir, question, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
-    gated_source_id = row.get("sourceId")
-    verdict, score = run_gate(f"Question: {question} Answer: {answer}", evidence_file)
+    out, why = ask_evidence(principal, pointer, question, answer, evidence_file, row.get("sourceId"))
+    if out and out.get("status") == "verified-cache-hit":
+        print("already cached")
+        return 0
+    if not out:
+        return not_saved(sdir, question, f"{why}; nothing to save")
+    # The gate checks exactly the passages that will be saved as evidence.
+    verdict, score = run_gate(f"Question: {question} Answer: {answer}",
+                              evidence_file, evidence_text(out))
     if verdict != "CLEAN" or score is None:
         return not_saved(sdir, question, f"check gate verdict {verdict} (only CLEAN saves)")
     if score < 0.80:
         return not_saved(sdir, question, f"check gate score {score:.2f} is below the 0.80 auto-save floor")
-    out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
-    if out.get("status") == "verified-cache-hit":
-        print("already cached")
-        return 0
-    if out.get("status") != "ready":
-        return not_saved(sdir, question, f"search returned {out.get('status')} on {pointer}")
-    out, why = file_evidence(principal, pointer, question, answer, evidence_file, gated_source_id, out)
-    if not out:
-        return not_saved(sdir, question, f"{why}; refusing to save evidence the gate did not clear")
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
     return send_approval(principal, question, answer, pointer, out, sdir,
                          approved_by=approved_by, evidence_file=evidence_file, score=score)
@@ -2122,41 +2174,44 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
     print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
     return 0
 
-def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None, rank=None, file=None) -> int:
-    chosen = None
-    if rank is not None or file is not None:
+def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None, rank=None, file=None,
+            chosen=None) -> int:
+    if chosen is None and (rank is not None or file is not None):
         # The lead picked a listed candidate by hand (any rank, possible tier
         # included): that pick IS the review, so approve from its own pointer.
         chosen, why = find_candidate(sdir, question, rank=rank, file=file)
         if not chosen:
             print(why)
             return 1
-        pointer = chosen["pointer"]
-    pointer = pointer or find_pointer(sdir, question)
+    if chosen is None and pointer is None:
+        top = find_top(sdir, question)  # the file ask() ranked first, unless possible-only
+        chosen = top if top and not top.get("possible") else None
+    pointer = chosen["pointer"] if chosen else pointer
     if not pointer:
         print("no confirmed top candidate for that question; run ask first, pick a listed "
               "file with --rank N or --file PATH, or use --add")
         return 1
-    out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
-    if out.get("status") == "verified-cache-hit":
-        print("already cached")
-        return 0
-    if out.get("status") != "ready":
-        print(f"cannot approve: search returned {out.get('status')} on {pointer}. Use --add to record it manually.")
-        log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
-        return 1
     extra = {"file": chosen["path"]} if chosen else {}
     if chosen:
-        # Evidence must come from the picked file itself (a same-name file in the same
-        # tree must never stand in, businessfi retest 2026-09-24), matched by full path.
-        listed = memory({"action": "sources", "pointer": pointer, "principal": principal, "limit": 100})
-        sid = next((r.get("sourceId") for r in listed.get("sources") or []
-                    if r.get("originalPath") == chosen["path"]), None)
-        out, why = file_evidence(principal, pointer, question, answer, chosen["path"], sid, out)
-        if not out:
-            print(f"cannot approve: {why}; use --add with --source to record it manually.")
-            log(sdir, "approve", question=question, pointer=pointer, result="evidence-mismatch")
-            return 1
+        # Evidence comes from the file ask() ranked (or the lead picked) itself, matched by
+        # full path so a same-name file in the same tree never stands in (businessfi
+        # retest 2026-09-24); memory's own search ranking plays no part.
+        row, _ = source_row(principal, pointer, chosen["path"])
+        out, why = ask_evidence(principal, pointer, question, answer, chosen["path"],
+                                (row or {}).get("sourceId"))
+    else:
+        # No file known (--approve with an explicit pointer only): search is the fallback.
+        out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
+        why = f"search returned {out.get('status')} on {pointer}"
+        if out.get("status") not in ("ready", "verified-cache-hit"):
+            out = None
+    if out and out.get("status") == "verified-cache-hit":
+        print("already cached")
+        return 0
+    if not out:
+        print(f"cannot approve: {why}; use --add with --source to record it manually.")
+        log(sdir, "approve", question=question, pointer=pointer, result="evidence-mismatch")
+        return 1
     rc = send_approval(principal, question, answer, pointer, out, sdir, **extra)
     if rc == 0:
         top = chosen or find_top(sdir, question)
@@ -2404,7 +2459,8 @@ def _settle_pick(principal: str, sdir: Path, pid: str, answer, drop) -> int:
         if not answer:
             print('usage: --confirm-pick ID "answer" (this pick has no answer text)')
             return 2
-        if approve(principal, pick["question"], answer, sdir, pointer=pick["pointer"]) != 0:
+        if approve(principal, pick["question"], answer, sdir,
+                   chosen={"path": pick["file"], "pointer": pick["pointer"]}) != 0:
             return 1
     save_picks(sdir, [r for r in picks if r["id"] != pid])
     print(f"pick {pid} {'dropped' if drop else 'confirmed'}")
