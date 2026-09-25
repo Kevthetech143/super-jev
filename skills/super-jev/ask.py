@@ -1122,10 +1122,13 @@ def confirm(question: str, paths: list):
     ctxs = [ctx for _, ctx in started if ctx]
     rows, error = run_navigation({"batch": [c["payload"] for c in ctxs]}) if ctxs else (None, None)
     rows = rows.get("results") if isinstance(rows, dict) else None
-    if not error and (not isinstance(rows, list) or len(rows) != len(ctxs)):
-        error = "content check returned invalid JSON"
-    outs = iter(rows if not error else [None] * len(ctxs))
-    results = [done or confirm_finish(question, ctx, next(outs), error) for done, ctx in started]
+    if ctxs and (error or not isinstance(rows, list) or len(rows) != len(ctxs)):
+        # The batched run itself failed: check each file on its own instead of
+        # marking every file inconclusive.
+        results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
+        return confirm_results(paths, results)
+    outs = iter(rows or [])
+    results = [done or confirm_finish(question, ctx, next(outs), None) for done, ctx in started]
     return confirm_results(paths, results)
 
 def confirm_results(paths: list, results: list):
