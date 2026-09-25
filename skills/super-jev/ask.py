@@ -1966,7 +1966,12 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path,
     if out.get("status") == "verified-cache-hit":
         print("already cached")
         return 0
-    if out.get("status") != "ready":
+    # search's own retrieval is a separate, narrower single-pointer engine from
+    # ask()'s ranking (see approve()'s matching fix) -- it can come back short of
+    # "ready" for a file the gate above already cleared. Its attemptId (recorded
+    # even on a non-ready result) still lets file_evidence cite that exact file
+    # via assist, so only a missing attemptId is a hard failure here.
+    if out.get("status") != "ready" and not out.get("attemptId"):
         return not_saved(sdir, question, f"search returned {out.get('status')} on {pointer}")
     out, why = file_evidence(principal, pointer, question, answer, evidence_file, gated_source_id, out)
     if not out:
@@ -2122,7 +2127,11 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
     print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
     return 0
 
-def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None, rank=None, file=None) -> int:
+def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None, rank=None, file=None,
+           evidence_file=None) -> int:
+    """evidence_file: a path already trusted to hold the answer (e.g. a pick trail's
+    own file) that does NOT need a matching lookups.jsonl entry the way --rank/--file
+    do -- see the businessfi report below."""
     chosen = None
     if rank is not None or file is not None:
         # The lead picked a listed candidate by hand (any rank, possible tier
@@ -2141,18 +2150,27 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
     if out.get("status") == "verified-cache-hit":
         print("already cached")
         return 0
-    if out.get("status") != "ready":
+    pin_file = (chosen or {}).get("path") or evidence_file
+    # `search`'s own retrieval is a separate, narrower single-pointer engine from
+    # ask()'s full ranking (routing across every pointer + word-search fallback +
+    # listwise) -- it can come back short of "ready" for a file ask() already
+    # confirmed (businessfi report, 2026-09-25: --confirm-pick "no-match" on a
+    # file ask() had just listed first). A non-ready result still carries an
+    # attemptId to assist from (service.py records the attempt before checking
+    # readiness), so a known evidence_file/chosen pick can still be cited
+    # directly via file_evidence's assist fallback instead of failing outright.
+    if out.get("status") != "ready" and not (pin_file and out.get("attemptId")):
         print(f"cannot approve: search returned {out.get('status')} on {pointer}. Use --add to record it manually.")
         log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
         return 1
-    extra = {"file": chosen["path"]} if chosen else {}
-    if chosen:
+    extra = {"file": pin_file} if pin_file else {}
+    if pin_file:
         # Evidence must come from the picked file itself (a same-name file in the same
         # tree must never stand in, businessfi retest 2026-09-24), matched by full path.
         listed = memory({"action": "sources", "pointer": pointer, "principal": principal, "limit": 100})
         sid = next((r.get("sourceId") for r in listed.get("sources") or []
-                    if r.get("originalPath") == chosen["path"]), None)
-        out, why = file_evidence(principal, pointer, question, answer, chosen["path"], sid, out)
+                    if r.get("originalPath") == pin_file), None)
+        out, why = file_evidence(principal, pointer, question, answer, pin_file, sid, out)
         if not out:
             print(f"cannot approve: {why}; use --add with --source to record it manually.")
             log(sdir, "approve", question=question, pointer=pointer, result="evidence-mismatch")
@@ -2412,7 +2430,8 @@ def _settle_pick(principal: str, sdir: Path, pid: str, answer, drop) -> int:
         if not answer:
             print('usage: --confirm-pick ID "answer" (this pick has no answer text)')
             return 2
-        if approve(principal, pick["question"], answer, sdir, pointer=pick["pointer"]) != 0:
+        if approve(principal, pick["question"], answer, sdir, pointer=pick["pointer"],
+                   evidence_file=pick["file"]) != 0:
             return 1
     save_picks(sdir, [r for r in picks if r["id"] != pid])
     print(f"pick {pid} {'dropped' if drop else 'confirmed'}")

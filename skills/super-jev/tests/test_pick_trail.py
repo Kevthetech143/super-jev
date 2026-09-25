@@ -117,6 +117,38 @@ def test_stale_file_stays_listed_under_dropped_section(world, monkeypatch):
     assert ask.settle_pick("alice", world["sdir"], pick["id"], drop=True) == 0
 
 
+def test_confirm_pick_saves_via_assist_when_search_comes_back_no_match(world, monkeypatch, capsys):
+    """--confirm-pick used to fail with "search returned no-match on <pointer>" even when
+    ask() had already listed the picked file first (businessfi report, 2026-09-25:
+    pending/geico-pending-discount-asks.md): search() is a separate, narrower
+    single-pointer retrieval engine from ask()'s own ranking, and can come back
+    short of "ready" for a file ask() found some other way. Its attemptId still
+    lets file_evidence cite that exact picked file via assist."""
+    def fake_memory(req):
+        act = req["action"]
+        if act == "sources":
+            return {"status": "ok", "sources": [{"sourceId": "b", "originalPath": str(world["b"]),
+                                                  "contentSHA": hashlib.sha256(world["b"].read_bytes()).hexdigest()}]}
+        if act == "search":
+            return {"status": "no-match", "attemptId": "att1", "passages": []}
+        if act == "assist":
+            assert req["attemptId"] == "att1"
+            assert req["references"] == [{"sourceId": "b", "startLine": 1, "endLine": 1}]
+            return {"status": "ready", "approvalTicket": "t", "passages": [{"sourceId": "b", "reviewedText": "The car is blue."}]}
+        if act == "approve":
+            world["cache"][Q] = req["answer"]
+            return {"status": "saved"}
+        raise AssertionError(act)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    ask.record_pick("alice", world["sdir"], "last", rank=2, answer="The car is blue.")
+    [pick] = ask.load_picks(world["sdir"])
+    assert ask.settle_pick("alice", world["sdir"], pick["id"]) == 0
+    assert "pick" in capsys.readouterr().out
+    assert world["cache"][Q] == "The car is blue."
+    assert ask.load_picks(world["sdir"]) == []
+
+
 def test_unsure_stays_listed_then_confirm_or_drop(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "run_gate", lambda c, p: ("READ", 0.5))
     ask.record_pick("alice", world["sdir"], "last", rank=2, answer="The car is blue.")
