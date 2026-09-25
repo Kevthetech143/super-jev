@@ -137,7 +137,8 @@ whole folder, or a whole agent brain spanning several folders, instead of a
 hand-picked file list. Repeat `--root` to inventory the union of multiple
 roots, in the order given; `--exclude` (repeatable) skips any file whose path
 relative to its root starts with that subpath, and `--no-recurse` limits each
-root to its direct children. It skips hidden dirs, backups and vault-style
+root to its direct children. It skips hidden dirs, backups, test/scratch output
+(`ops/sj*/`, `*superjev-test*`, `*-hand-test-*`, `*-sample*`) and vault-style
 subdirectories, and holds back any file that looks like it carries
 card/password text or sits over the gate's size ceiling, writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Picker noise: test/scratch output (`ops/sj*/`, `*superjev-test*`, `*-hand-test-*`, `*-sample*`) is skipped by connect and word search; word search drops already-routed files before taking its top 3, so no slot is wasted; the secret scan's password/api-key `:`/`=` value must have a digit or symbol or be 8+ characters (`PASSWORD: in other-file.md` is prose).
 - Per-stage ask trace: each traces.jsonl line carries `stages` (cache, routing + none-probability, word-search top 10 with fates, read list, per-file chunks/wording/score, near-twin tie-break, final rule); `ask.py --trace-show <id|last>` prints it. No answer changes, no extra Jev calls.
 
 ## 1.0.6 — 2026-09-24
