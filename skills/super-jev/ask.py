@@ -890,15 +890,49 @@ def load_cache_files(pointer: str) -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
+# A folder documents/<name>/ holds one person's records. A question naming that
+# person lifts their files and slightly lowers other people's; no name, no change.
+PERSON_RE = re.compile(r"/documents/([a-z][a-z0-9_-]*)/")
+PERSON_BOOST, PERSON_DEMOTE = 1.5, 0.85
+# Some question words ask for a shape, not a word: a phone number, an email, a
+# diagnosis code (M22.2X1). A shape in the text counts as a match for that word.
+PHONE_RE = re.compile(r"\(?\b\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b")
+EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", re.I)
+CODE_RE = re.compile(r"\b[A-Z]\d{2}\.[0-9A-Z]{1,4}\b")
+SHAPE_TERMS = {"phone": PHONE_RE, "number": PHONE_RE, "tel": PHONE_RE, "email": EMAIL_RE, "code": CODE_RE}
+
+# A file scores half by its best passage, half as a whole: passage-only let long
+# files full of near-miss passages crowd out short exact notes in replay.
+WORD_PASSAGE, PASSAGE_WEIGHT = CONFIRM_CHUNK, 0.5
+
+def passages(text: str) -> list:
+    """~WORD_PASSAGE-char windows, half-overlapping so no fact is cut in two."""
+    step = WORD_PASSAGE // 2
+    return [text[i:i + WORD_PASSAGE] for i in range(0, max(1, len(text) - step), step)] or [text]
+
+def extra_hits(text: str, shapes: dict, pairs: list) -> Counter:
+    hits = Counter({t: len(r.findall(text)) for t, r in shapes.items()})
+    low = text.lower()
+    for key, r in pairs:
+        hits[key] = len(r.findall(low))
+    return hits
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
-    files best matching the question's words (BM25; a file's path, description and
-    stored question count triple). Typos match a close word (difflib). A file must
-    cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered. Test/scratch
-    output is never searched; `skip` paths (already routed) are dropped before the top `limit`."""
+    files best matching the question's words (BM25, half best ~3500-char passage and
+    half whole file; a file's path, description and stored question count triple). Typos match
+    a close word (difflib). A file must cover FALLBACK_MIN_COVERAGE of the question's
+    weighted words to be offered. A named person's documents folder is lifted (PERSON_RE).
+    Test/scratch output is never searched; `skip` paths (already routed) are dropped
+    before the top `limit`."""
     terms = query_terms(question)
     if not terms:
         return []
+    shapes = {t: SHAPE_TERMS[t] for t in terms if t in SHAPE_TERMS}
+    # Two question words side by side in the text ("NYP ENT") score as one more,
+    # rarer word; they do not count toward coverage.
+    pairs = [(f"{a} {b}", re.compile(rf"\b{a}\W{{1,3}}{b}\b")) for a, b in zip(terms, terms[1:])]
+    keys = terms + [k for k, _ in pairs]
     docs = {}
     for ptr in pointers:
         for path, entry in load_cache_files(ptr).items():
@@ -915,13 +949,13 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
             head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                              str(entry.get("description") or ""), str(entry.get("question") or "")])
-            counts = Counter(WORD_RE.findall(text.lower()))
-            for w in WORD_RE.findall(head.lower()):
-                counts[w] += 3
-            docs[path] = (ptr, counts, sum(counts.values()))
+            head_counts = Counter({w: 3 * c for w, c in Counter(WORD_RE.findall(head.lower())).items()})
+            parts = [(Counter(WORD_RE.findall(x.lower())), extra_hits(x, shapes, pairs)) for x in passages(text)]
+            whole = Counter(WORD_RE.findall(text.lower())) + head_counts
+            docs[path] = (ptr, head_counts, parts, whole, extra_hits(text, shapes, pairs))
     if not docs:
         return []
-    vocab = sorted(set().union(*(c.keys() for _, c, _ in docs.values())))
+    vocab = sorted(set().union(*(d[3].keys() for d in docs.values())))
     variants = {}
     for t in terms:
         near = set(difflib.get_close_matches(t, vocab, n=3, cutoff=0.8)) if len(t) > 3 else set()
@@ -929,23 +963,44 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         variants[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
         # A synonym counts as a match for its source word, not as an extra word.
         variants[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
-    tf = {path: {t: sum(c.get(v, 0) for v in variants[t]) for t in terms} for path, (_, c, _) in docs.items()}
-    n, avg = len(docs), sum(size for _, _, size in docs.values()) / len(docs)
+
+    def tf_of(counts, shape_hits):
+        return {t: sum(counts.get(v, 0) for v in variants.get(t, ())) + shape_hits.get(t, 0) for t in keys}
+
+    # Per passage: head words + the passage's words (+ shape matches).
+    ptf = {path: [tf_of(head + c, sh) for c, sh in parts] for path, (_, head, parts, _, _) in docs.items()}
+    ftf = {path: {t: max(p[t] for p in ps) for t in keys} for path, ps in ptf.items()}
+    sizes = {path: [sum(head.values()) + sum(c.values()) for c, _ in parts] for path, (_, head, parts, _, _) in docs.items()}
+    wtf = {path: tf_of(d[3], d[4]) for path, d in docs.items()}
+    wsize = {path: sum(d[3].values()) for path, d in docs.items()}
+    wavg = sum(wsize.values()) / len(wsize) or 1
+
+    def bm25_of(f, rel):
+        return sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * rel)) for t in keys)
+
+    n = len(docs)
+    allsizes = [s for ss in sizes.values() for s in ss]
+    avg = sum(allsizes) / len(allsizes) or 1
     idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
-           for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
+           for t, df in ((t, sum(1 for f in ftf.values() if f[t])) for t in keys)}
     # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
     # them out of the coverage total so they do not sink every file.
-    total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
+    total = sum(idf[t] for t in terms if any(f[t] for f in ftf.values())) or 1
+    persons = {m.group(1).lower() for p in docs for m in [PERSON_RE.search(p)] if m}
+    named = persons & set(terms)
     scored = []
-    for path, (ptr, _, size) in docs.items():
-        f = tf[path]
-        if sum(idf[t] for t in terms if f[t]) / total < FALLBACK_MIN_COVERAGE:
+    for path, (ptr, *_) in docs.items():
+        if sum(idf[t] for t in terms if ftf[path][t]) / total < FALLBACK_MIN_COVERAGE:
             continue
-        bm25 = sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
+        best = max(bm25_of(f, size / avg) for f, size in zip(ptf[path], sizes[path]))
+        bm25 = PASSAGE_WEIGHT * best + (1 - PASSAGE_WEIGHT) * bm25_of(wtf[path], wsize[path] / wavg)
+        m = PERSON_RE.search(path)
+        if named and m:
+            bm25 *= PERSON_BOOST if m.group(1).lower() in named else PERSON_DEMOTE
         scored.append((round(bm25, 3), path, ptr))
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
-                      "ranked": ranked[:STAGE_LIST_CAP]}
+                      "named_person": sorted(named), "ranked": ranked[:STAGE_LIST_CAP]}
     return [r for r in ranked if r[1] not in skip][:limit]
 
 def confirm(question: str, paths: list):

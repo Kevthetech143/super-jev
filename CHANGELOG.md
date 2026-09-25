@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Word search (track A): a file scores by half its best ~3500-char passage + half whole-file, so a long timeline is not diluted; a question naming a person (`documents/<name>/`) lifts that folder x1.5 and other people's x0.85; phone/number/tel, email and code also match phone, email and ICD-style (M22.2X1) shapes; two question words side by side ("NYP ENT") score as one more rare word. Offline replay over all traces: confirmed/approved right files read 16 -> 17, none lost.
 - Picker noise: test/scratch output (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) is skipped by connect and word search; word search drops already-routed files before taking its top 3, so no slot is wasted; the secret scan's password/api-key `:`/`=` value is held unless it starts with a pointer/placeholder word (in, see, none, vault, `<...>`, `${...}`...) (`PASSWORD: in other-file.md` is prose).
 - Big notes: a file too long to read whole, routed >= 0.85 and judged on topic (>= 0.5), stays possible with a "start at section" pointer (health-fitness pending.md, 80 KB, was dropped at 0.57). It never outranks a file with a real content score; live-value asks unchanged.
 - "What is on ... list/to-do/backlog" asks use the open "does it answer" wording, not exact-value.
