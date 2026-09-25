@@ -75,6 +75,17 @@
       Logs the miss. If that exact question is a cache hit, the saved answer
       (human or auto-check) is un-saved so the next ask looks it up fresh.
 
+  ask.py --principal AGENT --used <lookup_id|last> (--rank N | --file PATH) [--answer "text"]
+      Pick trail: records "the agent used choice N" of that trace into
+      $STATE/pending_picks.jsonl (question, file, answer) and a "pick" line
+      (rank, file) in traces.jsonl. When SUPERJEV_PICK_BATCH (default 5)
+      unchecked picks queue, or on --flush-picks, each pick's answer is
+      checked against its chosen file with the same gate as --answer: CLEAN
+      saves as approved_by=agent-pick+check; REJECT/CONTRADICTED/
+      TIME_SENSITIVE/stale/secret drops it; anything else (or no answer text)
+      stays pending. --pending-picks lists them; --confirm-pick ID ["answer"]
+      approves one as a human, --drop-pick ID removes it.
+
 Cache hits print who approved them: "approved_by: human" (--approve, --add)
 or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
 
@@ -1417,17 +1428,23 @@ def run_gate(claim: str, path: str):
         verdict = "TIME_SENSITIVE"
     return verdict, (min(float(x) for x in rows) if rows else None)
 
+_LAST_WHY = {"why": None}
+
 def not_saved(sdir: Path, question: str, why: str) -> int:
+    _LAST_WHY["why"] = why
     print(f"not saved: {why}")
     log(sdir, "auto-approve", question=question, result="not-saved", why=why)
     return 1
 
-def auto_approve(principal: str, question: str, answer: str, sdir: Path) -> int:
-    """--answer: save the answer only if the check gate calls it CLEAN against a fresh top file."""
+def auto_approve(principal: str, question: str, answer: str, sdir: Path,
+                 top=None, approved_by: str = "auto-check") -> int:
+    """--answer: save the answer only if the check gate calls it CLEAN against a fresh top file.
+    top overrides the last lookup's top row (an agent's pick of a listed file)."""
+    _LAST_WHY["why"] = None
     if not auto_cache_on():
         print("not saved: auto-cache is off (--no-auto or SUPERJEV_AUTO_CACHE=0); a human can still --approve")
         return 0
-    top = find_top(sdir, question)
+    top = top or find_top(sdir, question)
     if not top or not top.get("path"):
         return not_saved(sdir, question, "no prior lookup with candidates for that exact question; run ask first")
     pointer, evidence_file = top["pointer"], top["path"]
@@ -1462,7 +1479,7 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path) -> int:
                           f"{gated_source_id!r} ({evidence_file}); refusing to save mismatched evidence")
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
     return send_approval(principal, question, answer, pointer, out, sdir,
-                         approved_by="auto-check", evidence_file=evidence_file, score=score)
+                         approved_by=approved_by, evidence_file=evidence_file, score=score)
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
     log(sdir, "miss", question=question, actual=actual)
@@ -1742,6 +1759,123 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
             write_outcome(sdir, lid, question, "wrong-added", file=added_file)
     return rc
 
+# --- Pick trail: an agent records which listed choice it used; every
+# PICK_BATCH picks the claim checker runs on each and saves only CLEAN ones.
+# Refused verdicts drop the pick; unsure ones stay for --pending-picks.
+PICK_BATCH_DEFAULT = 5
+PICK_REFUSED = ("REJECT", "CONTRADICTED", "TIME_SENSITIVE", "stale", "secret-held")
+
+def pick_batch() -> int:
+    try:
+        return max(1, int(os.environ.get("SUPERJEV_PICK_BATCH", PICK_BATCH_DEFAULT)))
+    except ValueError:
+        return PICK_BATCH_DEFAULT
+
+def picks_path(sdir: Path) -> Path:
+    return sdir / "pending_picks.jsonl"
+
+def load_picks(sdir: Path) -> list:
+    p = picks_path(sdir)
+    out = []
+    for line in (p.read_text().splitlines() if p.is_file() else []):
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+def save_picks(sdir: Path, picks: list) -> None:
+    sdir.mkdir(parents=True, exist_ok=True)
+    picks_path(sdir).write_text("".join(json.dumps(r) + "\n" for r in picks))
+
+def record_pick(principal: str, sdir: Path, which: str, rank=None, file=None, answer=None) -> int:
+    """--used: queue "agent used choice N of trace <which>"; flush once the queue is full."""
+    rec = find_trace(sdir, which)
+    if not rec:
+        print(f"no trace {which!r}; run ask first")
+        return 1
+    ranked = rec.get("final_ranked") or []
+    if rank is not None:
+        if not 1 <= rank <= len(ranked):
+            print(f"--rank {rank} is out of range: that lookup listed {len(ranked)} candidate(s)")
+            return 1
+        row = ranked[rank - 1]
+    else:
+        hits = [r for r in ranked if r.get("path") == file] or \
+               [r for r in ranked if Path(r.get("path", "")).name == Path(file).name]
+        if len(hits) != 1:
+            print(f"--file {file!r} matches {len(hits)} of that lookup's candidates; pass the full path or --rank N")
+            return 1
+        row, rank = hits[0], ranked.index(hits[0]) + 1
+    pick = {"id": hashlib.sha1(f"{rec.get('lookup_id')}|{rank}|{time.time()}".encode()).hexdigest()[:8],
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "lookup_id": rec.get("lookup_id"),
+            "question": rec.get("question"), "rank": rank, "file": row.get("path"),
+            "pointer": row.get("pointer"), "answer": answer}
+    picks = load_picks(sdir) + [pick]
+    save_picks(sdir, picks)
+    write_trace(sdir, kind="pick", lookup_id=pick["lookup_id"], question=pick["question"],
+                rank=rank, file=pick["file"])
+    print(f"pick {pick['id']} queued: rank {rank} {pick['file']}")
+    if sum(1 for r in picks if "why" not in r) >= pick_batch():
+        return flush_picks(principal, sdir)
+    return 0
+
+def flush_picks(principal: str, sdir: Path) -> int:
+    """Check every unchecked pick: CLEAN saves (approved_by agent-pick+check), a refused
+    verdict drops it, anything else stays listed as unsure."""
+    if not auto_cache_on():
+        print("picks kept: auto-cache is off (SUPERJEV_AUTO_CACHE=0)")
+        return 0
+    keep = []
+    for pick in load_picks(sdir):
+        if "why" in pick:
+            keep.append(pick)
+            continue
+        print(f"pick {pick['id']}: {pick['question']}")
+        if not pick.get("answer"):
+            keep.append({**pick, "why": "no answer text to check; confirm with an answer or drop"})
+            continue
+        rc = auto_approve(principal, pick["question"], pick["answer"], sdir,
+                          top={"path": pick["file"], "pointer": pick["pointer"]},
+                          approved_by="agent-pick+check")
+        why = _LAST_WHY["why"]
+        if rc == 0:
+            write_outcome(sdir, pick["lookup_id"], pick["question"], "right", file=pick["file"])
+        elif why and any(w in why for w in PICK_REFUSED):
+            print(f"pick {pick['id']} dropped: {why}")
+        else:
+            keep.append({**pick, "why": why or "not saved"})
+    save_picks(sdir, keep)
+    return 0
+
+def pending_picks(sdir: Path) -> int:
+    picks = load_picks(sdir)
+    if not picks:
+        print("no pending picks")
+    for r in picks:
+        print(f"{r['id']}  rank {r['rank']}  {r['file']}\n    Q: {r['question']}\n    "
+              f"{r.get('why') or 'waiting for batch check'}")
+    if any("why" in r for r in picks):
+        print('confirm: --confirm-pick ID ["answer"]   drop: --drop-pick ID')
+    return 0
+
+def settle_pick(principal: str, sdir: Path, pid: str, answer=None, drop=False) -> int:
+    picks = load_picks(sdir)
+    pick = next((r for r in picks if r["id"] == pid), None)
+    if not pick:
+        print(f"no pending pick {pid}")
+        return 1
+    if not drop:
+        answer = answer or pick.get("answer")
+        if not answer:
+            print('usage: --confirm-pick ID "answer" (this pick has no answer text)')
+            return 2
+        if approve(principal, pick["question"], answer, sdir, pointer=pick["pointer"]) != 0:
+            return 1
+    save_picks(sdir, [r for r in picks if r["id"] != pid])
+    print(f"pick {pid} {'dropped' if drop else 'confirmed'}")
+    return 0
+
 def resolve_principal(args: list) -> tuple[str, list]:
     if "--principal" in args:
         i = args.index("--principal")
@@ -1807,6 +1941,32 @@ def _main() -> int:
             print('usage: --approve "question" "answer" [--rank N | --file PATH]')
             return 2
         return approve(principal, rest[0], rest[1], sdir, rank=rank, file=file)
+    if a[0] == "--used":
+        rest, rank, file, answer = a[2:], None, None, None
+        try:
+            while rest:
+                flag, val = rest[0], rest[1]
+                if flag == "--rank":
+                    rank = int(val)
+                elif flag == "--file":
+                    file = val
+                elif flag == "--answer":
+                    answer = val
+                else:
+                    raise ValueError
+                del rest[:2]
+        except (IndexError, ValueError):
+            rank = file = None
+        if len(a) < 2 or (rank is None) == (file is None):
+            print('usage: --used <trace_id|last> (--rank N | --file PATH) [--answer "text"]')
+            return 2
+        return record_pick(principal, sdir, a[1], rank=rank, file=file, answer=answer)
+    if a[0] == "--flush-picks":
+        return flush_picks(principal, sdir)
+    if a[0] == "--pending-picks":
+        return pending_picks(sdir)
+    if a[0] in ("--confirm-pick", "--drop-pick") and len(a) >= 2:
+        return settle_pick(principal, sdir, a[1], answer=" ".join(a[2:]) or None, drop=a[0] == "--drop-pick")
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
     return lookup(" ".join(a), principal, sdir)
