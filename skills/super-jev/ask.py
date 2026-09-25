@@ -888,6 +888,69 @@ def judge_near_twin(question: str, candidates: list):
                key=lambda c: c["score"], default=None)
     return best.get("sourceId") if best else None
 
+# Listwise reorder + promote (2026-09-25, tested as "Version C" in
+# superjev-tests/listwise-2026-09-25/result.md): one extra Jev call over every
+# file that reached POSSIBLE_FLOOR on today's content check, asking which
+# single one best answers the question. Unlike an AND-gate this never demotes
+# a file -- the winner just moves to #1 of the final ranking (see the reorder
+# right after `top = apply_near_twin_tiebreak(...)`), and is only promoted to
+# CONFIRM_FLOOR if its own winning probability is itself >= LISTWISE_PROMOTE_FLOOR.
+# On the 74-question bakeoff this beat both the installed baseline and an
+# AND-gate variant on right-confirmed and wrong-confirmed at once (~44.5/61 vs
+# ~41/61 right-confirmed, ~4/74 vs ~6/74 wrong-confirmed). SUPERJEV_LISTWISE=0
+# turns it off and restores today's behavior (same style as SUPERJEV_BATCH_JEV).
+def listwise_enabled() -> bool:
+    return os.environ.get("SUPERJEV_LISTWISE", "1") != "0"
+
+LISTWISE_MAX_FILES = 8
+LISTWISE_SNIPPET = 2000
+LISTWISE_LABEL = "Passage {n}, choose only if this is the single best answer to the question"
+LISTWISE_PROMOTE_FLOOR = 0.9
+
+def judge_listwise(question: str, paths: list):
+    """One Jev call over up to LISTWISE_MAX_FILES paths (already capped by the
+    caller to files scoring >= POSSIBLE_FLOOR), asking which single one best
+    answers the question. Returns (winning path, its own probability), or
+    (None, None) if fewer than 1 file could be read/sent, or the call errored,
+    timed out, or was inconclusive -- callers must treat that as no opinion and
+    leave scores and ranking unchanged."""
+    texts = {}
+    for p in paths[:LISTWISE_MAX_FILES]:
+        try:
+            text = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        if has_secret(text):
+            continue
+        texts[p] = text[:LISTWISE_SNIPPET]
+    if len(texts) < 1:
+        return None, None
+    ordered = list(texts)
+    leaves = [{"id": f"t{i}", "label": LISTWISE_LABEL.format(n=i + 1),
+               "description": texts[p], "sourceId": p} for i, p in enumerate(ordered)]
+    payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
+               "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
+                           "nodes": [{"id": "root", "label": "Sources",
+                                      "description": "Candidate files", "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
+    if payload_has_secret(payload):
+        return None, None
+    try:
+        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
+                           text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, None
+    if r.returncode:
+        return None, None
+    try:
+        body = json.loads(r.stdout)
+    except ValueError:
+        return None, None
+    if not isinstance(body, dict) or body.get("status") != "candidates" or not body.get("candidates"):
+        return None, None
+    best = max((c for c in body["candidates"] if isinstance(c, dict) and isinstance(c.get("score"), (int, float))),
+               key=lambda c: c["score"], default=None)
+    return (best.get("sourceId"), best.get("score")) if best else (None, None)
+
 def apply_near_twin_tiebreak(question: str, top: list) -> list:
     """If the top NEAR_TWIN_FILES results are a near-twin cluster (small score
     gap, same folder or similar names), judge just that cluster and put the
@@ -1486,11 +1549,24 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
+    listwise_winner = None  # survives to the reorder step even when to_check is empty
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
         if check_error:
             errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
+        if listwise_enabled():
+            listwise_pool = [p for p in to_check if scores.get(p, 0) >= POSSIBLE_FLOOR]
+            _STAGE["listwise"] = {"pool": listwise_pool, "ran": len(listwise_pool) >= 1}
+            if listwise_pool:
+                listwise_winner, listwise_prob = judge_listwise(question, listwise_pool)
+                _STAGE["listwise"]["winner"] = listwise_winner
+                _STAGE["listwise"]["winner_prob"] = listwise_prob
+                _STAGE["listwise"]["promoted"] = False
+                if listwise_winner and isinstance(listwise_prob, (int, float)) \
+                        and listwise_prob >= LISTWISE_PROMOTE_FLOOR and scores.get(listwise_winner, 0) < CONFIRM_FLOOR:
+                    scores[listwise_winner] = max(scores[listwise_winner], CONFIRM_FLOOR)
+                    _STAGE["listwise"]["promoted"] = True
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
         # Value questions need a confirmed score; no possible tier -- except
@@ -1598,6 +1674,15 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         merged = prefer_sources(sorted(keep.values(), key=sort_metric, reverse=True), scores, possible)
     top = merged[:5]
     top = apply_near_twin_tiebreak(question, top)
+    # Listwise reorder: the winner moves to #1 if it is anywhere in `top`,
+    # preserving the relative order of everything else. Never drops or demotes
+    # a file; a no-op if the winner isn't in `top` (e.g. it scored below what
+    # made the final cut).
+    if listwise_winner and any(p == listwise_winner for _s, p, _ptr in top):
+        _STAGE["listwise"]["reordered"] = top[0][1] != listwise_winner
+        top = sorted(top, key=lambda m: m[1] != listwise_winner)
+    else:
+        _STAGE.setdefault("listwise", {})["reordered"] = False
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
@@ -1631,6 +1716,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
+            "listwise": _STAGE.get("listwise") or {},
             "person": _STAGE.get("person") or {},
             "prefilter": (_STAGE.get("prefilter") or [])[:STAGE_LIST_CAP],
             "source_moves": _STAGE.get("source_moves") or [],
