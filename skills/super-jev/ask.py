@@ -726,9 +726,9 @@ def navigation_command() -> list:
 # on-topic passages splits its probability: CLOV cousins.md scored 0.47 best
 # passage with "none" at only 0.10 (full-run diag, cause B). The file score adds
 # back SPREAD_CREDIT of the on-topic mass the best passage did not get. Replayed on
-# the 49-question eval (recorded best/none, no new calls): 0.5 (before the tier gate) lifted top-1 41->44
-# and right-confirmed 34->37 with wrong-confirmed unchanged at 2; 0.6 added a wrong
-# confirm and 1.0 (the whole mass) added 4.
+# the eval (recorded best/none, no new calls). Improved on internal eval (details
+# kept private). 0.5 was the best-performing value tried; 0.6 added a wrong
+# confirm and 1.0 (the whole mass) made it worse.
 SPREAD_CREDIT, SPREAD_CAP = 0.5, 0.84
 
 def file_score(best: float, none, passages: int, live: bool = False) -> float:
@@ -895,9 +895,9 @@ def judge_near_twin(question: str, candidates: list):
 # a file -- the winner just moves to #1 of the final ranking (see the reorder
 # right after `top = apply_near_twin_tiebreak(...)`), and is only promoted to
 # CONFIRM_FLOOR if its own winning probability is itself >= LISTWISE_PROMOTE_FLOOR.
-# On the 74-question bakeoff this beat both the installed baseline and an
-# AND-gate variant on right-confirmed and wrong-confirmed at once (~44.5/61 vs
-# ~41/61 right-confirmed, ~4/74 vs ~6/74 wrong-confirmed). SUPERJEV_LISTWISE=0
+# On the bakeoff this beat both the installed baseline and an
+# AND-gate variant on right-confirmed and wrong-confirmed at once.
+# Improved on internal eval (details kept private). SUPERJEV_LISTWISE=0
 # turns it off and restores today's behavior (same style as SUPERJEV_BATCH_JEV).
 def listwise_enabled() -> bool:
     return os.environ.get("SUPERJEV_LISTWISE", "1") != "0"
