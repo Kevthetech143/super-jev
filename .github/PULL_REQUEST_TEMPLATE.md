@@ -1,3 +1,5 @@
+Public repo: do not include Jev accuracy/performance numbers (TypeSafe ToS).
+
 ## What
 
 ## Why
