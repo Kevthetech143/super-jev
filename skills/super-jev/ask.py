@@ -1678,7 +1678,16 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # preserving the relative order of everything else. Never drops or demotes
     # a file; a no-op if the winner isn't in `top` (e.g. it scored below what
     # made the final cut).
-    if listwise_winner and any(p == listwise_winner for _s, p, _ptr in top):
+    winner_idx = next((i for i, (_s, p, _ptr) in enumerate(top) if p == listwise_winner), None) \
+        if listwise_winner else None
+    # A hub/copy/writeup winner never promotes past a non-hub file already
+    # ranked ahead of it: prefer_sources already made that source-over-hub
+    # call (see is_hub_file/copy_kind), same reasoning as the near-twin
+    # tiebreak's hub exemption above (h22, 2026-09-25: README 0.98 promoted
+    # itself back over the confirmed panel note 0.91).
+    blocked = winner_idx is not None and (is_hub_file(listwise_winner) or copy_kind(listwise_winner)) \
+        and any(not (is_hub_file(p) or copy_kind(p)) for _s, p, _ptr in top[:winner_idx])
+    if winner_idx is not None and not blocked:
         _STAGE["listwise"]["reordered"] = top[0][1] != listwise_winner
         top = sorted(top, key=lambda m: m[1] != listwise_winner)
     else:
