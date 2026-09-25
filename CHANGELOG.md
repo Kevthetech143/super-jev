@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Pick trail: `--used last --rank N --answer "..."` logs which listed file an agent used; every 5 picks the claim checker auto-saves CLEAN ones as `agent-pick+check`, unsure ones wait in `--pending-picks`. (#155)
 - `--approve --rank N` / `--file PATH` saves evidence only from the picked file (matched by full path); a same-name file in the same tree (clov/analysis/README.md vs clov/README.md) can no longer supply the quote. If the search has no passage from the picked file, approve refuses.
 - No-candidates wording no longer claims absence: "Super Jev couldn't find it in the connected files. It may still exist" plus an offer to search by hand.
 - Possible tier: a README with a real content score sorts by that score among possible notes (was printed last below 0.60 route-only files). Other hubs still rank last; confirmed-tier rules unchanged. Replay of 558 fleet traces: 1 reorder, 0 top-file flips.
