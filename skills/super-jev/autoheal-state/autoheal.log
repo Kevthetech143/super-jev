@@ -1,0 +1,9 @@
+{"ts": "2026-09-24T21:09:38-0400", "principal": "alice", "pointer": "p1", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:38-0400", "principal": "alice", "pointer": "p1", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:38-0400", "principal": "alice", "pointer": "broken", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:38-0400", "principal": "alice", "pointer": "p1", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:39-0400", "principal": "me", "pointer": "x", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:58-0400", "principal": "alice", "pointer": "p1", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:58-0400", "principal": "alice", "pointer": "p1", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:58-0400", "principal": "alice", "pointer": "broken", "action": "skip", "reason": "no-report"}
+{"ts": "2026-09-24T21:09:59-0400", "principal": "alice", "pointer": "p1", "action": "skip", "reason": "no-report"}
