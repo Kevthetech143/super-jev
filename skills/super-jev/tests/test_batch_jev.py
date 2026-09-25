@@ -143,3 +143,30 @@ def test_number_dense_evidence_under_the_old_char_cap_is_split_not_sent_over_the
     rows_out, meta, code = jev_client.check([("/ledger.md", rows)], ["Row 000042 is in the ledger file."])
     assert len(sent) >= 2 and meta["chunks"] == len(sent)
     assert rows_out[0]["verdict"] == "SUPPORTED" and code == 0
+
+
+def test_batched_and_single_checks_give_the_same_file_to_score_mapping(tmp_path, monkeypatch):
+    # q15 shape: two near-tied files on the same topic. The fake judge scores each
+    # payload from its own passage text, so a leak or a shifted row would show.
+    files = []
+    for name, body in (("nysc-membership", "NYSC membership: plan Passport, joined 2024.\n"),
+                       ("nysc-incident-2025-09-19", "NYSC incident 2025-09-19: slipped in the locker room.\n"),
+                       ("gym-notes", "Gym notes: leg day routine.\n" * 2000)):
+        f = tmp_path / f"{name}.md"
+        f.write_text(body)
+        files.append(str(f))
+
+    def judge(payload):
+        text = "".join(n["description"] for n in payload["catalog"]["nodes"][1:])
+        return {"status": "candidates", "candidates": [{"score": 0.6 + (sum(map(ord, text)) % 39) / 100, "sourceId": "0"}]}
+
+    def fake_run(cmd, input, **kw):
+        body = json.loads(input)
+        out = {"results": [judge(p) for p in body["batch"]], "calls": 1} if "batch" in body else judge(body)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(out), "")
+
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    batched = ask.confirm("what is my NYSC membership plan", files)[0]
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "0")
+    single = ask.confirm("what is my NYSC membership plan", files)[0]
+    assert batched == single and len(set(batched.values())) == len(batched) == 3
