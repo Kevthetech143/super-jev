@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Source over copy: a README/INDEX/PROFILE hub yields to a note under its own folder that passed the content check, a `_staging/` or `_TEMPLATE` copy yields to any such note (both then list as possible), and a PR-history write-up yields to a confirmed doc. With nothing to yield to they keep their place (clov/README stays the dashboard). No extra Jev calls.
+- Person resolution: "my dad"/"my mom"/a person's name/"I, me, my" resolves to one `documents/<name>/` folder (relation read from that folder's PROFILE `Relation:` line); other people's files are not read, not confirmed, and pointers holding only their files are not asked. No name resolved, nothing filtered.
+- Full 60-question eval (corrected key, 49 scored): top-1 38 -> 42, right-confirmed 34 -> 34, wrong-confirmed 5 -> 1.
 - Pick trail: `--used last --rank N --answer "..."` logs which listed file an agent used; every 5 picks the claim checker auto-saves CLEAN ones as `agent-pick+check`, unsure ones wait in `--pending-picks`. (#155)
 - `--approve --rank N` / `--file PATH` saves evidence only from the picked file (matched by full path); a same-name file in the same tree (clov/analysis/README.md vs clov/README.md) can no longer supply the quote. If the search has no passage from the picked file, approve cites the file's own reviewed lines that best match the answer (assisted review, needs `allowAgentAssist`); the pick trail uses the same evidence path. The saved quote is the picked file's passage that best matches the answer, not its first section.
 - Bench datasets under `.local/retrieval-datasets/` (e.g. health-selected-passages) are never connected by prepare_bulk and never listed in ask results (routing or word search).

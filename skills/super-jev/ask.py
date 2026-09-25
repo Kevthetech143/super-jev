@@ -862,9 +862,10 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
     # regression: "how should I organize my stock campaigns" fell from rank 1
     # to 2 when a new marginal candidate formed a near-twin with the hub
     # README that answered the question) is more likely to override a correct
-    # call than fix a wrong one, so hub files sit out the tie-break entirely.
+    # call than fix a wrong one, so hub files sit out the tie-break entirely;
+    # so do copies and write-ups (copy_kind), already ordered by prefer_sources.
     _STAGE["tiebreak"] = {"result": "skipped: a hub file is in the cluster"}
-    if any(is_hub_file(p) for _, p, _ in cluster):
+    if any(is_hub_file(p) or copy_kind(p) for _, p, _ in cluster):
         return top
     winner = judge_near_twin(question, cluster)
     _STAGE["tiebreak"] = {"result": f"ran on {len(cluster)} files: " + (
@@ -1018,6 +1019,98 @@ def is_hub_file(path: str) -> bool:
     # is a shape to copy, not a topic file; treat it like a navigation hub.
     return "template" in stem
 
+# Summaries and copies of a real note. A "hub" (README/INDEX/PROFILE/...) points
+# at the notes in its folder; a "copy" (_staging/ split, _TEMPLATE) repeats one;
+# a "writeup" (PR-history note) retells a change. Each can pass the content check
+# above the note itself (pending/README 0.99 over the stamps.com note beside it;
+# pr-19's hook survey over docs/wire-into-claude-code.md), so prefer_sources()
+# ranks the source first.
+WRITEUP_DIRS = {"superjev-pr-history", "pr-history"}
+
+def copy_kind(path: str):
+    parts = [x.lower() for x in Path(path).parts[:-1]]
+    stem = Path(path).stem.lower()
+    if stem in HUB_STEMS or stem == "profile":
+        return "hub"
+    if "template" in stem or any(x == "_staging" or "template" in x for x in parts):
+        return "copy"
+    if any(x in WRITEUP_DIRS for x in parts):
+        return "writeup"
+    return None
+
+def prefer_sources(ranked: list, scores: dict, possible: dict) -> list:
+    """Move each hub/copy/writeup just below the lowest real note it yields to.
+    A hub yields to a note under its own folder, a copy to any note, when that
+    note passed the content check (>= POSSIBLE_FLOOR); the hub or copy then
+    counts as possible itself -- it is the pointer or duplicate, not the
+    evidence. A writeup yields only to a confirmed note: pr-history notes are
+    the source for "which PR did X". With nothing to yield to, a hub, copy or
+    writeup keeps its place (it may be the only answer; clov/README is the
+    campaign dashboard)."""
+    out = list(ranked)
+    for m in list(ranked):
+        kind = copy_kind(m[1])
+        if not kind:
+            continue
+        targets = [x for x in out if not copy_kind(x[1])
+                   and (scores.get(x[1], 0) >= CONFIRM_FLOOR and x[1] not in possible if kind == "writeup"
+                        else scores.get(x[1], 0) >= POSSIBLE_FLOOR)
+                   and (kind != "hub" or Path(x[1]).is_relative_to(Path(m[1]).parent))]
+        last = max((out.index(x) for x in targets), default=-1)
+        if last > out.index(m):
+            out.remove(m)
+            out.insert(last, m)
+            if kind != "writeup":
+                possible[m[1]] = POSSIBLE_NOTE
+    return out
+
+# A folder documents/<name>/ holds one person's records. Its PROFILE's
+# "Relation:" line (father / mother / self ...) lets "my dad" find that folder.
+PERSON_RE = re.compile(r"/documents/([a-z][a-z0-9_-]*)/", re.I)
+RELATIONS = {"dad": "father", "father": "father", "mom": "mother", "mum": "mother", "mother": "mother",
+             "wife": "wife", "husband": "husband", "daughter": "daughter", "son": "son",
+             "sister": "sister", "brother": "brother", "self": "self"}
+FIRST_PERSON = {"i", "me", "my", "mine", "myself"}
+
+def person_of(path: str):
+    m = PERSON_RE.search(path)
+    return m.group(1).lower() if m else None
+
+def people(pointers: list) -> dict:
+    """{person folder name: relation words from its PROFILE's Relation line}."""
+    out = {}
+    for ptr in pointers:
+        for path in load_cache_files(ptr):
+            who = person_of(path)
+            if not who:
+                continue
+            rel = out.setdefault(who, set())
+            if Path(path).stem.lower() == "profile":
+                try:
+                    lines = Path(path).read_text(errors="replace").lower().splitlines()
+                except OSError:
+                    continue
+                for ln in lines:
+                    if "relation" in ln:
+                        rel |= {RELATIONS[w] for w in re.findall(r"[a-z]+", ln) if w in RELATIONS}
+                        break
+    return out
+
+def question_people(question: str, folks: dict) -> set:
+    """Whose records the question is about: a relation word ("my dad") wins,
+    then a person's folder name ("milbeny's"), then I/me/my -> the "self" folder.
+    Empty set = no one resolved, nothing is filtered."""
+    words = {w.removesuffix("'s") for w in re.findall(r"[a-z']+", question.lower())}
+    rel = {RELATIONS[w] for w in words if w in RELATIONS and w != "self"}
+    if rel:
+        return {n for n, r in folks.items() if r & rel}
+    named = {n for n in folks if n in words}
+    if named:
+        return named
+    if words & FIRST_PERSON:
+        return {n for n, r in folks.items() if "self" in r}
+    return set()
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
         print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
@@ -1072,6 +1165,15 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             active_pointers.append(ptr)
     pointers = active_pointers
+    # Person resolution: a question about one person never reads (or confirms)
+    # another person's records, and a pointer holding only theirs is not asked.
+    folks = people(pointers)
+    who = question_people(question, folks)
+    def other_person(path: str) -> bool:
+        return bool(who) and person_of(path) not in (None, *who)
+    if who:
+        pointers = [ptr for ptr in pointers
+                    if not (files := load_cache_files(ptr)) or not all(other_person(p) for p in files)]
 
     nav_none = {}
 
@@ -1138,15 +1240,16 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # text so it never changes what those already say.
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
-    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])),
-                    reverse=True)
+    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])
+                     and not other_person(m[1])), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}
     for s, p, _ in merged:
         route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
-    found = word_search(question, pointers, skip=set(routed[:CONFIRM_FILES]))
+    found = word_search(question, pointers, skip=set(routed[:CONFIRM_FILES])
+                        | {p for ptr in pointers for p in load_cache_files(ptr) if other_person(p)})
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
@@ -1259,7 +1362,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         # Non-hub files first (sort_metric's leading True), then content score
         # alone with routing only as a near-tie breaker (see metric_of/better/
         # sort_metric above), then the name tie-break.
-        merged = sorted(keep.values(), key=sort_metric, reverse=True)
+        merged = prefer_sources(sorted(keep.values(), key=sort_metric, reverse=True), scores, possible)
     top = merged[:5]
     top = apply_near_twin_tiebreak(question, top)
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
