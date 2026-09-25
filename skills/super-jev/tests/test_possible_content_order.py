@@ -124,3 +124,28 @@ def test_is_hub_file_names(tmp_path, name):
 
 def test_is_hub_file_false_for_a_real_note(tmp_path):
     assert ask.is_hub_file(str(tmp_path / "watchlist.md")) is False
+
+
+def test_possible_readme_with_content_score_sorts_by_score(tmp_path):
+    """businessfi retest 2026-09-24: 0.80, 0.60, 0.60, then a 0.72 README last.
+    A possible README with a real content score sorts among possible notes by
+    that score; route-only files and other hubs stay below it."""
+    d = tmp_path / "clov"
+    d.mkdir()
+    readme, note, route_only, index = (str(d / n) for n in ("README.md", "strategy.md", "positions.md", "INDEX.md"))
+    top = _run(
+        tmp_path, "should I hold CLOV shares",
+        {readme: "shares", note: "shares", route_only: "shares", index: "shares"},
+        [{"score": 0.5, "originalPath": readme}, {"score": 0.5, "originalPath": note},
+         {"score": 0.95, "originalPath": route_only}, {"score": 0.5, "originalPath": index}],
+        {readme: 0.72, note: 0.80, index: 0.75},
+    )
+    assert top == [note, readme, route_only, index]
+
+
+def test_no_candidates_message_does_not_claim_absence(tmp_path, capsys):
+    with pytest.raises(AssertionError, match="no lookup"):
+        _run(tmp_path, "what is my shoe size", {}, [], {})
+    out = capsys.readouterr().out
+    assert "couldn't find it in the connected files" in out and "may still exist" in out
+    assert "not in their files" not in out

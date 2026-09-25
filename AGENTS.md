@@ -55,8 +55,8 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    yourself; if the file only mentions the topic, the answer is not there.
 
 6. **Ask for a fact that is not in the files.** Success: `no-candidates across
-   1 pointers: no connected file answers this.` Tell your human it is not in
-   their files. Do not guess.
+   1 pointers: Super Jev couldn't find it in the connected files.` Tell your
+   human it may still exist, and offer to search by hand. Do not guess.
 
 7. **Check a claim before you send it.** Give it a claim you know is false:
 
@@ -81,7 +81,7 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 - Before you state a fact from their files: run `ask`, open the top file, read it.
 - Before you send an answer: run `check` with each claim and the file you read.
   Only exit 0 is a pass.
-- Nothing found means say "not in your files", never a guess.
+- Nothing found means say "Super Jev couldn't find it; it may still exist" and offer to search by hand, never a guess.
 - When their files change, run step 4 again with `--refresh`.
 - After you answer, run `ask.py --principal me --answer "question" "your answer"`: it
   saves the answer only if the check gate calls it CLEAN against the fresh top file
