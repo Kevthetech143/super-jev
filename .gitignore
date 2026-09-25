@@ -16,3 +16,4 @@ skills/super-jev/prepare-cache/
 
 # Private local datasets, pointer databases, and demonstration configuration.
 .local/
+skills/super-jev/autoheal-state/
