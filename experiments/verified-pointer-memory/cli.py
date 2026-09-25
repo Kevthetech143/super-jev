@@ -43,6 +43,7 @@ ACTIONS = {
     'approve': ['ticket', 'principal', 'approved', 'answer', 'evidence'],
     'assist': ['attemptId', 'principal', 'reason', 'references'],
     'attempt': ['attemptId', 'principal'],
+    'open': ['pointer', 'question', 'principal'],
     'sources': ['pointer', 'principal'],
 }
 
@@ -345,6 +346,9 @@ def run(request, config):
     if action == 'assist':
         return service.assist(request['attemptId'], request['principal'],
                               request['reason'], request['references'])
+    if action == 'open':
+        return service.open_attempt(request['pointer'], request['question'],
+                                    request['principal'], request.get('context', ''))
     if action == 'attempt':
         return service.attempt(request['attemptId'], request['principal'])
     if action == 'sources':
