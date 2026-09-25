@@ -122,3 +122,47 @@ def test_bad_rank_and_unknown_trace(world, capsys):
     assert ask.record_pick("alice", world["sdir"], "last", rank=9) == 1
     assert ask.record_pick("alice", world["sdir"], "nope", rank=1) == 1
     assert ask.load_picks(world["sdir"]) == []
+
+
+def _approve_world(tmp_path, monkeypatch, search_passages):
+    """--approve --file car.md with a fake harness; returns the evidence list it sent."""
+    car = tmp_path / "car.md"
+    car.write_text("# Car\nSeparate play: earnings overnight.\nThe car is blue.\n")
+    sdir = tmp_path / "state"
+    ask.log(sdir, "lookup", question=Q, top=[{"score": 0.92, "path": str(car), "pointer": "p1"}])
+    sent = {}
+
+    def fake_memory(req):
+        act = req["action"]
+        if act == "sources":
+            return {"status": "ok", "sources": [{"sourceId": "car", "originalPath": str(car)}]}
+        if act == "search":
+            return {"status": "ready", "approvalTicket": "t", "attemptId": "a1", "passages": search_passages}
+        if act == "assist":
+            [ref] = req["references"]
+            assert ref == {"sourceId": "car", "startLine": 3, "endLine": 3}
+            return {"status": "ready", "approvalTicket": "t2",
+                    "passages": [{"sourceId": "car", "reviewedText": "The car is blue."}]}
+        if act == "approve":
+            sent["evidence"] = req["evidence"]
+            return {"status": "saved"}
+        raise AssertionError(act)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.approve("alice", Q, "The car is blue.", sdir, file=str(car))
+    return rc, sent.get("evidence")
+
+
+def test_approve_file_cites_its_own_lines_when_search_tops_another_file(tmp_path, monkeypatch):
+    """businessfi retest 2026-09-25: a confirmed #1 README was refused because search's
+    passages all came from other files; approve now cites the file's own reviewed lines."""
+    rc, evidence = _approve_world(tmp_path, monkeypatch,
+                                  [{"sourceId": "other", "reviewedText": "The car is red."}])
+    assert rc == 0 and evidence == [{"sourceId": "car", "quote": "The car is blue."}]
+
+
+def test_approve_quotes_the_passage_that_supports_the_answer_first(tmp_path, monkeypatch):
+    rc, evidence = _approve_world(tmp_path, monkeypatch, [
+        {"sourceId": "car", "reviewedText": "Separate play: earnings overnight."},
+        {"sourceId": "car", "reviewedText": "The car is blue."}])
+    assert rc == 0 and evidence[0]["quote"] == "The car is blue."

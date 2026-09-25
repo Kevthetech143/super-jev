@@ -204,7 +204,11 @@ def _connect(request, config):
         if (old or dataset in data['datasets']) and request.get('replace') is not True:
             return _problem('already-connected', 'This pointer or dataset exists. Review its scope and explicitly set replace:true to refresh it.')
         if old and (old['dataset'] != dataset or sorted(old['principals']) != sorted(principals)):
-            return _problem('scope-change', 'Replacement must retain the same dataset and exact principal scope. Use a separate explicitly authorized connector for a different scope.')
+            problem = _problem('scope-change', 'Replacement must retain the same dataset and exact principal scope. Use a separate explicitly authorized connector for a different scope.')
+            # A caller already in scope may learn the full scope, so a refresh can keep it unchanged.
+            if old['dataset'] == dataset and set(principals) < set(old['principals']):
+                problem['registeredPrincipals'] = sorted(old['principals'])
+            return problem
         if any(name != pointer and row['dataset'] == dataset for name, row in rows.items()):
             return _problem('shared-dataset', 'Another pointer uses this dataset; choose a separate dataset name instead of replacing shared preparation.')
         if (dataset in data['datasets'] and not old
