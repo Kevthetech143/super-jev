@@ -1910,8 +1910,17 @@ def run_gate(claim: str, path: str):
     rows = re.findall(r"^\s*c\d+\s+[A-Z_]+\s+(\d+\.\d+)", out, re.M)
     verdict = body.get("verdict") or "ERROR"
     # check --claim treats time_sensitive as advisory, but a dated fact (a price,
-    # a breakeven) must never auto-cache: it goes stale silently.
-    if verdict == "CLEAN" and re.search(r"^\s*time_sensitive\s+TIME_SENSITIVE\b", out, re.M):
+    # a breakeven) must never auto-cache: it goes stale silently. jev's own
+    # reply table prints whichever LABEL won the choice even when its own
+    # confidence is under the 0.80 line it uses everywhere else to mean
+    # "read the source, act on neither answer" -- a TIME_SENSITIVE label at,
+    # say, 0.10 confidence is a near coin-flip, not a finding. Read the
+    # confidence that rides next to the label and only let a *confident*
+    # TIME_SENSITIVE call override CLEAN; a low-confidence one is noise
+    # (bug: a NOT_TIME_SENSITIVE-leaning 0.05 call was blocking real
+    # answers because only the label, never the score, was checked).
+    ts_match = re.search(r"^\s*time_sensitive\s+TIME_SENSITIVE\s+(\d+\.\d+)", out, re.M)
+    if verdict == "CLEAN" and ts_match and float(ts_match.group(1)) >= 0.80:
         verdict = "TIME_SENSITIVE"
     return verdict, (min(float(x) for x in rows) if rows else None)
 
@@ -2355,7 +2364,15 @@ def _flush_picks(principal: str, sdir: Path) -> int:
         if rc == 0:
             write_outcome(sdir, pick["lookup_id"], pick["question"], "right", file=pick["file"])
         elif why and any(w in why for w in PICK_REFUSED):
+            # A refused pick (TIME_SENSITIVE, stale, secret-held...) used to be
+            # discarded here with only a transient print, so it vanished from
+            # --pending-picks with no trace beyond lookups.jsonl -- a real
+            # refusal ("fair" per the businessfi report) looked identical to a
+            # silent bug. It now stays listed, like an unsure/READ pick, so
+            # --pending-picks always shows why, and a human still confirms or
+            # drops it explicitly instead of it disappearing on its own.
             print(f"pick {pick['id']} dropped: {why}")
+            keep.append({**pick, "why": f"dropped: {why}"})
         else:
             keep.append({**pick, "why": why or "not saved"})
     save_picks(sdir, keep)
