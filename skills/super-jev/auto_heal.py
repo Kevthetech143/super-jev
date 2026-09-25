@@ -194,8 +194,6 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
         return "cooldown"
     if not _acquire_lock(principal, owner):
         return "in-progress"
-    state["pointers"][owner] = time.time()
-    _save_state(principal, state)
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
     out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
     lock_file = str(_lock_path(principal))
@@ -210,6 +208,11 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
         _release_lock(principal)
         return "failed"
     result = "reconnected" if code == 0 else "failed"
+    if code == 0:
+        # Cooldown only after a success: a failed or timed-out reconnect leaves the
+        # pointer eligible for maybe_heal's background refresh.
+        state["pointers"][owner] = time.time()
+        _save_state(principal, state)
     _log(principal=principal, pointer=owner, action="reconnect", result=result, cmd=cmd)
     return result
 
