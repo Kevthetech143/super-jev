@@ -1233,7 +1233,13 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             else:
                 c = scores.get(p)
                 has_content, content, r = (c is not None, c if c is not None else s, route.get(p, 0))
-            return (not demoted(p), has_content, round(content, 2), r, path_rank(question, p))
+            # A README already in the possible tier with a real content score
+            # sorts by that score like any possible note (a route-only 0.60 file
+            # printed above a 0.72 README looked unsorted, businessfi retest
+            # 2026-09-24); its tier is unchanged. Other hubs stay last.
+            readme_scored = (Path(p).stem.lower() == "readme" and p in possible
+                             and scores.get(p, 0) >= POSSIBLE_FLOOR)
+            return (readme_scored or not demoted(p), has_content, round(content, 2), r, path_rank(question, p))
 
         # Non-hub files first (sort_metric's leading True), then content score
         # alone with routing only as a near-tie breaker (see metric_of/better/
@@ -1276,7 +1282,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             "tiebreak": _STAGE.get("tiebreak") or {},
             "final": [{"score": s, "path": p,
                        "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
-                                else "hub, ranked last" if p in possible and is_hub_file(p)
+                                else "hub, ranked last" if p in possible and demoted(p)
+                                and not (Path(p).stem.lower() == "readme" and scores.get(p, 0) >= POSSIBLE_FLOOR)
                                 else "possible (word search)" if p in possible and p in wpaths
                                 else "possible" if p in possible
                                 else "confirmed >= %s" % CONFIRM_FLOOR)} for s, p, ptr in top],
@@ -1312,9 +1319,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if not top:
         if dropped:
             print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
-        print(f"no-candidates across {len(original_pointers)} pointers: no connected file answers this. "
-              "Tell your human it is not in their files; do not guess. To fill the gap, connect more "
-              "files or record a fact with --add (see references/connectors.md).")
+        print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected files. "
+              "It may still exist: tell your human that, and offer to search by hand. To fill the gap, "
+              "connect more files or record a fact with --add (see references/connectors.md).")
         print(VOICE_LINE)
         return 0
     return 0
@@ -1654,6 +1661,20 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
         log(sdir, "approve", question=question, pointer=pointer, result=out.get("status"))
         return 1
     extra = {"file": chosen["path"]} if chosen else {}
+    if chosen:
+        # Evidence must come from the picked file itself: the search's top passages
+        # can belong to a same-name file in the same tree (clov/analysis/README.md
+        # saved for clov/README.md, businessfi retest 2026-09-24). Match by full path.
+        listed = memory({"action": "sources", "pointer": pointer, "principal": principal, "limit": 100})
+        sid = next((r.get("sourceId") for r in listed.get("sources") or []
+                    if r.get("originalPath") == chosen["path"]), None)
+        passages = [p for p in out.get("passages") or [] if sid is not None and p.get("sourceId") == sid]
+        if not any(p.get("reviewedText") for p in passages):
+            print(f"cannot approve: the search found no passage from {chosen['path']} itself "
+                  "(only other files); use --add with --source to record it manually.")
+            log(sdir, "approve", question=question, pointer=pointer, result="evidence-mismatch")
+            return 1
+        out = {**out, "passages": passages}
     rc = send_approval(principal, question, answer, pointer, out, sdir, **extra)
     if rc == 0:
         top = chosen or find_top(sdir, question)
