@@ -2352,7 +2352,7 @@ def record_pick(principal: str, sdir: Path, which: str, rank=None, file=None, an
     write_trace(sdir, kind="pick", lookup_id=pick["lookup_id"], question=pick["question"],
                 rank=rank, file=pick["file"])
     print(f"pick {pick['id']} queued: rank {rank} {pick['file']}")
-    if sum(1 for r in picks if "why" not in r) >= pick_batch():
+    if sum(1 for r in picks if "why" not in r and "dropped" not in r) >= pick_batch():
         return flush_picks(principal, sdir)
     return 0
 
@@ -2368,7 +2368,7 @@ def flush_picks(principal: str, sdir: Path) -> int:
 def _flush_picks(principal: str, sdir: Path) -> int:
     keep = []
     for pick in load_picks(sdir):
-        if "why" in pick:
+        if "why" in pick or "dropped" in pick:
             keep.append(pick)
             continue
         print(f"pick {pick['id']}: {pick['question']}")

@@ -106,6 +106,24 @@ def test_refused_verdict_stays_listed_under_dropped_section(world, monkeypatch, 
     assert ask.load_picks(world["sdir"]) == []
 
 
+def test_dropped_pick_is_not_re_sent_to_the_gate_on_a_second_flush(world, monkeypatch):
+    """The skip guard in _flush_picks used to check only "why" in pick, but a
+    dropped pick carries "dropped" instead -- so it looked unchecked again and
+    was re-sent to the gate (and re-counted toward the batch) on every later
+    flush. Fixed: a dropped pick is skipped exactly like an unsure one."""
+    calls = []
+    monkeypatch.setattr(ask, "run_gate", lambda c, p: (calls.append(1) or "TIME_SENSITIVE", 0.9))
+    ask.record_pick("alice", world["sdir"], "last", rank=2, answer="x")
+    ask.flush_picks("alice", world["sdir"])
+    assert len(calls) == 1
+    [pick] = ask.load_picks(world["sdir"])
+    assert pick["dropped"]
+    ask.flush_picks("alice", world["sdir"])
+    ask.flush_picks("alice", world["sdir"])
+    assert len(calls) == 1  # never re-sent to the gate
+    assert ask.load_picks(world["sdir"]) == [pick]
+
+
 def test_stale_file_stays_listed_under_dropped_section(world, monkeypatch):
     monkeypatch.setattr(ask, "run_gate", lambda *a: pytest.fail("gate must not run on a stale file"))
     ask.record_pick("alice", world["sdir"], "last", rank=1, answer="x")  # index.md: not in the pointer's sources
