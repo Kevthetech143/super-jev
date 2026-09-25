@@ -28,7 +28,10 @@ import urllib.request
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
-MAX_STATE_CHARS = 110_000   # a safe margin under Jev's 32,768-token input ceiling
+# Jev's input ceiling is 32,768 tokens for the state plus the longest question. Number-
+# dense text (IDs, dates, amounts) runs about 2 characters per token, so a character cap
+# sized for prose failed on it; tokens are estimated at 2 UTF-8 bytes each instead.
+MAX_INPUT_TOKENS = 30_000
 LINE = 0.80                 # under this confidence a human reads the source
 MAX_QUESTIONS = 255
 MIN_CLAIM_WORDS = 4
@@ -76,6 +79,12 @@ RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
        "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
 
+def estimate_tokens(value) -> int:
+    """A conservative token count: prose runs nearer 3.5 characters per token."""
+    text = value if isinstance(value, str) else json.dumps(value)
+    return (len(text.encode("utf-8")) + 1) // 2
+
+
 class JevError(RuntimeError):
     """A call that produced no verdict. Always exit 1, never a pass."""
 
@@ -113,7 +122,8 @@ def ask(state, questions, timeout=120, attempts=4):
     if not key:
         raise JevError("TYPESAFE_API_KEY is not set -- export it first "
                        "(export TYPESAFE_API_KEY=\"$(cat /path/to/your/key-file)\")")
-    if len(state) > MAX_STATE_CHARS:
+    longest = max((estimate_tokens(q) for q in questions.values()), default=0)
+    if estimate_tokens(state) + longest > MAX_INPUT_TOKENS:
         raise JevError("evidence exceeds the 32,768-token ceiling -- split the file; "
                        "it is never truncated")
     body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
@@ -182,14 +192,70 @@ def row(key, answer, subject="", side=False):
             "flag": (verdict not in FAVORABLE) if side else (verdict != "SUPPORTED" or conf < LINE)}
 
 
+def evidence_parts(evidence, room):
+    """Group (path, text) evidence into states of at most `room` estimated tokens.
+    A file too big for one state is cut at line breaks into labeled parts; no text
+    is ever dropped."""
+    pieces = []
+    for p, t in evidence:
+        lines, cur, cuts = t.strip().splitlines(keepends=True), "", []
+        for line in lines:
+            while estimate_tokens(line) > room:  # one enormous line: hard cut
+                if cur:
+                    cuts.append(cur)
+                    cur = ""
+                cuts.append(line[:room // 2])  # 4 UTF-8 bytes a character at most
+                line = line[room // 2:]
+            if cur and estimate_tokens(cur + line) > room:
+                cuts.append(cur)
+                cur = ""
+            cur += line
+        cuts.append(cur)
+        n = len(cuts)
+        pieces += [f"=== {p}{f' (part {i}/{n})' if n > 1 else ''} ===\n{c.strip()}"
+                   for i, c in enumerate(cuts, 1)]
+    groups, cur = [], []
+    for piece in pieces:
+        if cur and estimate_tokens("\n\n".join(cur + [piece])) > room:
+            groups.append(cur)
+            cur = []
+        cur.append(piece)
+    return groups + [cur] if cur else groups
+
+
+def merge_rows(parts):
+    """One row per question across evidence parts. A contradiction (or, for a draft-level
+    question, any red label) in any part wins, since it must be read; else a claim any
+    part supports is supported. The highest confidence of the winning label is kept."""
+    out = []
+    for rows in zip(*parts):
+        if rows[0]["key"] in DRAFT_QUESTIONS:
+            pick = [r for r in rows if r["verdict"] in RED]
+        else:
+            pick = ([r for r in rows if r["verdict"] == "CONTRADICTED"]
+                    or [r for r in rows if r["verdict"] == "SUPPORTED"])
+        out.append(max(pick or rows, key=lambda r: r["confidence"]))
+    return out
+
+
 def check(evidence, claims, draft=""):
-    """evidence: [(path, text)]. Returns (rows, meta, exit_code)."""
-    state = ("EVIDENCE:\n" + "\n\n".join(f"=== {p} ===\n{t.strip()}" for p, t in evidence)
-             + f"\n\nDRAFT:\n{draft.strip()}")
-    res = ask(state, questions_for(claims))
-    rows = [row(f"c{i}", res["answers"].get(f"c{i}"), c) for i, c in enumerate(claims, 1)]
-    rows += [row(k, res["answers"].get(k), side=True) for k in DRAFT_QUESTIONS]
-    return rows, res, (3 if any(r["flag"] for r in rows) else 0)
+    """evidence: [(path, text)]. Returns (rows, meta, exit_code). Evidence over Jev's
+    input ceiling is split into parts, each checked in its own call, then merged."""
+    questions = questions_for(claims)
+    tail = f"\n\nDRAFT:\n{draft.strip()}"
+    room = MAX_INPUT_TOKENS - max(estimate_tokens(q) for q in questions.values()) - estimate_tokens(tail) - 10
+    if room < 1000:
+        raise JevError("the draft or a claim alone is too long for one call -- shorten it")
+    parts, meta = [], {"model": None, "chunks": 0, "input_tokens": 0, "latency_ms": 0}
+    for group in evidence_parts(evidence, room):
+        res = ask("EVIDENCE:\n" + "\n\n".join(group) + tail, questions)
+        meta.update(model=meta["model"] or res.get("model"), chunks=meta["chunks"] + 1,
+                    input_tokens=meta["input_tokens"] + (res.get("input_tokens") or 0),
+                    latency_ms=meta["latency_ms"] + (res.get("latency_ms") or 0))
+        rows = [row(f"c{i}", res["answers"].get(f"c{i}"), c) for i, c in enumerate(claims, 1)]
+        parts.append(rows + [row(k, res["answers"].get(k), side=True) for k in DRAFT_QUESTIONS])
+    rows = merge_rows(parts)
+    return rows, meta, (3 if any(r["flag"] for r in rows) else 0)
 
 
 def print_table(rows, meta, n_claims, side_advisory=False):
