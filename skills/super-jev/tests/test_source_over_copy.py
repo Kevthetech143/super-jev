@@ -49,13 +49,13 @@ def _run(tmp_path, question, files, candidates, scores, caches=None):
     return rec["top"], checked, navigated
 
 
-def test_folder_readme_yields_to_the_note_beside_it(tmp_path):
-    """q49: pending/README 0.99 (a one-line index) beat the stamps.com note 0.70."""
+def test_folder_readme_yields_to_a_confirmed_note_beside_it(tmp_path):
+    """q50: pending/README 0.99 (a one-line index) beat the confirmed fincen note 0.94."""
     readme, note = str(tmp_path / "pending/README.md"), str(tmp_path / "pending/stamps-com-auto-charges.md")
     top, _, _ = _run(tmp_path, "why is stamps.com charging me automatically?",
                      {readme: "- stamps-com-auto-charges.md", note: "auto charges"},
                      [{"score": 0.9, "originalPath": readme}, {"score": 0.8, "originalPath": note}],
-                     {readme: 0.99, note: 0.70})
+                     {readme: 0.99, note: 0.94})
     assert [t["path"] for t in top] == [note, readme]
     assert top[1]["possible"]
 
@@ -107,7 +107,7 @@ def test_pr_writeup_yields_only_to_a_confirmed_doc(tmp_path):
 
 
 def _family(tmp_path):
-    d = tmp_path / "documents"
+    d = tmp_path / "agents/global/documents"
     files = {str(d / "kelvin/medical/PROFILE.md"): "# Kelvin\n- Relation: self\n",
              str(d / "esteban/medical/PROFILE.md"): "# Esteban\n- Relation: father\n",
              str(d / "iris/medical/PROFILE.md"): "# Iris\n- Relation: mother\n",
@@ -120,8 +120,8 @@ def _family(tmp_path):
 def test_my_dad_never_confirms_my_own_file(tmp_path):
     """q16: 'my dad' ranked Kelvin's medications (0.80) over the father's (0.60)."""
     files, caches = _family(tmp_path)
-    mine = str(tmp_path / "documents/kelvin/medical/medications/current.md")
-    dads = str(tmp_path / "documents/esteban/medical/medications/current.md")
+    mine = str(tmp_path / "agents/global/documents/kelvin/medical/medications/current.md")
+    dads = str(tmp_path / "agents/global/documents/esteban/medical/medications/current.md")
     top, checked, navigated = _run(tmp_path, "how many prescriptions is my dad on?", files,
                                    [{"score": 0.9, "originalPath": mine}, {"score": 0.8, "originalPath": dads}],
                                    {mine: 0.80, dads: 0.60}, caches)
@@ -132,8 +132,8 @@ def test_my_dad_never_confirms_my_own_file(tmp_path):
 
 def test_no_person_named_filters_nothing(tmp_path):
     files, caches = _family(tmp_path)
-    mine = str(tmp_path / "documents/kelvin/medical/medications/current.md")
-    dads = str(tmp_path / "documents/esteban/medical/medications/current.md")
+    mine = str(tmp_path / "agents/global/documents/kelvin/medical/medications/current.md")
+    dads = str(tmp_path / "agents/global/documents/esteban/medical/medications/current.md")
     top, _, navigated = _run(tmp_path, "list the medications on file", files,
                              [{"score": 0.9, "originalPath": mine}, {"score": 0.8, "originalPath": dads}],
                              {mine: 0.90, dads: 0.88}, caches)
@@ -148,3 +148,29 @@ def test_question_people():
     assert ask.question_people("who is milbeny's neurologist?", folks) == {"milbeny"}
     assert ask.question_people("is LASIK a good idea for me?", folks) == {"kelvin"}
     assert ask.question_people("what is on the pending list", folks) == set()
+
+
+def test_readme_keeps_confirm_over_possible_sibling(tmp_path):
+    """A confirmed dashboard README is never un-confirmed for a merely possible note in its folder."""
+    readme = str(tmp_path / "campaigns/clov/README.md")
+    ledger = str(tmp_path / "campaigns/clov/ledger.md")
+    top, _, _ = _run(tmp_path, "what's our all-in breakeven on the CLOV wheel",
+                     {readme: "breakeven 3.94", ledger: "breakeven history"},
+                     [{"score": 0.9, "originalPath": readme}, {"score": 0.8, "originalPath": ledger}],
+                     {readme: 0.92, ledger: 0.75})
+    assert top[0]["path"] == readme and not top[0]["possible"]
+
+
+def test_group_and_multi_person_questions():
+    folks = {"kelvin": {"self"}, "esteban": {"father"}, "iris": {"mother"}, "milbeny": {"wife"}, "kelsie": {"daughter"}}
+    for q in ["what meds are my parents on?", "when are my kids' checkups?", "do my children need shots?",
+              "what does my family owe?", "what's our insurance plan?"]:
+        assert ask.question_people(q, folks) == set(), q
+    assert ask.question_people("when did my wife and I see the doctor?", folks) == {"milbeny", "kelvin"}
+    assert ask.question_people("my dad and my mom's appointments", folks) == {"esteban", "iris"}
+    assert ask.question_people("what did my grandma say?", folks) == set()
+
+
+def test_person_filter_only_under_global_documents():
+    assert ask.person_of("/Users/x/agents/global/documents/iris/medical/a.md") == "iris"
+    assert ask.person_of("/Users/x/projects/documents/iris/a.md") is None

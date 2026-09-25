@@ -348,6 +348,12 @@ def trace_show(sdir: Path, which: str) -> int:
     t = st.get("tiebreak") or {}
     print(f"6 near-twin tie-break: {t.get('result', 'not reached')}" +
           (f" winner={t['winner']}" if t.get("winner") else ""))
+    pf = st.get("person") or {}
+    if pf.get("who"):
+        print(f"  person filter: about {', '.join(pf['who'])}; skipped pointers {pf.get('skipped_pointers') or []}"
+              f"; dropped {pf.get('dropped') or []}")
+    for mv in st.get("source_moves", []):
+        print(f"  source first: {Path(mv['path']).name} ({mv['kind']}) moved below {Path(mv['below']).name}")
     print("7 final ranking:")
     for i, f in enumerate(st.get("final", []), 1):
         print(f"  {i}. {f['score']}  {f['path']}  [{f['rule']}]")
@@ -1040,10 +1046,10 @@ def copy_kind(path: str):
 
 def prefer_sources(ranked: list, scores: dict, possible: dict) -> list:
     """Move each hub/copy/writeup just below the lowest real note it yields to.
-    A hub yields to a note under its own folder, a copy to any note, when that
-    note passed the content check (>= POSSIBLE_FLOOR); the hub or copy then
-    counts as possible itself -- it is the pointer or duplicate, not the
-    evidence. A writeup yields only to a confirmed note: pr-history notes are
+    A copy yields to any note that passed the content check (>= POSSIBLE_FLOOR);
+    a hub yields to a note under its own folder that is confirmed or scored
+    higher than the hub; the hub or copy then counts as possible itself -- it
+    is the pointer or duplicate, not the evidence. A writeup yields only to a confirmed note: pr-history notes are
     the source for "which PR did X". With nothing to yield to, a hub, copy or
     writeup keeps its place (it may be the only answer; clov/README is the
     campaign dashboard)."""
@@ -1053,24 +1059,32 @@ def prefer_sources(ranked: list, scores: dict, possible: dict) -> list:
         if not kind:
             continue
         targets = [x for x in out if not copy_kind(x[1])
-                   and (scores.get(x[1], 0) >= CONFIRM_FLOOR and x[1] not in possible if kind == "writeup"
-                        else scores.get(x[1], 0) >= POSSIBLE_FLOOR)
+                   and (scores.get(x[1], 0) >= POSSIBLE_FLOOR if kind == "copy"
+                        else x[1] not in possible and scores.get(x[1], 0) >= CONFIRM_FLOOR
+                        or kind == "hub" and scores.get(x[1], 0) > scores.get(m[1], 0))
                    and (kind != "hub" or Path(x[1]).is_relative_to(Path(m[1]).parent))]
         last = max((out.index(x) for x in targets), default=-1)
         if last > out.index(m):
             out.remove(m)
             out.insert(last, m)
+            _STAGE.setdefault("source_moves", []).append({"path": m[1], "kind": kind, "below": out[last - 1][1]})
             if kind != "writeup":
                 possible[m[1]] = POSSIBLE_NOTE
     return out
 
 # A folder documents/<name>/ holds one person's records. Its PROFILE's
 # "Relation:" line (father / mother / self ...) lets "my dad" find that folder.
-PERSON_RE = re.compile(r"/documents/([a-z][a-z0-9_-]*)/", re.I)
+PERSON_RE = re.compile(r"/agents/global/documents/([a-z][a-z0-9_-]*)/", re.I)
 RELATIONS = {"dad": "father", "father": "father", "mom": "mother", "mum": "mother", "mother": "mother",
              "wife": "wife", "husband": "husband", "daughter": "daughter", "son": "son",
-             "sister": "sister", "brother": "brother", "self": "self"}
+             "sister": "sister", "brother": "brother", "self": "self",
+             # No folder claims these today; naming one still means "not me", so nothing is filtered.
+             **{w: w for w in ("grandma", "grandmother", "grandpa", "grandfather", "aunt", "uncle", "cousin",
+                               "niece", "nephew", "partner", "girlfriend", "boyfriend", "friend", "baby")}}
 FIRST_PERSON = {"i", "me", "my", "mine", "myself"}
+# Words naming a group ("my parents", "our") could mean several folders: when
+# unsure, filter nothing.
+GROUP_WORDS = {"parents", "kids", "children", "family", "our", "we", "us", "everyone", "both", "grandparents"}
 
 def person_of(path: str):
     m = PERSON_RE.search(path)
@@ -1098,18 +1112,22 @@ def people(pointers: list) -> dict:
 
 def question_people(question: str, folks: dict) -> set:
     """Whose records the question is about: a relation word ("my dad") wins,
-    then a person's folder name ("milbeny's"), then I/me/my -> the "self" folder.
+    and person folder names ("milbeny's") add their folders; "I"/"me" adds the
+    "self" folder too ("my wife and I"), and I/me/my alone means just "self".
+    A group word, or a relation no folder claims, filters nothing.
     Empty set = no one resolved, nothing is filtered."""
-    words = {w.removesuffix("'s") for w in re.findall(r"[a-z']+", question.lower())}
+    words = {w.removesuffix("'s").strip("'") for w in re.findall(r"[a-z']+", question.lower())}
+    if words & GROUP_WORDS:
+        return set()
     rel = {RELATIONS[w] for w in words if w in RELATIONS and w != "self"}
-    if rel:
-        return {n for n, r in folks.items() if r & rel}
-    named = {n for n in folks if n in words}
-    if named:
-        return named
-    if words & FIRST_PERSON:
-        return {n for n, r in folks.items() if "self" in r}
-    return set()
+    by_rel = {n for n, r in folks.items() if r & rel}
+    if rel and not by_rel:
+        return set()
+    who = by_rel | {n for n in folks if n in words}
+    self_ = {n for n, r in folks.items() if "self" in r}
+    if not who:
+        return self_ if words & FIRST_PERSON else set()
+    return who | self_ if words & {"i", "me", "myself"} else who
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
     if len(question) > MAX_QUESTION:
@@ -1171,7 +1189,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     who = question_people(question, folks)
     def other_person(path: str) -> bool:
         return bool(who) and person_of(path) not in (None, *who)
+    _STAGE["person"] = {"who": sorted(who), "dropped": []}
     if who:
+        _STAGE["person"]["skipped_pointers"] = [ptr for ptr in pointers if (files := load_cache_files(ptr))
+                                                and all(other_person(p) for p in files)]
         pointers = [ptr for ptr in pointers
                     if not (files := load_cache_files(ptr)) or not all(other_person(p) for p in files)]
 
@@ -1240,6 +1261,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # text so it never changes what those already say.
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
+    _STAGE["person"]["dropped"] = [m[1] for m in merged if other_person(m[1])][:STAGE_LIST_CAP]
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])
                      and not other_person(m[1])), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
@@ -1398,6 +1420,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
+            "person": _STAGE.get("person") or {},
+            "source_moves": _STAGE.get("source_moves") or [],
             "final": [{"score": s, "path": p,
                        "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
                                 else "hub, ranked last" if p in possible and demoted(p)
