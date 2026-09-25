@@ -477,6 +477,10 @@ def _nav_concurrency() -> int:
     except ValueError:
         return 6
 NAV_CONCURRENCY = _nav_concurrency()
+# Routing and content checks batch their Jev questions into shared calls (see
+# src/enhance/coalesce.ts). SUPERJEV_BATCH_JEV=0 goes back to one call per pointer/file.
+def batch_jev() -> bool:
+    return os.environ.get("SUPERJEV_BATCH_JEV", "1") != "0"
 
 # Sick-pointer circuit breaker: a pointer that fails N times in a row is benched
 # for a short cool-off instead of being retried (and waited on) every single call.
@@ -742,13 +746,35 @@ def confirm_one(question: str, path: str):
     """(content score or None, whether the file was too long to read whole, error or None,
     note or None). note is HELD_SECRET (file not sent, not kept) or INCONCLUSIVE (the
     check did not finish; the file is kept on its routing score)."""
+    done, ctx = confirm_start(question, path)
+    if done:
+        return done
+    return confirm_finish(question, ctx, *run_navigation(ctx["payload"]))
+
+def run_navigation(payload: dict):
+    """(parsed navigation-cli output or None, error or None) for one payload or a batch."""
+    try:
+        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
+                           text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"content check could not run: {e.__class__.__name__}"
+    if r.returncode:
+        return None, (r.stderr.strip().splitlines()[-1:] or ["content check failed"])[0][:200]
+    try:
+        return json.loads(r.stdout), None
+    except ValueError:
+        return None, "content check returned invalid JSON"
+
+def confirm_start(question: str, path: str):
+    """(finished confirm_one result, None) when the file is never sent, else (None, what
+    confirm_finish needs, including the navigation payload)."""
     try:
         text = Path(path).read_text(errors="replace")
     except OSError as e:
-        return None, False, f"cannot read {path}: {e.strerror or e}", None
+        return (None, False, f"cannot read {path}: {e.strerror or e}", None), None
     # The file may have changed since connect scanned it; never ship a secret to Jev.
     if has_secret(text):
-        return None, False, None, HELD_SECRET
+        return (None, False, None, HELD_SECRET), None
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
@@ -764,18 +790,17 @@ def confirm_one(question: str, path: str):
                                       "description": "Full text of candidate files",
                                       "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
     if payload_has_secret(payload):  # the question rides in the payload too
-        return None, partial, None, HELD_SECRET
-    try:
-        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
-                           text=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return None, partial, f"content check could not run: {e.__class__.__name__}", None
-    if r.returncode:
-        return None, partial, (r.stderr.strip().splitlines()[-1:] or ["content check failed"])[0][:200], None
-    try:
-        body = json.loads(r.stdout)
-    except ValueError:
-        return None, partial, "content check returned invalid JSON", None
+        return (None, partial, None, HELD_SECRET), None
+    return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked,
+                  "detail": detail, "partial": partial}
+
+def confirm_finish(question: str, ctx: dict, body, error):
+    """confirm_one's result from one navigation-cli output (or its error)."""
+    text, chunks, picked, detail, partial = (ctx[k] for k in ("text", "chunks", "picked", "detail", "partial"))
+    if error:
+        return None, partial, error, None
+    if isinstance(body, dict) and body.get("status") == "error":
+        return None, partial, str(body.get("reason") or "content check failed")[:200], None
     if not isinstance(body, dict) or body.get("status") not in ("candidates", "no-candidates"):
         # e.g. budget-exhausted: the read did not finish, so "not in file" would be a guess
         return None, partial, None, INCONCLUSIVE
@@ -1085,10 +1110,28 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     return [r for r in rest if r[0] >= floor][:limit]
 
 def confirm(question: str, paths: list):
-    """Check each path alone, in parallel. Returns ({path: score} for kept files,
+    """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
     set of paths too long to read whole, first error or None, {path: note})."""
     paths = paths[:CONFIRM_FILES + FALLBACK_FILES]
-    results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
+    if not batch_jev():
+        results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
+        return confirm_results(paths, results)
+    # Every file's check rides in one navigation-cli run: their Jev questions share
+    # calls, split under the input ceiling, and each is still judged on its own.
+    started = [confirm_start(question, p) for p in paths]
+    ctxs = [ctx for _, ctx in started if ctx]
+    rows, error = run_navigation({"batch": [c["payload"] for c in ctxs]}) if ctxs else (None, None)
+    rows = rows.get("results") if isinstance(rows, dict) else None
+    if ctxs and (error or not isinstance(rows, list) or len(rows) != len(ctxs)):
+        # The batched run itself failed: check each file on its own instead of
+        # marking every file inconclusive.
+        results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
+        return confirm_results(paths, results)
+    outs = iter(rows or [])
+    results = [done or confirm_finish(question, ctx, next(outs), None) for done, ctx in started]
+    return confirm_results(paths, results)
+
+def confirm_results(paths: list, results: list):
     errors = [e for _, _, e, _ in results if e]
     scores = {p: sc for p, (sc, _, _, _) in zip(paths, results) if sc is not None}
     partial = {p for p, (_, part, _, _) in zip(paths, results) if part}
@@ -1334,17 +1377,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
 
     nav_none = {}
 
-    def nav(ptr):
-        t_start = time.time()
-        out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
+    def classify(ptr, out, elapsed):
         status, reason = out.get("status"), out.get("reason", "")
-        # One backoff retry for an overloaded provider (HTTP 529) -- not counted
-        # as a failure unless the retry also fails.
-        if status not in ("candidates", "no-candidates") and _is_overloaded(f"{status} {reason}"):
-            time.sleep(OVERLOAD_BACKOFF_SECS)
-            out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
-            status, reason = out.get("status"), out.get("reason", "")
-        elapsed = time.time() - t_start
         nav_none[ptr] = (_root_none(out), round(elapsed, 2))
         if status == "candidates" and out.get("candidates"):
             return ptr, "candidates", out["candidates"], elapsed, True
@@ -1353,14 +1387,42 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         kind = status or "error"
         return ptr, f"{kind}: {reason}" if reason else kind, [], elapsed, False
 
-    # Bounded fan-out: firing every pointer's navigate at once (formerly
-    # min(len(pointers), 32)) meant an N-pointer lookup fired N concurrent remote
-    # provider calls, and each one waiting on a shared provider queued behind the
-    # others past its own timeout ("Navigation provider timed out" on 51 of 87 asks
-    # with businessfi's 22 pointers). SUPERJEV_NAV_CONCURRENCY caps how many navigate
-    # calls run at once; SUPERJEV_NAV_TIMEOUT_MS (read by navigation-cli itself) raises
-    # how long each one is allowed to wait.
-    results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
+    def failed_overloaded(out):
+        return (out.get("status") not in ("candidates", "no-candidates")
+                and _is_overloaded(f"{out.get('status')} {out.get('reason', '')}"))
+
+    def nav(ptr):
+        t_start = time.time()
+        out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
+        # One backoff retry for an overloaded provider (HTTP 529) -- not counted
+        # as a failure unless the retry also fails.
+        if failed_overloaded(out):
+            time.sleep(OVERLOAD_BACKOFF_SECS)
+            out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
+        return classify(ptr, out, time.time() - t_start)
+
+    def nav_many(ptrs):
+        """{pointer: navigate result}: one navigation-cli run whose Jev questions for
+        every pointer share as few calls as fit under Jev's input ceiling."""
+        out = memory({"action": "navigate-many", "pointers": ptrs, "principal": principal, "question": question})
+        rows = out.get("results") if out.get("status") == "ok" else None
+        if not isinstance(rows, dict):  # an older runtime, or the batch itself failed
+            return None
+        return {ptr: rows.get(ptr) if isinstance(rows.get(ptr), dict) else {"status": "error"} for ptr in ptrs}
+
+    # Routing asks Jev about every pointer at once: their questions ride in shared
+    # calls (split under the input ceiling) instead of one navigate call per pointer.
+    t_start = time.time()
+    outs = nav_many(pointers) if pointers and batch_jev() else None
+    if outs is None:  # one navigate call per pointer, as before batching
+        results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
+    else:
+        retry = [ptr for ptr in pointers if failed_overloaded(outs[ptr])]
+        if retry:  # one backoff retry for the pointers an overloaded provider (HTTP 529) failed
+            time.sleep(OVERLOAD_BACKOFF_SECS)
+            outs.update(nav_many(retry) or {ptr: memory({"action": "navigate", "pointer": ptr, "principal": principal,
+                                                         "question": question}) for ptr in retry})
+        results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
     # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup.
