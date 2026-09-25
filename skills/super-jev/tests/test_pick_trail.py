@@ -82,35 +82,60 @@ def test_fifth_pick_flushes_and_saves_clean(world, capsys):
 
 
 @pytest.mark.parametrize("verdict", ["REJECT", "TIME_SENSITIVE"])
-def test_refused_verdict_stays_listed_with_a_reason(world, monkeypatch, verdict, capsys):
+def test_refused_verdict_stays_listed_under_dropped_section(world, monkeypatch, verdict, capsys):
     """A refused pick used to vanish from --pending-picks with no lasting trace
     beyond lookups.jsonl (businessfi report, 2026-09-25: a "fair" TIME_SENSITIVE
-    drop looked identical to a silent bug). It now stays listed, like an
-    unsure/READ pick, with the reason printed and visible via --pending-picks
-    until a human confirms or drops it."""
+    drop looked identical to a silent bug). It now stays in the file tagged
+    "dropped": why, listed under --pending-picks' "Dropped (not saved)"
+    section, until a human clears it with an explicit --confirm-pick or
+    --drop-pick."""
     monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: (verdict, 0.9))
     ask.record_pick("alice", world["sdir"], "last", rank=2, answer="x")
     ask.flush_picks("alice", world["sdir"])
     picks = ask.load_picks(world["sdir"])
     assert not world["cache"]
     [pick] = picks
-    assert pick["why"] == f"dropped: check gate verdict {verdict} (only CLEAN saves)"
+    assert pick["dropped"] == f"check gate verdict {verdict} (only CLEAN saves)"
+    assert "why" not in pick
     capsys.readouterr()
     ask.pending_picks(world["sdir"])
     out = capsys.readouterr().out
-    assert f"dropped: check gate verdict {verdict}" in out and "--drop-pick" in out
+    assert "Dropped (not saved):" in out
+    assert f"check gate verdict {verdict}" in out.split("Dropped (not saved):")[1]
+    assert "--drop-pick" in out
+    # not cleared just by being shown once -- only an explicit ack clears it
+    ask.pending_picks(world["sdir"])
+    assert ask.load_picks(world["sdir"]) == [pick]
     assert ask.settle_pick("alice", world["sdir"], pick["id"], drop=True) == 0
     assert ask.load_picks(world["sdir"]) == []
 
 
-def test_stale_file_stays_listed_with_a_reason(world, monkeypatch):
+def test_dropped_pick_is_not_re_sent_to_the_gate_on_a_second_flush(world, monkeypatch):
+    """The skip guard in _flush_picks used to check only "why" in pick, but a
+    dropped pick carries "dropped" instead -- so it looked unchecked again and
+    was re-sent to the gate (and re-counted toward the batch) on every later
+    flush. Fixed: a dropped pick is skipped exactly like an unsure one."""
+    calls = []
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: (calls.append(1) or "TIME_SENSITIVE", 0.9))
+    ask.record_pick("alice", world["sdir"], "last", rank=2, answer="x")
+    ask.flush_picks("alice", world["sdir"])
+    assert len(calls) == 1
+    [pick] = ask.load_picks(world["sdir"])
+    assert pick["dropped"]
+    ask.flush_picks("alice", world["sdir"])
+    ask.flush_picks("alice", world["sdir"])
+    assert len(calls) == 1  # never re-sent to the gate
+    assert ask.load_picks(world["sdir"]) == [pick]
+
+
+def test_stale_file_stays_listed_under_dropped_section(world, monkeypatch):
     monkeypatch.setattr(ask, "run_gate", lambda *a: pytest.fail("gate must not run on a stale file"))
     ask.record_pick("alice", world["sdir"], "last", rank=1, answer="x")  # index.md: not in the pointer's sources
     ask.flush_picks("alice", world["sdir"])
     picks = ask.load_picks(world["sdir"])
     assert not world["cache"]
     [pick] = picks
-    assert pick["why"].startswith("dropped: stale:")
+    assert pick["dropped"].startswith("stale:")
     assert ask.settle_pick("alice", world["sdir"], pick["id"], drop=True) == 0
 
 

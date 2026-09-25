@@ -959,3 +959,15 @@ def test_approve_refuses_when_picked_file_has_no_line_for_the_answer(tmp_path, m
     assert ask.approve("alice", "q", "zeppelin", tmp_path, rank=1) == 1
     assert not any(c["action"] == "approve" for c in calls)
     assert f"no line in {main} shares a word with the answer" in capsys.readouterr().out
+
+
+def test_approve_hand_picked_file_changed_since_connect_is_refused(tmp_path, monkeypatch, capsys):
+    _three_candidate_lookup(tmp_path)
+    calls, fake = [], None
+    fake = _ready_memory(calls, tmp_path)
+    monkeypatch.setattr(ask, "memory", lambda r: {"status": "ok", "sources": [
+        {"sourceId": "s", "originalPath": str(tmp_path / "r2/b.md"), "contentSHA": "old"}]}
+        if r["action"] == "sources" else fake(r))
+    assert ask.approve("alice", "q", "ans", tmp_path, rank=2) == 1
+    assert not any(c["action"] in ("open", "approve") for c in calls)
+    assert "stale" in capsys.readouterr().out
