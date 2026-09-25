@@ -290,7 +290,7 @@ def find_trace(sdir: Path, which: str):
             rec = json.loads(line)
         except ValueError:
             continue
-        if rec.get("kind") == "trace" and (which == "last" or rec.get("lookup_id") == which):
+        if isinstance(rec, dict) and rec.get("kind") == "trace" and (which == "last" or rec.get("lookup_id") == which):
             return rec
     return None
 
@@ -1209,35 +1209,38 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                                    else "dropped")}
                      for p in checked}
     tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed")
-    wsearch = _STAGE.get("word") or {}
-    fates = {p: "read" for p in wpaths}
-    stages = {
-        "cache": cache_stage,
-        "routing": {ptr: {"status": kind, "none": nav_none.get(ptr, (None,))[0],
-                          "secs": nav_none.get(ptr, (None, None))[1],
-                          "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0),
-                                     "kept": c.get("score", 0) >= ROUTE_FLOOR} for c in rows][:STAGE_LIST_CAP]}
-                    for ptr, kind, rows, _elapsed, _ok in results},
-        "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
-        "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
-                        "passed_coverage": wsearch.get("passed_coverage"),
-                        "top": [{"score": sc, "path": p,
-                                 "fate": fates.get(p) or ("already routed (used a slot)" if i < FALLBACK_FILES
-                                                          and p in routed[:CONFIRM_FILES]
-                                                          else "not read: past top %d" % FALLBACK_FILES)}
-                                for i, (sc, p, _ptr) in enumerate(wsearch.get("ranked", []))]},
-        "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
-        "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
-                          for p, v in content_check.items()},
-        "tiebreak": _STAGE.get("tiebreak") or {},
-        "final": [{"score": s, "path": p,
-                   "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
-                            else "hub, ranked last" if p in possible and is_hub_file(p)
-                            else "possible (word search)" if p in possible and p in wpaths
-                            else "possible" if p in possible
-                            else "confirmed >= %s" % CONFIRM_FLOOR)} for s, p, ptr in top],
-        "cut_after_top5": [p for _s, p, _ptr in merged[5:5 + STAGE_LIST_CAP]],
-    }
+    try:  # trace detail is best-effort; it must never fail the ask
+        wsearch = _STAGE.get("word") or {}
+        fates = {p: "read" for p in wpaths}
+        stages = {
+            "cache": cache_stage,
+            "routing": {ptr: {"status": kind, "none": nav_none.get(ptr, (None,))[0],
+                              "secs": nav_none.get(ptr, (None, None))[1],
+                              "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0),
+                                         "kept": c.get("score", 0) >= ROUTE_FLOOR} for c in rows][:STAGE_LIST_CAP]}
+                        for ptr, kind, rows, _elapsed, _ok in results},
+            "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
+            "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
+                            "passed_coverage": wsearch.get("passed_coverage"),
+                            "top": [{"score": sc, "path": p,
+                                     "fate": fates.get(p) or ("already routed (used a slot)" if i < FALLBACK_FILES
+                                                              and p in routed[:CONFIRM_FILES]
+                                                              else "not read: past top %d" % FALLBACK_FILES)}
+                                    for i, (sc, p, _ptr) in enumerate(wsearch.get("ranked", []))]},
+            "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
+            "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
+                              for p, v in content_check.items()},
+            "tiebreak": _STAGE.get("tiebreak") or {},
+            "final": [{"score": s, "path": p,
+                       "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
+                                else "hub, ranked last" if p in possible and is_hub_file(p)
+                                else "possible (word search)" if p in possible and p in wpaths
+                                else "possible" if p in possible
+                                else "confirmed >= %s" % CONFIRM_FLOOR)} for s, p, ptr in top],
+            "cut_after_top5": [p for _s, p, _ptr in merged[5:5 + STAGE_LIST_CAP]],
+        }
+    except Exception as e:
+        stages = {"error": type(e).__name__}
     write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing=routing,
                 content_check=content_check,
                 final_ranked=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top],
