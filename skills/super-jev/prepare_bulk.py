@@ -26,7 +26,7 @@ Usage:
 Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
-     hidden directories and test/scratch output (ops/sj*/, *superjev-test*, *-hand-test-*, *-sample*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
+     hidden directories and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only. Files matching
      card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
@@ -194,7 +194,7 @@ def relstr(p, roots) -> str:
 
 # Test/scratch output (e.g. a Super Jev test report that repeats the test questions) outranks the real
 # answer in word search, so it is never connected or searched. Kept narrow: real ops notes stay.
-TEST_MATERIAL_RE = re.compile(r"(^|/)ops/sj[^/]*/|superjev-test|-hand-test-|-sample", re.I)
+TEST_MATERIAL_RE = re.compile(r"(^|/)ops/sj(?!-manual/)[^/]*/|superjev-test|-hand-test-", re.I)  # ops/sj-manual/ holds real facts
 
 
 def is_test_material(path: str) -> bool:
