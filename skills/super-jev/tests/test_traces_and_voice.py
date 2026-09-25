@@ -281,20 +281,32 @@ def test_rotation_overwrites_a_prior_old_generation_keeping_only_one(tmp_path):
 
 # ---------------------------------------------------------------- outcomes
 
-def test_approve_marks_the_last_lookup_right_with_evidence_file(tmp_path, monkeypatch):
-    ask.write_trace(tmp_path, kind="trace", lookup_id="lid1", question="q",
-                    final_ranked=[{"score": 0.9, "path": "/a.md", "pointer": "p1"}], tier="confirmed")
-    ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": "/a.md", "pointer": "p1", "possible": False}])
-
+def _file_memory(path):
+    """Fake harness citing `path` through open + assist (the file ask() ranked)."""
     def fake_memory(req):
-        if req["action"] == "search":
+        if req["action"] == "sources":
+            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": str(path)}]}
+        if req["action"] == "cached":
+            return {"status": "cache-miss"}
+        if req["action"] == "open":
+            return {"status": "ok", "attemptId": "a1"}
+        if req["action"] == "assist":
             return {"status": "ready", "approvalTicket": "tix",
-                     "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
+                    "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
         if req["action"] == "approve":
             return {"status": "saved"}
         raise AssertionError(req)
+    return fake_memory
 
-    monkeypatch.setattr(ask, "memory", fake_memory)
+
+def test_approve_marks_the_last_lookup_right_with_evidence_file(tmp_path, monkeypatch):
+    note = tmp_path / "a.md"
+    note.write_text("answer text\n")
+    ask.write_trace(tmp_path, kind="trace", lookup_id="lid1", question="q",
+                    final_ranked=[{"score": 0.9, "path": str(note), "pointer": "p1"}], tier="confirmed")
+    ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": str(note), "pointer": "p1", "possible": False}])
+
+    monkeypatch.setattr(ask, "memory", _file_memory(note))
     rc = ask.approve("alice", "q", "answer", tmp_path)
 
     assert rc == 0
@@ -302,7 +314,7 @@ def test_approve_marks_the_last_lookup_right_with_evidence_file(tmp_path, monkey
     assert len(outcomes) == 1
     assert outcomes[0]["lookup_id"] == "lid1"
     assert outcomes[0]["result"] == "right"
-    assert outcomes[0]["file"] == "/a.md"
+    assert outcomes[0]["file"] == str(note)
 
 
 def test_miss_marks_the_last_lookup_wrong_with_the_actual_path(tmp_path, monkeypatch):
@@ -350,17 +362,11 @@ def test_add_after_a_miss_marks_the_lookup_wrong_added(tmp_path, monkeypatch):
 
 
 def test_approve_with_no_prior_lookup_writes_no_outcome(tmp_path, monkeypatch):
-    ask.log(tmp_path, "lookup", question="q4", top=[{"score": 0.9, "path": "/a.md", "pointer": "p1", "possible": False}])
+    note = tmp_path / "a.md"
+    note.write_text("answer text\n")
+    ask.log(tmp_path, "lookup", question="q4", top=[{"score": 0.9, "path": str(note), "pointer": "p1", "possible": False}])
 
-    def fake_memory(req):
-        if req["action"] == "search":
-            return {"status": "ready", "approvalTicket": "tix",
-                     "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
-        if req["action"] == "approve":
-            return {"status": "saved"}
-        raise AssertionError(req)
-
-    monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "memory", _file_memory(note))
     rc = ask.approve("alice", "q4", "answer", tmp_path)
 
     assert rc == 0

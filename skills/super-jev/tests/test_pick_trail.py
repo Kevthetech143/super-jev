@@ -36,15 +36,19 @@ def world(tmp_path, monkeypatch):
         if act == "sources":
             return {"status": "ok", "sources": [{"sourceId": "b", "originalPath": str(b),
                                                   "contentSHA": hashlib.sha256(b.read_bytes()).hexdigest()}]}
-        if act == "search":
-            return {"status": "ready", "approvalTicket": "t", "passages": [{"sourceId": "b", "reviewedText": "blue"}]}
+        if act == "cached":
+            return {"status": "cache-miss"}
+        if act == "open":
+            return {"status": "ok", "attemptId": "a1"}
+        if act == "assist":
+            return {"status": "ready", "approvalTicket": "t", "passages": [{"sourceId": "b", "reviewedText": "The car is blue."}]}
         if act == "approve":
             cache[Q] = req["answer"]
             return {"status": "saved"}
         raise AssertionError(act)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path: ("CLEAN", 0.93))
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
     monkeypatch.setenv("SUPERJEV_PICK_BATCH", "5")
     monkeypatch.delenv("SUPERJEV_AUTO_CACHE", raising=False)
     return {"sdir": sdir, "b": b, "cache": cache}
@@ -85,7 +89,7 @@ def test_refused_verdict_stays_listed_under_dropped_section(world, monkeypatch, 
     "dropped": why, listed under --pending-picks' "Dropped (not saved)"
     section, until a human clears it with an explicit --confirm-pick or
     --drop-pick."""
-    monkeypatch.setattr(ask, "run_gate", lambda c, p: (verdict, 0.9))
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: (verdict, 0.9))
     ask.record_pick("alice", world["sdir"], "last", rank=2, answer="x")
     ask.flush_picks("alice", world["sdir"])
     picks = ask.load_picks(world["sdir"])
@@ -112,7 +116,7 @@ def test_dropped_pick_is_not_re_sent_to_the_gate_on_a_second_flush(world, monkey
     was re-sent to the gate (and re-counted toward the batch) on every later
     flush. Fixed: a dropped pick is skipped exactly like an unsure one."""
     calls = []
-    monkeypatch.setattr(ask, "run_gate", lambda c, p: (calls.append(1) or "TIME_SENSITIVE", 0.9))
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: (calls.append(1) or "TIME_SENSITIVE", 0.9))
     ask.record_pick("alice", world["sdir"], "last", rank=2, answer="x")
     ask.flush_picks("alice", world["sdir"])
     assert len(calls) == 1
@@ -136,7 +140,7 @@ def test_stale_file_stays_listed_under_dropped_section(world, monkeypatch):
 
 
 def test_unsure_stays_listed_then_confirm_or_drop(world, monkeypatch, capsys):
-    monkeypatch.setattr(ask, "run_gate", lambda c, p: ("READ", 0.5))
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: ("READ", 0.5))
     ask.record_pick("alice", world["sdir"], "last", rank=2, answer="The car is blue.")
     ask.record_pick("alice", world["sdir"], "last", rank=1)  # no answer text
     ask.flush_picks("alice", world["sdir"])
@@ -152,7 +156,7 @@ def test_unsure_stays_listed_then_confirm_or_drop(world, monkeypatch, capsys):
 
 
 def test_checked_unsure_picks_do_not_count_toward_batch(world, monkeypatch):
-    monkeypatch.setattr(ask, "run_gate", lambda c, p: ("READ", 0.5))
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: ("READ", 0.5))
     monkeypatch.setenv("SUPERJEV_PICK_BATCH", "2")
     calls = []
     monkeypatch.setattr(ask, "flush_picks", lambda *a: calls.append(1) or 0)
@@ -167,7 +171,7 @@ def test_bad_rank_and_unknown_trace(world, capsys):
     assert ask.load_picks(world["sdir"]) == []
 
 
-def _approve_world(tmp_path, monkeypatch, search_passages, answer="The car is blue.", assisted="The car is blue."):
+def _approve_world(tmp_path, monkeypatch, search_passages, answer="The car is blue.", assisted=("The car is blue.",)):
     """--approve --file car.md with a fake harness; returns the evidence list it sent."""
     car = tmp_path / "car.md"
     car.write_text("# Car\nSeparate play: earnings overnight.\nThe car is blue.\n")
@@ -179,13 +183,16 @@ def _approve_world(tmp_path, monkeypatch, search_passages, answer="The car is bl
         act = req["action"]
         if act == "sources":
             return {"status": "ok", "sources": [{"sourceId": "car", "originalPath": str(car)}]}
-        if act == "search":
+        if act == "search":  # memory's own ranking: must never decide the save
             return {"status": "ready", "approvalTicket": "t", "attemptId": "a1", "passages": search_passages}
+        if act == "cached":
+            return {"status": "cache-miss"}
+        if act == "open":
+            return {"status": "ok", "attemptId": "a1"}
         if act == "assist":
-            [ref] = req["references"]
-            assert ref == {"sourceId": "car", "startLine": 3, "endLine": 3}
+            assert req["references"] == [{"sourceId": "car", "startLine": n, "endLine": n} for n in (1, 3)]
             return {"status": "ready", "approvalTicket": "t2",
-                    "passages": [{"sourceId": "car", "reviewedText": assisted}]}
+                    "passages": [{"sourceId": "car", "reviewedText": t} for t in assisted]}
         if act == "approve":
             sent["evidence"] = req["evidence"]
             return {"status": "saved"}
@@ -205,9 +212,8 @@ def test_approve_file_cites_its_own_lines_when_search_tops_another_file(tmp_path
 
 
 def test_approve_quotes_the_passage_that_supports_the_answer_first(tmp_path, monkeypatch):
-    rc, evidence = _approve_world(tmp_path, monkeypatch, [
-        {"sourceId": "car", "reviewedText": "Separate play: earnings overnight."},
-        {"sourceId": "car", "reviewedText": "The car is blue."}])
+    rc, evidence = _approve_world(tmp_path, monkeypatch, [], assisted=(
+        "Separate play: earnings overnight.", "The car is blue."))
     assert rc == 0 and evidence[0]["quote"] == "The car is blue."
 
 
@@ -219,5 +225,5 @@ def test_approve_refuses_when_no_line_matches_the_answer(tmp_path, monkeypatch):
 
 def test_approve_refuses_when_assisted_text_no_longer_supports_the_answer(tmp_path, monkeypatch):
     rc, evidence = _approve_world(tmp_path, monkeypatch, [{"sourceId": "other", "reviewedText": "x"}],
-                                  assisted="Changed since connect.")
+                                  assisted=("Changed since connect.",))
     assert rc == 1 and evidence is None
