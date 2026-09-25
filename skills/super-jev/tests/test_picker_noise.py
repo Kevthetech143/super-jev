@@ -61,7 +61,7 @@ def test_connect_inventory_skips_test_material_but_keeps_real_ops_notes(tmp_path
 
 # 2. files routing already has are dropped before word search takes its top N
 def test_word_search_fills_every_slot_after_skipping_routed_files(tmp_path, monkeypatch):
-    files = [_write(tmp_path, f"f{i}.md", "knee brace size " * (6 - i)) for i in range(5)]
+    files = [_write(tmp_path, f"f{i}.md", "knee brace size " * (7 - i)) for i in range(6)]
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache(files))
     top = [p for _, p, _ in ask.word_search("knee brace size", ["p1"])]
     got = [p for _, p, _ in ask.word_search("knee brace size", ["p1"], skip={top[0]})]
