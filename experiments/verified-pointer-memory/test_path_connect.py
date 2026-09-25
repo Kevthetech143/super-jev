@@ -95,6 +95,8 @@ class PathConnectTests(unittest.TestCase):
         self.assertEqual(connect(wide, self.config)['status'], 'registered')
         narrowed = connect({**wide, 'replace': True, 'principals': ['owner']}, self.config)
         self.assertEqual((narrowed['reason'], narrowed['registeredPrincipals']), ('scope-change', ['helper', 'owner']))
+        empty = connect({**wide, 'replace': True, 'principals': []}, self.config)
+        self.assertNotIn('registeredPrincipals', empty)
 
     def test_partial_publication_fails_closed(self):
         request = self.reviewed()

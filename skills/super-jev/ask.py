@@ -1418,13 +1418,16 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
         except OSError:
             lines = []
         best = max(range(len(lines)), key=lambda i: term_hits(terms, lines[i]), default=None)
+        if best is not None and term_hits(terms, lines[best]) == 0:
+            return None, f"no line in {path} shares a word with the answer"
         if best is not None:
             out = memory({"action": "assist", "attemptId": out["attemptId"], "principal": principal,
                           "reason": f"reviewer picked {path}; citing its own lines that state the answer.",
                           "references": [{"sourceId": sid, "startLine": best + 1, "endLine": best + 1}]})
             if out.get("status") == "error" and out.get("reason") == "agent assist is disabled":
                 return None, ASSIST_DISABLED_HINT
-            passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid]
+            # The file may have changed since connect: the cited reviewed text must still support the answer.
+            passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid and support(p)]
     if not any(p.get("reviewedText") for p in passages):
         return None, f"no passage from {path} itself could be cited"
     return {**out, "passages": sorted(passages, key=support, reverse=True)}, None

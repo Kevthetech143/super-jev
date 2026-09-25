@@ -206,7 +206,7 @@ def _connect(request, config):
         if old and (old['dataset'] != dataset or sorted(old['principals']) != sorted(principals)):
             problem = _problem('scope-change', 'Replacement must retain the same dataset and exact principal scope. Use a separate explicitly authorized connector for a different scope.')
             # A caller already in scope may learn the full scope, so a refresh can keep it unchanged.
-            if old['dataset'] == dataset and set(principals) < set(old['principals']):
+            if old['dataset'] == dataset and principals and set(principals) < set(old['principals']):
                 problem['registeredPrincipals'] = sorted(old['principals'])
             return problem
         if any(name != pointer and row['dataset'] == dataset for name, row in rows.items()):
