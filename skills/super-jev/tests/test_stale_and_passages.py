@@ -123,9 +123,60 @@ def test_lookup_reads_a_pointer_reconnected_before_the_ask(tmp_path, monkeypatch
         return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(pending)}]}
     monkeypatch.setattr(ask, "memory", fake)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
-    monkeypatch.setattr(ah, "reconnect_now", lambda ptr, principal: healed.append(ptr) or "reconnected")
+    monkeypatch.setattr(ah, "reconnect_now", lambda ptr, principal, timeout=None: healed.append(ptr) or "reconnected")
     monkeypatch.setattr(ah, "maybe_heal", lambda *a, **k: pytest.fail("background heal after a reconnect"))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(pending): 0.95}, set(), None, {}))
     ask.lookup("what is on the pending to-do list", "hf", tmp_path / "s")
     out = capsys.readouterr().out
     assert healed == ["p1"] and str(pending) in out and "preparation-required" not in out
+
+
+def test_all_reconnects_in_one_lookup_share_one_time_budget(tmp_path, monkeypatch):
+    # Review of #161: three stale pointers each given 45 s could hang one ask for 2+ minutes.
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
+    clock = [1000.0]
+    monkeypatch.setattr(ask.time, "time", lambda: clock[0])
+
+    def fake(req):
+        if req["action"] == "cached":
+            return {"status": "miss"}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": f"p{i}"} for i in range(3)]}
+        return {"status": "preparation-required"}
+    budgets = []
+
+    def slow(ptr, principal, timeout=None):
+        budgets.append(timeout)
+        clock[0] += timeout  # each reconnect uses its whole budget
+        return "timeout"
+    monkeypatch.setattr(ask, "memory", fake)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
+    monkeypatch.setattr(ah, "reconnect_now", slow)
+    monkeypatch.setattr(ah, "maybe_heal", lambda *a, **k: "in-progress")
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
+    ask.lookup("what is pending", "hf", tmp_path / "s")
+    assert sum(budgets) <= ah.RECONNECT_TIMEOUT_SECS and budgets[0] == ah.RECONNECT_TIMEOUT_SECS
+
+
+def test_rel_floor_is_measured_after_routed_files_are_skipped(tmp_path, monkeypatch):
+    # Review of #161: a routed top file must not set a floor that empties the word slots.
+    top, mid = tmp_path / "epley-home-handout.md", tmp_path / "epley.md"
+    top.write_text("# Epley maneuver at home\nEpley maneuver at home, Epley steps.\n")
+    mid.write_text("Lots about the day. " * 150 + "Did the Epley maneuver once at home.\n")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([top, mid]))
+    found = ask.word_search("how do I do the Epley maneuver at home?", ["p1"], skip={str(top)})
+    assert [p for _, p, _ in found] == [str(mid)]
+
+
+def test_a_failed_reconnect_sets_no_cooldown(tmp_path, monkeypatch):
+    cache_dir, _ = _heal_setup(tmp_path, monkeypatch)
+
+    class Fail:
+        def __init__(self, cmd, **kw):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+    monkeypatch.setattr(ah.subprocess, "Popen", Fail)
+    assert ah.reconnect_now("brain", "hf", cache_dir=cache_dir) == "failed"
+    assert "brain" not in ah._load_state("hf")["pointers"]

@@ -616,7 +616,7 @@ POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file befo
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
 # searched locally for the question's words (typo-tolerant), and the best
 # FALLBACK_FILES get the same content check (kept below CONFIRM_FLOOR as possible).
-FALLBACK_FILES, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.5
+FALLBACK_FILES, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 WORD_RE = re.compile(r"[a-z0-9]+")
 QUERY_STOPWORDS = SUBJECT_STOPWORDS | {
@@ -986,9 +986,11 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP]}
-    # A file under half the best file's score is a weak match: not worth a read slot.
-    floor = ranked[0][0] * FALLBACK_REL_FLOOR if ranked else 0
-    return [r for r in ranked if r[1] not in skip and r[0] >= floor][:limit]
+    # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
+    # Measured against the best file still eligible, i.e. after routed files are skipped.
+    rest = [r for r in ranked if r[1] not in skip]
+    floor = rest[0][0] * FALLBACK_REL_FLOOR if rest else 0
+    return [r for r in rest if r[0] >= floor][:limit]
 
 def confirm(question: str, paths: list):
     """Check each path alone, in parallel. Returns ({path: score} for kept files,
@@ -1248,10 +1250,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
-    reconnected = {}
+    # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup.
+    reconnected, deadline = {}, time.time() + auto_heal.RECONNECT_TIMEOUT_SECS
     for i, (ptr, kind, *_rest) in enumerate(results):
-        if auto_heal.is_stale_kind(kind):
-            reconnected[ptr] = auto_heal.reconnect_now(ptr, principal)
+        left = int(deadline - time.time())
+        if auto_heal.is_stale_kind(kind) and left >= 1:
+            reconnected[ptr] = auto_heal.reconnect_now(ptr, principal, timeout=left)
             if reconnected[ptr] == "reconnected":
                 results[i] = nav(ptr)
     _STAGE["reconnect"] = reconnected
