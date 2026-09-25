@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- Per-stage ask trace: each traces.jsonl line carries `stages` (cache, routing + none-probability, word-search top 10 with fates, read list, per-file chunks/wording/score, near-twin tie-break, final rule); `ask.py --trace-show <id|last>` prints it. No answer changes, no extra Jev calls.
+
 ## 1.0.6 — 2026-09-24
 - #126 live decision traces + Super Jev voice.
 - #128 auto-heal stale pointers.

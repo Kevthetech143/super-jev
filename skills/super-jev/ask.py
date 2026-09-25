@@ -91,6 +91,10 @@ are truncated). The file rotates at ~20MB, keeping one old generation
 it "wrong, added". `ask.py --principal AGENT --trace-report [--days N]`
 prints read-only counts of right/wrong/unlabeled and the top wrong questions
 with their ranked lists -- the input for weekly tuning.
+`ask.py --principal AGENT --trace-show <lookup_id|last>` prints one trace's
+stages (cache, routing + none-probability, word-search top 10 with each
+file's fate, read list, chunks/wording/score per content check, near-twin
+tie-break, final ranking with the rule that kept each file) as plain lines.
 
 JEV'S VOICE: when a lookup returns no usable answer (no confirmed or possible
 file, or only errors), the very last line printed is exactly:
@@ -257,6 +261,87 @@ def write_outcome(sdir: Path, lookup_id, question: str, result: str, file: str =
     if not lookup_id:
         return
     write_trace(sdir, kind="outcome", lookup_id=lookup_id, question=question, result=result, file=file)
+
+# Per-stage detail for the current lookup. Helpers deeper in the pipeline
+# (word_search, confirm_one, the near-twin tie-break) drop what they already
+# computed here; lookup() resets it and copies it into the trace's "stages".
+# Paths and numbers only, lists capped -- never file text. No extra Jev calls.
+STAGE_LIST_CAP = 10
+_STAGE = {}
+
+def _root_none(out) -> "float | None":
+    """Jev's "none of these fits" probability at the catalog root, from a
+    navigation result's own trace (None when the result carries no trace)."""
+    for step in (out.get("trace") or []) if isinstance(out, dict) else []:
+        for ch in (step.get("choices") or []) if isinstance(step, dict) else []:
+            if isinstance(ch, dict) and isinstance(ch.get("none"), (int, float)):
+                return round(ch["none"], 3)
+    return None
+
+def find_trace(sdir: Path, which: str):
+    """The trace line for a lookup id, or the newest trace when which == "last"."""
+    lines = []
+    for name in ("traces.jsonl.1", "traces.jsonl"):
+        p = sdir / name
+        if p.is_file():
+            lines += p.read_text().splitlines()
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("kind") == "trace" and (which == "last" or rec.get("lookup_id") == which):
+            return rec
+    return None
+
+def trace_show(sdir: Path, which: str) -> int:
+    """Read-only: print one lookup's stages as plain lines, so a human can see
+    where a file dropped out."""
+    rec = find_trace(sdir, which)
+    if not rec:
+        print(f"no trace found for {which!r} in {sdir}")
+        return 1
+    st = rec.get("stages") or {}
+    print(f"trace {rec.get('lookup_id')}  {rec.get('ts')}  tier={rec.get('tier')}  "
+          f"{(rec.get('timings') or {}).get('total_secs')}s")
+    print(f"question: {rec.get('question')}")
+    c = st.get("cache") or {}
+    if c:
+        print(f"1 cache: {c.get('result')} ({c.get('checked')} pointer(s) checked)")
+    if not st.get("routing"):
+        if not st:
+            print("(no stage detail: this trace predates --trace-show)")
+        return 0
+    print("2 routing (name + description only; floor %s):" % ROUTE_FLOOR)
+    for ptr, r in st["routing"].items():
+        none = f" none={r['none']}" if r.get("none") is not None else ""
+        files = ", ".join(f"{Path(f['path']).name} {f['score']}{'' if f.get('kept') else ' (under floor)'}"
+                          for f in r.get("files", []))
+        print(f"  [{ptr}] {r.get('status')}{none} {r.get('secs', '')}s" + (f": {files}" if files else ""))
+    for b in st.get("benched", []):
+        print(f"  benched: {b}")
+    w = st.get("word_search") or {}
+    print(f"3 word search terms={w.get('terms')} files={w.get('files_searched')} "
+          f"covering>=50%={w.get('passed_coverage')} slots={FALLBACK_FILES}:")
+    for i, f in enumerate(w.get("top", []), 1):
+        print(f"  {i:2}. {f['score']:7.3f}  {f['path']}  -> {f['fate']}")
+    print(f"4 read list ({len(st.get('read_list', []))}): " + ", ".join(Path(p).name for p in st.get("read_list", [])))
+    print("5 content check (confirm >= %s, possible >= %s):" % (CONFIRM_FLOOR, POSSIBLE_FLOOR))
+    for path, d in (st.get("content_check") or {}).items():
+        chunks = f"chunks {d.get('read')} of {d.get('chunks')}" if d.get("chunks") is not None else "not sent"
+        print(f"  {Path(path).name}: {d.get('verdict')}  best={d.get('best')} none={d.get('none')} "
+              f"{chunks} wording={d.get('wording')}  ({path})")
+    t = st.get("tiebreak") or {}
+    print(f"6 near-twin tie-break: {t.get('result', 'not reached')}" +
+          (f" winner={t['winner']}" if t.get("winner") else ""))
+    print("7 final ranking:")
+    for i, f in enumerate(st.get("final", []), 1):
+        print(f"  {i}. {f['score']}  {f['path']}  [{f['rule']}]")
+    for p in st.get("cut_after_top5", []):
+        print(f"  cut (past top 5): {p}")
+    if not st.get("final"):
+        print("  (nothing kept)")
+    return 0
 
 def trace_report(sdir: Path, days=None) -> int:
     """Read-only: counts of right/wrong/unlabeled traces, and the top wrong
@@ -610,8 +695,12 @@ def confirm_one(question: str, path: str):
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
+    picked = pick_chunks(question, chunks)
+    detail = _STAGE.setdefault("checks", {})[path] = {
+        "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
+        "wording": "exact-value" if label == CONFIRM_LABEL else "answers"}
     leaves = [{"id": f"c{i}", "label": label.format(n=i + 1), "description": chunks[i],
-               "sourceId": str(i)} for i in pick_chunks(question, chunks)]
+               "sourceId": str(i)} for i in picked]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
                "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
                            "nodes": [{"id": "root", "label": "Sources",
@@ -635,6 +724,7 @@ def confirm_one(question: str, path: str):
         return None, partial, None, INCONCLUSIVE
     scores = [c.get("score") for c in body.get("candidates") or [] if isinstance(c, dict)]
     best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
+    detail.update(best=round(best, 3), none=_root_none(body), status=body.get("status"))
     return (best if best >= POSSIBLE_FLOOR else None), partial, None, None
 
 # --- Near-twin tie-break -----------------------------------------------
@@ -711,8 +801,10 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
     winner first, preserving relative order of everything else. Any other
     case -- not enough candidates, gap too wide, not a near-twin pair, an
     inconclusive/errored judge call -- returns top unchanged."""
+    _STAGE["tiebreak"] = {"result": "skipped: fewer than 2 files"}
     if len(top) < 2:
         return top
+    _STAGE["tiebreak"] = {"result": f"skipped: no file within {NEAR_TWIN_GAP} of the top score"}
     head = top[:NEAR_TWIN_FILES]
     # Only files within NEAR_TWIN_GAP of the top score form the cluster: a
     # third result far behind (e.g. 0.9, 0.87, 0.3) is not a near-twin of
@@ -720,6 +812,7 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
     cluster = [head[0]] + [m for m in head[1:] if head[0][0] - m[0] <= NEAR_TWIN_GAP]
     if len(cluster) < 2:
         return top
+    _STAGE["tiebreak"] = {"result": "skipped: top files are not near-twins (folder/name)"}
     if not is_near_twin(cluster[0][1], cluster[1][1]):
         return top
     # A hub file (README/index/etc, see is_hub_file) in the cluster means the
@@ -732,9 +825,13 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
     # to 2 when a new marginal candidate formed a near-twin with the hub
     # README that answered the question) is more likely to override a correct
     # call than fix a wrong one, so hub files sit out the tie-break entirely.
+    _STAGE["tiebreak"] = {"result": "skipped: a hub file is in the cluster"}
     if any(is_hub_file(p) for _, p, _ in cluster):
         return top
     winner = judge_near_twin(question, cluster)
+    _STAGE["tiebreak"] = {"result": f"ran on {len(cluster)} files: " + (
+        "no pick, order unchanged" if not winner else
+        "kept #1" if winner == cluster[0][1] else "moved winner to #1"), "winner": winner}
     if not winner:
         return top
     cluster = sorted(cluster, key=lambda m: m[1] != winner)
@@ -820,7 +917,10 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES) -> l
             continue
         bm25 = sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
         scored.append((round(bm25, 3), path, ptr))
-    return sorted(scored, key=lambda x: (-x[0], x[1]))[:limit]
+    ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
+    _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
+                      "ranked": ranked[:STAGE_LIST_CAP]}
+    return ranked[:limit]
 
 def confirm(question: str, paths: list):
     """Check each path alone, in parallel. Returns ({path: score} for kept files,
@@ -873,14 +973,17 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         return 2
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
+    _STAGE.clear()
     cache = memory({"action": "cached", "principal": principal, "question": question})
+    cache_stage = {"result": cache.get("status"), "checked": len(cache.get("checked") or [])}
     withheld = None
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
                     content_check={}, final_ranked=[], tier="cache" if rc == 0 else "stale",
-                    timings={"total_secs": round(time.time() - t0, 2)})
+                    timings={"total_secs": round(time.time() - t0, 2)},
+                    stages={"cache": {"result": "hit" if rc == 0 else "stale"}})
         if rc == 0:
             return rc
         # The stale answer stays withheld, but the question still gets a fresh live search.
@@ -901,7 +1004,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             secs=round(time.time() - t0, 1))
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
                     content_check={}, final_ranked=[], tier="none",
-                    timings={"total_secs": round(time.time() - t0, 2)}, errors=["nothing-connected"])
+                    timings={"total_secs": round(time.time() - t0, 2)}, errors=["nothing-connected"],
+                    stages={"cache": cache_stage})
         print(VOICE_LINE)
         return 1
 
@@ -918,6 +1022,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             active_pointers.append(ptr)
     pointers = active_pointers
 
+    nav_none = {}
+
     def nav(ptr):
         t_start = time.time()
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
@@ -929,6 +1035,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
             status, reason = out.get("status"), out.get("reason", "")
         elapsed = time.time() - t_start
+        nav_none[ptr] = (_root_none(out), round(elapsed, 2))
         if status == "candidates" and out.get("candidates"):
             return ptr, "candidates", out["candidates"], elapsed, True
         if status in ("candidates", "no-candidates"):
@@ -1102,10 +1209,43 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                                    else "dropped")}
                      for p in checked}
     tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed")
+    try:  # trace detail is best-effort; it must never fail the ask
+        wsearch = _STAGE.get("word") or {}
+        fates = {p: "read" for p in wpaths}
+        stages = {
+            "cache": cache_stage,
+            "routing": {ptr: {"status": kind, "none": nav_none.get(ptr, (None,))[0],
+                              "secs": nav_none.get(ptr, (None, None))[1],
+                              "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0),
+                                         "kept": c.get("score", 0) >= ROUTE_FLOOR} for c in rows][:STAGE_LIST_CAP]}
+                        for ptr, kind, rows, _elapsed, _ok in results},
+            "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
+            "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
+                            "passed_coverage": wsearch.get("passed_coverage"),
+                            "top": [{"score": sc, "path": p,
+                                     "fate": fates.get(p) or ("already routed (used a slot)" if i < FALLBACK_FILES
+                                                              and p in routed[:CONFIRM_FILES]
+                                                              else "not read: past top %d" % FALLBACK_FILES)}
+                                    for i, (sc, p, _ptr) in enumerate(wsearch.get("ranked", []))]},
+            "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
+            "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
+                              for p, v in content_check.items()},
+            "tiebreak": _STAGE.get("tiebreak") or {},
+            "final": [{"score": s, "path": p,
+                       "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
+                                else "hub, ranked last" if p in possible and is_hub_file(p)
+                                else "possible (word search)" if p in possible and p in wpaths
+                                else "possible" if p in possible
+                                else "confirmed >= %s" % CONFIRM_FLOOR)} for s, p, ptr in top],
+            "cut_after_top5": [p for _s, p, _ptr in merged[5:5 + STAGE_LIST_CAP]],
+        }
+    except Exception as e:
+        stages = {"error": type(e).__name__}
     write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing=routing,
                 content_check=content_check,
                 final_ranked=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top],
-                tier=tier, timings={"total_secs": round(time.time() - t0, 2)}, errors=error_lines)
+                tier=tier, timings={"total_secs": round(time.time() - t0, 2)}, errors=error_lines,
+                stages=stages)
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for s, p, ptr in top:
@@ -1597,6 +1737,8 @@ def _main() -> int:
         if not a:
             print(__doc__)
             return 2
+    if a[0] == "--trace-show":
+        return trace_show(sdir, a[1] if len(a) > 1 else "last")
     if a[0] == "--trace-report":
         days = None
         if len(a) >= 3 and a[1] == "--days":
