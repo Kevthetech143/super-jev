@@ -127,6 +127,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -716,6 +717,27 @@ def navigation_command() -> list:
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
     return ["node", str(repo / "src" / "navigation-cli.ts")]
 
+# A file read as several passages is one Jev pick among them plus "none", so an
+# answer spread over two passages (a list, a split table) or a file with several
+# on-topic passages splits its probability: CLOV cousins.md scored 0.47 best
+# passage with "none" at only 0.10 (full-run diag, cause B). The file score adds
+# back SPREAD_CREDIT of the on-topic mass the best passage did not get. Replayed on
+# the 49-question eval (recorded best/none, no new calls): 0.5 (before the tier gate) lifted top-1 41->44
+# and right-confirmed 34->37 with wrong-confirmed unchanged at 2; 0.6 added a wrong
+# confirm and 1.0 (the whole mass) added 4.
+SPREAD_CREDIT, SPREAD_CAP = 0.5, 0.84
+
+def file_score(best: float, none, passages: int, live: bool = False) -> float:
+    """Content score for one file from its best passage and Jev's "none" probability.
+    The spread credit only orders files within a tier: a file is possible only when
+    its best passage alone reaches POSSIBLE_FLOOR and confirms only when it reaches
+    CONFIRM_FLOOR (capped just under it otherwise); live-value asks (balance, right
+    now...) get no credit at all."""
+    if live or passages <= 1 or not isinstance(none, (int, float)) or best < POSSIBLE_FLOOR:
+        return best
+    blended = max(best, best + SPREAD_CREDIT * (1 - none - best))
+    return blended if best >= CONFIRM_FLOOR else min(blended, SPREAD_CAP)
+
 def confirm_one(question: str, path: str):
     """(content score or None, whether the file was too long to read whole, error or None,
     note or None). note is HELD_SECRET (file not sent, not kept) or INCONCLUSIVE (the
@@ -769,7 +791,9 @@ def confirm_one(question: str, path: str):
         head = text[:int(top.get("sourceId") or 0) * CONFIRM_CHUNK + CONFIRM_CHUNK]
         detail["section"] = next((ln.lstrip("# ").strip() for ln in reversed(head.splitlines())
                                   if ln.startswith("#")), "")[:80]
-    return (best if best >= POSSIBLE_FLOOR else None), partial, None, None
+    score = file_score(best, detail["none"], len(picked), is_live_value_question(question))
+    detail["score"] = round(score, 3)
+    return (score if score >= POSSIBLE_FLOOR else None), partial, None, None
 
 # --- Near-twin tie-break -----------------------------------------------
 # When the top 2-3 ranked files are near-twins -- scores within a small gap,
@@ -921,6 +945,74 @@ def passage_words(text: str) -> Counter:
     counts["phone"] += phones
     counts["number"] += phones
     return counts
+
+# Routing costs one Jev call per pointer (about 21 of 29 calls per ask on the
+# 60-question eval). A pointer none of whose files holds a single question word
+# (same matching as term_hits, over path, description and reviewed text) is not
+# asked: on the eval those 222 of 1361 pointer asks never produced a kept file.
+# Each pointer's words are saved per generation, so a refresh re-reads them.
+POINTER_WORDS_FILE = "pointer-words.json"
+# Other words a file may use for a question word; a match on any keeps the pointer.
+PREFILTER_SYNONYMS = {
+    "doctor": ["physician", "pcp", "provider", "clinic", "dr"], "physician": ["doctor", "pcp"],
+    "dad": ["father", "parent"], "father": ["dad"], "mom": ["mother", "mum", "parent"],
+    "mother": ["mom", "mum"], "wife": ["spouse"], "husband": ["spouse"],
+    "car": ["vehicle", "auto"], "vehicle": ["car", "auto"], "meds": ["medication", "prescription"],
+    "medication": ["meds", "prescription", "drug"], "prescriptions": ["medication", "meds", "rx"],
+    "phone": ["number", "tel", "call"], "money": ["cash", "funds", "dollars"], "taxes": ["tax", "irs"],
+}
+
+def _load_pointer_words(path: Path) -> dict:
+    try:
+        saved = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+def pointer_words(sdir: Path, generations: dict) -> tuple:
+    """({pointer: its files' words joined} for pointers known at their current
+    generation, [pointers not known yet]). A pointer whose files could not be
+    listed or read is saved with no words: known, but never skipped."""
+    saved = _load_pointer_words(sdir / POINTER_WORDS_FILE)
+    known, missing = {}, []
+    for p, g in generations.items():
+        entry = saved.get(p) or {}
+        if not g:
+            continue
+        if entry.get("generation") != g:
+            missing.append(p)
+        elif entry.get("words") is not None:
+            known[p] = entry["words"]
+    return known, missing
+
+def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: list) -> None:
+    """List and read the missing pointers' files (local, no provider calls) and save
+    their words. Runs beside routing, so the first ask after a refresh is not slower."""
+    def load(ptr):
+        out = memory({"action": "sources", "pointer": ptr, "principal": principal})
+        if out.get("status") != "ok" or not out.get("sources"):
+            return ptr, None
+        words = set()
+        for src in out["sources"]:
+            head = f"{src.get('originalPath', '')} {src.get('description', '')}".lower()
+            try:
+                words.update(WORD_RE.findall(head + " " + Path(src["path"]).read_text(errors="replace").lower()))
+            except (OSError, KeyError, TypeError):
+                return ptr, None  # a file we cannot read: never skip this pointer
+        return ptr, " ".join(sorted(words))
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, min(len(missing), NAV_CONCURRENCY))) as pool:
+            loaded = list(pool.map(load, missing))
+        path = sdir / POINTER_WORDS_FILE
+        saved = _load_pointer_words(path)
+        for ptr, words in loaded:
+            saved[ptr] = {"generation": generations[ptr], "words": words}
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(saved))
+        tmp.replace(path)
+    except Exception:
+        pass  # best effort: an unsaved pointer is just asked again next time
 
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
@@ -1219,6 +1311,27 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         pointers = [ptr for ptr in pointers
                     if not (files := load_cache_files(ptr)) or not all(other_person(p) for p in files)]
 
+    # Word prefilter: skip routing for pointers that hold none of the question's words.
+    terms = query_terms(question)
+    generations = {p.get("pointer"): p.get("generation") for p in panel.get("pointers", []) if isinstance(p, dict)}
+    generations = {p: generations.get(p) for p in pointers}
+    vocab, unknown = pointer_words(sdir, generations)
+    # Only a question with 2+ words (synonyms counted) all missing skips a pointer,
+    # and never one holding a resolved person's folder ("my mom" -> iris).
+    wide = [[t, *PREFILTER_SYNONYMS.get(t, [])] for t in terms]
+    def no_words(p):
+        v = f" {vocab[p]} "
+        return (not any(f" {name} " in v for name in who)
+                and not any(term_hits(alts, vocab[p]) for alts in wide))
+    _STAGE["prefilter"] = [p for p in pointers if len(terms) >= 2 and p in vocab and no_words(p)]
+    # Word search still sees every pointer: the prefilter only saves routing calls.
+    search_pointers = pointers
+    pointers = [p for p in pointers if p not in _STAGE["prefilter"]]
+    learner = threading.Thread(target=save_pointer_words, args=(sdir, principal, generations, unknown),
+                               daemon=True) if unknown else None
+    if learner:
+        learner.start()
+
     nav_none = {}
 
     def nav(ptr):
@@ -1295,6 +1408,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # text so it never changes what those already say.
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
+    if learner:
+        learner.join()
     _STAGE["person"]["dropped"] = [m[1] for m in merged if other_person(m[1])][:STAGE_LIST_CAP]
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])
                      and not other_person(m[1])), reverse=True)
@@ -1304,8 +1419,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
-    found = word_search(question, pointers, skip=set(routed[:CONFIRM_FILES])
-                        | {p for ptr in pointers for p in load_cache_files(ptr) if other_person(p)})
+    found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
+                        | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
@@ -1455,6 +1570,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
             "person": _STAGE.get("person") or {},
+            "prefilter": (_STAGE.get("prefilter") or [])[:STAGE_LIST_CAP],
             "source_moves": _STAGE.get("source_moves") or [],
             "final": [{"score": s, "path": p,
                        "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
