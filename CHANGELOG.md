@@ -4,7 +4,7 @@
 - Pick trail: `--used last --rank N --answer "..."` logs which listed file an agent used; every 5 picks the claim checker auto-saves CLEAN ones as `agent-pick+check`, unsure ones wait in `--pending-picks`. (#155)
 - `--approve --rank N` / `--file PATH` saves evidence only from the picked file (matched by full path); a same-name file in the same tree (clov/analysis/README.md vs clov/README.md) can no longer supply the quote. If the search has no passage from the picked file, approve refuses.
 - No-candidates wording no longer claims absence: "Super Jev couldn't find it in the connected files. It may still exist" plus an offer to search by hand.
-- Possible tier: a README with a real content score sorts by that score among possible notes (was printed last below 0.60 route-only files). Other hubs still rank last; confirmed-tier rules unchanged. Replay of 558 fleet traces: 1 reorder, 0 top-file flips.
+- Possible tier: a README with a real content score ranks above route-only files (was printed last below 0.60 route-only files), still below any note with a content score (#149). Other hubs still rank last; confirmed-tier rules unchanged. Replay of 558 fleet traces: 1 reorder, 0 top-file flips.
 
 ## 1.0.11 — 2026-09-24
 - Picker noise: test/scratch output (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) is skipped by connect and word search; word search drops already-routed files before taking its top 3, so no slot is wasted; the secret scan's password/api-key `:`/`=` value is held unless it starts with a pointer/placeholder word (in, see, none, vault, `<...>`, `${...}`...) (`PASSWORD: in other-file.md` is prose). (#153)

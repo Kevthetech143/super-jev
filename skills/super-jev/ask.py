@@ -1233,13 +1233,15 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             else:
                 c = scores.get(p)
                 has_content, content, r = (c is not None, c if c is not None else s, route.get(p, 0))
-            # A README already in the possible tier with a real content score
-            # sorts by that score like any possible note (a route-only 0.60 file
-            # printed above a 0.72 README looked unsorted, businessfi retest
-            # 2026-09-24); its tier is unchanged. Other hubs stay last.
+            # Groups: notes with a content score, then a possible README with a
+            # real content score, then route-only notes, then other hubs. The
+            # README still yields to any scored note (#149), but no longer sits
+            # below route-only 0.60 files (businessfi retest 2026-09-24).
             readme_scored = (Path(p).stem.lower() == "readme" and p in possible
                              and scores.get(p, 0) >= POSSIBLE_FLOOR)
-            return (readme_scored or not demoted(p), has_content, round(content, 2), r, path_rank(question, p))
+            group = 0 if demoted(p) and not readme_scored else \
+                2 if readme_scored else 3 if has_content else 1
+            return (group, has_content, round(content, 2), r, path_rank(question, p))
 
         # Non-hub files first (sort_metric's leading True), then content score
         # alone with routing only as a near-tie breaker (see metric_of/better/
