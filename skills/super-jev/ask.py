@@ -2364,7 +2364,15 @@ def _flush_picks(principal: str, sdir: Path) -> int:
         if rc == 0:
             write_outcome(sdir, pick["lookup_id"], pick["question"], "right", file=pick["file"])
         elif why and any(w in why for w in PICK_REFUSED):
+            # A refused pick (TIME_SENSITIVE, stale, secret-held...) used to be
+            # discarded here with only a transient print, so it vanished from
+            # --pending-picks with no trace beyond lookups.jsonl -- a real
+            # refusal ("fair" per the businessfi report) looked identical to a
+            # silent bug. It now stays listed, like an unsure/READ pick, so
+            # --pending-picks always shows why, and a human still confirms or
+            # drops it explicitly instead of it disappearing on its own.
             print(f"pick {pick['id']} dropped: {why}")
+            keep.append({**pick, "why": f"dropped: {why}"})
         else:
             keep.append({**pick, "why": why or "not saved"})
     save_picks(sdir, keep)
