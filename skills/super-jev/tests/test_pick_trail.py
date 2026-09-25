@@ -78,18 +78,36 @@ def test_fifth_pick_flushes_and_saves_clean(world, capsys):
 
 
 @pytest.mark.parametrize("verdict", ["REJECT", "TIME_SENSITIVE"])
-def test_refused_verdict_drops_pick(world, monkeypatch, verdict):
+def test_refused_verdict_stays_listed_with_a_reason(world, monkeypatch, verdict, capsys):
+    """A refused pick used to vanish from --pending-picks with no lasting trace
+    beyond lookups.jsonl (businessfi report, 2026-09-25: a "fair" TIME_SENSITIVE
+    drop looked identical to a silent bug). It now stays listed, like an
+    unsure/READ pick, with the reason printed and visible via --pending-picks
+    until a human confirms or drops it."""
     monkeypatch.setattr(ask, "run_gate", lambda c, p: (verdict, 0.9))
     ask.record_pick("alice", world["sdir"], "last", rank=2, answer="x")
     ask.flush_picks("alice", world["sdir"])
-    assert not world["cache"] and ask.load_picks(world["sdir"]) == []
+    picks = ask.load_picks(world["sdir"])
+    assert not world["cache"]
+    [pick] = picks
+    assert pick["why"] == f"dropped: check gate verdict {verdict} (only CLEAN saves)"
+    capsys.readouterr()
+    ask.pending_picks(world["sdir"])
+    out = capsys.readouterr().out
+    assert f"dropped: check gate verdict {verdict}" in out and "--drop-pick" in out
+    assert ask.settle_pick("alice", world["sdir"], pick["id"], drop=True) == 0
+    assert ask.load_picks(world["sdir"]) == []
 
 
-def test_stale_file_drops_pick(world, monkeypatch):
+def test_stale_file_stays_listed_with_a_reason(world, monkeypatch):
     monkeypatch.setattr(ask, "run_gate", lambda *a: pytest.fail("gate must not run on a stale file"))
     ask.record_pick("alice", world["sdir"], "last", rank=1, answer="x")  # index.md: not in the pointer's sources
     ask.flush_picks("alice", world["sdir"])
-    assert not world["cache"] and ask.load_picks(world["sdir"]) == []
+    picks = ask.load_picks(world["sdir"])
+    assert not world["cache"]
+    [pick] = picks
+    assert pick["why"].startswith("dropped: stale:")
+    assert ask.settle_pick("alice", world["sdir"], pick["id"], drop=True) == 0
 
 
 def test_unsure_stays_listed_then_confirm_or_drop(world, monkeypatch, capsys):
