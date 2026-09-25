@@ -60,3 +60,19 @@ test('an HTTP 400 on a multi-question batch splits it and retries the halves', a
   assert.ok(out.every(r => r.status === 'candidates'));
   assert.equal(inner.sent.length, 3); // 4 refused, then 2 + 2
 });
+
+test('a batch never carries more than the question cap', async () => {
+  const inner = fake();
+  const batched = new BatchingEvaluator(inner, 1_000_000, 2);
+  await Promise.all([0, 1, 2, 3, 4].map(i => navigate(flat(['alpha', `f${i}`]), 'alpha', { transport: batched })));
+  assert.ok(inner.sent.every(r => Object.keys(r.questions).length <= 2));
+  assert.equal(inner.sent.length, 3);
+});
+
+test('a 529 or 429 is retried with backoff, then answers', async () => {
+  const inner = fake();
+  let failures = 1;
+  const flaky = { async evaluate(r: Request, s: AbortSignal) { if (failures-- > 0) throw new Error('Jev HTTP 529'); return inner.evaluate(r, s); } };
+  const out = await navigate(flat(['alpha', 'beta']), 'alpha', { transport: new BatchingEvaluator(flaky), timeoutMs: 10_000 });
+  assert.equal(out.candidates[0]?.sourceId, 'alpha');
+});

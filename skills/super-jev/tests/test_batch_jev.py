@@ -96,6 +96,28 @@ def test_content_checks_ride_one_run_and_one_file_error_stays_its_own(tmp_path, 
     assert error == "Navigation provider timed out" and notes == {files[1]: ask.INCONCLUSIVE}
 
 
+def test_a_failed_batched_run_falls_back_to_one_check_per_file(tmp_path, monkeypatch):
+    files = []
+    for name in ("a", "b"):
+        f = tmp_path / f"{name}.md"
+        f.write_text(f"{name} notes: the gate code is 4411.\n")
+        files.append(str(f))
+    runs = []
+
+    def fake_run(cmd, input, **kw):
+        body = json.loads(input)
+        runs.append(body)
+        if "batch" in body:
+            return subprocess.CompletedProcess(cmd, 2, "", "Navigation input is too large")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(
+            {"status": "candidates", "candidates": [{"score": 0.95, "sourceId": "0"}]}), "")
+
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    scores, _, error, notes = ask.confirm("what is the gate code", files)
+    assert len(runs) == 3 and "batch" in runs[0]
+    assert scores == {files[0]: 0.95, files[1]: 0.95} and error is None and notes == {}
+
+
 def test_number_dense_evidence_under_the_old_char_cap_is_split_not_sent_over_the_ceiling(monkeypatch):
     # Tens of thousands of characters of IDs and amounts: under the old 110k-character
     # guard, but dense enough that one call would run over Jev's token ceiling.

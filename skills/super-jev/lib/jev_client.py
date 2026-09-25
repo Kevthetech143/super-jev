@@ -30,7 +30,7 @@ API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
 # Jev's input ceiling is 32,768 tokens for the state plus the longest question. A
 # character cap sized for prose let number-dense text (IDs, dates, amounts) through
-# over the ceiling, so tokens are estimated on the high side instead (2 UTF-8 bytes each).
+# over the ceiling, so tokens are estimated on the high side instead.
 MAX_INPUT_TOKENS = 30_000
 LINE = 0.80                 # under this confidence a human reads the source
 MAX_QUESTIONS = 255
