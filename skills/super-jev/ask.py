@@ -2368,11 +2368,12 @@ def _flush_picks(principal: str, sdir: Path) -> int:
             # discarded here with only a transient print, so it vanished from
             # --pending-picks with no trace beyond lookups.jsonl -- a real
             # refusal ("fair" per the businessfi report) looked identical to a
-            # silent bug. It now stays listed, like an unsure/READ pick, so
-            # --pending-picks always shows why, and a human still confirms or
-            # drops it explicitly instead of it disappearing on its own.
+            # silent bug. It now stays listed under --pending-picks' "Dropped"
+            # section (tagged "dropped": why) until a human clears it with an
+            # explicit --confirm-pick or --drop-pick, instead of vanishing on
+            # its own the moment the checker runs.
             print(f"pick {pick['id']} dropped: {why}")
-            keep.append({**pick, "why": f"dropped: {why}"})
+            keep.append({**pick, "dropped": why})
         else:
             keep.append({**pick, "why": why or "not saved"})
     save_picks(sdir, keep)
@@ -2380,13 +2381,20 @@ def _flush_picks(principal: str, sdir: Path) -> int:
 
 def pending_picks(sdir: Path) -> int:
     picks = load_picks(sdir)
+    dropped = [r for r in picks if "dropped" in r]
+    unsure = [r for r in picks if "dropped" not in r]
     if not picks:
         print("no pending picks")
-    for r in picks:
+    for r in unsure:
         print(f"{r['id']}  rank {r['rank']}  {r['file']}\n    Q: {r['question']}\n    "
               f"{r.get('why') or 'waiting for batch check'}")
-    if any("why" in r for r in picks):
-        print('confirm: --confirm-pick ID ["answer"]   drop: --drop-pick ID')
+    if dropped:
+        print("\nDropped (not saved):")
+        for r in dropped:
+            print(f"{r['id']}  rank {r['rank']}  {r['file']}\n    Q: {r['question']}\n    "
+                  f"{r['dropped']}")
+    if any("why" in r for r in unsure) or dropped:
+        print('\nconfirm: --confirm-pick ID ["answer"]   drop/clear: --drop-pick ID')
     return 0
 
 def settle_pick(principal: str, sdir: Path, pid: str, answer=None, drop=False) -> int:
