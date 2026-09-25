@@ -143,25 +143,92 @@ def is_stale_kind(kind: str) -> bool:
     return bool(kind) and kind.startswith(("preparation-required", "refresh-required"))
 
 
+def _report_for(pointer: str, cache_dir: Path):
+    """(report, report owner) for a pointer. A split part (<pointer>-N) has no report of its
+    own; its parent's report lists it under "parts", so a stale part heals via its parent."""
+    names = [pointer]
+    base, _, n = pointer.rpartition("-")
+    if base and n.isdigit():
+        names.append(base)
+    for name in names:
+        try:
+            report = json.loads((cache_dir / f"{name}-report.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if name == pointer or any(isinstance(x, dict) and x.get("pointer") == pointer
+                                  for x in report.get("parts") or []):
+            return report, name
+    return None, None
+
+
+RECONNECT_TIMEOUT_SECS = 45
+
+
+def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
+                  timeout: int = RECONNECT_TIMEOUT_SECS) -> str:
+    """Heal a stale pointer inline, before the ask reads it, when nothing needs a redraft.
+
+    The service marks a pointer stale on file bytes (sha256), but maybe_heal skips any
+    pointer whose files all match the prepare cache ("no-change") -- e.g. a background
+    refresh that drafted the files and then did not reconnect, or a file edited and put
+    back -- so such a pointer stayed stale for good. Every file here is already reviewed
+    at its current bytes: the reconnect makes no writer call and runs with
+    --no-findability (no Jev calls). Returns "reconnected", or why not: "no-report",
+    "changed" (a file needs a redraft: use maybe_heal), "in-progress", "cooldown",
+    "timeout" (left running in the background) or "failed". Never raises."""
+    cache_dir = cache_dir or rc.CACHE_DIR
+    report, owner = _report_for(pointer, cache_dir)
+    args = rc.prepare_args(report) if isinstance(report, dict) else None
+    if args is None:
+        return "no-report"
+    cache_path = cache_dir / f"{owner}.json"
+    try:
+        cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
+    except ValueError:
+        cache = {}
+    if rc.changed_files(report, cache):
+        return "changed"
+    state = _load_state(principal)
+    if time.time() - state["pointers"].get(owner, 0) < COOLDOWN_SECS:
+        _log(principal=principal, pointer=owner, action="skip-reconnect", reason="cooldown")
+        return "cooldown"
+    if not _acquire_lock(principal, owner):
+        return "in-progress"
+    cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
+    out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
+    lock_file = str(_lock_path(principal))
+    wrapper = f"{shlex.join(cmd)} >{shlex.quote(str(out_log))} 2>&1; rc=$?; rm -f {shlex.quote(lock_file)}; exit $rc"
+    try:
+        proc = subprocess.Popen(["/bin/sh", "-c", wrapper], cwd=str(HERE), start_new_session=True)
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _log(principal=principal, pointer=owner, action="reconnect", result="timeout", cmd=cmd)
+        return "timeout"
+    except OSError:
+        _release_lock(principal)
+        return "failed"
+    result = "reconnected" if code == 0 else "failed"
+    if code == 0:
+        # Cooldown only after a success: a failed or timed-out reconnect leaves the
+        # pointer eligible for maybe_heal's background refresh.
+        state["pointers"][owner] = time.time()
+        _save_state(principal, state)
+    _log(principal=principal, pointer=owner, action="reconnect", result=result, cmd=cmd)
+    return result
+
+
 def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
                cooldown_secs: int = COOLDOWN_SECS, max_per_hour: int = MAX_PER_HOUR) -> str:
     """Start a bounded background refresh of `pointer` for `principal` if eligible. Returns a
     short reason string: "started", or why it was skipped ("no-report", "no-change",
     "in-progress", "cooldown", "rate-limited"). Never raises, never blocks."""
     cache_dir = cache_dir or rc.CACHE_DIR
-    report_path = cache_dir / f"{pointer}-report.json"
-    if not report_path.is_file():
-        _log(principal=principal, pointer=pointer, action="skip", reason="no-report")
-        return "no-report"
-    try:
-        report = json.loads(report_path.read_text())
-    except ValueError:
-        _log(principal=principal, pointer=pointer, action="skip", reason="no-report")
-        return "no-report"
-    args = rc.prepare_args(report)
+    report, owner = _report_for(pointer, cache_dir)
+    args = rc.prepare_args(report) if isinstance(report, dict) else None
     if args is None:
         _log(principal=principal, pointer=pointer, action="skip", reason="no-report")
         return "no-report"
+    pointer = owner  # a split part refreshes through its parent's recorded recipe
 
     cache_path = cache_dir / f"{pointer}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
