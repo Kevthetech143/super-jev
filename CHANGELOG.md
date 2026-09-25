@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Picker noise: test/scratch output (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) is skipped by connect and word search; word search drops already-routed files before taking its top 3, so no slot is wasted; the secret scan's password/api-key `:`/`=` value is held unless it starts with a pointer/placeholder word (in, see, none, vault, `<...>`, `${...}`...) (`PASSWORD: in other-file.md` is prose).
 - Big notes: a file too long to read whole, routed >= 0.85 and judged on topic (>= 0.5), stays possible with a "start at section" pointer (health-fitness pending.md, 80 KB, was dropped at 0.57). It never outranks a file with a real content score; live-value asks unchanged.
 - "What is on ... list/to-do/backlog" asks use the open "does it answer" wording, not exact-value.
 - Per-stage ask trace: each traces.jsonl line carries `stages` (cache, routing + none-probability, word-search top 10 with fates, read list, per-file chunks/wording/score, near-twin tie-break, final rule); `ask.py --trace-show <id|last>` prints it. No answer changes, no extra Jev calls.

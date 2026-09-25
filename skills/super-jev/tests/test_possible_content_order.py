@@ -35,7 +35,7 @@ def _run(tmp_path, question, files, candidates, scores):
     for p, text in files.items():
         Path(p).write_text(text)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
-    monkeypatch.setattr(ask, "word_search", lambda q, ptrs: [])
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
                         {"pointers": ["p1"]} if r["action"] == "panel" else
                         {"status": "candidates", "candidates": candidates})

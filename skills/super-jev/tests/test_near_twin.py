@@ -149,7 +149,7 @@ def test_single_result_never_calls_judge(monkeypatch):
 def _run_lookup(tmp_path, question, candidates, scores):
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
-    monkeypatch.setattr(ask, "word_search", lambda q, ptrs: [])
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
                         {"pointers": ["p1"]} if r["action"] == "panel" else
                         {"status": "candidates", "candidates": candidates})
