@@ -420,3 +420,52 @@ def test_trace_report_reads_the_rotated_old_generation_too(tmp_path, capsys):
 
     assert rc == 0
     assert "unlabeled: 2" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- per-stage trace
+
+def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_path, monkeypatch, capsys):
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": ["p1"]}
+        if req["action"] == "panel":
+            return {"pointers": ["p1"]}
+        if req["action"] == "navigate":
+            return {"status": "candidates", "candidates": [{"score": 0.7, "originalPath": "/a.md"},
+                                                           {"score": 0.02, "originalPath": "/b.md"}],
+                    "trace": [{"path": ["root"], "choices": [{"nodeId": "root", "none": 0.2}]}]}
+        raise AssertionError(req)
+
+    def fake_word_search(q, ptrs):
+        ask._STAGE["word"] = {"terms": ["knee"], "files_searched": 4, "passed_coverage": 4,
+                              "ranked": [(9.0, "/a.md", "p1"), (8.0, "/w.md", "p1"), (7.0, "/x.md", "p1"),
+                                         (6.0, "/y.md", "p1")]}
+        return [(9.0, "/a.md", "p1"), (8.0, "/w.md", "p1"), (7.0, "/x.md", "p1")]
+
+    def fake_confirm(q, paths):
+        ask._STAGE["checks"] = {"/a.md": {"chunks": 11, "read": [0, 1, 2, 9], "wording": "exact-value",
+                                          "best": 0.93, "none": 0.05}}
+        return {"/a.md": 0.93}, set(), None, {}
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "word_search", fake_word_search)
+    monkeypatch.setattr(ask, "confirm", fake_confirm)
+    ask.lookup("knee code?", "alice", tmp_path)
+    capsys.readouterr()
+
+    st = read_jsonl(tmp_path / "traces.jsonl")[-1]["stages"]
+    assert st["cache"] == {"result": "cache-miss", "checked": 1}
+    assert st["routing"]["p1"]["none"] == 0.2
+    assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, False]
+    fates = [f["fate"] for f in st["word_search"]["top"]]
+    assert fates == ["already routed (used a slot)", "read", "read", "not read: past top 3"]
+    assert st["read_list"] == ["/a.md", "/w.md", "/x.md"]
+    assert st["content_check"]["/a.md"]["read"] == [0, 1, 2, 9]
+    assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"].startswith("confirmed")
+
+    assert ask.trace_show(tmp_path, "last") == 0
+    out = capsys.readouterr().out
+    assert "/y.md  -> not read: past top 3" in out
+    assert "b.md 0.02 (under floor)" in out
+    assert "chunks [0, 1, 2, 9] of 11" in out
+    assert ask.trace_show(tmp_path, "nope") == 1
