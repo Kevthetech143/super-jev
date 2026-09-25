@@ -23,7 +23,10 @@ ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev   # or copy the direc
 ```
 
 `gate` works out of the box: it runs the judge client shipped in this repo
-(`lib/jev_client.py`), which needs only `TYPESAFE_API_KEY`. Two env vars, each
+(`lib/jev_client.py`), which needs only `TYPESAFE_API_KEY`. Evidence too big for one
+Jev call (sized by estimated tokens, not characters) is split into parts checked
+separately: a claim any part supports is SUPPORTED, a contradiction or red
+draft-level label in any part wins, and nothing is truncated. Two env vars, each
 a full shell command, swap in your own tools:
 
 ```bash

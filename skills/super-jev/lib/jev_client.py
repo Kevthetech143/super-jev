@@ -28,9 +28,9 @@ import urllib.request
 
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
-# Jev's input ceiling is 32,768 tokens for the state plus the longest question. Number-
-# dense text (IDs, dates, amounts) runs about 2 characters per token, so a character cap
-# sized for prose failed on it; tokens are estimated at 2 UTF-8 bytes each instead.
+# Jev's input ceiling is 32,768 tokens for the state plus the longest question. A
+# character cap sized for prose let number-dense text (IDs, dates, amounts) through
+# over the ceiling, so tokens are estimated on the high side instead (2 UTF-8 bytes each).
 MAX_INPUT_TOKENS = 30_000
 LINE = 0.80                 # under this confidence a human reads the source
 MAX_QUESTIONS = 255
@@ -80,7 +80,7 @@ RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
 
 
 def estimate_tokens(value) -> int:
-    """A conservative token count: prose runs nearer 3.5 characters per token."""
+    """A deliberately high token count, so dense text is never under-counted."""
     text = value if isinstance(value, str) else json.dumps(value)
     return (len(text.encode("utf-8")) + 1) // 2
 

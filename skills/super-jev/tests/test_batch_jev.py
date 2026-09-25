@@ -97,8 +97,8 @@ def test_content_checks_ride_one_run_and_one_file_error_stays_its_own(tmp_path, 
 
 
 def test_number_dense_evidence_under_the_old_char_cap_is_split_not_sent_over_the_ceiling(monkeypatch):
-    # ~90k characters of IDs and amounts: under the old 110k-character guard, but about
-    # 2 characters a token, so one call would be ~45k tokens and fail at Jev.
+    # Tens of thousands of characters of IDs and amounts: under the old 110k-character
+    # guard, but dense enough that one call would run over Jev's token ceiling.
     rows = "\n".join(f"{i:06d} 2026-09-{i % 28 + 1:02d} {i * 37 % 100000:>8} ACCT-{i * 7919 % 10**8:08d}"
                      for i in range(2400))
     assert 60_000 < len(rows) < 110_000
