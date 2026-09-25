@@ -114,6 +114,6 @@ def test_bare_password_word_is_not_held(text):
 
 @pytest.mark.parametrize("text", ["password: hunter2", "password=" + "hunter2hunter2", "the password is hunter2",
                                   "the password for the router is hunter2", "api_key = abc123",
-                                  "PASSWORD=\"Tr0ub4dor\"", "passwd: x9"])
+                                  "PASSWORD=\"Tr0ub4dor\"", "passwd: x"])
 def test_password_with_a_value_is_still_held(text):
     assert pb.has_secret(text)

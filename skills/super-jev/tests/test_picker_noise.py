@@ -68,12 +68,14 @@ def test_word_search_fills_every_slot_after_skipping_routed_files(tmp_path, monk
     assert len(got) == ask.FALLBACK_FILES and top[0] not in got
 
 
-# 3. secret scan: a keyword followed by a short plain word is prose; real keys still held
+# 3. secret scan: a keyword followed by a pointer/placeholder word is prose; real keys still held
 NOT_SECRET = ["PASSWORD: in other-file.md", "password: see vault", "passwd = none",
-              "API_KEY: in together-ai-secret.md", "client_secret = none", "aws_secret_access_key: in vault"]
+              "API_KEY: in together-ai-secret.md", "client_secret = none", "aws_secret_access_key: in vault",
+              "password: <your password>", "api_key: ${TOGETHER_KEY}", "passwd: n/a", "password: stored in keychain"]
 SECRET = ["api_key: Zq8rTvLmWp4K", "API_KEY=" + "sk-" + "a1B2" * 9, "password: hunter2",
           "password = correcthorsebattery", "passwd: x#y", 'api_key: "Qm9vYmFyYmF6cXV4"',
-          "secret_key=abcdefghij", "client_secret: x#y", "aws_secret_access_key = wJalrXUtnFEMIK7MDENG"]
+          "secret_key=abcdefghij", "client_secret: x#y", "aws_secret_access_key = wJalrXUtnFEMIK7MDENG",
+          "passwd: hunter", "password: kelvin", "api_key: x", "password: instance"]
 
 
 @pytest.mark.parametrize("text", NOT_SECRET)
