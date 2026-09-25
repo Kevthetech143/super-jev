@@ -609,7 +609,7 @@ POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file befo
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
 # searched locally for the question's words (typo-tolerant), and the best
 # FALLBACK_FILES get the same content check (kept below CONFIRM_FLOOR as possible).
-FALLBACK_FILES, FALLBACK_MIN_COVERAGE = 3, 0.5
+FALLBACK_FILES, FALLBACK_MIN_COVERAGE = 5, 0.5
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 WORD_RE = re.compile(r"[a-z0-9]+")
 QUERY_STOPWORDS = SUBJECT_STOPWORDS | {
