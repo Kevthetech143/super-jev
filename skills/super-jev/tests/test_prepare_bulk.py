@@ -1221,3 +1221,37 @@ def test_refresh_drops_removed_file_from_cache_and_reports_it(tmp_path, monkeypa
     saved_cache = json.loads((cache_dir / "my-records.json").read_text())
     assert gone_path not in saved_cache
     assert str(kept) in saved_cache
+
+
+def test_refresh_keeps_the_pointers_registered_principals(tmp_path, monkeypatch):
+    """primary-reference stayed STALE after a refresh naming only `primary`: the harness
+    refused the narrowed scope. The refresh now reconnects with every registered principal."""
+    f = tmp_path / "a.md"
+    f.write_text("# A\n")
+    cache = {str(f): {"description": "a", "labels_ok": False}}
+    sent = []
+
+    def fake_memory(req):
+        if req["action"] == "panel":
+            return {"pointers": ["ref"]}
+        sent.append(list(req["principals"]))
+        if not req.get("reviewed"):
+            return {"status": "preparation-required", "sources": [{"path": str(f), "sha256": "h"}]}
+        if req["principals"] == ["primary"]:
+            return {"status": "preparation-required", "reason": "scope-change",
+                    "registeredPrincipals": ["primary", "primary-helper"]}
+        return {"status": "registered", "pointer": "ref", "sources": [{}]}
+
+    monkeypatch.setattr(pb, "memory", fake_memory)
+    principals = ["primary"]
+    assert pb.connect_part("ref", principals, [f], cache) == {"connected": True}
+    assert sent[-1] == ["primary", "primary-helper"] and principals == ["primary", "primary-helper"]
+
+
+def test_bench_datasets_are_never_inventoried(tmp_path):
+    bench = tmp_path / "super-jev/.local/retrieval-datasets/health-selected-passages"
+    bench.mkdir(parents=True)
+    (bench / "p1.md").write_text("# Passage\ncopied text\n")
+    assert pb.is_bench_dataset(str(bench / "p1.md"))
+    assert not pb.inventory([bench])[0]
+    assert not pb.is_bench_dataset("/Users/x/agents/health-fitness-brain/INDEX.md")

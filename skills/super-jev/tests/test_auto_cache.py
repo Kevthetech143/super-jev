@@ -105,13 +105,15 @@ def test_search_source_mismatch_does_not_save(world, monkeypatch, capsys):
         if req["action"] == "search":
             return {"status": "ready", "approvalTicket": "t1",
                     "passages": [{"sourceId": "OTHER", "reviewedText": "unrelated text"}]}
+        if req["action"] == "assist":
+            return {"status": "error", "reason": "reference does not resolve to reviewed preparation"}
         return orig_memory(req)
 
     monkeypatch.setattr(ask, "memory", mismatched_memory)
     assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     out = capsys.readouterr().out
-    assert "not saved" in out and "differs from the gated file's source" in out
+    assert "not saved" in out and "could be cited" in out
 
 
 def test_low_gate_score_does_not_save(world, monkeypatch, capsys):

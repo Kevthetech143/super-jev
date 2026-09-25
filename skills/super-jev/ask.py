@@ -137,6 +137,7 @@ import prepare_bulk  # noqa: E402
 from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret,  # noqa: E402
                           payload_has_secret, path_has_secret, redact_path_secrets)
 import auto_heal  # noqa: E402
+import refresh_changed  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -916,7 +917,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     for ptr in pointers:
         for path, entry in load_cache_files(ptr).items():
             if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
-                    or prepare_bulk.is_test_material(path)):
+                    or prepare_bulk.is_test_material(path) or prepare_bulk.is_bench_dataset(path)):
                 continue
             try:
                 raw = Path(path).read_bytes()
@@ -980,9 +981,20 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
         return ""
     if "-manual-" in ptr:
         return "; its source changed: re-add it with ask.py --add ... --replace-entry"
-    # prepare_bulk --refresh replays the pointer's recorded roots/excludes/no-recurse/limit itself.
-    return (f"; its files changed since connect. Run: python3 skills/super-jev/prepare_bulk.py "
-            f"--refresh --pointer {ptr} --principal {principal}")
+    # The printed command must run as-is from any folder: the absolute script path plus the
+    # pointer's recorded roots/excludes and every principal it serves (a bare --refresh with
+    # no report is refused for want of --root; one principal short is refused as a scope change).
+    script = Path(__file__).resolve().parent / "prepare_bulk.py"
+    try:
+        report = json.loads((prepare_bulk.CACHE_DIR / f"{ptr}-report.json").read_text())
+        args = refresh_changed.prepare_args(report) if isinstance(report, dict) else None
+    except (OSError, ValueError):
+        args = None
+    if args:
+        return f"; its files changed since connect. Run: {shlex.join(['python3', str(script), *args])}"
+    return (f"; its files changed since connect and it has no recorded recipe. Run: python3 {script} "
+            f"--root DIR --pointer {ptr} --principal {principal} --refresh "
+            "(one --root per connected folder, one --principal per agent it serves)")
 
 def path_rank(question: str, path: str) -> tuple:
     """Tie-break for equal scores: more question words in the file's name or folder
@@ -1126,7 +1138,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # text so it never changes what those already say.
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
-    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR), reverse=True)
+    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])),
+                    reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}
     for s, p, _ in merged:
@@ -1390,6 +1403,35 @@ def approver(sdir: Path, question: str) -> dict:
                 break
     return {"approved_by": "human"}
 
+def file_evidence(principal: str, pointer: str, question: str, answer: str, path: str,
+                  sid, out: dict) -> tuple:
+    """(search/assist result holding only passages from `path`, best-supporting first, or
+    None, why). Search's passages are used when one comes from the file; otherwise the
+    file's own reviewed lines that best match the answer are cited via assisted review,
+    so a confirmed file is never refused just because search ranked another file first."""
+    terms = query_terms(answer) or query_terms(question)
+    support = lambda p: term_hits(terms, p.get("reviewedText") or "")
+    passages = [p for p in out.get("passages") or [] if sid is not None and p.get("sourceId") == sid]
+    if not any(p.get("reviewedText") for p in passages) and sid is not None and out.get("attemptId"):
+        try:
+            lines = Path(path).read_text(errors="replace").splitlines()
+        except OSError:
+            lines = []
+        best = max(range(len(lines)), key=lambda i: term_hits(terms, lines[i]), default=None)
+        if best is not None and term_hits(terms, lines[best]) == 0:
+            return None, f"no line in {path} shares a word with the answer"
+        if best is not None:
+            out = memory({"action": "assist", "attemptId": out["attemptId"], "principal": principal,
+                          "reason": f"reviewer picked {path}; citing its own lines that state the answer.",
+                          "references": [{"sourceId": sid, "startLine": best + 1, "endLine": best + 1}]})
+            if out.get("status") == "error" and out.get("reason") == "agent assist is disabled":
+                return None, ASSIST_DISABLED_HINT
+            # The file may have changed since connect: the cited reviewed text must still support the answer.
+            passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid and support(p)]
+    if not any(p.get("reviewedText") for p in passages):
+        return None, f"no passage from {path} itself could be cited"
+    return {**out, "passages": sorted(passages, key=support, reverse=True)}, None
+
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
                   approved_by: str = "human", **fields) -> int:
     evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
@@ -1483,11 +1525,9 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path,
         return 0
     if out.get("status") != "ready":
         return not_saved(sdir, question, f"search returned {out.get('status')} on {pointer}")
-    top_source_id = next((p.get("sourceId") for p in out.get("passages") or []), None)
-    if top_source_id != gated_source_id:
-        return not_saved(sdir, question,
-                          f"search's top source {top_source_id!r} differs from the gated file's source "
-                          f"{gated_source_id!r} ({evidence_file}); refusing to save mismatched evidence")
+    out, why = file_evidence(principal, pointer, question, answer, evidence_file, gated_source_id, out)
+    if not out:
+        return not_saved(sdir, question, f"{why}; refusing to save evidence the gate did not clear")
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
     return send_approval(principal, question, answer, pointer, out, sdir,
                          approved_by=approved_by, evidence_file=evidence_file, score=score)
@@ -1664,19 +1704,16 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
         return 1
     extra = {"file": chosen["path"]} if chosen else {}
     if chosen:
-        # Evidence must come from the picked file itself: the search's top passages
-        # can belong to a same-name file in the same tree (clov/analysis/README.md
-        # saved for clov/README.md, businessfi retest 2026-09-24). Match by full path.
+        # Evidence must come from the picked file itself (a same-name file in the same
+        # tree must never stand in, businessfi retest 2026-09-24), matched by full path.
         listed = memory({"action": "sources", "pointer": pointer, "principal": principal, "limit": 100})
         sid = next((r.get("sourceId") for r in listed.get("sources") or []
                     if r.get("originalPath") == chosen["path"]), None)
-        passages = [p for p in out.get("passages") or [] if sid is not None and p.get("sourceId") == sid]
-        if not any(p.get("reviewedText") for p in passages):
-            print(f"cannot approve: the search found no passage from {chosen['path']} itself "
-                  "(only other files); use --add with --source to record it manually.")
+        out, why = file_evidence(principal, pointer, question, answer, chosen["path"], sid, out)
+        if not out:
+            print(f"cannot approve: {why}; use --add with --source to record it manually.")
             log(sdir, "approve", question=question, pointer=pointer, result="evidence-mismatch")
             return 1
-        out = {**out, "passages": passages}
     rc = send_approval(principal, question, answer, pointer, out, sdir, **extra)
     if rc == 0:
         top = chosen or find_top(sdir, question)
