@@ -1,10 +1,32 @@
 # Changelog
 
 ## Unreleased
-- Picker noise: test/scratch output (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) is skipped by connect and word search; word search drops already-routed files before taking its top 3, so no slot is wasted; the secret scan's password/api-key `:`/`=` value is held unless it starts with a pointer/placeholder word (in, see, none, vault, `<...>`, `${...}`...) (`PASSWORD: in other-file.md` is prose).
-- Big notes: a file too long to read whole, routed >= 0.85 and judged on topic (>= 0.5), stays possible with a "start at section" pointer (health-fitness pending.md, 80 KB, was dropped at 0.57). It never outranks a file with a real content score; live-value asks unchanged.
-- "What is on ... list/to-do/backlog" asks use the open "does it answer" wording, not exact-value.
-- Per-stage ask trace: each traces.jsonl line carries `stages` (cache, routing + none-probability, word-search top 10 with fates, read list, per-file chunks/wording/score, near-twin tie-break, final rule); `ask.py --trace-show <id|last>` prints it. No answer changes, no extra Jev calls.
+- `--approve --rank N` / `--file PATH` saves evidence only from the picked file (matched by full path); a same-name file in the same tree (clov/analysis/README.md vs clov/README.md) can no longer supply the quote. If the search has no passage from the picked file, approve refuses.
+- No-candidates wording no longer claims absence: "Super Jev couldn't find it in the connected files. It may still exist" plus an offer to search by hand.
+- Possible tier: a README with a real content score sorts by that score among possible notes (was printed last below 0.60 route-only files). Other hubs still rank last; confirmed-tier rules unchanged. Replay of 558 fleet traces: 1 reorder, 0 top-file flips.
+
+## 1.0.11 — 2026-09-24
+- Picker noise: test/scratch output (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) is skipped by connect and word search; word search drops already-routed files before taking its top 3, so no slot is wasted; the secret scan's password/api-key `:`/`=` value is held unless it starts with a pointer/placeholder word (in, see, none, vault, `<...>`, `${...}`...) (`PASSWORD: in other-file.md` is prose). (#153)
+- Big notes: a file too long to read whole, routed >= 0.85 and judged on topic (>= 0.5), stays possible with a "start at section" pointer (health-fitness pending.md, 80 KB, was dropped at 0.57). It never outranks a file with a real content score; live-value asks unchanged. (#152)
+- "What is on ... list/to-do/backlog" asks use the open "does it answer" wording, not exact-value. (#152)
+
+## 1.0.10 — 2026-09-24
+- Per-stage ask trace: each traces.jsonl line carries `stages` (cache, routing + none-probability, word-search top 10 with fates, read list, per-file chunks/wording/score, near-twin tie-break, final rule); `ask.py --trace-show <id|last>` prints it. No answer changes, no extra Jev calls. (#151)
+
+## 1.0.9 — 2026-09-24
+- #150 prepare_bulk: legacy-report refresh keeps its recorded file set.
+
+## 1.0.8 — 2026-09-24
+- #149 auto-cache gates on claim verdict; a confirmed README ranks as evidence.
+- #148 refresh replays stored recipe; STALE falls through to live search; skills --request.
+
+## 1.0.7 — 2026-09-24
+- #144 `--approve` can pick any listed candidate (`--rank N` / `--file PATH`).
+- #145 GitHub connector: export a repo's PR/issue/commit/release history and connect it.
+- #138 prepare_bulk: a big folder refresh can pass --max-files on cache reuse.
+- #137 circuit breaker no longer benches stale (preparation-required) pointers.
+- #136 --followup requires the proposed file to match the question subject.
+- #139 CI: HOL plugin scanner. #147 manuals for v1.0.7.
 
 ## 1.0.6 — 2026-09-24
 - #126 live decision traces + Super Jev voice.
