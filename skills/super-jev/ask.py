@@ -625,6 +625,13 @@ LIVE_HOWMUCH_RE = re.compile(
 # Routing score at/above which a read file stays "possible" even when the content
 # check finds no answer (opinion asks like "should I invest" rarely read as answered).
 ROUTE_KEEP = 0.8
+# A file too big to read whole (health-fitness pending.md: 80 KB, 24 chunks) is
+# judged on 4 chunks, so the answer may sit in a chunk never read. When routing
+# is sure (>= BIG_ROUTE_KEEP) and the read passages were on topic (>= BIG_ON_TOPIC),
+# it stays possible. A big file scoring under BIG_ON_TOPIC (CLOV.md for a
+# meeting it never mentions) is still dropped.
+BIG_ROUTE_KEEP, BIG_ON_TOPIC = 0.85, 0.5
+BIG_NOTE = "  (possible: strongly routed, file too long to read whole; start at section: %s)"
 # Final order blends content and routing so a strong route is not thrown away.
 CONTENT_WEIGHT, ROUTE_WEIGHT = 0.6, 0.4
 # Word search only: vague words that name a file's topic in other words.
@@ -666,12 +673,20 @@ OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|
 WHAT_ANSWER_RE = re.compile(
     r"\bwhat\b.{0,40}\b(say|says|said|cover|covers|mean|means|discover|discovered|"
     r"discuss|discusses|find|found|include|includes|show|shows|about)\b", re.I)
+# "what is on the pending to-do list" wants the list, not one exact value: the
+# exact-value wording scored the right 80 KB pending.md 0.57 (live trace
+# 2026-09-24), so list/to-do/backlog asks get the open wording too.
+# Only "what is on ... list": "what is the phone number ... on the referral list"
+# still wants one exact value.
+LIST_RE = re.compile(r"\bwhat('?s|s| is| are)?\s+on\b.{0,50}\b(list|lists|to-?dos?|backlog|checklist)\b",
+                     re.I)
 
 def confirm_label(question: str) -> str:
     """Open how/should/why/when/which/where questions, and "what ... say/cover/mean"
     style casual asks, ask "does it answer"; the rest (and any value question) ask
     for the exact value."""
-    open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)) \
+    open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)
+              or LIST_RE.search(question)) \
         and not is_value_question(question)
     return ANSWER_LABEL if open_q else CONFIRM_LABEL
 HELD_SECRET = "contains a secret; not sent"
@@ -725,6 +740,15 @@ def confirm_one(question: str, path: str):
     scores = [c.get("score") for c in body.get("candidates") or [] if isinstance(c, dict)]
     best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
     detail.update(best=round(best, 3), none=_root_none(body), status=body.get("status"))
+    # A file too big to read whole whose chosen passages were on topic but under
+    # the possible floor records its best section; lookup keeps it as possible
+    # only if it was strongly routed (BIG_ROUTE_KEEP).
+    if len(chunks) > CONFIRM_CHUNKS_PER_FILE and BIG_ON_TOPIC <= best < POSSIBLE_FLOOR:
+        top = max((c for c in body.get("candidates") or [] if isinstance(c, dict)
+                   and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"])
+        head = text[:int(top.get("sourceId") or 0) * CONFIRM_CHUNK + CONFIRM_CHUNK]
+        detail["section"] = next((ln.lstrip("# ").strip() for ln in reversed(head.splitlines())
+                                  if ln.startswith("#")), "")[:80]
     return (best if best >= POSSIBLE_FLOOR else None), partial, None, None
 
 # --- Near-twin tie-break -----------------------------------------------
@@ -1127,6 +1151,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
                         and scores.get(p, 0) < CONFIRM_FLOOR:
                     possible[p] = POSSIBLE_NOTE
+            for p in to_check:
+                section = _STAGE.get("checks", {}).get(p, {}).get("section")
+                if section is not None and route.get(p, 0) >= BIG_ROUTE_KEEP \
+                        and p not in notes and p not in possible:
+                    possible[p] = BIG_NOTE % (section or "top of file")
         def demoted(p: str) -> bool:
             """A hub file (is_hub_file) ranks as a table of contents -- except a
             README whose own content check CONFIRMED the answer: that README is
