@@ -61,14 +61,6 @@ test('an HTTP 400 on a multi-question batch splits it and retries the halves', a
   assert.equal(inner.sent.length, 3); // 4 refused, then 2 + 2
 });
 
-test('a batch never carries more than the question cap', async () => {
-  const inner = fake();
-  const batched = new BatchingEvaluator(inner, 1_000_000, 2);
-  await Promise.all([0, 1, 2, 3, 4].map(i => navigate(flat(['alpha', `f${i}`]), 'alpha', { transport: batched })));
-  assert.ok(inner.sent.every(r => Object.keys(r.questions).length <= 2));
-  assert.equal(inner.sent.length, 3);
-});
-
 test('a 529 or 429 is retried with backoff, then answers', async () => {
   const inner = fake();
   let failures = 1;

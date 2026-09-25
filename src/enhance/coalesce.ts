@@ -4,10 +4,9 @@ import type { Evaluation, Evaluator, Request } from '../types.ts';
  * Estimated input budget for one batched Jev call. Jev's documented ceiling is
  * 32k tokens for the state plus the longest question. Tokens are estimated on the
  * high side so number-dense text is never under-counted, and a batch is kept under
- * this many estimated tokens and this many questions.
+ * this many estimated tokens.
  */
 export const BATCH_TOKEN_BUDGET = 30_000;
-export const BATCH_MAX_QUESTIONS = 50;
 /** Overloaded (529) and rate-limited (429) calls are retried with backoff. */
 const RETRY_ATTEMPTS = 4;
 const RETRY_FIRST_DELAY_MS = 1_000;
@@ -31,8 +30,7 @@ export class BatchingEvaluator implements Evaluator {
   private scheduled = false;
   private inner: Evaluator;
   private budget: number;
-  private maxQuestions: number;
-  constructor(inner: Evaluator, budget = BATCH_TOKEN_BUDGET, maxQuestions = BATCH_MAX_QUESTIONS) { this.inner = inner; this.budget = budget; this.maxQuestions = maxQuestions; }
+  constructor(inner: Evaluator, budget = BATCH_TOKEN_BUDGET) { this.inner = inner; this.budget = budget; }
 
   evaluate(request: Request, signal: AbortSignal): Promise<Evaluation> {
     return new Promise((resolve, reject) => {
@@ -55,13 +53,11 @@ export class BatchingEvaluator implements Evaluator {
     for (const items of groups.values()) {
       const stateTokens = estimateTokens(items[0]!.request.state);
       let batch: Pending[] = [];
-      let used = stateTokens, count = 0;
+      let used = stateTokens;
       for (const item of items) {
-        const n = Object.keys(item.request.questions).length;
-        if (batch.length && (used + item.tokens > this.budget || count + n > this.maxQuestions)) { void this.send(batch); batch = []; used = stateTokens; count = 0; }
+        if (batch.length && used + item.tokens > this.budget) { void this.send(batch); batch = []; used = stateTokens; }
         batch.push(item);
         used += item.tokens;
-        count += n;
       }
       if (batch.length) void this.send(batch);
     }
