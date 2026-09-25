@@ -2,9 +2,9 @@ import type { Evaluation, Evaluator, Request } from '../types.ts';
 
 /**
  * Estimated input budget for one batched Jev call. Jev's documented ceiling is
- * 32k tokens for the state plus the longest question; number-dense text runs
- * about 2 characters per token, so tokens are estimated at 2 UTF-8 bytes each
- * (an over-count for prose) and a batch is kept under this many estimated tokens.
+ * 32k tokens for the state plus the longest question. Tokens are estimated on the
+ * high side (2 UTF-8 bytes each) so number-dense text is never under-counted, and
+ * a batch is kept under this many estimated tokens.
  */
 export const BATCH_TOKEN_BUDGET = 30_000;
 const QUESTION_OVERHEAD = 20;
