@@ -616,7 +616,7 @@ POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file befo
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
 # searched locally for the question's words (typo-tolerant), and the best
 # FALLBACK_FILES get the same content check (kept below CONFIRM_FLOOR as possible).
-FALLBACK_FILES, FALLBACK_MIN_COVERAGE = 5, 0.5
+FALLBACK_FILES, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.5
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 WORD_RE = re.compile(r"[a-z0-9]+")
 QUERY_STOPWORDS = SUBJECT_STOPWORDS | {
@@ -911,10 +911,22 @@ def load_cache_files(pointer: str) -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
+# A written phone number ("212-305-6390") counts as the words "phone" and "number": a note lists
+# the number without ever saying "phone" (NYP ENT line in the medical timeline).
+PHONE_RE = re.compile(r"(?<!\d)\(?\d{3}\)?[-. ]\d{3}[-.]\d{4}(?!\d)")
+
+def passage_words(text: str) -> Counter:
+    counts = Counter(WORD_RE.findall(text.lower()))
+    phones = len(PHONE_RE.findall(text))
+    counts["phone"] += phones
+    counts["number"] += phones
+    return counts
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
-    files best matching the question's words (BM25; a file's path, description and
-    stored question count triple). Typos match a close word (difflib). A file must
+    files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
+    scores its best passage; a file's path, description and stored question count triple
+    in every passage). Typos match a close word (difflib). A file must
     cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered. Test/scratch
     output is never searched; `skip` paths (already routed) are dropped before the top `limit`."""
     terms = query_terms(question)
@@ -936,10 +948,10 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
             head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                              str(entry.get("description") or ""), str(entry.get("question") or "")])
-            counts = Counter(WORD_RE.findall(text.lower()))
-            for w in WORD_RE.findall(head.lower()):
-                counts[w] += 3
-            docs[path] = (ptr, counts, sum(counts.values()))
+            head_words = Counter(w for w in WORD_RE.findall(head.lower()) for _ in range(3))
+            passages = [passage_words(text[i:i + CONFIRM_CHUNK]) + head_words
+                        for i in range(0, len(text), CONFIRM_CHUNK)] or [Counter(head_words)]
+            docs[path] = (ptr, sum(passages, Counter()), [(c, sum(c.values())) for c in passages])
     if not docs:
         return []
     vocab = sorted(set().union(*(c.keys() for _, c, _ in docs.values())))
@@ -950,24 +962,33 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         variants[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
         # A synonym counts as a match for its source word, not as an extra word.
         variants[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
-    tf = {path: {t: sum(c.get(v, 0) for v in variants[t]) for t in terms} for path, (_, c, _) in docs.items()}
-    n, avg = len(docs), sum(size for _, _, size in docs.values()) / len(docs)
+    def tf_of(c):
+        return {t: sum(c.get(v, 0) for v in variants[t]) for t in terms}
+    tf = {path: tf_of(c) for path, (_, c, _) in docs.items()}
+    n = len(docs)
+    sizes = [size for _, _, parts in docs.values() for _, size in parts]
+    avg = sum(sizes) / len(sizes) or 1
     idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
            for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
     # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
     # them out of the coverage total so they do not sink every file.
     total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
     scored = []
-    for path, (ptr, _, size) in docs.items():
+    for path, (ptr, _, parts) in docs.items():
         f = tf[path]
         if sum(idf[t] for t in terms if f[t]) / total < FALLBACK_MIN_COVERAGE:
             continue
-        bm25 = sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
+        # Scored per passage, best passage wins: whole-file BM25 sank a long file
+        # (36 KB medical timeline) whose one passage held every question word.
+        bm25 = max(sum(idf[t] * pf[t] * 2.2 / (pf[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
+                   for pf, size in ((tf_of(c), size) for c, size in parts))
         scored.append((round(bm25, 3), path, ptr))
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP]}
-    return [r for r in ranked if r[1] not in skip][:limit]
+    # A file under half the best file's score is a weak match: not worth a read slot.
+    floor = ranked[0][0] * FALLBACK_REL_FLOOR if ranked else 0
+    return [r for r in ranked if r[1] not in skip and r[0] >= floor][:limit]
 
 def confirm(question: str, paths: list):
     """Check each path alone, in parallel. Returns ({path: score} for kept files,
@@ -1225,6 +1246,15 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # calls run at once; SUPERJEV_NAV_TIMEOUT_MS (read by navigation-cli itself) raises
     # how long each one is allowed to wait.
     results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
+    # A stale pointer whose files are all already reviewed at their current bytes needs no
+    # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
+    reconnected = {}
+    for i, (ptr, kind, *_rest) in enumerate(results):
+        if auto_heal.is_stale_kind(kind):
+            reconnected[ptr] = auto_heal.reconnect_now(ptr, principal)
+            if reconnected[ptr] == "reconnected":
+                results[i] = nav(ptr)
+    _STAGE["reconnect"] = reconnected
     merged, errored, statuses = [], 0, {}
     for ptr, kind, rows, elapsed, ok in results:
         record_pointer_outcome(health, ptr, ok, elapsed, stale=_is_stale_kind(kind))
