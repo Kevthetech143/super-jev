@@ -81,7 +81,7 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 - Before you state a fact from their files: run `ask`, open the top file, read it.
 - Before you send an answer: run `check` with each claim and the file you read.
   Only exit 0 is a pass.
-- Nothing found means say "not in your files", never a guess.
+- Nothing found means say "Super Jev couldn't find it; it may still exist" and offer to search by hand, never a guess.
 - When their files change, run step 4 again with `--refresh`.
 - After you answer, run `ask.py --principal me --answer "question" "your answer"`: it
   saves the answer only if the check gate calls it CLEAN against the fresh top file
