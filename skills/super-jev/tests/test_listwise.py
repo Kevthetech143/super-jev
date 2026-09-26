@@ -260,11 +260,34 @@ def test_none_pick_keeps_confirmed_file_but_not_as_confirmed(tmp_path):
     assert sdir.exists()
 
 
-def test_pick_keeps_confirmed_only_when_it_agrees(tmp_path):
+def _two_confirmed(tmp_path, prob):
     a, b = tmp_path / "a.md", tmp_path / "b.md"
     a.write_text("x")
     b.write_text("y")
     top = _run_lookup(tmp_path, "what is the answer",
                       [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
-                      {str(a): 0.95, str(b): 0.90}, listwise_winner_prob=(str(a), 0.8))
-    assert [(t["path"], t["possible"]) for t in top] == [(str(a), False), (str(b), True)]
+                      {str(a): 0.95, str(b): 0.90}, listwise_winner_prob=(str(a), prob))
+    return [(t["path"], t["possible"]) for t in top], str(a), str(b)
+
+
+def test_strong_pick_demotes_other_confirmed(tmp_path):
+    got, a, b = _two_confirmed(tmp_path, 0.95)
+    assert got == [(a, False), (b, True)]
+
+
+def test_weak_pick_keeps_other_confirmed(tmp_path):
+    got, a, b = _two_confirmed(tmp_path, 0.71)
+    assert got == [(a, False), (b, False)]
+
+
+def test_blocked_pick_keeps_confirmed(tmp_path):
+    """t11, 2026-09-26: a blocked hub pick must not demote the right confirmed file."""
+    readme = tmp_path / "docs/README.md"
+    note = tmp_path / "docs/cli.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("index of docs")
+    note.write_text("cli usage")
+    top = _run_lookup(tmp_path, "how do I use the cli",
+                      [{"score": 0.9, "originalPath": str(readme)}, {"score": 0.8, "originalPath": str(note)}],
+                      {str(readme): 0.98, str(note): 0.96}, listwise_winner_prob=(str(readme), 0.95))
+    assert (top[0]["path"], top[0]["possible"]) == (str(note), False)
