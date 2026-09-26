@@ -971,3 +971,28 @@ def test_approve_hand_picked_file_changed_since_connect_is_refused(tmp_path, mon
     assert ask.approve("alice", "q", "ans", tmp_path, rank=2) == 1
     assert not any(c["action"] in ("open", "approve") for c in calls)
     assert "stale" in capsys.readouterr().out
+
+
+def test_reviewed_dataset_copy_from_its_own_pointer_is_kept(tmp_path, monkeypatch, capsys):
+    """A reviewed dataset's pointer answers with its prepared copy under
+    .local/retrieval-datasets/. That copy is the answer; routing must not drop it
+    for where it lives (it used to vanish, leaving only weaker hits)."""
+    copy = "/Users/x/super-jev/.local/retrieval-datasets/brain-reviewed/operations-08.txt"
+
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": "brain-reviewed"}, {"pointer": "skills"}]}
+        if req["action"] == "navigate" and req["pointer"] == "brain-reviewed":
+            return {"status": "candidates", "candidates": [{"score": 0.99, "originalPath": copy}]}
+        if req["action"] == "navigate" and req["pointer"] == "skills":
+            return {"status": "candidates", "candidates": [{"score": 0.5, "originalPath": "/other.md"}]}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    rc = ask.lookup("when enqueue returns nothing was it sent?", "alice", tmp_path)
+
+    assert rc == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip() and l.strip()[0].isdigit()]
+    assert copy in lines[0] and "[brain-reviewed]" in lines[0]
