@@ -64,8 +64,9 @@ python3 skills/super-jev/prepare_bulk.py \
   --root /path/to/folder --pointer MYPOINTER --principal ME --writer builtin
 ```
 
-Success: one `PASS` line per file, then `connect: registered pointer=MYPOINTER`
-and `findability: N/N files rank first on their own question`.
+Success: one `PASS` line per file, then `connect: registered pointer=MYPOINTER`.
+Add `--findability` to also search each file's own sample question and report
+`findability: N/N files rank first on their own question` (one paid search per file).
 
 Each file gets a one-sentence description, and Jev checks that description
 against the file before it is connected. Pick the description writer:
