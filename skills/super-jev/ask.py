@@ -1969,7 +1969,8 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict) 
     topic, which files were read (closest first), and the exact commands to
     connect a missing folder or save a known answer."""
     on_topic = sorted(ptr for ptr, r in routing.items() if r.get("status") == "candidates")
-    read = sorted(content_check, key=lambda p: -(content_check[p].get("score") or 0))
+    read = sorted((p for p in content_check if content_check[p].get("label") != "held-secret"),
+                  key=lambda p: -(content_check[p].get("score") or 0))
     lines = ["What was searched:",
              f"  - {total} connected sets; {len(routing)} searched after the topic filter, {len(on_topic)} had matches"
              + (": " + ", ".join(on_topic[:5]) + (" ..." if len(on_topic) > 5 else "") if on_topic else "")]
