@@ -37,7 +37,8 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
      --pointer my-notes --principal me --writer builtin
    ```
 
-   Success: `connect: registered pointer=my-notes` and a `findability:` line.
+   Success: `connect: registered pointer=my-notes` (add `--findability` for a
+   `findability:` report; it costs one search per file).
    `--writer builtin` writes each file's description from its own headings, so
    the TypeSafe key is all you need. If the `claude` CLI is installed and logged
    in, you can drop that flag to get model-written descriptions instead.
