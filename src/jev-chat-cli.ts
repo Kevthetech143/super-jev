@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import {
   loadConfig, saveConfig, configPath, hasApiKey,
   cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
-  parseMissCandidate, formatMissCandidateReply,
+  parseMissCandidate, formatMissCandidateReply, parseMissReport,
   MISS_LINE, HELP_TEXT,
   type SuperJevConfig,
 } from './jev-chat-config.ts';
@@ -90,7 +90,7 @@ async function runSetup(existing: SuperJevConfig): Promise<SuperJevConfig> {
   return next;
 }
 
-async function handleQuestion(question: string, principal: string, apiKey?: string) {
+async function handleQuestion(question: string, principal: string) {
   const s = spinner();
   s.start('Super Jev is thinking');
   const hit = runAskPy(askLookupArgs(principal, question));
@@ -112,34 +112,14 @@ async function handleQuestion(question: string, principal: string, apiKey?: stri
     return;
   }
 
-  // True miss (no candidates at all, or ask.py/network unavailable): try one
-  // live call, then cache it.
-  s.message('No cache hit, trying a live lookup');
-  let liveAnswer: string | null = null;
-  const key = apiKey || process.env.TYPESAFE_API_KEY;
-  if (key) {
-    try {
-      const { Jev } = await import('./jev.ts');
-      const jev = new Jev({ apiKey: key });
-      const evaluation = await jev.evaluate(
-        { model: 'jev-latest', question, answers: [{ id: 'a', text: question }] } as any,
-        new AbortController().signal,
-      );
-      liveAnswer = JSON.stringify(evaluation).slice(0, 500);
-    } catch (err) {
-      liveAnswer = null;
-    }
-  }
-  s.stop('Done.');
-
-  if (liveAnswer) {
-    // Not cached: this is a raw Jev evaluation (a grade), not an answer, and
-    // writing it with --add would poison the approved-answer cache.
-    console.log(pc.bold('Answer (live): ') + liveAnswer);
-    return;
-  }
-
+  // True miss (no candidates at all, or ask.py/network unavailable): no live
+  // call -- a single-question evaluation can't answer anything and would
+  // just cost money. Show ask.py's own miss report (what was searched, and
+  // the next step to take) instead.
+  s.stop('No saved answer yet.');
+  const missReport = parseMissReport(hit.stdout);
   console.log();
+  if (missReport) console.log(missReport.join('\n'));
   console.log(pc.yellow(MISS_LINE));
   if (hit.stderr) console.log(pc.dim(hit.stderr.trim().split('\n').slice(0, 3).join('\n')));
 }
@@ -193,7 +173,7 @@ async function main() {
     const canned = cannedReply(line);
     if (canned) { console.log(pc.bold('Super Jev: ') + canned); continue; }
 
-    await handleQuestion(line, principal, config.typesafeApiKey);
+    await handleQuestion(line, principal);
   }
 }
 

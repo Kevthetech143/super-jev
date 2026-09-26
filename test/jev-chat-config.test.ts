@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import {
   loadConfig, saveConfig, configFileMode, hasApiKey,
   cannedReply, parseSlashCommand, isKnownSlashCommand,
-  parseMissCandidate, formatMissCandidateReply,
+  parseMissCandidate, formatMissCandidateReply, parseMissReport,
   MISS_LINE,
 } from '../src/jev-chat-config.ts';
 
@@ -158,4 +158,37 @@ test('formatMissCandidateReply names the top file and gives a one-line why, not 
   assert.match(reply, /\/notes\/pricing\.md/);
   assert.match(reply, /no approved answer/);
   assert.doesNotMatch(reply, /\[kelvin-notes\]/);
+});
+
+test('parseMissReport extracts the searched/next-step block from a true-miss ask.py run', () => {
+  const stdout = [
+    'no-candidates across 3 pointers: Super Jev could not find it in the connected files.',
+    'What was searched:',
+    '  - 3 connected sets; 2 searched after the topic filter, 1 had matches: kelvin-notes',
+    '  - 2 file(s) read; none contained the answer. Closest: notes/pricing.md, notes/other.md',
+    'Next step (pick one):',
+    '  - The answer is in a file you have: it is probably not connected. Connect its folder:',
+    '      python3 prepare_bulk.py --root <folder> --pointer kelvin-<name> --principal kelvin',
+    '  - You know the answer: save it for next time:',
+    '      python3 ask.py --principal kelvin --add "<question>" "<answer>"',
+    '  - Neither: tell your human it was not found and offer to search by hand.',
+    MISS_LINE,
+    '',
+  ].join('\n');
+  const report = parseMissReport(stdout);
+  assert.ok(report);
+  assert.equal(report[0], 'What was searched:');
+  assert.match(report.join('\n'), /Next step \(pick one\):/);
+  assert.match(report.join('\n'), /Connect its folder/);
+  // The closing voice line is printed separately by the CLI, not duplicated here.
+  assert.doesNotMatch(report.join('\n'), new RegExp(MISS_LINE.replace(/[.?]/g, '\\$&')));
+});
+
+test('parseMissReport returns null when ask.py predates the miss-report block', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  assert.equal(parseMissReport(stdout), null);
+});
+
+test('parseMissReport returns null on a cache hit', () => {
+  assert.equal(parseMissReport('CACHE HIT\nanswer: foo\n'), null);
 });
