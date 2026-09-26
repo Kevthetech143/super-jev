@@ -1694,9 +1694,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
     found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
                         | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
+    # Only the routed files the content check reads can stand in for a word hit's other spelling.
+    wreals = {os.path.realpath(p): p for p in routed[:CONFIRM_FILES]}
     wpaths = {}
     for _, p, ptr in found:
-        if reals.setdefault(os.path.realpath(p), p) == p:
+        if wreals.setdefault(os.path.realpath(p), p) == p:
             wpaths[p] = ptr
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
