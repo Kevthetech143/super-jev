@@ -139,6 +139,23 @@ export function formatMissCandidateReply(candidate: MissCandidate): string {
   return `Top file: ${candidate.path} -- closest match we found (score ${candidate.score.toFixed(2)}), but no approved answer is saved for this yet.`;
 }
 
+// ---------------------------------------------------------------------------
+// True-miss report parsing -- ask.py's no-candidates miss prints a
+// "What was searched:" / "Next step (pick one):" block (see ask.py's
+// miss_report()) before its closing voice line. The chat CLI shows that
+// block to the user instead of making a paid live call that cannot answer
+// anything on a true miss. Returns null if ask.py's output predates that
+// block (older ask.py) so callers can fall back cleanly.
+// ---------------------------------------------------------------------------
+export function parseMissReport(stdout: string): string[] | null {
+  const lines = stdout.split('\n');
+  const startIdx = lines.findIndex((l) => l.trim() === 'What was searched:');
+  if (startIdx === -1) return null;
+  const report = lines.slice(startIdx).filter((l) => l.trim() !== MISS_LINE.trim());
+  while (report.length && report[report.length - 1].trim() === '') report.pop();
+  return report.length ? report : null;
+}
+
 export const HELP_TEXT = `Super Jev commands:
   /help     show this help
   /setup    re-run first-time setup (API key, principal, folders)
