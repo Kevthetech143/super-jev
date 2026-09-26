@@ -837,6 +837,10 @@ def confirm_finish(question: str, ctx: dict, body, error):
     scores = [c.get("score") for c in body.get("candidates") or [] if isinstance(c, dict)]
     best = max((sc for sc in scores if isinstance(sc, (int, float))), default=0)
     detail.update(best=round(best, 3), none=_root_none(body), status=body.get("status"))
+    top_c = max((c for c in body.get("candidates") or [] if isinstance(c, dict)
+                 and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"], default=None)
+    if top_c and str(top_c.get("sourceId", "")).isdigit():
+        detail["best_chunk"] = int(top_c["sourceId"])
     # A file too big to read whole whose chosen passages were on topic but under
     # the possible floor records its best section; lookup keeps it as possible
     # only if it was strongly routed (BIG_ROUTE_KEEP).
@@ -918,68 +922,74 @@ def judge_near_twin(question: str, candidates: list):
                key=lambda c: c["score"], default=None)
     return best.get("sourceId") if best else None
 
-# Listwise reorder + promote (2026-09-25, tested as "Version C" in
-# superjev-tests/listwise-2026-09-25/result.md): one extra Jev call over every
-# file that reached POSSIBLE_FLOOR on today's content check, asking which
-# single one best answers the question. Unlike an AND-gate this never demotes
-# a file -- the winner just moves to #1 of the final ranking (see the reorder
-# right after `top = apply_near_twin_tiebreak(...)`), and is only promoted to
-# CONFIRM_FLOOR if its own winning probability is itself >= LISTWISE_PROMOTE_FLOOR.
-# On the bakeoff this beat both the installed baseline and an
-# AND-gate variant on right-confirmed and wrong-confirmed at once.
-# Improved on internal eval (details kept private). SUPERJEV_LISTWISE=0
-# turns it off and restores today's behavior (same style as SUPERJEV_BATCH_JEV).
+# Listwise choice step (design step 5). One Jev choice call over the top
+# LISTWISE_MAX_FILES ranked files -- each file's best passage from today's
+# content check -- plus a "none of these files states the answer" option, with
+# "When torn, pick none" (lead live test 2026-09-26, superjev-tests/lead-none-test:
+# on 20 held-out questions it kept every right answer and removed every wrong one).
+# A picked file moves to #1 and is promoted to CONFIRM_FLOOR if its own
+# probability is >= LISTWISE_PROMOTE_FLOOR; another file stays confirmed only if
+# it is the pick. "none" drops every possible hit, so a made-up question reports
+# not found instead of an on-topic lookalike. A failed call changes nothing.
+# SUPERJEV_LISTWISE=0 turns the step off (same style as SUPERJEV_BATCH_JEV).
 def listwise_enabled() -> bool:
     return os.environ.get("SUPERJEV_LISTWISE", "1") != "0"
 
-LISTWISE_MAX_FILES = 8
-LISTWISE_SNIPPET = 2000
-LISTWISE_LABEL = "Passage {n}, choose only if this is the single best answer to the question"
+LISTWISE_MAX_FILES = 4
 LISTWISE_PROMOTE_FLOOR = 0.9
+LISTWISE_NONE = "none"
+LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, pick none."
+
+def best_passage(path: str):
+    """The passage today's content check scored best (the file's start if it was
+    never checked), or None if the file cannot be read or holds a secret."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return None
+    if has_secret(text):
+        return None
+    i = (_STAGE.get("checks") or {}).get(path, {}).get("best_chunk") or 0
+    return text[i * CONFIRM_CHUNK:(i + 1) * CONFIRM_CHUNK]
+
+def jev_choice(state: dict, questions: dict) -> dict:
+    """One Jev call through the built-in client (lib/jev_client.py)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+    import jev_client
+    return jev_client.ask(state, questions, timeout=60)
 
 def judge_listwise(question: str, paths: list):
-    """One Jev call over up to LISTWISE_MAX_FILES paths (already capped by the
-    caller to files scoring >= POSSIBLE_FLOOR), asking which single one best
-    answers the question. Returns (winning path, its own probability), or
-    (None, None) if fewer than 1 file could be read/sent, or the call errored,
-    timed out, or was inconclusive -- callers must treat that as no opinion and
-    leave scores and ranking unchanged."""
-    texts = {}
-    for p in paths[:LISTWISE_MAX_FILES]:
-        try:
-            text = Path(p).read_text(errors="replace")
-        except OSError:
-            continue
-        if has_secret(text):
-            continue
-        texts[p] = text[:LISTWISE_SNIPPET]
-    if len(texts) < 1:
+    """Which of the first LISTWISE_MAX_FILES paths states the answer: (path, its
+    probability), (LISTWISE_NONE, probability) when Jev picks none, or (None, None)
+    if no file could be sent or the call failed -- callers treat that as no opinion."""
+    files = {}
+    for p in paths:
+        if len(files) >= LISTWISE_MAX_FILES:
+            break
+        text = best_passage(p)
+        if text is not None:
+            files[p] = text
+    if not files:
         return None, None
-    ordered = list(texts)
-    leaves = [{"id": f"t{i}", "label": LISTWISE_LABEL.format(n=i + 1),
-               "description": texts[p], "sourceId": p} for i, p in enumerate(ordered)]
-    payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
-               "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
-                           "nodes": [{"id": "root", "label": "Sources",
-                                      "description": "Candidate files", "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
-    if payload_has_secret(payload):
-        return None, None
+    ordered = list(files)
+    state = {f"file_{i + 1}": {"path": p, "text": files[p]} for i, p in enumerate(ordered)}
+    crit = {f"file_{i + 1}": f"{Path(p).name} answers the question" for i, p in enumerate(ordered)}
+    crit[LISTWISE_NONE] = "none of the files states the answer to the question"
     try:
-        r = subprocess.run(navigation_command(), input=json.dumps(payload), capture_output=True,
-                           text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
+        r = jev_choice(state, {"pick": {"type": "choice", "instructions": LISTWISE_INSTRUCTIONS % question,
+                                        "criteria": crit}})
+        pick = r["answers"]["pick"]
+        choice = pick["choice"]
+    except Exception:
         return None, None
-    if r.returncode:
+    probs = pick.get("probabilities") if isinstance(pick, dict) else None
+    prob = probs.get(choice) if isinstance(probs, dict) else pick.get("probability")
+    if choice == LISTWISE_NONE:
+        return LISTWISE_NONE, prob
+    m = re.fullmatch(r"file_(\d+)", str(choice))
+    if not m or not 1 <= int(m.group(1)) <= len(ordered):
         return None, None
-    try:
-        body = json.loads(r.stdout)
-    except ValueError:
-        return None, None
-    if not isinstance(body, dict) or body.get("status") != "candidates" or not body.get("candidates"):
-        return None, None
-    best = max((c for c in body["candidates"] if isinstance(c, dict) and isinstance(c.get("score"), (int, float))),
-               key=lambda c: c["score"], default=None)
-    return (best.get("sourceId"), best.get("score")) if best else (None, None)
+    return ordered[int(m.group(1)) - 1], prob
 
 def apply_near_twin_tiebreak(question: str, top: list) -> list:
     """If the top NEAR_TWIN_FILES results are a near-twin cluster (small score
@@ -1677,24 +1687,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
-    listwise_winner = None  # survives to the reorder step even when to_check is empty
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
         if check_error:
             errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
-        if listwise_enabled():
-            listwise_pool = [p for p in to_check if scores.get(p, 0) >= POSSIBLE_FLOOR]
-            _STAGE["listwise"] = {"pool": listwise_pool, "ran": len(listwise_pool) >= 1}
-            if listwise_pool:
-                listwise_winner, listwise_prob = judge_listwise(question, listwise_pool)
-                _STAGE["listwise"]["winner"] = listwise_winner
-                _STAGE["listwise"]["winner_prob"] = listwise_prob
-                _STAGE["listwise"]["promoted"] = False
-                if listwise_winner and isinstance(listwise_prob, (int, float)) \
-                        and listwise_prob >= LISTWISE_PROMOTE_FLOOR and scores.get(listwise_winner, 0) < CONFIRM_FLOOR:
-                    scores[listwise_winner] = max(scores[listwise_winner], CONFIRM_FLOOR)
-                    _STAGE["listwise"]["promoted"] = True
         off_topic = set(cover_gate(scores))
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
@@ -1805,24 +1802,41 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         merged = prefer_sources(sorted(keep.values(), key=sort_metric, reverse=True), scores, possible)
     top = merged[:5]
     top = apply_near_twin_tiebreak(question, top)
-    # Listwise reorder: the winner moves to #1 if it is anywhere in `top`,
-    # preserving the relative order of everything else. Never drops or demotes
-    # a file; a no-op if the winner isn't in `top` (e.g. it scored below what
-    # made the final cut).
-    winner_idx = next((i for i, (_s, p, _ptr) in enumerate(top) if p == listwise_winner), None) \
-        if listwise_winner else None
-    # A hub/copy/writeup winner never promotes past a non-hub file already
-    # ranked ahead of it: prefer_sources already made that source-over-hub
-    # call (see is_hub_file/copy_kind), same reasoning as the near-twin
-    # tiebreak's hub exemption above (h22, 2026-09-25: README 0.98 promoted
-    # itself back over the confirmed panel note 0.91).
-    blocked = winner_idx is not None and (is_hub_file(listwise_winner) or copy_kind(listwise_winner)) \
-        and any(not (is_hub_file(p) or copy_kind(p)) for _s, p, _ptr in top[:winner_idx])
-    if winner_idx is not None and not blocked:
-        _STAGE["listwise"]["reordered"] = top[0][1] != listwise_winner
-        top = sorted(top, key=lambda m: m[1] != listwise_winner)
-    else:
-        _STAGE.setdefault("listwise", {})["reordered"] = False
+    # Listwise choice step: see judge_listwise.
+    listwise_winner = None
+    if top and listwise_enabled():
+        pool = [p for _s, p, _ptr in top if notes.get(p) != HELD_SECRET]
+        _STAGE["listwise"] = {"pool": pool[:LISTWISE_MAX_FILES], "ran": bool(pool), "reordered": False}
+        listwise_winner, listwise_prob = judge_listwise(question, pool) if pool else (None, None)
+        _STAGE["listwise"].update(winner=listwise_winner, winner_prob=listwise_prob, promoted=False)
+    if listwise_winner == LISTWISE_NONE:
+        _STAGE["listwise"]["dropped"] = [p for _s, p, _ptr in top if p in possible]
+        top = [m for m in top if m[1] not in possible]
+        for _s, p, _ptr in top:  # a confirmed file stays only when the pick agrees
+            possible[p] = POSSIBLE_NOTE
+        if not top:
+            dropped += len(_STAGE["listwise"]["dropped"])
+    elif listwise_winner:
+        winner_idx = next((i for i, (_s, p, _ptr) in enumerate(top) if p == listwise_winner), None)
+        # A hub/copy/writeup winner never promotes past a non-hub file already
+        # ranked ahead of it: prefer_sources already made that source-over-hub
+        # call (h22, 2026-09-25: README 0.98 promoted itself back over the
+        # confirmed panel note 0.91).
+        blocked = winner_idx is None or ((is_hub_file(listwise_winner) or copy_kind(listwise_winner))
+                                         and any(not (is_hub_file(p) or copy_kind(p))
+                                                 for _s, p, _ptr in top[:winner_idx]))
+        if not blocked:
+            _STAGE["listwise"]["reordered"] = top[0][1] != listwise_winner
+            top = sorted(top, key=lambda m: m[1] != listwise_winner)
+            if isinstance(listwise_prob, (int, float)) and listwise_prob >= LISTWISE_PROMOTE_FLOOR \
+                    and listwise_winner in possible and notes.get(listwise_winner) != INCONCLUSIVE:
+                del possible[listwise_winner]
+                s0, p0, ptr0 = top[0]
+                top[0] = (max(s0, CONFIRM_FLOOR), p0, ptr0)
+                _STAGE["listwise"]["promoted"] = True
+        for _s, p, _ptr in top:  # a confirmed file stays only when the pick agrees
+            if p != listwise_winner and p not in possible and notes.get(p) != INCONCLUSIVE:
+                possible[p] = POSSIBLE_NOTE
     skills = skill_job.result() if skill_job else []
     _STAGE["skills"] = [path for _n, path in skills] if skill_job else None
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
