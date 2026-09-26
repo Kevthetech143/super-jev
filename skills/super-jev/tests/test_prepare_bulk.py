@@ -1233,6 +1233,34 @@ def test_refresh_drops_removed_file_from_cache_and_reports_it(tmp_path, monkeypa
     assert str(kept) in saved_cache
 
 
+def test_new_root_drops_cache_entries_from_the_old_root(tmp_path, monkeypatch, capsys):
+    # night-log 2026-09-26: after reconnecting a pointer from a /tmp stage to ~/.claude/skills,
+    # the cache kept the 298 still-existing /tmp entries and word search returned them.
+    old = tmp_path / "stage"
+    old.mkdir()
+    stale = old / "a.md"
+    stale.write_text("# Old copy\n")
+    root = tmp_path / "root"
+    root.mkdir()
+    kept = root / "a.md"
+    kept.write_text("# A\nHere.\n")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    entry = lambda f: {"sha256": sha256_of(f), "description": "Describes a.", "question": "What is a?",
+                       "verdict": "SUPPORTED", "confidence": 0.9, "pass": True, "checkedAt": "2026-01-01T00:00:00"}
+    (cache_dir / "my-records.json").write_text(json.dumps({str(stale): entry(stale), str(kept): entry(kept)}))
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: (_ for _ in ()).throw(AssertionError("writer should not run")))
+    monkeypatch.setattr(pb, "gate", lambda desc, path: (_ for _ in ()).throw(AssertionError("gate should not run")))
+
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--refresh", "--no-connect"]))
+    assert pb.main() == 0
+
+    saved = json.loads((cache_dir / "my-records.json").read_text())
+    assert list(saved) == [str(kept)]
+    assert "1 entries outside the current scope dropped" in capsys.readouterr().out
+
+
 def test_refresh_keeps_the_pointers_registered_principals(tmp_path, monkeypatch):
     """primary-reference stayed STALE after a refresh naming only `primary`: the harness
     refused the narrowed scope. The refresh now reconnects with every registered principal."""
