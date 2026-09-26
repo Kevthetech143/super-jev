@@ -39,6 +39,17 @@ def test_skills_preserves_arguments_and_seat_roots(tmp_path, family):
     assert result.stdout.splitlines() == expected
 
 
+def test_skills_runs_the_runtime_bundled_with_the_release(tmp_path):
+    root, skill = installed(tmp_path, 'release')
+    (tmp_path / 'release/src').mkdir()
+    (tmp_path / 'release/src/skill-search-cli.ts').write_text('')
+    stub(root / 'skill-search/search.sh')
+    result = run(skill, 'skills', '--request-file', 'r.json')
+    assert result.stdout.splitlines() == ['--request-file', 'r.json', '--repo', str((tmp_path / 'release').resolve())]
+    result = run(skill, 'skills', '--request-file', 'r.json', '--repo', '/elsewhere')
+    assert result.stdout.splitlines() == ['--request-file', 'r.json', '--repo', '/elsewhere']
+
+
 def test_skills_inline_request_becomes_request_file(tmp_path):
     root, skill = installed(tmp_path)
     stub(root / 'skill-search/search.sh', 'shift; cat "$1"\n')

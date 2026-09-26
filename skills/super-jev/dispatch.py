@@ -41,6 +41,12 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
         extra = []
         if root.parent.name == ".claude" and "--config" not in args:
             extra = ["--config", str(root / "skill-search/roots-claude.json")]
+        # Run the skill-search runtime bundled with this release, not whatever checkout the
+        # launcher defaults to, so an installed release is self-contained for every user.
+        release = Path(__file__).resolve().parents[2]
+        if ((release / "src/skill-search-cli.ts").is_file() and "--repo" not in args
+                and not any(arg.startswith("--repo=") for arg in args)):
+            extra += ["--repo", str(release)]
         cmd = ["bash", str(entry), *args, *extra]
     elif tool == "find":
         entry = root / "fleet-retrieval-experiment/run.sh"
