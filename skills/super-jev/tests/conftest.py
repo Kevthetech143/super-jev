@@ -18,3 +18,10 @@ def _no_skill_catalog(monkeypatch):
     """Lookups never shell out to the live skills connector in tests; test_stale_quiet_and_skills.py
     turns it on with a faked catalog."""
     monkeypatch.setenv("SUPERJEV_SKILLS", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_none_choice(monkeypatch):
+    """Lookups never make the live "none of these" Jev call in tests; test_none_choice.py
+    turns it on with a faked judge."""
+    monkeypatch.setenv("SUPERJEV_NONE_CHOICE", "0")

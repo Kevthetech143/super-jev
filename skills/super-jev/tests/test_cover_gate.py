@@ -57,12 +57,11 @@ def _lookup(tmp_path, routed, scores, cached):
     return []
 
 
-def test_file_without_the_questions_words_is_not_even_possible(tmp_path):
-    # night-0803 q18: capped at 0.84 it still came back "possible" for a made-up
-    # question; it must drop out so the answer is "not found".
+def test_file_without_the_questions_words_never_confirms(tmp_path):
     recall, clov, others = _files(tmp_path)
     top = _lookup(tmp_path, [recall], {str(recall): 0.87}, [recall, clov, *others])
-    assert str(recall) not in [t["path"] for t in top]
+    hit = next(t for t in top if t["path"] == str(recall))
+    assert hit["score"] < ask.CONFIRM_FLOOR and hit["possible"]
 
 
 def test_file_holding_the_questions_words_still_confirms(tmp_path):

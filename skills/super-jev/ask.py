@@ -981,6 +981,52 @@ def judge_listwise(question: str, paths: list):
                key=lambda c: c["score"], default=None)
     return (best.get("sourceId"), best.get("score")) if best else (None, None)
 
+# "None of these" check (night-0803 q14/q18): Jev chooses better than it scores,
+# and a score under 0.9 is shaky. One Jev call over the top NONE_FILES kept files
+# (each one's NONE_SNIPPET-character passage sharing the most question words) asks
+# which file states the answer, with a "none" option and "when torn, pick none".
+# When "none" wins, every kept file under NONE_KEEP_FLOOR is dropped: a made-up
+# question's cover-gated possible (history-recall, 0.84) and a fixture confirmed
+# at 0.89 both lost to "none". Any error or unreadable pool leaves results as they
+# are (fail open). SUPERJEV_NONE_CHOICE=0 turns it off.
+NONE_FILES, NONE_SNIPPET, NONE_KEEP_FLOOR = 4, 3500, 0.9
+
+def none_choice_enabled() -> bool:
+    return os.environ.get("SUPERJEV_NONE_CHOICE", "1") != "0"
+
+def judge_none(question: str, paths: list):
+    """(choice, probabilities): choice is "none", a path, or None (no opinion)."""
+    files = {}
+    for p in paths[:NONE_FILES]:
+        try:
+            text = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        # The passage sharing the most question words, not the file's head: a long
+        # timeline's answer sits far below its first NONE_SNIPPET characters.
+        chunks = [text[i:i + NONE_SNIPPET] for i in range(0, len(text), NONE_SNIPPET)] or [""]
+        terms = query_terms(question)
+        text = max(chunks, key=lambda c: term_hits(terms, c))
+        if not has_secret(text):
+            files[f"file_{len(files) + 1}"] = (p, text)
+    if not files:
+        return None, {}
+    state = {k: {"path": p, "text": t} for k, (p, t) in files.items()}
+    criteria = {k: f"{Path(p).name} answers the question" for k, (p, _) in files.items()}
+    criteria["none"] = "none of the files states the answer to the question"
+    questions = {"pick": {"type": "choice", "criteria": criteria,
+                          "instructions": f"Question: {question}\nWhich file states the answer? When torn, pick none."}}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+        import jev_client
+        ans = (jev_client.ask(state, questions, timeout=30, attempts=2)["answers"] or {}).get("pick") or {}
+    except Exception:
+        return None, {}
+    choice = ans.get("choice")
+    probs = {("none" if k == "none" else files[k][0]): v for k, v in (ans.get("probabilities") or {}).items()
+             if k == "none" or k in files}
+    return ("none" if choice == "none" else files[choice][0] if choice in files else None), probs
+
 def apply_near_twin_tiebreak(question: str, top: list) -> list:
     """If the top NEAR_TWIN_FILES results are a near-twin cluster (small score
     gap, same folder or similar names), judge just that cluster and put the
@@ -1209,18 +1255,17 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
 CONFIRM_MIN_COVER = 0.2
 
 def cover_gate(scores: dict) -> list:
-    """Drop any confirmed file that holds almost none of the question's words. A one-passage file is judged as that passage against
+    """Cap at SPREAD_CAP (possible at most) any confirmed file that holds almost none
+    of the question's words. A one-passage file is judged as that passage against
     "none", so a short on-topic-looking file can pass the 0.85 check for an event it
     never names: history-recall/SKILL.md confirmed at 0.87 for Kelvin's CLOV verdict
-    holding only "kelvin" and "last" (coverage 0.12). Capping it at SPREAD_CAP
-    (0.84) still kept it as "possible" for a made-up question, so it is dropped
-    (score 0, and no route or big-file keep) instead. A file word search did not
+    holding only "kelvin" and "last" (coverage 0.12). A file word search did not
     index gets no opinion. Returns the demoted paths."""
     cover = (_STAGE.get("word") or {}).get("cover") or {}
     demoted = [p for p, sc in scores.items()
                if sc >= CONFIRM_FLOOR and cover.get(p, 1) < CONFIRM_MIN_COVER]
     for p in demoted:
-        scores[p] = 0.0
+        scores[p] = SPREAD_CAP
     _STAGE["cover_gate"] = demoted[:STAGE_LIST_CAP]
     return demoted
 
@@ -1695,7 +1740,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                         and listwise_prob >= LISTWISE_PROMOTE_FLOOR and scores.get(listwise_winner, 0) < CONFIRM_FLOOR:
                     scores[listwise_winner] = max(scores[listwise_winner], CONFIRM_FLOOR)
                     _STAGE["listwise"]["promoted"] = True
-        off_topic = set(cover_gate(scores))
+        cover_gate(scores)
+        off_topic = set()  # dropped by the "none of these" check below
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
         # Value questions need a confirmed score; no possible tier -- except
@@ -1716,13 +1762,23 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question)
                       and not is_value_question(question) else []):
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
-                        and scores.get(p, 0) < CONFIRM_FLOOR and p not in off_topic:
+                        and scores.get(p, 0) < CONFIRM_FLOOR:
                     possible[p] = POSSIBLE_NOTE
             for p in to_check:
                 section = _STAGE.get("checks", {}).get(p, {}).get("section")
                 if section is not None and route.get(p, 0) >= BIG_ROUTE_KEEP \
-                        and p not in notes and p not in possible and p not in off_topic:
+                        and p not in notes and p not in possible:
                     possible[p] = BIG_NOTE % (section or "top of file")
+        if none_choice_enabled():
+            pool = sorted((p for p in to_check if p in possible or scores.get(p, 0) >= CONFIRM_FLOOR),
+                          key=lambda p: scores.get(p, POSSIBLE_FLOOR), reverse=True)
+            choice, probs = judge_none(question, pool) if pool else (None, {})
+            gone = [p for p in pool if choice == "none" and scores.get(p, 0) < NONE_KEEP_FLOOR]
+            for p in gone:
+                possible.pop(p, None)
+                off_topic.add(p)
+            _STAGE["none_choice"] = {"pool": pool[:NONE_FILES], "choice": choice, "probs": probs,
+                                     "dropped": gone[:STAGE_LIST_CAP]}
         def demoted(p: str) -> bool:
             """A hub file (is_hub_file) ranks as a table of contents -- except a
             README whose own content check CONFIRMED the answer: that README is
