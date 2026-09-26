@@ -1162,7 +1162,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     for ptr in pointers:
         for path, entry in load_cache_files(ptr).items():
             if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
-                    or prepare_bulk.is_test_material(path) or prepare_bulk.is_bench_dataset(path)):
+                    or prepare_bulk.is_test_material(path)):
                 continue
             try:
                 raw = Path(path).read_bytes()
@@ -1679,7 +1679,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if learner:
         learner.join()
     _STAGE["person"]["dropped"] = [m[1] for m in merged if other_person(m[1])][:STAGE_LIST_CAP]
-    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])
+    # A reviewed dataset's pointer serves its prepared copies under .local/retrieval-datasets/;
+    # those copies ARE its answers. Folder inventory already keeps the copies out of every
+    # other pointer (prepare_bulk.is_bench_dataset), so a path that reaches here came from its
+    # own registered pointer and must not be dropped by where it lives.
+    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR
                      and not prepare_bulk.is_test_material(m[1])
                      and not other_person(m[1])), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
