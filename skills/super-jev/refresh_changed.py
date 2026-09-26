@@ -50,6 +50,8 @@ def prepare_args(report: dict) -> list[str] | None:
         args += ["--exclude", e]
     if report.get("noRecurse"):
         args.append("--no-recurse")
+    for n in report.get("names") or []:
+        args += ["--name", n]
     args += ["--pointer", report["pointer"]]
     for p in principals:
         args += ["--principal", p]
