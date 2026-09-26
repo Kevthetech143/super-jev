@@ -928,8 +928,8 @@ def judge_near_twin(question: str, candidates: list):
 # "When torn, pick none" (lead live test 2026-09-26, superjev-tests/lead-none-test:
 # on 20 held-out questions it kept every right answer and removed every wrong one).
 # A picked file moves to #1 and is promoted to CONFIRM_FLOOR if its own
-# probability is >= LISTWISE_PROMOTE_FLOOR; another file stays confirmed only if
-# it is the pick. "none" drops every possible hit, so a made-up question reports
+# probability is >= LISTWISE_PROMOTE_FLOOR; another confirmed file is demoted
+# only when the pick is that strong and not blocked. "none" drops every possible hit, so a made-up question reports
 # not found instead of an on-topic lookalike. A failed call changes nothing.
 # SUPERJEV_LISTWISE=0 turns the step off (same style as SUPERJEV_BATCH_JEV).
 def listwise_enabled() -> bool:
@@ -1834,7 +1834,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 s0, p0, ptr0 = top[0]
                 top[0] = (max(s0, CONFIRM_FLOOR), p0, ptr0)
                 _STAGE["listwise"]["promoted"] = True
-        for _s, p, _ptr in top:  # a confirmed file stays only when the pick agrees
+        # Another confirmed file loses its label only to a strong, unblocked
+        # pick; a weak or blocked pick never demotes a confirmed file (t11,
+        # 2026-09-26: a blocked pick demoted the right 0.96 file).
+        strong = not blocked and isinstance(listwise_prob, (int, float)) \
+            and listwise_prob >= LISTWISE_PROMOTE_FLOOR
+        for _s, p, _ptr in top if strong else []:
             if p != listwise_winner and p not in possible and notes.get(p) != INCONCLUSIVE:
                 possible[p] = POSSIBLE_NOTE
     skills = skill_job.result() if skill_job else []
