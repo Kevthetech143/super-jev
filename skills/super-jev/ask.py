@@ -981,6 +981,52 @@ def judge_listwise(question: str, paths: list):
                key=lambda c: c["score"], default=None)
     return (best.get("sourceId"), best.get("score")) if best else (None, None)
 
+# "None of these" check (night-0803 q14/q18): Jev chooses better than it scores,
+# and a score under 0.85 is shaky. One Jev call over the top NONE_FILES kept files
+# (each one's NONE_SNIPPET-character passage sharing the most question words) asks
+# which file states the answer, with a "none" option and "when torn, pick none".
+# When "none" wins, every POSSIBLE-tier file Jev saw is dropped; a confirmed file
+# (>= CONFIRM_FLOOR) or one past the top NONE_FILES is never dropped (a right
+# restart-seat-opus5 SKILL.md confirmed at 0.85 lost to "none" on some runs). Any error or unreadable pool leaves results as they
+# are (fail open). SUPERJEV_NONE_CHOICE=0 turns it off.
+NONE_FILES, NONE_SNIPPET = 4, 3500
+
+def none_choice_enabled() -> bool:
+    return os.environ.get("SUPERJEV_NONE_CHOICE", "1") != "0"
+
+def judge_none(question: str, paths: list):
+    """(choice, probabilities): choice is "none", a path, or None (no opinion)."""
+    files = {}
+    for p in paths[:NONE_FILES]:
+        try:
+            text = Path(p).read_text(errors="replace")
+        except OSError:
+            continue
+        # The passage sharing the most question words, not the file's head: a long
+        # timeline's answer sits far below its first NONE_SNIPPET characters.
+        chunks = [text[i:i + NONE_SNIPPET] for i in range(0, len(text), NONE_SNIPPET)] or [""]
+        terms = query_terms(question)
+        text = max(chunks, key=lambda c: term_hits(terms, c))
+        if not has_secret(text):
+            files[f"file_{len(files) + 1}"] = (p, text)
+    if not files:
+        return None, {}
+    state = {k: {"path": p, "text": t} for k, (p, t) in files.items()}
+    criteria = {k: f"{Path(p).name} answers the question" for k, (p, _) in files.items()}
+    criteria["none"] = "none of the files states the answer to the question"
+    questions = {"pick": {"type": "choice", "criteria": criteria,
+                          "instructions": f"Question: {question}\nWhich file states the answer? When torn, pick none."}}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+        import jev_client
+        ans = (jev_client.ask(state, questions, timeout=30, attempts=2)["answers"] or {}).get("pick") or {}
+    except Exception:
+        return None, {}
+    choice = ans.get("choice")
+    probs = {("none" if k == "none" else files[k][0]): v for k, v in (ans.get("probabilities") or {}).items()
+             if k == "none" or k in files}
+    return ("none" if choice == "none" else files[choice][0] if choice in files else None), probs
+
 def apply_near_twin_tiebreak(question: str, top: list) -> list:
     """If the top NEAR_TWIN_FILES results are a near-twin cluster (small score
     gap, same folder or similar names), judge just that cluster and put the
@@ -1723,6 +1769,17 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 if section is not None and route.get(p, 0) >= BIG_ROUTE_KEEP \
                         and p not in notes and p not in possible and p not in off_topic:
                     possible[p] = BIG_NOTE % (section or "top of file")
+        if none_choice_enabled():
+            pool = sorted((p for p in to_check if p in possible or scores.get(p, 0) >= CONFIRM_FLOOR),
+                          key=lambda p: scores.get(p, POSSIBLE_FLOOR), reverse=True)
+            choice, probs = judge_none(question, pool) if pool else (None, {})
+            gone = [p for p in pool[:NONE_FILES] if choice == "none" and p in probs
+                    and p in possible and scores.get(p, 0) < CONFIRM_FLOOR]
+            for p in gone:
+                possible.pop(p, None)
+                off_topic.add(p)
+            _STAGE["none_choice"] = {"pool": pool[:NONE_FILES], "choice": choice, "probs": probs,
+                                     "dropped": gone[:STAGE_LIST_CAP]}
         def demoted(p: str) -> bool:
             """A hub file (is_hub_file) ranks as a table of contents -- except a
             README whose own content check CONFIRMED the answer: that README is
@@ -1860,6 +1917,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
             "listwise": _STAGE.get("listwise") or {},
+            "none_choice": _STAGE.get("none_choice") or {},
             "person": _STAGE.get("person") or {},
             "prefilter": (_STAGE.get("prefilter") or [])[:STAGE_LIST_CAP],
             "source_moves": _STAGE.get("source_moves") or [],
