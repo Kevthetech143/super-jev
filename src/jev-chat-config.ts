@@ -140,6 +140,57 @@ export function formatMissCandidateReply(candidate: MissCandidate): string {
 }
 
 // ---------------------------------------------------------------------------
+// Setup-missing parsing -- when a principal has no connected pointers at all,
+// ask.py's lookup() exits 1 with "nothing connected yet for principal 'X' --
+// run connect first:" plus the exact prepare_bulk.py command to run, before
+// it ever reaches the "no-candidates" miss report. Show that block instead of
+// the generic MISS_LINE so the user knows this is a setup problem, not a
+// real miss.
+// ---------------------------------------------------------------------------
+export function parseSetupMissing(stdout: string): string[] | null {
+  const lines = stdout.split('\n');
+  const idx = lines.findIndex((l) => l.trim().startsWith('nothing connected yet for principal'));
+  if (idx === -1) return null;
+  const block = [lines[idx]];
+  for (let i = idx + 1; i < lines.length && /^\s+\S/.test(lines[i]); i++) block.push(lines[i]);
+  return block;
+}
+
+// ---------------------------------------------------------------------------
+// Pointer-error parsing -- when ask.py's providers themselves fail (auth
+// errors, network errors, etc.) every pointer can error out with no
+// candidates and no "no-candidates" miss report either; ask.py prints
+// "[pointer] error: ..." lines and an "unresolved: N of M pointers errored"
+// summary to stdout before its closing voice line. Surface that instead of
+// letting the chat CLI look like a silent, unexplained miss.
+// ---------------------------------------------------------------------------
+const POINTER_ERROR_LINE = /^\[[^\]]+\]\s+error:/;
+
+export function parseErrorReport(stdout: string): string[] | null {
+  const lines = stdout.split('\n');
+  const errorLines = lines.filter((l) => POINTER_ERROR_LINE.test(l.trim())).slice(0, 3);
+  const unresolved = lines.find((l) => l.trim().startsWith('unresolved:'));
+  if (!errorLines.length && !unresolved) return null;
+  return unresolved ? [...errorLines, unresolved.trim()] : errorLines;
+}
+
+// ---------------------------------------------------------------------------
+// Panel-check parsing -- after /setup saves a principal, the chat CLI runs a
+// cheap local `dispatch.py memory --principal X` (panel action, no network)
+// to warn right away if that principal has no connected pointers yet (e.g. a
+// principal name typo or case mismatch -- pointers are matched exact-case).
+// ---------------------------------------------------------------------------
+export function parseAnyPointers(stdout: string): boolean | null {
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.pointers)) return null;
+    return parsed.pointers.length > 0;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // True-miss report parsing -- ask.py's no-candidates miss prints a
 // "What was searched:" / "Next step (pick one):" block (see ask.py's
 // miss_report()) before its closing voice line. The chat CLI shows that

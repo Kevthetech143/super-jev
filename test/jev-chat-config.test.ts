@@ -7,6 +7,7 @@ import {
   loadConfig, saveConfig, configFileMode, hasApiKey,
   cannedReply, parseSlashCommand, isKnownSlashCommand,
   parseMissCandidate, formatMissCandidateReply, parseMissReport,
+  parseSetupMissing, parseErrorReport, parseAnyPointers,
   MISS_LINE,
 } from '../src/jev-chat-config.ts';
 
@@ -191,4 +192,48 @@ test('parseMissReport returns null when ask.py predates the miss-report block', 
 
 test('parseMissReport returns null on a cache hit', () => {
   assert.equal(parseMissReport('CACHE HIT\nanswer: foo\n'), null);
+});
+
+test('parseSetupMissing extracts the message and connect command for a principal with no pointers', () => {
+  const stdout = "nothing connected yet for principal 'primary' -- run connect first:\n"
+    + "  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal primary\n"
+    + MISS_LINE + '\n';
+  const block = parseSetupMissing(stdout);
+  assert.ok(block);
+  assert.match(block[0], /nothing connected yet for principal 'primary'/);
+  assert.match(block[1], /prepare_bulk\.py/);
+  assert.equal(block.length, 2);
+});
+
+test('parseSetupMissing returns null when pointers exist (a real miss, not a setup problem)', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  assert.equal(parseSetupMissing(stdout), null);
+});
+
+test('parseErrorReport surfaces pointer errors and the unresolved summary', () => {
+  const stdout = [
+    '[brain-reviewed] error: Navigation provider failed: Jev HTTP 401 (TypeSafe rejected the API key)',
+    '[health-reviewed] error: Navigation provider failed: Jev HTTP 401 (TypeSafe rejected the API key)',
+    'unresolved: 2 of 2 pointers errored',
+    MISS_LINE,
+  ].join('\n');
+  const report = parseErrorReport(stdout);
+  assert.ok(report);
+  assert.match(report.join('\n'), /HTTP 401/);
+  assert.match(report.join('\n'), /unresolved: 2 of 2/);
+});
+
+test('parseErrorReport returns null when there are no pointer errors', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  assert.equal(parseErrorReport(stdout), null);
+});
+
+test('parseAnyPointers reads the panel action pointers array', () => {
+  assert.equal(parseAnyPointers(JSON.stringify({ pointers: [{ pointer: 'a' }] })), true);
+  assert.equal(parseAnyPointers(JSON.stringify({ pointers: [] })), false);
+});
+
+test('parseAnyPointers returns null on unparseable or unexpected output', () => {
+  assert.equal(parseAnyPointers('not json'), null);
+  assert.equal(parseAnyPointers(JSON.stringify({ status: 'ok' })), null);
 });
