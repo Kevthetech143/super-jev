@@ -10,7 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -274,6 +274,14 @@ test('skills with empty or malformed descriptions are excluded and counted', asy
   assert.equal(skills.length, 1);
   assert.equal(skills[0].id, 'good-skill');
   assert.equal(skipped, 2);
+});
+
+test('a symlinked skill folder is scanned like a real one', async () => {
+  const root = await tempRoot([['real-skill', 'A real folder.']]);
+  const elsewhere = await tempRoot([['linked-skill', 'Installed elsewhere and linked in.']]);
+  await symlink(join(elsewhere, 'linked-skill'), join(root, 'linked-skill'));
+  const { skills } = await scanSkillRoots([root]);
+  assert.deepEqual(skills.map(s => s.id).sort(), ['linked-skill', 'real-skill']);
 });
 
 test('YAML-ism leaks and unmatched quotes are malformed and skipped', async () => {
