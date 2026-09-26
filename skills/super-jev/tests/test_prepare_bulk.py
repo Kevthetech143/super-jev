@@ -795,6 +795,16 @@ def test_inventory_no_recurse_only_direct_children(tmp_path):
     assert {p.name for p in files} == {"top.md"}
 
 
+def test_inventory_name_keeps_only_skill_entry_files(tmp_path):
+    root = tmp_path / "skills"
+    (root / "ebay-return-label" / "reference").mkdir(parents=True)
+    (root / "ebay-return-label" / "SKILL.md").write_text("# eBay return label\nPrint it.\n")
+    (root / "ebay-return-label" / "reference" / "notes.md").write_text("# Notes\nDetail.\n")
+
+    files, held = pb.inventory([root], names=["SKILL.md"])
+
+    assert [p.relative_to(root).as_posix() for p in files] == ["ebay-return-label/SKILL.md"]
+
 def test_max_files_guard_refuses(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()

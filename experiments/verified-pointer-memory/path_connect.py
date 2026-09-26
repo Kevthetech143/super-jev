@@ -48,6 +48,9 @@ def _catalog(sources, structure):
     """Build a deterministic, bounded navigation catalog from explicit sources."""
     paths = [Path(source['path']) for source in sources]
     common = Path(os.path.commonpath([str(path.parent) for path in paths]))
+    # A file name shared by several flat sources (SKILL.md, README.md, index.md) tells routing
+    # nothing, so those leaves carry their parent folder too: "ebay-return-label/SKILL.md".
+    names = [path.name for path in paths]
     groups = {}
     leaves = []
     for source in sources:
@@ -70,7 +73,9 @@ def _catalog(sources, structure):
                 children.append(node_id)
             parent = node_id
         leaf_id = 'source:' + _hash(source['id'].encode())[:24]
-        leaf = {'id': leaf_id, 'label': Path(source['path']).name,
+        path = Path(source['path'])
+        shared = not labels and names.count(path.name) > 1 and path.parent.name
+        leaf = {'id': leaf_id, 'label': f'{path.parent.name}/{path.name}' if shared else path.name,
                 'description': source['description'], 'sourceId': source['id']}
         leaves.append((parent, leaf))
     root = {'id': 'root', 'label': 'Sources',
