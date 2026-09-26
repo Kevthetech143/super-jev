@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import {
   loadConfig, saveConfig, configFileMode, hasApiKey,
   cannedReply, parseSlashCommand, isKnownSlashCommand,
-  parseMissCandidate, formatMissCandidateReply,
+  parseMissCandidate, formatMissCandidateReply, parseMissReport,
+  parseSetupMissing, parseErrorReport, parseAnyPointers,
   MISS_LINE,
 } from '../src/jev-chat-config.ts';
 
@@ -158,4 +159,81 @@ test('formatMissCandidateReply names the top file and gives a one-line why, not 
   assert.match(reply, /\/notes\/pricing\.md/);
   assert.match(reply, /no approved answer/);
   assert.doesNotMatch(reply, /\[kelvin-notes\]/);
+});
+
+test('parseMissReport extracts the searched/next-step block from a true-miss ask.py run', () => {
+  const stdout = [
+    'no-candidates across 3 pointers: Super Jev could not find it in the connected files.',
+    'What was searched:',
+    '  - 3 connected sets; 2 searched after the topic filter, 1 had matches: kelvin-notes',
+    '  - 2 file(s) read; none contained the answer. Closest: notes/pricing.md, notes/other.md',
+    'Next step (pick one):',
+    '  - The answer is in a file you have: it is probably not connected. Connect its folder:',
+    '      python3 prepare_bulk.py --root <folder> --pointer kelvin-<name> --principal kelvin',
+    '  - You know the answer: save it for next time:',
+    '      python3 ask.py --principal kelvin --add "<question>" "<answer>"',
+    '  - Neither: tell your human it was not found and offer to search by hand.',
+    MISS_LINE,
+    '',
+  ].join('\n');
+  const report = parseMissReport(stdout);
+  assert.ok(report);
+  assert.equal(report[0], 'What was searched:');
+  assert.match(report.join('\n'), /Next step \(pick one\):/);
+  assert.match(report.join('\n'), /Connect its folder/);
+  // The closing voice line is printed separately by the CLI, not duplicated here.
+  assert.doesNotMatch(report.join('\n'), new RegExp(MISS_LINE.replace(/[.?]/g, '\\$&')));
+});
+
+test('parseMissReport returns null when ask.py predates the miss-report block', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  assert.equal(parseMissReport(stdout), null);
+});
+
+test('parseMissReport returns null on a cache hit', () => {
+  assert.equal(parseMissReport('CACHE HIT\nanswer: foo\n'), null);
+});
+
+test('parseSetupMissing extracts the message and connect command for a principal with no pointers', () => {
+  const stdout = "nothing connected yet for principal 'primary' -- run connect first:\n"
+    + "  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal primary\n"
+    + MISS_LINE + '\n';
+  const block = parseSetupMissing(stdout);
+  assert.ok(block);
+  assert.match(block[0], /nothing connected yet for principal 'primary'/);
+  assert.match(block[1], /prepare_bulk\.py/);
+  assert.equal(block.length, 2);
+});
+
+test('parseSetupMissing returns null when pointers exist (a real miss, not a setup problem)', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  assert.equal(parseSetupMissing(stdout), null);
+});
+
+test('parseErrorReport surfaces pointer errors and the unresolved summary', () => {
+  const stdout = [
+    '[brain-reviewed] error: Navigation provider failed: Jev HTTP 401 (TypeSafe rejected the API key)',
+    '[health-reviewed] error: Navigation provider failed: Jev HTTP 401 (TypeSafe rejected the API key)',
+    'unresolved: 2 of 2 pointers errored',
+    MISS_LINE,
+  ].join('\n');
+  const report = parseErrorReport(stdout);
+  assert.ok(report);
+  assert.match(report.join('\n'), /HTTP 401/);
+  assert.match(report.join('\n'), /unresolved: 2 of 2/);
+});
+
+test('parseErrorReport returns null when there are no pointer errors', () => {
+  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  assert.equal(parseErrorReport(stdout), null);
+});
+
+test('parseAnyPointers reads the panel action pointers array', () => {
+  assert.equal(parseAnyPointers(JSON.stringify({ pointers: [{ pointer: 'a' }] })), true);
+  assert.equal(parseAnyPointers(JSON.stringify({ pointers: [] })), false);
+});
+
+test('parseAnyPointers returns null on unparseable or unexpected output', () => {
+  assert.equal(parseAnyPointers('not json'), null);
+  assert.equal(parseAnyPointers(JSON.stringify({ status: 'ok' })), null);
 });

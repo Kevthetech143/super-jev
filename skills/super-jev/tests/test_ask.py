@@ -228,6 +228,38 @@ def test_miss_report_names_closest_files_read_first():
     assert lines[2] == "  - 2 file(s) read; none contained the answer. Closest: x/high.md, x/low.md"
 
 
+def test_skill_dir_for_display_prefers_env_override(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_SKILL_DIR", "/env/override/skills/super-jev")
+    assert ask.skill_dir_for_display() == Path("/env/override/skills/super-jev")
+
+
+def test_skill_dir_for_display_uses_invoked_argv0_not_resolved_path(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPERJEV_SKILL_DIR", raising=False)
+    # A stable symlinked skills dir, as an installed agent would invoke through --
+    # this must stay stable across releases, unlike Path(__file__).resolve().
+    stable_dir = tmp_path / "stable-skills-dir"
+    stable_dir.mkdir()
+    monkeypatch.setattr(sys, "argv", [str(stable_dir / "ask.py"), "--principal", "x", "q"])
+    assert ask.skill_dir_for_display() == stable_dir
+
+
+def test_skill_dir_for_display_falls_back_when_argv0_dir_missing(monkeypatch):
+    monkeypatch.delenv("SUPERJEV_SKILL_DIR", raising=False)
+    monkeypatch.setattr(sys, "argv", ["/does/not/exist/ask.py"])
+    assert ask.skill_dir_for_display() == Path(ask.__file__).resolve().parent
+
+
+def test_miss_report_next_steps_use_invoked_skill_dir(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPERJEV_SKILL_DIR", raising=False)
+    stable_dir = tmp_path / "stable-skills-dir"
+    stable_dir.mkdir()
+    monkeypatch.setattr(sys, "argv", [str(stable_dir / "ask.py")])
+    lines = ask.miss_report("bob", 1, {}, {})
+    joined = "\n".join(lines)
+    assert str(stable_dir / "prepare_bulk.py") in joined
+    assert str(stable_dir / "ask.py") in joined
+
+
 def test_approve_ready_search_sends_ticket_approved_answer_and_reviewedtext_quotes(tmp_path, monkeypatch):
     ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": "/a.md", "pointer": "p1"}])
     calls = []
