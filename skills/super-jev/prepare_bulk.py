@@ -3,7 +3,7 @@
 
 Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT [--principal AGENT2 ...]
-                          [--exclude SUBPATH ...] [--no-recurse] [--limit 50] [--max-files 250]
+                          [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
                           [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
                           [--no-findability] [--refresh]
@@ -27,7 +27,8 @@ Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
      hidden directories and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
-     root starts with that subpath; --no-recurse limits each root to its direct children only. Files matching
+     root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
+     keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc. Files matching
      card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
@@ -77,7 +78,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
+import argparse, fnmatch, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -308,7 +309,8 @@ def payload_has_secret(obj) -> bool:
     return False
 
 
-def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False):
+def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
+              names: list = None):
     """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
@@ -320,6 +322,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
         for p in glob_iter:
             rp = p.resolve()
             if rp in seen:
+                continue
+            if names and not any(fnmatch.fnmatch(p.name, n) for n in names):
                 continue
             if ".bak" in p.name or p.name == "logins.md" or p.name.endswith("-secret.md"):
                 continue
@@ -643,12 +647,14 @@ def replay_recipe(a) -> None:
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
     rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
+                    or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
                     or (a.roots and sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or [])))
     a.roots = a.roots or rep.get("roots") or None
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []
     a.no_recurse = a.no_recurse or bool(rep.get("noRecurse"))
+    a.names = a.names or rep.get("names") or []
     # --allow-held is never replayed: it would admit NEW secret-looking files without review.
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
@@ -679,6 +685,7 @@ def main() -> int:
                          "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
+    ap.add_argument("--name", dest="names", action="append", default=[])
     ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
@@ -760,7 +767,7 @@ def main() -> int:
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
         print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held)
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names)
     scope = getattr(a, "legacy_scope", None)
     if scope is not None:
         files = [p for p in files if str(p) in scope]
@@ -926,7 +933,7 @@ def main() -> int:
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
-              "excludes": a.excludes, "noRecurse": a.no_recurse, "limit": a.limit,
+              "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
               "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,

@@ -123,6 +123,14 @@ class PathConnectTests(unittest.TestCase):
         self.assertEqual(connect({**self.request, 'sources': self.request['sources'] * 51}, self.config)['reason'], 'source-limit')
         self.assertFalse(Path(self.config['db']).exists())
 
+    def test_flat_leaves_sharing_a_file_name_carry_their_folder(self):
+        from path_connect import _catalog
+        sources = [{'id': str(i), 'path': f'/skills/{d}/{n}', 'description': 'd', 'navigationPath': None}
+                   for i, (d, n) in enumerate([('ebay-return-label', 'SKILL.md'), ('buying-power', 'SKILL.md'),
+                                               ('notes', 'plan.md')])]
+        labels = sorted(n['label'] for n in _catalog(sources, 'flat-files')['nodes'] if 'sourceId' in n)
+        self.assertEqual(labels, ['buying-power/SKILL.md', 'ebay-return-label/SKILL.md', 'plan.md'])
+
 
 if __name__ == '__main__':
     unittest.main()

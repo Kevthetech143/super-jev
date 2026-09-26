@@ -137,7 +137,10 @@ whole folder, or a whole agent brain spanning several folders, instead of a
 hand-picked file list. Repeat `--root` to inventory the union of multiple
 roots, in the order given; `--exclude` (repeatable) skips any file whose path
 relative to its root starts with that subpath, and `--no-recurse` limits each
-root to its direct children. It skips hidden dirs, backups, test/scratch output
+root to its direct children. `--name GLOB` (repeatable) keeps only files whose
+name matches, e.g. `--root ~/.claude/skills --name SKILL.md` connects each skill's
+entry file in place; files that share a name are shown to routing with their
+folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, test/scratch output
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) and vault-style
 subdirectories, and holds back any file that looks like it carries
 card/password text or sits over the gate's size ceiling, writing a
