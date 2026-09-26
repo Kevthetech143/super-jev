@@ -1265,3 +1265,90 @@ def test_bench_datasets_are_never_inventoried(tmp_path):
     assert pb.is_bench_dataset(str(bench / "p1.md"))
     assert not pb.inventory([bench])[0]
     assert not pb.is_bench_dataset("/Users/x/agents/health-fitness-brain/INDEX.md")
+
+
+def test_connect_part_matches_a_symlinked_file_by_realpath(tmp_path, monkeypatch):
+    """Night 2026-09-26: the in-place skills reconnect died with KeyError on
+    marketplace-listing-pipeline/SKILL.md, a symlink into tools/; the preview echoed its target path."""
+    target = tmp_path / "tools" / "SKILL.md"
+    target.parent.mkdir()
+    target.write_text("# Pipeline\n")
+    link = tmp_path / "skills" / "marketplace-listing-pipeline" / "SKILL.md"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(target)
+    cache = {str(link): {"description": "a", "labels_ok": False}}
+    sent = []
+
+    def fake_memory(req):
+        if req["action"] == "panel":
+            return {"pointers": []}
+        sent.append(req)
+        if not req.get("reviewed"):
+            return {"status": "preparation-required", "sources": [{"path": str(target.resolve()), "sha256": "h"}]}
+        return {"status": "registered", "pointer": "p", "sources": [{}]}
+
+    monkeypatch.setattr(pb, "memory", fake_memory)
+    assert pb.connect_part("p", ["primary"], [link], cache) == {"connected": True}
+    assert sent[-1]["sources"][0]["sha256"] == "h"
+
+
+def test_inventory_name_matches_case_insensitively(tmp_path):
+    root = tmp_path / "skills"
+    for d, n in (("a", "SKILL.md"), ("b", "skill.md"), ("c", "notes.md")):
+        (root / d).mkdir(parents=True)
+        (root / d / n).write_text(f"# {d}\nBody.\n")
+
+    files, held = pb.inventory([root], names=["SKILL.md"])
+
+    assert sorted(p.relative_to(root).as_posix() for p in files) == ["a/SKILL.md", "b/skill.md"]
+
+
+def test_refresh_with_a_new_root_drops_the_old_no_recurse(tmp_path, monkeypatch):
+    # night-log 2026-09-26: a --refresh onto a new --root kept the old root's noRecurse,
+    # so nested skills/<name>/SKILL.md files were never inventoried.
+    import argparse
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    (cache_dir / "my-records-report.json").write_text(json.dumps(
+        {"pointer": "my-records", "roots": [str(tmp_path / "old")], "principals": ["alice"], "noRecurse": True}))
+
+    def args(roots):
+        return argparse.Namespace(pointer="my-records", roots=roots, principals=[], excludes=[], names=[],
+                                  no_recurse=False, allow_targets=[], limit=None)
+
+    fresh = args([str(tmp_path / "skills")])
+    pb.replay_recipe(fresh)
+    assert fresh.no_recurse is False
+    same = args(None)
+    pb.replay_recipe(same)
+    assert same.no_recurse is True
+
+
+@pytest.mark.parametrize("target_rel", ["profile/notes.md", "vault/logins.md", "vault/api-secret.md"])
+def test_inventory_skips_a_link_to_a_file_the_roots_would_refuse(tmp_path, target_rel):
+    # PR #173 review: guards ran on the link path only, so skills/x/SKILL.md -> profile/... passed.
+    home = tmp_path / "home"
+    target = home / target_rel
+    target.parent.mkdir(parents=True)
+    target.write_text("# Private\nPrivate text.\n")
+    root = home / "skills"
+    (root / "x").mkdir(parents=True)
+    (root / "x" / "SKILL.md").symlink_to(target)
+
+    assert pb.inventory([root], names=["SKILL.md"])[0] == []
+    # Allowing the target's folder does not lift the name/folder checks on the target.
+    assert pb.inventory([root], names=["SKILL.md"], allow_targets=[home])[0] == []
+
+
+def test_inventory_link_outside_roots_needs_allow_target(tmp_path):
+    tools = tmp_path / "tools" / "pipeline"
+    tools.mkdir(parents=True)
+    (tools / "SKILL.md").write_text("# Pipeline\nSteps.\n")
+    root = tmp_path / "skills"
+    (root / "pipeline").mkdir(parents=True)
+    (root / "pipeline" / "SKILL.md").symlink_to(tools / "SKILL.md")
+
+    assert pb.inventory([root])[0] == []
+    files = pb.inventory([root], allow_targets=[tmp_path / "tools"])[0]
+    assert [p.relative_to(root).as_posix() for p in files] == ["pipeline/SKILL.md"]

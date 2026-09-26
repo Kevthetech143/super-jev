@@ -52,6 +52,8 @@ def prepare_args(report: dict) -> list[str] | None:
         args.append("--no-recurse")
     for n in report.get("names") or []:
         args += ["--name", n]
+    for t in report.get("allowTargets") or []:
+        args += ["--allow-target", t]
     args += ["--pointer", report["pointer"]]
     for p in principals:
         args += ["--principal", p]
