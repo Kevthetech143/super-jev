@@ -209,6 +209,7 @@ def test_stale_pointer_without_report_says_root_is_needed(tmp_path, monkeypatch,
     """v1.0.12 printed a bare --refresh that prepare_bulk refused (needs --root)."""
     monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(ask, "memory", lambda req: {"status": "unknown-pointer"})
+    (tmp_path / "x.json").write_text("{}")  # a prepare_bulk pointer whose report is gone
     assert "--root DIR --pointer x --principal me --refresh" in ask.refresh_hint("x", "me", "preparation-required")
 
 
