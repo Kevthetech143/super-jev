@@ -6,7 +6,7 @@ Usage:
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
                           [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
-                          [--no-findability] [--refresh]
+                          [--findability] [--refresh]
 
   Prints a `writer: <command>` banner at the start of every run: the resolved --writer-command
   (or the SUPERJEV_WRITER_COMMAND env var, checked when --writer-command is omitted), or the
@@ -71,7 +71,7 @@ Pipeline per run:
      files per connect request, so a set over --limit (default 50, hard max 50) is split into parts named
      <pointer>, <pointer>-2, <pointer>-3, ... in stable sorted-path order, each connected separately; the
      cache and report stay keyed by the base pointer.
-  6. Findability: each connected file's own sample question is navigated; the file must rank first or it is
+  6. Findability (only with --findability; it costs a search per file): each connected file's own sample question is navigated; the file must rank first or it is
      listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
@@ -84,7 +84,57 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from connect_checked import gate, memory  # noqa: E402
+from connect_checked import gate, gate_many, memory  # noqa: E402
+
+# Gate packing: TypeSafe's docs batch independent questions into one call (parallel
+# questions, speculative fan-out). Small files are gated several to a call: each file's
+# description claim and its label claim ride together, under a FILE header, so one judge
+# call replaces up to 2 per file. A pack whose call fails or loses a claim row falls back
+# to the one-file gate(). Off with SUPERJEV_BATCH_JEV=0, the same switch as ask's batching.
+PACK_CHARS = 24000
+PACK_FILES = 6
+
+
+def pack_groups(paths: list, sizes: dict) -> list:
+    """Consecutive groups of at most PACK_FILES files and PACK_CHARS characters. A file too
+    big for a pack on its own is left out (it is gated alone)."""
+    groups, cur, used = [], [], 0
+    for p in paths:
+        n = sizes.get(str(p), PACK_CHARS + 1)
+        if n > PACK_CHARS:
+            continue
+        if cur and (len(cur) >= PACK_FILES or used + n > PACK_CHARS):
+            groups.append(cur); cur, used = [], 0
+        cur.append(p); used += n
+    if cur:
+        groups.append(cur)
+    return [g for g in groups if len(g) > 1]
+
+
+def gate_pack(items: list) -> dict:
+    """items: [(path, description, label_claim or None)]. One judge call for the whole pack;
+    returns {path: (description verdict, label verdict or None)}, or {} when the call failed."""
+    import tempfile
+    parts, claims, slots = [], [], []
+    for i, (p, desc, label_claim) in enumerate(items, 1):
+        tag = f"F{i}"
+        parts.append(f"===== FILE {tag} =====\n" + Path(p).read_text(errors="replace"))
+        claims.append(f"File {tag}: {desc}"); slots.append((str(p), 0))
+        if label_claim:
+            claims.append(f"File {tag}: {label_claim}"); slots.append((str(p), 1))
+    fd, tmp = tempfile.mkstemp(suffix=".md")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n\n".join(parts))
+        got = gate_many(claims, tmp)
+    finally:
+        os.unlink(tmp)
+    if not got:
+        return {}
+    out = {str(p): [None, None] for p, _d, _l in items}
+    for (p, k), v in zip(slots, got):
+        out[p][k] = v
+    return {p: tuple(v) for p, v in out.items()}
 
 CACHE_DIR = HERE / "prepare-cache"
 # Names of the files written into CACHE_DIR, one per line; uninstall deletes only these.
@@ -754,7 +804,10 @@ def main() -> int:
                     help="admit files the secret scan would hold (still listed in the held file, noting the override); "
                          "the size-ceiling hold is unaffected")
     ap.add_argument("--no-connect", action="store_true")
-    ap.add_argument("--no-findability", action="store_true")
+    ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
+    ap.add_argument("--findability", action="store_true",
+                    help="after connecting, search each file's own sample question (one search per file, "
+                         "paid judge calls) and report the misses; off by default")
     ap.add_argument("--refresh", action="store_true")
     ap.add_argument("--list", action="store_true",
                     help="no-judge local list: read already-gated labels from prepare-cache and filter them; "
@@ -763,6 +816,7 @@ def main() -> int:
     ap.add_argument("--subject", default=None)
     ap.add_argument("--within-days", type=int, default=None)
     a = ap.parse_args()
+    a.no_findability = a.no_findability or not a.findability
 
     if a.list:
         if not a.pointer and not a.principals:
@@ -905,6 +959,22 @@ def main() -> int:
         c = verdict.get("confidence")
         return f"{c:.2f}" if isinstance(c, (int, float)) else "n/a"
 
+    packed = {}
+    if not use_builtin and os.environ.get("SUPERJEV_BATCH_JEV") != "0":
+        sizes = {}
+        for p in todo:
+            try:
+                sizes[str(p)] = len(Path(p).read_text(errors="replace"))
+            except OSError:
+                pass
+        ready = [p for p in todo if (drafts.get(str(p)) or {}).get("description")]
+        for group in pack_groups(ready, sizes):
+            items = [(p, drafts[str(p)]["description"].strip(),
+                      claim_sentence(validate_labels(drafts[str(p)]))) for p in group]
+            packed.update(gate_pack(items))
+        if packed:
+            print(f"gate packs: {len(packed)} files checked in shared calls")
+
     exceptions, passing = [], []
     for p in todo:
         d = drafts.get(str(p))
@@ -919,6 +989,8 @@ def main() -> int:
             # it from the file proves that exactly. The judge scored such quotes 0.29-0.89, so a
             # plain note could fall under the line and be set aside for no real reason.
             v = {"state": "QUOTED", "confidence": None}
+        elif packed.get(str(p)):
+            v = packed[str(p)][0]
         else:
             v = gate(desc, str(p))
         ok = v["state"] == "QUOTED" or (v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line)
@@ -953,7 +1025,9 @@ def main() -> int:
         # never drops the file -- it connects on its plain description with labels unknown.
         labels = validate_labels(d)
         # the built-in writer drafts no labels, so there is nothing worth a judge call
+        pre = packed.get(str(p))
         v_labels = ({"state": "SKIPPED"} if use_builtin
+                    else pre[1] if pre and pre[1] and pre[0] is v
                     else gate(claim_sentence(labels), str(p)))
         labels_ok = v_labels["state"] == "SUPPORTED" and v_labels.get("confidence", 0) >= a.line
         if not labels_ok:
