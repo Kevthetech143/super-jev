@@ -929,8 +929,9 @@ def judge_near_twin(question: str, candidates: list):
 # on 20 held-out questions it kept every right answer and removed every wrong one).
 # A picked file moves to #1 and is promoted to CONFIRM_FLOOR if its own
 # probability is >= LISTWISE_PROMOTE_FLOOR; another confirmed file is demoted
-# only when the pick is that strong and not blocked. "none" drops every possible hit, so a made-up question reports
-# not found instead of an on-topic lookalike. A failed call changes nothing.
+# only when the pick is that strong and not blocked. "none" at >= the same floor
+# drops every possible hit, so a made-up question reports not found instead of an
+# on-topic lookalike; a weaker "none" keeps the files and prints LEANS_NONE_NOTE. A failed call changes nothing.
 # SUPERJEV_LISTWISE=0 turns the step off (same style as SUPERJEV_BATCH_JEV).
 def listwise_enabled() -> bool:
     return os.environ.get("SUPERJEV_LISTWISE", "1") != "0"
@@ -938,6 +939,7 @@ def listwise_enabled() -> bool:
 LISTWISE_MAX_FILES = 4
 LISTWISE_PROMOTE_FLOOR = 0.9
 LISTWISE_NONE = "none"
+LEANS_NONE_NOTE = "(Jev leans none of these: read the files before answering; the answer may not be here)"
 LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, pick none."
 
 def best_passage(path: str):
@@ -1809,7 +1811,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         _STAGE["listwise"] = {"pool": pool[:LISTWISE_MAX_FILES], "ran": bool(pool), "reordered": False}
         listwise_winner, listwise_prob = judge_listwise(question, pool) if pool else (None, None)
         _STAGE["listwise"].update(winner=listwise_winner, winner_prob=listwise_prob, promoted=False)
-    if listwise_winner == LISTWISE_NONE:
+    if listwise_winner == LISTWISE_NONE and not (isinstance(listwise_prob, (int, float))
+                                                 and listwise_prob >= LISTWISE_PROMOTE_FLOOR):
+        # A weak "none" keeps every file; the agent reads them and decides
+        # (q16, 2026-09-26: none at 0.87 dropped the right possible file).
+        _STAGE["listwise"]["leans_none"] = True
+    elif listwise_winner == LISTWISE_NONE:
         _STAGE["listwise"]["dropped"] = [p for _s, p, _ptr in top if p in possible]
         top = [m for m in top if m[1] not in possible]
         for _s, p, _ptr in top:  # a confirmed file stays only when the pick agrees
@@ -1907,6 +1914,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         note = ("  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE
                 else possible.get(p, ""))
         print(f"{s:5.2f}  {p}  [{ptr}]{note}")
+    if top and (_STAGE.get("listwise") or {}).get("leans_none"):
+        print(LEANS_NONE_NOTE)
     for p, note in notes.items():
         if note == HELD_SECRET:
             print(f"HELD  {p}  ({HELD_SECRET})")

@@ -231,7 +231,7 @@ def test_none_pick_drops_possible_lookalike_for_made_up_question(tmp_path):
     skill.write_text("Recall what Kelvin said last time about a topic.")
     top = _run_lookup_top_and_trace(
         tmp_path, "What was Kelvin's final verdict on the CLOV earnings call last week?",
-        [{"score": 0.8, "originalPath": str(skill)}], {str(skill): 0.83}, (ask.LISTWISE_NONE, 0.7))
+        [{"score": 0.8, "originalPath": str(skill)}], {str(skill): 0.83}, (ask.LISTWISE_NONE, 0.95))
     assert top == []
 
 
@@ -243,7 +243,7 @@ def test_none_pick_drops_possible_wrong_file(tmp_path):
     loop.write_text("Run a loop job on Opus 5.")
     top = _run_lookup_top_and_trace(
         tmp_path, "What are the steps in the restart-seat-opus5 skill?",
-        [{"score": 0.8, "originalPath": str(loop)}], {str(loop): 0.80}, (ask.LISTWISE_NONE, 0.6))
+        [{"score": 0.8, "originalPath": str(loop)}], {str(loop): 0.80}, (ask.LISTWISE_NONE, 0.95))
     assert top == []
 
 
@@ -254,7 +254,7 @@ def test_none_pick_keeps_confirmed_file_but_not_as_confirmed(tmp_path):
     sdir = tmp_path / "s"
     top = _run_lookup(tmp_path, "what is the answer",
                       [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
-                      {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.6))
+                      {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.95))
     assert [t["path"] for t in top] == [str(a)]
     assert top[0]["possible"] is True
     assert sdir.exists()
@@ -291,3 +291,16 @@ def test_blocked_pick_keeps_confirmed(tmp_path):
                       [{"score": 0.9, "originalPath": str(readme)}, {"score": 0.8, "originalPath": str(note)}],
                       {str(readme): 0.98, str(note): 0.96}, listwise_winner_prob=(str(readme), 0.95))
     assert (top[0]["path"], top[0]["possible"]) == (str(note), False)
+
+
+def test_weak_none_keeps_files_and_prints_hint(tmp_path, capsys):
+    """q16, 2026-09-26: none at 0.87 dropped the right possible file. A weak
+    none keeps every file as it was and tells the agent Jev leans none."""
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a.write_text("x")
+    b.write_text("y")
+    top = _run_lookup(tmp_path, "what is the answer",
+                      [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
+                      {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.87))
+    assert [(t["path"], t["possible"]) for t in top] == [(str(a), False), (str(b), True)]
+    assert ask.LEANS_NONE_NOTE in capsys.readouterr().out
