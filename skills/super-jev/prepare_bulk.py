@@ -359,7 +359,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
         glob_iter, linked = walk_md(root, no_recurse)
         # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
         # skills into ~/.claude/skills), so its target is admitted like a root, unless it is a vault folder.
-        bases += [t for t in linked if not SKIP_PARTS.intersection(t.parts)]
+        bases += [t for t in linked if not SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
         for p in glob_iter:
             rp = p.resolve()
             if rp in seen:
@@ -371,9 +371,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if base is None:
                 print(f"  SKIP  {p}  (links to {rp}, outside every --root/--allow-target)")
                 continue
-            if any(".bak" in n or n == "logins.md" or n.endswith("-secret.md") for n in (p.name, rp.name)):
+            if any(".bak" in n or n == "logins.md" or n.endswith("-secret.md") for n in (p.name.casefold(), rp.name.casefold())):
                 continue
-            if any(part in SKIP_PARTS or part.startswith(".")
+            if any(part.casefold() in SKIP_PARTS or part.startswith(".")
                    for part in p.relative_to(root).parts + rp.relative_to(base).parts):
                 continue
             if (_excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix())

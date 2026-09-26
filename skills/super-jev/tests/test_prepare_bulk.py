@@ -112,6 +112,28 @@ def test_inventory_follows_a_symlinked_folder_but_not_into_a_vault(tmp_path):
     assert held == []
 
 
+def test_vault_and_secret_name_checks_ignore_capitals(tmp_path):
+    # macOS folders are case-insensitive: PROFILE/ is profile/, so the guard must be too.
+    root, outside = tmp_path / "root", tmp_path / "agents" / "global"
+    for d in ("PROFILE/x", "Documents/y"):
+        (outside / d).mkdir(parents=True)
+        (outside / d / "note.md").write_text("# vault\nbody\n")
+    (root / "Profile").mkdir(parents=True)
+    (root / ".ENV").mkdir()
+    (root / "ok.md").write_text("# ok\nbody\n")
+    (root / "LOGINS.md").write_text("# logins\nbody\n")
+    (root / "X-SECRET.md").write_text("# x\nbody\n")
+    (root / "Profile" / "me.md").write_text("# me\nbody\n")
+    (root / ".ENV" / "vars.md").write_text("# env\nbody\n")
+    (root / "linked-profile").symlink_to(outside / "PROFILE" / "x")
+    (root / "linked-docs").symlink_to(outside / "Documents" / "y")
+
+    files, held = pb.inventory([root])
+
+    assert [p.name for p in files] == ["ok.md"]
+    assert held == []
+
+
 def test_limit_over_50_refuses(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", base_argv(tmp_path, extra=["--limit", "51"]))
     rc = pb.main()
