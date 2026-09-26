@@ -159,7 +159,7 @@ through the normal preview-then-confirm path; a set larger than `--limit`
 (default 50, the connector's hard per-request cap) is split into parts named
 `<pointer>`, `<pointer>-2`, `<pointer>-3`, ... in stable sorted-path order,
 each connected separately, with the cache and report staying keyed by the
-base pointer. After connecting, it re-runs each connected file's own sample
+base pointer. With `--findability` (off by default; one paid search per file), after connecting it re-runs each connected file's own sample
 question through `navigate` and reports whether the file ranks first, as a
 soft findability check, not a pass/fail gate. Results and a cache keyed by
 file hash land under `prepare-cache/` next to the script, so an unchanged
@@ -310,6 +310,6 @@ python3 connect_github.py OWNER/REPO --pointer myrepo-history --principal YOUR_A
 
 - Export: one file per item under `$SUPERJEV_STATE_DIR/<principal>/github/<owner>-<repo>/` (`--out DIR` to choose): `prs/pr-N.md`, `issues/issue-N.md`, `commits/commit-SHA7.md`, `releases/release-TAG.md`. The title line leads each file so the item is findable by its title.
 - Secrets: every line that trips the shared secret scan (`secret_patterns.json`) is dropped before writing, and `prepare_bulk.py` scans again. The count of dropped lines is printed. Private-repo text still goes to the configured Jev provider; connect only repos you are allowed to send.
-- Connect: the folder goes through the normal `prepare_bulk.py` path (writer, gates, parts of 50, findability). Writer flags pass through.
+- Connect: the folder goes through the normal `prepare_bulk.py` path (writer, gates, parts of 50; findability only with `--findability`). Writer flags pass through.
 - Refresh: `.github-sync.json` in the export folder records the last export time; `--refresh` asks `gh` only for PRs/issues updated since then, commits since then, and newer releases, rewrites those files, and re-prepares the pointer with `--refresh`. Nothing changed means nothing is re-prepared. A first `--refresh` does a full export. Deleted or transferred items are not removed automatically.
 - `--no-connect` exports only, for review before connecting.
