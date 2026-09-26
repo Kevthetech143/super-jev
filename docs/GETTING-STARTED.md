@@ -97,8 +97,10 @@ question you approved before) prints `CACHE HIT` and the saved answer.
 
 - **Nothing connected yet:** prints `nothing connected yet for principal
   'ME' -- run connect first` and the command. Go back to step 4.
-- **Fact not in the files:** prints `no-candidates across N pointers: no
-  connected file answers this.` Say so; do not guess.
+- **Fact not in the files:** prints `no-candidates across N pointers`, then
+  `What was searched:` (sets searched, files read, closest named) and
+  `Next step (pick one):` with the exact connect and `--add` commands. Say so;
+  do not guess, and take one of the listed next steps.
 
 ## 6. Open the top file yourself
 

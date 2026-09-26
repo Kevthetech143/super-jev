@@ -73,7 +73,10 @@ def test_long_file_failing_the_check_is_not_kept(tmp_path, monkeypatch, capsys):
         cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), ""))
     ask.lookup("whens the CLOV annual shareholder meeting", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert "CLOV.md" not in out and "no-candidates" in out
+    # never kept as a result row; the miss report may name it as read-but-no-answer
+    assert "no-candidates" in out
+    assert not any(l.strip().endswith("[p1]") or "CLOV.md  [" in l for l in out.splitlines())
+    assert "none contained the answer. Closest:" in out and "CLOV.md" in out
 
 
 # 2. the possible tier: only the top routed files, only between the two floors
