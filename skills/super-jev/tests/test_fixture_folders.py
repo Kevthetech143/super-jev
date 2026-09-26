@@ -27,7 +27,7 @@ QUESTION = "What decision was made about releasing Super Jev v1.0.22?"
 @pytest.mark.parametrize("path", [
     "/r/docs/evidence/connector-navigation-20260920/sources/Engineering/Deployment/releases.md",
     "/r/test/fixtures/notes.md", "/r/tests/fixture/a.md", "/r/src/__fixtures__/x.md",
-    "/r/pkg/testdata/a.md", "/r/test-data/a.md", "/r/sample_data/a.md", "fixtures/a.md",
+    "/r/pkg/testdata/a.md", "/r/test-data/a.md", "/r/sample_data/a.md", "/r/tests/unit/fixtures/a.md",
 ])
 def test_fixture_paths_are_test_material(path):
     assert prepare_bulk.is_test_material(path)
@@ -36,6 +36,9 @@ def test_fixture_paths_are_test_material(path):
 @pytest.mark.parametrize("path", [
     "/r/notes/release-decisions.md", "/r/docs/evidence-log.md", "/r/evidence/2026-09.md",
     "/r/sources/reading-list.md", "/r/my-fixtures-plan.md", "/r/samples-of-work.md",
+    # a real business folder needs a test or docs folder above it to count as a fixture
+    "/biz/lighting/fixtures/catalog.md", "fixtures/a.md",
+    "/law/case-2026/evidence/exhibit-a/sources/scan.md", "/Users/k/Documents/evidence/x/sources/a.md",
 ])
 def test_real_notes_are_not_test_material(path):
     assert not prepare_bulk.is_test_material(path)
@@ -66,3 +69,17 @@ def test_routed_fixture_never_ranks(tmp_path):
                if json.loads(ln).get("kind") == "lookup")
     paths = [t["path"] for t in rec.get("top") or []]
     assert str(fixture) not in paths and paths[:1] == [str(real)]
+
+
+@pytest.mark.parametrize("path,hidden", [
+    # A real run folder's own STATUS.md is its outcome record: visible.
+    ("/a/primary-brain/ops/sj-fleet-onboard-2/STATUS.md", False),
+    ("/a/primary-brain/ops/sj-fleet-onboard-2/notes.md", True),
+    ("/a/primary-brain/ops/sj-fleet-onboard-2/sub/STATUS.md", True),
+    # Bench/eval/test run folders stay hidden, STATUS.md included.
+    ("/a/primary-brain/ops/sj-retrieval-bench/STATUS.md", True),
+    ("/a/primary-brain/ops/sj-evalset/STATUS.md", True),
+    ("/a/primary-brain/ops/sj-manual/pointers.md", False),
+])
+def test_ops_sj_run_status_is_visible_but_bench_is_not(path, hidden):
+    assert prepare_bulk.is_test_material(path) is hidden
