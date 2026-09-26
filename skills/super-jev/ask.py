@@ -925,8 +925,7 @@ def judge_near_twin(question: str, candidates: list):
 # Listwise choice step (design step 5). One Jev choice call over the top
 # LISTWISE_MAX_FILES ranked files -- each file's best passage from today's
 # content check -- plus a "none of these files states the answer" option, with
-# "When torn, pick none" (lead live test 2026-09-26, superjev-tests/lead-none-test:
-# on 20 held-out questions it kept every right answer and removed every wrong one).
+# "When torn, pick none".
 # A picked file moves to #1 and is promoted to CONFIRM_FLOOR if its own
 # probability is >= LISTWISE_PROMOTE_FLOOR; another confirmed file is demoted
 # only when the pick is that strong and not blocked. "none" at >= the same floor
@@ -1814,7 +1813,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if listwise_winner == LISTWISE_NONE and not (isinstance(listwise_prob, (int, float))
                                                  and listwise_prob >= LISTWISE_PROMOTE_FLOOR):
         # A weak "none" keeps every file; the agent reads them and decides
-        # (q16, 2026-09-26: none at 0.87 dropped the right possible file).
+        # (a weak "none" once dropped the right possible file).
         _STAGE["listwise"]["leans_none"] = True
     elif listwise_winner == LISTWISE_NONE:
         _STAGE["listwise"]["dropped"] = [p for _s, p, _ptr in top if p in possible]
@@ -1827,8 +1826,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         winner_idx = next((i for i, (_s, p, _ptr) in enumerate(top) if p == listwise_winner), None)
         # A hub/copy/writeup winner never promotes past a non-hub file already
         # ranked ahead of it: prefer_sources already made that source-over-hub
-        # call (h22, 2026-09-25: README 0.98 promoted itself back over the
-        # confirmed panel note 0.91).
+        # call (a folder README once promoted itself back over the confirmed
+        # panel note beside it).
         blocked = winner_idx is None or ((is_hub_file(listwise_winner) or copy_kind(listwise_winner))
                                          and any(not (is_hub_file(p) or copy_kind(p))
                                                  for _s, p, _ptr in top[:winner_idx]))
@@ -1842,8 +1841,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 top[0] = (max(s0, CONFIRM_FLOOR), p0, ptr0)
                 _STAGE["listwise"]["promoted"] = True
         # Another confirmed file loses its label only to a strong, unblocked
-        # pick; a weak or blocked pick never demotes a confirmed file (t11,
-        # 2026-09-26: a blocked pick demoted the right 0.96 file).
+        # pick; a weak or blocked pick never demotes a confirmed file (a
+        # blocked pick once demoted the right confirmed file).
         strong = not blocked and isinstance(listwise_prob, (int, float)) \
             and listwise_prob >= LISTWISE_PROMOTE_FLOOR
         for _s, p, _ptr in top if strong else []:
