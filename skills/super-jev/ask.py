@@ -110,7 +110,10 @@ tie-break, final ranking with the rule that kept each file) as plain lines.
 JEV'S VOICE: when a lookup returns no usable answer (no confirmed or possible
 file, or only errors), the very last line printed is exactly:
     Super Jev: I didn't have this. Want me to find it by hand and save it for next time?
-A hit prints nothing extra. Any harness relaying ask.py's output to a human
+Just above that line a no-candidates miss prints "What was searched:" (connected sets
+checked and which looked on topic, files read with the closest named) and "Next step
+(pick one):" with the exact connect and --add commands, so the agent can act on the
+miss without digging. A hit prints nothing extra. Any harness relaying ask.py's output to a human
 should relay that line to them verbatim, unedited.
 
 AGENT can also come from SUPERJEV_PRINCIPAL. State lives under
@@ -1949,12 +1952,40 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if not top and not skills:
         if dropped:
             print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
-        print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected files. "
-              "It may still exist: tell your human that, and offer to search by hand. To fill the gap, "
-              "connect more files or record a fact with --add (see references/connectors.md).")
+        print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected "
+              "files. It may still exist (see references/connectors.md to fill the gap).")
+        for line in miss_report(principal, len(original_pointers), routing, content_check):
+            print(line)
         print(VOICE_LINE)
         return 0
     return 0
+
+MISS_CLOSEST = 3
+
+
+def miss_report(principal: str, total: int, routing: dict, content_check: dict) -> list:
+    """What a no-answer lookup searched, and the clean next steps, so the agent or
+    human acting on a miss does not have to dig: which connected sets looked on
+    topic, which files were read (closest first), and the exact commands to
+    connect a missing folder or save a known answer."""
+    on_topic = sorted(ptr for ptr, r in routing.items() if r.get("status") == "candidates")
+    read = sorted(content_check, key=lambda p: -(content_check[p].get("score") or 0))
+    lines = ["What was searched:",
+             f"  - {total} connected sets; {len(routing)} searched after the topic filter, {len(on_topic)} had matches"
+             + (": " + ", ".join(on_topic[:5]) + (" ..." if len(on_topic) > 5 else "") if on_topic else "")]
+    if read:
+        lines.append(f"  - {len(read)} file(s) read; none contained the answer. Closest: "
+                     + ", ".join("/".join(Path(p).parts[-2:]) for p in read[:MISS_CLOSEST]))
+    else:
+        lines.append("  - no connected file matched the question's words closely enough to read")
+    lines += ["Next step (pick one):",
+              "  - The answer is in a file you have: it is probably not connected. Connect its folder:",
+              f"      python3 {Path(__file__).resolve().parent / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}",
+              "  - You know the answer: save it for next time:",
+              f"      python3 {Path(__file__).resolve().parent / 'ask.py'} --principal {principal} --add \"<question>\" \"<answer>\"",
+              "  - Neither: tell your human it was not found and offer to search by hand."]
+    return lines
+
 
 def find_pointer(sdir: Path, question: str):
     path = sdir / "lookups.jsonl"
