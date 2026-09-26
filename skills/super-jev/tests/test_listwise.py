@@ -86,12 +86,13 @@ def test_judge_listwise_sends_best_passages_plus_none_and_returns_winner(tmp_pat
 
 def test_judge_listwise_sends_the_best_scored_passage_of_a_long_file(tmp_path, monkeypatch):
     a = tmp_path / "a.md"
-    a.write_text("x" * ask.CONFIRM_CHUNK + "the answer lives in passage two")
-    monkeypatch.setitem(ask._STAGE, "checks", {str(a): {"best_chunk": 1}})
+    n = ask.WHOLE_FILE_CHARS // ask.CONFIRM_CHUNK + 1  # long enough to be read in passages
+    a.write_text("x" * ask.CONFIRM_CHUNK * n + "the answer lives in a late passage")
+    monkeypatch.setitem(ask._STAGE, "checks", {str(a): {"best_chunk": n}})
     seen = []
     monkeypatch.setattr(ask, "jev_choice", _fake_choice("file_1", None, seen))
     ask.judge_listwise("q", [str(a)])
-    assert seen[0][0]["file_1"]["text"] == "the answer lives in passage two"
+    assert seen[0][0]["file_1"]["text"] == "the answer lives in a late passage"
 
 
 def test_judge_listwise_caps_at_four_files(tmp_path, monkeypatch):
@@ -301,3 +302,14 @@ def test_weak_none_keeps_files_and_prints_hint(tmp_path, capsys):
                       {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.87))
     assert [(t["path"], t["possible"]) for t in top] == [(str(a), False), (str(b), True)]
     assert ask.LEANS_NONE_NOTE in capsys.readouterr().out
+
+
+def test_small_file_is_judged_and_shown_whole(tmp_path, monkeypatch):
+    """A small table/list file is one passage: split, Jev's confidence spread across
+    the pieces and the file missed the bar though its answer was in it."""
+    a = tmp_path / "map.md"
+    a.write_text("| bot | risk |\n" + "| x | none |\n" * 400 + "| polymarket | real money |\n")
+    assert len(a.read_text()) > ask.CONFIRM_CHUNK
+    done, ctx = ask.confirm_start("which bot has real money risk?", str(a))
+    assert done is None and len(ctx["chunks"]) == 1
+    assert ask.best_passage(str(a)) == a.read_text()

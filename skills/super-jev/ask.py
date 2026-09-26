@@ -609,6 +609,9 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # being reported as not in the files. Replayed on the test's 196 traced asks: the
 # near-miss negatives' top-routed files scored 0-0.55, so no negative gained a hit.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
+# A file this small is judged whole in one passage: split into pieces, a table or a list
+# spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
+WHOLE_FILE_CHARS = 12000
 ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.85
 POSSIBLE_FLOOR = 0.6
 # Round 2 (same stress test, 17 bad results): any file the check read scoring
@@ -810,7 +813,10 @@ def confirm_start(question: str, path: str):
     # The file may have changed since connect scanned it; never ship a secret to Jev.
     if has_secret(text):
         return (None, False, None, HELD_SECRET), None
-    chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+    if len(text) <= WHOLE_FILE_CHARS:
+        chunks = [text]
+    else:
+        chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     picked = pick_chunks(question, chunks)
@@ -955,6 +961,8 @@ def best_passage(path: str):
         return None
     if has_secret(text):
         return None
+    if len(text) <= WHOLE_FILE_CHARS:  # judged whole, so shown whole
+        return text
     i = (_STAGE.get("checks") or {}).get(path, {}).get("best_chunk") or 0
     return text[i * CONFIRM_CHUNK:(i + 1) * CONFIRM_CHUNK]
 
