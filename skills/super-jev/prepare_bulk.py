@@ -194,15 +194,21 @@ def relstr(p, roots) -> str:
 
 
 # Test/scratch output (e.g. a Super Jev test report that repeats the test questions) outranks the real
-# answer in word search, so it is never connected or searched. Kept narrow: real ops notes stay.
-TEST_MATERIAL_RE = re.compile(r"(^|/)ops/sj(?!-manual/)[^/]*/|superjev-test|-hand-test-", re.I)  # ops/sj-manual/ holds real facts
+# answer in word search, so it is never connected or searched. Kept narrow: real ops notes stay, and so
+# does a run folder's own STATUS.md (the run's outcome record) unless the folder is a bench/eval/test one.
+TEST_MATERIAL_RE = re.compile(r"(^|/)ops/sj(?!-manual/)(?![^/]*/STATUS\.md$)[^/]*/"  # ops/sj-manual/ holds real facts
+                              r"|(^|/)ops/sj[^/]*(bench|eval|test)[^/]*/|superjev-test|-hand-test-", re.I)
 
 
 # Fixture/sample folders (a test fixture, sample data, or an evidence run's copied
 # sources) hold made-up text about other companies, never the user's own facts; a
 # fixture releases.md once answered "what was decided about releasing v1.0.22".
-FIXTURE_RE = re.compile(r"(^|/)(fixtures?|__fixtures__|__mocks__|test[-_]?data|sample[-_]data)/"
-                        r"|(^|/)evidence/(.+/)?sources/", re.I)
+# Names only a test tool uses count on their own; a plain fixtures/ or
+# evidence/*/sources/ folder counts only under a test or docs folder, so a
+# lighting business's fixtures/ or a legal case's evidence/ stays visible.
+TEST_CONTEXT = r"(^|/)(tests?|__tests__|specs?|e2e|docs|examples|bench(marks?)?)/(.+/)?"
+FIXTURE_RE = re.compile(r"(^|/)(__fixtures__|__mocks__|test[-_]?data|sample[-_]data)/"
+                        rf"|{TEST_CONTEXT}(fixtures?/|evidence/(.+/)?sources/)", re.I)
 
 
 def is_test_material(path: str) -> bool:
