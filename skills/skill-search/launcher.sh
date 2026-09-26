@@ -35,7 +35,10 @@
 set -u
 
 LAUNCHER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-DEFAULT_REPO="$HOME/super-jev"
+# Default runtime: the checkout this launcher ships in (an installed release is
+# self-contained); a copy installed outside a checkout falls back to ~/super-jev.
+DEFAULT_REPO="$(cd "$LAUNCHER_DIR/../.." && pwd -P)"
+[ -f "$DEFAULT_REPO/src/skill-search-cli.ts" ] || DEFAULT_REPO="$HOME/super-jev"
 DEFAULT_CONFIG="$LAUNCHER_DIR/roots.json"
 RUNTIME_ENTRY="src/skill-search-cli.ts"
 RUN_TIMEOUT_SECS="${SKILL_SEARCH_RUN_TIMEOUT_SECS:-120}"

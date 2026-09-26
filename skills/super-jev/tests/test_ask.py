@@ -84,6 +84,30 @@ def test_miss_fans_out_over_panel_pointers_merged_by_score_and_logs(tmp_path, mo
     assert rec["statuses"] == {"p1": "candidates", "p2": "candidates"}
 
 
+def test_one_file_reached_through_a_link_and_its_target_is_one_hit(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "release" / "SKILL.md"
+    target.parent.mkdir()
+    target.write_text("x")
+    link = tmp_path / "linked"
+    link.symlink_to(target.parent)
+
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": "p1"}, {"pointer": "p2"}]}
+        if req["action"] == "navigate" and req["pointer"] == "p1":
+            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(target)}]}
+        if req["action"] == "navigate" and req["pointer"] == "p2":
+            return {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": str(link / "SKILL.md")}]}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    assert ask.lookup("where is it?", "alice", tmp_path) == 0
+    lines = [l for l in capsys.readouterr().out.splitlines() if "SKILL.md" in l]
+    assert len(lines) == 1 and str(target) in lines[0]
+
+
 def test_pointer_error_prints_status_line_and_is_not_folded_into_no_candidates(tmp_path, monkeypatch, capsys):
     def fake_memory(req):
         if req["action"] == "cached":

@@ -1682,6 +1682,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])
                      and not prepare_bulk.is_test_material(m[1])
                      and not other_person(m[1])), reverse=True)
+    # One file reached by two paths (a symlinked skill folder connected as the link and as its
+    # target) is one hit: keep the best-scored path, drop the other spelling.
+    reals = {}
+    merged = [m for m in merged if reals.setdefault(os.path.realpath(m[1]), m[1]) == m[1]]
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}
     for s, p, _ in merged:
@@ -1690,7 +1694,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # Always add the word search's best few: routing alone missed 7 of 30 right files.
     found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
                         | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
-    wpaths = {p: ptr for _, p, ptr in found}
+    wpaths = {}
+    for _, p, ptr in found:
+        if reals.setdefault(os.path.realpath(p), p) == p:
+            wpaths[p] = ptr
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
     if to_check:
