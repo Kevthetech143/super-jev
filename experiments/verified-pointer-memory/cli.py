@@ -45,6 +45,7 @@ ACTIONS = {
     'attempt': ['attemptId', 'principal'],
     'open': ['pointer', 'question', 'principal'],
     'sources': ['pointer', 'principal'],
+    'recipe': ['pointer', 'principal'],
 }
 
 
@@ -351,6 +352,8 @@ def run(request, config):
                                     request['principal'], request.get('context', ''))
     if action == 'attempt':
         return service.attempt(request['attemptId'], request['principal'])
+    if action == 'recipe':
+        return service.recipe(request['pointer'], request['principal'])
     if action == 'sources':
         return service.sources(request['pointer'], request['principal'],
                                request.get('offset', 0), request.get('limit', 25))

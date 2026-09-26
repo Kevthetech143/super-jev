@@ -1221,6 +1221,20 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
         args = None
     if args:
         return f"; its files changed since connect. Run: {shlex.join(['python3', str(script), *args])}"
+    # Not built by prepare_bulk: the ask already replayed its recorded connect recipe
+    # (auto_heal.reconnect_recipe), or it has none and the prepare_bulk command below
+    # would not rebuild it. One reconnect through the connector records a recipe.
+    try:
+        recipe = memory({"action": "recipe", "pointer": ptr, "principal": principal}).get("status")
+    except Exception:
+        recipe = None
+    if recipe == "ok":
+        return (f"; its files changed since connect and replaying its connect recipe failed "
+                f"(see {auto_heal.LOG_PATH})")
+    if recipe == "no-recipe":
+        return ("; its files changed since connect and it was not built by prepare_bulk, with no "
+                "recorded connect recipe. Reconnect it once through the connector "
+                "(references/connectors.md); later changes then heal on their own")
     return (f"; its files changed since connect and it has no recorded recipe. Run: python3 {script} "
             f"--root DIR --pointer {ptr} --principal {principal} --refresh "
             "(one --root per connected folder, one --principal per agent it serves)")
@@ -1495,6 +1509,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         left = int(deadline - time.time())
         if auto_heal.is_stale_kind(kind) and left >= 1:
             reconnected[ptr] = auto_heal.reconnect_now(ptr, principal, timeout=left)
+            if reconnected[ptr] == "no-report":
+                # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
+                reconnected[ptr] = auto_heal.reconnect_recipe(ptr, principal, memory=memory)
             if reconnected[ptr] == "reconnected":
                 results[i] = nav(ptr)
     _STAGE["reconnect"] = reconnected
