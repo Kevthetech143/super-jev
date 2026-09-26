@@ -1235,9 +1235,58 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
         return ("; its files changed since connect and it was not built by prepare_bulk, with no "
                 "recorded connect recipe. Reconnect it once through the connector "
                 "(references/connectors.md); later changes then heal on their own")
+    if not (prepare_bulk.CACHE_DIR / f"{ptr}.json").is_file():
+        # Neither a prepare_bulk cache nor a readable recipe: a prepare_bulk command
+        # could not rebuild it, so do not print one.
+        return ("; its files changed since connect. Reconnect it through the connector it was "
+                "built with (references/connectors.md)")
     return (f"; its files changed since connect and it has no recorded recipe. Run: python3 {script} "
             f"--root DIR --pointer {ptr} --principal {principal} --refresh "
             "(one --root per connected folder, one --principal per agent it serves)")
+
+# A stale pointer that cannot refresh itself (no prepare_bulk report, no connect recipe,
+# or a replay that failed) waits on a human. Warn about it once per day per principal,
+# not on every answer; the other sightings go to lookups.jsonl only.
+STALE_WARNED_FILE = "stale-warned.json"
+
+def warn_stale_today(sdir: Path, ptr: str) -> bool:
+    """True the first time today this pointer is seen stuck stale (and records it)."""
+    path, today = sdir / STALE_WARNED_FILE, time.strftime("%Y-%m-%d")
+    try:
+        seen = json.loads(path.read_text())
+    except (OSError, ValueError):
+        seen = {}
+    if not isinstance(seen, dict):
+        seen = {}
+    if seen.get(ptr) == today:
+        return False
+    seen[ptr] = today
+    try:
+        sdir.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(seen))
+    except OSError:
+        pass
+    return True
+
+# "Which skill/tool/command ..." asks a skill catalog question: the answer is a SKILL.md
+# in the trusted skill roots, which are not connected files. The skills connector
+# (dispatch.py skills) searches them for every principal; its picks print first.
+SKILL_Q_RE = re.compile(r"\b(skills?|slash commands?)\b|\b(which|what|any)\b.{0,30}\b(tools?|commands?)\b", re.I)
+SKILL_NOTE = "  (skill catalog match: read the SKILL.md before using it)"
+
+def skill_question(question: str) -> bool:
+    return os.environ.get("SUPERJEV_SKILLS", "1") != "0" and bool(SKILL_Q_RE.search(question))
+
+def skill_catalog(question: str) -> list:
+    """[(name, SKILL.md path)] from the skills connector; [] on any failure."""
+    try:
+        r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "dispatch.py"),
+                            "skills", "--request", question], capture_output=True, text=True, timeout=60)
+        out = json.loads(r.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    return [(c.get("name") or c.get("id") or "", c["path"]) for c in out.get("candidates") or []
+            if isinstance(c, dict) and isinstance(c.get("path"), str)] if isinstance(out, dict) else []
 
 def path_rank(question: str, path: str) -> tuple:
     """Tie-break for equal scores: more question words in the file's name or folder
@@ -1411,6 +1460,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # recent failures instead of waiting on them (and re-erroring) again this call.
     health = load_pointer_health(sdir)
     original_pointers = pointers
+    # Runs beside routing; its picks print first (see SKILL_Q_RE).
+    skill_job = (ThreadPoolExecutor(max_workers=1).submit(skill_catalog, question)
+                 if skill_question(question) else None)
     active_pointers, error_lines = [], []
     for ptr in original_pointers:
         benched, remaining, fails = pointer_benched(health, ptr, principal)
@@ -1535,6 +1587,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # it only means the *next* lookup may no longer hit it.
             heal_note = ""
             stale = auto_heal.is_stale_kind(kind)
+            result = None
             if stale:
                 result = auto_heal.maybe_heal(ptr, principal)
                 if result == "started":
@@ -1549,6 +1602,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # a live error, never benched) so it reads differently at a glance from
             # a real provider error -- appended after the existing kind/hint/heal
             # text so it never changes what those already say.
+            if stale and result == "no-report" and reconnected.get(ptr) != "reconnected" \
+                    and not warn_stale_today(sdir, ptr):
+                errored -= 1
+                log(sdir, "stale-quiet", pointer=ptr, status=kind)
+                continue
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
     if learner:
@@ -1710,6 +1768,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         top = sorted(top, key=lambda m: m[1] != listwise_winner)
     else:
         _STAGE.setdefault("listwise", {})["reordered"] = False
+    skills = skill_job.result() if skill_job else []
+    _STAGE["skills"] = [path for _n, path in skills] if skill_job else None
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
@@ -1747,6 +1807,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             "person": _STAGE.get("person") or {},
             "prefilter": (_STAGE.get("prefilter") or [])[:STAGE_LIST_CAP],
             "source_moves": _STAGE.get("source_moves") or [],
+            "skills": _STAGE.get("skills"),
             "final": [{"score": s, "path": p,
                        "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
                                 else "hub, ranked last" if p in possible and demoted(p)
@@ -1765,6 +1826,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 stages=stages)
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
+    for name, path in skills:
+        print(f"skill  {path}  [skills: {name}]{SKILL_NOTE}")
     for s, p, ptr in top:
         note = ("  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE
                 else possible.get(p, ""))
@@ -1776,14 +1839,14 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print(line)
     if errored:
         print(f"unresolved: {errored} of {len(original_pointers)} pointers errored")
-        if not top:
+        if not top and not skills:
             print(VOICE_LINE)
             return 1
         # Partial failure: some pointers errored or are benched, but healthy
         # pointers still answered -- the failure stays visible above, it just
         # does not fail a lookup that actually has a real result.
         return 0
-    if not top:
+    if not top and not skills:
         if dropped:
             print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
         print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected files. "
