@@ -201,6 +201,33 @@ def test_all_pointers_empty_gives_no_candidates_hint_naming_connectors_and_add(t
     assert "--add" in out
 
 
+def test_miss_report_says_what_was_searched_and_next_steps(tmp_path, monkeypatch, capsys):
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": ["p1", "p2"]}
+        if req["action"] == "navigate":
+            return {"status": "no-candidates", "candidates": []}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    assert ask.lookup("q", "alice", tmp_path) == 0
+    out = capsys.readouterr().out.strip().splitlines()
+    assert "What was searched:" in out
+    assert "  - 2 connected sets; 2 searched after the topic filter, 0 had matches" in out
+    assert any("ask.py --principal alice --add" in line for line in out)
+    assert any("/prepare_bulk.py --root <folder> --pointer alice-<name>" in line for line in out)
+    assert out[-1] == ask.VOICE_LINE  # the voice line stays last
+
+
+def test_miss_report_names_closest_files_read_first():
+    lines = ask.miss_report("bob", 5, {"p1": {"status": "candidates"}, "p2": {"status": "no-candidates"}},
+                            {"/x/low.md": {"score": 0.2}, "/x/high.md": {"score": 0.5}})
+    assert lines[1] == "  - 5 connected sets; 2 searched after the topic filter, 1 had matches: p1"
+    assert lines[2] == "  - 2 file(s) read; none contained the answer. Closest: x/high.md, x/low.md"
+
+
 def test_approve_ready_search_sends_ticket_approved_answer_and_reviewedtext_quotes(tmp_path, monkeypatch):
     ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": "/a.md", "pointer": "p1"}])
     calls = []
