@@ -1315,7 +1315,7 @@ def test_refresh_with_a_new_root_drops_the_old_no_recurse(tmp_path, monkeypatch)
 
     def args(roots):
         return argparse.Namespace(pointer="my-records", roots=roots, principals=[], excludes=[], names=[],
-                                  no_recurse=False, limit=None)
+                                  no_recurse=False, allow_targets=[], limit=None)
 
     fresh = args([str(tmp_path / "skills")])
     pb.replay_recipe(fresh)
@@ -1323,3 +1323,32 @@ def test_refresh_with_a_new_root_drops_the_old_no_recurse(tmp_path, monkeypatch)
     same = args(None)
     pb.replay_recipe(same)
     assert same.no_recurse is True
+
+
+@pytest.mark.parametrize("target_rel", ["profile/notes.md", "vault/logins.md", "vault/api-secret.md"])
+def test_inventory_skips_a_link_to_a_file_the_roots_would_refuse(tmp_path, target_rel):
+    # PR #173 review: guards ran on the link path only, so skills/x/SKILL.md -> profile/... passed.
+    home = tmp_path / "home"
+    target = home / target_rel
+    target.parent.mkdir(parents=True)
+    target.write_text("# Private\nPrivate text.\n")
+    root = home / "skills"
+    (root / "x").mkdir(parents=True)
+    (root / "x" / "SKILL.md").symlink_to(target)
+
+    assert pb.inventory([root], names=["SKILL.md"])[0] == []
+    # Allowing the target's folder does not lift the name/folder checks on the target.
+    assert pb.inventory([root], names=["SKILL.md"], allow_targets=[home])[0] == []
+
+
+def test_inventory_link_outside_roots_needs_allow_target(tmp_path):
+    tools = tmp_path / "tools" / "pipeline"
+    tools.mkdir(parents=True)
+    (tools / "SKILL.md").write_text("# Pipeline\nSteps.\n")
+    root = tmp_path / "skills"
+    (root / "pipeline").mkdir(parents=True)
+    (root / "pipeline" / "SKILL.md").symlink_to(tools / "SKILL.md")
+
+    assert pb.inventory([root])[0] == []
+    files = pb.inventory([root], allow_targets=[tmp_path / "tools"])[0]
+    assert [p.relative_to(root).as_posix() for p in files] == ["pipeline/SKILL.md"]
