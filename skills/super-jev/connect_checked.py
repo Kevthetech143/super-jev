@@ -51,6 +51,29 @@ def gate(description: str, path: str) -> dict:
     return {"state": m.group(1), "confidence": float(m.group(2)), "secs": secs}
 
 
+def gate_many(claims: list, path: str):
+    """Several claims against one evidence file in ONE judge call. Returns one verdict dict per
+    claim, in order (same shape as gate()), or None when the call failed or any claim row is
+    missing -- the caller then falls back to gate() per claim."""
+    t = time.time()
+    args = [sys.executable, str(HERE / "dispatch.py"), "check"]
+    for c in claims:
+        args += ["--claim", c]
+    try:
+        r = subprocess.run([*args, path], capture_output=True, text=True)
+    except ValueError:
+        return None
+    txt = r.stdout + r.stderr
+    secs = round(time.time() - t, 1)
+    rows = {int(n): (v, float(c)) for n, v, c in re.findall(r"\bc(\d+)\s+(\S+)\s+([\d.]+)", txt)}
+    out = []
+    for i in range(1, len(claims) + 1):
+        if i not in rows or rows[i][0] not in KNOWN_VERDICTS:
+            return None
+        out.append({"state": rows[i][0], "confidence": rows[i][1], "secs": secs})
+    return out
+
+
 def memory(req: dict) -> dict:
     r = subprocess.run([sys.executable, str(HERE / "dispatch.py"), "memory", "--input", "/dev/stdin"],
                        input=json.dumps(req), capture_output=True, text=True)

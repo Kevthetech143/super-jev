@@ -387,7 +387,7 @@ def test_findability_hit_and_miss(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(pb, "navigate", fake_navigate)
 
-    monkeypatch.setattr(sys, "argv", base_argv(root))
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--findability"]))
     rc = pb.main()
 
     assert rc == 0
