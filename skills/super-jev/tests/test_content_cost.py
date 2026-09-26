@@ -100,4 +100,4 @@ def test_pointer_whose_files_cannot_be_listed_is_always_routed(tmp_path):
     navigated, listed = _lookup(tmp_path, "knee referral code", words, sources_ok=False)
     assert sorted(navigated) == ["knee", "taxes"] and listed == []
     saved = json.loads((tmp_path / "s" / ask.POINTER_WORDS_FILE).read_text())
-    assert saved["taxes"] == {"generation": "g1", "words": None}
+    assert saved["taxes"] == {"generation": "g1", "words": None, "version": ask.WORDS_VERSION}
