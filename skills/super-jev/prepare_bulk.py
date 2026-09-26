@@ -323,7 +323,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             rp = p.resolve()
             if rp in seen:
                 continue
-            if names and not any(fnmatch.fnmatch(p.name, n) for n in names):
+            # Case-insensitive: 225 of 315 fleet skills name the entry file skill.md, not SKILL.md.
+            if names and not any(fnmatch.fnmatch(p.name.lower(), n.lower()) for n in names):
                 continue
             if ".bak" in p.name or p.name == "logins.md" or p.name.endswith("-secret.md"):
                 continue
@@ -518,9 +519,11 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict) 
     if prev.get("status") != "preparation-required":
         print(f"connect preview failed for {pointer}:", json.dumps(prev)[:300])
         return {"connected": False}
-    hashes = {x["path"]: x["sha256"] for x in prev["sources"]}
+    # The backend echoes each path in realpath form: a symlinked file (a skill folder whose SKILL.md
+    # links into tools/) came back under its target and crashed the skills reconnect with a KeyError.
+    hashes = {os.path.realpath(x["path"]): x["sha256"] for x in prev["sources"]}
     for s in req["sources"]:
-        s["sha256"] = hashes[s["path"]]
+        s["sha256"] = hashes[os.path.realpath(s["path"])]
     req["reviewed"] = True
     reg = memory(req)
     wider = reg.get("registeredPrincipals") if reg.get("reason") == "scope-change" else None
@@ -646,14 +649,16 @@ def replay_recipe(a) -> None:
         return
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
+    new_roots = bool(a.roots and sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or []))
     rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
                     or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
-                    or (a.roots and sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or [])))
+                    or new_roots)
     a.roots = a.roots or rep.get("roots") or None
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []
-    a.no_recurse = a.no_recurse or bool(rep.get("noRecurse"))
+    # A new root set is a new scope: the old root's --no-recurse does not carry over to it.
+    a.no_recurse = a.no_recurse or (not new_roots and bool(rep.get("noRecurse")))
     a.names = a.names or rep.get("names") or []
     # --allow-held is never replayed: it would admit NEW secret-looking files without review.
     if a.limit is None and isinstance(rep.get("limit"), int):
