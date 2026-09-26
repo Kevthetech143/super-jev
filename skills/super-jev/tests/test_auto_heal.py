@@ -152,3 +152,75 @@ def test_stale_kind_detection():
     assert not ah.is_stale_kind("error")
     assert not ah.is_stale_kind("no-candidates")
     assert not ah.is_stale_kind("")
+
+
+# ---- pointers prepare_bulk did not build: replay the connect recipe recorded at connect time ----
+# The live failure (primary, 2026-09-25): a connector-built pointer went stale when one of its
+# files changed, every ask printed "no recorded recipe" and a prepare_bulk command that could
+# not rebuild it, and auto-heal skipped it ("no-report") on every ask, for good.
+
+def _path_connected(tmp_path, monkeypatch):
+    import sys
+    exp = SKILL.parent.parent / "experiments" / "verified-pointer-memory"
+    sys.path.insert(0, str(exp))
+    from path_connect import connect
+    from service import Service
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(ah, "STATE_DIR", state_dir)
+    monkeypatch.setattr(ah, "LOG_PATH", state_dir / "autoheal.log")
+    src = tmp_path / "facts.json"
+    src.write_text('{"version": "0.2.0"}\n')
+    config = {"db": str(tmp_path / "answers.sqlite"), "registry": str(tmp_path / "registry.json")}
+    service = Service(config["db"], config["registry"], lambda *_: {"status": "no-match"})
+
+    def memory(req):
+        if req["action"] == "recipe":
+            return service.recipe(req["pointer"], req["principal"])
+        return connect(req, config)
+
+    monkeypatch.setattr(ah, "_memory", memory)
+    req = {"pointer": "structured", "principals": ["agent"],
+           "sources": [{"path": str(src), "description": "package manifest"}]}
+    preview = connect(req, config)
+    assert connect({**req, "reviewed": True, "sources": preview["sources"]}, config)["status"] == "registered"
+    return src, service
+
+
+def test_a_changed_connector_pointer_heals_from_its_recorded_recipe(tmp_path, monkeypatch):
+    src, service = _path_connected(tmp_path, monkeypatch)
+    src.write_text('{"version": "1.0.6"}\n')
+    assert service.pointer("structured", "agent")[1] == {"status": "preparation-required"}
+    assert ah.reconnect_now("structured", "agent", cache_dir=tmp_path) == "no-report"
+    assert ah.reconnect_recipe("structured", "agent") == "reconnected"
+    pointer, error = service.pointer("structured", "agent")
+    assert error is None
+    sources = service.sources("structured", "agent")["sources"]
+    assert [s["description"] for s in sources] == ["package manifest"]
+    assert "1.0.6" in Path(sources[0]["path"]).read_text()
+    # Cooled down after a success: an immediate second stale sighting does not reconnect again.
+    assert ah.reconnect_recipe("structured", "agent") == "cooldown"
+
+
+def test_a_recipe_never_widens_or_leaks_to_another_principal(tmp_path, monkeypatch):
+    _path_connected(tmp_path, monkeypatch)
+    assert ah.reconnect_recipe("structured", "intruder") == "no-recipe"
+
+
+def test_a_hand_built_dataset_with_no_recipe_is_reported_not_retried(tmp_path, monkeypatch):
+    _, service = _path_connected(tmp_path, monkeypatch)
+    registry = json.loads(Path(service.registry).read_text())
+    entry = registry["datasets"]["structured"]
+    del entry["recipe"], entry["pathConnection"]
+    Path(service.registry).write_text(json.dumps(registry))
+    assert ah.reconnect_recipe("structured", "agent") == "no-recipe"
+    assert json.loads(ah.LOG_PATH.read_text().splitlines()[-1])["reason"] == "no-recipe"
+
+
+def test_a_connector_pointer_from_before_recipes_heals_from_its_manifest(tmp_path, monkeypatch):
+    src, service = _path_connected(tmp_path, monkeypatch)
+    registry = json.loads(Path(service.registry).read_text())
+    del registry["datasets"]["structured"]["recipe"]
+    Path(service.registry).write_text(json.dumps(registry))
+    src.write_text('{"version": "1.0.7"}\n')
+    assert ah.reconnect_recipe("structured", "agent") == "reconnected"
+    assert service.pointer("structured", "agent")[1] is None

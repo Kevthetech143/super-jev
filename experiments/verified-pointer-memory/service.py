@@ -217,6 +217,38 @@ class Service:
                 raise ValueError('stale source')
         return {'entry': entry, 'sources': manifest['sources']}
 
+    def recipe(self, name: str, principal: str) -> dict[str, Any]:
+        """The recorded connect request for a pointer, readable while it is stale.
+
+        A dataset connected before recipes were recorded, through the path connector,
+        yields one rebuilt from its prepared manifest (original paths and descriptions).
+        Any other dataset (built by hand) has none."""
+        require_text('pointer', name)
+        require_text('principal', principal)
+        with self.connect() as c:
+            row = c.execute('SELECT body FROM pointers WHERE name=?', (name, )).fetchone()
+        if not row:
+            return {'status': 'unknown-pointer'}
+        pointer = json.loads(row[0])
+        if principal not in pointer['principals']:
+            return {'status': 'access-denied'}
+        entry = json.loads(self.registry.read_bytes())['datasets'].get(pointer['dataset']) or {}
+        recipe = entry.get('recipe')
+        if not recipe and entry.get('pathConnection'):
+            try:
+                manifest = self._manifest(entry)
+            except (OSError, ValueError, KeyError):
+                return {'status': 'no-recipe'}
+            recipe = {'pointer': name, 'dataset': pointer['dataset'],
+                      'principals': sorted(pointer['principals']),
+                      'structure': entry.get('structure', 'flat-files'),
+                      'sources': [{'path': s['originalPath'], 'id': s['id'],
+                                   'description': s.get('description', '')}
+                                  for s in manifest['sources'] if s.get('originalPath')]}
+        if not recipe or not recipe.get('sources'):
+            return {'status': 'no-recipe'}
+        return {'status': 'ok', 'recipe': recipe}
+
     def register(self, name: str, dataset: str, principals: list[str]) -> None:
         """Register a pointer and clear data from its previous generation."""
         require_text('pointer', name)
