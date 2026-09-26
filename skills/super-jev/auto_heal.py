@@ -217,6 +217,63 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
     return result
 
 
+def _memory(req: dict) -> dict:
+    from connect_checked import memory
+    return memory(req)
+
+
+def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
+    """Heal a stale pointer that prepare_bulk did not build (no report): replay the connect
+    request recorded when it was connected (memory action "recipe"), at the files' current
+    bytes, with the same paths, descriptions, structure and principals. Local only: no
+    writer or Jev call, and the connector's own secret scan still runs. Returns
+    "reconnected", or why not: "no-recipe", "manual" (a --add record re-adds itself),
+    "cooldown", "in-progress" or "failed". Never raises."""
+    if "-manual-" in pointer:
+        return "manual"
+    memory = memory or _memory
+    try:
+        got = memory({"action": "recipe", "pointer": pointer, "principal": principal})
+    except Exception:
+        got = {}
+    recipe = got.get("recipe") if got.get("status") == "ok" else None
+    if not isinstance(recipe, dict):
+        _log(principal=principal, pointer=pointer, action="skip-recipe", reason="no-recipe")
+        return "no-recipe"
+    state = _load_state(principal)
+    if time.time() - state["pointers"].get(pointer, 0) < COOLDOWN_SECS:
+        _log(principal=principal, pointer=pointer, action="skip-recipe", reason="cooldown")
+        return "cooldown"
+    if not _acquire_lock(principal, pointer):
+        return "in-progress"
+    try:
+        req = {"action": "connect", "pointer": recipe["pointer"], "dataset": recipe["dataset"],
+               "principals": recipe["principals"], "structure": recipe["structure"],
+               "sources": recipe["sources"], "replace": True}
+        preview = memory(req)
+        hashes = {s.get("path"): s.get("sha256") for s in preview.get("sources") or []}
+        if preview.get("status") != "preparation-required" or preview.get("reason") != "review-required":
+            result = "failed"
+        else:
+            sources = [{**s, "sha256": hashes.get(str(Path(s["path"]).expanduser().resolve()))}
+                       for s in recipe["sources"]]
+            out = memory({**req, "sources": sources, "reviewed": True,
+                           "navigationSHA": preview.get("navigationSHA")})
+            result = "reconnected" if out.get("status") == "registered" else "failed"
+            if result == "failed":
+                preview = out
+    except Exception:
+        result, preview = "failed", {}
+    finally:
+        _release_lock(principal)
+    if result == "reconnected":
+        state["pointers"][pointer] = time.time()
+        _save_state(principal, state)
+    _log(principal=principal, pointer=pointer, action="reconnect-recipe", result=result,
+         reason=preview.get("reason") if result == "failed" else None)
+    return result
+
+
 def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
                cooldown_secs: int = COOLDOWN_SECS, max_per_hour: int = MAX_PER_HOUR) -> str:
     """Start a bounded background refresh of `pointer` for `principal` if eligible. Returns a
