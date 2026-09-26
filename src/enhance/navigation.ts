@@ -38,7 +38,7 @@ export type NavigationOptions = NavigationLimits & {
 export const DEFAULT_NAVIGATION_LIMITS = { beamWidth: 3, maxRounds: 6, maxResults: 3 } as const;
 const MAX_NODES = 200;
 const MAX_LEAVES = 50;
-const MAX_DESCRIPTION = 4000;
+const MAX_DESCRIPTION = 12000;  // a small file is judged whole (ask.py WHOLE_FILE_CHARS)
 const MAX_QUESTION = 8000;
 const NONE_ID = 'o_none';
 
