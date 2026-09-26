@@ -11,3 +11,10 @@ def _one_call_per_pointer(monkeypatch):
     SUPERJEV_BATCH_JEV=0 keeps and a failed batch falls back to. The batched path
     has its own tests (test_batch_jev.py), which turn it back on."""
     monkeypatch.setenv("SUPERJEV_BATCH_JEV", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_skill_catalog(monkeypatch):
+    """Lookups never shell out to the live skills connector in tests; test_stale_quiet_and_skills.py
+    turns it on with a faked catalog."""
+    monkeypatch.setenv("SUPERJEV_SKILLS", "0")
