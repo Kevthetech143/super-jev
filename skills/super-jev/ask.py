@@ -1166,12 +1166,33 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         scored.append((round(bm25, 3), path, ptr))
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
-                      "ranked": ranked[:STAGE_LIST_CAP]}
+                      "ranked": ranked[:STAGE_LIST_CAP],
+                      "cover": {p: sum(idf[t] for t in terms if f[t]) / total for p, f in tf.items()}}
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
     rest = [r for r in ranked if r[1] not in skip]
     floor = rest[0][0] * FALLBACK_REL_FLOOR if rest else 0
     return [r for r in rest if r[0] >= floor][:limit]
+
+# A confirmed file must hold at least CONFIRM_MIN_COVER of the question's
+# weighted words (word_search's idf-weighted coverage). Replayed on 165 traced
+# confirmed pairs (night-0603): every right confirm held 0.26 or more.
+CONFIRM_MIN_COVER = 0.2
+
+def cover_gate(scores: dict) -> list:
+    """Cap at SPREAD_CAP (possible at most) any confirmed file that holds almost none
+    of the question's words. A one-passage file is judged as that passage against
+    "none", so a short on-topic-looking file can pass the 0.85 check for an event it
+    never names: history-recall/SKILL.md confirmed at 0.87 for Kelvin's CLOV verdict
+    holding only "kelvin" and "last" (coverage 0.12). A file word search did not
+    index gets no opinion. Returns the demoted paths."""
+    cover = (_STAGE.get("word") or {}).get("cover") or {}
+    demoted = [p for p, sc in scores.items()
+               if sc >= CONFIRM_FLOOR and cover.get(p, 1) < CONFIRM_MIN_COVER]
+    for p in demoted:
+        scores[p] = SPREAD_CAP
+    _STAGE["cover_gate"] = demoted[:STAGE_LIST_CAP]
+    return demoted
 
 def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
@@ -1643,6 +1664,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                         and listwise_prob >= LISTWISE_PROMOTE_FLOOR and scores.get(listwise_winner, 0) < CONFIRM_FLOOR:
                     scores[listwise_winner] = max(scores[listwise_winner], CONFIRM_FLOOR)
                     _STAGE["listwise"]["promoted"] = True
+        cover_gate(scores)
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
         # Value questions need a confirmed score; no possible tier -- except
@@ -1800,6 +1822,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                                                               else "not read: past top %d" % FALLBACK_FILES)}
                                     for sc, p, _ptr in wsearch.get("ranked", [])]},
             "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
+            "cover_gate": _STAGE.get("cover_gate"),
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
