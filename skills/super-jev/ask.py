@@ -1963,6 +1963,25 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
 MISS_CLOSEST = 3
 
 
+def skill_dir_for_display() -> Path:
+    """Directory to print in user-facing next-step commands: the path this
+    script was actually invoked with (stable across releases when it's run
+    through a symlinked skills dir), not Path(__file__).resolve()'s dated
+    release path, which goes stale the moment the next release deploys.
+    SUPERJEV_SKILL_DIR overrides both when a caller knows the right answer.
+    Falls back to the resolved path when argv[0] isn't a usable directory
+    (e.g. run via -m, or a REPL/embedded invocation)."""
+    env_dir = os.environ.get("SUPERJEV_SKILL_DIR")
+    if env_dir:
+        return Path(env_dir)
+    argv0 = sys.argv[0] if sys.argv else ""
+    if argv0 and os.path.basename(argv0):
+        candidate = Path(os.path.abspath(os.path.dirname(argv0) or "."))
+        if candidate.is_dir():
+            return candidate
+    return Path(__file__).resolve().parent
+
+
 def miss_report(principal: str, total: int, routing: dict, content_check: dict) -> list:
     """What a no-answer lookup searched, and the clean next steps, so the agent or
     human acting on a miss does not have to dig: which connected sets looked on
@@ -1979,11 +1998,12 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict) 
                      + ", ".join("/".join(Path(p).parts[-2:]) for p in read[:MISS_CLOSEST]))
     else:
         lines.append("  - no connected file matched the question's words closely enough to read")
+    skill_dir = skill_dir_for_display()
     lines += ["Next step (pick one):",
               "  - The answer is in a file you have: it is probably not connected. Connect its folder:",
-              f"      python3 {Path(__file__).resolve().parent / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}",
+              f"      python3 {skill_dir / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}",
               "  - You know the answer: save it for next time:",
-              f"      python3 {Path(__file__).resolve().parent / 'ask.py'} --principal {principal} --add \"<question>\" \"<answer>\"",
+              f"      python3 {skill_dir / 'ask.py'} --principal {principal} --add \"<question>\" \"<answer>\"",
               "  - Neither: tell your human it was not found and offer to search by hand."]
     return lines
 
