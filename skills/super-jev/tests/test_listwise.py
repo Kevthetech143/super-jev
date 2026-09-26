@@ -172,8 +172,7 @@ def test_failed_call_keeps_todays_order(tmp_path):
 
 
 def test_hub_winner_never_promotes_past_a_confirmed_source_note(tmp_path):
-    """h22, 2026-09-25: a folder README (0.98) outranked a CONFIRMED real
-    source note (0.91) beside it, because prefer_sources() correctly moved
+    """A folder README outranked a CONFIRMED real source note beside it, because prefer_sources() correctly moved
     the README below the note, but listwise then picked the README (Jev's
     single-best-answer judgment landed on the index, not the note) and moved
     it right back to #1 with no hub exemption -- unlike the near-twin
@@ -223,8 +222,8 @@ def _run_lookup_top_and_trace(tmp_path, question, candidates, scores, pick):
 
 
 def test_none_pick_drops_possible_lookalike_for_made_up_question(tmp_path):
-    """q18 (post-177, 2026-09-26): a made-up CLOV verdict question returned
-    history-recall/SKILL.md at 0.83 as "possible". Jev picking none must drop it
+    """A made-up CLOV verdict question returned history-recall/SKILL.md as
+    "possible". Jev picking none must drop it
     and report not found."""
     skill = tmp_path / "history-recall/SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -236,8 +235,7 @@ def test_none_pick_drops_possible_lookalike_for_made_up_question(tmp_path):
 
 
 def test_none_pick_drops_possible_wrong_file(tmp_path):
-    """q17 (post-177): "restart-seat-opus5 steps" returned loop-job-opus5 at 0.80
-    as possible, a wrong file. Jev picking none must drop it."""
+    """"restart-seat-opus5 steps" returned loop-job-opus5 as possible, a wrong file. Jev picking none must drop it."""
     loop = tmp_path / "loop-job-opus5/SKILL.md"
     loop.parent.mkdir(parents=True)
     loop.write_text("Run a loop job on Opus 5.")
@@ -281,7 +279,7 @@ def test_weak_pick_keeps_other_confirmed(tmp_path):
 
 
 def test_blocked_pick_keeps_confirmed(tmp_path):
-    """t11, 2026-09-26: a blocked hub pick must not demote the right confirmed file."""
+    """A blocked hub pick must not demote the right confirmed file."""
     readme = tmp_path / "docs/README.md"
     note = tmp_path / "docs/cli.md"
     readme.parent.mkdir(parents=True)
@@ -294,8 +292,7 @@ def test_blocked_pick_keeps_confirmed(tmp_path):
 
 
 def test_weak_none_keeps_files_and_prints_hint(tmp_path, capsys):
-    """q16, 2026-09-26: none at 0.87 dropped the right possible file. A weak
-    none keeps every file as it was and tells the agent Jev leans none."""
+    """A weak none once dropped the right possible file. A weak none keeps every file as it was and tells the agent Jev leans none."""
     a, b = tmp_path / "a.md", tmp_path / "b.md"
     a.write_text("x")
     b.write_text("y")
