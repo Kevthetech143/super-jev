@@ -31,7 +31,8 @@ def _lookup(tmp_path, monkeypatch, files, scores, choice):
                         {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(p)} for p in files]})
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({p: s for p, s in scores.items() if p in ps}, set(), None, {}))
     monkeypatch.setattr(ask, "judge_listwise", lambda q, pool: (None, None))
-    monkeypatch.setattr(ask, "judge_none", lambda q, pool: (calls.append(pool), (choice, {}))[1])
+    probs = {p: 0.0 for p in map(str, files)} if choice else {}
+    monkeypatch.setattr(ask, "judge_none", lambda q, pool: (calls.append(pool), (choice, probs))[1])
     sdir = tmp_path / "s"
     sdir.mkdir(exist_ok=True)
     ask.lookup(QUESTION, "me", sdir)
@@ -47,15 +48,17 @@ def _notes(tmp_path):
     return a, b
 
 
-def test_none_drops_shaky_hits(tmp_path, monkeypatch):
+def test_none_drops_seen_possible_hits(tmp_path, monkeypatch):
     a, b = _notes(tmp_path)
-    top, calls = _lookup(tmp_path, monkeypatch, [a, b], {str(a): 0.84, str(b): 0.89}, "none")
+    top, calls = _lookup(tmp_path, monkeypatch, [a, b], {str(a): 0.84, str(b): 0.7}, "none")
     assert calls and top == []
 
 
-def test_none_keeps_a_trusted_confirm(tmp_path, monkeypatch):
+def test_none_never_drops_a_confirmed_file(tmp_path, monkeypatch):
+    # night-0803 review: restart-seat-opus5 SKILL.md, right and confirmed at 0.85,
+    # lost to "none" on some runs; confirmed files stay.
     a, b = _notes(tmp_path)
-    top, _ = _lookup(tmp_path, monkeypatch, [a, b], {str(a): 0.7, str(b): 0.95}, "none")
+    top, _ = _lookup(tmp_path, monkeypatch, [a, b], {str(a): 0.7, str(b): 0.85}, "none")
     assert top == [str(b)]
 
 
@@ -83,3 +86,10 @@ def test_judge_sends_the_passage_with_the_questions_words(tmp_path, monkeypatch)
     choice, probs = ask.judge_none(QUESTION, [str(long)])
     assert choice == str(long) and "CLOV verdict" in sent["file_1"]["text"]
     assert len(sent["file_1"]["text"]) <= ask.NONE_SNIPPET
+
+
+def test_none_never_drops_a_file_jev_did_not_see(tmp_path, monkeypatch):
+    a, b = _notes(tmp_path)
+    monkeypatch.setattr(ask, "NONE_FILES", 1)
+    top, calls = _lookup(tmp_path, monkeypatch, [a, b], {str(a): 0.8, str(b): 0.7}, "none")
+    assert top == [str(b)]
