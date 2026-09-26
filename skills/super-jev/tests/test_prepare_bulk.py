@@ -93,6 +93,47 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
     assert "password" in held_by_name["pw.md"]
 
 
+def test_inventory_follows_a_symlinked_folder_but_not_into_a_vault(tmp_path):
+    # Path.rglob never entered a symlinked folder, so a skill installed as a link was never connected.
+    root, elsewhere = tmp_path / "skills", tmp_path / "release"
+    (root / "plain").mkdir(parents=True)
+    (elsewhere / "linked").mkdir(parents=True)
+    (tmp_path / "profile" / "x").mkdir(parents=True)
+    (root / "plain" / "SKILL.md").write_text("# plain\nbody\n")
+    (elsewhere / "linked" / "SKILL.md").write_text("# linked\nbody\n")
+    (tmp_path / "profile" / "x" / "SKILL.md").write_text("# vault\nbody\n")
+    (root / "linked").symlink_to(elsewhere / "linked")
+    (root / "vault").symlink_to(tmp_path / "profile" / "x")
+    (root / "plain" / "loop").symlink_to(root)
+
+    files, held = pb.inventory([root])
+
+    assert sorted(p.relative_to(root).as_posix() for p in files) == ["linked/SKILL.md", "plain/SKILL.md"]
+    assert held == []
+
+
+def test_vault_and_secret_name_checks_ignore_capitals(tmp_path):
+    # macOS folders are case-insensitive: PROFILE/ is profile/, so the guard must be too.
+    root, outside = tmp_path / "root", tmp_path / "agents" / "global"
+    for d in ("PROFILE/x", "Documents/y"):
+        (outside / d).mkdir(parents=True)
+        (outside / d / "note.md").write_text("# vault\nbody\n")
+    (root / "Profile").mkdir(parents=True)
+    (root / ".ENV").mkdir()
+    (root / "ok.md").write_text("# ok\nbody\n")
+    (root / "LOGINS.md").write_text("# logins\nbody\n")
+    (root / "X-SECRET.md").write_text("# x\nbody\n")
+    (root / "Profile" / "me.md").write_text("# me\nbody\n")
+    (root / ".ENV" / "vars.md").write_text("# env\nbody\n")
+    (root / "linked-profile").symlink_to(outside / "PROFILE" / "x")
+    (root / "linked-docs").symlink_to(outside / "Documents" / "y")
+
+    files, held = pb.inventory([root])
+
+    assert [p.name for p in files] == ["ok.md"]
+    assert held == []
+
+
 def test_limit_over_50_refuses(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", base_argv(tmp_path, extra=["--limit", "51"]))
     rc = pb.main()

@@ -323,6 +323,26 @@ def payload_has_secret(obj) -> bool:
     return False
 
 
+def walk_md(root: Path, no_recurse: bool = False):
+    """*.md files under `root`, sorted, plus the resolved targets of folder symlinks walked into.
+    Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
+    symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
+    loop is walked once."""
+    if no_recurse:
+        return sorted(root.glob("*.md")), []
+    out, linked, walked = [], [], set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in walked:
+            dirnames[:] = []
+            continue
+        walked.add(real)
+        linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
+                   if os.path.islink(os.path.join(dirpath, d))]
+        out += [Path(dirpath) / n for n in filenames if n.endswith(".md")]
+    return sorted(out), linked
+
+
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
               names: list = None, allow_targets: list = None):
     """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
@@ -336,7 +356,10 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen = [], [], set()
     for root in roots:
-        glob_iter = sorted(root.glob("*.md")) if no_recurse else sorted(root.rglob("*.md"))
+        glob_iter, linked = walk_md(root, no_recurse)
+        # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
+        # skills into ~/.claude/skills), so its target is admitted like a root, unless it is a vault folder.
+        bases += [t for t in linked if not SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
         for p in glob_iter:
             rp = p.resolve()
             if rp in seen:
@@ -348,9 +371,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if base is None:
                 print(f"  SKIP  {p}  (links to {rp}, outside every --root/--allow-target)")
                 continue
-            if any(".bak" in n or n == "logins.md" or n.endswith("-secret.md") for n in (p.name, rp.name)):
+            if any(".bak" in n or n == "logins.md" or n.endswith("-secret.md") for n in (p.name.casefold(), rp.name.casefold())):
                 continue
-            if any(part in SKIP_PARTS or part.startswith(".")
+            if any(part.casefold() in SKIP_PARTS or part.startswith(".")
                    for part in p.relative_to(root).parts + rp.relative_to(base).parts):
                 continue
             if (_excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix())

@@ -92,3 +92,25 @@ def test_cache_with_no_report_is_listed_needs_manual_prepare_not_skipped_silentl
     assert calls == []
     out = capsys.readouterr().out
     assert "NEEDS MANUAL PREPARE" in out and "orphan" in out
+
+
+def test_a_file_added_to_a_connected_folder_refreshes_its_pointer(tmp_path, monkeypatch, capsys):
+    calls = _setup(tmp_path, monkeypatch)
+    (tmp_path / "brain" / "moving.md").write_text("# moving\n")  # undo the change: only the new file is left
+    (tmp_path / "brain" / "added.md").write_text("# added after connect\n")
+    assert rc.main(["--dry-run"]) == 0
+    out = capsys.readouterr().out
+    # Both pointers share the root, so both pick up the new in-scope file; neither re-claims the other's.
+    assert "STALE moving: 0 changed, 1 new (added.md)" in out and "STALE steady: 0 changed, 1 new (added.md)" in out
+    assert calls == []
+
+
+def test_new_file_check_skips_a_legacy_report_pinned_to_its_file_list(tmp_path, monkeypatch, capsys):
+    calls = _setup(tmp_path, monkeypatch)
+    (tmp_path / "brain" / "moving.md").write_text("# moving\n")
+    (tmp_path / "brain" / "added.md").write_text("# added\n")
+    for name in ("steady", "moving"):
+        rp = rc.CACHE_DIR / f"{name}-report.json"
+        rep = json.loads(rp.read_text()); rep.pop("noRecurse"); rp.write_text(json.dumps(rep))
+    assert rc.main([]) == 0
+    assert calls == [] and "STALE" not in capsys.readouterr().out
