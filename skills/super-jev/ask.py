@@ -725,9 +725,14 @@ OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|
 # casual ask about what a file says/covers/means, not a fact lookup -- gets the
 # open treatment (idea B, 2026-09-23, recall80 bench: tools-audit's "what swap
 # path services did we discover" was one of the 7 rejections this targets).
+# "what steps / process / procedure" asks want a sequence that spans passages; the
+# exact-value wording split Jev's pick across them and held the right file's best
+# passage near POSSIBLE_FLOOR, so the same file ranked first on one run and was
+# dropped on the next.
 WHAT_ANSWER_RE = re.compile(
     r"\bwhat\b.{0,40}\b(say|says|said|cover|covers|mean|means|discover|discovered|"
-    r"discuss|discusses|find|found|include|includes|show|shows|about)\b", re.I)
+    r"discuss|discusses|find|found|include|includes|show|shows|about|"
+    r"steps?|process|procedure)\b", re.I)
 # "what is on the pending to-do list" wants the list, not one exact value: the
 # exact-value wording scored the right 80 KB pending.md 0.57 (live trace
 # 2026-09-24), so list/to-do/backlog asks get the open wording too.

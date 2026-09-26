@@ -53,6 +53,8 @@ ask = load("ask_r4b", SKILL / "ask.py")
     "which section covers the tools audit",
     "where is the agentic-economy plan discussed",
     "what swap path services did we discover",
+    "what steps does the restart skill take to restart the seat",
+    "what is the process for returning a laptop",
 ])
 def test_casual_wh_questions_get_answer_label(question):
     assert ask.confirm_label(question) is ask.ANSWER_LABEL
@@ -74,6 +76,7 @@ def test_wh_value_questions_still_get_exact_value_label(question):
 @pytest.mark.parametrize("question", [
     "What car do I have?",
     "What time does TP201 depart?",
+    "What model does the overnight cron job run?",
 ])
 def test_plain_what_fact_lookup_keeps_exact_value_label(question):
     assert ask.confirm_label(question) is ask.CONFIRM_LABEL
