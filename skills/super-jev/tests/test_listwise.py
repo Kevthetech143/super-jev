@@ -11,7 +11,6 @@ order. Nothing here makes a live provider call.
 """
 import importlib.util
 import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -61,30 +60,61 @@ def _run_lookup(tmp_path, question, candidates, scores, listwise_winner_prob=Non
 
 # ------------------------------------------------------------ judge_listwise
 
-def test_judge_listwise_reads_snippets_and_returns_winner_and_prob(tmp_path, monkeypatch):
+def _fake_choice(choice, prob=None, seen=None):
+    def f(state, questions):
+        if seen is not None:
+            seen.append((state, questions))
+        pick = {"choice": choice}
+        if prob is not None:
+            pick["probabilities"] = {choice: prob}
+        return {"answers": {"pick": pick}}
+    return f
+
+
+def test_judge_listwise_sends_best_passages_plus_none_and_returns_winner(tmp_path, monkeypatch):
     a, b = tmp_path / "a.md", tmp_path / "b.md"
     a.write_text("the real answer")
     b.write_text("a lookalike, not the answer")
-    monkeypatch.setattr(ask.subprocess, "run", lambda *a2, **k: FakeRun(_judge_result(str(a), 0.95)))
-    winner, prob = ask.judge_listwise("q", [str(a), str(b)])
-    assert winner == str(a)
-    assert prob == 0.95
+    seen = []
+    monkeypatch.setattr(ask, "jev_choice", _fake_choice("file_1", 0.95, seen))
+    assert ask.judge_listwise("q", [str(a), str(b)]) == (str(a), 0.95)
+    state, questions = seen[0]
+    assert state["file_1"]["text"] == "the real answer"
+    assert "none" in questions["pick"]["criteria"]
+    assert "When torn, pick none" in questions["pick"]["instructions"]
 
 
-def test_judge_listwise_returns_none_on_error(tmp_path, monkeypatch):
+def test_judge_listwise_sends_the_best_scored_passage_of_a_long_file(tmp_path, monkeypatch):
     a = tmp_path / "a.md"
-    a.write_text("x")
-    monkeypatch.setattr(ask.subprocess, "run", lambda *a2, **k: FakeRun("", returncode=1))
-    assert ask.judge_listwise("q", [str(a)]) == (None, None)
+    a.write_text("x" * ask.CONFIRM_CHUNK + "the answer lives in passage two")
+    monkeypatch.setitem(ask._STAGE, "checks", {str(a): {"best_chunk": 1}})
+    seen = []
+    monkeypatch.setattr(ask, "jev_choice", _fake_choice("file_1", None, seen))
+    ask.judge_listwise("q", [str(a)])
+    assert seen[0][0]["file_1"]["text"] == "the answer lives in passage two"
 
 
-def test_judge_listwise_returns_none_on_timeout(tmp_path, monkeypatch):
+def test_judge_listwise_caps_at_four_files(tmp_path, monkeypatch):
+    paths = []
+    for i in range(6):
+        f = tmp_path / f"f{i}.md"
+        f.write_text(f"text {i}")
+        paths.append(str(f))
+    seen = []
+    monkeypatch.setattr(ask, "jev_choice", _fake_choice("none", 0.8, seen))
+    assert ask.judge_listwise("q", paths) == (ask.LISTWISE_NONE, 0.8)
+    assert len(seen[0][0]) == 4
+
+
+def test_judge_listwise_returns_no_opinion_on_error(tmp_path, monkeypatch):
     a = tmp_path / "a.md"
     a.write_text("x")
 
     def boom(*a2, **k):
-        raise subprocess.TimeoutExpired(cmd="jev", timeout=60)
-    monkeypatch.setattr(ask.subprocess, "run", boom)
+        raise RuntimeError("TypeSafe returned HTTP 500")
+    monkeypatch.setattr(ask, "jev_choice", boom)
+    assert ask.judge_listwise("q", [str(a)]) == (None, None)
+    monkeypatch.setattr(ask, "jev_choice", _fake_choice("file_9"))
     assert ask.judge_listwise("q", [str(a)]) == (None, None)
 
 
@@ -127,7 +157,7 @@ def test_winner_under_promote_floor_is_not_confirmed(tmp_path):
 
 def test_failed_call_keeps_todays_order(tmp_path):
     """judge_listwise returning (None, None) -- the call failed, timed out, or
-    picked none -- leaves ranking and scores exactly as today."""
+    was inconclusive -- leaves ranking and scores exactly as today."""
     a, b = tmp_path / "a.md", tmp_path / "b.md"
     a.write_text("x")
     b.write_text("y")
@@ -181,3 +211,60 @@ def test_off_switch_skips_the_call_entirely(tmp_path, monkeypatch):
     )
     assert [t["path"] for t in top] == [str(a), str(b)]
     assert not called
+
+
+def _run_lookup_top_and_trace(tmp_path, question, candidates, scores, pick):
+    top = None
+    try:
+        top = _run_lookup(tmp_path, question, candidates, scores, listwise_winner_prob=pick)
+    except AssertionError:
+        pass  # nothing kept: no lookup log entry with a top list
+    return top or []
+
+
+def test_none_pick_drops_possible_lookalike_for_made_up_question(tmp_path):
+    """q18 (post-177, 2026-09-26): a made-up CLOV verdict question returned
+    history-recall/SKILL.md at 0.83 as "possible". Jev picking none must drop it
+    and report not found."""
+    skill = tmp_path / "history-recall/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("Recall what Kelvin said last time about a topic.")
+    top = _run_lookup_top_and_trace(
+        tmp_path, "What was Kelvin's final verdict on the CLOV earnings call last week?",
+        [{"score": 0.8, "originalPath": str(skill)}], {str(skill): 0.83}, (ask.LISTWISE_NONE, 0.7))
+    assert top == []
+
+
+def test_none_pick_drops_possible_wrong_file(tmp_path):
+    """q17 (post-177): "restart-seat-opus5 steps" returned loop-job-opus5 at 0.80
+    as possible, a wrong file. Jev picking none must drop it."""
+    loop = tmp_path / "loop-job-opus5/SKILL.md"
+    loop.parent.mkdir(parents=True)
+    loop.write_text("Run a loop job on Opus 5.")
+    top = _run_lookup_top_and_trace(
+        tmp_path, "What are the steps in the restart-seat-opus5 skill?",
+        [{"score": 0.8, "originalPath": str(loop)}], {str(loop): 0.80}, (ask.LISTWISE_NONE, 0.6))
+    assert top == []
+
+
+def test_none_pick_keeps_confirmed_file_but_not_as_confirmed(tmp_path):
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a.write_text("x")
+    b.write_text("y")
+    sdir = tmp_path / "s"
+    top = _run_lookup(tmp_path, "what is the answer",
+                      [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
+                      {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.6))
+    assert [t["path"] for t in top] == [str(a)]
+    assert top[0]["possible"] is True
+    assert sdir.exists()
+
+
+def test_pick_keeps_confirmed_only_when_it_agrees(tmp_path):
+    a, b = tmp_path / "a.md", tmp_path / "b.md"
+    a.write_text("x")
+    b.write_text("y")
+    top = _run_lookup(tmp_path, "what is the answer",
+                      [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
+                      {str(a): 0.95, str(b): 0.90}, listwise_winner_prob=(str(a), 0.8))
+    assert [(t["path"], t["possible"]) for t in top] == [(str(a), False), (str(b), True)]
