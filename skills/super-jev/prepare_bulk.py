@@ -817,6 +817,14 @@ def main() -> int:
             print(f"refresh: {len(removed)} cached files removed from disk, dropped from cache and connect set")
             for k in removed:
                 print(f"  REMOVED  {relstr(k, roots)}")
+    # Word search reads this cache as the pointer's file list, so an entry outside the current
+    # scope (an old --root, a narrowed --exclude/--name) would keep surfacing unconnected files.
+    in_scope = {str(p) for p in files} | {str(p) for p, _ in held}
+    out_of_scope = [k for k in cache if k not in in_scope]
+    for k in out_of_scope:
+        cache.pop(k, None)
+    if out_of_scope:
+        print(f"cache: {len(out_of_scope)} entries outside the current scope dropped")
 
     todo, reused = [], []
     for p in files:
@@ -949,7 +957,7 @@ def main() -> int:
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
-              "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": a.allow_targets, "limit": a.limit,
+              "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
               "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
