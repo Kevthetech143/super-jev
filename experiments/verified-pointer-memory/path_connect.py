@@ -233,7 +233,15 @@ def _connect(request, config):
             'pathConnection': {'pointer': pointer, 'principals': sorted(principals)},
             'scope': f'Only the {len(sources)} explicitly supplied local files; no recursive discovery or automatic synchronization.',
             'manifestPath': str(manifest_path), 'manifestSHA256': _hash(manifest_raw),
-            'originals': [{'path': s['path'], 'sha256': s['sha256']} for s in sources]}
+            'originals': [{'path': s['path'], 'sha256': s['sha256']} for s in sources],
+            # The connect request itself, minus the review hashes: an ask that finds this
+            # pointer stale replays it (auto_heal.reconnect_recipe) at the files' current bytes.
+            'recipe': {'pointer': pointer, 'dataset': dataset, 'principals': sorted(principals),
+                       'structure': structure,
+                       'sources': [{'path': s['path'], 'id': s['id'], 'description': s['description'],
+                                    **({'navigationPath': s['navigationPath']}
+                                       if s['navigationPath'] is not None else {})}
+                                   for s in sources]}}
         _atomic(registry, data)
         # Publication changes the fingerprint first, so interruption cannot reuse an old cache.
         service.register(pointer, dataset, principals)

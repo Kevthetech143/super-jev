@@ -208,4 +208,14 @@ def test_stale_pointer_line_names_the_refresh_command(tmp_path, monkeypatch, cap
 def test_stale_pointer_without_report_says_root_is_needed(tmp_path, monkeypatch, capsys):
     """v1.0.12 printed a bare --refresh that prepare_bulk refused (needs --root)."""
     monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "unknown-pointer"})
     assert "--root DIR --pointer x --principal me --refresh" in ask.refresh_hint("x", "me", "preparation-required")
+
+
+def test_stale_connector_pointer_without_recipe_does_not_print_a_prepare_bulk_command(tmp_path, monkeypatch):
+    """A connector-built pointer with no recorded recipe: prepare_bulk cannot rebuild it
+    (live 2026-09-25: its printed command failed with "no .md files found")."""
+    monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "no-recipe"})
+    hint = ask.refresh_hint("x", "me", "preparation-required")
+    assert "prepare_bulk.py" not in hint and "Reconnect it once through the connector" in hint
