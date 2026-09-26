@@ -982,14 +982,14 @@ def judge_listwise(question: str, paths: list):
     return (best.get("sourceId"), best.get("score")) if best else (None, None)
 
 # "None of these" check (night-0803 q14/q18): Jev chooses better than it scores,
-# and a score under 0.9 is shaky. One Jev call over the top NONE_FILES kept files
+# and a score under 0.85 is shaky. One Jev call over the top NONE_FILES kept files
 # (each one's NONE_SNIPPET-character passage sharing the most question words) asks
 # which file states the answer, with a "none" option and "when torn, pick none".
-# When "none" wins, every kept file under NONE_KEEP_FLOOR is dropped: a made-up
-# question's cover-gated possible (history-recall, 0.84) and a fixture confirmed
-# at 0.89 both lost to "none". Any error or unreadable pool leaves results as they
+# When "none" wins, every POSSIBLE-tier file Jev saw is dropped; a confirmed file
+# (>= CONFIRM_FLOOR) or one past the top NONE_FILES is never dropped (a right
+# restart-seat-opus5 SKILL.md confirmed at 0.85 lost to "none" on some runs). Any error or unreadable pool leaves results as they
 # are (fail open). SUPERJEV_NONE_CHOICE=0 turns it off.
-NONE_FILES, NONE_SNIPPET, NONE_KEEP_FLOOR = 4, 3500, 0.9
+NONE_FILES, NONE_SNIPPET = 4, 3500
 
 def none_choice_enabled() -> bool:
     return os.environ.get("SUPERJEV_NONE_CHOICE", "1") != "0"
@@ -1255,17 +1255,18 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
 CONFIRM_MIN_COVER = 0.2
 
 def cover_gate(scores: dict) -> list:
-    """Cap at SPREAD_CAP (possible at most) any confirmed file that holds almost none
-    of the question's words. A one-passage file is judged as that passage against
+    """Drop any confirmed file that holds almost none of the question's words. A one-passage file is judged as that passage against
     "none", so a short on-topic-looking file can pass the 0.85 check for an event it
     never names: history-recall/SKILL.md confirmed at 0.87 for Kelvin's CLOV verdict
-    holding only "kelvin" and "last" (coverage 0.12). A file word search did not
+    holding only "kelvin" and "last" (coverage 0.12). Capping it at SPREAD_CAP
+    (0.84) still kept it as "possible" for a made-up question, so it is dropped
+    (score 0, and no route or big-file keep) instead. A file word search did not
     index gets no opinion. Returns the demoted paths."""
     cover = (_STAGE.get("word") or {}).get("cover") or {}
     demoted = [p for p, sc in scores.items()
                if sc >= CONFIRM_FLOOR and cover.get(p, 1) < CONFIRM_MIN_COVER]
     for p in demoted:
-        scores[p] = SPREAD_CAP
+        scores[p] = 0.0
     _STAGE["cover_gate"] = demoted[:STAGE_LIST_CAP]
     return demoted
 
@@ -1740,8 +1741,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                         and listwise_prob >= LISTWISE_PROMOTE_FLOOR and scores.get(listwise_winner, 0) < CONFIRM_FLOOR:
                     scores[listwise_winner] = max(scores[listwise_winner], CONFIRM_FLOOR)
                     _STAGE["listwise"]["promoted"] = True
-        cover_gate(scores)
-        off_topic = set()  # dropped by the "none of these" check below
+        off_topic = set(cover_gate(scores))
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
         # Value questions need a confirmed score; no possible tier -- except
@@ -1762,18 +1762,19 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question)
                       and not is_value_question(question) else []):
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
-                        and scores.get(p, 0) < CONFIRM_FLOOR:
+                        and scores.get(p, 0) < CONFIRM_FLOOR and p not in off_topic:
                     possible[p] = POSSIBLE_NOTE
             for p in to_check:
                 section = _STAGE.get("checks", {}).get(p, {}).get("section")
                 if section is not None and route.get(p, 0) >= BIG_ROUTE_KEEP \
-                        and p not in notes and p not in possible:
+                        and p not in notes and p not in possible and p not in off_topic:
                     possible[p] = BIG_NOTE % (section or "top of file")
         if none_choice_enabled():
             pool = sorted((p for p in to_check if p in possible or scores.get(p, 0) >= CONFIRM_FLOOR),
                           key=lambda p: scores.get(p, POSSIBLE_FLOOR), reverse=True)
             choice, probs = judge_none(question, pool) if pool else (None, {})
-            gone = [p for p in pool if choice == "none" and scores.get(p, 0) < NONE_KEEP_FLOOR]
+            gone = [p for p in pool[:NONE_FILES] if choice == "none" and p in probs
+                    and p in possible and scores.get(p, 0) < CONFIRM_FLOOR]
             for p in gone:
                 possible.pop(p, None)
                 off_topic.add(p)
@@ -1916,6 +1917,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
             "listwise": _STAGE.get("listwise") or {},
+            "none_choice": _STAGE.get("none_choice") or {},
             "person": _STAGE.get("person") or {},
             "prefilter": (_STAGE.get("prefilter") or [])[:STAGE_LIST_CAP],
             "source_moves": _STAGE.get("source_moves") or [],
