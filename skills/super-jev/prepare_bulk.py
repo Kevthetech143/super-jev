@@ -310,11 +310,15 @@ def payload_has_secret(obj) -> bool:
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
-              names: list = None):
+              names: list = None, allow_targets: list = None):
     """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
-    since an oversized file cannot be gated regardless."""
+    since an oversized file cannot be gated regardless.
+    A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
+    folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
+    logins.md or any other file the roots would never have admitted."""
+    bases = [Path(r).resolve() for r in list(roots) + list(allow_targets or [])]
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen = [], [], set()
     for root in roots:
@@ -326,10 +330,14 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             # Case-insensitive: 225 of 315 fleet skills name the entry file skill.md, not SKILL.md.
             if names and not any(fnmatch.fnmatch(p.name.lower(), n.lower()) for n in names):
                 continue
-            if ".bak" in p.name or p.name == "logins.md" or p.name.endswith("-secret.md"):
+            base = next((b for b in bases if rp.is_relative_to(b)), None)
+            if base is None:
+                print(f"  SKIP  {p}  (links to {rp}, outside every --root/--allow-target)")
                 continue
-            rel_parts = p.relative_to(root).parts
-            if any(part in SKIP_PARTS or part.startswith(".") for part in rel_parts):
+            if any(".bak" in n or n == "logins.md" or n.endswith("-secret.md") for n in (p.name, rp.name)):
+                continue
+            if any(part in SKIP_PARTS or part.startswith(".")
+                   for part in p.relative_to(root).parts + rp.relative_to(base).parts):
                 continue
             if (_excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix())
                     or is_bench_dataset(str(rp))):
@@ -352,7 +360,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
                 else:
                     held.append((str(p), "card/password-like text; review before onboarding")); continue
-            if path_has_secret(p.name):
+            if path_has_secret(p.name) or path_has_secret(rp.name):
                 if allow_held:
                     held.append((str(p), "secret-keyword-like file name; admitted by --allow-held"))
                 else:
@@ -660,6 +668,7 @@ def replay_recipe(a) -> None:
     # A new root set is a new scope: the old root's --no-recurse does not carry over to it.
     a.no_recurse = a.no_recurse or (not new_roots and bool(rep.get("noRecurse")))
     a.names = a.names or rep.get("names") or []
+    a.allow_targets = a.allow_targets or rep.get("allowTargets") or []
     # --allow-held is never replayed: it would admit NEW secret-looking files without review.
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
@@ -691,6 +700,8 @@ def main() -> int:
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--name", dest="names", action="append", default=[])
+    ap.add_argument("--allow-target", dest="allow_targets", action="append", default=[],
+                    help="folder a symlinked file may point into besides the roots (repeatable)")
     ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=250)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
@@ -772,7 +783,7 @@ def main() -> int:
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
         print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names)
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets)
     scope = getattr(a, "legacy_scope", None)
     if scope is not None:
         files = [p for p in files if str(p) in scope]
@@ -938,7 +949,7 @@ def main() -> int:
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
-              "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "limit": a.limit,
+              "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": a.allow_targets, "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
               "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
