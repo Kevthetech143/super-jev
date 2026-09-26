@@ -130,6 +130,7 @@ import tempfile
 import sys
 import threading
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -624,12 +625,40 @@ POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file befo
 # FALLBACK_FILES get the same content check (kept below CONFIRM_FLOOR as possible).
 FALLBACK_FILES, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
-WORD_RE = re.compile(r"[a-z0-9]+")
+# Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
+# toma mi papá?" gives cuantas/medicinas/toma/papa (an ASCII-only [a-z0-9] split
+# "papá" into "pap" and "cuántas" into "cu" + "ntas"). Every word match (word search,
+# cover gate, prefilter, term_hits) goes through words()/fold(). Bump WORDS_VERSION
+# when this changes: saved pointer words carry it and rebuild on a mismatch.
+WORD_RE = re.compile(r"[^\W_]+")
+WORDS_VERSION = 2
+
+_ASCII_WORD_RE = re.compile(r"[a-z0-9]+")  # same result on ASCII text, and faster
+
+def fold(text: str) -> str:
+    """Casefold and drop accents: "Papá" -> "papa"."""
+    if text.isascii():
+        return text.lower()
+    text = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(c for c in text if not unicodedata.combining(c))
+
+def words(text: str) -> list:
+    if text.isascii():
+        return _ASCII_WORD_RE.findall(text.lower())
+    # NFC first so a decomposed "e" + accent (macOS file names) stays one word;
+    # folding word by word is about 2x faster than folding the whole text.
+    found = WORD_RE.findall(unicodedata.normalize("NFC", text).casefold())
+    return [w if w.isascii() else fold(w) for w in found]
 QUERY_STOPWORDS = SUBJECT_STOPWORDS | {
     "i", "me", "we", "our", "us", "you", "can", "could", "should", "would", "will", "get",
     "got", "much", "many", "any", "now", "still", "need", "there", "about", "into", "out",
     "whats", "hows", "whens", "wheres", "whos", "im", "ive", "dont", "not", "no", "yes",
     "all", "some", "just", "so", "if", "than", "then", "up", "tell", "know", "right",
+} | {  # Spanish question words, accent-folded like every other word
+    "que", "cual", "cuales", "quien", "quienes", "como", "donde", "cuando", "cuanto", "cuanta",
+    "cuantos", "cuantas", "por", "para", "con", "sin", "del", "los", "las", "una", "uno", "unos",
+    "unas", "mis", "tus", "sus", "esta", "este", "estos", "estas", "esa", "ese", "eso",
+    "fue", "muy", "pero", "tiene", "tengo",
 }
 CONFIRM_LABEL = ("Passage {n}, choose only if it states the exact value asked for, for the exact "
                  "event asked about (a value for another event, or only the topic, is none)")
@@ -996,12 +1025,12 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
     return cluster + top[len(cluster):]
 
 def query_terms(question: str) -> list:
-    words = WORD_RE.findall(question.lower().replace("'", ""))
-    return list(dict.fromkeys(w for w in words if len(w) > 2 and w not in QUERY_STOPWORDS))
+    found = words(question.replace("'", "").replace("\u2019", ""))
+    return list(dict.fromkeys(w for w in found if len(w) > 2 and w not in QUERY_STOPWORDS))
 
 def term_hits(terms: list, text: str) -> int:
     """How many terms appear in text, a term also matching by its first five letters."""
-    low = text.lower()
+    low = fold(text)
     return sum(1 for t in terms if t in low or (len(t) > 5 and t[:5] in low))
 
 def pick_chunks(question: str, chunks: list) -> list:
@@ -1029,7 +1058,7 @@ def load_cache_files(pointer: str) -> dict:
 PHONE_RE = re.compile(r"(?<!\d)\(?\d{3}\)?[-. ]\d{3}[-.]\d{4}(?!\d)")
 
 def passage_words(text: str) -> Counter:
-    counts = Counter(WORD_RE.findall(text.lower()))
+    counts = Counter(words(text))
     phones = len(PHONE_RE.findall(text))
     counts["phone"] += phones
     counts["number"] += phones
@@ -1068,8 +1097,8 @@ def pointer_words(sdir: Path, generations: dict) -> tuple:
         entry = saved.get(p) or {}
         if not g:
             continue
-        if entry.get("generation") != g:
-            missing.append(p)
+        if entry.get("generation") != g or entry.get("version") != WORDS_VERSION:
+            missing.append(p)  # changed files, or words saved by an older tokenizer
         elif entry.get("words") is not None:
             known[p] = entry["words"]
     return known, missing
@@ -1081,22 +1110,22 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
         out = memory({"action": "sources", "pointer": ptr, "principal": principal})
         if out.get("status") != "ok" or not out.get("sources"):
             return ptr, None
-        words = set()
+        seen = set()
         for src in out["sources"]:
             head = f"{src.get('originalPath', '')} {src.get('description', '')}".lower()
             try:
-                words.update(WORD_RE.findall(head + " " + Path(src["path"]).read_text(errors="replace").lower()))
+                seen.update(words(head + " " + Path(src["path"]).read_text(errors="replace")))
             except (OSError, KeyError, TypeError):
                 return ptr, None  # a file we cannot read: never skip this pointer
-        return ptr, " ".join(sorted(words))
+        return ptr, " ".join(sorted(seen))
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, min(len(missing), NAV_CONCURRENCY))) as pool:
             loaded = list(pool.map(load, missing))
         path = sdir / POINTER_WORDS_FILE
         saved = _load_pointer_words(path)
-        for ptr, words in loaded:
-            saved[ptr] = {"generation": generations[ptr], "words": words}
+        for ptr, found in loaded:
+            saved[ptr] = {"generation": generations[ptr], "words": found, "version": WORDS_VERSION}
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(saved))
         tmp.replace(path)
@@ -1129,7 +1158,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
             head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                              str(entry.get("description") or ""), str(entry.get("question") or "")])
-            head_words = Counter(w for w in WORD_RE.findall(head.lower()) for _ in range(3))
+            head_words = Counter(w for w in words(head) for _ in range(3))
             passages = [passage_words(text[i:i + CONFIRM_CHUNK]) + head_words
                         for i in range(0, len(text), CONFIRM_CHUNK)] or [Counter(head_words)]
             docs[path] = (ptr, sum(passages, Counter()), [(c, sum(c.values())) for c in passages])
@@ -1422,14 +1451,14 @@ def question_people(question: str, folks: dict) -> set:
     "self" folder too ("my wife and I"), and I/me/my alone means just "self".
     A group word, or a relation no folder claims, filters nothing.
     Empty set = no one resolved, nothing is filtered."""
-    words = {w.removesuffix("'s").strip("'") for w in re.findall(r"[a-z']+", question.lower())}
+    words = {w.removesuffix("'s").strip("'") for w in re.findall(r"(?:[^\W\d_]|')+", fold(question))}
     if words & GROUP_WORDS:
         return set()
     rel = {RELATIONS[w] for w in words if w in RELATIONS and w != "self"}
     by_rel = {n for n, r in folks.items() if r & rel}
     if rel and not by_rel:
         return set()
-    who = by_rel | {n for n in folks if n in words}
+    who = by_rel | {n for n in folks if fold(n) in words}
     self_ = {n for n, r in folks.items() if "self" in r}
     if not who:
         return self_ if words & FIRST_PERSON else set()
