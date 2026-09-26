@@ -93,6 +93,25 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
     assert "password" in held_by_name["pw.md"]
 
 
+def test_inventory_follows_a_symlinked_folder_but_not_into_a_vault(tmp_path):
+    # Path.rglob never entered a symlinked folder, so a skill installed as a link was never connected.
+    root, elsewhere = tmp_path / "skills", tmp_path / "release"
+    (root / "plain").mkdir(parents=True)
+    (elsewhere / "linked").mkdir(parents=True)
+    (tmp_path / "profile" / "x").mkdir(parents=True)
+    (root / "plain" / "SKILL.md").write_text("# plain\nbody\n")
+    (elsewhere / "linked" / "SKILL.md").write_text("# linked\nbody\n")
+    (tmp_path / "profile" / "x" / "SKILL.md").write_text("# vault\nbody\n")
+    (root / "linked").symlink_to(elsewhere / "linked")
+    (root / "vault").symlink_to(tmp_path / "profile" / "x")
+    (root / "plain" / "loop").symlink_to(root)
+
+    files, held = pb.inventory([root])
+
+    assert sorted(p.relative_to(root).as_posix() for p in files) == ["linked/SKILL.md", "plain/SKILL.md"]
+    assert held == []
+
+
 def test_limit_over_50_refuses(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", base_argv(tmp_path, extra=["--limit", "51"]))
     rc = pb.main()

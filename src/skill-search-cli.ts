@@ -168,7 +168,12 @@ export async function scanSkillRoots(roots: string[]): Promise<{ skills: SkillEn
     try { entries = await readdir(root, { withFileTypes: true }); }
     catch { throw new CliError(`Cannot list skill root: ${root}`); }
     for (const entry of entries) {
-      if (entry.isDirectory()) candidates.push({ name: entry.name, dir: join(root, entry.name) });
+      // A symlinked skill folder (install.sh links the Super Jev skills in) is a Dirent
+      // symlink, not a directory; follow it, since the harness loads it as a skill.
+      const dir = join(root, entry.name);
+      const isDir = entry.isDirectory()
+        || (entry.isSymbolicLink() && (await stat(dir).catch(() => null))?.isDirectory());
+      if (isDir) candidates.push({ name: entry.name, dir });
     }
     for (const { name, dir } of candidates) {
       const skillFile = await findSkillFile(dir);

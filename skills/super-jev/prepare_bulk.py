@@ -323,6 +323,26 @@ def payload_has_secret(obj) -> bool:
     return False
 
 
+def walk_md(root: Path, no_recurse: bool = False):
+    """*.md files under `root`, sorted, plus the resolved targets of folder symlinks walked into.
+    Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
+    symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
+    loop is walked once."""
+    if no_recurse:
+        return sorted(root.glob("*.md")), []
+    out, linked, walked = [], [], set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in walked:
+            dirnames[:] = []
+            continue
+        walked.add(real)
+        linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
+                   if os.path.islink(os.path.join(dirpath, d))]
+        out += [Path(dirpath) / n for n in filenames if n.endswith(".md")]
+    return sorted(out), linked
+
+
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
               names: list = None, allow_targets: list = None):
     """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
@@ -336,7 +356,10 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen = [], [], set()
     for root in roots:
-        glob_iter = sorted(root.glob("*.md")) if no_recurse else sorted(root.rglob("*.md"))
+        glob_iter, linked = walk_md(root, no_recurse)
+        # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
+        # skills into ~/.claude/skills), so its target is admitted like a root, unless it is a vault folder.
+        bases += [t for t in linked if not SKIP_PARTS.intersection(t.parts)]
         for p in glob_iter:
             rp = p.resolve()
             if rp in seen:
