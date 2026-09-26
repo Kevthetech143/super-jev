@@ -1209,17 +1209,18 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
 CONFIRM_MIN_COVER = 0.2
 
 def cover_gate(scores: dict) -> list:
-    """Cap at SPREAD_CAP (possible at most) any confirmed file that holds almost none
-    of the question's words. A one-passage file is judged as that passage against
+    """Drop any confirmed file that holds almost none of the question's words. A one-passage file is judged as that passage against
     "none", so a short on-topic-looking file can pass the 0.85 check for an event it
     never names: history-recall/SKILL.md confirmed at 0.87 for Kelvin's CLOV verdict
-    holding only "kelvin" and "last" (coverage 0.12). A file word search did not
+    holding only "kelvin" and "last" (coverage 0.12). Capping it at SPREAD_CAP
+    (0.84) still kept it as "possible" for a made-up question, so it is dropped
+    (score 0, and no route or big-file keep) instead. A file word search did not
     index gets no opinion. Returns the demoted paths."""
     cover = (_STAGE.get("word") or {}).get("cover") or {}
     demoted = [p for p, sc in scores.items()
                if sc >= CONFIRM_FLOOR and cover.get(p, 1) < CONFIRM_MIN_COVER]
     for p in demoted:
-        scores[p] = SPREAD_CAP
+        scores[p] = 0.0
     _STAGE["cover_gate"] = demoted[:STAGE_LIST_CAP]
     return demoted
 
@@ -1663,6 +1664,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         learner.join()
     _STAGE["person"]["dropped"] = [m[1] for m in merged if other_person(m[1])][:STAGE_LIST_CAP]
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR and not prepare_bulk.is_bench_dataset(m[1])
+                     and not prepare_bulk.is_test_material(m[1])
                      and not other_person(m[1])), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}
@@ -1693,7 +1695,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                         and listwise_prob >= LISTWISE_PROMOTE_FLOOR and scores.get(listwise_winner, 0) < CONFIRM_FLOOR:
                     scores[listwise_winner] = max(scores[listwise_winner], CONFIRM_FLOOR)
                     _STAGE["listwise"]["promoted"] = True
-        cover_gate(scores)
+        off_topic = set(cover_gate(scores))
         # Only files the check actually read may stay: a file past the first
         # CONFIRM_FILES was never read, so it is not evidence of anything.
         # Value questions need a confirmed score; no possible tier -- except
@@ -1714,12 +1716,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question)
                       and not is_value_question(question) else []):
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
-                        and scores.get(p, 0) < CONFIRM_FLOOR:
+                        and scores.get(p, 0) < CONFIRM_FLOOR and p not in off_topic:
                     possible[p] = POSSIBLE_NOTE
             for p in to_check:
                 section = _STAGE.get("checks", {}).get(p, {}).get("section")
                 if section is not None and route.get(p, 0) >= BIG_ROUTE_KEEP \
-                        and p not in notes and p not in possible:
+                        and p not in notes and p not in possible and p not in off_topic:
                     possible[p] = BIG_NOTE % (section or "top of file")
         def demoted(p: str) -> bool:
             """A hub file (is_hub_file) ranks as a table of contents -- except a
@@ -1736,6 +1738,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         keep = {}
         for s, p, ptr in cands:
             if p in keep:
+                continue
+            if p in off_topic:
                 continue
             if (scores.get(p, 0) >= CONFIRM_FLOOR or p in possible or p in partial
                     or (notes.get(p) == INCONCLUSIVE and p not in wpaths)):

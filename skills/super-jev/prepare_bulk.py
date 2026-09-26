@@ -198,8 +198,16 @@ def relstr(p, roots) -> str:
 TEST_MATERIAL_RE = re.compile(r"(^|/)ops/sj(?!-manual/)[^/]*/|superjev-test|-hand-test-", re.I)  # ops/sj-manual/ holds real facts
 
 
+# Fixture/sample folders (a test fixture, sample data, or an evidence run's copied
+# sources) hold made-up text about other companies, never the user's own facts; a
+# fixture releases.md once answered "what was decided about releasing v1.0.22".
+FIXTURE_RE = re.compile(r"(^|/)(fixtures?|__fixtures__|__mocks__|test[-_]?data|sample[-_]data)/"
+                        r"|(^|/)evidence/(.+/)?sources/", re.I)
+
+
 def is_test_material(path: str) -> bool:
-    return bool(TEST_MATERIAL_RE.search(Path(path).as_posix()))
+    p = Path(path).as_posix()
+    return bool(TEST_MATERIAL_RE.search(p) or FIXTURE_RE.search(p))
 
 
 # Super Jev's own bench/eval datasets (e.g. health-selected-passages): copies of passages,
