@@ -3,9 +3,18 @@ import json
 import sys
 from pathlib import Path
 
-import prepare_bulk as pb
+import pytest
+
 import connect_checked as cc
-from test_prepare_bulk import base_argv, fake_connect_memory
+from test_prepare_bulk import base_argv, fake_connect_memory, pb
+
+
+@pytest.fixture(autouse=True)
+def _claude_cli_present(monkeypatch):
+    # --writer auto falls back to builtin (no judge calls to pack) when no claude CLI is on PATH, as on CI.
+    real_which = pb.shutil.which
+    monkeypatch.setattr(pb.shutil, "which",
+                        lambda name, *a, **k: "/usr/bin/claude" if name == "claude" else real_which(name, *a, **k))
 
 
 def _files(root, n):
