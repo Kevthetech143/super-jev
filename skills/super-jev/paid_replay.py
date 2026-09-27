@@ -11,26 +11,34 @@ for "kind": "claim" cases (graded against "expected": TRUE or FALSE), and the lo
         --ask OLD/ask.py --ask NEW/ask.py --max-asks 10
 
 --max-asks is required: it refuses to start when cases x builds is larger, and says how
-many it would need. Cases use the scorecard's format (question, gold, principal, split).
+many it would need. Cases use the scorecard's format (question, gold, principal, split);
+a held-out row must match its frozen reservation exactly.
 
-Freezing: every run gets a fresh temp SUPERJEV_STATE_DIR copied from the principal's
-state, without traces, lookups, approvals or saved claim verdicts, and SUPERJEV_REPLAY=1,
-so a build never reads or writes a saved answer or claim verdict (a build too old to
-honor SUPERJEV_REPLAY that answers from a saved answer counts as inconclusive). Both
-builds must read the same prepare-cache (copy one release twice, as the build playbook
-says), or it refuses to start.
+Freezing: one snapshot is taken before the first ask: the principals' state (links
+followed, without traces, lookups, approvals or saved claim verdicts) and the memory
+backend (its answer database and dataset registry, copied). Every run gets a fresh copy
+of it as SUPERJEV_STATE_DIR, with SUPERJEV_REPLAY=1, which makes ask.py skip saved
+answers, saved claim verdicts, stale-pointer reconnects and auto-heal. A build whose ask
+code predates SUPERJEV_REPLAY is refused: it could start paid refresh work outside the
+cap. Both builds must read byte-identical prepare-caches (copy one release twice); the
+report carries the fingerprints, a cache that changes mid-replay voids the run (exit 3),
+and a case whose read files changed between its two runs is inconclusive.
 
-Wobble: live Jev scores move about 0.05-0.10 run to run. A change counts as gained or
-lost only when neither side sits within --wobble (default 0.10) of the line that decides
-it (the 5th top score, or the claim's sure line); otherwise, and on any error, timeout
-or saved answer, the case is INCONCLUSIVE. Exit 1 on any real loss, or on a held-out
-case the old build passed and the new one did not, even within the wobble.
+Wobble: live Jev scores move about 0.05-0.10 run to run. A flip counts as gained or lost
+unless the passing side cleared its line by less than --wobble (default 0.10) AND the
+failing side missed it by less than --wobble (the line: the best file left out of the
+top 5, the 5th score, or the claim's 0.90 sure line). That, and any error, timeout or
+drift, is INCONCLUSIVE. Exit 1 on any real loss, or on a held-out case the old build
+passed and the new one did not, even within the wobble.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -41,11 +49,13 @@ sys.path.insert(0, str(HERE))
 import scorecard as sc  # noqa: E402
 
 CLAIM_SURE = 0.9  # ask.py CLAIM_SURE: a TRUE/FALSE verdict needs this probability
-POSSIBLE_FLOOR = 0.6  # ask.py POSSIBLE_FLOOR: the cut when the top 5 is not full
-# Left out of each run's state copy: logs, and every saved answer or verdict.
+POSSIBLE_FLOOR = 0.6  # ask.py POSSIBLE_FLOOR: the line when the top 5 is not full
+# Left out of the state snapshot: logs, and every saved answer or verdict.
 NOT_COPIED = ("traces.jsonl*", "lookups.jsonl*", "approvals.jsonl", "claim-verdicts.json",
               "pending_picks*")
-VERDICT_RE = re.compile(r"^(TRUE|FALSE|CONFLICT|PARTIAL|UNSURE|NOT FOUND)\b(?: \((\d+(?:\.\d+)?)(, saved)?)?", re.M)
+VERDICT_RE = re.compile(r"^(TRUE|FALSE|CONFLICT|PARTIAL|UNSURE|NOT FOUND)\b"
+                        r"(?: \((?:(supported|contradicted) )?(\d+(?:\.\d+)?)(, saved)?)?", re.M)
+LEAN = {"supported": "TRUE", "contradicted": "FALSE"}
 
 
 def state_root() -> Path:
@@ -54,43 +64,114 @@ def state_root() -> Path:
     return Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
 
 
-def snapshot(principal: str, dest: Path) -> None:
-    src = state_root()
-    if (src / principal).is_dir():
-        shutil.copytree(src / principal, dest / principal, symlinks=True,
-                        ignore=shutil.ignore_patterns(*NOT_COPIED))
-    else:
-        (dest / principal).mkdir(parents=True)
-    if (src / "_memory" / "config.json").is_file():  # the memory config, never its answer store
-        (dest / "_memory").mkdir()
-        shutil.copy2(src / "_memory" / "config.json", dest / "_memory" / "config.json")
+def file_sha(path) -> str:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return "missing"
 
 
-def cache_listing(ask: Path) -> list:
-    cache = sc.build_path(ask).parent / "prepare-cache"
-    return sorted((str(f.relative_to(cache)), f.stat().st_size) for f in cache.rglob("*") if f.is_file())
+def tree_sha(root: Path) -> str:
+    """Contents and names of every file under root, links followed."""
+    h = hashlib.sha256()
+    if root.is_dir():
+        for f in sorted(p for p in root.rglob("*") if p.is_file()):
+            h.update(f"{f.relative_to(root)}\0{file_sha(f)}\n".encode())
+    return h.hexdigest()
 
 
-def run_one(ask: Path, case: dict, timeout: float, wobble: float) -> dict:
-    """One full ask of one case on one build, in its own state copy."""
+def memory_config(ask: Path, override) -> Path:
+    """The memory config this build's lookups use: its memory.sh's --config, else setup's."""
+    if override:
+        return Path(override).expanduser().resolve()
+    wrapper = sc.build_path(ask).parent / "memory.sh"
+    m = re.search(r"--config\s+(\S+)", wrapper.read_text()) if wrapper.is_file() else None
+    return Path(m.group(1)).expanduser().resolve() if m else state_root() / "_memory" / "config.json"
+
+
+def check_build(ask: Path) -> str:
+    """Why this build cannot be replayed safely, or ''."""
+    code = sc.build_path(ask)
+    if "SUPERJEV_REPLAY" not in code.read_text(errors="replace"):
+        return f"{code} predates SUPERJEV_REPLAY: it could read saved answers or start paid auto-heal work"
+    if not (code.parent.resolve().parents[1] / "experiments/verified-pointer-memory/cli.py").is_file():
+        return f"{code} has no memory runtime two folders up (experiments/verified-pointer-memory)"
+    return ""
+
+
+def snapshot(principals, config: Path, dest: Path) -> dict:
+    """Freeze the principals' state and a copy of the memory backend under dest."""
+    for pr in principals:
+        src = state_root() / pr
+        if src.is_dir():
+            shutil.copytree(src, dest / "state" / pr, symlinks=False, ignore_dangling_symlinks=True,
+                            ignore=shutil.ignore_patterns(*NOT_COPIED))
+        else:
+            (dest / "state" / pr).mkdir(parents=True)
+    cfg = json.loads(config.read_text())
+    base = config.parent
+    db, registry = (Path(cfg[k]).expanduser() for k in ("db", "registry"))
+    db, registry = (p if p.is_absolute() else base / p for p in (db, registry))
+    (dest / "memory").mkdir()
+    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as src, sqlite3.connect(dest / "memory" / "answers.sqlite") as out:
+        src.backup(out)
+    reg = json.loads(registry.read_text())
+    for entry in (reg.get("datasets") or {}).values():  # a relative manifest path stays pointed at the original
+        if isinstance(entry, dict) and entry.get("manifestPath") and not os.path.isabs(entry["manifestPath"]):
+            entry["manifestPath"] = str(registry.parent / entry["manifestPath"])
+    (dest / "memory" / "registry.json").write_text(json.dumps(reg))
+    (dest / "config.json").write_text(json.dumps(cfg))
+    return {"state": tree_sha(dest / "state"), "answers_db": file_sha(dest / "memory" / "answers.sqlite"),
+            "registry": file_sha(registry)}
+
+
+def run_once(ask: Path, base: Path, case: dict, timeout: float):
+    """One full ask in a fresh copy of the snapshot; its whole process group dies with it."""
     pr, claim = case["principal"], case.get("kind") == "claim"
     with tempfile.TemporaryDirectory(prefix="sj-replay-") as tmp:
-        snapshot(pr, Path(tmp))
-        env = {**os.environ, "SUPERJEV_STATE_DIR": tmp, "SUPERJEV_REPLAY": "1",
-               "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_TRACES": "1"}
+        tmp = Path(tmp)
+        shutil.copytree(base / "state", tmp / "state")
+        shutil.copytree(base / "memory", tmp / "memory")
+        cfg = json.loads((base / "config.json").read_text())
+        cfg.update(db=str(tmp / "memory" / "answers.sqlite"), registry=str(tmp / "memory" / "registry.json"))
+        (tmp / "state" / "_memory").mkdir(exist_ok=True)
+        (tmp / "state" / "_memory" / "config.json").write_text(json.dumps(cfg))
+        # SUPERJEV_MEMORY_WRAPPER_ACTIVE: skip memory.sh (it names the real config) and use the copy.
+        env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp / "state"), "SUPERJEV_REPLAY": "1",
+               "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_TRACES": "1", "SUPERJEV_MEMORY_WRAPPER_ACTIVE": "1"}
         cmd = [sys.executable, str(ask), "--principal", pr] + (
             ["--claim", case["question"]] if claim else [case["question"]])
+        p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             start_new_session=True)
         try:
-            r = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=timeout)
+            stdout, stderr = p.communicate(timeout=timeout)
+            timed_out = False
         except subprocess.TimeoutExpired:
-            return {"error": f"timeout after {timeout:g}s"}
-        traces = [t for t in sc._jsonl(Path(tmp) / pr / "traces.jsonl") if t.get("kind") == "trace"]
+            timed_out = True
+        finally:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if timed_out:
+            p.communicate()
+            return None, {"error": f"timeout after {timeout:g}s"}
+        traces = [t for t in sc._jsonl(tmp / "state" / pr / "traces.jsonl") if t.get("kind") == "trace"]
+    return (p.returncode, stdout, stderr, traces), None
+
+
+def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
+    ran, failed = run_once(ask, base, case, timeout)
+    if failed:
+        return failed
+    rc, stdout, stderr, traces = ran
+    claim = case.get("kind") == "claim"
     out = {"lookup_id": traces[-1].get("lookup_id") if traces else None}
-    m = VERDICT_RE.search(r.stdout)
-    if r.returncode not in (0, 1):
-        out["error"] = f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[-200:]}"
-    elif (m and m.group(3)) or any(t.get("tier") in ("cache", "stale") for t in traces):
-        out["error"] = "answered from a saved answer, not live (build lacks SUPERJEV_REPLAY)"
+    m = VERDICT_RE.search(stdout)
+    if rc not in (0, 1):
+        out["error"] = f"exit {rc}: {(stderr or stdout).strip()[-200:]}"
+    elif (m and m.group(4)) or any(t.get("tier") in ("cache", "stale") for t in traces):
+        out["error"] = "answered from a saved answer, not live"
     elif not traces:
         out["error"] = "no trace written"
     elif traces[-1].get("errors"):
@@ -99,34 +180,40 @@ def run_one(ask: Path, case: dict, timeout: float, wobble: float) -> dict:
         return out
     t = traces[-1]
     final = [f for f in t.get("final_ranked") or [] if isinstance(f, dict)][:5]
+    paths = [os.path.realpath(str(f.get("path"))) for f in final]
     scores = [f.get("score") or 0 for f in final]
+    checked = {os.path.realpath(p): v.get("score") or 0
+               for p, v in (t.get("content_check") or {}).items() if isinstance(v, dict)}
     gold = {os.path.realpath(g) for g in case["gold"]}
-    rank = next((i + 1 for i, f in enumerate(final) if os.path.realpath(str(f.get("path"))) in gold), None)
+    rank = next((i + 1 for i, p in enumerate(paths) if p in gold), None)
     out.update(tier=t.get("tier"), rank=rank, score=scores[rank - 1] if rank else None)
-    cut = min(scores) if len(final) == 5 else None
+    out["read"] = {p: file_sha(p) for p in sorted(set(paths) | set(checked) | gold)}
     if claim:
-        out["verdict"] = m.group(1) if m else None
-        out["prob"] = float(m.group(2)) if m and m.group(2) else None
+        out["verdict"], out["prob"] = (m.group(1), float(m.group(3)) if m.group(3) else None) if m else (None, None)
         out["ok"] = out["verdict"] == case["expected"]
-        out["near"] = out["ok"] and (out["prob"] or 0) < CLAIM_SURE + wobble
-    elif rank:
+        leans = out["ok"] or (out["verdict"] == "UNSURE" and LEAN.get(m.group(2)) == case["expected"])
+        out["margin"] = (out["prob"] or 0) - CLAIM_SURE if leans and out["prob"] is not None else -1.0
+    elif rank:  # cleared the best file it kept out of the top 5
         out["ok"] = True
-        out["near"] = cut is not None and out["score"] < cut + wobble
-    else:
+        out["margin"] = out["score"] - max((s for p, s in checked.items() if p not in paths), default=0)
+    else:  # missed the 5th score, or the floor when the top 5 had room
         out["ok"] = False
-        checked = {os.path.realpath(p): (v or {}).get("score") for p, v in (t.get("content_check") or {}).items()
-                   if isinstance(v, dict) or v is None}
-        best = max((s for p, s in checked.items() if p in gold and isinstance(s, (int, float))), default=None)
-        out["near"] = best is not None and best >= (POSSIBLE_FLOOR if cut is None else cut) - wobble
+        line = min(scores) if len(final) == 5 else POSSIBLE_FLOOR
+        out["margin"] = max((s for p, s in checked.items() if p in gold), default=0) - line
+    out["margin"] = round(out["margin"], 6)
     return out
 
 
-def compare(old: dict, new: dict) -> str:
+def compare(old: dict, new: dict, wobble: float) -> str:
     if "error" in old or "error" in new:
+        return "inconclusive"
+    if any(old["read"][p] != new["read"][p] for p in set(old["read"]) & set(new["read"])):
+        old["error"] = new["error"] = "a file it read changed between the two runs"
         return "inconclusive"
     if old["ok"] == new["ok"]:
         return "same"
-    if old["near"] or new["near"]:
+    passing, failing = (new, old) if new["ok"] else (old, new)
+    if passing["margin"] < wobble and failing["margin"] > -wobble:
         return "inconclusive"
     return "gained" if new["ok"] else "lost"
 
@@ -147,6 +234,7 @@ def main(argv=None) -> int:
     ap.add_argument("--max-asks", type=int, required=True, help="hard cap on paid ask.py runs")
     ap.add_argument("--wobble", type=float, default=0.10, help="run-to-run score wobble (default 0.10)")
     ap.add_argument("--timeout", type=float, default=300, help="seconds per ask (default 300)")
+    ap.add_argument("--memory-config", help="memory config to snapshot (default: the builds' memory.sh one)")
     ap.add_argument("--held-out", metavar="FILE", help="frozen held-out manifest (scorecard)")
     ap.add_argument("--held-out-sha256", help="its checksum")
     ap.add_argument("--json", action="store_true")
@@ -157,9 +245,12 @@ def main(argv=None) -> int:
         ap.error("--held-out and --held-out-sha256 must be supplied together")
     try:
         rows = [c for f in a.cases for c in sc.input_cases(f)]
-        if a.held_out:
-            rows += sc.frozen_cases(a.held_out, a.held_out_sha256)
-        cases = [c for c in sc.normalize_cases(rows, a.principal[0]) if c["principal"] in a.principal]
+        reserved = sc.frozen_cases(a.held_out, a.held_out_sha256) if a.held_out else []
+        if reserved:  # an unfrozen row may repeat a frozen one, never change it (scorecard's rule)
+            for c in sc.normalize_cases(rows, a.principal[0]):
+                if c["split"] == "held-out" and c not in reserved:
+                    raise ValueError("held-out input differs from the frozen reservation")
+        cases = [c for c in sc.normalize_cases(rows + reserved, a.principal[0]) if c["principal"] in a.principal]
         for c in cases:
             if c.get("kind") == "claim" and c.get("expected") not in ("TRUE", "FALSE"):
                 raise ValueError(f"claim case needs expected TRUE or FALSE: {c['question']}")
@@ -174,16 +265,39 @@ def main(argv=None) -> int:
         ap.error("no cases for the given --principal")
     if need > a.max_asks:
         ap.error(f"{len(cases)} case(s) x {len(builds)} builds needs {need} paid asks; --max-asks is {a.max_asks}")
-    if cache_listing(builds[0]) != cache_listing(builds[1]):
+    for b in builds:
+        if why := check_build(b):
+            ap.error(why)
+    caches = [sc.build_path(b).parent / "prepare-cache" for b in builds]
+    fingerprints = {"prepare_cache": tree_sha(caches[0])}
+    if tree_sha(caches[1]) != fingerprints["prepare_cache"]:
         ap.error("the builds read different prepare-caches; copy one release twice so they differ in code only")
+    configs = {memory_config(b, a.memory_config) for b in builds}
+    if len(configs) != 1 or not next(iter(configs)).is_file():
+        ap.error(f"the builds need one existing memory config (found {sorted(map(str, configs))}); pass --memory-config")
 
     report = {"asks": need, "wobble": a.wobble, "builds": [str(b) for b in builds], "rows": []}
-    for c in cases:
-        old, new = (run_one(b, c, a.timeout, a.wobble) for b in builds)
-        report["rows"].append({"question": c["question"], "split": c["split"], "kind": c.get("kind") or "question",
-                               "result": compare(old, new), "old": old, "new": new})
+    with tempfile.TemporaryDirectory(prefix="sj-replay-base-") as base:
+        base = Path(base)
+        try:
+            fingerprints.update(snapshot({c["principal"] for c in cases}, configs.pop(), base))
+        except (OSError, ValueError, KeyError, sqlite3.Error) as e:
+            ap.error(f"cannot snapshot state and memory: {e}")
+        report["fingerprints"] = fingerprints
+        for c in cases:
+            old, new = (grade(b, base, c, a.timeout) for b in builds)
+            report["rows"].append({"question": c["question"], "split": c["split"], "kind": c.get("kind") or "question",
+                                   "result": compare(old, new, a.wobble), "old": old, "new": new})
+    drift = [str(p) for p in caches if tree_sha(p) != fingerprints["prepare_cache"]]
     rows = report["rows"]
-    held_drop = [r for r in rows if r["split"] == "held-out" and r["old"].get("ok") and r["new"].get("ok") is False]
+    for r in rows:
+        for side in ("old", "new"):
+            r[side].pop("read", None)
+        if drift:
+            r["result"] = "inconclusive"
+    report["drift"] = drift
+    held_drop = [r for r in rows if r["split"] == "held-out" and r["old"].get("ok") and r["new"].get("ok") is False
+                 and "error" not in r["old"] and "error" not in r["new"]]
     report["splits"] = {s: {k: sum(r["result"] == k for r in rows if r["split"] == s)
                             for k in ("gained", "lost", "same", "inconclusive")} for s in sc.SPLITS}
     failed = any(r["result"] == "lost" for r in rows) or bool(held_drop)
@@ -201,7 +315,12 @@ def main(argv=None) -> int:
             print(f"  {s}: {n['gained']} gained, {n['lost']} lost, {n['same']} same, {n['inconclusive']} inconclusive")
         if held_drop:
             print(f"  held-out: {len(held_drop)} case(s) the old build passed and the new one did not")
-        print("(inconclusive = an error, a timeout, a saved answer, or a change inside the wobble; rerun or read it)")
+        print("  fingerprints: " + ", ".join(f"{k} {v[:12]}" for k, v in fingerprints.items()))
+        if drift:
+            print(f"  DRIFT: prepare-cache changed during the replay ({', '.join(drift)}); every case is void")
+        print("(inconclusive = an error, a timeout, a saved answer, drift, or a change inside the wobble)")
+    if drift:
+        return 3
     return 1 if failed else 0
 
 
