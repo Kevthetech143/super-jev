@@ -183,3 +183,17 @@ def test_claims_file_is_capped(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "lookup", lambda q, p, s: (_ for _ in ()).throw(AssertionError("no lookup")))
     monkeypatch.setattr(sys, "argv", ["ask.py", "--claims-file", str(f)])
     assert ask._main() == 2 and "at most" in capsys.readouterr().out
+
+
+def test_the_line_that_proves_it_is_offered_even_when_long_and_late(tmp_path):
+    # Live miss (2026-09-27): the rule sat ~450 chars into a long paragraph line after ~25 other
+    # lines; choices showed each line's first 160 chars in file order, so Jev picked a wrong line.
+    filler = "\n".join(f"Setup note {i} about folders and pointers " + "x" * 150 for i in range(40))
+    rule = ("Every agent should see the fleet's shared sets, not only its own brain. " + "y" * 350 +
+            " an unmarked pointer is refused, and one with any source in documents or profile cannot be marked.")
+    a = _f(tmp_path, "a.md", filler + "\n" + rule + "\n")
+    qs, lines = ask.claim_questions("a pointer with a source in documents or profile cannot be marked",
+                                    [a], {a: open(a).read()})
+    assert rule in lines["file_1"]
+    shown = qs["line_1"]["criteria"][f"L{lines['file_1'].index(rule) + 1}"]
+    assert "cannot be marked" in shown and len(shown) <= ask.CLAIM_LINE_CHARS
