@@ -92,7 +92,8 @@ def test_judge_listwise_sends_the_best_scored_passage_of_a_long_file(tmp_path, m
     seen = []
     monkeypatch.setattr(ask, "jev_choice", _fake_choice("file_1", None, seen))
     ask.judge_listwise("q", [str(a)])
-    assert seen[0][0]["file_1"]["text"] == "the answer lives in a late passage"
+    shown = seen[0][0]["file_1"]["text"]  # led by the file's title, cut at SUBJECT_CHARS
+    assert shown == "x" * ask.SUBJECT_CHARS + ask.SUBJECT_SEP + "the answer lives in a late passage"
 
 
 def test_judge_listwise_caps_at_four_files(tmp_path, monkeypatch):
