@@ -238,9 +238,15 @@ def test_skill_dir_for_display_uses_invoked_argv0_not_resolved_path(monkeypatch,
     # A stable symlinked skills dir, as an installed agent would invoke through --
     # this must stay stable across releases, unlike Path(__file__).resolve().
     stable_dir = tmp_path / "stable-skills-dir"
-    stable_dir.mkdir()
+    stable_dir.symlink_to(Path(ask.__file__).resolve().parent)  # the link an install makes
     monkeypatch.setattr(sys, "argv", [str(stable_dir / "ask.py"), "--principal", "x", "q"])
     assert ask.skill_dir_for_display() == stable_dir
+
+
+def test_skill_dir_for_display_ignores_an_unrelated_launcher_folder(monkeypatch, tmp_path):
+    monkeypatch.delenv("SUPERJEV_SKILL_DIR", raising=False)
+    monkeypatch.setattr(sys, "argv", [str(tmp_path / "pytest")])  # e.g. pytest's bin/
+    assert ask.skill_dir_for_display() == Path(ask.__file__).resolve().parent
 
 
 def test_skill_dir_for_display_falls_back_when_argv0_dir_missing(monkeypatch):
@@ -252,7 +258,7 @@ def test_skill_dir_for_display_falls_back_when_argv0_dir_missing(monkeypatch):
 def test_miss_report_next_steps_use_invoked_skill_dir(monkeypatch, tmp_path):
     monkeypatch.delenv("SUPERJEV_SKILL_DIR", raising=False)
     stable_dir = tmp_path / "stable-skills-dir"
-    stable_dir.mkdir()
+    stable_dir.symlink_to(Path(ask.__file__).resolve().parent)  # the link an install makes
     monkeypatch.setattr(sys, "argv", [str(stable_dir / "ask.py")])
     lines = ask.miss_report("bob", 1, {}, {})
     joined = "\n".join(lines)
