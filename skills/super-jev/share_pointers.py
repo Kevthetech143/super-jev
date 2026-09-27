@@ -111,7 +111,7 @@ def share(names: list, principals: list, dry_run: bool = False, memory=memory) -
             out[name] = "unknown-pointer"; continue
         body = rows[name]
         entry = datasets.get(body.get("dataset")) or {}
-        originals = [o.get("path", "") for o in entry.get("originals") or []]
+        originals = [x for o in entry.get("originals") or [] for x in (o.get("path", ""), o.get("realPath")) if x]
         why = (private_source(originals) if originals else "no recorded source list to check") or \
             (None if entry.get("shareable") is True else "private (not marked shareable; a person can run --mark)")
         if why:
@@ -153,7 +153,7 @@ def mark(names: list, value: bool = True, memory=memory, principal: str = None) 
             entry = data.get("datasets", {}).get((rows.get(name) or {}).get("dataset"))
             if name not in rows or entry is None:
                 out[name] = "unknown-pointer"; continue
-            originals = [o.get("path", "") for o in entry.get("originals") or []]
+            originals = [x for o in entry.get("originals") or [] for x in (o.get("path", ""), o.get("realPath")) if x]
             why = (private_source(originals) if originals else "no recorded source list to check") if value else None
             if why:
                 out[name] = f"refused: {why}"; continue
