@@ -126,7 +126,12 @@ def _connect(request, config):
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get('path'), str):
             return _problem('invalid-source', 'Each source needs a path; description and stable id are optional.')
-        path = Path(item['path']).expanduser().resolve(strict=True)
+        # A source is recorded at the path it was given (made absolute, symlinks kept), so a link
+        # that tracks a moving target (a skills folder linked to the current release) is read and
+        # checked for staleness through the link, not frozen at whatever it pointed to at connect.
+        # The real file still decides duplicates and is recorded as realPath for path-based rules.
+        given = Path(os.path.abspath(Path(item['path']).expanduser()))
+        path = given.resolve(strict=True)
         if not path.is_file():
             return _problem('unsupported-source', 'Directories and special files are unsupported. Supply explicit authorized text files; export PDFs or other binary formats to reviewed UTF-8 first.')
         with path.open('rb') as stream:
@@ -142,7 +147,7 @@ def _connect(request, config):
             return _problem('unsupported-source', 'Empty or binary/control-character content cannot be connected. Supply nonempty reviewed UTF-8 text.')
         if has_secret(text):
             return _problem('secret-held', 'A source contains a secret (key, token, password or card number); remove it first. No partial connection was created.')
-        source_id = item.get('id', 'file:' + _hash(str(path).encode())[:24])
+        source_id = item.get('id', 'file:' + _hash(str(given).encode())[:24])
         if not isinstance(source_id, str) or not source_id or len(source_id) > 256 or source_id in seen_ids or path in seen_paths:
             return _problem('duplicate-source', 'Each source needs a unique path and nonempty unique id of at most 256 characters.')
         description = item.get('description', 'Local text file: ' + path.name)
@@ -159,7 +164,7 @@ def _connect(request, config):
                 return _problem('invalid-navigation-path', 'navigationPath must be an array of at most 8 nonempty labels, each at most 200 characters.')
         seen_paths.add(path)
         seen_ids.add(source_id)
-        sources.append({'id': source_id, 'path': str(path), 'raw': raw, 'text': text,
+        sources.append({'id': source_id, 'path': str(given), 'realPath': str(path), 'raw': raw, 'text': text,
                         'description': description, 'navigationPath': navigation_path,
                         'sha256': _hash(raw), 'reviewedSHA': item.get('sha256')})
     if structure == 'folder-tree':
@@ -243,7 +248,9 @@ def _connect(request, config):
             'pathConnection': {'pointer': pointer, 'principals': sorted(principals)},
             'scope': f'Only the {len(sources)} explicitly supplied local files; no recursive discovery or automatic synchronization.',
             'manifestPath': str(manifest_path), 'manifestSHA256': _hash(manifest_raw),
-            'originals': [{'path': s['path'], 'sha256': s['sha256']} for s in sources],
+            'originals': [{'path': s['path'], 'sha256': s['sha256'],
+                           **({'realPath': s['realPath']} if s['realPath'] != s['path'] else {})}
+                          for s in sources],
             'shareable': shareable,
             # The connect request itself, minus the review hashes: an ask that finds this
             # pointer stale replays it (auto_heal.reconnect_recipe) at the files' current bytes.
