@@ -6,7 +6,7 @@ Usage:
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
                           [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
-                          [--findability] [--refresh] [--no-shared]
+                          [--findability] [--refresh] [--no-shared] [--shareable]
 
   Prints a `writer: <command>` banner at the start of every run: the resolved --writer-command
   (or the SUPERJEV_WRITER_COMMAND env var, checked when --writer-command is omitted), or the
@@ -76,6 +76,8 @@ Pipeline per run:
      listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
   7. Shared sets (onboarding default, skip with --no-shared): once every part connected, each --principal is added to
      the fleet's shared pointers listed in shared-pointers.json (share_pointers.py): register only, no writer or Jev call.
+  Every connection is private (share_pointers.py refuses it) unless --shareable marks it for fleet-wide sharing;
+  a refresh without the flag keeps the mark it had.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
@@ -612,7 +614,7 @@ def navigate(pointer: str, principal: str, question: str) -> list:
     return [c.get("originalPath") for c in out.get("candidates", [])]
 
 
-def connect_part(pointer: str, principals: list, part_files: list, cache: dict) -> dict:
+def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
     Labels ride in the bracketed description only for a file whose stage-2 label gate passed
     (cache["labels_ok"]); a cache entry without that key (pre-two-stage cache) defaults to
@@ -641,6 +643,8 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict) 
         print(f"connect held for {pointer}: secret-like text in {', '.join(held)}; not sent")
         return {"connected": False}
     req = {"action": "connect", "pointer": pointer, "principals": list(principals), "sources": sources}
+    if shareable:
+        req["shareable"] = True
     known = memory({"action": "panel", "principal": principals[0]})
     if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
         req["replace"] = True
@@ -844,6 +848,8 @@ def main() -> int:
                     help="after connecting, search each file's own sample question (one search per file, "
                          "paid judge calls) and report the misses; off by default")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--shareable", action="store_true",
+                    help="mark this connection shareable with other agents (default private); a person's decision")
     ap.add_argument("--no-shared", action="store_true",
                     help="skip the onboarding default: sharing the fleet's shared-pointers.json list with --principal")
     ap.add_argument("--list", action="store_true",
@@ -1132,7 +1138,7 @@ def main() -> int:
     hits, total, misses = 0, 0, []
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
-        result = connect_part(pname, a.principals, part_files, cache)
+        result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable)
         report["parts"].append({"pointer": pname, "count": len(part_files), "connected": result["connected"]})
         if not result["connected"]:
             all_connected = False
