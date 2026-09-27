@@ -51,7 +51,7 @@ Bulk prepare and manual entries draft four labels — `kind`, `status`, `as_of`,
 
 ## 7. Held files
 
-The secret scan holds a file that looks like it carries card/password text, and separately holds any file over the size ceiling; `prepare-cache/<pointer>-held.txt` records each hold's reason (and, for the secret-pattern case, the matching line and a digit-masked excerpt) so a human can review without opening the file. `--allow-held` admits a file the secret scan alone would hold — it stays listed in the held file, noting the override — as an explicit operator decision; it never lifts the size-ceiling hold. Real secret files and vault-style folders stay out of every run regardless.
+The secret scan holds a file that looks like it carries card/password text, and separately holds any file over the 250,000-byte size ceiling (a big notes file is gated in parts, no hand split needed); `prepare-cache/<pointer>-held.txt` records each hold's reason (and, for the secret-pattern case, the matching line and a digit-masked excerpt) so a human can review without opening the file. `--allow-held` admits a file the secret scan alone would hold — it stays listed in the held file, noting the override — as an explicit operator decision; it never lifts the size-ceiling hold. Real secret files and vault-style folders stay out of every run regardless.
 
 ## 8. Refresh
 
