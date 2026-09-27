@@ -267,3 +267,10 @@ def test_a_failed_refresh_is_named_not_hidden_behind_cooldown(tmp_path, monkeypa
     assert ah.last_refresh_error("me", "docs") == "description writer failed: boom"
     (tmp_path / "me-docs-last-refresh.log").write_text("inventory: 3 files\nconnect: registered\n")
     assert ah.last_refresh_error("me", "docs") == ""
+
+
+def test_a_split_parts_failed_refresh_is_read_from_its_parents_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(ah, "STATE_DIR", tmp_path)
+    (tmp_path / "docs-report.json").write_text(json.dumps({"parts": [{"pointer": "docs-2"}]}))
+    (tmp_path / "me-docs-last-refresh.log").write_text("ERROR: description writer failed: boom\n")
+    assert ah.last_refresh_error("me", "docs-2", cache_dir=tmp_path) == "description writer failed: boom"

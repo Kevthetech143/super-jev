@@ -139,9 +139,11 @@ def _release_lock(principal: str) -> None:
         pass
 
 
-def last_refresh_error(principal: str, pointer: str) -> str:
+def last_refresh_error(principal: str, pointer: str, cache_dir: Path = None) -> str:
     """The ERROR line of this pointer's last background refresh, or "" (none, still running,
-    or it passed). Lets a cooling-down note say the refresh failed instead of hiding it."""
+    or it passed). Lets a cooling-down note say the refresh failed instead of hiding it.
+    A split part (<pointer>-N) refreshes, and logs, under its parent's name."""
+    pointer = _report_for(pointer, cache_dir or rc.CACHE_DIR)[1] or pointer
     try:
         text = (STATE_DIR / f"{principal}-{pointer}-last-refresh.log").read_text(errors="replace")
     except OSError:
