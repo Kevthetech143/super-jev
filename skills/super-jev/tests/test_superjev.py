@@ -565,8 +565,10 @@ def test_verify_passes_pr_base_and_claims_to_the_door(tmp_path, door, monkeypatc
     assert sj.main(["verify", str(report), "--pr", "206", "--base", "HEAD~1",
                     "--claim", "tests pass", "--claim", "PR merged"]) == 0
     argv = door.argv
-    assert argv[argv.index("--pr") + 1] == "206" and argv[argv.index("--base") + 1] == "HEAD~1"
-    assert [argv[i + 1] for i, x in enumerate(argv) if x == "--claim"] == ["tests pass", "PR merged"]
+    assert "--pr=206" in argv and "--base=HEAD~1" in argv
+    assert [x for x in argv if x.startswith("--claim=")] == ["--claim=tests pass", "--claim=PR merged"]
+    sj.main(["verify", str(report), "--claim=-q flag works"])  # a dash-led value stays one argument
+    assert "--claim=-q flag works" in door.argv
 
 # --------------------------------------------- verify: derived-facts fallback
 #
