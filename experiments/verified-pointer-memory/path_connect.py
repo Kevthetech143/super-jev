@@ -12,6 +12,7 @@ from pathlib import Path
 from service import Service, valid_principal
 from cli import has_secret
 from reviewed_view import derive
+import prepare_bulk
 
 MAX_FILES = 50
 MAX_BYTES = 5 * 1024 * 1024
@@ -55,7 +56,9 @@ def _catalog(sources, structure):
     groups = {}
     leaves = []
     for source in sources:
-        if source['navigationPath'] is not None:
+        if source.get('viewTransform') is not None and source['navigationPath'] is None:
+            labels = []
+        elif source['navigationPath'] is not None:
             labels = source['navigationPath']
         elif structure == 'folder-tree':
             labels = list(Path(source['path']).parent.relative_to(common).parts)
@@ -76,7 +79,9 @@ def _catalog(sources, structure):
         leaf_id = 'source:' + _hash(source['id'].encode())[:24]
         path = Path(source['path'])
         shared = not labels and names.count(path.name) > 1 and path.parent.name
-        leaf = {'id': leaf_id, 'label': f'{path.parent.name}/{path.name}' if shared else path.name,
+        label = ('Reviewed source ' + _hash(source['id'].encode())[:12] if source.get('viewTransform') is not None
+                 else (f'{path.parent.name}/{path.name}' if shared else path.name))
+        leaf = {'id': leaf_id, 'label': label,
                 'description': source['description'], 'sourceId': source['id']}
         leaves.append((parent, leaf))
     root = {'id': 'root', 'label': 'Sources',
@@ -119,6 +124,12 @@ def _connect(request, config):
     items = request.get('sources')
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_FILES:
         return _problem('source-limit', 'Supply 1–50 explicit UTF-8 text file paths, up to 5 MiB total. Directories are not expanded.')
+    if any(isinstance(item, dict) and 'viewTransform' in item for item in items):
+        # Bulk readers/writers use these artifacts independently of memory connect.
+        # Never turn a bulk pointer into a view while its raw recipe/cache survives.
+        if any((prepare_bulk.CACHE_DIR / (pointer + suffix)).exists()
+               for suffix in ('.json', '-report.json')):
+            return _problem('view-bulk-cache-conflict', 'A raw bulk cache or report exists for this pointer. Quarantine its old bulk artifacts and review saved raw evidence before creating a view connector; no view connection was made.')
     explicit_navigation = 'structure' in request
     structure = request.get('structure', 'flat-files')
     if structure not in ('flat-files', 'folder-tree'):
@@ -168,7 +179,7 @@ def _connect(request, config):
         source_id = item.get('id', 'file:' + _hash(str(given).encode())[:24])
         if not isinstance(source_id, str) or not source_id or len(source_id) > 256 or source_id in seen_ids or path in seen_paths:
             return _problem('duplicate-source', 'Each source needs a unique path and nonempty unique id of at most 256 characters.')
-        description = item.get('description', 'Local text file: ' + path.name)
+        description = item.get('description', 'Reviewed local source' if policy is not None else 'Local text file: ' + path.name)
         if not isinstance(description, str) or not description.strip() or len(description) > 4000:
             return _problem('invalid-description', 'Omit description for a filename description, or supply a factual description of at most 4000 characters.')
         navigation_path = item.get('navigationPath')
@@ -180,6 +191,12 @@ def _connect(request, config):
                     or any(not isinstance(label, str) or not label.strip()
                            or len(label) > 200 for label in navigation_path)):
                 return _problem('invalid-navigation-path', 'navigationPath must be an array of at most 8 nonempty labels, each at most 200 characters.')
+        if policy is not None:
+            # Configuration stays local; none of these routing fields may reveal
+            # values that the body policy hides. Filename-derived labels are omitted.
+            metadata = [source_id, description, *(navigation_path or [])]
+            if any(derive(value, policy)[0].decode() != value or has_secret(value) for value in metadata):
+                return _problem('view-metadata-held', 'Supply an opaque source id and descriptions/navigation labels that need no redaction under the view policy.')
         seen_paths.add(path)
         seen_ids.add(source_id)
         sources.append({'id': source_id, 'path': str(given), 'realPath': str(path), 'raw': raw, 'text': text,

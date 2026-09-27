@@ -113,6 +113,8 @@ def main() -> int:
             if "viewTransform" in s:
                 try:
                     view, policy_sha = derive(raw.decode("utf-8"), s["viewTransform"])
+                    if derive(s["description"], s["viewTransform"])[0].decode() != s["description"]:
+                        raise ValueError("description requires redaction")
                     if not view.strip() or has_secret(view.decode("utf-8")) or has_secret(s["description"]):
                         raise ValueError("empty or secret-bearing view")
                     # Never hand the original to the description gate.
