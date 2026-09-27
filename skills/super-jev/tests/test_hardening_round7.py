@@ -116,3 +116,16 @@ def test_gh_issue_body_is_scanned(monkeypatch):
     monkeypatch.setattr(sj.subprocess, "run", lambda *a, **k: pytest.fail("sent"))
     ok, msg = sj._run_gh_issue_create("o/r", "t", f"body {PW}")
     assert not ok and "not sent" in msg
+
+
+def test_writer_scans_file_text_not_its_json_form(tmp_path):
+    """Live 2026-09-27: GETTING-STARTED.md held `export TYPESAFE_API_KEY="$(cat ~/.key)"`; the
+    inventory scan (raw text) admitted it, but its JSON form (\\"$(cat) read as key=value, so the
+    writer refused every refresh of the pointer."""
+    line = 'export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"'
+    assert not pb.has_secret(line)
+    got = pb.writer([{"path": "g.md", "start": f"Setup\n{line}\n"}], "m",
+                    command=["python3", "-c", "print('[{\"path\": \"g.md\", \"description\": \"d\"}]')"])
+    assert got["g.md"]["description"] == "d"
+    with pytest.raises(pb.WriterError, match="not sent"):  # a real secret in the feedback is still caught
+        pb.writer([{"path": "g.md", "start": "x"}], "m", feedback={"g.md": PW}, command=["false"])

@@ -579,8 +579,11 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
         "subject: the ticker, person, case, or topic the file is about, 1 to 4 words.\n"
         "Return ONLY a JSON array, no prose." + fb + "\n\nFILES:\n" + json.dumps(items, indent=1)
     )
-    # The one place the writer prompt leaves this machine: scan it here, whoever called.
-    if has_secret(prompt):
+    # The one place the writer prompt leaves this machine: scan it here, whoever called. Scan the
+    # file text itself, not its JSON form: escaping (\" and \n) turned a safe shell line such as
+    # KEY="$(cat file)", which the inventory scan admits, into a key=value hit, and that one file
+    # failed every refresh of its pointer.
+    if payload_has_secret(items) or payload_has_secret(feedback or {}):
         raise WriterError("the writer prompt contains a secret; not sent")
     argv = command or ["claude", "-p", "--model", model]
     for attempt in range(2):

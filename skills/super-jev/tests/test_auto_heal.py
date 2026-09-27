@@ -256,3 +256,14 @@ def test_a_pointer_made_through_a_moving_link_heals_to_the_new_target(tmp_path, 
     assert service.pointer("skills", "agent")[1] is None
     src = service.sources("skills", "agent")["sources"][0]["path"]
     assert "version two" in Path(src).read_text()
+
+
+def test_a_failed_refresh_is_named_not_hidden_behind_cooldown(tmp_path, monkeypatch):
+    # Live 2026-09-27: every refresh failed ("the writer prompt contains a secret") for 2 hours
+    # while each ask said only "refreshed recently, cooling down".
+    monkeypatch.setattr(ah, "STATE_DIR", tmp_path)
+    assert ah.last_refresh_error("me", "docs") == ""
+    (tmp_path / "me-docs-last-refresh.log").write_text("inventory: 3 files\nERROR: description writer failed: boom\n  hint\n")
+    assert ah.last_refresh_error("me", "docs") == "description writer failed: boom"
+    (tmp_path / "me-docs-last-refresh.log").write_text("inventory: 3 files\nconnect: registered\n")
+    assert ah.last_refresh_error("me", "docs") == ""
