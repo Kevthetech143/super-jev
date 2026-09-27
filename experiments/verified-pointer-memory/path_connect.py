@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from service import Service
+from service import Service, valid_principal
 from cli import has_secret
 
 MAX_FILES = 50
@@ -113,8 +113,8 @@ def _connect(request, config):
            for v in (pointer, dataset)):
         return _problem('invalid-name', 'Use pointer/dataset names of 1–128 letters, digits, dots, underscores, colons or hyphens.')
     principals = request.get('principals')
-    if not isinstance(principals, list) or not principals or any(not isinstance(p, str) or not p.strip() for p in principals) or len(set(principals)) != len(principals):
-        return _problem('invalid-principals', 'Supply a nonempty, duplicate-free list of authorized principal labels.')
+    if not isinstance(principals, list) or not principals or not all(valid_principal(p) for p in principals) or len(set(principals)) != len(principals):
+        return _problem('invalid-principals', 'Supply a nonempty, duplicate-free list of agent names (letters, digits, ".", "_", "-"; no spaces or slashes).')
     items = request.get('sources')
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_FILES:
         return _problem('source-limit', 'Supply 1–50 explicit UTF-8 text file paths, up to 5 MiB total. Directories are not expanded.')

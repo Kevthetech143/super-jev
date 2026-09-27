@@ -3131,6 +3131,10 @@ def _main() -> int:
     if not principal or not a:
         print(__doc__)
         return 2
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", principal):  # same rule as the memory runtime
+        print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
+              "'.', '_', '-'; no spaces or slashes)")
+        return 2
     sdir = state_dir(principal)
     if "--no-auto" in a:
         os.environ["SUPERJEV_AUTO_CACHE"] = "0"
