@@ -1493,6 +1493,15 @@ def refresh_would_admit(path: str, ptr: str) -> bool:
         return False
     return not any(x.casefold() in prepare_bulk.SKIP_PARTS or x.startswith(".") for x in rp.relative_to(base).parts)
 
+PHRASE_WEIGHT = 0.7
+
+def word_pairs(text: str) -> set:
+    """Adjacent content words of text (stopwords and 1-2 letter words skipped), by their
+    first four letters, so "reads the source" pairs read+source like the question does."""
+    toks = [w[:4] for w in words(text.replace("'", "").replace("\u2019", ""))
+            if len(w) > 2 and w not in QUERY_STOPWORDS]
+    return set(zip(toks, toks[1:]))
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -1528,9 +1537,10 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                              str(entry.get("description") or ""), str(entry.get("question") or "")])
             head_words = Counter(w for w in words(head) for _ in range(3))
-            passages = [passage_words(text[i:i + CONFIRM_CHUNK]) + head_words
-                        for i in range(0, len(text), CONFIRM_CHUNK)] or [Counter(head_words)]
-            docs[path] = (ptr, sum(passages, Counter()), [(c, sum(c.values())) for c in passages])
+            chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+            passages = [passage_words(c) + head_words for c in chunks]
+            docs[path] = (ptr, sum(passages, Counter()),
+                          [(c, sum(c.values()), word_pairs(t)) for c, t in zip(passages, chunks)])
     if not docs:
         return []
     _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
@@ -1546,13 +1556,14 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         return {t: sum(c.get(v, 0) for v in variants[t]) for t in terms}
     tf = {path: tf_of(c) for path, (_, c, _) in docs.items()}
     n = len(docs)
-    sizes = [size for _, _, parts in docs.values() for _, size in parts]
+    sizes = [size for _, _, parts in docs.values() for _, size, _ in parts]
     avg = sum(sizes) / len(sizes) or 1
     idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
            for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
     # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
     # them out of the coverage total so they do not sink every file.
     total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
+    qpairs = list(zip(terms, terms[1:]))
     scored = []
     for path, (ptr, _, parts) in docs.items():
         f = tf[path]
@@ -1560,8 +1571,12 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             continue
         # Scored per passage, best passage wins: whole-file BM25 sank a long file
         # (36 KB medical timeline) whose one passage held every question word.
+        # Two question words side by side in a passage (a phrase: "read the source",
+        # "parent folder") add their weight once more: scattered matches tie often, and a
+        # file stating the phrase was left one slot past the read list.
         bm25 = max(sum(idf[t] * pf[t] * 2.2 / (pf[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
-                   for pf, size in ((tf_of(c), size) for c, size in parts))
+                   + PHRASE_WEIGHT * sum((idf[a] + idf[b]) / 2 for a, b in qpairs if (a[:4], b[:4]) in pairs)
+                   for pf, size, pairs in ((tf_of(c), size, pairs) for c, size, pairs in parts))
         scored.append((round(bm25, 3), path, ptr))
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
