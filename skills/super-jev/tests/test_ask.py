@@ -225,7 +225,7 @@ def test_miss_report_names_closest_files_read_first():
     lines = ask.miss_report("bob", 5, {"p1": {"status": "candidates"}, "p2": {"status": "no-candidates"}},
                             {"/x/low.md": {"score": 0.2}, "/x/high.md": {"score": 0.5}})
     assert lines[1] == "  - 5 connected sets; 2 searched after the topic filter, 1 had matches: p1"
-    assert lines[2] == "  - 2 file(s) read; none contained the answer. Closest: x/high.md, x/low.md"
+    assert lines[2] == "  - 2 file(s) read; no answer confirmed. Closest: x/high.md, x/low.md"
 
 
 def test_skill_dir_for_display_prefers_env_override(monkeypatch):
