@@ -640,7 +640,7 @@ POSSIBLE_FLOOR = 0.6
 # get no possible tier at all, since on-topic files at 0.81 gave two false hits.
 VALUE_RE = re.compile(r"\b(how much|how many|balance|breakeven|break even|right now|"
                       r"net worth|owe|owed|price|cost|total)\b", re.I)
-WORTH_VALUE_RE = re.compile(r"\bwhat(?:'s| is| are| was| were)\b.{0,80}\bworth\b|"
+WORTH_VALUE_RE = re.compile(r"\bwhat(?:['’]s| is| are| was| were)\s+(?!worth\b).{1,80}\bworth\b|"
                             r"\bworth\s+(?:in|of)\b", re.I)
 POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file before answering)"
 # Word search: on every lookup the
@@ -2231,6 +2231,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         candidates = {p: (route.get(p, 0), p, ptr) for _s, p, ptr in cands}
         merged = [candidates[p] for p in dict.fromkeys(to_check)
                   if p in candidates and notes.get(p) not in (HELD_SECRET, INCONCLUSIVE)]
+        merged.sort(key=lambda item: (scores.get(item[1], 0), route.get(item[1], 0)), reverse=True)
         possible.update({p: POSSIBLE_NOTE for _s, p, _ptr in merged})
     top = merged[:5]
     top = apply_near_twin_tiebreak(question, top)
@@ -2551,8 +2552,8 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict,
     elif read:
         lines += ["  - Inspect the read files and the filtering trace before changing connections:",
                   f"      python3 {skill_dir / 'ask.py'} --principal {principal} --trace-show last"]
-    else:
-        lines += ["  - The answer is in a file you have: it is probably not connected. Connect its folder:",
+    if not skipped:
+        lines += ["  - If the answer is in a different file outside the connected sets, connect its folder:",
                   f"      python3 {skill_dir / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}"]
     lines += ["  - You know the answer: save it for next time:",
               f"      python3 {skill_dir / 'ask.py'} --principal {principal} --add \"<question>\" \"<answer>\"",
