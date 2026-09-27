@@ -1521,3 +1521,12 @@ def test_parts_close_early_before_the_connect_byte_limit(tmp_path):
         small.append(f)
     assert [len(p) for p in pb.split_parts(small, 4)] == [4, 2]  # count only, as before
     assert [len(p) for p in pb.split_parts(small, 50, part_bytes=250)] == [2, 2, 2]
+
+
+def test_setup_tools_refuse_a_malformed_agent_name_before_any_path_is_built():
+    import argparse
+    import pytest
+    for bad in ("bad name", "x/../primary", "primary "):
+        with pytest.raises(argparse.ArgumentTypeError):
+            pb.principal_name(bad)
+    assert pb.principal_name("primary-helper") == "primary-helper"
