@@ -229,6 +229,25 @@ def test_ask_with_nothing_connected_says_run_connect(env, monkeypatch, capsys):
     assert "nothing connected yet" in out and "prepare_bulk.py" in out and "--principal me" in out
 
 
+
+def test_a_new_agent_gets_a_runnable_command_and_the_fleets_shared_sets(env, monkeypatch, capsys, tmp_path):
+    # Live 2026-09-27: the first ask printed "python3 skills/super-jev/prepare_bulk.py", which only
+    # runs from the repo root, and never mentioned the shared sets a new fleet agent can join.
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "ok", "pointers": []}
+                        if req["action"] == "panel" else {"status": "miss"})
+    shared = tmp_path / "shared.json"
+    shared.write_text(json.dumps({"pointers": ["fleet-knowledge", "main-skills-catalog"]}))
+    monkeypatch.setenv("SUPERJEV_SHARED_POINTERS", str(shared))
+    assert ask.lookup("where is it?", "newbot", env / "state" / "newbot") == 1
+    out = capsys.readouterr().out
+    assert f"python3 {ask.skill_dir_for_display() / 'prepare_bulk.py'} --root" in out
+    assert "2 shared set(s) now (fleet-knowledge, main-skills-catalog)" in out
+    assert "share_pointers.py --principal newbot --shared" in out
+    shared.unlink()  # no shared list: no shared line
+    ask.lookup("where is it?", "newbot", env / "state" / "newbot")
+    assert "shared set" not in capsys.readouterr().out
+
+
 def test_ask_before_setup_says_run_setup(env, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: {"status": "error", "reason": "not-set-up"})
     assert ask.lookup("where is it?", "me", env / "state" / "me") == 1
