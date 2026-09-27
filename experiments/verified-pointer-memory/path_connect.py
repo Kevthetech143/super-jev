@@ -190,6 +190,8 @@ def _connect(request, config):
                 'fileCount': len(sources), 'bytes': total}
     if 'replace' in request and not isinstance(request['replace'], bool):
         return _problem('invalid-replace', 'replace must be true or false.')
+    if 'shareable' in request and not isinstance(request['shareable'], bool):
+        return _problem('invalid-shareable', 'shareable must be true or false.')
     chunks = json.loads(subprocess.run(
         ['node', str(Path(__file__).with_name('chunk_paths.mjs'))],
         input=json.dumps([{'id': s['id'], 'text': s['text']} for s in sources]),
@@ -221,6 +223,9 @@ def _connect(request, config):
             return _problem('unowned-dataset', 'An existing dataset cannot be overwritten by a new pointer. Choose a new dataset name.')
         if any(_hash(Path(s['path']).read_bytes()) != s['sha256'] for s in sources):
             return _problem('source-changed', 'A source changed after review. Review current bytes and repeat connect with their hashes.')
+        # Private unless someone marked it shareable on purpose; a refresh that does not say keeps the mark.
+        kept = bool(old and (data['datasets'].get(dataset) or {}).get('shareable'))
+        shareable = request.get('shareable', kept)
         folder = Path(tempfile.mkdtemp(prefix='.prepared-', dir=registry.parent))
         manifest = {'expectedPolicy': 'reviewed', 'descriptionsAffirmed': True,
                     'catalog': catalog, 'sources': [], 'preparations': []}
@@ -239,6 +244,7 @@ def _connect(request, config):
             'scope': f'Only the {len(sources)} explicitly supplied local files; no recursive discovery or automatic synchronization.',
             'manifestPath': str(manifest_path), 'manifestSHA256': _hash(manifest_raw),
             'originals': [{'path': s['path'], 'sha256': s['sha256']} for s in sources],
+            'shareable': shareable,
             # The connect request itself, minus the review hashes: an ask that finds this
             # pointer stale replays it (auto_heal.reconnect_recipe) at the files' current bytes.
             'recipe': {'pointer': pointer, 'dataset': dataset, 'principals': sorted(principals),
