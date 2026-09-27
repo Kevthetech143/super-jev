@@ -59,6 +59,8 @@ def test_frozen_replay_ignores_live_note_change_and_never_edits_it(tmp_path):
     assert result['decision']=='REJECT' and result['deployed'] is False
     assert note.read_text()=='changed'
     assert (tmp_path/'result'/'proposal.md').is_file()
+    tool=tmp_path/'result'/'tools'/'shadow_repair.py'
+    assert sr.digest(tool.read_bytes())==result['runner_sha256']
 
 
 def test_modified_snapshot_refused_before_candidate_import(tmp_path):

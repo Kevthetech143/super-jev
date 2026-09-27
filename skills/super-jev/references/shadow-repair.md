@@ -22,7 +22,7 @@ Replay with the original snapshot and its printed checksum:
 python3 shadow_repair.py --snapshot /private/run/baseline-snapshot --snapshot-sha256 PIN --candidate candidate/ask.py --out /private/run/candidate
 ```
 
-Each result directory contains `requests.jsonl`, `scorecard.json`, `candidate.patch`, `proposal.md`, `report.json` and a copied candidate build. Existing result directories are refused. The snapshot and its source/code hashes are verified before replay. Source reads use frozen bytes at the original logical paths; current notes are neither edited nor used as changing comparison inputs. The report records the runner and scorecard code hashes as well as build hashes. Retain that tool version and the snapshot to reproduce results.
+Each result directory contains `requests.jsonl`, `scorecard.json`, `candidate.patch`, `proposal.md`, `report.json` a copied candidate build, and the exact runner/scorecard dependencies in `tools/`. Existing result directories are refused. The snapshot and its source/code hashes are verified before replay. Source reads use frozen bytes at the original logical paths; current notes are neither edited nor used as changing comparison inputs. The report records the runner and scorecard code hashes as well as build hashes. Retain that tool version and the snapshot to reproduce results.
 
 ## Fixed decision rules
 
