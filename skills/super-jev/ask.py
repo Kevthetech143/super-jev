@@ -974,6 +974,7 @@ LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, 
 # call. Plain code then combines the per-file answers (claim_verdict): only answers
 # at >= CLAIM_SURE count; files that disagree are a CONFLICT, newest first.
 CLAIM_SURE = 0.9
+MAX_CLAIMS = 25
 CLAIM_LINES = 60
 CLAIM_LINE_CHARS = 160
 CLAIM_LINE_BUDGET = 4000  # characters of line choices per file, so a claim call stays well under the input ceiling
@@ -3170,7 +3171,8 @@ def _main() -> int:
                 claims.append(rest[1])
             else:  # one statement per line: a draft's facts or a worker report's claims
                 try:
-                    claims += [ln.strip() for ln in Path(rest[1]).expanduser().read_text(errors="replace").splitlines()
+                    claims += [re.sub(r"^(?:[-*\u2022]|\d+[.)])\s+", "", ln.strip())
+                               for ln in Path(rest[1]).expanduser().read_text(errors="replace").splitlines()
                                if ln.strip() and not ln.lstrip().startswith("#")]
                 except OSError as e:
                     print(f"cannot read {rest[1]}: {e.strerror or e}")
@@ -3178,6 +3180,9 @@ def _main() -> int:
             rest = rest[2:]
         if not claims or rest:
             print('usage: --claim "statement" [--claim ...] | --claims-file FILE (one statement per line)')
+            return 2
+        if len(claims) > MAX_CLAIMS:  # each statement is its own lookup and paid Jev calls
+            print(f"{len(claims)} statements; at most {MAX_CLAIMS} per run -- split the file or keep the facts that matter")
             return 2
         rc = 0
         for i, claim in enumerate(claims):

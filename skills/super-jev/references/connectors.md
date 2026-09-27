@@ -145,7 +145,7 @@ folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktr
 `.git/worktrees/`, even when that checkout is the `--root` itself), test/scratch output
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) and vault-style
 subdirectories, and holds back any file that looks like it carries
-card/password text or sits over the 1,000,000-byte size ceiling (a bigger-than-one-call file is gated in parts), writing a
+card/password text or sits over the 250,000-byte size ceiling (a bigger-than-one-call file is gated in parts), writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
 secret-pattern case, the pattern type, line number and a digit-masked line so
 a human can review without opening the file. The card-number check ignores ISO
