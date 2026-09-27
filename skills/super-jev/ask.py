@@ -1546,7 +1546,7 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
     # The printed command must run as-is from any folder: the absolute script path plus the
     # pointer's recorded roots/excludes and every principal it serves (a bare --refresh with
     # no report is refused for want of --root; one principal short is refused as a scope change).
-    script = Path(__file__).resolve().parent / "prepare_bulk.py"
+    script = skill_dir_for_display() / "prepare_bulk.py"  # stable across releases
     try:
         report = json.loads((prepare_bulk.CACHE_DIR / f"{ptr}-report.json").read_text())
         args = refresh_changed.prepare_args(report) if isinstance(report, dict) else None
@@ -2267,7 +2267,9 @@ def skill_dir_for_display() -> Path:
     argv0 = sys.argv[0] if sys.argv else ""
     if argv0 and os.path.basename(argv0):
         candidate = Path(os.path.abspath(os.path.dirname(argv0) or "."))
-        if candidate.is_dir():
+        # Only a path to this same folder (a link to it counts), never an unrelated
+        # launcher's folder such as pytest's or a wrapper's bin/.
+        if candidate.is_dir() and candidate.resolve() == Path(__file__).resolve().parent:
             return candidate
     return Path(__file__).resolve().parent
 

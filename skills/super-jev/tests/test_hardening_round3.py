@@ -220,3 +220,18 @@ def test_stale_connector_pointer_without_recipe_does_not_print_a_prepare_bulk_co
     monkeypatch.setattr(ask, "memory", lambda req: {"status": "no-recipe"})
     hint = ask.refresh_hint("x", "me", "preparation-required")
     assert "prepare_bulk.py" not in hint and "Reconnect it once through the connector" in hint
+
+
+def test_a_refresh_command_names_the_linked_skill_folder_not_the_release(tmp_path, monkeypatch):
+    """Live 2026-09-27: run through ~/.claude/skills/super-jev (a link to releases/vX), the
+    printed command named releases/vX/prepare_bulk.py, which is gone after the next sync."""
+    link = tmp_path / "super-jev"
+    link.symlink_to(Path(ask.__file__).resolve().parent)
+    monkeypatch.setattr(ask.sys, "argv", [str(link / "ask.py")])
+    monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "unknown-pointer"})
+    (tmp_path / "x.json").write_text("{}")
+    assert f"python3 {link / 'prepare_bulk.py'} --root DIR" in ask.refresh_hint("x", "me", "preparation-required")
+    monkeypatch.setattr(ask.sys, "argv", [str(tmp_path / "bin" / "pytest")])  # an unrelated launcher
+    (tmp_path / "bin").mkdir()
+    assert str(Path(ask.__file__).resolve().parent / "prepare_bulk.py") in ask.refresh_hint("x", "me", "preparation-required")
