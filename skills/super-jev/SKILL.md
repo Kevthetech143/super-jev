@@ -21,7 +21,7 @@ Run from this skill directory: `python3 dispatch.py <tool> ...` (or `ask.py` dir
 
 ## Not connected yet?
 
-A `preparation-required` result, an unknown pointer, or onboarding a new person/project is setup work, not "nothing found": see [`super-jev-connect/SKILL.md`](../super-jev-connect/SKILL.md). Check what you already have first:
+A `preparation-required` result, an unknown pointer, or onboarding a new person/project is setup work, not "nothing found": see [`super-jev-connect/SKILL.md`](../super-jev-connect/SKILL.md). Check what you already have first: `YOUR_AGENT` is the agent's exact name (letters, digits, `.`, `_`, `-`; no spaces or slashes); any other name is refused.
 
 ```sh
 python3 dispatch.py memory --principal YOUR_AGENT_NAME
