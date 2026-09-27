@@ -4,6 +4,7 @@
 import { mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname, basename } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export type SuperJevConfig = {
   typesafeApiKey?: string;
@@ -256,14 +257,26 @@ function expandTilde(p: string): string {
   return p;
 }
 
+/** A dropped-path token must be unambiguously a path, not a word that merely
+ * happens to name something in the cwd: an absolute path (`/...`, more than
+ * just `/`) or a `~/...` home-relative path. Bare `~`, `.`, `..`, `/`, and
+ * plain relative words like "docs" are never treated as a drop, even if they
+ * exist on disk. */
+function looksLikeDropPathToken(raw: string): boolean {
+  if (raw === '/' || raw === '~' || raw === '.' || raw === '..') return false;
+  if (raw.startsWith('~/')) return true;
+  return raw.startsWith('/') && raw.length > 1;
+}
+
 export type DroppedPath = { raw: string; path: string; isDirectory: boolean };
 
 /** Detects whether the WHOLE input is one or more existing local paths
  * (after unescaping/unquoting/tilde-expansion) -- the shape a terminal
  * drag-drop pastes. Returns null (treat as a normal question) unless every
- * token resolves to something that actually exists on disk -- a single
- * non-existent token anywhere in the line means it's not a clean drop.
- * `existsFn`/`statFn` are injectable for tests. */
+ * token is shaped like an absolute or ~/-prefixed path AND actually exists
+ * on disk -- a single non-path-shaped or non-existent token anywhere in the
+ * line means it's not a clean drop. `existsFn`/`statFn` are injectable for
+ * tests. */
 export function detectDroppedPaths(
   input: string,
   existsFn: (p: string) => boolean = existsSync,
@@ -273,6 +286,7 @@ export function detectDroppedPaths(
   if (!trimmed) return null;
   const tokens = splitPathTokens(trimmed);
   if (!tokens.length) return null;
+  if (!tokens.every(looksLikeDropPathToken)) return null;
   const resolved = tokens.map((raw) => ({ raw, path: expandTilde(raw) }));
   const allExist = resolved.every(({ path }) => {
     try { return existsFn(path); } catch { return false; }
@@ -291,9 +305,28 @@ export function slugify(name: string): string {
   return slug || 'drop';
 }
 
-/** `<principal>-drop-<slug>` pointer name for a dropped file or folder. */
-export function buildDropPointerName(principal: string, label: string): string {
-  return `${slugify(principal)}-drop-${slugify(label)}`;
+/** `<principal>-drop-<slug>-<6hex>` pointer name for a dropped file or
+ * folder. The trailing 6 hex chars are a short sha256 of the absolute
+ * location being connected, so two different folders/files that happen to
+ * share a basename (e.g. two "notes.md") never collide on the same pointer
+ * name and silently overwrite each other. */
+export function buildDropPointerName(principal: string, label: string, location: string): string {
+  const hash = createHash('sha256').update(location).digest('hex').slice(0, 6);
+  return `${slugify(principal)}-drop-${slugify(label)}-${hash}`;
+}
+
+/** Escapes fnmatch-magic characters (`[ ] * ?`) in a filename so
+ * prepare_bulk.py's `--name GLOB` matches only that literal file -- not an
+ * unintended glob, and not a same-named file in a different subfolder (paired
+ * with --no-recurse, which keeps the scan out of subfolders in the first
+ * place). Same escaping Python's own glob.escape uses. */
+export function escapeNameGlob(name: string): string {
+  return name.replace(/[[\]*?]/g, (c) => {
+    if (c === '[') return '[[]';
+    if (c === ']') return '[]]';
+    if (c === '*') return '[*]';
+    return '[?]';
+  });
 }
 
 export type DropPlan = {
@@ -314,11 +347,11 @@ export function buildDropPlan(paths: DroppedPath[], principal: string): DropPlan
     const [p] = paths;
     if (p.isDirectory) {
       const label = basename(p.path) || p.path;
-      return { root: p.path, names: null, pointer: buildDropPointerName(principal, label), fileCount: 0, label: `folder ${p.path}` };
+      return { root: p.path, names: null, pointer: buildDropPointerName(principal, label, p.path), fileCount: 0, label: `folder ${p.path}` };
     }
     const root = dirname(p.path);
     const name = basename(p.path);
-    return { root, names: [name], pointer: buildDropPointerName(principal, name), fileCount: 1, label: `file ${p.path}` };
+    return { root, names: [name], pointer: buildDropPointerName(principal, name, p.path), fileCount: 1, label: `file ${p.path}` };
   }
 
   // Multiple paths: only a flat multi-file drop from the same folder (a
@@ -331,14 +364,25 @@ export function buildDropPlan(paths: DroppedPath[], principal: string): DropPlan
   }
   const root = uniqueDirs[0];
   const names = paths.map((p) => basename(p.path));
-  return { root, names, pointer: buildDropPointerName(principal, basename(root)), fileCount: names.length, label: `${paths.length} files in ${root}` };
+  return { root, names, pointer: buildDropPointerName(principal, basename(root), root), fileCount: names.length, label: `${paths.length} files in ${root}` };
+}
+
+/** Whole-folder drops default the confirm to No (Enter = no) since they can
+ * pull in far more than intended; single-file (and same-folder multi-file)
+ * drops default to Yes (Enter = yes). */
+export function dropConfirmDefault(plan: DropPlan): boolean {
+  return plan.names !== null;
 }
 
 /** One-key confirm message. Connecting makes paid judge calls, so the chat
- * must never connect without an explicit yes (Enter = yes at the call site). */
-export function formatDropConfirm(plan: DropPlan, principal: string): string {
+ * must never connect without an explicit yes. `pointerAlreadyExists` (from a
+ * pre-confirm local panel check) adds a plain warning that connecting will
+ * replace that pointer's existing approved answers. */
+export function formatDropConfirm(plan: DropPlan, principal: string, pointerAlreadyExists: boolean = false): string {
   const what = plan.names ? `${plan.fileCount} file${plan.fileCount === 1 ? '' : 's'}` : 'the whole folder';
-  return `Connect ${what} from ${plan.root} as pointer "${plan.pointer}" for ${principal}? This makes paid judge calls.`;
+  let msg = `Connect ${what} from ${plan.root} as pointer "${plan.pointer}" for ${principal}? This makes paid judge calls.`;
+  if (pointerAlreadyExists) msg += ` Pointer "${plan.pointer}" already exists and will be REPLACED.`;
+  return msg;
 }
 
 /** The confirm gate itself: only an explicit `true` proceeds. A cancel
@@ -347,11 +391,46 @@ export function shouldConnect(confirmed: unknown): boolean {
   return confirmed === true;
 }
 
-/** argv (after the script path) for running prepare_bulk.py on a drop plan. */
+/** argv (after the script path) for running prepare_bulk.py on a drop plan.
+ * `--no-recurse` accompanies any `--name` filter so a same-named file in a
+ * subfolder is never picked up alongside the intended one. */
 export function buildConnectArgs(plan: DropPlan, principal: string): string[] {
   const args = ['--root', plan.root, '--pointer', plan.pointer, '--principal', principal];
-  if (plan.names) for (const n of plan.names) args.push('--name', n);
+  if (plan.names) {
+    args.push('--no-recurse');
+    for (const n of plan.names) args.push('--name', escapeNameGlob(n));
+  }
   return args;
+}
+
+/** Pointer names for a principal from `dispatch.py memory --principal X`'s
+ * panel JSON (`{"pointers": [{"pointer": "name", ...}, ...]}`), or null if
+ * the output isn't that shape. No network -- a local panel action. */
+export function parsePointerNames(stdout: string): string[] | null {
+  try {
+    const parsed = JSON.parse(stdout);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.pointers)) return null;
+    return parsed.pointers
+      .map((p: unknown) => (p && typeof p === 'object' ? (p as { pointer?: unknown }).pointer : p))
+      .filter((n: unknown): n is string => typeof n === 'string');
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a specific pointer name is already registered for this
+ * principal, per the local panel check above. */
+export function pointerExists(stdout: string, pointerName: string): boolean {
+  const names = parsePointerNames(stdout);
+  return !!names && names.includes(pointerName);
+}
+
+/** prepare_bulk.py's own `WARNING: replace:true on pointer ...` line, printed
+ * when connecting reuses an existing pointer name -- surfaced verbatim
+ * instead of being swallowed by the summary parsing below. */
+export function parseReplaceWarning(stdout: string): string | null {
+  const line = stdout.split('\n').find((l) => l.trim().startsWith('WARNING: replace:true'));
+  return line ? line.trim() : null;
 }
 
 export type ConnectSummary = { approved: number; exceptions: number; held: number; heldLines: string[]; exceptionLines: string[] };
@@ -365,8 +444,11 @@ export function parseConnectSummary(stdout: string): ConnectSummary | null {
   const summaryLine = lines.find((l) => SUMMARY_LINE.test(l.trim()));
   if (!summaryLine) return null;
   const m = summaryLine.trim().match(SUMMARY_LINE)!;
-  const heldLines = lines.filter((l) => l.trim().startsWith('HELD')).map((l) => l.trim());
-  const exceptionLines = lines.filter((l) => l.trim().startsWith('EXCEPTION')).map((l) => l.trim());
+  // prepare_bulk.py prints a HELD line once during inventory and again in
+  // its closing report for the same file -- dedupe so the chat doesn't list
+  // it twice.
+  const heldLines = [...new Set(lines.filter((l) => l.trim().startsWith('HELD')).map((l) => l.trim()))];
+  const exceptionLines = [...new Set(lines.filter((l) => l.trim().startsWith('EXCEPTION')).map((l) => l.trim()))];
   return { approved: Number(m[1]), exceptions: Number(m[2]), held: Number(m[3]), heldLines, exceptionLines };
 }
 

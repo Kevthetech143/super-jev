@@ -15,8 +15,8 @@ import {
   cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
   parseMissCandidate, formatMissCandidateReply, parseMissReport,
   parseSetupMissing, parseErrorReport, parseAnyPointers,
-  detectDroppedPaths, buildDropPlan, formatDropConfirm, shouldConnect,
-  buildConnectArgs, parseConnectSummary, formatConnectSummary,
+  detectDroppedPaths, buildDropPlan, formatDropConfirm, shouldConnect, dropConfirmDefault,
+  buildConnectArgs, parseConnectSummary, formatConnectSummary, pointerExists, parseReplaceWarning,
   MISS_LINE, HELP_TEXT,
   type SuperJevConfig,
 } from './jev-chat-config.ts';
@@ -74,6 +74,20 @@ function checkPrincipalHasConnections(principal: string): boolean | null {
   });
   if (result.error || result.status !== 0 || !result.stdout) return null;
   return parseAnyPointers(result.stdout);
+}
+
+/** Same local panel check, but for whether one specific pointer name is
+ * already registered for this principal -- run right before a drop confirm
+ * so a name collision (two different drops slugifying to the same pointer)
+ * is surfaced as "will be REPLACED" instead of silently overwriting. Returns
+ * null (skip the warning, connect proceeds as usual) if the check itself
+ * fails for any reason. */
+function checkPointerExists(principal: string, pointer: string): boolean | null {
+  const result = spawnSync('python3', [DISPATCH_PY, 'memory', '--principal', principal], {
+    encoding: 'utf8', timeout: 5000,
+  });
+  if (result.error || result.status !== 0 || !result.stdout) return null;
+  return pointerExists(result.stdout, pointer);
 }
 
 async function runSetup(existing: SuperJevConfig): Promise<SuperJevConfig> {
@@ -185,6 +199,11 @@ function runConnect(plan: ReturnType<typeof buildDropPlan>, principal: string) {
     return;
   }
   const stdout = result.stdout || '';
+  // prepare_bulk.py's own reuse warning (connecting a pointer name that
+  // already exists rotates its approved answers) -- shown verbatim, never
+  // swallowed by the summary parsing below.
+  const replaceWarning = parseReplaceWarning(stdout);
+  if (replaceWarning) console.log(pc.yellow(replaceWarning));
   const summary = parseConnectSummary(stdout);
   if (summary) {
     s.stop('Connect finished.');
@@ -198,9 +217,11 @@ function runConnect(plan: ReturnType<typeof buildDropPlan>, principal: string) {
 }
 
 /** Handles a line that detectDroppedPaths recognized as one or more existing
- * local paths: shows what would be connected, gets a one-key confirm
- * (Enter = yes), then runs the connector. Never connects without the
- * confirm -- connecting makes paid judge calls. */
+ * local paths: shows what would be connected, checks (local, no network)
+ * whether the pointer name already exists so a reuse is called out plainly,
+ * gets a one-key confirm (folder drops default No, file drops default Yes),
+ * then runs the connector. Never connects without an explicit yes --
+ * connecting makes paid judge calls. */
 async function handleDrop(line: string, principal: string) {
   const dropped = detectDroppedPaths(line)!;
   const plan = buildDropPlan(dropped, principal);
@@ -209,7 +230,11 @@ async function handleDrop(line: string, principal: string) {
     return;
   }
   console.log(pc.bold('Detected a drop: ') + plan.label);
-  const proceed = await confirm({ message: formatDropConfirm(plan, principal), initialValue: true });
+  const existing = checkPointerExists(principal, plan.pointer);
+  const proceed = await confirm({
+    message: formatDropConfirm(plan, principal, existing === true),
+    initialValue: dropConfirmDefault(plan),
+  });
   if (isCancel(proceed) || !shouldConnect(proceed)) {
     console.log(pc.dim('Not connected.'));
     return;
