@@ -244,3 +244,60 @@ def test_fallback_catalog_uses_opaque_view_label(setup, monkeypatch):
     monkeypatch.setattr(service, '_manifest', lambda _: m)
     begun = service._navigate_begin('notes', 'owner', 'notes', None)
     assert 'Alice' not in json.dumps(begun['catalog'])
+
+
+@pytest.mark.parametrize('principal,blocked', [('owner', True), ('outsider', False)])
+def test_manual_answer_with_hidden_literal_blocks_only_its_scope(setup, principal, blocked):
+    src, config, req = setup
+    manual = src.with_name('manual.md')
+    manual.write_text('An independently saved answer mentions Alice Example.\n')
+    manual_req = {'pointer': principal + '-manual-abc123', 'principals': [principal],
+                  'sources': [{'path': str(manual), 'description': 'Saved answer'}]}
+    assert connect(confirm(manual_req, config), config)['status'] == 'registered'
+    result = connect(req, config)
+    assert result['reason'] == ('view-manual-record-conflict' if blocked else 'review-required')
+    if blocked:
+        assert result['manualPointers'] == ['owner-manual-abc123']
+        assert 'Alice' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('shared', [False, True])
+def test_switch_retires_owned_generation_and_raw_claim_proofs(setup, monkeypatch, shared):
+    src, config, req = setup
+    monkeypatch.setenv('SUPERJEV_STATE_DIR', str(src.parent / 'state'))
+    raw_req = copy.deepcopy(req)
+    del raw_req['sources'][0]['viewTransform']
+    assert connect(confirm(raw_req, config), config)['status'] == 'registered'
+    _, entry = manifest(config)
+    old_folder = Path(entry['manifestPath']).parent
+    if shared:
+        registry = json.loads(Path(config['registry']).read_text())
+        registry['datasets']['other-retained'] = copy.deepcopy(entry)
+        Path(config['registry']).write_text(json.dumps(registry))
+    claims = src.parent / 'state/owner/claim-verdicts.json'
+    claims.parent.mkdir(parents=True)
+    claims.write_text(json.dumps({'raw': {'path': str(src), 'line': 'Alice Example'},
+                                 'unrelated': {'path': str(src.with_name('unrelated.md'))}}))
+    req['replace'] = True
+    result = connect(confirm(req, config), config)
+    assert result['status'] == 'registered'
+    assert old_folder.exists() == shared
+    assert set(json.loads(claims.read_text())) == {'unrelated'}
+    assert src.exists()
+    assert bool(result['cleanupWarnings']) == shared
+
+
+def test_unexpected_file_prevents_generation_deletion(setup, monkeypatch):
+    src, config, req = setup
+    monkeypatch.setenv('SUPERJEV_STATE_DIR', str(src.parent / 'state'))
+    raw_req = copy.deepcopy(req)
+    del raw_req['sources'][0]['viewTransform']
+    assert connect(confirm(raw_req, config), config)['status'] == 'registered'
+    _, entry = manifest(config)
+    unexpected = Path(entry['manifestPath']).parent / 'operator-note.txt'
+    unexpected.write_text('Keep this operator artifact')
+    req['replace'] = True
+    result = connect(confirm(req, config), config)
+    assert result['status'] == 'registered'
+    assert unexpected.read_text() == 'Keep this operator artifact'
+    assert result['cleanupWarnings']

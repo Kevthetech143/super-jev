@@ -170,6 +170,8 @@ def main() -> int:
     req["reviewed"] = True
     reg = memory(req)
     print("connect:", reg.get("status"), "pointer:", reg.get("pointer"), "sources:", len(reg.get("sources", [])))
+    for warning in reg.get("cleanupWarnings", []):
+        print("retention review:", warning)
     return 0 if reg.get("status") == "registered" else 1
 
 
