@@ -140,3 +140,23 @@ def test_middle_passage_keeps_the_file_title():
 def test_title_is_capped_and_blank_start_skipped():
     chunks = ["\n\n" + "T" * 300 + "\nbody\n", "second\n"]
     assert ask.with_subject(chunks, 1) == "T" * ask.SUBJECT_CHARS + "\n...\nsecond\n"
+
+
+def _claim_line(tmp_path, text, shown, pick, cand):
+    a = tmp_path / "big.md"
+    a.write_text(text)
+    answers = {"verdict_1": {"choice": "supported", "probabilities": {"supported": 0.97}},
+               "line_1": {"choice": f"L{pick}", "probabilities": {f"L{pick}": 0.9}}}
+    return ask.read_claim_answers(answers, [str(a)], {"file_1": cand}, {str(a): shown})[str(a)]["line_no"]
+
+
+def test_proof_line_in_a_titled_middle_passage_keeps_its_own_number(tmp_path):
+    text = "# Big log\n## Setup\n" + "filler\n" * 10 + "## Setup\nThe limit is 255 options.\n"
+    shown = "# Big log" + ask.SUBJECT_SEP + text[text.rindex("## Setup"):]
+    assert _claim_line(tmp_path, text, shown, 1, ["## Setup", "The limit is 255 options."]) == 13
+
+
+def test_title_picked_as_proof_line_maps_to_line_one(tmp_path):
+    text = "# Big log title line\n" + "filler\n" * 10 + "## Later\nbody text here\n"
+    shown = "# Big log title line" + ask.SUBJECT_SEP + text[text.rindex("## Later"):]
+    assert _claim_line(tmp_path, text, shown, 1, ["# Big log title line"]) == 1
