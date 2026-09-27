@@ -5,7 +5,11 @@ import contextlib
 import difflib
 import hashlib
 import io
+import importlib.machinery
 import json
+import os
+import sys
+import sysconfig
 from pathlib import Path
 from unittest.mock import patch
 import scorecard
@@ -54,6 +58,18 @@ def validate_bundle(root, expected):
     if digest(raw) != expected:
         raise ValueError('snapshot checksum mismatch')
     data = json.loads(raw)
+    expected_root = {'manifest.json', 'sources', 'baseline'}
+    if data.get('held_out_sha256'):
+        expected_root.add('held-out.json')
+    if {p.name for p in root.iterdir()} != expected_root or any(p.is_symlink() for p in root.iterdir()):
+        raise ValueError('unlisted or linked snapshot file')
+    if data['baseline']['entry'] not in data['baseline']['files']:
+        raise ValueError('unlisted baseline entry')
+    for folder, expected_files in [('sources', set(data['blobs'])),
+                                   ('baseline', set(data['baseline']['files']))]:
+        actual = {str(p.relative_to(root / folder)) for p in (root / folder).rglob('*') if p.is_file()}
+        if actual != expected_files or any(p.is_symlink() for p in (root / folder).rglob('*')):
+            raise ValueError('unlisted or linked snapshot file')
     for name, sha in data['blobs'].items():
         if Path(name).name != name or digest((root / 'sources' / name).read_bytes()) != sha:
             raise ValueError('source snapshot changed')
@@ -62,13 +78,86 @@ def validate_bundle(root, expected):
             raise ValueError('invalid build path')
         if digest((root / 'baseline' / rel).read_bytes()) != sha:
             raise ValueError('baseline snapshot changed')
+    if data.get('held_out_sha256'):
+        if scorecard.frozen_cases(root / 'held-out.json', data['held_out_sha256']) != data.get('reserved'):
+            raise ValueError('reserved rows differ from pinned manifest')
+    elif data.get('reserved'):
+        raise ValueError('reserved rows lack checksum')
     return data
 
+
+
+@contextlib.contextmanager
+def no_bytecode():
+    def source_only(loader, fullname):
+        return loader.source_to_code(loader.get_data(loader.path), loader.path)
+    with patch.object(sys, 'dont_write_bytecode', True), patch.object(
+            importlib.machinery.SourceFileLoader, 'get_code', source_only):
+        yield
+
+
+# Python audit events cover read_text, builtin/io/os.open and resolved aliases.
+# This is a fail-closed guard for trusted Python builds, not an OS sandbox.
+_READ_GUARDS = []
+_STDLIB = Path(sysconfig.get_path("stdlib")).resolve()
+def _audit_reads(event, args):
+    if event != 'open' or not _READ_GUARDS:
+        return
+    permitted, violations = _READ_GUARDS[-1]
+    path = args[0]
+    if isinstance(path, int):
+        violations.append('file descriptor read')
+        raise PermissionError('unfrozen file descriptor access')
+    resolved = os.path.realpath(os.fsdecode(path))
+    if args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC):
+        violations.append(resolved)
+        raise PermissionError('writes forbidden during replay: ' + resolved)
+    runtime = (Path(resolved).is_relative_to(_STDLIB) and Path(resolved).suffix == '.py'
+               and not {'site-packages', 'dist-packages'}.intersection(Path(resolved).parts))
+    if resolved not in permitted and not runtime:
+        violations.append(resolved)
+        raise PermissionError('unfrozen file access: ' + resolved)
+
+sys.addaudithook(_audit_reads)
+
+
+@contextlib.contextmanager
+def guarded_reads(paths, violations):
+    _READ_GUARDS.append(({os.path.realpath(p) for p in paths}, violations))
+    try:
+        yield
+    finally:
+        _READ_GUARDS.pop()
+
+
+def evidence_gates(data, reads, target_i):
+    reserved = data.get('reserved', [])
+    held = [i for i, c in enumerate(data['cases']) if c in reserved]
+    controls = [i for i, c in enumerate(data['cases'])
+                if i != target_i and c['split'] != 'held-out']
+    controls_ok = (any(reads[i][0] for i in controls)
+                   and all(not reads[i][0] or reads[i][1] for i in controls))
+    held_count = sum(bool(reads[i][0]) for i in held)
+    held_ok = all(not reads[i][0] or reads[i][1] for i in held)
+    return controls_ok, held_count, held_ok
+
+
+def build_diff(old_root, old_spec, new_root, new_spec):
+    result = []
+    for rel in sorted(set(old_spec['files']) | set(new_spec['files'])):
+        old = (old_root / rel).read_text() if rel in old_spec['files'] else ''
+        new = (new_root / rel).read_text() if rel in new_spec['files'] else ''
+        result.extend(difflib.unified_diff(old.splitlines(True), new.splitlines(True),
+                      'a/skills/super-jev/' + rel, 'b/skills/super-jev/' + rel))
+    return ''.join(result)
 
 def freeze(target, controls, held, held_sha, baseline, cache, out):
     """Freeze only the principals' reviewed, non-secret files; no model call."""
     reserved = scorecard.frozen_cases(held, held_sha) if held else []
     target = {**target, 'split': 'tuned'}
+    for c in scorecard.normalize_cases(controls, target['principal']):
+        if c['split'] == 'held-out' and c not in reserved:
+            raise ValueError('held-out input differs from the frozen reservation')
     cases = scorecard.normalize_cases([target] + controls + reserved, target['principal'])
     if len(cases) > MAX_CASES:
         raise ValueError('request budget exceeded')
@@ -79,7 +168,12 @@ def freeze(target, controls, held, held_sha, baseline, cache, out):
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     (out / 'sources').mkdir()
     baseline_spec = copy_build(baseline, out / 'baseline')
-    ask = scorecard.load_ask(scorecard.build_path(Path(baseline).resolve()), 'shadow_capture')
+    with no_bytecode():
+        ask = scorecard.load_ask(out / 'baseline' / baseline_spec['entry'], 'shadow_capture')
+    # The existing dispatcher provides read-only connector panel metadata only.
+    # Import/search code comes from the hashed copy, never the mutable baseline.
+    if hasattr(ask, 'SKILL'):
+        ask.SKILL = scorecard.build_path(Path(baseline).resolve()).parent / 'dispatch.py'
     ask.prepare_bulk.CACHE_DIR = Path(cache)
     principals = sorted({c['principal'] for c in cases})
     # Metadata only. Error/empty scopes cannot be called successful searches.
@@ -94,7 +188,8 @@ def freeze(target, controls, held, held_sha, baseline, cache, out):
     entries, names, admit, sources, blobs = {}, {}, {}, {}, {}
     total = 0
     for ptr in sorted({p for ps in pointers.values() for p in ps}):
-        entries[ptr] = ask.load_cache_files(ptr)
+        entries[ptr] = {path: entry for path, entry in ask.load_cache_files(ptr).items()
+                        if allowed(path) and allowed(str(Path(path).resolve()))}
         names[ptr] = ask.connector_names(ptr)
         admit[ptr] = {}
         for path, entry in entries[ptr].items():
@@ -124,9 +219,11 @@ def freeze(target, controls, held, held_sha, baseline, cache, out):
             (out / 'sources' / sha).write_bytes(raw)
             blobs[sha] = sha
             sources[path] = {'status': 'captured', 'blob': sha, 'sha256': sha}
-    data = dict(version=1, target=target, cases=cases, pointers=pointers, entries=entries,
+    data = dict(reserved=reserved, version=1, target=target, cases=cases, pointers=pointers, entries=entries,
                 names=names, admit=admit, sources=sources, blobs=blobs, baseline=baseline_spec,
                 held_out_sha256=held_sha, controls=[c['question'] for c in controls])
+    if held:
+        (out / 'held-out.json').write_bytes(Path(held).read_bytes())
     write_json(out / 'manifest.json', data)
     return digest((out / 'manifest.json').read_bytes())
 
@@ -169,7 +266,7 @@ def compare(root, pin, candidate, out):
     def frozen_read(path):
         rec = data['sources'].get(str(path))
         if rec is None:
-            return original_read(path)
+            return original_read(path)  # audit guard refuses unknown paths
         if rec['status'] != 'captured':
             raise FileNotFoundError(str(path))
         return original_read(root / 'sources' / rec['blob'])
@@ -198,8 +295,16 @@ def compare(root, pin, candidate, out):
             str(out / 'candidate' / candidate_spec['entry'])]
     for principal in data['pointers']:
         args += ['--principal', principal]
+    if data.get('held_out_sha256'):
+        args += ['--held-out', str(root / 'held-out.json'), '--held-out-sha256', data['held_out_sha256']]
+    permitted = [casefile, root / 'held-out.json']
+    for folder, spec in [(root / 'baseline', data['baseline']), (out / 'candidate', candidate_spec),
+                         (Path(__file__).parent, tools_spec)]:
+        permitted += [folder / rel for rel in spec['files']]
+    permitted += [root / 'sources' / name for name in data['blobs']]
+    violations = []
     captured = io.StringIO()
-    with patch.object(scorecard, 'load_ask', loader), patch.object(Path, 'read_bytes', frozen_read), contextlib.redirect_stdout(captured):
+    with no_bytecode(), guarded_reads(permitted, violations), patch.object(scorecard, 'load_ask', loader), patch.object(Path, 'read_bytes', frozen_read), contextlib.redirect_stdout(captured):
         rc = scorecard.main(args)
     report = json.loads(captured.getvalue())
     write_json(out / 'scorecard.json', report)
@@ -207,17 +312,17 @@ def compare(root, pin, candidate, out):
     reads = [[any(g in selected.get((f'scorecard_ask_{b}', tuple(data['pointers'][c['principal']]), c['question']), []) for g in c['gold'])
               for b in range(2)] for c in data['cases']]
     cause, uncertainty = classify(data, report['rows'][target_i]['ranks'][0], reads[target_i][0])
-    held = [i for i,c in enumerate(data['cases']) if c['split'] == 'held-out']
-    controls_ok = all(not before or after for i,(before,after) in enumerate(reads) if i != target_i and i not in held)
-    held_ok = all(not reads[i][0] or reads[i][1] for i in held)
+    controls_ok, held_count, held_ok = evidence_gates(data, reads, target_i)
     # E must supply independently reviewed, snapshot-bound evidence before promotion.
     # This offline runner intentionally cannot turn an unverified external JSON into approval.
-    decision, reasons = decide(*reads[target_i], controls_ok, len(held) if data['held_out_sha256'] else 0, held_ok, False)
+    decision, reasons = decide(*reads[target_i], controls_ok, held_count, held_ok, False)
+    if violations:
+        decision = 'REJECT'
+        reasons.append('unfrozen file access attempted')
+        uncertainty.extend('Unfrozen access: ' + path for path in sorted(set(violations)))
     if len(set(slots.values())) != 1:
         uncertainty.append('Read-slot budget changed; extra paid-stage work must be measured before promotion.')
-    old = (root / 'baseline' / data['baseline']['entry']).read_text()
-    new = (out / 'candidate' / candidate_spec['entry']).read_text()
-    diff = ''.join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), 'a/skills/super-jev/ask.py', 'b/skills/super-jev/ask.py'))
+    diff = build_diff(root / 'baseline', data['baseline'], out / 'candidate', candidate_spec)
     (out / 'candidate.patch').write_text(diff)
     proposal = ('Propose restoring/refreshing the reviewed note; inspect its source and connector. Do not edit it automatically.'
                 if cause in ('missing-or-unavailable-note','stale-note') else
