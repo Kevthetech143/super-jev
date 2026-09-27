@@ -186,8 +186,10 @@ def share_defaults(principals: list, memory=memory, path: Path = None) -> dict:
 
 
 def main() -> int:
+    from prepare_bulk import principal_name  # the agent-name rule, checked before any path is built
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--principal", dest="principals", action="append", default=[])
+    ap.add_argument("--principal", dest="principals", action="append", default=[],
+                    type=principal_name)
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--pointer", dest="pointers", action="append")
     group.add_argument("--shared", action="store_true", help=f"apply {shared_config_path()}")

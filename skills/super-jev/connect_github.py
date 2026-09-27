@@ -26,6 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from prepare_bulk import principal_name  # noqa: E402
 
 SYNC_FILE = ".github-sync.json"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -185,7 +186,7 @@ def main(argv=None) -> int:
                                  description="Connect a GitHub repo's PR/issue/commit/release history.")
     ap.add_argument("repo", help="OWNER/REPO")
     ap.add_argument("--pointer", required=True)
-    ap.add_argument("--principal", required=True)
+    ap.add_argument("--principal", required=True, type=principal_name)
     ap.add_argument("--out", help="export folder (default: state dir/<principal>/github/<owner>-<repo>)")
     ap.add_argument("--refresh", action="store_true", help="only items updated since the last run")
     ap.add_argument("--no-connect", action="store_true", help="export only; skip prepare_bulk")
