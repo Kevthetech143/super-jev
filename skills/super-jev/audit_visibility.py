@@ -80,7 +80,8 @@ def audit(registry_path: Path, db_path: Path, shared: list | None = None) -> dic
         path_connection = entry.get("pathConnection") or {}
         connected_by_dataset[dataset_name] = list(path_connection.get("principals") or [])
         originals_by_dataset[dataset_name] = [
-            o.get("path", "") for o in entry.get("originals") or [] if isinstance(o, dict)
+            x for o in entry.get("originals") or [] if isinstance(o, dict)
+            for x in (o.get("path", ""), o.get("realPath")) if x
         ]
 
     principals: dict[str, dict[str, Any]] = {}

@@ -1,5 +1,6 @@
 """End-to-end local onboarding contracts, using the production chunker."""
 import hashlib
+import os
 import json
 import tempfile
 import unittest
@@ -45,8 +46,9 @@ class PathConnectTests(unittest.TestCase):
         self.assertNotIn('checkedAt', entry)
         manifest = json.loads(Path(entry['manifestPath']).read_text())
         self.assertEqual(len(manifest['preparations']), 2)
-        self.assertEqual(manifest['sources'][0]['originalPath'], str(self.source.resolve()))
-        self.assertEqual(result['sources'][0]['originalPath'], str(self.source.resolve()))
+        # Recorded as given (absolute, symlinks kept); /var -> /private/var on macOS stays /var.
+        self.assertEqual(manifest['sources'][0]['originalPath'], os.path.abspath(self.source))
+        self.assertEqual(result['sources'][0]['originalPath'], os.path.abspath(self.source))
         lines = self.source.read_text().split('\n')
         for p in manifest['preparations']:
             self.assertEqual(p['reviewedText'], '\n'.join(lines[p['startLine'] - 1:p['endLine']]))
@@ -134,3 +136,31 @@ class PathConnectTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class LinkedSourceTests(unittest.TestCase):
+    def test_a_source_under_a_moving_link_follows_the_link(self):
+        """The skills catalog held Super Jev's own SKILL.md at a resolved release path
+        (releases/v1.0.46/...): after each release the pointer kept serving the old copy and
+        was never marked stale, because that old file never changed."""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "v1").mkdir(); (d / "v2").mkdir()
+            (d / "v1" / "SKILL.md").write_text("# Skill\nold release text\n")
+            (d / "v2" / "SKILL.md").write_text("# Skill\nnew release text\n")
+            link = d / "current"
+            link.symlink_to(d / "v1")
+            config = {"db": str(d / "a.sqlite"), "registry": str(d / "registry.json")}
+            src = str(link / "SKILL.md")
+            req = {"action": "connect", "pointer": "cat", "principals": ["owner"],
+                   "sources": [{"path": src, "description": "skill"}]}
+            prev = connect(req, config)
+            req["sources"][0]["sha256"] = prev["sources"][0]["sha256"]
+            self.assertEqual(connect({**req, "reviewed": True}, config)["status"], "registered")
+            original = json.loads((d / "registry.json").read_text())["datasets"]["cat"]["originals"][0]
+            self.assertEqual(original["path"], os.path.abspath(src))
+            self.assertEqual(original["realPath"], str((d / "v1" / "SKILL.md").resolve()))
+            link.unlink(); link.symlink_to(d / "v2")  # a new release
+            from service import Service
+            service = Service(config["db"], Path(config["registry"]), lambda *_: None)
+            self.assertEqual(service.pointer("cat", "owner")[1]["status"], "preparation-required")
