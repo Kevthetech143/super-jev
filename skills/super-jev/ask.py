@@ -356,8 +356,10 @@ def trace_show(sdir: Path, which: str) -> int:
     w = st.get("word_search") or {}
     print(f"3 word search terms={w.get('terms')} files={w.get('files_searched')} "
           f"covering>=50%={w.get('passed_coverage')} slots={FALLBACK_FILES}:")
+    edited = set(w.get("changed_since_connect") or [])
     for i, f in enumerate(w.get("top", []), 1):
-        print(f"  {i:2}. {f['score']:7.3f}  {f['path']}  -> {f['fate']}")
+        mark = " (edited since connect: current text)" if f["path"] in edited else ""
+        print(f"  {i:2}. {f['score']:7.3f}  {f['path']}{mark}  -> {f['fate']}")
     print(f"4 read list ({len(st.get('read_list', []))}): " + ", ".join(Path(p).name for p in st.get("read_list", [])))
     print("5 content check (confirm >= %s, possible >= %s):" % (CONFIRM_FLOOR, POSSIBLE_FLOOR))
     for path, d in (st.get("content_check") or {}).items():
@@ -1475,17 +1477,36 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
     except Exception:
         pass  # best effort: an unsaved pointer is just asked again next time
 
+def refresh_would_admit(path: str, ptr: str) -> bool:
+    """Would the pointer's own refresh admit this file where it now resolves? The same rule
+    prepare_bulk.inventory applies to a link target: under a recorded root or allow-target,
+    no vault folder (profile/, documents/), no hidden folder, no logins/secret/backup name.
+    No recorded report (a connector-built pointer): no."""
+    report = auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0]
+    if not isinstance(report, dict):
+        return False
+    rp = Path(os.path.realpath(path))
+    bases = [Path(os.path.realpath(b)) for b in (report.get("roots") or []) + (report.get("allowTargets") or [])]
+    base = next((b for b in bases if rp.is_relative_to(b)), None)
+    name = rp.name.casefold()
+    if base is None or ".bak" in name or name == "logins.md" or name.endswith("-secret.md"):
+        return False
+    return not any(x.casefold() in prepare_bulk.SKIP_PARTS or x.startswith(".") for x in rp.relative_to(base).parts)
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
     in every passage). Typos match a close word (difflib). A file must
     cover FALLBACK_MIN_COVERAGE of the question's weighted words to be offered. Test/scratch
-    output is never searched; `skip` paths (already routed) are dropped before the top `limit`."""
+    output is never searched; `skip` paths (already routed) are dropped before the top `limit`.
+    A reviewed file edited since connect stays searchable at its current text while its
+    pointer waits on the refresh (routing cannot see a stale pointer), if that text passes
+    the same secret scan and size ceiling connect applies; it is listed in the trace."""
     terms = query_terms(question)
     if not terms:
         return []
-    docs = {}
+    docs, changed = {}, []
     for ptr in pointers:
         for path, entry in load_cache_files(ptr).items():
             if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
@@ -1495,9 +1516,14 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
                 raw = Path(path).read_bytes()
             except OSError:
                 continue
-            if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
-                continue  # changed since review: not reviewed text any more
             text = raw.decode("utf-8", "replace")
+            if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+                # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
+                # search its current text, held back only as a refresh would hold it.
+                if (not entry.get("sha256") or len(raw) > prepare_bulk.CEILING_BYTES or has_secret(text)
+                        or not refresh_would_admit(path, ptr)):
+                    continue  # never reviewed at a known version, or a refresh would hold it
+                changed.append(path)
             heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
             head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                              str(entry.get("description") or ""), str(entry.get("question") or "")])
@@ -1507,6 +1533,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             docs[path] = (ptr, sum(passages, Counter()), [(c, sum(c.values())) for c in passages])
     if not docs:
         return []
+    _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
     vocab = sorted(set().union(*(c.keys() for _, c, _ in docs.values())))
     variants = {}
     for t in terms:
@@ -1608,11 +1635,9 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
     # pointer's recorded roots/excludes and every principal it serves (a bare --refresh with
     # no report is refused for want of --root; one principal short is refused as a scope change).
     script = skill_dir_for_display() / "prepare_bulk.py"  # stable across releases
-    try:
-        report = json.loads((prepare_bulk.CACHE_DIR / f"{ptr}-report.json").read_text())
-        args = refresh_changed.prepare_args(report) if isinstance(report, dict) else None
-    except (OSError, ValueError):
-        args = None
+    # A split part (<pointer>-N) has no report of its own: it refreshes through its parent's.
+    report = auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0]
+    args = refresh_changed.prepare_args(report) if isinstance(report, dict) else None
     if args:
         return f"; its files changed since connect. Run: {shlex.join(['python3', str(script), *args])}"
     # Not built by prepare_bulk: the ask already replayed its recorded connect recipe
@@ -2236,6 +2261,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
             "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
+                            "changed_since_connect": _STAGE.get("word_changed") or [],
                             "passed_coverage": wsearch.get("passed_coverage"),
                             "top": [{"score": sc, "path": p,
                                      "fate": fates.get(p) or ("already routed" if p in routed[:CONFIRM_FILES]
@@ -2279,7 +2305,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             side = [p for p, f in (files or {}).items() if f["verdict"] == ("supported" if word == "TRUE" else "contradicted")
                     and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE]
             best = max(side, key=lambda p: files[p]["prob"])
-            claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
+            if best not in (_STAGE.get("word_changed") or []):  # never save from text no refresh has passed
+                claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
         log(sdir, "claim", question=question, result=word)
         if top:
             print("Files found:")
