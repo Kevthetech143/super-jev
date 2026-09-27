@@ -378,7 +378,7 @@ def test_a_queued_connector_pointer_is_replayed_by_the_drain(tmp_path, monkeypat
     src, service = _path_connected(tmp_path, monkeypatch)
     src.write_text('{"version": "1.0.8"}\n')
     token = ah._acquire_lock("agent", "a-running-refresh")
-    assert ah.reconnect_recipe("structured", "agent") == "in-progress"
+    assert ah.reconnect_recipe_or_queue("structured", "agent") == "in-progress"
     assert service.pointer("structured", "agent")[1] == {"status": "preparation-required"}
     ah.drain("agent", token)
     assert service.pointer("structured", "agent")[1] is None
