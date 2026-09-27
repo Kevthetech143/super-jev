@@ -1516,6 +1516,13 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     if not terms:
         return []
     docs, changed = {}, []
+    # Adjacent question words, in question order (before de-duplication); a passage keeps
+    # only the pairs it shares with these, so the pair pass costs little memory.
+    qwords = [w for w in words(question.replace("'", "").replace("\u2019", ""))
+              if len(w) > 2 and w not in QUERY_STOPWORDS]
+    qpairs = list(dict.fromkeys((a, b) for a, b in zip(qwords, qwords[1:])
+                                if a != b and a in terms and b in terms))  # "step by step" is no phrase
+    qkeys = {(a[:4], b[:4]) for a, b in qpairs}
     for ptr in pointers:
         for path, entry in load_cache_files(ptr).items():
             if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
@@ -1540,7 +1547,8 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
             passages = [passage_words(c) + head_words for c in chunks]
             docs[path] = (ptr, sum(passages, Counter()),
-                          [(c, sum(c.values()), word_pairs(t)) for c, t in zip(passages, chunks)])
+                          [(c, sum(c.values()), word_pairs(t) & qkeys if qkeys else set())
+                           for c, t in zip(passages, chunks)])
     if not docs:
         return []
     _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
@@ -1563,7 +1571,6 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
     # them out of the coverage total so they do not sink every file.
     total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
-    qpairs = list(zip(terms, terms[1:]))
     scored = []
     for path, (ptr, _, parts) in docs.items():
         f = tf[path]
