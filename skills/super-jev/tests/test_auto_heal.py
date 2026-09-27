@@ -274,3 +274,112 @@ def test_a_split_parts_failed_refresh_is_read_from_its_parents_log(tmp_path, mon
     (tmp_path / "docs-report.json").write_text(json.dumps({"parts": [{"pointer": "docs-2"}]}))
     (tmp_path / "me-docs-last-refresh.log").write_text("ERROR: description writer failed: boom\n")
     assert ah.last_refresh_error("me", "docs-2", cache_dir=tmp_path) == "description writer failed: boom"
+
+
+# Starvation (live 2026-09-27): an ask heals its stale pointers in a fixed order, so the first
+# changed one took the per-principal lock and the last one was skipped "in-progress" on every
+# ask while the others kept changing. Now a pointer that finds the lock held is queued, and
+# the refresh holding the lock heals the queue before it releases it.
+
+def _add_pointer(cache_dir, name, principal="agent"):
+    f = cache_dir.parent / "brain" / f"{name}.md"
+    f.write_text(f"# {name}\n")
+    (cache_dir / f"{name}-report.json").write_text(json.dumps(
+        {"pointer": name, "roots": [str(f.parent)], "approved": [str(f)], "excludes": [],
+         "noRecurse": True, "principal": principal, "principals": [principal]}))
+    (cache_dir / f"{name}.json").write_text(json.dumps({}))
+
+
+def _token(wrapper_call):
+    # The detached child's shell line ends in: auto_heal.py --drain <principal> <token> ...
+    words = wrapper_call[2].split()
+    return words[words.index("--drain") + 2]
+
+
+def _fake_run(monkeypatch, principal="agent", code=0):
+    runs = []
+
+    def run(cmd, **kw):
+        # Serial: the drain runs each refresh while it still holds the principal's lock.
+        assert ah._lock_path(principal).is_file()
+        runs.append(cmd[cmd.index("--pointer") + 1] if "--pointer" in cmd else cmd)
+        return ah.subprocess.CompletedProcess(cmd, code)
+    monkeypatch.setattr(ah.subprocess, "run", run)
+    return runs
+
+
+def test_a_pointer_skipped_for_the_lock_is_refreshed_before_the_lock_is_released(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    for name in ("second", "last"):
+        _add_pointer(cache_dir, name)
+    runs = _fake_run(monkeypatch)
+    for _ in range(2):  # two lookups while the first refresh is still running
+        assert ah.maybe_heal("first", "agent") in ("started", "cooldown")
+        assert ah.maybe_heal("second", "agent") == "in-progress"
+        assert ah.maybe_heal("last", "agent") == "in-progress"
+    assert len(calls) == 1  # never two refreshes at once
+    assert ah.drain("agent", _token(calls[0])) == 0  # the first refresh has finished
+    assert [r for r in runs] == ["second", "last"]  # oldest first, one at a time
+    assert not ah._lock_path("agent").exists()
+    assert ah._load_state("agent")["pending"] == {}
+    assert ah.maybe_heal("last", "agent") == "cooldown"  # counted like any other refresh
+
+
+def test_the_drain_keeps_the_hourly_cap_and_cooldown_and_leaves_those_queued(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    for name in ("cool", "over"):
+        _add_pointer(cache_dir, name)
+    runs = _fake_run(monkeypatch)
+    monkeypatch.setattr(ah, "MAX_PER_HOUR", 2)
+    assert ah.maybe_heal("first", "agent", max_per_hour=2) == "started"
+    ah._mark("agent", "cool", time.time())  # refreshed a moment ago: cooling down
+    assert ah.maybe_heal("cool", "agent", cooldown_secs=0) == "in-progress"
+    assert ah.maybe_heal("over", "agent") == "in-progress"
+    ah._mark("agent", "x", time.time(), [time.time(), time.time()])  # hourly cap reached
+    ah.drain("agent", _token(calls[0]))
+    assert runs == []
+    assert set(ah._load_state("agent")["pending"]) == {"cool", "over"}
+    assert not ah._lock_path("agent").exists()
+
+
+def test_a_drain_never_touches_a_lock_that_is_no_longer_its_own(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    _add_pointer(cache_dir, "last")
+    runs = _fake_run(monkeypatch)
+    assert ah.maybe_heal("first", "agent") == "started"
+    assert ah.maybe_heal("last", "agent") == "in-progress"
+    token = _token(calls[0])
+    ah._release_lock("agent")
+    assert ah._acquire_lock("agent", "someone-else")  # e.g. taken over as stale
+    ah.drain("agent", token)
+    assert runs == [] and ah._lock_path("agent").is_file()
+
+
+def test_a_running_refresh_keeps_the_lock_after_the_lookup_that_started_it_exits(tmp_path, monkeypatch):
+    # The lock used to name the lookup's pid; once that lookup exited the lock looked dead while
+    # its refresh still ran, and the next lookup started a second refresh for the principal.
+    live_child = os.getpid()
+
+    class Proc:
+        pid = live_child
+
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    _add_pointer(cache_dir, "other")
+    monkeypatch.setattr(ah.subprocess, "Popen", Proc)
+    monkeypatch.setattr(ah.os, "getpid", lambda: 999999999)  # the lookup, gone by now
+    assert ah.maybe_heal("first", "agent") == "started"
+    assert ah.maybe_heal("other", "agent") == "in-progress"
+    assert len(calls) == 1
+
+
+def test_a_queued_connector_pointer_is_replayed_by_the_drain(tmp_path, monkeypatch):
+    src, service = _path_connected(tmp_path, monkeypatch)
+    src.write_text('{"version": "1.0.8"}\n')
+    token = ah._acquire_lock("agent", "a-running-refresh")
+    assert ah.reconnect_recipe("structured", "agent") == "in-progress"
+    assert service.pointer("structured", "agent")[1] == {"status": "preparation-required"}
+    ah.drain("agent", token)
+    assert service.pointer("structured", "agent")[1] is None
+    assert not ah._lock_path("agent").exists()
