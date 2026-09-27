@@ -96,7 +96,7 @@
       saves as approved_by=agent-pick+check; REJECT/CONTRADICTED/
       TIME_SENSITIVE/stale/secret drops it; anything else (or no answer text)
       stays pending. --pending-picks lists them; --confirm-pick ID ["answer"]
-      approves one as a human, --drop-pick ID removes it.
+      records explicit approval by the caller principal, --drop-pick ID removes it.
 
 Cache hits print the caller principal for --approve and --add (principal:NAME)
 or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
