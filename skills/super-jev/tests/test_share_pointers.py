@@ -158,8 +158,10 @@ def test_a_connection_is_private_until_a_person_marks_it(tmp_path, monkeypatch):
     assert "register" not in calls and _visible(memory, "otherbot") == {}
     assert sp.mark(["team-notes"], memory=memory) == {"team-notes": "marked"}
     assert _shareable(tmp_path, "team-notes") is True
+    assert _visible(memory, "owner")["team-notes"] == "available"  # a mark never stales the pointer
     assert sp.share(["team-notes"], ["otherbot"], memory=memory) == {"team-notes": "shared"}
     assert sp.mark(["team-notes"], value=False, memory=memory) == {"team-notes": "unmarked"}
+    assert _visible(memory, "owner")["team-notes"] == "available"
     assert sp.share(["team-notes"], ["third"], memory=memory)["team-notes"].startswith("refused: private")
     assert sp.mark(["nope"], memory=memory) == {"nope": "unknown-pointer"}
     assert not marker.exists()
