@@ -15,6 +15,8 @@ import {
   cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
   parseMissCandidate, formatMissCandidateReply, parseMissReport,
   parseSetupMissing, parseErrorReport, parseAnyPointers,
+  detectDroppedPaths, buildDropPlan, formatDropConfirm, shouldConnect,
+  buildConnectArgs, parseConnectSummary, formatConnectSummary,
   MISS_LINE, HELP_TEXT,
   type SuperJevConfig,
 } from './jev-chat-config.ts';
@@ -24,6 +26,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
 const ASK_PY = join(REPO_ROOT, 'skills', 'super-jev', 'ask.py');
 const DISPATCH_PY = join(REPO_ROOT, 'skills', 'super-jev', 'dispatch.py');
+const PREPARE_BULK_PY = join(REPO_ROOT, 'skills', 'super-jev', 'prepare_bulk.py');
 
 const BANNER = String.raw`
    ____                       ____
@@ -168,6 +171,52 @@ async function handleQuestion(question: string, principal: string) {
   if (hit.stderr) console.log(pc.dim(hit.stderr.trim().split('\n').slice(0, 3).join('\n')));
 }
 
+/** Runs prepare_bulk.py for a confirmed drop plan and prints its plain-words
+ * result. Held/exception files are always surfaced, never swallowed. */
+function runConnect(plan: ReturnType<typeof buildDropPlan>, principal: string) {
+  if ('error' in plan) return; // callers check for .error before calling this
+  const s = spinner();
+  s.start(`Connecting ${plan.label}`);
+  const args = buildConnectArgs(plan, principal);
+  const result = spawnSync('python3', [PREPARE_BULK_PY, ...args], { encoding: 'utf8' });
+  if (result.error) {
+    s.stop('Connect failed.');
+    console.log(pc.red(`Connect failed: ${result.error.message}`));
+    return;
+  }
+  const stdout = result.stdout || '';
+  const summary = parseConnectSummary(stdout);
+  if (summary) {
+    s.stop('Connect finished.');
+    console.log(formatConnectSummary(summary));
+    return;
+  }
+  s.stop('Connect did not finish cleanly.');
+  console.log(pc.red('Connect did not report a clean approved/held/exception summary.'));
+  if (stdout.trim()) console.log(pc.dim(stdout.trim().split('\n').slice(-10).join('\n')));
+  if (result.stderr && result.stderr.trim()) console.log(pc.dim(result.stderr.trim().split('\n').slice(0, 5).join('\n')));
+}
+
+/** Handles a line that detectDroppedPaths recognized as one or more existing
+ * local paths: shows what would be connected, gets a one-key confirm
+ * (Enter = yes), then runs the connector. Never connects without the
+ * confirm -- connecting makes paid judge calls. */
+async function handleDrop(line: string, principal: string) {
+  const dropped = detectDroppedPaths(line)!;
+  const plan = buildDropPlan(dropped, principal);
+  if ('error' in plan) {
+    console.log(pc.red(plan.error));
+    return;
+  }
+  console.log(pc.bold('Detected a drop: ') + plan.label);
+  const proceed = await confirm({ message: formatDropConfirm(plan, principal), initialValue: true });
+  if (isCancel(proceed) || !shouldConnect(proceed)) {
+    console.log(pc.dim('Not connected.'));
+    return;
+  }
+  runConnect(plan, principal);
+}
+
 async function main() {
   console.clear?.();
   let config = loadConfig();
@@ -191,6 +240,14 @@ async function main() {
     if (isCancel(input) || input === undefined) { outro('Bye.'); return; }
     const line = String(input).trim();
     if (!line) continue;
+
+    // Check drag-drop shape BEFORE slash commands: an absolute path like
+    // /Users/kelvin/notes.md also starts with '/' and must not be parsed as
+    // a slash command.
+    if (detectDroppedPaths(line)) {
+      await handleDrop(line, principal);
+      continue;
+    }
 
     const slash = parseSlashCommand(line);
     if (slash) {
