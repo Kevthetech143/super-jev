@@ -145,6 +145,7 @@ import tempfile
 import sys
 import threading
 import time
+import traceback
 import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -1016,13 +1017,15 @@ def claim_window(line: str, want: set) -> str:
     toks = [(m.start(), m.end(), want & _stems(words(m.group()))) for m in re.finditer(r"\S+", line)]
     counts, score, j = {}, [], 0
     for i, (st, _, _) in enumerate(toks):  # one pass: distinct statement words in each window
+        j = max(j, i)  # a single word longer than the window (a long URL) is never counted
         while j < len(toks) and toks[j][1] <= st + size:
             for w in toks[j][2]:
                 counts[w] = counts.get(w, 0) + 1
             j += 1
         score.append(sum(1 for c in counts.values() if c))
-        for w in toks[i][2]:
-            counts[w] -= 1
+        if j > i:  # token i was counted; it leaves the window now
+            for w in toks[i][2]:
+                counts[w] -= 1
     best = max(score)
     top = [toks[i][0] for i, n in enumerate(score) if n == best]
     start = min(top[len(top) // 2], len(line) - size)  # the middle of the best stretch
@@ -3228,6 +3231,11 @@ def _main() -> int:
             _CLAIM["text"] = claim
             try:
                 rc = max(rc, lookup(claim, principal, sdir))
+            except Exception as e:  # one failed statement must not drop the rest of the file
+                print(f"ERROR: this statement could not be checked ({type(e).__name__}: {e}); "
+                      "check it by hand")
+                traceback.print_exc()
+                rc = max(rc, 3)  # distinct from 2 (bad arguments)
             finally:
                 _CLAIM["text"] = None
         return rc
