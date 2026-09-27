@@ -1788,14 +1788,25 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         print("Searching live instead...")
     panel = memory({"action": "panel", "principal": principal})
     if panel.get("reason") == "not-set-up":
-        print("Super Jev is not set up yet. Run: python3 skills/super-jev/setup.py")
+        print(f"Super Jev is not set up yet. Run: python3 {skill_dir_for_display() / 'setup.py'}")
         return 1
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
                             for p in panel.get("pointers", [])) if n and n != withheld]
     if not pointers:
+        # Runnable from any folder (the skill folder as invoked), and a new agent in a fleet
+        # learns the shared sets it can join at once, with no connect.
+        here = skill_dir_for_display()
         print(f"nothing connected yet for principal '{principal}' -- run connect first:\n"
-              f"  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
+              f"  python3 {here / 'prepare_bulk.py'} --root /path/to/folder "
               f"--pointer my-notes --principal {principal}")
+        try:
+            import share_pointers
+            shared = share_pointers.load_shared()
+        except Exception:
+            shared = []
+        if shared:
+            print(f"or join the fleet's {len(shared)} shared set(s) now ({', '.join(shared[:5])}):\n"
+                  f"  python3 {here / 'share_pointers.py'} --principal {principal} --shared")
         log(sdir, "lookup", question=question, pointers=0, result="nothing-connected",
             secs=round(time.time() - t0, 1))
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
