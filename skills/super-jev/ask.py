@@ -3355,6 +3355,11 @@ def _main() -> int:
         print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
               "'.', '_', '-'; no spaces or slashes)")
         return 2
+    if a[0] == "--":  # the rest is the question, read literally (never a --flag)
+        if len(a) == 1:
+            print(__doc__)
+            return 2
+        return lookup(" ".join(a[1:]), principal, state_dir(principal))
     if a[0] == "--status":
         if len(a) != 1:
             print("usage: --principal AGENT --status")
