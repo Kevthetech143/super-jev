@@ -256,3 +256,21 @@ def test_a_pointer_made_through_a_moving_link_heals_to_the_new_target(tmp_path, 
     assert service.pointer("skills", "agent")[1] is None
     src = service.sources("skills", "agent")["sources"][0]["path"]
     assert "version two" in Path(src).read_text()
+
+
+def test_a_failed_refresh_is_named_not_hidden_behind_cooldown(tmp_path, monkeypatch):
+    # Live 2026-09-27: every refresh failed ("the writer prompt contains a secret") for 2 hours
+    # while each ask said only "refreshed recently, cooling down".
+    monkeypatch.setattr(ah, "STATE_DIR", tmp_path)
+    assert ah.last_refresh_error("me", "docs") == ""
+    (tmp_path / "me-docs-last-refresh.log").write_text("inventory: 3 files\nERROR: description writer failed: boom\n  hint\n")
+    assert ah.last_refresh_error("me", "docs") == "description writer failed: boom"
+    (tmp_path / "me-docs-last-refresh.log").write_text("inventory: 3 files\nconnect: registered\n")
+    assert ah.last_refresh_error("me", "docs") == ""
+
+
+def test_a_split_parts_failed_refresh_is_read_from_its_parents_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(ah, "STATE_DIR", tmp_path)
+    (tmp_path / "docs-report.json").write_text(json.dumps({"parts": [{"pointer": "docs-2"}]}))
+    (tmp_path / "me-docs-last-refresh.log").write_text("ERROR: description writer failed: boom\n")
+    assert ah.last_refresh_error("me", "docs-2", cache_dir=tmp_path) == "description writer failed: boom"
