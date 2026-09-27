@@ -139,6 +139,17 @@ def _release_lock(principal: str) -> None:
         pass
 
 
+def last_refresh_error(principal: str, pointer: str) -> str:
+    """The ERROR line of this pointer's last background refresh, or "" (none, still running,
+    or it passed). Lets a cooling-down note say the refresh failed instead of hiding it."""
+    try:
+        text = (STATE_DIR / f"{principal}-{pointer}-last-refresh.log").read_text(errors="replace")
+    except OSError:
+        return ""
+    return next((ln.strip()[len("ERROR:"):].strip()[:160] for ln in text.splitlines()
+                 if ln.strip().startswith("ERROR:")), "")
+
+
 def is_stale_kind(kind: str) -> bool:
     return bool(kind) and kind.startswith(("preparation-required", "refresh-required"))
 

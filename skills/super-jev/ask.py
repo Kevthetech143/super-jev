@@ -1944,7 +1944,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 elif result == "in-progress":
                     heal_note = " (auto-heal: refresh already in progress)"
                 elif result == "cooldown":
-                    heal_note = " (auto-heal: refreshed recently, cooling down)"
+                    err = auto_heal.last_refresh_error(principal, ptr)
+                    heal_note = (f" (auto-heal: last refresh FAILED: {err}; retrying after cooldown)" if err
+                                 else " (auto-heal: refreshed recently, cooling down)")
                 elif result == "rate-limited":
                     heal_note = " (auto-heal: hourly refresh limit reached)"
             # [STALE] marks a pointer that is just waiting on its own refresh (not
