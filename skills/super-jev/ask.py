@@ -974,6 +974,7 @@ LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, 
 CLAIM_SURE = 0.9
 CLAIM_LINES = 60
 CLAIM_LINE_CHARS = 160
+CLAIM_LINE_BUDGET = 4000  # characters of line choices per file, so a claim call stays well under the input ceiling
 CLAIM_CRITERIA = {
     "supported": "the file states that the statement is true",
     "partly": "the file states part of the statement but not all of it",
@@ -1004,7 +1005,12 @@ def claim_questions(claim: str, ordered: list, files: dict) -> tuple:
         key = f"file_{i + 1}"
         qs[f"verdict_{i + 1}"] = {"type": "choice", "criteria": CLAIM_CRITERIA,
                                   "instructions": CLAIM_VERDICT_INSTRUCTIONS % (claim, key, Path(p).name)}
-        cand = claim_lines(files[p])
+        cand, used = [], 0
+        for t in claim_lines(files[p]):
+            used += min(len(t), CLAIM_LINE_CHARS) + 8
+            if used > CLAIM_LINE_BUDGET:
+                break
+            cand.append(t)
         lines[key] = cand
         if cand:
             crit = {f"L{j + 1}": t[:CLAIM_LINE_CHARS] for j, t in enumerate(cand)}
@@ -1017,8 +1023,9 @@ def _answer_prob(ans: dict):
     probs = ans.get("probabilities") if isinstance(ans, dict) else None
     return probs.get(ans.get("choice")) if isinstance(probs, dict) else ans.get("probability")
 
-def read_claim_answers(answers: dict, ordered: list, lines: dict) -> dict:
-    """{path: {verdict, prob, line, line_no}} from one Jev response."""
+def read_claim_answers(answers: dict, ordered: list, lines: dict, shown: dict = None) -> dict:
+    """{path: {verdict, prob, line, line_no}} from one Jev response. line_no counts from the
+    passage actually shown, so a line repeated earlier in the file is not misnumbered."""
     out = {}
     for i, p in enumerate(ordered):
         v = answers.get(f"verdict_{i + 1}")
@@ -1031,8 +1038,11 @@ def read_claim_answers(answers: dict, ordered: list, lines: dict) -> dict:
         if m and 1 <= int(m.group(1)) <= len(cand):
             rec["line"] = cand[int(m.group(1)) - 1]
             try:
-                whole = Path(p).read_text(errors="replace").splitlines()
-                rec["line_no"] = next((k + 1 for k, t in enumerate(whole) if t.strip() == rec["line"]), None)
+                text = Path(p).read_text(errors="replace")
+                off = max(text.find((shown or {}).get(p) or ""), 0)
+                base = text[:off].count("\n")
+                rec["line_no"] = next((base + k + 1 for k, t in enumerate(text[off:].splitlines())
+                                       if t.strip() == rec["line"]), None)
             except OSError:
                 pass
         out[p] = rec
@@ -1089,7 +1099,8 @@ def claim_verdict(files: dict, read: list) -> tuple:
     return "NOT FOUND", [f"NOT FOUND in the {len(read)} file(s) I read; it may still exist in a file that was not read."]
 
 def claim_key(claim: str) -> str:
-    return " ".join(words(claim))
+    """Case and spacing folded, every symbol kept: "-50" and "50", "<" and ">" stay different claims."""
+    return " ".join(claim.casefold().split()).rstrip(".!?")
 
 def claim_cache_path(sdir: Path) -> Path:
     return sdir / "claim-verdicts.json"
@@ -1177,9 +1188,18 @@ def judge_listwise(question: str, paths: list):
         questions.update(extra)
         _STAGE["claim_read"] = ordered
     try:
-        r = jev_choice(state, questions)
+        try:
+            r = jev_choice(state, questions)
+        except Exception:
+            if not _CLAIM["text"]:
+                raise
+            # A claim call can only be bigger than a normal one: retry once without the line picks.
+            questions = {k: v for k, v in questions.items() if not k.startswith("line_")}
+            r = jev_choice(state, questions)
         if _CLAIM["text"]:
-            _STAGE["claim_files"] = read_claim_answers(r.get("answers") or {}, ordered, claim_lines_by_key)
+            got = read_claim_answers(r.get("answers") or {}, ordered, claim_lines_by_key, files)
+            if got:  # no verdicts back means the check did not run, never "not found"
+                _STAGE["claim_files"] = got
         pick = r["answers"]["pick"]
         choice = pick["choice"]
     except Exception:
