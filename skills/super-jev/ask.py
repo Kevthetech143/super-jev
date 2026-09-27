@@ -1190,9 +1190,9 @@ def judge_listwise(question: str, paths: list):
     try:
         try:
             r = jev_choice(state, questions)
-        except Exception:
-            if not _CLAIM["text"]:
-                raise
+        except Exception as e:
+            if not _CLAIM["text"] or not re.search(r"ceiling|max_tokens_exceeded", str(e)):
+                raise  # only a size refusal is retried; a timeout or auth error is not waited on twice
             # A claim call can only be bigger than a normal one: retry once without the line picks.
             questions = {k: v for k, v in questions.items() if not k.startswith("line_")}
             r = jev_choice(state, questions)

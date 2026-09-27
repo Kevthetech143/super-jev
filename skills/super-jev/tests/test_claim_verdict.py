@@ -119,7 +119,7 @@ def test_a_too_big_claim_call_retries_without_line_picks(tmp_path, monkeypatch):
     def fake(state, questions):
         calls.append(set(questions))
         if any(k.startswith("line_") for k in questions):
-            raise RuntimeError("max_tokens_exceeded")
+            raise RuntimeError("evidence exceeds the 32,768-token ceiling")
         return {"answers": {"pick": {"choice": "file_1", "probabilities": {"file_1": 0.95}},
                             "verdict_1": {"choice": "supported", "probabilities": {"supported": 0.96}}}}
     monkeypatch.setattr(ask, "jev_choice", fake)
@@ -147,3 +147,16 @@ def test_line_number_counts_from_the_shown_passage(tmp_path):
                "line_1": {"choice": "L1", "probabilities": {"L1": 0.9}}}
     got = ask.read_claim_answers(answers, [a], {"file_1": ["## Setup", "The limit is 255 options."]}, {a: shown})[a]
     assert got["line_no"] == 13
+
+
+def test_a_timeout_in_claim_mode_is_not_retried(tmp_path, monkeypatch):
+    a = _f(tmp_path, "a.md", "text\n")
+    calls = []
+
+    def fake(state, questions):
+        calls.append(1)
+        raise RuntimeError("could not reach TypeSafe: timed out")
+    monkeypatch.setattr(ask, "jev_choice", fake)
+    monkeypatch.setitem(ask._CLAIM, "text", "s")
+    ask._STAGE.clear()
+    assert ask.judge_listwise("s", [a]) == (None, None) and len(calls) == 1
