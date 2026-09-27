@@ -48,8 +48,8 @@ def _files(tmp_path, n):
     return out
 
 
-# 1. long files: chunk 0 plus the chunks sharing the question's words, never a pass-through
-def test_long_file_reads_first_chunk_plus_matching_chunks(tmp_path, monkeypatch):
+# 1. long files: the passages matching the question's words, within READ_CHARS, never a pass-through
+def test_long_file_reads_matching_chunks_within_budget(tmp_path, monkeypatch):
     chunks = ["intro " * 580] + ["filler " * 500] * 5 + ["the shareholder meeting is in June " * 100] + ["filler " * 500]
     f = tmp_path / "long.md"
     f.write_text("".join(c[:ask.CONFIRM_CHUNK].ljust(ask.CONFIRM_CHUNK) for c in chunks))
@@ -60,8 +60,10 @@ def test_long_file_reads_first_chunk_plus_matching_chunks(tmp_path, monkeypatch)
         return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": 0.0}]}), "")
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
     score, partial, err, note = ask.confirm_one("when is the shareholder meeting", str(f))
-    ids = [n["sourceId"] for n in sent[0]["catalog"]["nodes"][1:]]
-    assert ids[0] == "0" and "6" in ids and len(ids) == ask.CONFIRM_CHUNKS_PER_FILE
+    leaves = sent[0]["catalog"]["nodes"][1:]
+    ids = [n["sourceId"] for n in leaves]
+    assert "6" in ids and len(ids) < len(chunks)
+    assert sum(len(n["description"]) for n in leaves) <= ask.READ_CHARS
     assert score is None and partial is False and err is None and note is None
 
 
