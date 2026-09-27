@@ -45,8 +45,9 @@ def _runtime(tmp_path):
     return memory, marker, calls
 
 
-def _connect(memory, tmp_path, pointer, principals):
-    src = tmp_path / f"{pointer}.md"
+def _connect(memory, tmp_path, pointer, principals, folder="global/knowledge"):
+    (tmp_path / folder).mkdir(parents=True, exist_ok=True)
+    src = tmp_path / folder / f"{pointer}.md"
     src.write_text(f"# {pointer}\nshared fleet note\n")
     req = {"action": "connect", "pointer": pointer, "principals": principals,
            "sources": [{"path": str(src), "description": "fleet note"}]}
@@ -67,7 +68,7 @@ def test_share_adds_principals_with_no_provider_call_and_is_idempotent(tmp_path)
     assert "fleet-knowledge" not in _visible(memory, "otherbot")
 
     calls.clear()
-    out = sp.share(["fleet-knowledge", "main-skills-catalog*"], ["otherbot"], memory=memory)
+    out = sp.share(["fleet-knowledge", "main-skills-catalog", "main-skills-catalog-2"], ["otherbot"], memory=memory)
     assert out == {"fleet-knowledge": "shared", "main-skills-catalog": "shared",
                    "main-skills-catalog-2": "shared"}
     assert calls == ["panel", "register", "register", "register"]  # no connect, no search, no navigate
@@ -76,7 +77,7 @@ def test_share_adds_principals_with_no_provider_call_and_is_idempotent(tmp_path)
     assert all(seen[p] == "available" for p in out)
     assert "fleet-knowledge" in _visible(memory, "owner")  # the owner keeps it
     assert sp.share(["fleet-knowledge"], ["otherbot"], memory=memory) == {"fleet-knowledge": "already"}
-    assert sp.share(["nope*"], ["otherbot"], memory=memory) == {"nope*": "unknown-pointer"}
+    assert sp.share(["main-skills-catalog*"], ["otherbot"], memory=memory) == {"main-skills-catalog*": "unknown-pointer"}  # no globs
     assert sp.share(["fleet-knowledge"], ["x"], dry_run=True, memory=memory) == {"fleet-knowledge": "would-share"}
     assert "fleet-knowledge" not in _visible(memory, "x")
 
@@ -123,4 +124,18 @@ def test_audit_does_not_flag_a_pointer_on_the_shared_list(tmp_path):
     reg, db = tmp_path / "registry.json", tmp_path / "answers.sqlite"
     flags = av.audit(reg, db)["principals"]["otherbot"]["flags"]
     assert [f["type"] for f in flags] == ["visible-but-not-connected"]
-    assert av.audit(reg, db, ["fleet-*"])["principals"]["otherbot"]["flags"] == []
+    assert av.audit(reg, db, ["fleet-knowledge"])["principals"]["otherbot"]["flags"] == []
+
+
+def test_a_pointer_with_a_brain_documents_or_profile_source_is_refused(tmp_path):
+    memory, _, calls = _runtime(tmp_path)
+    _connect(memory, tmp_path, "bot-brain-notes", ["bot"], folder="agents/bot-brain/notes")
+    _connect(memory, tmp_path, "bot-docs", ["bot"], folder="home/Documents")
+    _connect(memory, tmp_path, "bot-profile", ["bot"], folder="agents/global/profile")
+    calls.clear()
+    out = sp.share(["bot-brain-notes", "bot-docs", "bot-profile"], ["otherbot"], memory=memory)
+    assert out["bot-brain-notes"].startswith("refused:") and "bot's brain" in out["bot-brain-notes"]
+    assert out["bot-docs"].startswith("refused:") and "documents/" in out["bot-docs"]
+    assert out["bot-profile"].startswith("refused:") and "profile/" in out["bot-profile"]
+    assert "register" not in calls
+    assert _visible(memory, "otherbot") == {}

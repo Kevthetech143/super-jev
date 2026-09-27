@@ -249,20 +249,21 @@ roll-up read fresh, not a cached label.
 ### Share a connected pointer
 
 `python3 share_pointers.py --principal AGENT --pointer NAME` (repeat either;
-`--pointer` takes a glob such as `main-skills-catalog*`; `--dry-run` lists what
-would change) lets more principals see a pointer that is already connected.
+exact pointer names, no globs; `--dry-run` lists what would change) lets more principals see a pointer that is already connected.
 It calls the memory `register` action with the pointer's current dataset and
 its principals plus the new ones: no reconnect, no writer, no Jev call, so it
 costs nothing. A connect with `replace:true` cannot do this; it refuses any
 change of principals as `scope-change`. `register` starts a new generation, so
 the pointer's cached and pending answers are dropped (the count is printed
-first); keep shared pointers to reference sets. A stale pointer
+first); keep shared pointers to reference sets. A pointer is refused (printed,
+skipped) when any of its original sources sits under an agent's brain
+(`~/agents/<bot>-brain/`) or in a `documents/` or `profile/` folder. A stale pointer
 (`preparation-required`) must be refreshed before it can be shared. A later
 refresh keeps the shared scope: `prepare_bulk.py` and the recipe heal retry
 with the registered principals on `scope-change`.
 
 Onboarding default: `<state dir>/shared-pointers.json`
-(`{"pointers": ["fleet-knowledge", "main-skills-catalog*"]}`, or the file
+(`{"pointers": ["fleet-knowledge", "main-skills-catalog", "main-skills-catalog-2"]}`, or the file
 named by `SUPERJEV_SHARED_POINTERS`) lists the fleet's shared sets, such as
 the shared knowledge folder and the skills catalog. After every fully
 connected `prepare_bulk.py` run, each `--principal` is added to every pointer

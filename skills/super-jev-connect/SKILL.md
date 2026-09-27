@@ -60,9 +60,9 @@ The secret scan holds a file that looks like it carries card/password text, and 
 
 ## 10. Shared sets and onboarding defaults
 
-Every agent should see the fleet's shared sets (shared knowledge folder, skills catalog), not only its own brain. Connect a shared set once, then share it: `python3 ../super-jev/share_pointers.py --principal NAME --pointer POINTER` (globs allowed, `--dry-run` to preview). It uses the memory `register` action on the already-connected pointer: no reconnect, no writer, no Jev call, zero cost. It drops that pointer's cached answers (new generation), and a stale pointer must be refreshed first.
+Every agent should see the fleet's shared sets (shared knowledge folder, skills catalog), not only its own brain. Connect a shared set once, then share it: `python3 ../super-jev/share_pointers.py --principal NAME --pointer POINTER` (exact names, `--dry-run` to preview). A pointer with any source in an agent's brain, `documents/` or `profile/` is refused. It uses the memory `register` action on the already-connected pointer: no reconnect, no writer, no Jev call, zero cost. It drops that pointer's cached answers (new generation), and a stale pointer must be refreshed first.
 
-List the shared sets once in `~/.local/state/super-jev/shared-pointers.json` (`{"pointers": ["fleet-knowledge", "main-skills-catalog*"]}`). Every fully connected `prepare_bulk.py` run then shares them with its `--principal`s (`--no-shared` to skip); for an agent already connected run `share_pointers.py --principal NAME --shared`. Never connect a per-agent copy of a shared folder; share the one pointer.
+List the shared sets once in `~/.local/state/super-jev/shared-pointers.json` (`{"pointers": ["fleet-knowledge", "main-skills-catalog"]}`, exact names). Every fully connected `prepare_bulk.py` run then shares them with its `--principal`s (`--no-shared` to skip); for an agent already connected run `share_pointers.py --principal NAME --shared`. Never connect a per-agent copy of a shared folder; share the one pointer.
 
 Git worktree copies (`.claude/worktrees/`, or any checkout whose `.git` file points into `.git/worktrees/`) are never inventoried, even as a `--root`: they are stale copies of a brain or repo.
 
