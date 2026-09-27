@@ -4,7 +4,6 @@ description: "Find skills and reviewed brain/doc evidence through Super Jev sour
 ---
 
 # Super Jev
-
 Run from this skill directory: `python3 dispatch.py <tool> ...` (or `ask.py` directly, as shown below). Use the user's original request and relevant context; keep backend names and setup mechanics out of ordinary replies.
 
 ## Commands
@@ -20,6 +19,7 @@ Run from this skill directory: `python3 dispatch.py <tool> ...` (or `ask.py` dir
 | `help` | `python3 dispatch.py help --topic overview` | Quick Start and focused setup answers; no data, key, or Jev call needed. |
 
 ## Not connected yet?
+Run `python3 ask.py --principal YOUR_AGENT --status` for scoped ready/stale/unknown sets and next steps, without a search or refresh.
 
 A `preparation-required` result, an unknown pointer, or onboarding a new person/project is setup work, not "nothing found": see [`super-jev-connect/SKILL.md`](../super-jev-connect/SKILL.md). Check what you already have first: `YOUR_AGENT_NAME` is the agent's exact name: letters, digits, `.`, `_`, `-`, starting with a letter or digit, at most 64 (no spaces or slashes); any other name is refused.
 
