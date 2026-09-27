@@ -45,6 +45,13 @@ def principal_name(name: str) -> str:
 CASES_FILE = "scorecard-cases.jsonl"
 
 
+def build_path(path: Path) -> Path:
+    """An install may keep the real ask.py as ask_impl.py behind a small launcher named
+    ask.py; grade the real code, never the launcher."""
+    impl = path.with_name("ask_impl.py")
+    return impl if path.name == "ask.py" and impl.is_file() else path
+
+
 def load_ask(path: Path, name: str):
     """A build's ask module, loaded in-process (no subprocess, no Jev)."""
     # Each build imports its own sibling modules (prepare_bulk, auto_heal...) and reads its
@@ -142,8 +149,11 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
-    builds = [Path(p).expanduser().resolve() for p in a.ask] or [HERE / "ask.py"]
+    builds = [build_path(Path(p).expanduser().resolve()) for p in a.ask] or [build_path(HERE / "ask.py")]
     mods = [load_ask(p, f"scorecard_ask_{i}") for i, p in enumerate(builds)]
+    for p, m in zip(builds, mods):
+        if not hasattr(m, "word_search"):
+            ap.error(f"{p} is not a Super Jev ask module (no word_search); pass the real ask.py with --ask")
     base = mods[0]
     cache = Path(a.cache).expanduser() if a.cache else base.prepare_bulk.CACHE_DIR
     for m in mods:
