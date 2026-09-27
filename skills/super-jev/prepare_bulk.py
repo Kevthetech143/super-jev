@@ -30,7 +30,7 @@ Pipeline per run:
      another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
      keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc. Files matching
-     card/password-like patterns or over the size ceiling (1,000,000 bytes; bigger files are gated in parts) are HELD and never sent to the writer; a
+     card/password-like patterns or over the size ceiling (250,000 bytes; files over one Jev call are gated in parts) are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
@@ -195,8 +195,9 @@ SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 # One file's size limit. The label gate splits evidence over Jev's input ceiling into parts and
 # merges the verdicts (lib/jev_client.check; the fleet door does the same), and the writer reads an
 # excerpt, so a big file needs no hand split. The old 90,000-byte hold left every notes log, dead-ends
-# list and knowledge file over it unsearchable. This bound keeps one file's gate to a handful of calls.
-CEILING_BYTES = 1_000_000
+# list and knowledge file over it unsearchable. 250,000 bytes keeps one file's gate to about 5 Jev
+# calls; a bigger file is still held with a split hint.
+CEILING_BYTES = 250_000
 # One connect (a part pointer) may hold at most 5 MiB (path_connect.MAX_BYTES); parts close early
 # before that. Under the old 90,000-byte file limit 50 files never reached it, so parts are unchanged.
 PART_BYTES = 4_500_000

@@ -164,7 +164,7 @@ def test_a_timeout_in_claim_mode_is_not_retried(tmp_path, monkeypatch):
 
 def test_claims_file_checks_every_statement(tmp_path, monkeypatch, capsys):
     f = tmp_path / "report-claims.txt"
-    f.write_text("# worker report\nThe limit is 255.\n\nTests pass in test_x.py.\n")
+    f.write_text("# worker report\n- The limit is 255.\n\n2. Tests pass in test_x.py.\n")
     seen = []
     monkeypatch.setattr(ask, "resolve_principal", lambda argv: ("p", argv))
     monkeypatch.setattr(ask, "state_dir", lambda p: tmp_path / "s")
@@ -173,3 +173,13 @@ def test_claims_file_checks_every_statement(tmp_path, monkeypatch, capsys):
     assert ask._main() == 0
     assert [q for q, _ in seen] == ["The limit is 255.", "Tests pass in test_x.py.", "One more."]
     assert all(q == c for q, c in seen) and ask._CLAIM["text"] is None
+
+
+def test_claims_file_is_capped(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "many.txt"
+    f.write_text("\n".join(f"Statement {i}." for i in range(ask.MAX_CLAIMS + 1)))
+    monkeypatch.setattr(ask, "resolve_principal", lambda argv: ("p", argv))
+    monkeypatch.setattr(ask, "state_dir", lambda p: tmp_path / "s")
+    monkeypatch.setattr(ask, "lookup", lambda q, p, s: (_ for _ in ()).throw(AssertionError("no lookup")))
+    monkeypatch.setattr(sys, "argv", ["ask.py", "--claims-file", str(f)])
+    assert ask._main() == 2 and "at most" in capsys.readouterr().out
