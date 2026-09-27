@@ -1061,3 +1061,13 @@ def test_reviewed_dataset_copy_from_its_own_pointer_is_kept(tmp_path, monkeypatc
     assert rc == 0
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip() and l.strip()[0].isdigit()]
     assert copy in lines[0] and "[brain-reviewed]" in lines[0]
+
+
+def test_a_malformed_principal_is_refused_before_any_state_is_touched(monkeypatch, tmp_path, capsys):
+    # Live 2026-09-27: "businessfi " (trailing space) had made a second, empty state folder.
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path))
+    for bad in ("businessfi ", "x/../primary"):
+        monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", bad, "a question"])
+        assert ask.main() == 2
+        assert "invalid --principal" in capsys.readouterr().out
+    assert list(tmp_path.iterdir()) == []
