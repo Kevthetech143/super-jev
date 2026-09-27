@@ -7,6 +7,7 @@ and backend, and the refusals, all against fake ask builds. No Jev, no network.
 import hashlib
 import json
 import sqlite3
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -19,11 +20,11 @@ import paid_replay as pr  # noqa: E402
 import scorecard as sc  # noqa: E402
 import ask  # noqa: E402
 
-# A fake build (it honors SUPERJEV_REPLAY): answers each question from PLAN, writes the
+# A fake build (it declares REPLAY_PROTOCOL = 2): answers each question from PLAN, writes the
 # trace ask.py would, and logs what it saw. PLAN may also make it write to its state, its
 # memory database, a file, or leave a child running.
 FAKE = r'''
-# honors SUPERJEV_REPLAY
+REPLAY_PROTOCOL = 2  # honors SUPERJEV_REPLAY
 import json, os, sqlite3, subprocess, sys, time
 from pathlib import Path
 PLAN = %r
@@ -63,13 +64,13 @@ sys.exit(p.get("rc", 0))
 TOP = [(0.99, "/a.md"), (0.95, "/b.md"), (0.9, "/c.md"), (0.85, "/d.md"), (0.5, "/e.md")]
 
 
-def _build(tmp_path, name, plan, code=FAKE):
+def _build(tmp_path, name, plan, code=None):
     d = tmp_path / name / "skills" / "super-jev"
     d.mkdir(parents=True, exist_ok=True)
     cli = tmp_path / name / "experiments" / "verified-pointer-memory" / "cli.py"
     cli.parent.mkdir(parents=True, exist_ok=True)
     cli.write_text("")
-    (d / "ask.py").write_text(code % (plan,))
+    (d / "ask.py").write_text(FAKE % (plan,) if code is None else code)
     return str(d / "ask.py")
 
 
@@ -253,14 +254,55 @@ def test_a_cache_or_read_file_that_changes_mid_replay_is_drift(tmp_path, env, ca
     assert json.loads(capsys.readouterr().out)["drift"] == [str(cache.parent)]
 
 
-def test_refuses_a_build_that_predates_the_replay_switch(tmp_path, env, capsys):
+OLD_ASKS = ("d6eb3b8", "0a3185d")  # SUPERJEV_REPLAY in name, without every replay guarantee
+
+
+@pytest.mark.parametrize("ref", ("no-protocol",) + OLD_ASKS)
+def test_refuses_a_build_without_the_replay_protocol_before_any_ask(tmp_path, env, capsys, ref):
+    if ref == "no-protocol":
+        code = FAKE.replace("REPLAY_PROTOCOL = 2", "# SUPERJEV_REPLAY") % ({},)
+    else:  # the real, partly protected ask.py of an earlier commit on this branch
+        got = subprocess.run(["git", "-C", str(SKILL), "show", f"{ref}:skills/super-jev/ask.py"],
+                             capture_output=True, text=True)
+        if got.returncode:
+            pytest.skip(f"{ref} is not in this clone")
+        code = got.stdout
     cases = _cases(tmp_path, [{"question": "q", "gold": ["/a.md"]}])
-    old = _build(tmp_path, "old", {}, code=FAKE.replace("# honors SUPERJEV_REPLAY", "# old build"))
+    old = _build(tmp_path, "old", {}, code=code)
     with pytest.raises(SystemExit) as e:
         pr.main(["--principal", "me", "--cases", cases, "--ask", old,
                  "--ask", _build(tmp_path, "new", {}), "--max-asks", "2"])
-    assert e.value.code == 2 and "predates SUPERJEV_REPLAY" in capsys.readouterr().err
+    assert e.value.code == 2 and "REPLAY_PROTOCOL = 2" in capsys.readouterr().err
     assert _log(tmp_path) == []
+    assert pr.check_build(SKILL / "ask.py") == ""  # this build declares it
+
+
+def test_a_file_only_the_old_run_read_that_changes_during_the_pair_is_drift(tmp_path, env, capsys):
+    # Astra's repro on 0a3185d: old reads a competitor and misses gold; new changes the
+    # competitor and finds gold without reading it. Only shared reads were compared.
+    gold, rival = tmp_path / "gold.md", tmp_path / "rival.md"
+    gold.write_text("gold")
+    rival.write_text("v1")
+    cases = _cases(tmp_path, [{"question": "q", "gold": [str(gold)]}])
+    old = {"q": {"final": [(0.99, str(rival))]}}
+    new = {"q": {"final": [(0.99, str(gold))], "write": {str(rival): "v2"}}}
+    assert _run(tmp_path, cases, old, new) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert row["result"] == "inconclusive" and "changed" in row["new"]["error"]
+
+
+def test_a_connected_file_only_the_new_run_read_that_changed_before_it_is_drift(tmp_path, env, capsys):
+    gold, rival = tmp_path / "gold.md", tmp_path / "rival.md"
+    gold.write_text("gold")
+    rival.write_text("v1")
+    registry = json.loads((env / "_memory" / "config.json").read_text())["registry"]
+    Path(registry).write_text(json.dumps({"version": 1, "datasets": {"d": {"originals": [{"path": str(rival)}]}}}))
+    cases = _cases(tmp_path, [{"question": "q", "gold": [str(gold)]}])
+    old = {"q": {"final": [], "write": {str(rival): "v2"}}}
+    new = {"q": {"final": [(0.99, str(gold)), (0.5, str(rival))]}}
+    assert _run(tmp_path, cases, old, new) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert row["result"] == "inconclusive" and "changed" in row["new"]["error"]
 
 
 def test_an_unfrozen_row_cannot_widen_a_frozen_held_out_row(tmp_path, env, capsys):

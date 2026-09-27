@@ -492,6 +492,10 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
 
 # navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
 MAX_QUESTION = 8000
+# What paid_replay.py may rely on, checked by value. 2 = with SUPERJEV_REPLAY=1 a lookup reads
+# and writes no saved answer or claim verdict, never reconnects or auto-heals a stale
+# pointer, and `ask.py --principal P -- QUESTION` reads QUESTION literally.
+REPLAY_PROTOCOL = 2
 # How many navigate() calls run at once (each is its own remote provider call).
 # Default 6 keeps a many-pointer lookup off the provider's queue; override for a
 # faster/slower provider. Falls back to the default on a non-positive-int value.
