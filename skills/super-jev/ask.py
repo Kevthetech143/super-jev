@@ -482,7 +482,9 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     print("approved_by:", who.get("approved_by", "human") + (
         f" (evidence {who['evidence_file']}, score {who['score']:.2f})" if who.get("evidence_file") else ""))
     for e in (hit.get("evidence") or [])[:3]:
-        print("  evidence:", e.get("sourceId", ""), "|", str(e.get("quote", ""))[:120])
+        quote = str(e.get("quote", ""))
+        line = best_evidence_line(quote, hit.get("answer") or "", question)
+        print("  evidence:", e.get("sourceId", ""), "|", line[:120])
     return 0
 
 # navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
@@ -2623,22 +2625,37 @@ def approver(sdir: Path, question: str) -> dict:
                 break
     return {"approved_by": "unknown (legacy)"}
 
+def evidence_line_rank(text: str, answer: str, question: str = "") -> tuple:
+    """Preserve exact dates and numeric identifiers that retrieval stopwords omit.
+    This selects reviewed evidence for display; it is not a truth verdict."""
+    dates = set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", answer))
+    numbers = {w for w in words(answer) if w.isdigit()}
+    return (term_hits(query_terms(answer) or query_terms(question), text),
+            len(dates & set(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", text))),
+            len(numbers & set(words(text))))
+
+
+def best_evidence_line(text: str, answer: str, question: str = "") -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return max(lines, key=lambda line: evidence_line_rank(line, answer, question), default="")
+
+
 def file_evidence(principal: str, pointer: str, question: str, answer: str, path: str,
                   sid, out: dict) -> tuple:
     """(search/assist result holding only passages from `path`, best-supporting first, or
     None, why). Search's passages are used when one comes from the file; otherwise the
     file's own reviewed lines that best match the answer are cited via assisted review,
     so a confirmed file is never refused just because search ranked another file first."""
-    terms = query_terms(answer) or query_terms(question)
-    support = lambda p: term_hits(terms, p.get("reviewedText") or "")
+    support = lambda p: evidence_line_rank(
+        best_evidence_line(p.get("reviewedText") or "", answer, question), answer, question)
     passages = [p for p in out.get("passages") or [] if sid is not None and p.get("sourceId") == sid]
     if not any(p.get("reviewedText") for p in passages) and sid is not None and out.get("attemptId"):
         try:
             lines = Path(path).read_text(errors="replace").splitlines()
         except OSError:
             lines = []
-        best = max(range(len(lines)), key=lambda i: term_hits(terms, lines[i]), default=None)
-        if best is not None and term_hits(terms, lines[best]) == 0:
+        best = max(range(len(lines)), key=lambda i: evidence_line_rank(lines[i], answer, question), default=None)
+        if best is not None and evidence_line_rank(lines[best], answer, question)[0] <= 0:
             return None, f"no line in {path} shares a word with the answer"
         if best is not None:
             # The file's opening lines ride along so the cited passage keeps its
@@ -2652,7 +2669,7 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
                 return None, ASSIST_DISABLED_HINT
             # The file may have changed since connect: the cited reviewed text must still support the answer.
             passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid]
-            if not any(support(p) for p in passages):
+            if not any(support(p)[0] > 0 for p in passages):
                 passages = []
     if not any(p.get("reviewedText") for p in passages):
         return None, f"no passage from {path} itself could be cited"
