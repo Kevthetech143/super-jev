@@ -96,9 +96,9 @@
       saves as approved_by=agent-pick+check; REJECT/CONTRADICTED/
       TIME_SENSITIVE/stale/secret drops it; anything else (or no answer text)
       stays pending. --pending-picks lists them; --confirm-pick ID ["answer"]
-      approves one as a human, --drop-pick ID removes it.
+      records explicit approval by the caller principal, --drop-pick ID removes it.
 
-Cache hits print who approved them: "approved_by: human" (--approve, --add)
+Cache hits print the caller principal for --approve and --add (principal:NAME)
 or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
 
 LIVE DECISION TRACES: every live lookup (a real navigate/content-check pass,
@@ -2621,7 +2621,7 @@ def approver(sdir: Path, question: str) -> dict:
                 return rec
             if rec.get("question") == question:
                 break
-    return {"approved_by": "human"}
+    return {"approved_by": "unknown (legacy)"}
 
 def file_evidence(principal: str, pointer: str, question: str, answer: str, path: str,
                   sid, out: dict) -> tuple:
@@ -2692,7 +2692,8 @@ def ask_evidence(principal: str, pointer: str, question: str, answer: str, path:
                          {"attemptId": out["attemptId"]})
 
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
-                  approved_by: str = "human", **fields) -> int:
+                  approved_by: str = None, **fields) -> int:
+    approved_by = approved_by if approved_by is not None else f"principal:{principal}"
     evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
     res = memory({"action": "approve", "ticket": ticket_result["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
     ok = res.get("status") in ("approved", "saved", "ok")
