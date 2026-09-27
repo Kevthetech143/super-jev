@@ -131,8 +131,8 @@ def snapshot(principals, config: Path, dest: Path) -> dict:
             "registry": file_sha(registry)}
 
 
-def run_once(ask: Path, base: Path, case: dict, timeout: float):
-    """One full ask in a fresh copy of the snapshot; its whole process group dies with it."""
+def run_once(ask: Path, base: Path, case: dict, timeout: float, argv=None):
+    """One full ask (or argv) in a fresh copy of the snapshot; its whole process group dies with it."""
     pr, claim = case["principal"], case.get("kind") == "claim"
     with tempfile.TemporaryDirectory(prefix="sj-replay-") as tmp:
         tmp = Path(tmp)
@@ -145,8 +145,8 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float):
         # SUPERJEV_MEMORY_WRAPPER_ACTIVE: skip memory.sh (it names the real config) and use the copy.
         env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp / "state"), "SUPERJEV_REPLAY": "1",
                "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_TRACES": "1", "SUPERJEV_MEMORY_WRAPPER_ACTIVE": "1"}
-        cmd = [sys.executable, str(ask), "--principal", pr] + (
-            ["--claim", case["question"]] if claim else ["--", case["question"]])
+        cmd = [sys.executable, str(ask), "--principal", pr] + (argv or (
+            ["--claim", case["question"]] if claim else ["--", case["question"]]))
         p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              start_new_session=True)
         try:
@@ -166,6 +166,28 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float):
         if any((d / "traces.jsonl").exists() for d in (tmp / "state").iterdir() if d.name != pr):
             return None, {"error": "a trace was written for another principal; not this case's lookup"}
     return (p.returncode, stdout, stderr, traces), None
+
+
+def preflight(builds, base: Path, principals, timeout: float) -> str:
+    """Free: each build's `ask.py --status` on the frozen copy. Why the replay cannot
+    start, or ''. Fail closed: every listed pointer must say "ready", and output in any
+    other shape (nothing connected, an error, an unknown line) refuses. A replay never
+    reconnects, so every case would pay to end in the same error."""
+    problems = []
+    for b in builds:
+        for pr in sorted(principals):
+            ran, failed = run_once(b, base, {"principal": pr}, timeout, argv=["--status"])
+            if failed or ran[0] != 0:
+                out = (failed or {}).get("error") or (ran[1] + ran[2]).strip()[-300:]
+                problems.append(f"{pr}: status unavailable ({out})")
+                continue
+            lines = [ln for ln in ran[1].splitlines() if ln.strip()]
+            rows = [ln.strip() for ln in lines[1:] if ln.startswith("  ")]
+            if not lines or not lines[0].startswith(f"Connections for {pr} ") or not rows:
+                problems.append(f"{pr}: status not understood, or nothing connected ({ran[1].strip()[-300:]!r})")
+            problems += [f"{pr}: {row}" for row in rows
+                         if not re.fullmatch(r"\S+: ready", row) and f"{pr}: {row}" not in problems]
+    return "\n  ".join(problems)
 
 
 def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
@@ -331,6 +353,9 @@ def main(argv=None) -> int:
         except (OSError, ValueError, KeyError, sqlite3.Error) as e:
             ap.error(f"cannot snapshot state and memory: {e}")
         report["fingerprints"] = fingerprints
+        if why := preflight(builds, base, {c["principal"] for c in cases}, a.timeout):
+            ap.error("not started, no ask spent: every pointer must be ready; reconnect or fix these first "
+                     "(a replay never reconnects):\n  " + why)
         sources = eligible_sources(base, caches[0])
         for c in cases:
             before = {p: file_sha(p) for p in sources | {os.path.realpath(g) for g in c["gold"]}}
