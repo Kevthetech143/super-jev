@@ -2536,8 +2536,8 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
         if best is not None and term_hits(terms, lines[best]) == 0:
             return None, f"no line in {path} shares a word with the answer"
         if best is not None:
-            # Like ask()'s content check (pick_chunks always reads chunk 0), the file's
-            # opening lines ride along so the passage keeps its subject (a bare table row
+            # The file's opening lines ride along so the cited passage keeps its
+            # subject (a bare table row
             # "Trash | Monday..." never says which address it is for).
             refs = [{"sourceId": sid, "startLine": n, "endLine": n} for n in sorted({1, best + 1})]
             out = memory({"action": "assist", "attemptId": out["attemptId"], "principal": principal,
