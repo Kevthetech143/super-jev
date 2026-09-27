@@ -840,7 +840,7 @@ def confirm_start(question: str, path: str):
     detail = _STAGE.setdefault("checks", {})[path] = {
         "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
         "wording": "exact-value" if label == CONFIRM_LABEL else "answers"}
-    leaves = [{"id": f"c{i}", "label": label.format(n=i + 1), "description": chunks[i],
+    leaves = [{"id": f"c{i}", "label": label.format(n=i + 1), "description": with_subject(chunks, i),
                "sourceId": str(i)} for i in picked]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
                "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
@@ -1199,7 +1199,7 @@ def best_passage(path: str):
         return text
     i = (_STAGE.get("checks") or {}).get(path, {}).get("best_chunk") or 0
     chunks = split_passages(text)
-    return chunks[min(i, len(chunks) - 1)]
+    return with_subject(chunks, min(i, len(chunks) - 1))
 
 def jev_choice(state: dict, questions: dict) -> dict:
     """One Jev call through the built-in client (lib/jev_client.py)."""
@@ -1323,6 +1323,17 @@ def split_passages(text: str) -> list:
         cuts.append(pos)
     return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
 
+SUBJECT_CHARS = 100
+
+def with_subject(chunks: list, i: int) -> str:
+    """Passage i, led by the file's first non-blank line (its title) when i is not the
+    first passage: a middle section read alone can lose its subject (a table row that
+    never names what it is about), now that the first passage is not always read."""
+    if i == 0:
+        return chunks[0]
+    title = next((ln.strip() for ln in chunks[0].splitlines() if ln.strip()), "")[:SUBJECT_CHARS]
+    return f"{title}\n...\n{chunks[i]}" if title else chunks[i]
+
 def pick_chunks(question: str, chunks: list) -> list:
     """Indexes to read, in file order: every passage if they fit in READ_CHARS, else
     the passages scoring best by BM25 on the question's words (each word weighted by
@@ -1330,7 +1341,9 @@ def pick_chunks(question: str, chunks: list) -> list:
     matches is read from its top) until READ_CHARS is spent. Counting distinct words,
     with the first chunk always read, spent the slots on the intro and on passages
     full of the file's common words, missing the one section that answered."""
-    if sum(map(len, chunks)) <= READ_CHARS:
+    # A passage after the first is sent led by the file's title (with_subject).
+    cost = [len(c) + (SUBJECT_CHARS + 5 if i else 0) for i, c in enumerate(chunks)]
+    if sum(cost) <= READ_CHARS:
         return list(range(len(chunks)))
     terms = query_terms(question)
     tfs = []
@@ -1348,9 +1361,11 @@ def pick_chunks(question: str, chunks: list) -> list:
              for f, size in zip(tfs, sizes)]
     picked, used = [], 0
     for i in sorted(range(len(chunks)), key=lambda i: (-score[i], i)):
-        if used + len(chunks[i]) <= READ_CHARS:
+        if used + cost[i] <= READ_CHARS:
             picked.append(i)
-            used += len(chunks[i])
+            used += cost[i]
+        elif not score[i]:
+            break  # no word left to match: read on from the top only, never skip ahead
     return sorted(picked)
 
 def load_cache_files(pointer: str) -> dict:

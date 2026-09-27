@@ -127,3 +127,16 @@ def test_big_file_on_topic_records_its_section_heading(tmp_path, monkeypatch):
     ask.confirm_one("does a split part heal through its parent's recipe", str(f))
     section = ask._STAGE["checks"][str(f)]["section"]
     assert section.startswith("v1.0.") and f"## {section}\n" in "".join(parts[:rule_i + 1])
+
+
+def test_middle_passage_keeps_the_file_title():
+    chunks = ask.split_passages("# Trash schedule for 12 Oak St\n" + "row | Monday\n" * 1500)
+    assert len(chunks) > 1
+    assert ask.with_subject(chunks, 0) == chunks[0]
+    shown = ask.with_subject(chunks, 2)
+    assert shown.startswith("# Trash schedule for 12 Oak St\n...\n") and shown.endswith(chunks[2])
+
+
+def test_title_is_capped_and_blank_start_skipped():
+    chunks = ["\n\n" + "T" * 300 + "\nbody\n", "second\n"]
+    assert ask.with_subject(chunks, 1) == "T" * ask.SUBJECT_CHARS + "\n...\nsecond\n"
