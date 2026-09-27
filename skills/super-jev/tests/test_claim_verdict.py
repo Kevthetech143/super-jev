@@ -229,5 +229,5 @@ def test_one_failed_statement_does_not_drop_the_rest(tmp_path, monkeypatch, caps
     f.write_text("bad\ngood\n")
     monkeypatch.setattr(ask.sys, "argv", ["ask.py", "--principal", "me", "--claims-file", str(f)])
     rc = ask.main()
-    assert calls == ["bad", "good"] and rc == 2
+    assert calls == ["bad", "good"] and rc == 3
     assert "could not be checked" in capsys.readouterr().out
