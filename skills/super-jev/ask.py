@@ -613,8 +613,8 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # A later breaker set still passed near misses at 0.70-0.83, so the floor is 0.85:
 # re-measured 2026-09-22 on 8 near-miss and 8 present x2, near misses 0-0.87 (one,
 # "current APY after the rate change", 0.86-0.87 still passes), present 0.90-0.96.
-# A file too long to send whole (more than CONFIRM_CHUNKS_PER_FILE chunks) is judged on
-# its first chunk plus the chunks sharing the most words with the question, never
+# A file too long to send whole (over READ_CHARS) is judged on the line-aligned
+# passages that best match the question's words (pick_chunks), never
 # kept on its routing score alone: that bypass returned CLOV.md at 0.97 for a
 # meeting it does not mention (businessfi stress test 2, 2026-09-23).
 #
@@ -625,6 +625,7 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # being reported as not in the files. Replayed on the test's 196 traced asks: the
 # near-miss negatives' top-routed files scored 0-0.55, so no negative gained a hit.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
+READ_CHARS = CONFIRM_CHUNK * CONFIRM_CHUNKS_PER_FILE  # most text one file's check sends
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
@@ -832,7 +833,7 @@ def confirm_start(question: str, path: str):
     if len(text) <= WHOLE_FILE_CHARS:
         chunks = [text]
     else:
-        chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+        chunks = split_passages(text)
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     picked = pick_chunks(question, chunks)
@@ -871,10 +872,10 @@ def confirm_finish(question: str, ctx: dict, body, error):
     # A file too big to read whole whose chosen passages were on topic but under
     # the possible floor records its best section; lookup keeps it as possible
     # only if it was strongly routed (BIG_ROUTE_KEEP).
-    if len(chunks) > CONFIRM_CHUNKS_PER_FILE and BIG_ON_TOPIC <= best < POSSIBLE_FLOOR:
+    if len(picked) < len(chunks) and BIG_ON_TOPIC <= best < POSSIBLE_FLOOR:
         top = max((c for c in body.get("candidates") or [] if isinstance(c, dict)
                    and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"])
-        head = text[:int(top.get("sourceId") or 0) * CONFIRM_CHUNK + CONFIRM_CHUNK]
+        head = "".join(chunks[:int(top.get("sourceId") or 0) + 1])
         detail["section"] = next((ln.lstrip("# ").strip() for ln in reversed(head.splitlines())
                                   if ln.startswith("#")), "")[:80]
     score = file_score(best, detail["none"], len(picked), is_live_value_question(question))
@@ -1197,7 +1198,8 @@ def best_passage(path: str):
     if len(text) <= WHOLE_FILE_CHARS:  # judged whole, so shown whole
         return text
     i = (_STAGE.get("checks") or {}).get(path, {}).get("best_chunk") or 0
-    return text[i * CONFIRM_CHUNK:(i + 1) * CONFIRM_CHUNK]
+    chunks = split_passages(text)
+    return chunks[min(i, len(chunks) - 1)]
 
 def jev_choice(state: dict, questions: dict) -> dict:
     """One Jev call through the built-in client (lib/jev_client.py)."""
@@ -1306,14 +1308,50 @@ def term_hits(terms: list, text: str) -> int:
     low = fold(text)
     return sum(1 for t in terms if t in low or (len(t) > 5 and t[:5] in low))
 
+def split_passages(text: str) -> list:
+    """A long file cut about every CONFIRM_CHUNK characters, each cut moved to the
+    nearest line end within half a passage (a longer line is cut where it falls).
+    "".join(result) == text. Fixed 3500-character cuts split a rule in two:
+    super-jev/SKILL.md line 50 (split parts heal through the parent's recipe)
+    straddled chunks 2 and 3, so neither passage stated it whole."""
+    cuts, pos = [0], 0
+    while len(text) - pos > CONFIRM_CHUNK:
+        target = pos + CONFIRM_CHUNK
+        ends = [i + 1 for i in (text.rfind("\n", pos + CONFIRM_CHUNK // 2, target),
+                                text.find("\n", target, target + CONFIRM_CHUNK // 2)) if i >= 0]
+        pos = min(ends, key=lambda i: abs(i - target)) if ends else target
+        cuts.append(pos)
+    return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
+
 def pick_chunks(question: str, chunks: list) -> list:
-    """Indexes to read: all chunks if they fit, else chunk 0 plus the chunks sharing
-    the most question words, in file order."""
-    if len(chunks) <= CONFIRM_CHUNKS_PER_FILE:
+    """Indexes to read, in file order: every passage if they fit in READ_CHARS, else
+    the passages scoring best by BM25 on the question's words (each word weighted by
+    how rare it is within this file; earlier passages win ties, so a file with few
+    matches is read from its top) until READ_CHARS is spent. Counting distinct words,
+    with the first chunk always read, spent the slots on the intro and on passages
+    full of the file's common words, missing the one section that answered."""
+    if sum(map(len, chunks)) <= READ_CHARS:
         return list(range(len(chunks)))
     terms = query_terms(question)
-    ranked = sorted(range(1, len(chunks)), key=lambda i: (-term_hits(terms, chunks[i]), i))
-    return sorted([0] + ranked[:CONFIRM_CHUNKS_PER_FILE - 1])
+    tfs = []
+    for c in chunks:
+        found = Counter(words(c))
+        by_stem = Counter()
+        for w, n in found.items():
+            by_stem[w[:4]] += n  # first four letters, as claim lines match: "heals"/"heal"
+        tfs.append({t: by_stem[t[:4]] for t in terms})
+    sizes = [len(c) or 1 for c in chunks]
+    avg = sum(sizes) / len(sizes)
+    idf = {t: math.log(1 + (len(chunks) - df + 0.5) / (df + 0.5))
+           for t, df in ((t, sum(1 for f in tfs if f[t])) for t in terms)}
+    score = [sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
+             for f, size in zip(tfs, sizes)]
+    picked, used = [], 0
+    for i in sorted(range(len(chunks)), key=lambda i: (-score[i], i)):
+        if used + len(chunks[i]) <= READ_CHARS:
+            picked.append(i)
+            used += len(chunks[i])
+    return sorted(picked)
 
 def load_cache_files(pointer: str) -> dict:
     """Only prepare-cache/<pointer>.json. Part caches are registered as their own
