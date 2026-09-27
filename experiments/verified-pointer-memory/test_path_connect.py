@@ -164,3 +164,12 @@ class LinkedSourceTests(unittest.TestCase):
             from service import Service
             service = Service(config["db"], Path(config["registry"]), lambda *_: None)
             self.assertEqual(service.pointer("cat", "owner")[1]["status"], "preparation-required")
+
+
+class PrincipalNameTests(unittest.TestCase):
+    def test_agent_names_with_spaces_or_path_parts_are_refused(self):
+        from service import valid_principal
+        for good in ('primary', 'primary-helper', 'wheel_watchers', 'lead0923', 'a.b'):
+            self.assertTrue(valid_principal(good), good)
+        for bad in ('businessfi ', ' primary', 'x/../primary', '..', 'a b', '', '-x', 'a/b', None):
+            self.assertFalse(valid_principal(bad), repr(bad))

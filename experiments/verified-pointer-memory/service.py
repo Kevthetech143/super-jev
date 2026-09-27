@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import time
 import uuid
@@ -109,6 +110,15 @@ def valid_v2_schema(connection: sqlite3.Connection, tables: set[str]) -> bool:
             return False
     return True
 
+
+# An agent name: letters, digits, ".", "_", "-", starting with a letter or digit. A space or a path
+# separator made a second, empty identity ("businessfi " beside "businessfi") and could point an
+# agent's state folder at another agent's ("x/../primary").
+PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def valid_principal(name) -> bool:
+    return isinstance(name, str) and PRINCIPAL_RE.fullmatch(name) is not None
 
 class Service:
     """Store verified dataset pointers, review tickets, and approved results."""
@@ -255,9 +265,8 @@ class Service:
         """Register a pointer and clear data from its previous generation."""
         require_text('pointer', name)
         require_text('dataset', dataset)
-        if not isinstance(principals, list) or any(
-                not isinstance(p, str) or not p for p in principals):
-            raise ValueError('principals must be a list of nonempty strings')
+        if not isinstance(principals, list) or not all(valid_principal(p) for p in principals):
+            raise ValueError('principals must be agent names (letters, digits, ".", "_", "-")')
         snapshot = self.snapshot(dataset)
         row = {
             'dataset': dataset,
