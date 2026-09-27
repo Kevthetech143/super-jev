@@ -142,6 +142,7 @@ def mark(names: list, value: bool = True, memory=memory, principal: str = None) 
     db, registry = paths.get("db"), paths.get("registry")
     if not db or not registry or not Path(db).is_file() or not Path(registry).is_file():
         return {n: "error: memory runtime not set up" for n in names}
+    registry = str(Path(registry).resolve())  # same lock and file path_connect uses
     rows = _rows(db)
     out = {}
     fd = os.open(registry + ".connect.lock", os.O_RDWR | os.O_CREAT, 0o600)
