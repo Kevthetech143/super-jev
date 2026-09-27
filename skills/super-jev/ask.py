@@ -729,6 +729,21 @@ SYNONYMS = {"verify": ["check", "feedback"], "rebalance": ["watchlist", "allocat
 # Opinion asks ("should I invest", "who is winning", "can I sell calls") rarely read
 # as answered; only these get the route-keep.
 OPINION_RE = re.compile(r"\b(should|can i|could i|who is winning|whos winning|worth it|good idea)\b", re.I)
+# A question whose main ask is a stance ("our take on X", "what do we think of X")
+# wants a view, which rarely reads as one exact value: it gets the "does it answer"
+# wording and the route-keep. Anchored at the start, so a fact question that only
+# mentions a take ("what date did we publish our take on X") stays exact-value, and
+# any value cue (date, when, percentage, number, amount...) keeps the exact wording.
+STANCE_RE = re.compile(r"\s*(?:(?:so|and|ok|okay|hey)[,\s]+)?(?:what(?:'s|s|\u2019s| is| are)\s+)?"
+                       r"(?:our|my|your)\s+(?:take|view|views|opinion|thoughts|stance)\s+(?:on|about)\b|"
+                       r"\s*what\s+do\s+(?:we|i|you)\s+think\s+(?:of|about)\b|"
+                       r"\s*how\s+do\s+(?:we|i|you)\s+feel\s+about\b", re.I)
+STANCE_VALUE_CUE_RE = re.compile(r"%|\b(date|when|percent|percentage|number|amount|how much|how many|"
+                                 r"revenue|share of|cut of|price|cost|total|deadline)\b", re.I)
+
+def is_stance_question(question: str) -> bool:
+    return bool(STANCE_RE.match(question)) and not STANCE_VALUE_CUE_RE.search(question) \
+        and not is_value_question(question)
 
 def rank_score(content: float, route: float) -> float:
     return CONTENT_WEIGHT * content + ROUTE_WEIGHT * route
@@ -784,7 +799,7 @@ def confirm_label(question: str) -> str:
                 "the statement; disagreement is relevant evidence, not absence. "
                 "A passage only sharing the topic is none.")
     open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)
-              or LIST_RE.search(question)) \
+              or LIST_RE.search(question) or is_stance_question(question)) \
         and not is_value_question(question)
     return ANSWER_LABEL if open_q else CONFIRM_LABEL
 HELD_SECRET = "contains a secret; not sent"
@@ -2163,7 +2178,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # A strongly routed file that was read keeps a possible slot even if the
             # answer check found nothing (opinion asks); never for live-value asks.
             # Never for any value question (count or money) -- only plain opinion asks.
-            for p in (routed[:CONFIRM_FILES] if OPINION_RE.search(question)
+            for p in (routed[:CONFIRM_FILES] if (OPINION_RE.search(question) or is_stance_question(question))
                       and not is_value_question(question) else []):
                 if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
                         and scores.get(p, 0) < CONFIRM_FLOOR and p not in off_topic:
