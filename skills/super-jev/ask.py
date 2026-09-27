@@ -975,8 +975,9 @@ LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, 
 # at >= CLAIM_SURE count; files that disagree are a CONFLICT, newest first.
 CLAIM_SURE = 0.9
 MAX_CLAIMS = 25
-CLAIM_LINES = 60
+CLAIM_LINES = 2000  # lines ranked per passage; the line budget picks which are shown
 CLAIM_LINE_CHARS = 160
+CLAIM_SCAN_CHARS = 5000  # of one line, when ranking lines and placing the window: a minified file stays fast
 CLAIM_LINE_BUDGET = 4000  # characters of line choices per file, so a claim call stays well under the input ceiling
 CLAIM_CRITERIA = {
     "supported": "the file states that the statement is true",
@@ -991,15 +992,41 @@ CLAIM_LINE_INSTRUCTIONS = ("Statement: %s\nWhich line of the file `%s.text` (%s)
 _CLAIM = {"text": None}
 
 def claim_lines(text: str) -> list:
-    """Up to CLAIM_LINES candidate lines of a passage (non-empty, 12+ characters)."""
-    out = []
+    """Up to CLAIM_LINES distinct candidate lines of a passage (non-empty, 12+ characters), in order."""
+    out = {}
     for ln in text.splitlines():
         t = ln.strip()
-        if len(t) >= 12 and t not in out:
-            out.append(t)
-        if len(out) >= CLAIM_LINES:
-            break
-    return out
+        if len(t) >= 12:
+            out.setdefault(t, len(out))
+            if len(out) >= CLAIM_LINES:
+                break
+    return list(out)
+
+def _stems(ws) -> set:
+    """First four letters of each word, so "sources"/"source" and "mark"/"marked" match."""
+    return {w[:4] for w in ws}
+
+def claim_window(line: str, want: set) -> str:
+    """At most CLAIM_LINE_CHARS of a line: a long markdown paragraph line is shown around the
+    stretch holding the most statement words, not cut to its opening, which may not show it."""
+    if len(line) <= CLAIM_LINE_CHARS:
+        return line
+    line = line[:CLAIM_SCAN_CHARS]
+    size = CLAIM_LINE_CHARS - 2
+    toks = [(m.start(), m.end(), want & _stems(words(m.group()))) for m in re.finditer(r"\S+", line)]
+    counts, score, j = {}, [], 0
+    for i, (st, _, _) in enumerate(toks):  # one pass: distinct statement words in each window
+        while j < len(toks) and toks[j][1] <= st + size:
+            for w in toks[j][2]:
+                counts[w] = counts.get(w, 0) + 1
+            j += 1
+        score.append(sum(1 for c in counts.values() if c))
+        for w in toks[i][2]:
+            counts[w] -= 1
+    best = max(score)
+    top = [toks[i][0] for i, n in enumerate(score) if n == best]
+    start = min(top[len(top) // 2], len(line) - size)  # the middle of the best stretch
+    return ("…" if start else "") + line[start:start + size] + ("…" if start + size < len(line) else "")
 
 def claim_questions(claim: str, ordered: list, files: dict) -> tuple:
     """Per shown file: a verdict question and a line-pick question. Returns (questions, lines by key)."""
@@ -1008,15 +1035,23 @@ def claim_questions(claim: str, ordered: list, files: dict) -> tuple:
         key = f"file_{i + 1}"
         qs[f"verdict_{i + 1}"] = {"type": "choice", "criteria": CLAIM_CRITERIA,
                                   "instructions": CLAIM_VERDICT_INSTRUCTIONS % (claim, key, Path(p).name)}
+        # Lines sharing the most statement words fill the budget first (a file's opening lines
+        # used to crowd out the one that proves it), then are shown in file order.
+        want = _stems(set(words(claim)) - QUERY_STOPWORDS)
+        found = claim_lines(files[p])
+        hits = {t: len(want & _stems(words(t[:CLAIM_SCAN_CHARS]))) for t in found}
         cand, used = [], 0
-        for t in claim_lines(files[p]):
+        for t in sorted(found, key=lambda t: -hits[t]):
             used += min(len(t), CLAIM_LINE_CHARS) + 8
             if used > CLAIM_LINE_BUDGET:
                 break
             cand.append(t)
+        order = {t: i for i, t in enumerate(found)}
+        cand.sort(key=order.get)
         lines[key] = cand
         if cand:
-            crit = {f"L{j + 1}": t[:CLAIM_LINE_CHARS] for j, t in enumerate(cand)}
+            crit = {f"L{j + 1}": claim_window(t, want) if hits[t] else t[:CLAIM_LINE_CHARS]
+                    for j, t in enumerate(cand)}
             crit["none"] = "no line of this file shows it"
             qs[f"line_{i + 1}"] = {"type": "choice", "criteria": crit,
                                    "instructions": CLAIM_LINE_INSTRUCTIONS % (claim, key, Path(p).name)}
