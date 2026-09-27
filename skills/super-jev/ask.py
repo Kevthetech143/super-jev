@@ -1880,8 +1880,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
+    # SUPERJEV_REPLAY=1 (paid_replay.py): answer live; never read a saved answer or claim verdict.
+    replay = os.environ.get("SUPERJEV_REPLAY") == "1"
     if _CLAIM["text"]:
-        saved = claim_cache_get(sdir, _CLAIM["text"])
+        saved = None if replay else claim_cache_get(sdir, _CLAIM["text"])
         if saved:
             q = f'line {saved["line_no"]}: "{saved["line"]}"' if saved.get("line_no") else (
                 f'"{saved["line"]}"' if saved.get("line") else "")
@@ -1892,6 +1894,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             log(sdir, "claim", question=question, result="saved", verdict=saved["verdict"])
             return 0
         cache = {"status": "skipped (claim)"}  # saved answers answer questions, not statements
+    elif replay:
+        cache = {"status": "skipped (replay)"}
     else:
         cache = memory({"action": "cached", "principal": principal, "question": question})
     cache_stage = {"result": cache.get("status"), "checked": len(cache.get("checked") or [])}
@@ -2365,7 +2369,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             side = [p for p, f in (files or {}).items() if f["verdict"] == ("supported" if word == "TRUE" else "contradicted")
                     and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE]
             best = max(side, key=lambda p: files[p]["prob"])
-            if best not in (_STAGE.get("word_changed") or []):  # never save from text no refresh has passed
+            # never save from text no refresh has passed, nor from a replay
+            if best not in (_STAGE.get("word_changed") or []) and not replay:
                 claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
         log(sdir, "claim", question=question, result=word)
         if top:

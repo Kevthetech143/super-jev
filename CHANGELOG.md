@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- New `paid_replay.py`: compares two builds on a small frozen case set (scorecard format; claim cases carry an expected TRUE/FALSE) through the full paid ask path, one `ask.py` subprocess per case and build, under a required `--max-asks` cap it checks before the first ask. Each run gets a throwaway state copy without saved claim verdicts, approvals or logs, and `SUPERJEV_REPLAY=1` makes `ask.py` skip saved answers and saved claim verdicts (reads and writes). Both builds must read the same prepare-cache. A change inside the run-to-run wobble (`--wobble`, default 0.10), an error, a timeout or a saved answer is inconclusive; any other loss, or any held-out drop, exits 1.
 - Scorecard reports tuned, held-out and retrospective cases separately, rejects known cross-split question/source-family overlap, and can reserve held-out cases in a new manifest verified against a pinned checksum. Any compared build losing a baseline-readable case fails, regardless of gains elsewhere. Untagged history stays retrospective; checksums do not prove unseen data.
 - New `ask.py --principal AGENT --status` shows only that principal's registered connections, snapshot status and next steps, without a search or refresh.
 - Claim checks retain read contradictory evidence for judgment instead of dropping it as an unanswered question. Abstract worth questions no longer automatically require an exact monetary value. Misses after reading files direct the caller to inspect the files and filtering trace rather than reconnect them.
