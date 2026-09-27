@@ -1081,10 +1081,15 @@ def read_claim_answers(answers: dict, ordered: list, lines: dict, shown: dict = 
             rec["line"] = cand[int(m.group(1)) - 1]
             try:
                 text = Path(p).read_text(errors="replace")
-                off = max(text.find((shown or {}).get(p) or ""), 0)
-                base = text[:off].count("\n")
-                rec["line_no"] = next((base + k + 1 for k, t in enumerate(text[off:].splitlines())
-                                       if t.strip() == rec["line"]), None)
+                seen = (shown or {}).get(p) or ""
+                if seen not in text:  # a middle passage shown led by the file's title
+                    seen = seen.split(SUBJECT_SEP, 1)[-1]
+                for off in (max(text.find(seen), 0), 0):  # the title line itself: from the top
+                    base = text[:off].count("\n")
+                    rec["line_no"] = next((base + k + 1 for k, t in enumerate(text[off:].splitlines())
+                                           if t.strip() == rec["line"]), None)
+                    if rec["line_no"]:
+                        break
             except OSError:
                 pass
         out[p] = rec
@@ -1323,7 +1328,7 @@ def split_passages(text: str) -> list:
         cuts.append(pos)
     return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
 
-SUBJECT_CHARS = 100
+SUBJECT_CHARS, SUBJECT_SEP = 100, "\n...\n"
 
 def with_subject(chunks: list, i: int) -> str:
     """Passage i, led by the file's first non-blank line (its title) when i is not the
@@ -1332,7 +1337,7 @@ def with_subject(chunks: list, i: int) -> str:
     if i == 0:
         return chunks[0]
     title = next((ln.strip() for ln in chunks[0].splitlines() if ln.strip()), "")[:SUBJECT_CHARS]
-    return f"{title}\n...\n{chunks[i]}" if title else chunks[i]
+    return f"{title}{SUBJECT_SEP}{chunks[i]}" if title else chunks[i]
 
 def pick_chunks(question: str, chunks: list) -> list:
     """Indexes to read, in file order: every passage if they fit in READ_CHARS, else
@@ -1342,7 +1347,7 @@ def pick_chunks(question: str, chunks: list) -> list:
     with the first chunk always read, spent the slots on the intro and on passages
     full of the file's common words, missing the one section that answered."""
     # A passage after the first is sent led by the file's title (with_subject).
-    cost = [len(c) + (SUBJECT_CHARS + 5 if i else 0) for i, c in enumerate(chunks)]
+    cost = [len(c) + (SUBJECT_CHARS + len(SUBJECT_SEP) if i else 0) for i, c in enumerate(chunks)]
     if sum(cost) <= READ_CHARS:
         return list(range(len(chunks)))
     terms = query_terms(question)
