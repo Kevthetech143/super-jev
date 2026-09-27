@@ -88,3 +88,21 @@ def test_saved_pointer_words_carry_the_version(tmp_path):
         mp.undo()
     entry = json.loads((tmp_path / ask.POINTER_WORDS_FILE).read_text())["p"]
     assert entry["version"] == ask.WORDS_VERSION and "papa" in entry["words"].split()
+
+
+def test_pointer_words_read_every_sources_page(tmp_path):
+    """sources is paged: a pointer's files past the first page must reach its word list,
+    or the prefilter skips questions that only those files answer."""
+    first, later = tmp_path / "a.md", tmp_path / "b.md"
+    first.write_text("alpha notes", encoding="utf-8")
+    later.write_text("payability outstanding balance", encoding="utf-8")
+    pages = {0: {"status": "ok", "sources": [{"path": str(first), "originalPath": str(first)}], "nextOffset": 1},
+             1: {"status": "ok", "sources": [{"path": str(later), "originalPath": str(later)}], "nextOffset": None}}
+    mp = pytest.MonkeyPatch()
+    mp.setattr(ask, "memory", lambda r: pages[r.get("offset", 0)])
+    try:
+        ask.save_pointer_words(tmp_path, "me", {"p": "g1"}, ["p"])
+    finally:
+        mp.undo()
+    got = json.loads((tmp_path / ask.POINTER_WORDS_FILE).read_text())["p"]["words"].split()
+    assert "alpha" in got and "payability" in got
