@@ -19,10 +19,12 @@ followed, without traces, lookups, approvals or saved claim verdicts) and the me
 backend (its answer database and dataset registry, copied). Every run gets a fresh copy
 of it as SUPERJEV_STATE_DIR, with SUPERJEV_REPLAY=1, which makes ask.py skip saved
 answers, saved claim verdicts, stale-pointer reconnects and auto-heal. A build whose ask
-code predates SUPERJEV_REPLAY is refused: it could start paid refresh work outside the
-cap. Both builds must read byte-identical prepare-caches (copy one release twice); the
-report carries the fingerprints, a cache that changes mid-replay voids the run (exit 3),
-and a case whose read files changed between its two runs is inconclusive.
+code does not declare REPLAY_PROTOCOL = 2 (all of those, and a literal question after
+--) is refused: it could start paid refresh work outside the cap. Both builds must read
+byte-identical prepare-caches (copy one release twice); the report carries the
+fingerprints, and a cache that changes mid-replay voids the run (exit 3). Every connected
+original and the gold are hashed before each pair; a case is inconclusive when a file
+either run read, or the gold, changed from then until the end of the pair.
 
 Wobble: live Jev scores move about 0.05-0.10 run to run. A flip counts as gained or lost
 unless the passing side cleared its line by less than --wobble (default 0.10) AND the
@@ -56,6 +58,7 @@ NOT_COPIED = ("traces.jsonl*", "lookups.jsonl*", "approvals.jsonl", "claim-verdi
 VERDICT_RE = re.compile(r"^(TRUE|FALSE|CONFLICT|PARTIAL|UNSURE|NOT FOUND)\b"
                         r"(?: \((?:(supported|contradicted) )?(\d+(?:\.\d+)?)(, saved)?)?", re.M)
 LEAN = {"supported": "TRUE", "contradicted": "FALSE"}
+REPLAY_PROTOCOL = 2  # the ask.py replay guarantees this replay needs (see ask.py REPLAY_PROTOCOL)
 
 
 def state_root() -> Path:
@@ -92,8 +95,10 @@ def memory_config(ask: Path, override) -> Path:
 def check_build(ask: Path) -> str:
     """Why this build cannot be replayed safely, or ''."""
     code = sc.build_path(ask)
-    if "SUPERJEV_REPLAY" not in code.read_text(errors="replace"):
-        return f"{code} predates SUPERJEV_REPLAY: it could read saved answers or start paid auto-heal work"
+    m = re.search(r"^REPLAY_PROTOCOL = (\d+)[ \t]*(?:#.*)?$", code.read_text(errors="replace"), re.M)
+    if not m or int(m.group(1)) != REPLAY_PROTOCOL:
+        return (f"{code} does not declare REPLAY_PROTOCOL = {REPLAY_PROTOCOL}: it could read saved answers, "
+                "start paid auto-heal work or read a question as a flag")
     if not (code.parent.resolve().parents[1] / "experiments/verified-pointer-memory/cli.py").is_file():
         return f"{code} has no memory runtime two folders up (experiments/verified-pointer-memory)"
     return ""
@@ -208,6 +213,23 @@ def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
     return out
 
 
+def eligible_sources(base: Path) -> set:
+    """Every connected original the frozen registry lists: what any build may read."""
+    reg = json.loads((base / "memory" / "registry.json").read_text())
+    return {os.path.realpath(o["path"]) for e in (reg.get("datasets") or {}).values() if isinstance(e, dict)
+            for o in e.get("originals") or [] if isinstance(o, dict) and isinstance(o.get("path"), str)}
+
+
+def drifted(old: dict, new: dict, before: dict) -> bool:
+    """Did any file either run read (or the gold) change from before the pair to after it,
+    or between a run reading it and the end of the pair?"""
+    for p in set(old["read"]) | set(new["read"]):
+        now = file_sha(p)
+        if now != before.get(p, now) or now != old["read"].get(p, now) or now != new["read"].get(p, now):
+            return True
+    return False
+
+
 def same_question(traced, asked: str) -> bool:
     """The trace's question is the asked one (a trace cuts long fields to a prefix)."""
     if isinstance(traced, str) and traced.endswith("...[truncated]"):
@@ -215,11 +237,11 @@ def same_question(traced, asked: str) -> bool:
     return traced == asked
 
 
-def compare(old: dict, new: dict, wobble: float) -> str:
+def compare(old: dict, new: dict, wobble: float, before: dict) -> str:
     if "error" in old or "error" in new:
         return "inconclusive"
-    if any(old["read"][p] != new["read"][p] for p in set(old["read"]) & set(new["read"])):
-        old["error"] = new["error"] = "a file it read changed between the two runs"
+    if drifted(old, new, before):
+        old["error"] = new["error"] = "a file it read changed during the pair"
         return "inconclusive"
     if old["ok"] == new["ok"]:
         return "same"
@@ -298,10 +320,12 @@ def main(argv=None) -> int:
         except (OSError, ValueError, KeyError, sqlite3.Error) as e:
             ap.error(f"cannot snapshot state and memory: {e}")
         report["fingerprints"] = fingerprints
+        sources = eligible_sources(base)
         for c in cases:
+            before = {p: file_sha(p) for p in sources | {os.path.realpath(g) for g in c["gold"]}}
             old, new = (grade(b, base, c, a.timeout) for b in builds)
             report["rows"].append({"question": c["question"], "split": c["split"], "kind": c.get("kind") or "question",
-                                   "result": compare(old, new, a.wobble), "old": old, "new": new})
+                                   "result": compare(old, new, a.wobble, before), "old": old, "new": new})
     drift = [str(p) for p in caches if tree_sha(p) != fingerprints["prepare_cache"]]
     rows = report["rows"]
     for r in rows:
