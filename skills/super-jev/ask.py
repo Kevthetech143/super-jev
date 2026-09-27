@@ -3235,7 +3235,7 @@ def _main() -> int:
                 print(f"ERROR: this statement could not be checked ({type(e).__name__}: {e}); "
                       "check it by hand")
                 traceback.print_exc()
-                rc = max(rc, 2)
+                rc = max(rc, 3)  # distinct from 2 (bad arguments)
             finally:
                 _CLAIM["text"] = None
         return rc
