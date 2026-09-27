@@ -2008,17 +2008,19 @@ PART_RE = re.compile(r"^(.+)-\d+$")
 
 
 def skipped_files(pointers, principal: str = "") -> dict:
-    """{path: (plain reason, fix, secret-like)} for files setup held or whose label
-    failed its check, across the principal's own pointers only (part pointers
-    <base>-N read the base's prepare-cache). Local files only, no provider call."""
+    """{path: (plain reason, fix, name-only)} for files setup held or whose label
+    failed its check, across the principal's own visible pointers only. A part
+    pointer <base>-N has no cache of its own: its base is read only when the base
+    is itself visible to the principal. Local files only, no provider call."""
     cache_dir = prepare_bulk.CACHE_DIR
+    visible = list(dict.fromkeys(pointers or ()))
     bases = []
-    for ptr in pointers or ():
+    for ptr in visible:
         base = ptr
         if not any((cache_dir / f"{ptr}{suf}").is_file() for suf in (".json", "-report.json", "-held.txt")):
             m = PART_RE.match(ptr)
-            base = m.group(1) if m else ptr
-        if base not in bases:
+            base = m.group(1) if m and m.group(1) in visible else None
+        if base and base not in bases:
             bases.append(base)
     out = {}
     for base in bases:
@@ -2032,27 +2034,32 @@ def skipped_files(pointers, principal: str = "") -> dict:
             continue  # a report naming its principals never lends its files to another one
         cache = load_cache_files(base)
         held = [tuple(e) for e in report.get("held") or [] if isinstance(e, list) and len(e) == 2]
-        try:
-            held += [tuple(ln.split("\t", 1)) for ln in (cache_dir / f"{base}-held.txt").read_text().splitlines()
-                     if "\t" in ln and not ln[:1].isspace()]
-        except OSError:
-            pass
+        if not report:  # the report is the newer record; -held.txt only stands in without one
+            try:
+                held += [tuple(ln.split("\t", 1)) for ln in (cache_dir / f"{base}-held.txt").read_text().splitlines()
+                         if "\t" in ln and not ln[:1].isspace()]
+            except OSError:
+                pass
         failed = [tuple(e) for e in report.get("exceptions") or [] if isinstance(e, list) and len(e) == 2]
         failed += [(path, str(c.get("verdict"))) for path, c in cache.items()
                    if isinstance(c, dict) and c.get("pass") is False]
         for path, why in held + failed:
-            if path in out or "admitted by --allow-held" in why or (cache.get(path) or {}).get("pass"):
+            if (path in out or "admitted by --allow-held" in why or (cache.get(path) or {}).get("pass")
+                    or not os.path.exists(path)):
                 continue
             if "over size ceiling" in why:
                 m = re.search(r"\(([\d,]+) bytes, max ([\d,]+)\)", why)
                 size = (f" ({int(m.group(1).replace(',', '')) // 1000} KB, limit "
                         f"{int(m.group(2).replace(',', '')) // 1000} KB)") if m else ""
-                out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", False)
+                out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
             elif any(k in why for k in SECRET_HELD):
                 out[path] = ("held back: it looks like it holds a password, key or card number",
                              "review the flagged line, then re-run setup with --allow-held", True)
             elif "UTF-8" in why:
                 out[path] = ("not saved as UTF-8 text", "re-save it as UTF-8, then re-run setup", False)
+            elif (path, why) in failed and "no draft" in why:
+                out[path] = ("not connected: setup could not write a label for it",
+                             "re-run setup on that file", False)
             elif (path, why) in failed:
                 out[path] = ("not connected: its label did not pass the setup check",
                              "re-run setup on that file (its label failed the check)", False)
@@ -2061,8 +2068,9 @@ def skipped_files(pointers, principal: str = "") -> dict:
 
 def skipped_for_question(question: str, pointers, principal: str = "") -> list:
     """Up to MISS_SKIPPED (path, reason, fix) skipped files sharing the question's
-    words: by file name, and for a non-secret file its own local text too. A
-    secret-like file is matched on its name only and never opened."""
+    words: by file name, and for a label-failed file its own local text too. A
+    secret-like file is matched on its name only and never opened; a size-held file
+    (a big log holds most questions' words) on its name only too."""
     terms = query_terms(question or "")
     if not terms:
         return []
@@ -2071,10 +2079,10 @@ def skipped_for_question(question: str, pointers, principal: str = "") -> list:
     need = max(2, math.ceil(SKIPPED_TEXT_COVERAGE * len(terms))) if len(terms) > 1 else 2
     hits = lambda ws: sum(1 for t in terms if t in ws or (len(t) > 5 and any(w.startswith(t[:5]) for w in ws)))
     ranked = []
-    for path, (why, fix, secret) in skipped_files(pointers, principal).items():
+    for path, (why, fix, name_only) in skipped_files(pointers, principal).items():
         name_hits = hits(set(words(Path(path).stem)))
         text_hits = 0
-        if not secret and not name_hits:
+        if not name_only and not name_hits:
             try:
                 with open(path, "rb") as fh:
                     text_hits = hits(set(words(fh.read(SKIPPED_READ_BYTES).decode("utf-8", "replace"))))

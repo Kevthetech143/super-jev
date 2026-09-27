@@ -17,8 +17,13 @@ def cache(tmp_path, monkeypatch):
     cdir.mkdir()
     notes = tmp_path / "notes"
     notes.mkdir()
-    big = notes / "closed.md"
+    big = notes / "roof-quote.md"
     big.write_text("Villa roof repair quote from the contractor: 4,200 dollars.\n")
+    log = notes / "closed.md"  # a big log holding the question's words in its text only
+    log.write_text("Villa roof repair quote, painting, lawn, and every other closed item.\n")
+    nodraft = notes / "pool-pump.md"
+    nodraft.write_text("pool pump\n")
+    gone = notes / "roof-gone.md"  # held once, since deleted
     secret = notes / "wifi-router.md"
     secret.write_text("SECRET-CONTENT-NEVER-PRINT router password hunter2\n")
     arc = notes / "arc-campaign.md"
@@ -28,8 +33,13 @@ def cache(tmp_path, monkeypatch):
     (cdir / "alice-notes-report.json").write_text(json.dumps({
         "pointer": "alice-notes",
         "held": [[str(big), "over size ceiling (109,340 bytes, max 90,000); split it into smaller .md files"],
+                 [str(log), "over size ceiling (188,082 bytes, max 90,000); split it"],
+                 [str(gone), "over size ceiling (99,000 bytes, max 90,000); split it"],
                  [str(secret), "card/password-like text; review before onboarding"]],
-        "exceptions": [[str(arc), "CONTRADICTED 0.28"]], "removed": []}))
+        "exceptions": [[str(arc), "CONTRADICTED 0.28"], [str(nodraft), "writer returned no draft"]], "removed": []}))
+    # A stale held list beside a report is ignored: the report is the newer record.
+    (cdir / "alice-notes-held.txt").write_text(f"{notes / 'roof-stale.md'}\tover size ceiling (1 bytes, max 2)\n")
+    (notes / "roof-stale.md").write_text("roof\n")
     (cdir / "alice-notes.json").write_text(json.dumps({
         str(arc): {"verdict": "CONTRADICTED", "pass": False},
         str(ok): {"verdict": "SUPPORTED", "pass": True}}))
@@ -38,6 +48,7 @@ def cache(tmp_path, monkeypatch):
     brain.write_text("garden\n")
     (cdir / "alice-brain-held.txt").write_text(
         f"{brain}\tover size ceiling (95,000 bytes, max 90,000); split it\n    pattern=x line=1 masked=#\n")
+    (notes / "gate.md").write_text("gate\n")
     (cdir / "alice-brain.json").write_text(json.dumps({str(notes / "gate.md"): {"verdict": "ERROR", "pass": False}}))
     # Another principal's pointer: never shown to alice.
     other = notes / "roof-bob.md"
@@ -65,7 +76,10 @@ def test_size_held_file_named_with_split_fix_and_no_connect_step(cache):
     lines = ask.miss_report("alice", 1, {}, {}, "How much was the villa roof repair quote?", ["alice-notes"])
     joined = "\n".join(lines)
     assert "Skipped at setup, and may hold the answer:" in lines
-    assert "    notes/closed.md: too big to connect (109 KB, limit 90 KB) -> Fix: split it into smaller files, then re-run setup" in lines
+    assert "    notes/roof-quote.md: too big to connect (109 KB, limit 90 KB) -> Fix: split it into smaller files, then re-run setup" in lines
+    assert "closed.md" not in joined  # size-held: its text never counts, only its name
+    assert "roof-gone.md" not in joined  # no longer exists
+    assert "roof-stale.md" not in joined  # stale -held.txt beside a report
     assert "prepare_bulk.py --root <folder>" not in joined  # its folder is already connected
     assert "apply its fix, then ask again" in joined
     assert "roof-ok.md" not in joined  # connected file is not skipped
@@ -90,8 +104,15 @@ def test_gate_failed_file_named_with_rerun_fix(cache):
             "Fix: re-run setup on that file (its label failed the check)") in lines
 
 
-def test_part_pointer_reads_base_held_txt_and_cache(cache):
-    lines = ask.miss_report("alice", 1, {}, {}, "garden gate notes", ["alice-brain-2"])
+def test_writer_no_draft_reads_as_its_own_reason(cache):
+    lines = ask.miss_report("alice", 1, {}, {}, "pool pump schedule", ["alice-notes"])
+    assert ("    notes/pool-pump.md: not connected: setup could not write a label for it -> "
+            "Fix: re-run setup on that file") in lines
+
+
+def test_part_pointer_reads_base_only_when_base_visible(cache):
+    assert "garden" not in "\n".join(ask.miss_report("alice", 1, {}, {}, "garden gate notes", ["alice-brain-2"]))
+    lines = ask.miss_report("alice", 1, {}, {}, "garden gate notes", ["alice-brain-2", "alice-brain"])
     joined = "\n".join(lines)
     assert "notes/brain-garden.md: too big to connect (95 KB, limit 90 KB)" in joined
     assert "notes/gate.md: not connected" in joined
@@ -118,6 +139,15 @@ def test_errored_pointer_still_prints_miss_report(cache, tmp_path, monkeypatch, 
     assert rc == 1
     assert "unresolved: 1 of 2 pointers errored" in out
     assert "What was searched:" in out and "Next step (pick one):" in out
-    assert any("notes/closed.md: too big to connect" in line for line in out)
+    assert any("notes/roof-quote.md: too big to connect" in line for line in out)
     assert out.index("unresolved: 1 of 2 pointers errored") < out.index("What was searched:")
     assert out[-1] == ask.VOICE_LINE
+
+
+def test_write_held_txt_clears_old_list_when_nothing_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(prepare_bulk, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(prepare_bulk, "_record_written", lambda p: None)
+    prepare_bulk.write_held_txt("p", [("/x/a.md", "over size ceiling (1 bytes, max 2)")])
+    assert (tmp_path / "p-held.txt").is_file()
+    prepare_bulk.write_held_txt("p", [])
+    assert not (tmp_path / "p-held.txt").exists()
