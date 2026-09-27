@@ -2055,7 +2055,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             reconnected[ptr] = auto_heal.reconnect_now(ptr, principal, timeout=left)
             if reconnected[ptr] == "no-report":
                 # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
-                reconnected[ptr] = auto_heal.reconnect_recipe(ptr, principal, memory=memory)
+                reconnected[ptr] = auto_heal.reconnect_recipe_or_queue(ptr, principal, memory=memory)
             if reconnected[ptr] == "reconnected":
                 results[i] = nav(ptr)
     _STAGE["reconnect"] = reconnected

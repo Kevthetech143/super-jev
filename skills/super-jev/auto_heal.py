@@ -151,8 +151,14 @@ def _publish_lock(lock: Path, payload: bytes) -> bool:
             pass
 
 
+_DRAINING = {}  # principal -> token of the lock this process's drain holds
+
+
 def _acquire_lock(principal: str, pointer: str) -> str:
-    """The new lock's token (truthy) if acquired, else ""."""
+    """The new lock's token (truthy) if acquired, else "". Inside a drain, the drain's own
+    lock (it is already held for this principal by this process)."""
+    if principal in _DRAINING:
+        return _DRAINING[principal]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = _lock_path(principal)
     token = uuid.uuid4().hex
@@ -189,7 +195,10 @@ def _hold_lock(principal: str, token: str, **fields) -> bool:
 
 
 def _release_lock(principal: str, token: str = None) -> None:
-    """Remove the lock; given a token, only if the lock is still that one."""
+    """Remove the lock; given a token, only if the lock is still that one. Inside a drain only
+    the drain itself (with its token) releases it."""
+    if principal in _DRAINING and token != _DRAINING[principal]:
+        return
     lock = _lock_path(principal)
     try:
         if token is not None and json.loads(lock.read_text()).get("token") != token:
@@ -295,14 +304,13 @@ def _memory(req: dict) -> dict:
     return memory(req)
 
 
-def reconnect_recipe(pointer: str, principal: str, memory=None, held: bool = False) -> str:
+def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     """Heal a stale pointer that prepare_bulk did not build (no report): replay the connect
     request recorded when it was connected (memory action "recipe"), at the files' current
     bytes, with the same paths, descriptions, structure and principals. Local only: no
     writer or Jev call, and the connector's own secret scan still runs. Returns
     "reconnected", or why not: "no-recipe", "manual" (a --add record re-adds itself),
-    "cooldown", "in-progress" or "failed". Never raises. `held`: the caller (a drain) already
-    holds the lock."""
+    "cooldown", "in-progress" or "failed". Never raises."""
     if "-manual-" in pointer:
         return "manual"
     memory = memory or _memory
@@ -318,8 +326,7 @@ def reconnect_recipe(pointer: str, principal: str, memory=None, held: bool = Fal
     if time.time() - state["pointers"].get(pointer, 0) < COOLDOWN_SECS:
         _log(principal=principal, pointer=pointer, action="skip-recipe", reason="cooldown")
         return "cooldown"
-    if not held and not _acquire_lock(principal, pointer):
-        _queue(principal, pointer, "recipe")
+    if not _acquire_lock(principal, pointer):
         return "in-progress"
     try:
         req = {"action": "connect", "pointer": recipe["pointer"], "dataset": recipe["dataset"],
@@ -345,12 +352,23 @@ def reconnect_recipe(pointer: str, principal: str, memory=None, held: bool = Fal
     except Exception:
         result, preview = "failed", {}
     finally:
-        if not held:
-            _release_lock(principal)
+        _release_lock(principal)
     if result == "reconnected":
-        _mark(principal, pointer, time.time())
+        state["pointers"][pointer] = time.time()
+        _save_state(principal, state)
     _log(principal=principal, pointer=pointer, action="reconnect-recipe", result=result,
          reason=preview.get("reason") if result == "failed" else None)
+    return result
+
+
+def reconnect_recipe_or_queue(pointer: str, principal: str, memory=None) -> str:
+    """reconnect_recipe, queuing the pointer for the lock holder's drain when the lock is held."""
+    result = reconnect_recipe(pointer, principal, memory=memory)
+    if result == "in-progress":
+        _queue(principal, pointer, "recipe")
+    elif result == "reconnected":
+        with _state_txn(principal) as state:
+            state["pending"].pop(pointer, None)
     return result
 
 
@@ -461,6 +479,7 @@ def drain(principal: str, token: str, memory=None) -> int:
     cooling down or over the hourly cap stays queued for the next drain. Touches nothing if the
     lock is no longer this refresh's (token)."""
     tried = set()
+    _DRAINING[principal] = token
     try:
         while True:
             pending = _load_state(principal).get("pending") or {}
@@ -473,7 +492,7 @@ def drain(principal: str, token: str, memory=None) -> int:
             kind = pending[pointer].get("kind")
             try:
                 if kind == "recipe":
-                    result = reconnect_recipe(pointer, principal, memory=memory, held=True)
+                    result = reconnect_recipe(pointer, principal, memory=memory)
                 else:
                     result = _drain_prepare(pointer, principal, kind)
             except Exception:
@@ -484,6 +503,7 @@ def drain(principal: str, token: str, memory=None) -> int:
             _log(principal=principal, pointer=pointer, action="drain", kind=kind, result=result)
     finally:
         _release_lock(principal, token)
+        _DRAINING.pop(principal, None)
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--drain"] and len(sys.argv) == 4:
