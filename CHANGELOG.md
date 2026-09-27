@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- New `ask.py --principal AGENT --status` shows only that principal's registered connections, snapshot status and next steps, without a search or refresh.
 - Claim checks retain read contradictory evidence for judgment instead of dropping it as an unanswered question. Abstract worth questions no longer automatically require an exact monetary value. Misses after reading files direct the caller to inspect the files and filtering trace rather than reconnect them.
 - Explicit approvals record the caller principal instead of assuming a human approved them. Existing recorded approver labels are preserved; a cache entry without recorded identity displays unknown (legacy). Automatic check labels are unchanged.
 - A file named exactly with `--name` is no longer dropped by the test-output name rule (`*superjev-test*`, `*-hand-test-*`): it is judged by its folder only, at connect, in routing and in word search. Before, a run log connected on purpose (a `superjev-test-timeline.md` named in its pointer's `--name` list) was silently never connected or searched, so a claim it proves came back NOT FOUND. A named file inside a test/scratch or fixture folder still stays out, and a wildcard `--name` does not count. Connect now prints how many test/scratch files it skipped.
