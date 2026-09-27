@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sqlite3
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -44,6 +45,78 @@ def _atomic(path, data):
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def _manual_conflicts(config, principals, sources):
+    """Read only registered, in-scope manual records; never echo their contents."""
+    literals = {value for source in sources for op in (source.get('viewTransform') or {}).get('operations', [])
+                if op['op'] == 'redact-literals' for value in op['values']}
+    if not literals or not Path(config['db']).exists():
+        return None
+    with sqlite3.connect(config['db']) as db:
+        rows = db.execute('SELECT name, body FROM pointers').fetchall()
+    blocked = []
+    for name, body in rows:
+        row = json.loads(body)
+        if not any(p in row['principals'] and name.startswith(p + '-manual-') for p in principals):
+            continue
+        try:
+            path = Path(row['snapshot']['entry']['manifestPath'])
+            if path.stat().st_size > MAX_BYTES:
+                raise ValueError('manual manifest too large')
+            text = json.dumps(json.loads(path.read_text()), ensure_ascii=False)
+            # Both the prepared answer and its routing metadata must be safe.
+            if any(value in text for value in literals):
+                blocked.append(name)
+        except (OSError, ValueError, KeyError):
+            blocked.append(name)  # An unreadable manual answer cannot be cleared.
+    if blocked:
+        return {**_problem('view-manual-record-conflict', 'Review and disconnect or redact these manual answer pointers before switching; nothing was connected.'),
+                'manualPointers': sorted(blocked)}
+    return None
+
+
+def _retire_view_artifacts(previous, data, registry, principals, new_originals):
+    """Remove obsolete local proofs and only the directly replaced owned generation."""
+    warnings = []
+    for principal in principals:
+        path = prepare_bulk._state_dir(principal) / 'claim-verdicts.json'
+        if not path.exists():
+            continue
+        try:
+            records = json.loads(path.read_text())
+            kept = {key: value for key, value in records.items()
+                    if not isinstance(value, dict) or os.path.realpath(value.get('path', '')) not in new_originals}
+            if kept != records:
+                _atomic(path, kept)
+        except (OSError, ValueError, AttributeError):
+            warnings.append('claim-verdict cleanup failed for ' + principal)
+    old_manifest = Path(previous.get('manifestPath', ''))
+    folder = old_manifest.parent
+    if not previous.get('pathConnection'):
+        if previous:
+            warnings.append('Legacy prepared artifacts require an explicit local retention review.')
+        return warnings
+    try:
+        owned = (folder.parent == registry.parent and folder.name.startswith('.prepared-')
+                 and not folder.is_symlink() and old_manifest.name == 'manifest.json')
+        referenced = any(Path(entry.get('manifestPath', '')).parent == folder or
+                         any(Path(item['path']).parent == folder for item in entry.get('originals', []))
+                         for entry in data['datasets'].values())
+        if owned and not referenced:
+            files = list(folder.iterdir())
+            if all(not f.is_symlink() and f.is_file() and
+                   (f.name == 'manifest.json' or re.fullmatch(r'[0-9]+\.txt', f.name)) for f in files):
+                shutil.rmtree(folder)
+            else:
+                warnings.append('Replaced generation contains unexpected files; retained for local review.')
+        elif owned:
+            warnings.append('Replaced generation is still referenced; retained.')
+        else:
+            warnings.append('Prepared folder is not an owned local generation; retained for review.')
+    except OSError:
+        warnings.append('Replaced generation cleanup failed; inspect local prepared artifacts.')
+    return warnings
 
 
 def _catalog(sources, structure):
@@ -215,6 +288,9 @@ def _connect(request, config):
         catalog = _catalog(sources, structure)
     except (ValueError, OSError):
         return _problem('navigation-limit', 'The explicit source grouping must fit within 200 catalog nodes and 50 source leaves.')
+    conflict = _manual_conflicts(config, principals, sources)
+    if conflict:
+        return conflict
     navigation_sha = _hash(json.dumps(catalog, sort_keys=True, separators=(',', ':'),
                                       ensure_ascii=False).encode())
     navigation_reviewed = (request.get('navigationSHA') == navigation_sha
@@ -268,6 +344,9 @@ def _connect(request, config):
         if (dataset in data['datasets'] and not old
                 and data['datasets'][dataset].get('pathConnection') != {'pointer': pointer, 'principals': sorted(principals)}):
             return _problem('unowned-dataset', 'An existing dataset cannot be overwritten by a new pointer. Choose a new dataset name.')
+        conflict = _manual_conflicts(config, principals, sources)
+        if conflict:
+            return conflict
         previous = data['datasets'].get(dataset) or {}
         policies = {s['path']: s['transformSHA'] for s in sources if s['viewTransform'] is not None}
         if any(policies.get(path) != digest for path, digest in previous.get('viewPolicies', {}).items()):
@@ -317,8 +396,11 @@ def _connect(request, config):
         _, error = service.pointer(pointer, principals[0])
         if error:
             return _problem('source-changed', 'A source changed during connection. Review it and reconnect with replace:true.')
+        cleanup_warnings = (_retire_view_artifacts(previous, data, registry, principals,
+                            {os.path.realpath(path) for path in policies}) if policies else [])
     return {'status': 'registered', 'pointer': pointer, 'dataset': dataset,
             'structure': structure, 'navigationSHA': navigation_sha,
+            'cleanupWarnings': cleanup_warnings,
             'sources': [{'id': s['id'], 'originalPath': s['path']} for s in sources],
             'fileCount': len(sources), 'passageCount': len(manifest['preparations']),
             'nextAction': 'search', 'hint': 'Ready for snapshot searches. Originals are unchanged; upstream synchronization and privacy approval are not automatic.'}
