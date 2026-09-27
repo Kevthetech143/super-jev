@@ -647,10 +647,19 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     req = {"action": "connect", "pointer": pointer, "principals": list(principals), "sources": sources}
     if shareable:
         req["shareable"] = True
-    known = memory({"action": "panel", "principal": principals[0]})
-    if any((x.get("pointer") if isinstance(x, dict) else x) == pointer for x in known.get("pointers", [])):
+    # Whether the pointer exists is asked of EVERY principal, not just the first: a part that one
+    # of them cannot see yet (never shared to it) still exists, and a fresh connect of it fails
+    # "already-connected" on every refresh and heal. Refresh it in the scope it has, then widen.
+    seen_by = [p for p in principals
+               if any((x.get("pointer") if isinstance(x, dict) else x) == pointer
+                      for x in memory({"action": "panel", "principal": p}).get("pointers", []))]
+    widen_to = None
+    if seen_by:
         req["replace"] = True
         print(f"WARNING: replace:true on pointer {pointer} rotates that pointer's approved answers")
+        if set(seen_by) != set(principals):
+            widen_to = list(principals)
+            req["principals"] = seen_by
     prev = memory(req)
     if prev.get("status") != "preparation-required":
         print(f"connect preview failed for {pointer}:", json.dumps(prev)[:300])
@@ -667,9 +676,15 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
         # A refresh naming only some of the pointer's principals would narrow it; the harness
         # refuses that, which left the pointer stale. Keep its registered scope instead.
         print(f"refresh: {pointer} is registered for {', '.join(wider)}; reconnecting with all of them")
-        principals[:] = wider
+        principals[:] = list(dict.fromkeys(list(principals) + list(wider)))
         req["principals"] = list(wider)
         reg = memory(req)
+    if reg.get("status") == "registered" and widen_to and not set(widen_to) <= set(req["principals"]):
+        scope = sorted(set(req["principals"]) | set(widen_to))
+        print(f"refresh: {pointer} was registered for {', '.join(req['principals'])} only; "
+              f"widening to {', '.join(scope)} like the rest of this connect")
+        reg = {**reg, **memory({"action": "register", "pointer": pointer,
+                                "dataset": reg.get("dataset") or pointer, "principals": scope})}
     connected = reg.get("status") == "registered"
     print(f"connect: {reg.get('status')} pointer={reg.get('pointer')} sources={len(reg.get('sources', []))}")
     if not connected:

@@ -1469,3 +1469,34 @@ def test_inventory_link_outside_roots_needs_allow_target(tmp_path):
     assert pb.inventory([root])[0] == []
     files = pb.inventory([root], allow_targets=[tmp_path / "tools"])[0]
     assert [p.relative_to(root).as_posix() for p in files] == ["pipeline/SKILL.md"]
+
+
+def test_a_part_one_principal_cannot_see_still_refreshes_and_is_widened(tmp_path, monkeypatch):
+    """primary-skills-catalog-4 stayed STALE: it was registered for primary only while its
+    siblings also served polymarket. The refresh asked only polymarket (the first principal)
+    whether the part existed, heard no, connected it fresh and hit already-connected every
+    time. Real memory runtime: the part now refreshes in its own scope, then widens."""
+    import importlib.util
+    exp = Path(pb.__file__).resolve().parent.parent.parent / "experiments" / "verified-pointer-memory"
+    spec = importlib.util.spec_from_file_location("cli_partscope_t", exp / "cli.py")
+    sys.path.insert(0, str(exp))
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"db": "answers.sqlite", "registry": "registry.json",
+                               "retrievalCommand": ["true"], "navigationCommand": ["true"]}))
+    config = cli.load_config(cfg)
+    (tmp_path / "registry.json").write_text(json.dumps({"version": 1, "datasets": {}}))
+    memory = lambda req: cli.run(req, config)
+    monkeypatch.setattr(pb, "memory", memory)
+    f = tmp_path / "skill.md"
+    f.write_text("# Skill\nold text\n")
+    cache = {str(f): {"description": "a skill", "labels_ok": False}}
+    assert pb.connect_part("cat-4", ["primary"], [f], cache) == {"connected": True}
+    f.write_text("# Skill\nnew text\n")
+    principals = ["polymarket", "primary"]
+    assert pb.connect_part("cat-4", principals, [f], cache) == {"connected": True}
+    for who in ("polymarket", "primary"):
+        seen = {p["pointer"]: p["status"] for p in memory({"action": "panel", "principal": who})["pointers"]}
+        assert seen.get("cat-4") == "available", who
+    assert principals == ["polymarket", "primary"]
