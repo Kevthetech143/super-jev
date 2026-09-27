@@ -154,47 +154,58 @@ def _publish_lock(lock: Path, payload: bytes) -> bool:
 _DRAINING = {}  # principal -> token of the lock this process's drain holds
 
 
+@contextmanager
+def _control(principal: str):
+    """One short per-principal mutex around every read-check-write of the lock file (acquire,
+    stale reclaim, pid/ts update, release), so a token or pid check and the write it guards
+    can never interleave with another process's."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / f".{principal}.lock-control", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
 def _acquire_lock(principal: str, pointer: str) -> str:
     """The new lock's token (truthy) if acquired, else "". Inside a drain, the drain's own
     lock (it is already held for this principal by this process)."""
     if principal in _DRAINING:
         return _DRAINING[principal]
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = _lock_path(principal)
     token = uuid.uuid4().hex
     payload = json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer,
                           "token": token}).encode()
-    if _publish_lock(lock, payload):
-        return token
-    if _lock_holder_alive(lock):
-        return ""
-    # Dead/stale lock: clear it and retry once. This retry still has a narrow race with
-    # another racer doing the same thing, but that only matters for the rare dead-holder
-    # case; the common contended case above is race-free.
-    try:
-        lock.unlink()
-    except OSError:
-        pass
-    return token if _publish_lock(lock, payload) else ""
+    with _control(principal):
+        if _publish_lock(lock, payload):
+            return token
+        if _lock_holder_alive(lock):
+            return ""
+        # Dead/stale lock: clear it and retry once (under the control mutex, so two racers
+        # cannot both reclaim it).
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        return token if _publish_lock(lock, payload) else ""
 
 
 def _hold_lock(principal: str, token: str, expect_pid: int = None, **fields) -> bool:
     """Refresh our own lock (matched by token, and by pid when `expect_pid` is given): a new ts
     plus `fields`. False if it is not ours."""
     lock = _lock_path(principal)
-    try:
-        info = json.loads(lock.read_text())
-    except (OSError, ValueError):
-        return False
-    if not token or info.get("token") != token:
-        return False
-    if expect_pid is not None and info.get("pid") != expect_pid:
-        return False
-    info.update(fields, ts=time.time())
-    tmp = lock.parent / f".{lock.name}.hold.{os.getpid()}.{threading.get_ident()}"
-    tmp.write_text(json.dumps(info))
-    os.replace(tmp, lock)
-    return True
+    with _control(principal):
+        try:
+            info = json.loads(lock.read_text())
+        except (OSError, ValueError):
+            return False
+        if not token or info.get("token") != token:
+            return False
+        if expect_pid is not None and info.get("pid") != expect_pid:
+            return False
+        info.update(fields, ts=time.time())
+        tmp = lock.parent / f".{lock.name}.hold.{os.getpid()}.{threading.get_ident()}"
+        tmp.write_text(json.dumps(info))
+        os.replace(tmp, lock)
+        return True
 
 
 def _drain_cmd(principal: str, token: str) -> list:
@@ -241,12 +252,13 @@ def _release_lock(principal: str, token: str = None) -> None:
     if principal in _DRAINING and token != _DRAINING[principal]:
         return
     lock = _lock_path(principal)
-    try:
-        if token is not None and json.loads(lock.read_text()).get("token") != token:
-            return
-        lock.unlink()
-    except (OSError, ValueError):
-        pass
+    with _control(principal):
+        try:
+            if token is not None and json.loads(lock.read_text()).get("token") != token:
+                return
+            lock.unlink()
+        except (OSError, ValueError):
+            pass
 
 
 def last_refresh_error(principal: str, pointer: str, cache_dir: Path = None) -> str:

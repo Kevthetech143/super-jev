@@ -454,3 +454,28 @@ def test_the_drain_takes_the_lock_over_under_its_own_pid(tmp_path, monkeypatch):
 def shlex_join(cmd):
     import shlex
     return shlex.join(cmd)
+
+
+def test_a_lookup_naming_its_child_never_overwrites_a_drain_that_already_took_the_lock(tmp_path, monkeypatch):
+    # Review of #223 (at 9b394dc): _name_child checked the pid, then a drain claimed the lock,
+    # then the lookup's write put back the exited shell's pid over the live drain's, so the
+    # next lookup took the drain's lock as dead and started a second refresh.
+    import threading
+    _setup(tmp_path, monkeypatch)
+    token = ah._acquire_lock("agent", "x")
+    real_replace, drain = ah.os.replace, []
+
+    def replace(src, dst):
+        if not drain:  # the lookup's write: let the drain try to claim the lock right now
+            drain.append(threading.Thread(target=ah._hold_lock, args=("agent", token),
+                                          kwargs={"pid": 333333333}))
+            drain[0].start()
+            drain[0].join(0.5)
+        return real_replace(src, dst)
+    monkeypatch.setattr(ah.os, "replace", replace)
+
+    class Shell:
+        pid = 222222222
+    ah._name_child("agent", token, Shell)
+    drain[0].join()
+    assert json.loads(ah._lock_path("agent").read_text())["pid"] == 333333333
