@@ -9,7 +9,7 @@ Onboarding and refresh for [Super Jev](../super-jev/SKILL.md). Scripts live in `
 
 ## 1. What a connector is
 
-A connector is one named set of reviewed files, registered as one pointer, for one principal (agent). "Connected" means registered and prepared for search — never automatically synced to the live source. Update a connector by refreshing it (section 8), not by assuming it tracks its source.
+A connector is one named set of reviewed files, registered as one pointer, for one or more principals (agents). "Connected" means registered and prepared for search — never automatically synced to the live source. Update a connector by refreshing it (section 8), not by assuming it tracks its source.
 
 ## 2. Connector kinds
 
@@ -20,7 +20,7 @@ A connector is one named set of reviewed files, registered as one pointer, for o
 | Project queue | A pending-work folder |
 | Manual entries | One small pointer per approved fact, added with `ask.py --add` |
 | Documents / Repo / Tools docs | Reviewed local text: documents, a repo checkout snapshot, or tool documentation |
-| Fleet datasets | A shared reviewed set used by more than one agent |
+| Fleet datasets | A shared reviewed set used by more than one agent (shared knowledge folder, skills catalog); see section 10 |
 | Database, Website | Proposed only — not built |
 
 ## 3. Naming rule
@@ -60,5 +60,13 @@ The secret scan holds a file that looks like it carries card/password text, and 
 ## 9. Safeguards
 
 `preparation-required` and an unknown pointer are setup errors, never "nothing found" — follow the setup step, don't repeat the search or ask another agent to prepare unrelated records. `connect`, `connect_checked.py` and `prepare_bulk.py` always preview before publishing; nothing is registered until the confirm step runs. Originals are never edited — only reviewed copies are prepared and sent to the provider.
+
+## 10. Shared sets and onboarding defaults
+
+Every agent should see the fleet's shared sets (shared knowledge folder, skills catalog), not only its own brain. Connect a shared set once, then share it: `python3 ../super-jev/share_pointers.py --principal NAME --pointer POINTER` (exact names, `--dry-run` to preview). A pointer with any source in an agent's brain, `documents/` or `profile/` is refused. It uses the memory `register` action on the already-connected pointer: no reconnect, no writer, no Jev call, zero cost. It drops that pointer's cached answers (new generation), and a stale pointer must be refreshed first.
+
+List the shared sets once in `~/.local/state/super-jev/shared-pointers.json` (`{"pointers": ["fleet-knowledge", "main-skills-catalog"]}`, exact names). Every fully connected `prepare_bulk.py` run then shares them with its `--principal`s (`--no-shared` to skip); for an agent already connected run `share_pointers.py --principal NAME --shared`. Never connect a per-agent copy of a shared folder; share the one pointer.
+
+Git worktree copies (`.claude/worktrees/`, or any checkout whose `.git` file points into `.git/worktrees/`) are never inventoried, even as a `--root`: they are stale copies of a brain or repo.
 
 Deeper reference: [connector setup](../super-jev/references/connectors.md). Daily use of an already-connected pointer: [`super-jev/SKILL.md`](../super-jev/SKILL.md).

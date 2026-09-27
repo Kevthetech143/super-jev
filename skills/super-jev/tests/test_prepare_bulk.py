@@ -93,6 +93,54 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
     assert "password" in held_by_name["pw.md"]
 
 
+def test_inventory_never_picks_up_git_worktree_copies(tmp_path):
+    # One agent carried 23 pointers of a Claude worktree's stale copy of its own brain.
+    brain = tmp_path / "brain"
+    (brain / ".git").mkdir(parents=True)
+    (brain / "live.md").write_text("# live\nbody\n")
+    claude_wt = brain / ".claude" / "worktrees" / "wf_1"
+    claude_wt.mkdir(parents=True)
+    (claude_wt / ".git").write_text(f"gitdir: {brain}/.git/worktrees/wf_1\n")
+    (claude_wt / "copy.md").write_text("# stale copy\nbody\n")
+    # A worktree checkout anywhere (no .claude in the path): its .git is a file into .git/worktrees/.
+    other_wt = tmp_path / "site-worktrees" / "migration"
+    (other_wt / "docs").mkdir(parents=True)
+    (other_wt / ".git").write_text(f"gitdir: {tmp_path}/site/.git/worktrees/migration\n")
+    (other_wt / "docs" / "spec.md").write_text("# spec copy\nbody\n")
+    # A submodule's .git file points into .git/modules/: that is a real checkout, kept.
+    sub = brain / "vendor"
+    sub.mkdir()
+    (sub / ".git").write_text(f"gitdir: {brain}/.git/modules/vendor\n")
+    (sub / "notes.md").write_text("# vendor notes\nbody\n")
+
+    files, _ = pb.inventory([brain])
+    assert sorted(p.relative_to(brain).as_posix() for p in files) == ["live.md", "vendor/notes.md"]
+    # A --root that is itself the worktree copy is refused too, so no per-folder pointer is born.
+    assert pb.inventory([claude_wt]) == ([], [])
+    assert pb.inventory([other_wt]) == ([], [])
+    assert pb.inventory([other_wt / "docs"]) == ([], [])
+
+
+def test_a_connect_shares_the_fleet_shared_list_unless_no_shared(tmp_path, monkeypatch):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "a.md").write_text("# A\nbody\n")
+    seen = []
+    monkeypatch.setitem(sys.modules, "share_pointers", type(sys)("share_pointers"))
+    sys.modules["share_pointers"].share_defaults = lambda principals, memory=None: seen.append(list(principals))
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    (tmp_path / "cache").mkdir()
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
+    monkeypatch.setattr(pb, "gate", lambda path, claim, *a, **k: {"state": "SUPPORTED", "confidence": 0.95, "secs": 0})
+    monkeypatch.setattr(pb, "gate_many", lambda path, claims, *a, **k: [{"state": "SUPPORTED", "confidence": 0.95, "secs": 0} for _ in claims], raising=False)
+    monkeypatch.setattr(pb, "memory", fake_connect_memory([]))
+    monkeypatch.setattr(sys, "argv", base_argv(root, principal="newbot"))
+    assert pb.main() == 0
+    assert seen == [["newbot"]]
+    monkeypatch.setattr(sys, "argv", base_argv(root, principal="newbot", extra=["--no-shared", "--refresh"]))
+    pb.main()
+    assert seen == [["newbot"]]
+
+
 def test_inventory_follows_a_symlinked_folder_but_not_into_a_vault(tmp_path):
     # Path.rglob never entered a symlinked folder, so a skill installed as a link was never connected.
     root, elsewhere = tmp_path / "skills", tmp_path / "release"
