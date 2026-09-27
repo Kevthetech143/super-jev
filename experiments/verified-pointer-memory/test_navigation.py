@@ -1,5 +1,6 @@
 """Connector navigation metadata and authorization contracts."""
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -165,7 +166,7 @@ class NavigationTests(unittest.TestCase):
                       'principal': 'owner', 'question': 'where'},
                      load_config(config_path))
         self.assertEqual(result['status'], 'candidates')
-        self.assertEqual(result['candidates'][0]['originalPath'], str(self.two.resolve()))
+        self.assertEqual(result['candidates'][0]['originalPath'], os.path.abspath(self.two))
         self.assertEqual(result['complete'], False)
 
 
