@@ -301,6 +301,9 @@ def run(request, config):
             pointers.append({
                 'pointer': name, 'dataset': binding['dataset'],
                 'generation': binding['generation'],
+                # Safe readers/healers must not fall back to a former raw prepare-cache.
+                'viewOriginals': sorted(set(entry.get('viewPolicies', {})) |
+                                        set(binding.get('snapshot', {}).get('entry', {}).get('viewPolicies', {}))),
                 'checkedAt': entry.get('checkedAt'),
                 'datasetScope': entry.get('scope', entry.get('description', '')),
                 'snapshotStatus': error['status'] if error else 'available',

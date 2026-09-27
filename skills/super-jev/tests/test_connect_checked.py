@@ -77,6 +77,19 @@ def test_source_change_after_gate_cannot_get_a_fresh_unchecked_hash(tmp_path, mo
     assert len(calls) == 1
 
 
+def test_transformed_description_cannot_leak_a_hidden_literal_to_gate(tmp_path, monkeypatch):
+    f = make_source_file(tmp_path, 'note.md', 'Alice Example wrote this.\n')
+    policy = {'version': 1, 'operations': [{'op': 'redact-literals', 'values': ['Alice Example'],
+                                          'replacement': '[PERSON_REDACTED]'}]}
+    request = make_request(tmp_path, [{'path': str(f), 'description': 'Alice Example private notes',
+                                      'viewTransform': policy}])
+    calls = []
+    monkeypatch.setattr(cc, 'gate', lambda *a: calls.append(a) or {'state': 'SUPPORTED', 'confidence': 1, 'secs': 0})
+    monkeypatch.setattr(sys, 'argv', ['connect_checked.py', str(request), '--check-only'])
+    assert cc.main() == 1
+    assert not calls
+
+
 def test_not_supported_refuses_and_never_calls_memory(tmp_path, monkeypatch, capsys):
     f = make_source_file(tmp_path, "a.md")
     req_path = make_request(tmp_path, [{"path": str(f), "description": "bad description"}])

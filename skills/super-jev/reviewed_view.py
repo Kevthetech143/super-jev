@@ -39,7 +39,9 @@ def derive(text, policy):
                 for value in sorted(set(values), key=lambda v: (-len(v), v)):
                     text = text.replace(value, operation['replacement'])
             else:
-                text = ''.join(line for line in text.splitlines(keepends=True) if not any(v in line for v in values))
+                # The chunker defines lines with LF only. Unicode separators inside one
+                # such line must never detach hidden text from its drop marker.
+                text = '\n'.join(line for line in text.split('\n') if not any(v in line for v in values))
         else:
             raise ValueError('unknown view operation')
         if len(text.encode()) > 5 * 1024 * 1024:

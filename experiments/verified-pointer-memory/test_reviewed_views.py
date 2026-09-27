@@ -166,3 +166,81 @@ def test_legacy_handmade_dataset_cannot_be_replaced_by_raw(setup):
     req['replace'] = True
     del req['sources'][0]['viewTransform']
     assert connect(confirm(req, config), config)['reason'] == 'legacy-view-policy-required'
+
+
+@pytest.mark.parametrize('field', ['description', 'navigationPath', 'id'])
+def test_hidden_literal_in_routing_metadata_is_refused(setup, field):
+    _, config, req = setup
+    if field == 'navigationPath':
+        req['structure'] = 'folder-tree'
+        req['sources'][0][field] = ['Alice Example']
+    else:
+        req['sources'][0][field] = 'Alice Example private notes'
+    assert connect(req, config)['reason'] == 'view-metadata-held'
+    assert not Path(config['registry']).exists()
+
+
+def test_transformed_catalog_omits_raw_filename_and_parent_labels(setup):
+    src, config, req = setup
+    named = src.parent / 'Alice-Example' / 'Alice-Example-notes.md'
+    named.parent.mkdir()
+    named.write_bytes(src.read_bytes())
+    req['sources'][0]['path'] = str(named)
+    req['structure'] = 'folder-tree'
+    preview = connect(req, config)
+    assert 'Alice' not in json.dumps(preview['catalog'])
+    assert connect(confirm(req, config), config)['status'] == 'registered'
+    m, _ = manifest(config)
+    assert 'Alice' not in json.dumps(m['catalog'])
+
+
+@pytest.mark.parametrize('separator', ['\u2028', '\u0085'])
+def test_unicode_separator_cannot_detach_text_from_its_drop_marker(setup, separator):
+    src, config, req = setup
+    src.write_text('secret-ish Jane Roe' + separator + 'PRIVATE: x\nPublic notes\n')
+    assert connect(confirm(req, config), config)['status'] == 'registered'
+    m, _ = manifest(config)
+    assert Path(m['sources'][0]['path']).read_text() == 'Public notes\n'
+
+
+@pytest.mark.parametrize('suffix', ['.json', '-report.json'])
+def test_raw_bulk_artifact_blocks_view_conversion(setup, monkeypatch, suffix):
+    _, config, req = setup
+    import prepare_bulk
+    cache = Path(config['db']).parent / 'cache'
+    cache.mkdir()
+    (cache / ('notes' + suffix)).write_text('{}')
+    monkeypatch.setattr(prepare_bulk, 'CACHE_DIR', cache)
+    assert connect(req, config)['reason'] == 'view-bulk-cache-conflict'
+    assert not Path(config['registry']).exists()
+
+
+def test_panel_keeps_view_guard_when_current_registry_policy_is_missing(setup):
+    import cli
+    src, config, req = setup
+    assert connect(confirm(req, config), config)['status'] == 'registered'
+    cfg = Path(config['db']).with_suffix('.json')
+    cfg.write_text(json.dumps(config))
+    loaded = cli.load_config(cfg)
+    panel = cli.run({'action': 'panel', 'principal': 'owner'}, loaded)
+    assert panel['pointers'][0]['viewOriginals'] == [str(src)]
+    registry = json.loads(Path(config['registry']).read_text())
+    del registry['datasets']['notes']['viewPolicies']
+    Path(config['registry']).write_text(json.dumps(registry))
+    panel = cli.run({'action': 'panel', 'principal': 'owner'}, loaded)
+    assert panel['pointers'][0]['viewOriginals'] == [str(src)]
+    assert cli.run({'action': 'panel', 'principal': 'outsider'}, loaded)['pointers'] == []
+
+
+def test_fallback_catalog_uses_opaque_view_label(setup, monkeypatch):
+    _, config, req = setup
+    assert connect(confirm(req, config), config)['status'] == 'registered'
+    m, _ = manifest(config)
+    del m['catalog']
+    m['sources'][0]['originalPath'] = '/synthetic/Alice-Example-notes.md'
+    service = Service(config['db'], config['registry'], lambda *_: None)
+    binding = service.pointer('notes', 'owner')
+    monkeypatch.setattr(service, 'pointer', lambda *_: binding)
+    monkeypatch.setattr(service, '_manifest', lambda _: m)
+    begun = service._navigate_begin('notes', 'owner', 'notes', None)
+    assert 'Alice' not in json.dumps(begun['catalog'])

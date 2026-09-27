@@ -721,7 +721,9 @@ class Service:
                       'children': ['source:' + digest(source_id)[:24]
                                    for source_id in sorted(sources)]}]
             nodes.extend({'id': 'source:' + digest(source_id)[:24],
-                          'label': Path(source.get('originalPath', source['path'])).name,
+                          'label': ('Reviewed source ' + digest(source_id)[:12]
+                                    if source.get('viewTransform') else
+                                    Path(source.get('originalPath', source['path'])).name),
                           'description': source.get('description', ''),
                           'sourceId': source_id}
                          for source_id, source in sorted(sources.items()))
