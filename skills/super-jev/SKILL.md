@@ -38,6 +38,8 @@ Super Jev: I didn't have this. Want me to find it by hand and save it for next t
 
 **A harness relaying `ask.py` output to a human must pass that line on verbatim.**
 
+Just above it, a miss prints `What was searched:` (connected sets, which had matches, files read with the closest named) and `Next step (pick one):` with exact commands. Act on it instead of guessing: if the answer lives in a file you have, connect its folder with the printed `prepare_bulk.py` command; if you know the answer, save it with the printed `--add` command; otherwise tell your human it was not found and offer a by-hand search. A hit marked `possible` is a lead, not an answer: open and check the file before using it.
+
 ## Maturity
 
 Proven in current use: skill search, file-level `navigate`, checked connect, bulk prepare, `check` as a description gate, dataset and pointer listing, and the not-connected path. Experimental: passage-level `search`, saved-answer reuse (`approve`), and `verify` — treat their results as leads and read the evidence twice.
