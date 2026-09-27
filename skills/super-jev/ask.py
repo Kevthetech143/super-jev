@@ -1502,6 +1502,11 @@ def word_pairs(text: str) -> set:
             if len(w) > 2 and w not in QUERY_STOPWORDS]
     return set(zip(toks, toks[1:]))
 
+def connector_names(ptr: str) -> list:
+    """The --name list a pointer was connected with (its report; a split part uses its parent's)."""
+    return (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("names") or []
+
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -1524,9 +1529,10 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
                                 if a != b and a in terms and b in terms))  # "step by step" is no phrase
     qkeys = {(a[:4], b[:4]) for a, b in qpairs}
     for ptr in pointers:
+        names = connector_names(ptr)
         for path, entry in load_cache_files(ptr).items():
             if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
-                    or prepare_bulk.is_test_material(path)):
+                    or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names))):
                 continue
             try:
                 raw = Path(path).read_bytes()
@@ -2083,8 +2089,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # those copies ARE its answers. Folder inventory already keeps the copies out of every
     # other pointer (prepare_bulk.is_bench_dataset), so a path that reaches here came from its
     # own registered pointer and must not be dropped by where it lives.
+    names_of = {ptr: connector_names(ptr) for ptr in {m[2] for m in merged}}
     merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR
-                     and not prepare_bulk.is_test_material(m[1])
+                     and not prepare_bulk.is_test_material(
+                         m[1], prepare_bulk.named_exactly(Path(m[1]).name, names_of[m[2]]))
                      and not other_person(m[1])), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
     route = {}

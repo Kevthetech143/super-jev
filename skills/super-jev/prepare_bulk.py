@@ -274,9 +274,20 @@ FIXTURE_RE = re.compile(r"(^|/)(__fixtures__|__mocks__|test[-_]?data|sample[-_]d
                         rf"|{TEST_CONTEXT}(fixtures?/|evidence/(.+/)?sources/)", re.I)
 
 
-def is_test_material(path: str) -> bool:
+def is_test_material(path: str, named: bool = False) -> bool:
+    """A file its connector named exactly (named=True) is judged by its folder only: naming a
+    run log such as superjev-test-timeline.md connects it on purpose, while a named file inside
+    a test/scratch or fixture folder stays out."""
     p = Path(path).as_posix()
+    if named:
+        p = p.rpartition("/")[0] + "/"
     return bool(TEST_MATERIAL_RE.search(p) or FIXTURE_RE.search(p))
+
+
+def named_exactly(filename: str, names) -> bool:
+    """True when a --name with no wildcard is this file's own name (case-insensitive)."""
+    return any(isinstance(n, str) and not any(c in n for c in "*?[") and n.casefold() == filename.casefold()
+               for n in names or [])
 
 
 # Super Jev's own bench/eval datasets (e.g. health-selected-passages): copies of passages,
@@ -444,7 +455,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
     logins.md or any other file the roots would never have admitted."""
     bases = [Path(r).resolve() for r in list(roots) + list(allow_targets or [])]
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
-    files, held, seen, worktree_skips = [], [], set(), 0
+    files, held, seen, worktree_skips, test_skips = [], [], set(), 0, 0
     for root in roots:
         glob_iter, linked = walk_md(root, no_recurse)
         # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
@@ -466,8 +477,10 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if any(part.casefold() in SKIP_PARTS or part.startswith(".")
                    for part in p.relative_to(root).parts + rp.relative_to(base).parts):
                 continue
-            if (_excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix())
-                    or is_bench_dataset(str(rp))):
+            if _excluded(p.relative_to(root).as_posix(), excludes) or is_bench_dataset(str(rp)):
+                continue
+            if is_test_material(p.relative_to(root).as_posix(), named_exactly(p.name, names)):
+                test_skips += 1
                 continue
             if is_worktree_copy(p.absolute()) or is_worktree_copy(rp):
                 worktree_skips += 1
@@ -496,6 +509,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                 else:
                     held.append((str(p), "secret-keyword-like file name; review before onboarding")); continue
             files.append(p)
+    if test_skips:
+        print(f"  SKIP  {test_skips} test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); name one exactly with --name to connect it")
     if worktree_skips:
         print(f"  SKIP  {worktree_skips} file(s) inside git worktree copies (.claude/worktrees/ or a worktree checkout)")
     return files, held

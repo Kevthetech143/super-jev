@@ -143,7 +143,8 @@ entry file in place; files that share a name are shown to routing with their
 folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktree copies (any
 `.claude/worktrees/` folder, or a checkout whose `.git` file points into another repo's
 `.git/worktrees/`, even when that checkout is the `--root` itself), test/scratch output
-(`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) and vault-style
+(`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`; a file named
+exactly with `--name` is judged by its folder only) and vault-style
 subdirectories, and holds back any file that looks like it carries
 card/password text or sits over the 250,000-byte size ceiling (a bigger-than-one-call file is gated in parts), writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
