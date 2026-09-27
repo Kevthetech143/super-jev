@@ -2073,8 +2073,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             hint = refresh_hint(ptr, principal, kind)
             # A stale pointer never has to wait on a human to run the refresh hint above by
             # hand: this starts the exact same prepare_bulk.py --refresh in the background,
-            # bounded (one in flight per principal, per-pointer cooldown, hourly cap -- see
-            # auto_heal.py), and returns immediately either way. It never blocks this lookup
+            # bounded (one in flight per principal, the rest queued behind it, per-pointer
+            # cooldown, hourly cap -- see auto_heal.py), and returns immediately either way. It never blocks this lookup
             # and never changes what this lookup reports for the pointer that triggered it;
             # it only means the *next* lookup may no longer hit it.
             heal_note = ""
@@ -2085,7 +2085,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 if result == "started":
                     heal_note = " (auto-heal: refresh started in background)"
                 elif result == "in-progress":
-                    heal_note = " (auto-heal: refresh already in progress)"
+                    heal_note = " (auto-heal: another refresh in progress; queued to run after it)"
                 elif result == "cooldown":
                     err = auto_heal.last_refresh_error(principal, ptr)
                     heal_note = (f" (auto-heal: last refresh FAILED: {err}; retrying after cooldown)" if err

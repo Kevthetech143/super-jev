@@ -9,6 +9,9 @@ same held-file behavior) that a human would run by hand.
 
 Bounds (all per principal, state kept in autoheal-state/):
   - one refresh in flight at a time per principal (lock file, stale after LOCK_STALE_SECS)
+  - a pointer that finds the lock held is queued; the refresh holding the lock heals the queue
+    one pointer at a time, oldest first, before it releases the lock (drain), so a pointer
+    that sorts after others is never skipped for good while they keep changing
   - a cooldown per pointer (default 10 min) before it is eligible to retrigger
   - a cap on refreshes per principal per rolling hour (default 6)
 Every attempt (started or skipped, and why) is appended to autoheal.log as one JSON line.
@@ -17,6 +20,7 @@ This only ever *starts* a refresh; it does not change what a lookup reports for 
 that triggered it (that pointer's current lookup still reports its real status). The point is
 the *next* lookup, after the background refresh finishes, no longer hits the stale pointer.
 """
+import fcntl
 import json
 import os
 import shlex
@@ -24,6 +28,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -61,7 +67,38 @@ def _load_state(principal: str) -> dict:
 
 def _save_state(principal: str, state: dict) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    _state_path(principal).write_text(json.dumps(state))
+    tmp = STATE_DIR / f".{principal}.json.{os.getpid()}.{threading.get_ident()}"
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, _state_path(principal))  # a reader never sees a half-written file
+
+
+@contextmanager
+def _state_txn(principal: str):
+    """Load, change and save the state under a file lock, so a lookup queuing a pointer and
+    the lock holder's drain never overwrite each other's change."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / f".{principal}.state-lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        state = _load_state(principal)
+        state.setdefault("pending", {})
+        yield state
+        _save_state(principal, state)
+
+
+def _mark(principal: str, pointer: str, when: float, attempts: list = None) -> None:
+    """Start `pointer`'s cooldown (and record the hourly attempts) and drop it from the queue."""
+    with _state_txn(principal) as state:
+        state["pointers"][pointer] = when
+        if attempts is not None:
+            state["attempts"] = attempts
+        state["pending"].pop(pointer, None)
+
+
+def _queue(principal: str, pointer: str, kind: str) -> None:
+    """Queue a pointer that found the lock held; the holder's drain heals it (oldest first)."""
+    with _state_txn(principal) as state:
+        first = (state["pending"].get(pointer) or {}).get("ts", time.time())
+        state["pending"][pointer] = {"kind": kind, "ts": first}
 
 
 def _lock_path(principal: str) -> Path:
@@ -114,14 +151,17 @@ def _publish_lock(lock: Path, payload: bytes) -> bool:
             pass
 
 
-def _acquire_lock(principal: str, pointer: str) -> bool:
+def _acquire_lock(principal: str, pointer: str) -> str:
+    """The new lock's token (truthy) if acquired, else ""."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     lock = _lock_path(principal)
-    payload = json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer}).encode()
+    token = uuid.uuid4().hex
+    payload = json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer,
+                          "token": token}).encode()
     if _publish_lock(lock, payload):
-        return True
+        return token
     if _lock_holder_alive(lock):
-        return False
+        return ""
     # Dead/stale lock: clear it and retry once. This retry still has a narrow race with
     # another racer doing the same thing, but that only matters for the rare dead-holder
     # case; the common contended case above is race-free.
@@ -129,13 +169,33 @@ def _acquire_lock(principal: str, pointer: str) -> bool:
         lock.unlink()
     except OSError:
         pass
-    return _publish_lock(lock, payload)
+    return token if _publish_lock(lock, payload) else ""
 
 
-def _release_lock(principal: str) -> None:
+def _hold_lock(principal: str, token: str, **fields) -> bool:
+    """Refresh our own lock (matched by token): a new ts plus `fields`. False if it is not ours."""
+    lock = _lock_path(principal)
     try:
-        _lock_path(principal).unlink()
-    except OSError:
+        info = json.loads(lock.read_text())
+    except (OSError, ValueError):
+        return False
+    if not token or info.get("token") != token:
+        return False
+    info.update(fields, ts=time.time())
+    tmp = lock.parent / f".{lock.name}.hold.{os.getpid()}.{threading.get_ident()}"
+    tmp.write_text(json.dumps(info))
+    os.replace(tmp, lock)
+    return True
+
+
+def _release_lock(principal: str, token: str = None) -> None:
+    """Remove the lock; given a token, only if the lock is still that one."""
+    lock = _lock_path(principal)
+    try:
+        if token is not None and json.loads(lock.read_text()).get("token") != token:
+            return
+        lock.unlink()
+    except (OSError, ValueError):
         pass
 
 
@@ -206,6 +266,7 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
         _log(principal=principal, pointer=owner, action="skip-reconnect", reason="cooldown")
         return "cooldown"
     if not _acquire_lock(principal, owner):
+        _queue(principal, owner, "reconnect")
         return "in-progress"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
     out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
@@ -224,8 +285,7 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
     if code == 0:
         # Cooldown only after a success: a failed or timed-out reconnect leaves the
         # pointer eligible for maybe_heal's background refresh.
-        state["pointers"][owner] = time.time()
-        _save_state(principal, state)
+        _mark(principal, owner, time.time())
     _log(principal=principal, pointer=owner, action="reconnect", result=result, cmd=cmd)
     return result
 
@@ -235,13 +295,14 @@ def _memory(req: dict) -> dict:
     return memory(req)
 
 
-def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
+def reconnect_recipe(pointer: str, principal: str, memory=None, held: bool = False) -> str:
     """Heal a stale pointer that prepare_bulk did not build (no report): replay the connect
     request recorded when it was connected (memory action "recipe"), at the files' current
     bytes, with the same paths, descriptions, structure and principals. Local only: no
     writer or Jev call, and the connector's own secret scan still runs. Returns
     "reconnected", or why not: "no-recipe", "manual" (a --add record re-adds itself),
-    "cooldown", "in-progress" or "failed". Never raises."""
+    "cooldown", "in-progress" or "failed". Never raises. `held`: the caller (a drain) already
+    holds the lock."""
     if "-manual-" in pointer:
         return "manual"
     memory = memory or _memory
@@ -257,7 +318,8 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     if time.time() - state["pointers"].get(pointer, 0) < COOLDOWN_SECS:
         _log(principal=principal, pointer=pointer, action="skip-recipe", reason="cooldown")
         return "cooldown"
-    if not _acquire_lock(principal, pointer):
+    if not held and not _acquire_lock(principal, pointer):
+        _queue(principal, pointer, "recipe")
         return "in-progress"
     try:
         req = {"action": "connect", "pointer": recipe["pointer"], "dataset": recipe["dataset"],
@@ -283,10 +345,10 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     except Exception:
         result, preview = "failed", {}
     finally:
-        _release_lock(principal)
+        if not held:
+            _release_lock(principal)
     if result == "reconnected":
-        state["pointers"][pointer] = time.time()
-        _save_state(principal, state)
+        _mark(principal, pointer, time.time())
     _log(principal=principal, pointer=pointer, action="reconnect-recipe", result=result,
          reason=preview.get("reason") if result == "failed" else None)
     return result
@@ -324,22 +386,105 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
              attempts_last_hour=len(recent))
         return "rate-limited"
 
-    if not _acquire_lock(principal, pointer):
-        _log(principal=principal, pointer=pointer, action="skip", reason="in-progress")
+    token = _acquire_lock(principal, pointer)
+    if not token:
+        _queue(principal, pointer, "refresh")
+        _log(principal=principal, pointer=pointer, action="skip", reason="in-progress", queued=True)
         return "in-progress"
 
-    state["pointers"][pointer] = now
-    state["attempts"] = recent + [now]
-    _save_state(principal, state)
+    _mark(principal, pointer, now, recent + [now])
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     out_log = STATE_DIR / f"{principal}-{pointer}-last-refresh.log"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args]
     lock_file = str(_lock_path(principal))
-    # Detached background run: the lock is released by the child itself when it exits (success
-    # or failure) so a crashed refresh cannot wedge the principal's lock past LOCK_STALE_SECS
-    # anyway, but a clean exit releases it immediately rather than waiting for staleness.
-    wrapper = f"{shlex.join(cmd)} >{shlex.quote(str(out_log))} 2>&1; rc=$?; rm -f {shlex.quote(lock_file)}; exit $rc"
-    subprocess.Popen(["/bin/sh", "-c", wrapper], cwd=str(HERE), start_new_session=True)
+    drain_cmd = [sys.executable, str(HERE / "auto_heal.py"), "--drain", principal, token]
+    # Detached background run: after the refresh, the child drains the pointers queued while it
+    # held the lock, then releases it (the drain releases; if the drain itself fails, the shell
+    # removes the lock), so a crashed refresh cannot wedge the principal's lock past
+    # LOCK_STALE_SECS anyway, but a clean exit releases it immediately.
+    wrapper = (f"{shlex.join(cmd)} >{shlex.quote(str(out_log))} 2>&1; rc=$?; "
+               f"{shlex.join(drain_cmd)} >/dev/null 2>&1 || rm -f {shlex.quote(lock_file)}; exit $rc")
+    proc = subprocess.Popen(["/bin/sh", "-c", wrapper], cwd=str(HERE), start_new_session=True)
+    # The lock names the child, not this lookup: after the lookup exits, a live refresh must
+    # still hold the lock, or the next lookup takes it as dead and starts a second refresh.
+    if getattr(proc, "pid", None):
+        _hold_lock(principal, token, pid=proc.pid)
     _log(principal=principal, pointer=pointer, action="started", cmd=cmd)
     return "started"
+
+
+def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
+    """Heal one queued prepare_bulk pointer inline, under the drain's lock, with maybe_heal's and
+    reconnect_now's own rules: changed files get a refresh (per-pointer cooldown, hourly cap);
+    a pointer queued by reconnect_now with nothing to redraft gets the --no-findability
+    reconnect. Returns "refreshed", "reconnected", or why not."""
+    report, owner = _report_for(pointer, rc.CACHE_DIR)
+    args = rc.prepare_args(report) if isinstance(report, dict) else None
+    if args is None:
+        return "no-report"
+    cache_path = rc.CACHE_DIR / f"{owner}.json"
+    try:
+        cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
+    except ValueError:
+        cache = {}
+    changed = bool(rc.changed_files(report, cache))
+    if not changed and kind != "reconnect":
+        return "no-change"  # refreshed since it was queued
+    state, now = _load_state(principal), time.time()
+    if now - state["pointers"].get(owner, 0) < COOLDOWN_SECS:
+        return "cooldown"
+    cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args]
+    if changed:
+        recent = [t for t in state["attempts"] if now - t < 3600]
+        if len(recent) >= MAX_PER_HOUR:
+            return "rate-limited"
+        _mark(principal, owner, now, recent + [now])
+    else:
+        cmd.append("--no-findability")
+    try:
+        with (STATE_DIR / f"{principal}-{owner}-last-refresh.log").open("w") as out:
+            code = subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(HERE),
+                                  timeout=LOCK_STALE_SECS // 2).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        code = 1
+    if code:
+        return "failed"
+    if not changed:
+        _mark(principal, owner, time.time())
+    return "refreshed" if changed else "reconnected"
+
+
+def drain(principal: str, token: str, memory=None) -> int:
+    """Run by the refresh holding the lock, before it releases it: heal the queued pointers one
+    at a time, oldest first, each at most once per drain, then release the lock. A pointer still
+    cooling down or over the hourly cap stays queued for the next drain. Touches nothing if the
+    lock is no longer this refresh's (token)."""
+    tried = set()
+    try:
+        while True:
+            pending = _load_state(principal).get("pending") or {}
+            todo = sorted((v.get("ts", 0), p) for p, v in pending.items() if p not in tried)
+            # Refresh the lock's ts per pointer so a long drain is not taken for a dead one.
+            if not todo or not _hold_lock(principal, token):
+                return 0
+            pointer = todo[0][1]
+            tried.add(pointer)
+            kind = pending[pointer].get("kind")
+            try:
+                if kind == "recipe":
+                    result = reconnect_recipe(pointer, principal, memory=memory, held=True)
+                else:
+                    result = _drain_prepare(pointer, principal, kind)
+            except Exception:
+                result = "failed"
+            if result not in ("cooldown", "rate-limited"):
+                with _state_txn(principal) as state:
+                    state["pending"].pop(pointer, None)
+            _log(principal=principal, pointer=pointer, action="drain", kind=kind, result=result)
+    finally:
+        _release_lock(principal, token)
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--drain"] and len(sys.argv) == 4:
+    sys.exit(drain(sys.argv[2], sys.argv[3]))
