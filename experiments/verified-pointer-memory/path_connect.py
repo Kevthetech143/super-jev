@@ -50,7 +50,7 @@ def _atomic(path, data):
 def _manual_conflicts(config, principals, sources):
     """Read only registered, in-scope manual records; never echo their contents."""
     literals = {value for source in sources for op in (source.get('viewTransform') or {}).get('operations', [])
-                if op['op'] == 'redact-literals' for value in op['values']}
+                if op['op'] in ('redact-literals', 'drop-lines-containing') for value in op['values']}
     if not literals or not Path(config['db']).exists():
         return None
     with sqlite3.connect(config['db']) as db:
