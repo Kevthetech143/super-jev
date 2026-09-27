@@ -1477,6 +1477,22 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
     except Exception:
         pass  # best effort: an unsaved pointer is just asked again next time
 
+def refresh_would_admit(path: str, ptr: str) -> bool:
+    """Would the pointer's own refresh admit this file where it now resolves? The same rule
+    prepare_bulk.inventory applies to a link target: under a recorded root or allow-target,
+    no vault folder (profile/, documents/), no hidden folder, no logins/secret/backup name.
+    No recorded report (a connector-built pointer): no."""
+    report = auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0]
+    if not isinstance(report, dict):
+        return False
+    rp = Path(os.path.realpath(path))
+    bases = [Path(os.path.realpath(b)) for b in (report.get("roots") or []) + (report.get("allowTargets") or [])]
+    base = next((b for b in bases if rp.is_relative_to(b)), None)
+    name = rp.name.casefold()
+    if base is None or ".bak" in name or name == "logins.md" or name.endswith("-secret.md"):
+        return False
+    return not any(x.casefold() in prepare_bulk.SKIP_PARTS or x.startswith(".") for x in rp.relative_to(base).parts)
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -1504,7 +1520,8 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
                 # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
                 # search its current text, held back only as a refresh would hold it.
-                if not entry.get("sha256") or len(raw) > prepare_bulk.CEILING_BYTES or has_secret(text):
+                if (not entry.get("sha256") or len(raw) > prepare_bulk.CEILING_BYTES or has_secret(text)
+                        or not refresh_would_admit(path, ptr)):
                     continue  # never reviewed at a known version, or a refresh would hold it
                 changed.append(path)
             heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
@@ -2288,7 +2305,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             side = [p for p, f in (files or {}).items() if f["verdict"] == ("supported" if word == "TRUE" else "contradicted")
                     and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE]
             best = max(side, key=lambda p: files[p]["prob"])
-            claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
+            if best not in (_STAGE.get("word_changed") or []):  # never save from text no refresh has passed
+                claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
         log(sdir, "claim", question=question, result=word)
         if top:
             print("Files found:")
