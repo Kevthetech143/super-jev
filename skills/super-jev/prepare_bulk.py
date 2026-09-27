@@ -30,7 +30,7 @@ Pipeline per run:
      another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
      keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc. Files matching
-     card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
+     card/password-like patterns or over the size ceiling (1,000,000 bytes; bigger files are gated in parts) are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
@@ -192,7 +192,14 @@ def normalize_for_scan(text: str) -> str:
     s = text.casefold() if text.isascii() else unicodedata.normalize("NFKC", text).casefold()
     return _CTRL_RE.sub(" ", _NON_ASCII_RE.sub(_fold_run, s))
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
-CEILING_BYTES = 90_000  # conservative stand-in for the gate's 32k-token ceiling
+# One file's size limit. The label gate splits evidence over Jev's input ceiling into parts and
+# merges the verdicts (lib/jev_client.check; the fleet door does the same), and the writer reads an
+# excerpt, so a big file needs no hand split. The old 90,000-byte hold left every notes log, dead-ends
+# list and knowledge file over it unsearchable. This bound keeps one file's gate to a handful of calls.
+CEILING_BYTES = 1_000_000
+# One connect (a part pointer) may hold at most 5 MiB (path_connect.MAX_BYTES); parts close early
+# before that. Under the old 90,000-byte file limit 50 files never reached it, so parts are unchanged.
+PART_BYTES = 4_500_000
 
 # Four gated labels drafted by the writer, validated locally, then folded into the one
 # claim gated per file. A value outside its own enum is coerced to "unknown" rather than
@@ -508,6 +515,20 @@ def secret_detail(p: Path):
         if _token_hit(line):
             return {"type": "token/key-like text", "line": i, "masked": re.sub(r"[A-Za-z0-9]", "#", line)}
     return None
+
+
+def split_parts(ordered: list, limit: int, part_bytes: int = None) -> list:
+    """Files in order, cut into parts of at most `limit` files and `part_bytes` bytes (PART_BYTES)."""
+    part_bytes = PART_BYTES if part_bytes is None else part_bytes
+    parts, cur, size = [], [], 0
+    for p in ordered:
+        n = Path(p).stat().st_size if Path(p).exists() else 0
+        if cur and (len(cur) >= limit or size + n > part_bytes):
+            parts.append(cur); cur, size = [], 0
+        cur.append(p); size += n
+    if cur:
+        parts.append(cur)
+    return parts
 
 
 def write_held_txt(pointer: str, held: list) -> None:
@@ -1147,7 +1168,7 @@ def main() -> int:
         return 1
 
     ordered = sorted(connect_set, key=str)
-    parts = [ordered[i:i + a.limit] for i in range(0, len(ordered), a.limit)]
+    parts = split_parts(ordered, a.limit)
     if len(parts) > 1:
         print(f"splitting {len(ordered)} approved files into {len(parts)} parts of at most {a.limit}")
 

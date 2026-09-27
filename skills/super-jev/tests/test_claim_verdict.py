@@ -160,3 +160,16 @@ def test_a_timeout_in_claim_mode_is_not_retried(tmp_path, monkeypatch):
     monkeypatch.setitem(ask._CLAIM, "text", "s")
     ask._STAGE.clear()
     assert ask.judge_listwise("s", [a]) == (None, None) and len(calls) == 1
+
+
+def test_claims_file_checks_every_statement(tmp_path, monkeypatch, capsys):
+    f = tmp_path / "report-claims.txt"
+    f.write_text("# worker report\nThe limit is 255.\n\nTests pass in test_x.py.\n")
+    seen = []
+    monkeypatch.setattr(ask, "resolve_principal", lambda argv: ("p", argv))
+    monkeypatch.setattr(ask, "state_dir", lambda p: tmp_path / "s")
+    monkeypatch.setattr(ask, "lookup", lambda q, p, s: seen.append((q, ask._CLAIM["text"])) or 0)
+    monkeypatch.setattr(sys, "argv", ["ask.py", "--claims-file", str(f), "--claim", "One more."])
+    assert ask._main() == 0
+    assert [q for q, _ in seen] == ["The limit is 255.", "Tests pass in test_x.py.", "One more."]
+    assert all(q == c for q, c in seen) and ask._CLAIM["text"] is None
