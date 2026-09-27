@@ -492,6 +492,10 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
 
 # navigation-cli refuses longer questions (src/enhance/navigation.ts MAX_QUESTION)
 MAX_QUESTION = 8000
+# What paid_replay.py may rely on, checked by value. 2 = with SUPERJEV_REPLAY=1 a lookup reads
+# and writes no saved answer or claim verdict, never reconnects or auto-heals a stale
+# pointer, and `ask.py --principal P -- QUESTION` reads QUESTION literally.
+REPLAY_PROTOCOL = 2
 # How many navigate() calls run at once (each is its own remote provider call).
 # Default 6 keeps a many-pointer lookup off the provider's queue; override for a
 # faster/slower provider. Falls back to the default on a non-positive-int value.
@@ -1880,8 +1884,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
+    # SUPERJEV_REPLAY=1 (paid_replay.py): answer live; never read a saved answer or claim verdict.
+    replay = os.environ.get("SUPERJEV_REPLAY") == "1"
     if _CLAIM["text"]:
-        saved = claim_cache_get(sdir, _CLAIM["text"])
+        saved = None if replay else claim_cache_get(sdir, _CLAIM["text"])
         if saved:
             q = f'line {saved["line_no"]}: "{saved["line"]}"' if saved.get("line_no") else (
                 f'"{saved["line"]}"' if saved.get("line") else "")
@@ -1892,6 +1898,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             log(sdir, "claim", question=question, result="saved", verdict=saved["verdict"])
             return 0
         cache = {"status": "skipped (claim)"}  # saved answers answer questions, not statements
+    elif replay:
+        cache = {"status": "skipped (replay)"}
     else:
         cache = memory({"action": "cached", "principal": principal, "question": question})
     cache_stage = {"result": cache.get("status"), "checked": len(cache.get("checked") or [])}
@@ -2038,11 +2046,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
-    # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup.
+    # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup. A replay
+    # never reconnects or heals: that changes connector state and starts paid work.
     reconnected, deadline = {}, time.time() + auto_heal.RECONNECT_TIMEOUT_SECS
     for i, (ptr, kind, *_rest) in enumerate(results):
         left = int(deadline - time.time())
-        if auto_heal.is_stale_kind(kind) and left >= 1:
+        if auto_heal.is_stale_kind(kind) and left >= 1 and not replay:
             reconnected[ptr] = auto_heal.reconnect_now(ptr, principal, timeout=left)
             if reconnected[ptr] == "no-report":
                 # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
@@ -2071,7 +2080,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             heal_note = ""
             stale = auto_heal.is_stale_kind(kind)
             result = None
-            if stale:
+            if stale and not replay:
                 result = auto_heal.maybe_heal(ptr, principal)
                 if result == "started":
                     heal_note = " (auto-heal: refresh started in background)"
@@ -2365,7 +2374,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             side = [p for p, f in (files or {}).items() if f["verdict"] == ("supported" if word == "TRUE" else "contradicted")
                     and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE]
             best = max(side, key=lambda p: files[p]["prob"])
-            if best not in (_STAGE.get("word_changed") or []):  # never save from text no refresh has passed
+            # never save from text no refresh has passed, nor from a replay
+            if best not in (_STAGE.get("word_changed") or []) and not replay:
                 claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
         log(sdir, "claim", question=question, result=word)
         if top:
@@ -3349,6 +3359,11 @@ def _main() -> int:
         print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
               "'.', '_', '-'; no spaces or slashes)")
         return 2
+    if a[0] == "--":  # the rest is the question, read literally (never a --flag)
+        if len(a) == 1:
+            print(__doc__)
+            return 2
+        return lookup(" ".join(a[1:]), principal, state_dir(principal))
     if a[0] == "--status":
         if len(a) != 1:
             print("usage: --principal AGENT --status")
