@@ -15,6 +15,8 @@ import {
   cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
   parseMissCandidate, formatMissCandidateReply, parseMissReport,
   parseSetupMissing, parseErrorReport, parseAnyPointers,
+  detectDroppedPaths, buildDropPlan, formatDropConfirm, shouldConnect, dropConfirmDefault,
+  buildConnectArgs, parseConnectSummary, formatConnectSummary, pointerExists, parseReplaceWarning,
   MISS_LINE, HELP_TEXT,
   type SuperJevConfig,
 } from './jev-chat-config.ts';
@@ -24,6 +26,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..');
 const ASK_PY = join(REPO_ROOT, 'skills', 'super-jev', 'ask.py');
 const DISPATCH_PY = join(REPO_ROOT, 'skills', 'super-jev', 'dispatch.py');
+const PREPARE_BULK_PY = join(REPO_ROOT, 'skills', 'super-jev', 'prepare_bulk.py');
 
 const BANNER = String.raw`
    ____                       ____
@@ -71,6 +74,20 @@ function checkPrincipalHasConnections(principal: string): boolean | null {
   });
   if (result.error || result.status !== 0 || !result.stdout) return null;
   return parseAnyPointers(result.stdout);
+}
+
+/** Same local panel check, but for whether one specific pointer name is
+ * already registered for this principal -- run right before a drop confirm
+ * so a name collision (two different drops slugifying to the same pointer)
+ * is surfaced as "will be REPLACED" instead of silently overwriting. Returns
+ * null (skip the warning, connect proceeds as usual) if the check itself
+ * fails for any reason. */
+function checkPointerExists(principal: string, pointer: string): boolean | null {
+  const result = spawnSync('python3', [DISPATCH_PY, 'memory', '--principal', principal], {
+    encoding: 'utf8', timeout: 5000,
+  });
+  if (result.error || result.status !== 0 || !result.stdout) return null;
+  return pointerExists(result.stdout, pointer);
 }
 
 async function runSetup(existing: SuperJevConfig): Promise<SuperJevConfig> {
@@ -168,6 +185,63 @@ async function handleQuestion(question: string, principal: string) {
   if (hit.stderr) console.log(pc.dim(hit.stderr.trim().split('\n').slice(0, 3).join('\n')));
 }
 
+/** Runs prepare_bulk.py for a confirmed drop plan and prints its plain-words
+ * result. Held/exception files are always surfaced, never swallowed. */
+function runConnect(plan: ReturnType<typeof buildDropPlan>, principal: string) {
+  if ('error' in plan) return; // callers check for .error before calling this
+  const s = spinner();
+  s.start(`Connecting ${plan.label}`);
+  const args = buildConnectArgs(plan, principal);
+  const result = spawnSync('python3', [PREPARE_BULK_PY, ...args], { encoding: 'utf8' });
+  if (result.error) {
+    s.stop('Connect failed.');
+    console.log(pc.red(`Connect failed: ${result.error.message}`));
+    return;
+  }
+  const stdout = result.stdout || '';
+  // prepare_bulk.py's own reuse warning (connecting a pointer name that
+  // already exists rotates its approved answers) -- shown verbatim, never
+  // swallowed by the summary parsing below.
+  const replaceWarning = parseReplaceWarning(stdout);
+  if (replaceWarning) console.log(pc.yellow(replaceWarning));
+  const summary = parseConnectSummary(stdout);
+  if (summary) {
+    s.stop('Connect finished.');
+    console.log(formatConnectSummary(summary));
+    return;
+  }
+  s.stop('Connect did not finish cleanly.');
+  console.log(pc.red('Connect did not report a clean approved/held/exception summary.'));
+  if (stdout.trim()) console.log(pc.dim(stdout.trim().split('\n').slice(-10).join('\n')));
+  if (result.stderr && result.stderr.trim()) console.log(pc.dim(result.stderr.trim().split('\n').slice(0, 5).join('\n')));
+}
+
+/** Handles a line that detectDroppedPaths recognized as one or more existing
+ * local paths: shows what would be connected, checks (local, no network)
+ * whether the pointer name already exists so a reuse is called out plainly,
+ * gets a one-key confirm (folder drops default No, file drops default Yes),
+ * then runs the connector. Never connects without an explicit yes --
+ * connecting makes paid judge calls. */
+async function handleDrop(line: string, principal: string) {
+  const dropped = detectDroppedPaths(line)!;
+  const plan = buildDropPlan(dropped, principal);
+  if ('error' in plan) {
+    console.log(pc.red(plan.error));
+    return;
+  }
+  console.log(pc.bold('Detected a drop: ') + plan.label);
+  const existing = checkPointerExists(principal, plan.pointer);
+  const proceed = await confirm({
+    message: formatDropConfirm(plan, principal, existing === true),
+    initialValue: dropConfirmDefault(plan),
+  });
+  if (isCancel(proceed) || !shouldConnect(proceed)) {
+    console.log(pc.dim('Not connected.'));
+    return;
+  }
+  runConnect(plan, principal);
+}
+
 async function main() {
   console.clear?.();
   let config = loadConfig();
@@ -191,6 +265,14 @@ async function main() {
     if (isCancel(input) || input === undefined) { outro('Bye.'); return; }
     const line = String(input).trim();
     if (!line) continue;
+
+    // Check drag-drop shape BEFORE slash commands: an absolute path like
+    // /Users/kelvin/notes.md also starts with '/' and must not be parsed as
+    // a slash command.
+    if (detectDroppedPaths(line)) {
+      await handleDrop(line, principal);
+      continue;
+    }
 
     const slash = parseSlashCommand(line);
     if (slash) {
