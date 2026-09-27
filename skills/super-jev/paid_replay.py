@@ -170,8 +170,9 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float, argv=None):
 
 def preflight(builds, base: Path, principals, timeout: float) -> str:
     """Free: each build's `ask.py --status` on the frozen copy. Why the replay cannot
-    start (a pointer a case could route to is stale, or status is unavailable), or ''.
-    A replay never reconnects, so every case would pay to end in the same error."""
+    start, or ''. Fail closed: every listed pointer must say "ready", and output in any
+    other shape (nothing connected, an error, an unknown line) refuses. A replay never
+    reconnects, so every case would pay to end in the same error."""
     problems = []
     for b in builds:
         for pr in sorted(principals):
@@ -180,8 +181,12 @@ def preflight(builds, base: Path, principals, timeout: float) -> str:
                 out = (failed or {}).get("error") or (ran[1] + ran[2]).strip()[-300:]
                 problems.append(f"{pr}: status unavailable ({out})")
                 continue
-            problems += [f"{pr}: {line.strip()}" for line in ran[1].splitlines()
-                         if re.match(r"\s+\S+: stale \(", line) and f"{pr}: {line.strip()}" not in problems]
+            lines = [ln for ln in ran[1].splitlines() if ln.strip()]
+            rows = [ln.strip() for ln in lines[1:] if ln.startswith("  ")]
+            if not lines or not lines[0].startswith(f"Connections for {pr} ") or not rows:
+                problems.append(f"{pr}: status not understood, or nothing connected ({ran[1].strip()[-300:]!r})")
+            problems += [f"{pr}: {row}" for row in rows
+                         if not re.fullmatch(r"\S+: ready", row) and f"{pr}: {row}" not in problems]
     return "\n  ".join(problems)
 
 
@@ -349,7 +354,8 @@ def main(argv=None) -> int:
             ap.error(f"cannot snapshot state and memory: {e}")
         report["fingerprints"] = fingerprints
         if why := preflight(builds, base, {c["principal"] for c in cases}, a.timeout):
-            ap.error("not started, no ask spent: reconnect these first (a replay never reconnects):\n  " + why)
+            ap.error("not started, no ask spent: every pointer must be ready; reconnect or fix these first "
+                     "(a replay never reconnects):\n  " + why)
         sources = eligible_sources(base, caches[0])
         for c in cases:
             before = {p: file_sha(p) for p in sources | {os.path.realpath(g) for g in c["gold"]}}

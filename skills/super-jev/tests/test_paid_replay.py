@@ -31,7 +31,7 @@ PLAN = %r
 args = sys.argv[1:]
 principal = args[args.index("--principal") + 1]
 if args[-1] == "--status":  # the free preflight: PLAN["status"] is its output
-    print(PLAN.get("status", "Connections for " + principal + ":\n  p1: ready"))
+    print(PLAN.get("status", "Connections for " + principal + " (registered snapshots):\n  p1: ready\nNext: ..."))
     sys.exit(PLAN.get("status_rc", 0))
 claim = "--claim" in args
 q = args[args.index("--claim") + 1] if claim else args[-1]
@@ -418,7 +418,7 @@ def test_a_file_read_that_no_registry_or_cache_pins_is_unpinned(tmp_path, env, c
 
 
 @pytest.mark.parametrize("status,rc", [
-    ("Connections for me:\n  p1: ready\n  brain-reviewed: stale (preparation-required); its files changed", 0),
+    ("Connections for me (registered snapshots):\n  p1: ready\n  brain-reviewed: stale (preparation-required); its files changed", 0),
     ("Not set up. Next: python3 setup.py", 1)])
 def test_a_stale_pointer_or_no_status_refuses_before_any_paid_ask(tmp_path, env, capsys, status, rc):
     # First live run: a stale pointer turned every case into ERROR -> ERROR after 14 paid asks.
@@ -429,4 +429,23 @@ def test_a_stale_pointer_or_no_status_refuses_before_any_paid_ask(tmp_path, env,
     err = capsys.readouterr().err
     assert e.value.code == 2 and "no ask spent" in err
     assert ("brain-reviewed: stale" if rc == 0 else "status unavailable") in err
+    assert _log(tmp_path) == []
+
+
+@pytest.mark.parametrize("status", ["error", "unknown", "nothing", "empty"])
+def test_preflight_refuses_unless_every_pointer_is_explicitly_ready(tmp_path, env, monkeypatch, capsys, status):
+    # Astra's repro on f03c4e6: the real --status prints "broken: error" and exits 0.
+    if status in ("error", "unknown"):
+        monkeypatch.setattr(ask, "memory", lambda req: {"pointers": [
+            {"pointer": "p1", "snapshotStatus": "available"}, {"pointer": "broken", "snapshotStatus": status}]})
+        assert ask.connection_status("me") == 0
+        text = capsys.readouterr().out
+    else:
+        text = "Nothing connected for me." if status == "nothing" else ""
+    cases = _cases(tmp_path, [{"question": "q", "gold": ["/a.md"]}])
+    with pytest.raises(SystemExit) as e:
+        _run(tmp_path, cases, {"q": {"final": TOP}}, {"status": text})
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "no ask spent" in err
+    assert (f"broken: {status}" if status in ("error", "unknown") else "not understood") in err
     assert _log(tmp_path) == []
