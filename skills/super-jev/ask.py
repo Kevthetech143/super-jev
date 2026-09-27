@@ -13,7 +13,7 @@
       --add. Any error -> "unresolved: N of M pointers errored" last, exit 1
       (even when candidates printed above); exit 0 otherwise.
 
-  ask.py --principal AGENT --claim "statement" [--claim "statement2" ...]
+  ask.py --principal AGENT --claim "statement" [--claim "statement2" ...] [--claims-file FILE]
       Is a statement true by our own files? One lookup per statement; the same
       listwise Jev call also judges each shown file (supports / partly /
       contradicts / does not state) and picks the line that shows it. Prints
@@ -21,7 +21,9 @@
       (sure files disagree; newest first), PARTIAL, UNSURE (read these files) or
       NOT FOUND (in the files read; may still exist), then the files found. A
       sure TRUE/FALSE is saved and answers the same statement instantly until
-      its proof file changes.
+      its proof file changes. --claims-file FILE checks one statement per line
+      (blank lines and # comments skipped): a draft's facts, or a worker
+      report's claims next to `dispatch.py verify REPORT` for its tests and git.
 
   ask.py --principal AGENT --approve "question" "answer" [--rank N | --file PATH]
       Re-searches the last lookup's top pointer and approves it, quotes taken
@@ -3161,12 +3163,21 @@ def _main() -> int:
         return settle_pick(principal, sdir, a[1], answer=" ".join(a[2:]) or None, drop=a[0] == "--drop-pick")
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
-    if a[0] == "--claim":
+    if a[0] in ("--claim", "--claims-file"):
         claims, rest = [], a
-        while rest and rest[0] == "--claim" and len(rest) >= 2:
-            claims.append(rest[1]); rest = rest[2:]
+        while rest and rest[0] in ("--claim", "--claims-file") and len(rest) >= 2:
+            if rest[0] == "--claim":
+                claims.append(rest[1])
+            else:  # one statement per line: a draft's facts or a worker report's claims
+                try:
+                    claims += [ln.strip() for ln in Path(rest[1]).expanduser().read_text(errors="replace").splitlines()
+                               if ln.strip() and not ln.lstrip().startswith("#")]
+                except OSError as e:
+                    print(f"cannot read {rest[1]}: {e.strerror or e}")
+                    return 2
+            rest = rest[2:]
         if not claims or rest:
-            print('usage: --claim "statement" [--claim "statement2" ...]')
+            print('usage: --claim "statement" [--claim ...] | --claims-file FILE (one statement per line)')
             return 2
         rc = 0
         for i, claim in enumerate(claims):

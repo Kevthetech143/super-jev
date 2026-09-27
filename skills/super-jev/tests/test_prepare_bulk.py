@@ -1500,3 +1500,24 @@ def test_a_part_one_principal_cannot_see_still_refreshes_and_is_widened(tmp_path
         seen = {p["pointer"]: p["status"] for p in memory({"action": "panel", "principal": who})["pointers"]}
         assert seen.get("cat-4") == "available", who
     assert principals == ["polymarket", "primary"]
+
+
+def test_a_long_notes_file_connects_instead_of_being_held(tmp_path):
+    """things-we-have-tried.md (146 KB) was held by the old 90,000-byte limit and so never
+    searchable; the gate splits evidence over Jev's ceiling, so it is inventoried now."""
+    root = tmp_path / "brain"
+    root.mkdir()
+    (root / "tried.md").write_text("# Things we tried\n" + ("- tried a thing, it failed because of a reason\n" * 3500))
+    assert (root / "tried.md").stat().st_size > 146_000
+    files, held = pb.inventory([root])
+    assert [p.name for p in files] == ["tried.md"] and held == []
+
+
+def test_parts_close_early_before_the_connect_byte_limit(tmp_path):
+    small = []
+    for i in range(6):
+        f = tmp_path / f"f{i}.md"
+        f.write_text("x" * 100)
+        small.append(f)
+    assert [len(p) for p in pb.split_parts(small, 4)] == [4, 2]  # count only, as before
+    assert [len(p) for p in pb.split_parts(small, 50, part_bytes=250)] == [2, 2, 2]
