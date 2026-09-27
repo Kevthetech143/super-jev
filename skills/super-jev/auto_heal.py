@@ -255,7 +255,7 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
         if preview.get("status") != "preparation-required" or preview.get("reason") != "review-required":
             result = "failed"
         else:
-            sources = [{**s, "sha256": hashes.get(str(Path(s["path"]).expanduser().resolve()))}
+            sources = [{**s, "sha256": hashes.get(os.path.abspath(os.path.expanduser(s["path"])))}
                        for s in recipe["sources"]]
             out = memory({**req, "sources": sources, "reviewed": True,
                            "navigationSHA": preview.get("navigationSHA")})

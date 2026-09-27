@@ -224,3 +224,35 @@ def test_a_connector_pointer_from_before_recipes_heals_from_its_manifest(tmp_pat
     src.write_text('{"version": "1.0.7"}\n')
     assert ah.reconnect_recipe("structured", "agent") == "reconnected"
     assert service.pointer("structured", "agent")[1] is None
+
+
+def test_a_pointer_made_through_a_moving_link_heals_to_the_new_target(tmp_path, monkeypatch):
+    # A skills folder linked to the current release: after a release moves the link, the pointer
+    # goes stale and the heal must find the file by the path it was given, not the old target.
+    import sys
+    exp = SKILL.parent.parent / "experiments" / "verified-pointer-memory"
+    sys.path.insert(0, str(exp))
+    from path_connect import connect
+    from service import Service
+    monkeypatch.setattr(ah, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(ah, "LOG_PATH", tmp_path / "state" / "autoheal.log")
+    for rel, text in (("v1", "version one"), ("v2", "version two")):
+        (tmp_path / rel).mkdir()
+        (tmp_path / rel / "SKILL.md").write_text(text + "\n")
+    link = tmp_path / "current"
+    link.symlink_to(tmp_path / "v1")
+    config = {"db": str(tmp_path / "answers.sqlite"), "registry": str(tmp_path / "registry.json")}
+    service = Service(config["db"], config["registry"], lambda *_: {"status": "no-match"})
+    monkeypatch.setattr(ah, "_memory", lambda req: service.recipe(req["pointer"], req["principal"])
+                        if req["action"] == "recipe" else connect(req, config))
+    req = {"pointer": "skills", "principals": ["agent"],
+           "sources": [{"path": str(link / "SKILL.md"), "description": "skill page"}]}
+    preview = connect(req, config)
+    assert connect({**req, "reviewed": True, "sources": preview["sources"]}, config)["status"] == "registered"
+    link.unlink()
+    link.symlink_to(tmp_path / "v2")
+    assert service.pointer("skills", "agent")[1] == {"status": "preparation-required"}
+    assert ah.reconnect_recipe("skills", "agent") == "reconnected"
+    assert service.pointer("skills", "agent")[1] is None
+    src = service.sources("skills", "agent")["sources"][0]["path"]
+    assert "version two" in Path(src).read_text()
