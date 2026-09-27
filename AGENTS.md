@@ -131,6 +131,8 @@ ln -s "$(pwd)/skills/super-jev" ~/.claude/skills/super-jev
 ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 ```
 
+`skills/super-jev-build-cycle/` is an optional third skill: a plain-CLI build cycle (`build_cycle.py`) that uses Super Jev in every step and leaves a receipt per step. Link it into any agent's skills folder next to `super-jev` (it finds `../super-jev/`).
+
 | subcommand | wraps | what it needs |
 | --- | --- | --- |
 | `gate <evidence...> --draft <file>` / `--claim "..."` | the built-in judge client (`skills/super-jev/lib/jev_client.py`) | `TYPESAFE_API_KEY`; `SUPERJEV_GATE_CMD` (env) replaces the client with your own tool |
