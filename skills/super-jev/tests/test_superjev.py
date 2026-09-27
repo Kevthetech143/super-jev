@@ -554,6 +554,20 @@ def test_verify_uses_the_env_command_when_set(tmp_path, door, monkeypatch):
     assert argv[1] == "/elsewhere/verify.py"
 
 
+
+def test_verify_passes_pr_base_and_claims_to_the_door(tmp_path, door, monkeypatch):
+    # Live 2026-09-27: `dispatch.py verify REPORT --pr 206 --base HEAD~1` was rejected by the
+    # wrapper although worker-verify takes both, so a PR's state could never be gathered.
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.setenv(sj.VERIFY_CMD_ENV, "python3 /elsewhere/verify.py")
+    report = tmp_path / "r.md"
+    report.write_text("done", encoding="utf-8")
+    assert sj.main(["verify", str(report), "--pr", "206", "--base", "HEAD~1",
+                    "--claim", "tests pass", "--claim", "PR merged"]) == 0
+    argv = door.argv
+    assert argv[argv.index("--pr") + 1] == "206" and argv[argv.index("--base") + 1] == "HEAD~1"
+    assert [argv[i + 1] for i, x in enumerate(argv) if x == "--claim"] == ["tests pass", "PR merged"]
+
 # --------------------------------------------- verify: derived-facts fallback
 #
 # These run against a REAL tiny git repo and REAL node — no subprocess.run

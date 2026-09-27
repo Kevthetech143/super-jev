@@ -5097,6 +5097,12 @@ def cmd_verify(a):
         cmd += ["--worktree", a.worktree]
     if a.test_cmd:
         cmd += ["--test-cmd", a.test_cmd]
+    if getattr(a, "pr", None):
+        cmd += ["--pr", str(a.pr)]
+    if getattr(a, "base", None):
+        cmd += ["--base", a.base]
+    for c in getattr(a, "claim", None) or []:
+        cmd += ["--claim", c]
     if paths_for_cmd:
         cmd += ["--paths", *paths_for_cmd]
     if a.dry_run:
@@ -13191,6 +13197,10 @@ def build_parser():
     v.add_argument("--worktree", help="the repo or folder the work happened in")
     v.add_argument("--test-cmd", default="", help="the test command, exact path")
     v.add_argument("--paths", nargs="*", default=[], help="paths the report claims")
+    v.add_argument("--pr", help="the PR the report is about (its state is gathered)")
+    v.add_argument("--base", help="diff/log base for the worktree (door default: origin/main)")
+    v.add_argument("--claim", action="append", default=[],
+                   help="name a claim yourself (repeatable); beats the automatic split")
     v.add_argument("--dry-run", action="store_true", help="collect evidence, no judging")
     v.add_argument("--explain", action="store_true",
                    help="door-absent fallback only: list the gh commands run "
