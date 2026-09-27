@@ -16,8 +16,10 @@ worse before spending paid asks on it.
     python3 scorecard.py --principal primary --ask OLD/ask.py --ask NEW/ask.py
     python3 scorecard.py --principal primary --cases extra.jsonl   # add hand-written cases
 
-Cases found in the state folder are kept in <state>/scorecard-cases.jsonl, so a miss
-stays a test after its trace rotates away. A --cases line is
+Cases found in the state folder are kept in <state>/scorecard-cases.jsonl (the one file
+it writes, in each named principal's state folder), so a miss stays a test after its trace
+rotates away; a later --miss replaces that question's saved file. It prints questions,
+ranks and file paths, never file contents. A --cases line is
 {"question": "...", "gold": ["/abs/path"], "principal": "...", "split": "held-out"}.
 """
 import argparse
@@ -103,18 +105,20 @@ def harvest(sdir: Path, principal: str) -> list:
 
 
 def merge_saved(sdir: Path, new: list) -> list:
-    """Append new cases to the principal's saved set; a question already saved keeps its
-    first gold file. Returns the full saved set."""
+    """Merge harvested cases into the principal's saved set. The current harvest wins for
+    every question it covers (a later --miss corrects an earlier approval's file); saved
+    questions it no longer covers (their trace rotated away) are kept. Returns the set."""
     path = sdir / CASES_FILE
     saved = _jsonl(path)
-    have = {c.get("question") for c in saved}
-    add = [c for c in new if c["question"] not in have]
-    if add:
+    merged = {c.get("question"): c for c in saved if c.get("question")}
+    merged.update({c["question"]: c for c in new})
+    cases = list(merged.values())
+    if cases != saved:
         sdir.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as fh:
-            for c in add:
-                fh.write(json.dumps(c, ensure_ascii=False) + "\n")
-    return saved + add
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases))
+        os.replace(tmp, path)
+    return cases
 
 
 def gold_rank(ask, case: dict, pointers: list):
