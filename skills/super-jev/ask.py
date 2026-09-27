@@ -639,7 +639,9 @@ POSSIBLE_FLOOR = 0.6
 # value" (VALUE_RE picks the exact-value wording); live-number questions (LIVE_RE)
 # get no possible tier at all, since on-topic files at 0.81 gave two false hits.
 VALUE_RE = re.compile(r"\b(how much|how many|balance|breakeven|break even|right now|"
-                      r"worth|owe|owed|price|cost|total)\b", re.I)
+                      r"net worth|owe|owed|price|cost|total)\b", re.I)
+WORTH_VALUE_RE = re.compile(r"\bwhat(?:'s| is| are| was| were)\b.{0,80}\bworth\b|"
+                            r"\bworth\s+(?:in|of)\b", re.I)
 POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file before answering)"
 # Word search: on every lookup the
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
@@ -723,7 +725,8 @@ def rank_score(content: float, route: float) -> float:
     return CONTENT_WEIGHT * content + ROUTE_WEIGHT * route
 
 def is_value_question(question: str) -> bool:
-    return bool(VALUE_RE.search(question))
+    # Bare "worth" also describes dignity, usefulness and meaning, not a price.
+    return bool(VALUE_RE.search(question) or WORTH_VALUE_RE.search(question))
 
 def is_live_value_question(question: str) -> bool:
     return bool(LIVE_RE.search(question)) or bool(LIVE_HOWMUCH_RE.search(question))
@@ -767,6 +770,10 @@ def confirm_label(question: str) -> str:
     """Open how/should/why/when/which/where questions, and "what ... say/cover/mean"
     style casual asks, ask "does it answer"; the rest (and any value question) ask
     for the exact value."""
+    if _CLAIM["text"]:
+        return ("Passage {n}, choose if it provides evidence supporting OR contradicting "
+                "the statement; disagreement is relevant evidence, not absence. "
+                "A passage only sharing the topic is none.")
     open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)
               or LIST_RE.search(question)) \
         and not is_value_question(question)
@@ -2218,6 +2225,13 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         # alone with routing only as a near-tie breaker (see metric_of/better/
         # sort_metric above), then the name tie-break.
         merged = prefer_sources(sorted(keep.values(), key=sort_metric, reverse=True), scores, possible)
+    if _CLAIM["text"] and to_check:
+        # The answer filter is not a claim verdict. Let the bounded claim judge
+        # inspect read evidence even when it does not affirm the statement.
+        candidates = {p: (route.get(p, 0), p, ptr) for _s, p, ptr in cands}
+        merged = [candidates[p] for p in dict.fromkeys(to_check)
+                  if p in candidates and notes.get(p) not in (HELD_SECRET, INCONCLUSIVE)]
+        possible.update({p: POSSIBLE_NOTE for _s, p, _ptr in merged})
     top = merged[:5]
     top = apply_near_twin_tiebreak(question, top)
     # Listwise choice step: see judge_listwise.
@@ -2265,6 +2279,16 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         for _s, p, _ptr in top if strong else []:
             if p != listwise_winner and p not in possible and notes.get(p) != INCONCLUSIVE:
                 possible[p] = POSSIBLE_NOTE
+    if _CLAIM["text"]:
+        # A listwise "none answers" cannot erase a file that disproves a claim.
+        proven = {p: f for p, f in (_STAGE.get("claim_files") or {}).items()
+                  if f.get("verdict") in ("supported", "contradicted")
+                  and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE}
+        if proven:
+            by_path = {p: (proven[p]["prob"], p, ptr) for _s, p, ptr in merged if p in proven}
+            top = sorted(by_path.values(), reverse=True)[:5]
+            for p in by_path:
+                possible.pop(p, None)
     skills = skill_job.result() if skill_job else []
     _STAGE["skills"] = [path for _n, path in skills] if skill_job else None
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
@@ -2325,10 +2349,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 stages=stages)
     if _CLAIM["text"]:
         files = _STAGE.get("claim_files")
-        if top and files is None:
+        if (top or _STAGE.get("claim_read")) and files is None:
             word, lines = "UNSURE", ["UNSURE: the true/false check did not run; read the files below before answering."]
         else:
-            word, lines = claim_verdict(files or {}, _STAGE.get("claim_read") or [])
+            word, lines = claim_verdict(files or {}, _STAGE.get("claim_read") or list(content_check))
         for line in lines:
             print(line)
         if word in ("TRUE", "FALSE"):
@@ -2371,7 +2395,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         return 0
     if not top and not skills:
         if dropped:
-            print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
+            print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
         print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected "
               "files. It may still exist (see references/connectors.md to fill the gap).")
         for line in miss_report(principal, len(original_pointers), routing, content_check,
@@ -2511,7 +2535,7 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict,
              f"  - {total} connected sets; {len(routing)} searched after the topic filter, {len(on_topic)} had matches"
              + (": " + ", ".join(on_topic[:5]) + (" ..." if len(on_topic) > 5 else "") if on_topic else "")]
     if read:
-        lines.append(f"  - {len(read)} file(s) read; none contained the answer. Closest: "
+        lines.append(f"  - {len(read)} file(s) read; no answer confirmed. Closest: "
                      + ", ".join("/".join(Path(p).parts[-2:]) for p in read[:MISS_CLOSEST]))
     else:
         lines.append("  - no connected file matched the question's words closely enough to read")
@@ -2524,6 +2548,9 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict,
     if skipped:
         # Their folder is already connected: connecting it again would skip them again.
         lines.append("  - The answer is in a skipped file above: apply its fix, then ask again.")
+    elif read:
+        lines += ["  - Inspect the read files and the filtering trace before changing connections:",
+                  f"      python3 {skill_dir / 'ask.py'} --principal {principal} --trace-show last"]
     else:
         lines += ["  - The answer is in a file you have: it is probably not connected. Connect its folder:",
                   f"      python3 {skill_dir / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}"]
