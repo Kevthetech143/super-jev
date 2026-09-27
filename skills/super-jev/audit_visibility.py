@@ -19,7 +19,6 @@ verified-pointer-memory sqlite database and returns findings.
 """
 from __future__ import annotations
 
-import fnmatch
 import json
 import re
 import sqlite3
@@ -67,7 +66,7 @@ def audit(registry_path: Path, db_path: Path, shared: list | None = None) -> dic
     """Return {"principals": {name: {"visible": [...], "connected": [...],
     "flags": [...]}}} for every principal seen in either source.
 
-    `shared` holds the fleet's shared pointer names/globs (shared-pointers.json): a
+    `shared` holds the fleet's shared pointer names (shared-pointers.json): a
     pointer shared on purpose is not flagged visible-but-not-connected."""
     shared = shared or []
     registry = _load_registry(registry_path)
@@ -101,8 +100,7 @@ def audit(registry_path: Path, db_path: Path, shared: list | None = None) -> dic
             entry = bucket(principal)
             entry["visible"].append(pointer_name)
 
-            if principal not in connected_principals and not any(
-                    fnmatch.fnmatchcase(pointer_name, pat) for pat in shared):
+            if principal not in connected_principals and pointer_name not in shared:
                 entry["flags"].append({
                     "pointer": pointer_name,
                     "dataset": dataset,
