@@ -1143,9 +1143,10 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
             if out.get("status") != "ok":
                 return ptr, None
             rows += out.get("sources") or []
-            if out.get("nextOffset") is None:
-                break
-            offset = out["nextOffset"]
+            nxt = out.get("nextOffset")
+            if not isinstance(nxt, int) or nxt <= offset:
+                break  # last page, or a runtime that ignores offset: never loop forever
+            offset = nxt
         if not rows:
             return ptr, None
         seen = set()
