@@ -1,6 +1,6 @@
 ---
 name: super-jev-build-cycle
-description: "Walk a build or fix through eight steps with Super Jev used inside each one (brief yourself, name the target, find the cause, brief helpers, check reports, prove, review, check the reply), leaving a receipt per step. Close refuses until every step has a receipt or a recorded skip. Works for any agent that can run a shell."
+description: "Walk a build, fix or new skill through ten steps with Super Jev used inside each one (preflight, brief yourself, name the target, find the cause, brief helpers, check reports, prove, review, check the reply, teach back), leaving a receipt per step. Close refuses until every step has a receipt or a recorded skip. Works for any agent that can run a shell."
 ---
 
 # Super Jev build cycle
@@ -17,7 +17,8 @@ python3 build_cycle.py --dir CYCLE_DIR --principal YOUR_AGENT STEP ...
 
 | # | Step | Command | Super Jev use |
 |---|---|---|---|
-| 1 | start | `start "the idea in plain words" [--project NAME]` | 4 asks: tried before? design rules? known traps? which files and tests? Open the files it lists. |
+| 0 | preflight | `preflight [--project-dir DIR ...] [--skill "what the new skill does"]` | free: Super Jev reachable, every connection ready, project folders connected; names each fix. `--skill` searches for an existing skill first (reuse beats a duplicate). No receipt until ready. |
+| 1 | start | `start "the idea in plain words" [--project NAME]` | 4 asks: tried before? design rules? known traps? which files and tests? Open the files it lists. No strong hit = NEW GROUND: research outside first. |
 | 2 | target | `target --goal "..." --evidence "lookup id / log line / user report" [--ask]` | optional ask for related past misses |
 | 3 | cause | `cause --cause "..." [--file PATH ...] [--ask "question" ...] [--trace last]` | lookups on the cause; `--trace` shows a Super Jev ask's trace when the failure is an ask |
 | 4 | brief | `brief` | prints a block to paste into any helper's task, so helpers start briefed |
@@ -25,10 +26,11 @@ python3 build_cycle.py --dir CYCLE_DIR --principal YOUR_AGENT STEP ...
 | 6 | prove | `prove --cmd "the test command" --output FILE [--output FILE] [--note "old vs new"]` | none; the output file must exist |
 | 7 | review | `review --reviewer NAME --verdict "..." --file REVIEW_FILE [--claims FILE]` | `--claim` on the reviewer's key claims |
 | 8 | reply-check | `reply-check --claims FILE` | `--claim` on each key fact of the draft reply (one per line) |
+| 9 | learn | `learn [--note FILE ...] [--fact "question" "answer" [--source PATH]]` | teach back: notes must sit in a connected folder; facts are saved with `ask.py --add` |
 
 Then:
 
-- `skip STEP --reason "why"`: allowed for any step; recorded and printed at close, never silent.
+- `skip STEP --reason "why"`: recorded and printed at close, never silent. `start`, `check-report` and `reply-check` cannot be skipped.
 - `status`: steps done / skipped / missing, and each Super Jev use with its mark.
 - `mark USE_ID helped|neutral|missed [--note "..."]`: judge each Super Jev use (ids `u1`, `u2`, ... are printed in the receipts and by `status`).
 - `close [--log FILE]`: exit 1 naming every missing step and unmarked use. Otherwise writes `summary.md` and appends one tab-separated line per use (time, agent, cycle, id, step, mark, what, note) to `--log` (default `CYCLE_DIR/super-jev-uses.log`).

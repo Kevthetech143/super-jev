@@ -9,12 +9,21 @@ from pathlib import Path
 import pytest
 
 TOOL = Path(__file__).resolve().parent.parent / "build_cycle.py"
-STEPS = ["start", "target", "cause", "brief", "check-report", "prove", "review", "reply-check"]
+STEPS = ["preflight", "start", "target", "cause", "brief", "check-report", "prove", "review", "reply-check",
+         "learn"]
 
 FAKE = '''import json, os, sys
+if "--status" in sys.argv:  # free status: never logged as a Super Jev use
+    print("Connections for x (registered snapshots, not a freshness guarantee):")
+    for row in os.environ.get("FAKE_STATUS", "notes: ready").split(";"):
+        print("  " + row)
+    sys.exit(int(os.environ.get("FAKE_STATUS_EXIT", "0")))
 with open(os.environ["FAKE_SJ_LOG"], "a") as f:
     f.write(json.dumps([os.path.basename(__file__)] + sys.argv[1:]) + "\\n")
-print(" 0.91  /notes/design.md  [notes]")
+if os.environ.get("FAKE_WEAK"):
+    print(" 0.62  /notes/other.md  [notes]  (possible: word-search match, answer not confirmed)")
+else:
+    print(" 0.91  /notes/design.md  [notes]")
 print("TRUE  (fake verdict)")
 '''
 
@@ -26,12 +35,18 @@ def env(tmp_path):
     (skills / "super-jev").mkdir(parents=True)
     for name in ("ask.py", "dispatch.py"):
         (skills / "super-jev" / name).write_text(FAKE)
+    (skills / "super-jev" / "prepare-cache").mkdir()
+    proj = tmp_path / "project"
+    (proj / "src").mkdir(parents=True)
+    (skills / "super-jev" / "prepare-cache" / "notes-report.json").write_text(
+        json.dumps({"pointer": "notes", "roots": [str(tmp_path)],
+                    "approved": [str(proj / "src" / "a.py"), str(proj / "readme.md")]}))
     (skills / "super-jev-build-cycle").mkdir()
     shutil.copy(TOOL, skills / "super-jev-build-cycle" / "build_cycle.py")
     e = {k: v for k, v in os.environ.items() if k != "SUPERJEV_PRINCIPAL"}
     e["FAKE_SJ_LOG"] = str(tmp_path / "calls.jsonl")
     return {"tool": skills / "super-jev-build-cycle" / "build_cycle.py", "env": e, "tmp": tmp_path,
-            "cycle": tmp_path / "cycle", "log": tmp_path / "calls.jsonl"}
+            "cycle": tmp_path / "cycle", "log": tmp_path / "calls.jsonl", "proj": proj}
 
 
 def run(env, *args, principal="agent-1", extra_env=None):
@@ -59,7 +74,11 @@ def do_all(env, skip=()):
     claims = f(env, "claims.txt", "the fix is in ask.py\nthe tests pass\n")
     out = f(env, "new.txt", "all green\n")
     review = f(env, "review.md", "APPROVE\n")
+    note = env["proj"] / "lesson.md"
+    note.write_text("retries need a cap\n")
     steps = {
+        "preflight": ["preflight", "--project-dir", str(env["proj"] / "src")],
+        "learn": ["learn", "--note", str(note), "--fact", "how many retries", "three"],
         "start": ["start", "retry on timeout"],
         "target": ["target", "--goal", "asks time out", "--evidence", "lookup id abc123", "--ask"],
         "cause": ["cause", "--cause", "no retry", "--ask", "where are timeouts handled", "--trace", "last"],
@@ -91,33 +110,36 @@ def test_principal_required_never_guessed(env):
 
 
 def test_principal_from_env(env):
+    run(env, "preflight", principal=None, extra_env={"SUPERJEV_PRINCIPAL": "agent-env"})
     r = run(env, "start", "x", principal=None, extra_env={"SUPERJEV_PRINCIPAL": "agent-env"})
     assert r.returncode == 0, r.stderr
     assert all(c[c.index("--principal") + 1] == "agent-env" for c in calls(env))
 
 
 def test_start_runs_four_asks_from_sibling_folder(env):
+    run(env, "preflight")
     r = run(env, "start", "retry on timeout", "--project", "demo")
     assert r.returncode == 0, r.stderr
     cs = calls(env)
     assert len(cs) == 4 and all(c[0] == "ask.py" and c[1:3] == ["--principal", "agent-1"] for c in cs)
     assert all("retry on timeout in demo" in c[-1] for c in cs)
-    receipt = (env["cycle"] / "01-start.md").read_text()
+    receipt = (env["cycle"] / "02-start.md").read_text()
     assert "0.91  /notes/design.md" in receipt and "- idea: retry on timeout" in receipt
 
 
 def test_super_jev_missing_is_named(env):
     shutil.rmtree(env["tool"].parent.parent / "super-jev")
-    r = run(env, "start", "x")
+    r = run(env, "preflight")
     assert r.returncode == 2 and "Super Jev not found" in r.stderr
 
 
 def test_brief_prints_start_hits(env):
+    run(env, "preflight")
     run(env, "start", "retry on timeout")
     r = run(env, "brief")
     assert r.returncode == 0
     assert "BRIEFING" in r.stdout and "/notes/design.md" in r.stdout
-    assert (env["cycle"] / "04-brief.md").exists()
+    assert (env["cycle"] / "05-brief.md").exists()
 
 
 def test_check_report_runs_verify_and_claims(env):
@@ -131,7 +153,7 @@ def test_check_report_runs_verify_and_claims(env):
 
 def test_prove_needs_existing_output(env):
     r = run(env, "prove", "--cmd", "pytest", "--output", str(env["tmp"] / "nope.txt"))
-    assert r.returncode == 2 and not (env["cycle"] / "06-prove.md").exists()
+    assert r.returncode == 2 and not (env["cycle"] / "07-prove.md").exists()
 
 
 def test_close_refuses_missing_and_names_them(env):
@@ -146,7 +168,7 @@ def test_close_refuses_missing_and_names_them(env):
 def test_close_refuses_empty_receipt(env):
     do_all(env)
     mark_all(env)
-    (env["cycle"] / "06-prove.md").write_text("")
+    (env["cycle"] / "07-prove.md").write_text("")
     r = run(env, "close")
     assert r.returncode == 1 and "prove" in r.stdout
 
@@ -193,3 +215,98 @@ def test_skip_needs_known_step_and_reason(env):
 
 def test_mark_rejects_unknown_use(env):
     assert run(env, "mark", "u9", "helped").returncode == 2
+
+
+# --- preflight, new ground, learn, unskippable steps ---
+
+def test_preflight_ready_writes_receipt_and_costs_nothing(env):
+    r = run(env, "preflight", "--project-dir", str(env["proj"]))
+    assert r.returncode == 0, r.stderr
+    assert "preflight READY" in r.stdout and "project folder connected" in r.stdout
+    assert (env["cycle"] / "01-preflight.md").exists()
+    assert calls(env) == []  # status is free, never a logged use
+
+
+def test_preflight_names_stale_connection_and_writes_no_receipt(env):
+    r = run(env, "preflight", extra_env={"FAKE_STATUS": "notes: ready;old-notes: stale (preparation-required)"})
+    assert r.returncode == 2 and "old-notes is not ready" in r.stderr
+    assert not (env["cycle"] / "01-preflight.md").exists()
+
+
+def test_preflight_unconnected_project_is_refused_with_fix(env):
+    other = env["tmp"] / "elsewhere"
+    other.mkdir()
+    r = run(env, "preflight", "--project-dir", str(other))
+    assert r.returncode == 2 and "not on Super Jev's shelves" in r.stderr and "super-jev-connect" in r.stderr
+
+
+def test_preflight_status_failure_is_not_ready(env):
+    r = run(env, "preflight", extra_env={"FAKE_STATUS": "", "FAKE_STATUS_EXIT": "1"})
+    assert r.returncode == 2 and "status unavailable" in r.stderr
+
+
+def test_preflight_skill_search_runs_dispatch(env):
+    r = run(env, "preflight", "--skill", "turns meeting notes into tasks")
+    assert r.returncode == 0, r.stderr
+    cs = calls(env)
+    assert len(cs) == 1 and cs[0][:2] == ["dispatch.py", "skills"]
+
+
+def test_start_requires_preflight(env):
+    r = run(env, "start", "x")
+    assert r.returncode == 2 and "preflight first" in r.stderr and calls(env) == []
+    assert run(env, "skip", "preflight", "--reason", "offline box").returncode == 0
+    assert run(env, "start", "x").returncode == 0
+
+
+def test_start_flags_new_ground_when_only_weak_hits(env):
+    run(env, "preflight")
+    r = run(env, "start", "quantum widget", extra_env={"FAKE_WEAK": "1"})
+    assert r.returncode == 0 and "NEW GROUND" in r.stdout
+    assert "- new ground: YES" in (env["cycle"] / "02-start.md").read_text()
+
+
+def test_start_known_topic_is_not_new_ground(env):
+    run(env, "preflight")
+    r = run(env, "start", "retry on timeout")
+    assert "NEW GROUND" not in r.stdout
+    assert "new ground" not in (env["cycle"] / "02-start.md").read_text()
+
+
+@pytest.mark.parametrize("step", ["start", "check-report", "reply-check"])
+def test_unskippable_steps(env, step):
+    r = run(env, "skip", step, "--reason", "busy")
+    assert r.returncode == 2 and "cannot be skipped" in r.stderr
+
+
+def test_learn_needs_something_to_teach(env):
+    assert run(env, "learn").returncode == 2
+
+
+def test_learn_refuses_note_outside_connected_folders(env):
+    stray = env["tmp"] / "stray.md"
+    stray.write_text("x\n")
+    r = run(env, "learn", "--note", str(stray))
+    assert r.returncode == 2 and "not on Super Jev's shelves" in r.stderr
+
+
+def test_learn_fact_calls_add(env):
+    r = run(env, "learn", "--fact", "how many retries", "three", "--source", str(env["proj"]))
+    assert r.returncode == 0, r.stderr
+    c = calls(env)[0]
+    assert c[0] == "ask.py" and "--add" in c and c[c.index("--add") + 1:c.index("--add") + 3] == ["how many retries", "three"]
+
+
+def test_close_requires_learn(env):
+    do_all(env, skip=("learn",))
+    mark_all(env)
+    r = run(env, "close")
+    assert r.returncode == 1 and "learn" in r.stdout
+
+
+def test_preflight_root_alone_is_not_connected(env):
+    """A connection rooted above the folder but listing no file inside it does not count."""
+    lone = env["tmp"] / "lone"
+    lone.mkdir()
+    r = run(env, "preflight", "--project-dir", str(lone))
+    assert r.returncode == 2 and "not on Super Jev's shelves" in r.stderr
