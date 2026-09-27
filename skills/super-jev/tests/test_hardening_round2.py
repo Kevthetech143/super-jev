@@ -160,7 +160,7 @@ def test_content_check_drops_a_topic_only_match(env, monkeypatch, capsys):
     monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None, {}))
     assert ask.lookup("collar color?", "me", env / "state" / "me") == 0
     out = capsys.readouterr().out
-    assert "no-candidates" in out and "did not contain the answer" in out
+    assert "no-candidates" in out and "no answer was confirmed" in out
 
 
 def test_content_check_keeps_a_file_with_the_fact(env, monkeypatch, capsys):
