@@ -4,7 +4,11 @@
 Usage: build_cycle.py --dir CYCLE_DIR [--principal NAME] [--super-jev DIR] STEP [options]
 
 Steps (receipts are CYCLE_DIR/NN-step.md; Super Jev uses go to CYCLE_DIR/uses.jsonl):
-  start "idea" [--project NAME]        4 asks: tried before / design rules / known traps / which files
+  preflight [--project-dir DIR ...] [--skill "what the new skill does"]
+                                       free readiness check (reachable, every connection ready, project
+                                       folders connected); --skill also searches for an existing skill
+  start "idea" [--project NAME]        4 asks: tried before / design rules / known traps / which files;
+                                       flags NEW GROUND when Super Jev knows little
   target --goal TEXT --evidence TEXT [--ask]   the concrete failure or goal and where it came from
   cause --cause TEXT [--ask Q ...] [--trace ID|last]   root cause + what Super Jev returned for it
   brief                                print (and save) a block to paste into a helper's task
@@ -12,7 +16,9 @@ Steps (receipts are CYCLE_DIR/NN-step.md; Super Jev uses go to CYCLE_DIR/uses.js
   prove --cmd CMD --output FILE [--output FILE ...] [--note TEXT]
   review --reviewer NAME --verdict TEXT --file FILE [--claims FILE]
   reply-check --claims FILE            one key fact of the draft reply per line
+  learn [--note FILE ...] [--fact Q A [--source PATH]]   teach back what this cycle learned
   skip STEP --reason TEXT              recorded and shown at close, never silent
+                                       (start, check-report and reply-check cannot be skipped)
   mark USE_ID helped|neutral|missed [--note TEXT]
   status                               which steps are done, skipped or missing
   close [--log FILE]                   exit 1 naming missing steps / unmarked uses; else summary + log lines
@@ -31,7 +37,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-STEPS = ["start", "target", "cause", "brief", "check-report", "prove", "review", "reply-check"]
+STEPS = ["preflight", "start", "target", "cause", "brief", "check-report", "prove", "review", "reply-check",
+         "learn"]
+UNSKIPPABLE = ("start", "check-report", "reply-check")
+STRONG = 0.85  # a hit at or above this, not marked "possible", counts as Super Jev knowing the topic
 VERDICTS = ("helped", "neutral", "missed")
 NAME_RE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"  # same agent-name rule as ask.py
 START_QUESTIONS = [
@@ -41,6 +50,7 @@ START_QUESTIONS = [
     "which code files and tests handle {idea}",
 ]
 HIT_RE = re.compile(r"^\s*[0-9]+\.[0-9]{2}\s+\S")  # a ranked hit line: "0.91  /path  [pointer]"
+STATUS_RE = re.compile(r"^\s+([A-Za-z0-9][A-Za-z0-9._-]*): (.*)$")  # "  pointer: ready" from ask.py --status
 
 
 class CycleError(Exception):
@@ -124,14 +134,103 @@ def need_file(p: str, label: str) -> Path:
     return path.absolute()
 
 
+def connected_files(ctx, pointer: str) -> list:
+    """Files a pointer actually connected, per its prepare report (a split part "<p>-2" uses its parent's).
+    Roots alone are not enough: a connection can name single files inside a big folder."""
+    names = [pointer] + ([re.sub(r"-[0-9]+$", "", pointer)] if re.search(r"-[0-9]+$", pointer) else [])
+    for n in names:
+        rep = ctx.sj / "prepare-cache" / f"{n}-report.json"
+        if rep.is_file():
+            try:
+                files = json.loads(rep.read_text(encoding="utf-8")).get("approved") or []
+            except (OSError, ValueError):
+                return []
+            return [Path(f).expanduser().resolve() for f in files if isinstance(f, str)]
+    return []
+
+
+def covers(root: Path, target: Path) -> bool:
+    return target == root or root in target.parents
+
+
+def status_rows(ctx) -> tuple[int, str, list]:
+    """ask.py --status for this principal: (exit code, printed text, [(pointer, state), ...]). Free, no search."""
+    try:
+        r = subprocess.run([sys.executable, str(ctx.sj / "ask.py"), "--principal", ctx.principal, "--status"],
+                           capture_output=True, text=True, timeout=ctx.timeout)
+    except subprocess.TimeoutExpired:
+        return 1, f"(status timed out after {ctx.timeout}s)", []
+    out = r.stdout + r.stderr
+    return r.returncode, out, [m.groups() for m in map(STATUS_RE.match, out.splitlines()) if m]
+
+
+def cmd_preflight(ctx, a):
+    """Free readiness check. No receipt unless every check passes; fix what it names, or skip with a reason."""
+    problems, lines = [], [f"Super Jev found: {ctx.sj}", f"principal: {ctx.principal}"]
+    code, out, rows = status_rows(ctx)
+    if code != 0 or not rows:
+        problems.append("connection status unavailable or nothing connected:\n" + out.strip())
+    ready = [n for n, st in rows if st == "ready"]
+    for n, st in rows:
+        if st != "ready":
+            problems.append(f"{n} is not ready: {st}")
+    lines.append(f"connections: {len(ready)} of {len(rows)} ready")
+    for d in a.project_dir or []:
+        target = Path(d).expanduser().resolve()
+        if not target.is_dir():
+            problems.append(f"--project-dir is not a folder: {d}")
+            continue
+        inside = {n: sum(1 for f in connected_files(ctx, n) if covers(target, f)) for n in ready}
+        inside = {n: c for n, c in inside.items() if c}
+        if inside:
+            lines.append(f"project folder connected: {target} ({sum(inside.values())} files via "
+                         + ", ".join(sorted(inside)) + ")")
+        else:
+            problems.append(f"project folder not on Super Jev's shelves: {target}. Connect it (see "
+                            f"{ctx.sj.parent / 'super-jev-connect' / 'SKILL.md'}), then rerun preflight")
+    outs = [("connection status", out)]
+    if a.skill:
+        req = ctx.dir / "preflight-skill-request.json"
+        req.write_text(json.dumps({"request": f"a skill that {a.skill}", "context": []}), encoding="utf-8")
+        uid, sout = run_sj(ctx, "preflight", "dispatch.py", ["skills", "--request-file", str(req)],
+                           f"existing skill for: {a.skill}")
+        outs.append((f"[{uid}] existing skills for: {a.skill}", sout))
+        lines.append(f"existing-skill search: see [{uid}]; reuse or extend a match instead of building a duplicate")
+    if problems:
+        raise CycleError("preflight NOT READY (no receipt written):\n- " + "\n- ".join(problems)
+                         + "\nFix these and rerun, or: skip preflight --reason \"why\"")
+    print("\n".join(["preflight READY"] + lines))
+    return {"checks": "; ".join(lines), "project dirs": ", ".join(a.project_dir or [])}, outs
+
+
+def strong_hits(out: str) -> int:
+    n = 0
+    for line in out.splitlines():
+        if HIT_RE.match(line) and "(possible" not in line:
+            try:
+                n += float(line.split()[0]) >= STRONG
+            except ValueError:
+                pass
+    return n
+
+
 def cmd_start(ctx, a):
+    if step_state(ctx.dir, "preflight") == "missing":
+        raise CycleError("run preflight first (or: skip preflight --reason \"why\")")
     idea = a.idea + (f" in {a.project}" if a.project else "")
-    outs = []
+    outs, strong = [], 0
     for q in START_QUESTIONS:
         q = q.format(idea=idea)
         uid, out = ask(ctx, "start", q)
+        strong += strong_hits(out)
         outs.append((f"[{uid}] {q}", out))
-    return {"idea": a.idea, "project": a.project}, outs
+    fields = {"idea": a.idea, "project": a.project}
+    if not strong:
+        fields["new ground"] = ("YES: Super Jev has no strong note on this. Research outside (official docs, "
+                                "maintained open-source projects) before building, and teach what you learn back "
+                                "at the learn step")
+        print("NEW GROUND: " + fields["new ground"])
+    return fields, outs
 
 
 def cmd_target(ctx, a):
@@ -211,6 +310,30 @@ def cmd_reply_check(ctx, a):
     return {"claims": Path(a.claims).absolute()}, [(f"[{uid}] draft reply claim verdicts", out)]
 
 
+def cmd_learn(ctx, a):
+    """Teach back: notes written into a connected folder and/or facts saved with ask.py --add."""
+    if not a.note and not a.fact:
+        raise CycleError("learn needs --note FILE (a note in a connected folder) and/or --fact QUESTION ANSWER")
+    fields, outs = {}, []
+    if a.note:
+        notes = [need_file(n, "--note") for n in a.note]
+        ready = [n for n, st in status_rows(ctx)[2] if st == "ready"]
+        files = [f for n in ready for f in connected_files(ctx, n)]
+        dirs = {f.parent for f in files}
+        off = [str(n) for n in notes if n.resolve() not in files and n.resolve().parent not in dirs]
+        if off:
+            raise CycleError("not on Super Jev's shelves, so it cannot learn from them: " + ", ".join(off)
+                             + ". Save the note next to connected notes, or connect its folder first")
+        fields["note check"] = ("each note is connected or sits beside connected notes; a connection that lists "
+                                "named files only needs the note added to it")
+        fields["notes"] = ", ".join(map(str, notes))
+    for q, ans in a.fact or []:
+        args = ["--principal", ctx.principal, "--add", q, ans] + (["--source", a.source] if a.source else [])
+        uid, out = run_sj(ctx, "learn", "ask.py", args, f"add fact: {q}")
+        outs.append((f"[{uid}] add fact: {q}", out))
+    return fields, outs
+
+
 def load_uses(d: Path) -> list:
     f = d / "uses.jsonl"
     if not f.exists():
@@ -250,6 +373,8 @@ def cmd_status(ctx, a):
 def cmd_skip(ctx, a):
     if a.step not in STEPS:
         raise CycleError(f"unknown step {a.step!r}; steps: {', '.join(STEPS)}")
+    if a.step in UNSKIPPABLE:
+        raise CycleError(f"{a.step} cannot be skipped (unskippable: {', '.join(UNSKIPPABLE)})")
     if not a.reason.strip():
         raise CycleError("--reason must say why the step is skipped")
     skip_path(ctx.dir, a.step).write_text(
@@ -308,10 +433,10 @@ def cmd_close(ctx, a):
     return 0
 
 
-RECEIPT_STEPS = {"start": cmd_start, "target": cmd_target, "cause": cmd_cause, "brief": cmd_brief,
+RECEIPT_STEPS = {"preflight": cmd_preflight, "learn": cmd_learn, "start": cmd_start, "target": cmd_target, "cause": cmd_cause, "brief": cmd_brief,
                  "check-report": cmd_check_report, "prove": cmd_prove, "review": cmd_review,
                  "reply-check": cmd_reply_check}
-NEEDS_SJ = {"start", "target", "cause", "check-report", "review", "reply-check"}
+NEEDS_SJ = {"preflight", "start", "target", "cause", "check-report", "review", "reply-check", "learn"}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -322,6 +447,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--super-jev", help="Super Jev skill folder (default: sibling ../super-jev)")
     p.add_argument("--timeout", type=int, default=600, help="seconds per Super Jev call")
     sub = p.add_subparsers(dest="step", required=True)
+    s = sub.add_parser("preflight"); s.add_argument("--project-dir", action="append")
+    s.add_argument("--skill", help="building a skill: what it does (searches for an existing one first)")
     s = sub.add_parser("start"); s.add_argument("idea"); s.add_argument("--project")
     s = sub.add_parser("target"); s.add_argument("--goal", required=True); s.add_argument("--evidence", required=True)
     s.add_argument("--ask", action="store_true", help="also ask for related past misses")
@@ -337,6 +464,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("review"); s.add_argument("--reviewer", required=True); s.add_argument("--verdict", required=True)
     s.add_argument("--file", required=True); s.add_argument("--claims")
     s = sub.add_parser("reply-check"); s.add_argument("--claims", required=True)
+    s = sub.add_parser("learn"); s.add_argument("--note", action="append")
+    s.add_argument("--fact", nargs=2, action="append", metavar=("QUESTION", "ANSWER"))
+    s.add_argument("--source", help="file the facts come from")
     s = sub.add_parser("skip"); s.add_argument("skip_step", metavar="STEP"); s.add_argument("--reason", required=True)
     s = sub.add_parser("mark"); s.add_argument("use_id"); s.add_argument("verdict", choices=VERDICTS)
     s.add_argument("--note")
