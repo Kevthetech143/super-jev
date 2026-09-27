@@ -247,10 +247,11 @@ def test_fallback_catalog_uses_opaque_view_label(setup, monkeypatch):
 
 
 @pytest.mark.parametrize('principal,blocked', [('owner', True), ('outsider', False)])
-def test_manual_answer_with_hidden_literal_blocks_only_its_scope(setup, principal, blocked):
+@pytest.mark.parametrize('answer', ['Alice Example', 'PRIVATE: a saved line'])
+def test_manual_answer_with_hidden_literal_blocks_only_its_scope(setup, principal, blocked, answer):
     src, config, req = setup
     manual = src.with_name('manual.md')
-    manual.write_text('An independently saved answer mentions Alice Example.\n')
+    manual.write_text('An independently saved answer mentions ' + answer + '.\n')
     manual_req = {'pointer': principal + '-manual-abc123', 'principals': [principal],
                   'sources': [{'path': str(manual), 'description': 'Saved answer'}]}
     assert connect(confirm(manual_req, config), config)['status'] == 'registered'
