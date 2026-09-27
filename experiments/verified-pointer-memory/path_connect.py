@@ -5,12 +5,15 @@ import json
 import os
 import re
 import sqlite3
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 from service import Service, valid_principal
 from cli import has_secret
+from reviewed_view import derive
+import prepare_bulk
 
 MAX_FILES = 50
 MAX_BYTES = 5 * 1024 * 1024
@@ -44,6 +47,78 @@ def _atomic(path, data):
             os.unlink(name)
 
 
+def _manual_conflicts(config, principals, sources):
+    """Read only registered, in-scope manual records; never echo their contents."""
+    literals = {value for source in sources for op in (source.get('viewTransform') or {}).get('operations', [])
+                if op['op'] in ('redact-literals', 'drop-lines-containing') for value in op['values']}
+    if not literals or not Path(config['db']).exists():
+        return None
+    with sqlite3.connect(config['db']) as db:
+        rows = db.execute('SELECT name, body FROM pointers').fetchall()
+    blocked = []
+    for name, body in rows:
+        row = json.loads(body)
+        if not any(p in row['principals'] and name.startswith(p + '-manual-') for p in principals):
+            continue
+        try:
+            path = Path(row['snapshot']['entry']['manifestPath'])
+            if path.stat().st_size > MAX_BYTES:
+                raise ValueError('manual manifest too large')
+            text = json.dumps(json.loads(path.read_text()), ensure_ascii=False)
+            # Both the prepared answer and its routing metadata must be safe.
+            if any(value in text for value in literals):
+                blocked.append(name)
+        except (OSError, ValueError, KeyError):
+            blocked.append(name)  # An unreadable manual answer cannot be cleared.
+    if blocked:
+        return {**_problem('view-manual-record-conflict', 'Review and disconnect or redact these manual answer pointers before switching; nothing was connected.'),
+                'manualPointers': sorted(blocked)}
+    return None
+
+
+def _retire_view_artifacts(previous, data, registry, principals, new_originals):
+    """Remove obsolete local proofs and only the directly replaced owned generation."""
+    warnings = []
+    for principal in principals:
+        path = prepare_bulk._state_dir(principal) / 'claim-verdicts.json'
+        if not path.exists():
+            continue
+        try:
+            records = json.loads(path.read_text())
+            kept = {key: value for key, value in records.items()
+                    if not isinstance(value, dict) or os.path.realpath(value.get('path', '')) not in new_originals}
+            if kept != records:
+                _atomic(path, kept)
+        except (OSError, ValueError, AttributeError):
+            warnings.append('claim-verdict cleanup failed for ' + principal)
+    old_manifest = Path(previous.get('manifestPath', ''))
+    folder = old_manifest.parent
+    if not previous.get('pathConnection'):
+        if previous:
+            warnings.append('Legacy prepared artifacts require an explicit local retention review.')
+        return warnings
+    try:
+        owned = (folder.parent == registry.parent and folder.name.startswith('.prepared-')
+                 and not folder.is_symlink() and old_manifest.name == 'manifest.json')
+        referenced = any(Path(entry.get('manifestPath', '')).parent == folder or
+                         any(Path(item['path']).parent == folder for item in entry.get('originals', []))
+                         for entry in data['datasets'].values())
+        if owned and not referenced:
+            files = list(folder.iterdir())
+            if all(not f.is_symlink() and f.is_file() and
+                   (f.name == 'manifest.json' or re.fullmatch(r'[0-9]+\.txt', f.name)) for f in files):
+                shutil.rmtree(folder)
+            else:
+                warnings.append('Replaced generation contains unexpected files; retained for local review.')
+        elif owned:
+            warnings.append('Replaced generation is still referenced; retained.')
+        else:
+            warnings.append('Prepared folder is not an owned local generation; retained for review.')
+    except OSError:
+        warnings.append('Replaced generation cleanup failed; inspect local prepared artifacts.')
+    return warnings
+
+
 def _catalog(sources, structure):
     """Build a deterministic, bounded navigation catalog from explicit sources."""
     paths = [Path(source['path']) for source in sources]
@@ -54,7 +129,9 @@ def _catalog(sources, structure):
     groups = {}
     leaves = []
     for source in sources:
-        if source['navigationPath'] is not None:
+        if source.get('viewTransform') is not None and source['navigationPath'] is None:
+            labels = []
+        elif source['navigationPath'] is not None:
             labels = source['navigationPath']
         elif structure == 'folder-tree':
             labels = list(Path(source['path']).parent.relative_to(common).parts)
@@ -75,7 +152,9 @@ def _catalog(sources, structure):
         leaf_id = 'source:' + _hash(source['id'].encode())[:24]
         path = Path(source['path'])
         shared = not labels and names.count(path.name) > 1 and path.parent.name
-        leaf = {'id': leaf_id, 'label': f'{path.parent.name}/{path.name}' if shared else path.name,
+        label = ('Reviewed source ' + _hash(source['id'].encode())[:12] if source.get('viewTransform') is not None
+                 else (f'{path.parent.name}/{path.name}' if shared else path.name))
+        leaf = {'id': leaf_id, 'label': label,
                 'description': source['description'], 'sourceId': source['id']}
         leaves.append((parent, leaf))
     root = {'id': 'root', 'label': 'Sources',
@@ -118,11 +197,18 @@ def _connect(request, config):
     items = request.get('sources')
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_FILES:
         return _problem('source-limit', 'Supply 1–50 explicit UTF-8 text file paths, up to 5 MiB total. Directories are not expanded.')
+    if any(isinstance(item, dict) and 'viewTransform' in item for item in items):
+        # Bulk readers/writers use these artifacts independently of memory connect.
+        # Never turn a bulk pointer into a view while its raw recipe/cache survives.
+        if any((prepare_bulk.CACHE_DIR / (pointer + suffix)).exists()
+               for suffix in ('.json', '-report.json')):
+            return _problem('view-bulk-cache-conflict', 'A raw bulk cache or report exists for this pointer. Quarantine its old bulk artifacts and review saved raw evidence before creating a view connector; no view connection was made.')
     explicit_navigation = 'structure' in request
     structure = request.get('structure', 'flat-files')
     if structure not in ('flat-files', 'folder-tree'):
         return _problem('unsupported-structure', 'Use structure "flat-files" or "folder-tree". Directories are never crawled.')
     sources, seen_paths, seen_ids, total = [], set(), set(), 0
+    view_total = 0
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get('path'), str):
             return _problem('invalid-source', 'Each source needs a path; description and stable id are optional.')
@@ -145,12 +231,28 @@ def _connect(request, config):
             return _problem('unsupported-source', 'Export non-UTF-8 or binary files into reviewed UTF-8 text first. No partial connection was created.')
         if not text.strip() or any(ord(c) < 32 and c not in '\n\r\t' for c in text):
             return _problem('unsupported-source', 'Empty or binary/control-character content cannot be connected. Supply nonempty reviewed UTF-8 text.')
+        original_sha = _hash(raw)
+        if 'viewTransform' not in item and any(k in item for k in ('viewSHA', 'transformSHA')):
+            return _problem('invalid-view-transform', 'View review hashes require the original viewTransform policy; raw fallback is refused.')
+        policy = item.get('viewTransform')
+        transform_sha = None
+        if 'viewTransform' in item:
+            try:
+                raw, transform_sha = derive(text, policy)
+                text = raw.decode('utf-8')
+            except (ValueError, TypeError):
+                return _problem('invalid-view-transform', 'Use a supported versioned declarative redaction policy. No raw-source fallback is permitted.')
+            if not text.strip():
+                return _problem('empty-view', 'The policy produced an empty view. No connection was created.')
+        view_total += len(raw)
+        if view_total > MAX_BYTES:
+            return _problem('byte-limit', 'The complete derived view set must fit within 5 MiB.')
         if has_secret(text):
             return _problem('secret-held', 'A source contains a secret (key, token, password or card number); remove it first. No partial connection was created.')
         source_id = item.get('id', 'file:' + _hash(str(given).encode())[:24])
         if not isinstance(source_id, str) or not source_id or len(source_id) > 256 or source_id in seen_ids or path in seen_paths:
             return _problem('duplicate-source', 'Each source needs a unique path and nonempty unique id of at most 256 characters.')
-        description = item.get('description', 'Local text file: ' + path.name)
+        description = item.get('description', 'Reviewed local source' if policy is not None else 'Local text file: ' + path.name)
         if not isinstance(description, str) or not description.strip() or len(description) > 4000:
             return _problem('invalid-description', 'Omit description for a filename description, or supply a factual description of at most 4000 characters.')
         navigation_path = item.get('navigationPath')
@@ -162,11 +264,19 @@ def _connect(request, config):
                     or any(not isinstance(label, str) or not label.strip()
                            or len(label) > 200 for label in navigation_path)):
                 return _problem('invalid-navigation-path', 'navigationPath must be an array of at most 8 nonempty labels, each at most 200 characters.')
+        if policy is not None:
+            # Configuration stays local; none of these routing fields may reveal
+            # values that the body policy hides. Filename-derived labels are omitted.
+            metadata = [source_id, description, *(navigation_path or [])]
+            if any(derive(value, policy)[0].decode() != value or has_secret(value) for value in metadata):
+                return _problem('view-metadata-held', 'Supply an opaque source id and descriptions/navigation labels that need no redaction under the view policy.')
         seen_paths.add(path)
         seen_ids.add(source_id)
         sources.append({'id': source_id, 'path': str(given), 'realPath': str(path), 'raw': raw, 'text': text,
                         'description': description, 'navigationPath': navigation_path,
-                        'sha256': _hash(raw), 'reviewedSHA': item.get('sha256')})
+                        'sha256': original_sha, 'viewSHA': _hash(raw), 'viewTransform': policy,
+                        'transformSHA': transform_sha, 'reviewedViewSHA': item.get('viewSHA'),
+                        'reviewedTransformSHA': item.get('transformSHA'), 'reviewedSHA': item.get('sha256')})
     if structure == 'folder-tree':
         common = Path(os.path.commonpath([str(Path(source['path']).parent)
                                          for source in sources]))
@@ -178,16 +288,24 @@ def _connect(request, config):
         catalog = _catalog(sources, structure)
     except (ValueError, OSError):
         return _problem('navigation-limit', 'The explicit source grouping must fit within 200 catalog nodes and 50 source leaves.')
+    conflict = _manual_conflicts(config, principals, sources)
+    if conflict:
+        return conflict
     navigation_sha = _hash(json.dumps(catalog, sort_keys=True, separators=(',', ':'),
                                       ensure_ascii=False).encode())
     navigation_reviewed = (request.get('navigationSHA') == navigation_sha
                            if explicit_navigation or 'navigationSHA' in request
                            else True)
     if (request.get('reviewed') is not True
-            or any(s['reviewedSHA'] != s['sha256'] for s in sources)
+            or any(s['reviewedSHA'] != s['sha256']
+                   or (s['viewTransform'] is not None and
+                       (s['reviewedViewSHA'] != s['viewSHA'] or s['reviewedTransformSHA'] != s['transformSHA']))
+                   for s in sources)
             or not navigation_reviewed):
-        return {**_problem('review-required', 'Review these local files within authorized scope. To permit their entire text for provider processing, repeat connect with reviewed:true and each returned sha256. This is not automatic privacy approval.'),
+        return {**_problem('review-required', 'Review the local files or derived views within authorized scope. Repeat with reviewed:true, each returned sha256, and for transformed sources viewSHA and transformSHA while retaining viewTransform. Only the derived view is published. This is not automatic privacy approval.'),
                 'sources': [{**{k: s[k] for k in ('path', 'id', 'description', 'sha256')},
+                             **({'viewSHA': s['viewSHA'], 'transformSHA': s['transformSHA']}
+                                if s['viewTransform'] is not None else {}),
                              **({'navigationPath': s['navigationPath']}
                                 if s['navigationPath'] is not None else {})} for s in sources],
                 'structure': structure, 'catalog': catalog,
@@ -226,6 +344,15 @@ def _connect(request, config):
         if (dataset in data['datasets'] and not old
                 and data['datasets'][dataset].get('pathConnection') != {'pointer': pointer, 'principals': sorted(principals)}):
             return _problem('unowned-dataset', 'An existing dataset cannot be overwritten by a new pointer. Choose a new dataset name.')
+        conflict = _manual_conflicts(config, principals, sources)
+        if conflict:
+            return conflict
+        previous = data['datasets'].get(dataset) or {}
+        policies = {s['path']: s['transformSHA'] for s in sources if s['viewTransform'] is not None}
+        if any(policies.get(path) != digest for path, digest in previous.get('viewPolicies', {}).items()):
+            return _problem('view-policy-change', 'A replacement cannot remove or change an existing view policy or its source. Use a separately authorized connector for a different policy.')
+        if previous and not previous.get('pathConnection') and not all(s['viewTransform'] is not None for s in sources):
+            return _problem('legacy-view-policy-required', 'Hand-prepared datasets require an explicit reviewed view transform for every replacement source; raw replacement is refused.')
         if any(_hash(Path(s['path']).read_bytes()) != s['sha256'] for s in sources):
             return _problem('source-changed', 'A source changed after review. Review current bytes and repeat connect with their hashes.')
         # Private unless someone marked it shareable on purpose; a refresh that does not say keeps the mark.
@@ -237,9 +364,11 @@ def _connect(request, config):
         for i, (s, passages) in enumerate(zip(sources, chunks)):
             prepared_path = folder / f'{i}.txt'
             _write(prepared_path, s['raw'])
-            manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['sha256'], 'description': s['description']})
+            manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['viewSHA'], 'description': s['description'],
+                                        **({'viewTransform': s['viewTransform'], 'transformSHA': s['transformSHA'],
+                                            'originalSHA': s['sha256']} if s['viewTransform'] is not None else {})})
             for p in passages:
-                manifest['preparations'].append({'sourceId': s['id'], 'contentSHA': s['sha256'], 'chunkIndex': p['chunkIndex'], 'startLine': p['startLine'], 'endLine': p['endLine'], 'reviewedText': p['text'], 'safeHeading': p['heading'] or s['description'], 'policy': 'reviewed', 'status': 'reviewed'})
+                manifest['preparations'].append({'sourceId': s['id'], 'contentSHA': s['viewSHA'], 'chunkIndex': p['chunkIndex'], 'startLine': p['startLine'], 'endLine': p['endLine'], 'reviewedText': p['text'], 'safeHeading': p['heading'] or s['description'], 'policy': 'reviewed', 'status': 'reviewed'})
         manifest_path = folder / 'manifest.json'
         manifest_raw = json.dumps(manifest, ensure_ascii=False).encode()
         _write(manifest_path, manifest_raw)
@@ -251,12 +380,13 @@ def _connect(request, config):
             'originals': [{'path': s['path'], 'sha256': s['sha256'],
                            **({'realPath': s['realPath']} if s['realPath'] != s['path'] else {})}
                           for s in sources],
-            'shareable': shareable,
+            'shareable': shareable, 'viewPolicies': policies,
             # The connect request itself, minus the review hashes: an ask that finds this
             # pointer stale replays it (auto_heal.reconnect_recipe) at the files' current bytes.
             'recipe': {'pointer': pointer, 'dataset': dataset, 'principals': sorted(principals),
                        'structure': structure,
                        'sources': [{'path': s['path'], 'id': s['id'], 'description': s['description'],
+                                    **({'viewTransform': s['viewTransform']} if s['viewTransform'] is not None else {}),
                                     **({'navigationPath': s['navigationPath']}
                                        if s['navigationPath'] is not None else {})}
                                    for s in sources]}}
@@ -266,8 +396,11 @@ def _connect(request, config):
         _, error = service.pointer(pointer, principals[0])
         if error:
             return _problem('source-changed', 'A source changed during connection. Review it and reconnect with replace:true.')
+        cleanup_warnings = (_retire_view_artifacts(previous, data, registry, principals,
+                            {os.path.realpath(path) for path in policies}) if policies else [])
     return {'status': 'registered', 'pointer': pointer, 'dataset': dataset,
             'structure': structure, 'navigationSHA': navigation_sha,
+            'cleanupWarnings': cleanup_warnings,
             'sources': [{'id': s['id'], 'originalPath': s['path']} for s in sources],
             'fileCount': len(sources), 'passageCount': len(manifest['preparations']),
             'nextAction': 'search', 'hint': 'Ready for snapshot searches. Originals are unchanged; upstream synchronization and privacy approval are not automatic.'}

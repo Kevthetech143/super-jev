@@ -1395,6 +1395,8 @@ def load_cache_files(pointer: str) -> dict:
     """Only prepare-cache/<pointer>.json. Part caches are registered as their own
     pointers (<pointer>-N) and arrive in the principal's pointer list when owned, so
     matching <pointer>-N.json here could read another principal's pointer."""
+    if pointer in _STAGE.get("view_pointers", ()):
+        return {}  # A leftover bulk cache names raw originals, never reviewed views.
     p = prepare_bulk.CACHE_DIR / f"{pointer}.json"
     try:
         data = json.loads(p.read_text())
@@ -1886,8 +1888,14 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     _STAGE.clear()
     # SUPERJEV_REPLAY=1 (paid_replay.py): answer live; never read a saved answer or claim verdict.
     replay = os.environ.get("SUPERJEV_REPLAY") == "1"
+    panel = None
     if _CLAIM["text"]:
+        panel = memory({"action": "panel", "principal": principal})
+        view_originals = {os.path.realpath(path) for row in panel.get("pointers", []) if isinstance(row, dict)
+                          for path in row.get("viewOriginals", [])}
         saved = None if replay else claim_cache_get(sdir, _CLAIM["text"])
+        if saved and os.path.realpath(saved.get("path", "")) in view_originals:
+            saved = None  # A verdict from a former raw source is not a view approval.
         if saved:
             q = f'line {saved["line_no"]}: "{saved["line"]}"' if saved.get("line_no") else (
                 f'"{saved["line"]}"' if saved.get("line") else "")
@@ -1917,7 +1925,10 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         # Its manual pointer's record text IS the stale answer, so keep it out of the live search.
         withheld = manual_pointer_name(principal, question)
         print("Searching live instead...")
-    panel = memory({"action": "panel", "principal": principal})
+    panel = panel if panel is not None else memory({"action": "panel", "principal": principal})
+    view_pointers = {row["pointer"] for row in panel.get("pointers", [])
+                     if isinstance(row, dict) and row.get("viewOriginals")}
+    _STAGE["view_pointers"] = sorted(view_pointers)
     if panel.get("reason") == "not-set-up":
         print(f"Super Jev is not set up yet. Run: python3 {skill_dir_for_display() / 'setup.py'}")
         return 1
@@ -2052,7 +2063,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     for i, (ptr, kind, *_rest) in enumerate(results):
         left = int(deadline - time.time())
         if auto_heal.is_stale_kind(kind) and left >= 1 and not replay:
-            reconnected[ptr] = auto_heal.reconnect_now(ptr, principal, timeout=left)
+            reconnected[ptr] = ("no-report" if ptr in view_pointers else
+                                auto_heal.reconnect_now(ptr, principal, timeout=left))
             if reconnected[ptr] == "no-report":
                 # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
                 reconnected[ptr] = auto_heal.reconnect_recipe_or_queue(ptr, principal, memory=memory)
@@ -2070,7 +2082,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             errored += 1
             statuses[ptr] = kind
-            hint = refresh_hint(ptr, principal, kind)
+            hint = ("; refresh through the recorded view recipe; raw bulk refresh is disabled"
+                    if ptr in view_pointers else refresh_hint(ptr, principal, kind))
             # A stale pointer never has to wait on a human to run the refresh hint above by
             # hand: this starts the exact same prepare_bulk.py --refresh in the background,
             # bounded (one in flight per principal, the rest queued behind it, per-pointer
@@ -2081,7 +2094,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             stale = auto_heal.is_stale_kind(kind)
             result = None
             if stale and not replay:
-                result = auto_heal.maybe_heal(ptr, principal)
+                result = (reconnected.get(ptr, "no-recipe") if ptr in view_pointers else
+                          auto_heal.maybe_heal(ptr, principal))
                 if result == "started":
                     heal_note = " (auto-heal: refresh started in background)"
                 elif result == "in-progress":
