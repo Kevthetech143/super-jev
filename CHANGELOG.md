@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- A new agent's first ask (nothing connected) prints commands that run from any folder: the skill folder it was run from, not the repo-relative `skills/super-jev/...`, and the same for the not-set-up hint. When the fleet has a shared list (`shared-pointers.json`), it also names those sets and the one `share_pointers.py --principal NAME --shared` command that joins them without any connect.
 - Agent names (`--principal`) must be letters, digits, `.`, `_` or `-`, starting with a letter or digit (at most 64). `ask.py` refuses anything else before touching state, and the memory runtime refuses to register it (connect and share). Before, a trailing space made a second, empty identity ("businessfi " beside "businessfi"), and a name such as `x/../primary` pointed its state folder at another agent's. That case was blocked only because no pointer was registered to such a name. Every name registered today already fits.
 - The label writer's secret check scans the file text it sends, not that text's JSON form. JSON escaping turned a safe shell line such as `KEY="$(cat file)"`, which the setup scan admits, into a key=value hit. The writer then refused the whole batch, so every refresh of that pointer failed and it stayed stale. A real secret in the text or the checker feedback is still refused.
 - A stale pointer whose last background refresh failed now says `auto-heal: last refresh FAILED: <reason>; retrying after cooldown` instead of the plain "refreshed recently, cooling down", which hid a refresh that kept failing.
