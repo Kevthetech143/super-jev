@@ -204,3 +204,30 @@ def test_a_proof_line_past_the_sixtieth_line_is_still_offered(tmp_path):
     a = _f(tmp_path, "a.md", filler + "\nThe choice limit is 255 options per question.\n")
     qs, lines = ask.claim_questions("A choice can have 255 options.", [a], {a: open(a).read()})
     assert "The choice limit is 255 options per question." in lines["file_1"]
+
+
+def test_a_word_longer_than_the_window_does_not_crash_the_line_pick(tmp_path):
+    # Live crash (2026-09-27): a line holding a long URL made the window drop a word it never added.
+    url = "https://example.com/answers/" + "a" * 200  # the long word holds a statement word
+    line = f"see {url} where the answer about choice questions reliability is stated " + "z " * 40
+    a = _f(tmp_path, "a.md", line + "\n")
+    qs, lines = ask.claim_questions("Jev answers choice questions more reliably", [a], {a: open(a).read()})
+    shown = qs["line_1"]["criteria"]["L1"]
+    assert "choice questions" in shown and len(shown) <= ask.CLAIM_LINE_CHARS
+
+
+def test_one_failed_statement_does_not_drop_the_rest(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def fake_lookup(q, principal, sdir):
+        calls.append(q)
+        if q == "bad":
+            raise KeyError("x")
+        return 0
+    monkeypatch.setattr(ask, "lookup", fake_lookup)
+    f = tmp_path / "c.txt"
+    f.write_text("bad\ngood\n")
+    monkeypatch.setattr(ask.sys, "argv", ["ask.py", "--principal", "me", "--claims-file", str(f)])
+    rc = ask.main()
+    assert calls == ["bad", "good"] and rc == 2
+    assert "could not be checked" in capsys.readouterr().out
