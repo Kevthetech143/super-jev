@@ -259,3 +259,58 @@ def test_reserved_manifest_passed_to_scorecard(tmp_path):
     report=json.loads((tmp_path/'result'/'scorecard.json').read_text())
     assert report['held_out_verified'] is True
     assert report['held_out_sha256']==data['held_out_sha256']
+
+
+
+def test_child_process_cannot_read_live_note_through_pipe(tmp_path):
+    root,pin,note=bundle(tmp_path)
+    candidate=tmp_path/'candidate';candidate.mkdir()
+    code=(root/'baseline'/'ask.py').read_text().replace("    text=Path(%r).read_bytes()" % str(note),
+        """    import os, subprocess
+    reader, writer = os.pipe()
+    try:
+        child = subprocess.Popen(['cat', %r], stdout=writer)
+        child.wait()
+        text = os.read(reader, 100)
+    finally:
+        os.close(reader)
+        os.close(writer)""" % str(note))
+    (candidate/'ask.py').write_text(code)
+    note.write_text('changed')
+    with pytest.raises(PermissionError,match='subprocess.Popen'):
+        sr.compare(root,pin,candidate/'ask.py',tmp_path/'result')
+
+
+@pytest.mark.parametrize('event', ['os.system', 'os.posix_spawn', 'os.exec', 'os.fork', 'os.forkpty'])
+def test_process_audit_events_refused(event):
+    violations=[]
+    with sr.guarded_reads([],violations), pytest.raises(PermissionError,match='operation forbidden'):
+        sys.audit(event)  # exercise the hook without starting/replacing the test process
+    assert violations == ['forbidden operation: ' + event]
+
+
+@pytest.mark.parametrize('operation', ['mkdir', 'rename', 'remove', 'symlink'])
+def test_filesystem_mutations_refused(tmp_path, operation):
+    import os
+    source=tmp_path/'source';source.write_text('original')
+    dest=tmp_path/'destination'
+    calls={'mkdir':lambda:os.mkdir(dest),'rename':lambda:os.rename(source,dest),
+           'remove':lambda:os.remove(source),'symlink':lambda:os.symlink(source,dest)}
+    violations=[]
+    with sr.guarded_reads([],violations), pytest.raises(PermissionError,match='operation forbidden'):
+        calls[operation]()
+    assert source.read_text()=='original' and not dest.exists()
+    assert violations
+
+
+def test_caught_filesystem_mutation_still_rejects(tmp_path):
+    root,pin,note=bundle(tmp_path)
+    candidate=tmp_path/'candidate';candidate.mkdir()
+    dest=tmp_path/'unwanted-directory'
+    code=(root/'baseline'/'ask.py').read_text().replace('    text=',
+        "    try:\n        __import__('os').mkdir(%r)\n    except PermissionError:\n        pass\n    text=" % str(dest))
+    (candidate/'ask.py').write_text(code)
+    result=sr.compare(root,pin,candidate/'ask.py',tmp_path/'result')
+    assert result['decision']=='REJECT'
+    assert any('os.mkdir' in u for u in result['uncertainty'])
+    assert not dest.exists()

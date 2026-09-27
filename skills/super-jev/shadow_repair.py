@@ -100,10 +100,20 @@ def no_bytecode():
 # This is a fail-closed guard for trusted Python builds, not an OS sandbox.
 _READ_GUARDS = []
 _STDLIB = Path(sysconfig.get_path("stdlib")).resolve()
+_FORBIDDEN_EVENTS = {
+    'subprocess.Popen', 'os.system', 'os.posix_spawn', 'os.exec', 'os.fork', 'os.forkpty',
+    'os.mkdir', 'os.rename', 'os.remove', 'os.rmdir', 'os.symlink', 'os.link',
+    'os.truncate', 'os.chmod', 'os.chown', 'os.utime', 'os.chdir', 'os.fchdir',
+}
 def _audit_reads(event, args):
-    if event != 'open' or not _READ_GUARDS:
+    if not _READ_GUARDS:
         return
     permitted, violations = _READ_GUARDS[-1]
+    if event in _FORBIDDEN_EVENTS or event.startswith('os.exec'):
+        violations.append('forbidden operation: ' + event)
+        raise PermissionError('operation forbidden during replay: ' + event)
+    if event != 'open':
+        return
     path = args[0]
     if isinstance(path, int):
         violations.append('file descriptor read')
