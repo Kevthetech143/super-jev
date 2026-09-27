@@ -38,7 +38,13 @@ def test_saved_cases_outlive_the_records_they_came_from(tmp_path):
     first = sc.merge_saved(tmp_path, [{"question": "q1", "gold": ["/a"]}])
     again = sc.merge_saved(tmp_path, [{"question": "q1", "gold": ["/b"]}, {"question": "q2", "gold": ["/c"]}])
     assert [c["question"] for c in first] == ["q1"]
-    assert [(c["question"], c["gold"]) for c in again] == [("q1", ["/a"]), ("q2", ["/c"])]
+    # A later record for the same question (a --miss naming the right file) replaces the old gold.
+    assert [(c["question"], c["gold"]) for c in again] == [("q1", ["/b"]), ("q2", ["/c"])]
+    # A question the harvest no longer covers (its trace rotated away) is kept.
+    later = sc.merge_saved(tmp_path, [{"question": "q2", "gold": ["/c"]}])
+    assert [(c["question"], c["gold"]) for c in later] == [("q1", ["/b"]), ("q2", ["/c"])]
+    assert [(c["question"], c["gold"]) for c in sc._jsonl(tmp_path / sc.CASES_FILE)] == \
+        [("q1", ["/b"]), ("q2", ["/c"])]
 
 
 FAKE = '''
