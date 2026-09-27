@@ -637,7 +637,7 @@ FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the 
 # cover gate, prefilter, term_hits) goes through words()/fold(). Bump WORDS_VERSION
 # when this changes: saved pointer words carry it and rebuild on a mismatch.
 WORD_RE = re.compile(r"[^\W_]+")
-WORDS_VERSION = 2
+WORDS_VERSION = 3  # 3: word lists read every sources page (were first 25 files only)
 
 _ASCII_WORD_RE = re.compile(r"[a-z0-9]+")  # same result on ASCII text, and faster
 
@@ -1134,11 +1134,22 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
     """List and read the missing pointers' files (local, no provider calls) and save
     their words. Runs beside routing, so the first ask after a refresh is not slower."""
     def load(ptr):
-        out = memory({"action": "sources", "pointer": ptr, "principal": principal})
-        if out.get("status") != "ok" or not out.get("sources"):
+        # sources is paged (25 rows by default): read every page, or a pointer's later
+        # files never reach its word list and the prefilter skips questions about them.
+        rows, offset = [], 0
+        while True:
+            out = memory({"action": "sources", "pointer": ptr, "principal": principal,
+                          "offset": offset, "limit": 100})
+            if out.get("status") != "ok":
+                return ptr, None
+            rows += out.get("sources") or []
+            if out.get("nextOffset") is None:
+                break
+            offset = out["nextOffset"]
+        if not rows:
             return ptr, None
         seen = set()
-        for src in out["sources"]:
+        for src in rows:
             head = f"{src.get('originalPath', '')} {src.get('description', '')}".lower()
             try:
                 seen.update(words(head + " " + Path(src["path"]).read_text(errors="replace")))
