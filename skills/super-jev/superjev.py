@@ -5015,6 +5015,10 @@ def cmd_verify(a):
         if fallback is None:
             return door_refuse(json_mode, "verify", bad)
         block, verdicts, code, guard = fallback
+        dropped = [f for f in ("pr", "base", "claim") if getattr(a, f, None)]
+        if dropped:  # the offline fallback cannot use them; say so rather than judge other claims
+            block = (f"door absent: {', '.join('--' + f for f in dropped)} ignored by the offline "
+                     "fallback; its verdict covers the report's own claims only\n") + block
         summary = VERIFY_VERDICT.get(code, f"exit {code}")
         ledger_append({
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -5097,6 +5101,13 @@ def cmd_verify(a):
         cmd += ["--worktree", a.worktree]
     if a.test_cmd:
         cmd += ["--test-cmd", a.test_cmd]
+    # "--flag=value" so a value that starts with "-" is not read as an option by the door
+    if getattr(a, "pr", None):
+        cmd += [f"--pr={a.pr}"]
+    if getattr(a, "base", None):
+        cmd += [f"--base={a.base}"]
+    for c in getattr(a, "claim", None) or []:
+        cmd += [f"--claim={c}"]
     if paths_for_cmd:
         cmd += ["--paths", *paths_for_cmd]
     if a.dry_run:
@@ -10511,7 +10522,7 @@ def _hook_verify_from_file(door, path, worktree=None, test_cmd="", pr=None,
     evidence, the same way a real PostToolUse hook derives it from the
     payload — passed straight through to worker-verify's own --worktree/
     --test-cmd flags (verify.py's real argparse; see FLEET_VERIFY_PY).
-    `pr`, a PR number, has no equivalent verify.py flag — instead it is
+    `pr`, a PR number, is not passed as verify.py's --pr on this hook path — instead it is
     turned into a full GitHub pull URL via `_pr_url_from_worktree` (which
     needs `worktree` to resolve the origin remote) and appended to the
     report text, so worker-verify's own atom extraction picks it up and
@@ -13191,6 +13202,10 @@ def build_parser():
     v.add_argument("--worktree", help="the repo or folder the work happened in")
     v.add_argument("--test-cmd", default="", help="the test command, exact path")
     v.add_argument("--paths", nargs="*", default=[], help="paths the report claims")
+    v.add_argument("--pr", help="the PR the report is about (its state is gathered)")
+    v.add_argument("--base", help="diff/log base for the worktree (door default: origin/main)")
+    v.add_argument("--claim", action="append", default=[],
+                   help="name a claim yourself (repeatable); beats the automatic split")
     v.add_argument("--dry-run", action="store_true", help="collect evidence, no judging")
     v.add_argument("--explain", action="store_true",
                    help="door-absent fallback only: list the gh commands run "
