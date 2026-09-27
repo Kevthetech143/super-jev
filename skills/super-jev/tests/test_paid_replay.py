@@ -30,6 +30,9 @@ from pathlib import Path
 PLAN = %r
 args = sys.argv[1:]
 principal = args[args.index("--principal") + 1]
+if args[-1] == "--status":  # the free preflight: PLAN["status"] is its output
+    print(PLAN.get("status", "Connections for " + principal + ":\n  p1: ready"))
+    sys.exit(PLAN.get("status_rc", 0))
 claim = "--claim" in args
 q = args[args.index("--claim") + 1] if claim else args[-1]
 root = Path(os.environ["SUPERJEV_STATE_DIR"])
@@ -412,3 +415,18 @@ def test_a_file_read_that_no_registry_or_cache_pins_is_unpinned(tmp_path, env, c
     row = json.loads(capsys.readouterr().out)["rows"][0]
     assert row["result"] == "inconclusive"
     assert ("unpinned source" if pinned_by == "nothing" else "changed during the pair") in row["new"]["error"]
+
+
+@pytest.mark.parametrize("status,rc", [
+    ("Connections for me:\n  p1: ready\n  brain-reviewed: stale (preparation-required); its files changed", 0),
+    ("Not set up. Next: python3 setup.py", 1)])
+def test_a_stale_pointer_or_no_status_refuses_before_any_paid_ask(tmp_path, env, capsys, status, rc):
+    # First live run: a stale pointer turned every case into ERROR -> ERROR after 14 paid asks.
+    cases = _cases(tmp_path, [{"question": "q", "gold": ["/a.md"]}])
+    plan = {"status": status, "status_rc": rc}
+    with pytest.raises(SystemExit) as e:
+        _run(tmp_path, cases, {"q": {"final": TOP}}, plan)
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "no ask spent" in err
+    assert ("brain-reviewed: stale" if rc == 0 else "status unavailable") in err
+    assert _log(tmp_path) == []
