@@ -45,12 +45,14 @@ def _runtime(tmp_path):
     return memory, marker, calls
 
 
-def _connect(memory, tmp_path, pointer, principals, folder="global/knowledge"):
+def _connect(memory, tmp_path, pointer, principals, folder="global/knowledge", shareable=True):
     (tmp_path / folder).mkdir(parents=True, exist_ok=True)
     src = tmp_path / folder / f"{pointer}.md"
     src.write_text(f"# {pointer}\nshared fleet note\n")
     req = {"action": "connect", "pointer": pointer, "principals": principals,
            "sources": [{"path": str(src), "description": "fleet note"}]}
+    if shareable is not None:
+        req["shareable"] = shareable
     preview = memory(req)
     assert memory({**req, "reviewed": True, "sources": preview["sources"]})["status"] == "registered"
     return src
@@ -139,3 +141,50 @@ def test_a_pointer_with_a_brain_documents_or_profile_source_is_refused(tmp_path)
     assert out["bot-profile"].startswith("refused:") and "profile/" in out["bot-profile"]
     assert "register" not in calls
     assert _visible(memory, "otherbot") == {}
+
+
+def _shareable(tmp_path, pointer):
+    return json.loads((tmp_path / "registry.json").read_text())["datasets"][pointer].get("shareable")
+
+
+def test_a_connection_is_private_until_a_person_marks_it(tmp_path, monkeypatch):
+    memory, marker, calls = _runtime(tmp_path)
+    monkeypatch.setattr(sp, "memory", memory)
+    _connect(memory, tmp_path, "team-notes", ["owner"], folder="agents/hearth/notes", shareable=None)
+    assert _shareable(tmp_path, "team-notes") is False  # recorded private at connect
+    calls.clear()
+    out = sp.share(["team-notes"], ["otherbot"], memory=memory)
+    assert out["team-notes"].startswith("refused: private")
+    assert "register" not in calls and _visible(memory, "otherbot") == {}
+    assert sp.mark(["team-notes"], memory=memory) == {"team-notes": "marked"}
+    assert _shareable(tmp_path, "team-notes") is True
+    assert _visible(memory, "owner")["team-notes"] == "available"  # a mark never stales the pointer
+    assert sp.share(["team-notes"], ["otherbot"], memory=memory) == {"team-notes": "shared"}
+    assert sp.mark(["team-notes"], value=False, memory=memory) == {"team-notes": "unmarked"}
+    assert _visible(memory, "owner")["team-notes"] == "available"
+    assert sp.share(["team-notes"], ["third"], memory=memory)["team-notes"].startswith("refused: private")
+    assert sp.mark(["nope"], memory=memory) == {"nope": "unknown-pointer"}
+    assert not marker.exists()
+
+
+def test_a_private_source_cannot_be_marked_shareable(tmp_path):
+    memory, _, _ = _runtime(tmp_path)
+    _connect(memory, tmp_path, "bot-brain-notes", ["bot"], folder="agents/bot-brain/notes", shareable=None)
+    out = sp.mark(["bot-brain-notes"], memory=memory)
+    assert out["bot-brain-notes"].startswith("refused:") and _shareable(tmp_path, "bot-brain-notes") is False
+
+
+def test_a_refresh_keeps_the_mark_and_a_heal_keeps_it_too(tmp_path, monkeypatch):
+    ah = _load("auto_heal_mark_t", SKILL / "auto_heal.py")
+    monkeypatch.setattr(ah, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(ah, "LOG_PATH", tmp_path / "state" / "autoheal.log")
+    memory, _, _ = _runtime(tmp_path)
+    monkeypatch.setattr(ah, "_memory", memory)
+    src = _connect(memory, tmp_path, "fleet-knowledge", ["owner"])
+    src.write_text("# fleet-knowledge\nnew bytes\n")
+    assert ah.reconnect_recipe("fleet-knowledge", "owner") == "reconnected"  # recipe carries no mark
+    assert _shareable(tmp_path, "fleet-knowledge") is True
+    priv = _connect(memory, tmp_path, "own-notes", ["owner"], shareable=None)
+    priv.write_text("# own\nchanged\n")
+    assert ah.reconnect_recipe("own-notes", "owner") == "reconnected"
+    assert _shareable(tmp_path, "own-notes") is False

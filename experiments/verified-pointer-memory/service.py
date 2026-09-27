@@ -215,6 +215,8 @@ class Service:
         for source in manifest['sources']:
             if sha(source['path']) != source['contentSHA']:
                 raise ValueError('stale source')
+        # The shareable mark is who-may-see policy, not content: changing it must not stale the pointer.
+        entry = {k: v for k, v in entry.items() if k != 'shareable'}
         return {'entry': entry, 'sources': manifest['sources']}
 
     def recipe(self, name: str, principal: str) -> dict[str, Any]:
