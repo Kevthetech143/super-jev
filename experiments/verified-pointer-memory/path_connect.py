@@ -47,6 +47,17 @@ def _atomic(path, data):
             os.unlink(name)
 
 
+def _json_strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _json_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _json_strings(item)
+
+
 def _manual_conflicts(config, principals, sources):
     """Read only registered, in-scope manual records; never echo their contents."""
     literals = {value for source in sources for op in (source.get('viewTransform') or {}).get('operations', [])
@@ -64,7 +75,7 @@ def _manual_conflicts(config, principals, sources):
             path = Path(row['snapshot']['entry']['manifestPath'])
             if path.stat().st_size > MAX_BYTES:
                 raise ValueError('manual manifest too large')
-            text = json.dumps(json.loads(path.read_text()), ensure_ascii=False)
+            text = '\n'.join(_json_strings(json.loads(path.read_text())))
             # Both the prepared answer and its routing metadata must be safe.
             if any(value in text for value in literals):
                 blocked.append(name)
