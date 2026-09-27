@@ -37,3 +37,14 @@ def test_a_passage_stating_the_phrase_outranks_scattered_words(tmp_path, monkeyp
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([phrase, scattered, *others]))
     found = [p for _, p, _ in ask.word_search("overclaim row said read the source on a clean report", ["p1"])]
     assert found[0] == str(phrase)
+
+
+def test_a_repeated_word_is_no_phrase(tmp_path, monkeypatch):
+    seen = []
+    real = ask.word_pairs
+    monkeypatch.setattr(ask, "word_pairs", lambda text: seen.append(1) or real(text))
+    f = tmp_path / "a.md"
+    f.write_text("step by step guide\n")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([f]))
+    ask.word_search("step by step", ["p1"])
+    assert seen == []  # no question pair, so no passage pair pass at all
