@@ -18,3 +18,10 @@ def _no_skill_catalog(monkeypatch):
     """Lookups never shell out to the live skills connector in tests; test_stale_quiet_and_skills.py
     turns it on with a faked catalog."""
     monkeypatch.setenv("SUPERJEV_SKILLS", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_shared_list(monkeypatch, tmp_path):
+    """prepare_bulk shares the deployment's shared-pointers.json after a connect; tests never read
+    the live list. test_share_pointers.py points it at its own file."""
+    monkeypatch.setenv("SUPERJEV_SHARED_POINTERS", str(tmp_path / "no-shared-pointers.json"))

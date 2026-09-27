@@ -6,7 +6,7 @@ Usage:
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
                           [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
-                          [--findability] [--refresh]
+                          [--findability] [--refresh] [--no-shared]
 
   Prints a `writer: <command>` banner at the start of every run: the resolved --writer-command
   (or the SUPERJEV_WRITER_COMMAND env var, checked when --writer-command is omitted), or the
@@ -26,7 +26,8 @@ Usage:
 Pipeline per run:
   1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
-     hidden directories and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
+     hidden directories, git worktree copies (any .claude/worktrees/ folder, or a checkout whose .git file points into
+     another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
      keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc. Files matching
      card/password-like patterns or over the gate's size ceiling are HELD and never sent to the writer; a
@@ -73,12 +74,14 @@ Pipeline per run:
      cache and report stay keyed by the base pointer.
   6. Findability (only with --findability; it costs a search per file): each connected file's own sample question is navigated; the file must rank first or it is
      listed as a findability miss. Report only; no automatic loop beyond the one rewrite.
+  7. Shared sets (onboarding default, skip with --no-shared): once every part connected, each --principal is added to
+     the fleet's shared pointers listed in shared-pointers.json (share_pointers.py): register only, no writer or Jev call.
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, fnmatch, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
+import argparse, fnmatch, functools, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -373,6 +376,33 @@ def payload_has_secret(obj) -> bool:
     return False
 
 
+@functools.lru_cache(maxsize=None)
+def _worktree_dir(d: str) -> bool:
+    """True when folder `d` (or a parent) is a git worktree checkout: its `.git` is a file whose
+    gitdir points into another repo's .git/worktrees/. A submodule's .git file (.git/modules/)
+    and a real repo root (.git folder) end the climb."""
+    g = Path(d) / ".git"
+    if g.is_file():
+        try:
+            return "/worktrees/" in g.read_text(errors="replace")
+        except OSError:
+            return False
+    if g.is_dir() or Path(d).parent == Path(d):
+        return False
+    return _worktree_dir(str(Path(d).parent))
+
+
+def is_worktree_copy(path: Path) -> bool:
+    """A file inside a git worktree copy (a `.claude/worktrees/` folder, or any worktree checkout)
+    is a stale snapshot of a brain or repo, never its live notes: one agent once carried 23
+    pointers of a Claude worktree's copy of its own brain. Checked on the absolute path, so a
+    --root that is itself a worktree is refused too."""
+    parts = path.parts
+    if any(a == ".claude" and b == "worktrees" for a, b in zip(parts, parts[1:])):
+        return True
+    return _worktree_dir(str(path.parent))
+
+
 def walk_md(root: Path, no_recurse: bool = False):
     """*.md files under `root`, sorted, plus the resolved targets of folder symlinks walked into.
     Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
@@ -404,7 +434,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
     logins.md or any other file the roots would never have admitted."""
     bases = [Path(r).resolve() for r in list(roots) + list(allow_targets or [])]
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
-    files, held, seen = [], [], set()
+    files, held, seen, worktree_skips = [], [], set(), 0
     for root in roots:
         glob_iter, linked = walk_md(root, no_recurse)
         # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
@@ -428,6 +458,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                 continue
             if (_excluded(p.relative_to(root).as_posix(), excludes) or is_test_material(p.relative_to(root).as_posix())
                     or is_bench_dataset(str(rp))):
+                continue
+            if is_worktree_copy(p.absolute()) or is_worktree_copy(rp):
+                worktree_skips += 1
                 continue
             b = p.read_bytes()
             if not b.strip():
@@ -453,6 +486,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                 else:
                     held.append((str(p), "secret-keyword-like file name; review before onboarding")); continue
             files.append(p)
+    if worktree_skips:
+        print(f"  SKIP  {worktree_skips} file(s) inside git worktree copies (.claude/worktrees/ or a worktree checkout)")
     return files, held
 
 
@@ -809,6 +844,8 @@ def main() -> int:
                     help="after connecting, search each file's own sample question (one search per file, "
                          "paid judge calls) and report the misses; off by default")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--no-shared", action="store_true",
+                    help="skip the onboarding default: sharing the fleet's shared-pointers.json list with --principal")
     ap.add_argument("--list", action="store_true",
                     help="no-judge local list: read already-gated labels from prepare-cache and filter them; "
                          "never calls the writer, the gate, or memory")
@@ -1112,6 +1149,11 @@ def main() -> int:
                 else:
                     misses.append((str(p), f"ranked {'#' + str(top.index(str(p)) + 1) if str(p) in top else 'absent'}; top={Path(top[0]).name if top else 'none'}"))
     report["connected"] = all_connected
+    if all_connected and not a.no_shared:
+        # Onboarding default: every connected principal also sees the fleet's shared sets
+        # (shared knowledge, skills catalog). Zero cost: register only, no writer or Jev call.
+        from share_pointers import share_defaults
+        share_defaults(a.principals, memory=memory)
 
     if not a.no_findability:
         report["findability"] = {"hits": hits, "total": total, "misses": misses}
