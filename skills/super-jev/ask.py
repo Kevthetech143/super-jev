@@ -2042,11 +2042,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
-    # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup.
+    # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup. A replay
+    # never reconnects or heals: that changes connector state and starts paid work.
     reconnected, deadline = {}, time.time() + auto_heal.RECONNECT_TIMEOUT_SECS
     for i, (ptr, kind, *_rest) in enumerate(results):
         left = int(deadline - time.time())
-        if auto_heal.is_stale_kind(kind) and left >= 1:
+        if auto_heal.is_stale_kind(kind) and left >= 1 and not replay:
             reconnected[ptr] = auto_heal.reconnect_now(ptr, principal, timeout=left)
             if reconnected[ptr] == "no-report":
                 # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
@@ -2075,7 +2076,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             heal_note = ""
             stale = auto_heal.is_stale_kind(kind)
             result = None
-            if stale:
+            if stale and not replay:
                 result = auto_heal.maybe_heal(ptr, principal)
                 if result == "started":
                     heal_note = " (auto-heal: refresh started in background)"
