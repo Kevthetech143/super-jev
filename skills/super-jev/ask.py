@@ -975,7 +975,7 @@ LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, 
 # at >= CLAIM_SURE count; files that disagree are a CONFLICT, newest first.
 CLAIM_SURE = 0.9
 MAX_CLAIMS = 25
-CLAIM_LINES = 60
+CLAIM_LINES = 2000  # lines ranked per passage; the line budget picks which are shown
 CLAIM_LINE_CHARS = 160
 CLAIM_SCAN_CHARS = 5000  # of one line, when ranking lines and placing the window: a minified file stays fast
 CLAIM_LINE_BUDGET = 4000  # characters of line choices per file, so a claim call stays well under the input ceiling
@@ -992,15 +992,15 @@ CLAIM_LINE_INSTRUCTIONS = ("Statement: %s\nWhich line of the file `%s.text` (%s)
 _CLAIM = {"text": None}
 
 def claim_lines(text: str) -> list:
-    """Up to CLAIM_LINES candidate lines of a passage (non-empty, 12+ characters)."""
-    out = []
+    """Up to CLAIM_LINES distinct candidate lines of a passage (non-empty, 12+ characters), in order."""
+    out = {}
     for ln in text.splitlines():
         t = ln.strip()
-        if len(t) >= 12 and t not in out:
-            out.append(t)
-        if len(out) >= CLAIM_LINES:
-            break
-    return out
+        if len(t) >= 12:
+            out.setdefault(t, len(out))
+            if len(out) >= CLAIM_LINES:
+                break
+    return list(out)
 
 def _stems(ws) -> set:
     """First four letters of each word, so "sources"/"source" and "mark"/"marked" match."""
@@ -1046,7 +1046,8 @@ def claim_questions(claim: str, ordered: list, files: dict) -> tuple:
             if used > CLAIM_LINE_BUDGET:
                 break
             cand.append(t)
-        cand.sort(key=found.index)
+        order = {t: i for i, t in enumerate(found)}
+        cand.sort(key=order.get)
         lines[key] = cand
         if cand:
             crit = {f"L{j + 1}": claim_window(t, want) if hits[t] else t[:CLAIM_LINE_CHARS]

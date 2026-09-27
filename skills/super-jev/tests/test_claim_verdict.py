@@ -197,3 +197,10 @@ def test_the_line_that_proves_it_is_offered_even_when_long_and_late(tmp_path):
     assert rule in lines["file_1"]
     shown = qs["line_1"]["criteria"][f"L{lines['file_1'].index(rule) + 1}"]
     assert "cannot be marked" in shown and len(shown) <= ask.CLAIM_LINE_CHARS
+
+
+def test_a_proof_line_past_the_sixtieth_line_is_still_offered(tmp_path):
+    filler = "\n".join(f"Unrelated setup note number {i} here" for i in range(120))
+    a = _f(tmp_path, "a.md", filler + "\nThe choice limit is 255 options per question.\n")
+    qs, lines = ask.claim_questions("A choice can have 255 options.", [a], {a: open(a).read()})
+    assert "The choice limit is 255 options per question." in lines["file_1"]
