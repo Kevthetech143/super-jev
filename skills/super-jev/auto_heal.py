@@ -259,6 +259,11 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
                        for s in recipe["sources"]]
             out = memory({**req, "sources": sources, "reviewed": True,
                            "navigationSHA": preview.get("navigationSHA")})
+            if out.get("reason") == "scope-change" and out.get("registeredPrincipals"):
+                # Shared since connect (share_pointers.py): the recipe names only the connect-time
+                # principals; keep the pointer's registered scope rather than failing the heal.
+                out = memory({**req, "principals": out["registeredPrincipals"], "sources": sources,
+                              "reviewed": True, "navigationSHA": preview.get("navigationSHA")})
             result = "reconnected" if out.get("status") == "registered" else "failed"
             if result == "failed":
                 preview = out

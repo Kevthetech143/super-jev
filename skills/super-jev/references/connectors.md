@@ -140,7 +140,9 @@ relative to its root starts with that subpath, and `--no-recurse` limits each
 root to its direct children. `--name GLOB` (repeatable) keeps only files whose
 name matches (case-insensitive; a symlinked file's target must sit under a root or an `--allow-target DIR` and pass the same checks), e.g. `--root ~/.claude/skills --name SKILL.md` connects each skill's
 entry file in place; files that share a name are shown to routing with their
-folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, test/scratch output
+folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktree copies (any
+`.claude/worktrees/` folder, or a checkout whose `.git` file points into another repo's
+`.git/worktrees/`, even when that checkout is the `--root` itself), test/scratch output
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`) and vault-style
 subdirectories, and holds back any file that looks like it carries
 card/password text or sits over the gate's size ceiling, writing a
@@ -243,6 +245,33 @@ calls the writer, the gate, or memory; `--within-days` excludes rows whose
 true as the file or record it came from; `as_of` shows staleness, not
 currency — live truth for anything time-sensitive still needs a gated
 roll-up read fresh, not a cached label.
+
+### Share a connected pointer
+
+`python3 share_pointers.py --principal AGENT --pointer NAME` (repeat either;
+exact pointer names, no globs; `--dry-run` lists what would change) lets more principals see a pointer that is already connected.
+It calls the memory `register` action with the pointer's current dataset and
+its principals plus the new ones: no reconnect, no writer, no Jev call, so it
+costs nothing. A connect with `replace:true` cannot do this; it refuses any
+change of principals as `scope-change`. `register` starts a new generation, so
+the pointer's cached and pending answers are dropped (the count is printed
+first); keep shared pointers to reference sets. A pointer is refused (printed,
+skipped) when any of its original sources sits under an agent's brain
+(`~/agents/<bot>-brain/`) or in a `documents/` or `profile/` folder. A stale pointer
+(`preparation-required`) must be refreshed before it can be shared. A later
+refresh keeps the shared scope: `prepare_bulk.py` and the recipe heal retry
+with the registered principals on `scope-change`.
+
+Onboarding default: `<state dir>/shared-pointers.json`
+(`{"pointers": ["fleet-knowledge", "main-skills-catalog", "main-skills-catalog-2"]}`, or the file
+named by `SUPERJEV_SHARED_POINTERS`) lists the fleet's shared sets, such as
+the shared knowledge folder and the skills catalog. After every fully
+connected `prepare_bulk.py` run, each `--principal` is added to every pointer
+on that list (`--no-shared` skips it), so a new agent sees the shared sets and
+not only its own brain. `share_pointers.py --principal AGENT --shared` applies
+the list to an agent that is already connected. `dispatch.py
+audit-visibility` does not flag a pointer on the list as
+visible-but-not-connected.
 
 ### Ask loop
 

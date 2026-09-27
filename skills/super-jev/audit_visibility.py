@@ -8,7 +8,8 @@ pointers it actually CONNECTED (the path-connect `registry.json`
 
 A pointer is flagged when:
   - it is visible to a principal that is not in its connect-time
-    principals list ("visible-but-not-connected"); or
+    principals list and not on the fleet's shared list, shared-pointers.json
+    ("visible-but-not-connected"); or
   - one of its original source paths resolves under another bot's own
     brain directory, `~/agents/<otherbot>-brain`, for a principal that
     is not that bot ("foreign-brain-root").
@@ -21,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -60,9 +62,13 @@ def _brain_owner(path: str) -> str | None:
     return match.group(1) if match else None
 
 
-def audit(registry_path: Path, db_path: Path) -> dict[str, Any]:
+def audit(registry_path: Path, db_path: Path, shared: list | None = None) -> dict[str, Any]:
     """Return {"principals": {name: {"visible": [...], "connected": [...],
-    "flags": [...]}}} for every principal seen in either source."""
+    "flags": [...]}}} for every principal seen in either source.
+
+    `shared` holds the fleet's shared pointer names (shared-pointers.json): a
+    pointer shared on purpose is not flagged visible-but-not-connected."""
+    shared = shared or []
     registry = _load_registry(registry_path)
     datasets = registry.get("datasets", {})
     pointers = _load_pointers(db_path)
@@ -94,7 +100,7 @@ def audit(registry_path: Path, db_path: Path) -> dict[str, Any]:
             entry = bucket(principal)
             entry["visible"].append(pointer_name)
 
-            if principal not in connected_principals:
+            if principal not in connected_principals and pointer_name not in shared:
                 entry["flags"].append({
                     "pointer": pointer_name,
                     "dataset": dataset,
@@ -197,7 +203,9 @@ def run(args: list[str]) -> tuple[int, dict[str, Any]]:
             ),
         }
 
-    result = audit(registry_path, db_path)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from share_pointers import load_shared
+    result = audit(registry_path, db_path, load_shared())
     if only_principal is not None:
         result = {
             "principals": {
