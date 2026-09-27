@@ -6,7 +6,10 @@ found elsewhere (--miss with the right file) becomes a test case: the question a
 file that held the answer. The scorecard replays each case through word search (step 4,
 local, no Jev call) and reports where the right file ranks, and whether it made the read
 slots (the top FALLBACK_FILES). Given two builds (--ask OLD --ask NEW) it compares them
-case by case and exits 1 if the new one drops any case the old one read.
+case by case and exits 1 if any compared build drops a case the baseline read.
+Reports tuned, held-out and retrospective cases separately; untagged and legacy
+harvested cases are retrospective. See references/scorecard-splits.md for frozen
+held-out reservation and its limits.
 
 It measures the free stage only: routing and the content check call Jev, so a case
 the scorecard passes can still miss live. Use it to reject a change that makes search
@@ -23,6 +26,7 @@ ranks and file paths, never file contents. A --cases line is
 {"question": "...", "gold": ["/abs/path"], "principal": "...", "split": "held-out"}.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -107,7 +111,7 @@ def harvest(sdir: Path, principal: str) -> list:
             q = str(rec.get("question") or "").strip()
             if q and rec.get("file"):
                 found[q] = str(rec["file"])
-    return [{"question": q, "gold": [f], "principal": principal, "split": "harvested"}
+    return [{"question": q, "gold": [f], "principal": principal, "split": "retrospective"}
             for q, f in found.items() if os.path.isabs(f) and os.path.isfile(f)]
 
 
@@ -126,6 +130,73 @@ def merge_saved(sdir: Path, new: list) -> list:
         tmp.write_text("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases))
         os.replace(tmp, path)
     return cases
+
+
+SPLITS = ("tuned", "held-out", "retrospective")
+
+
+def normalize_cases(cases, default_principal):
+    """Reject known leakage instead of silently merging split labels."""
+    seen, merged = {}, {}
+    for raw in cases:
+        c = dict(raw)
+        split = c.get("split") or "retrospective"
+        if split == "harvested":
+            split = "retrospective"
+        if not isinstance(split, str):
+            raise ValueError("case split must be a string")
+        if split not in SPLITS:
+            c["original_split"] = split
+            split = "retrospective"
+        c["split"] = split
+        c["principal"] = c.get("principal") or default_principal
+        if (not isinstance(c.get("question"), str) or not c["question"].strip()
+                or not isinstance(c.get("gold"), list) or not c["gold"]
+                or any(not isinstance(g, str) or not os.path.isabs(g) for g in c["gold"])):
+            raise ValueError("cases need a question and a nonempty list of absolute gold paths")
+        question = " ".join(c["question"].casefold().split()).rstrip(".!?")
+        identities = [("question", question)] + [("source", os.path.realpath(g)) for g in c["gold"]]
+        for field in ("group", "source_family"):
+            if field in c:
+                if not isinstance(c[field], str) or not c[field].strip():
+                    raise ValueError(f"{field} must be a nonempty string")
+                identities.append((field, c[field].strip().casefold()))
+        for identity in identities:
+            if identity in seen and seen[identity] != split:
+                raise ValueError(f"cross-split overlap in {identity[0]}; keep the entire family together")
+            seen[identity] = split
+        key = (c["principal"], question)
+        if key in merged and any(merged[key].get(f) != c.get(f) for f in ("group", "source_family")):
+            raise ValueError("duplicate question has conflicting family metadata")
+        m = merged.setdefault(key, {**c, "gold": []})
+        m["gold"] += [g for g in c["gold"] if g not in m["gold"]]
+    return list(merged.values())
+
+
+def input_cases(path):
+    """Explicit evaluation inputs must not silently lose malformed rows."""
+    rows = []
+    for line in Path(path).expanduser().read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if not isinstance(row, dict):
+            raise ValueError("case input must contain JSON objects")
+        rows.append(row)
+    return rows
+
+
+def frozen_cases(path, checksum):
+    data = Path(path).expanduser().read_bytes()
+    if hashlib.sha256(data).hexdigest() != checksum:
+        raise ValueError("held-out checksum mismatch")
+    payload = json.loads(data)
+    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("cases"), list):
+        raise ValueError("invalid held-out manifest")
+    rows = payload["cases"]
+    if not rows or any(c.get("split") != "held-out" or not c.get("group") or not c.get("source_family") for c in rows):
+        raise ValueError("frozen cases must be held-out with group and source_family")
+    return rows
 
 
 def gold_rank(ask, case: dict, pointers: list):
@@ -147,7 +218,33 @@ def main(argv=None) -> int:
     ap.add_argument("--cache", help="prepare-cache every build reads (default: the first build's), "
                     "so builds differ in code only, never in data")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--freeze-held-out", metavar="FILE", help="reserve held-out rows from --cases into a new manifest; print its checksum")
+    ap.add_argument("--held-out", metavar="FILE", help="frozen held-out manifest")
+    ap.add_argument("--held-out-sha256", help="checksum pinned before tuning")
     a = ap.parse_args(argv)
+    if bool(a.held_out) != bool(a.held_out_sha256):
+        ap.error("--held-out and --held-out-sha256 must be supplied together")
+    try:
+        reserved = frozen_cases(a.held_out, a.held_out_sha256) if a.held_out else []
+        if any(c.get("principal") not in a.principal for c in reserved):
+            raise ValueError("include every frozen principal with --principal")
+        if a.freeze_held_out:
+            if not a.cases or a.held_out:
+                raise ValueError("--freeze-held-out needs --cases and cannot combine with --held-out")
+            rows = normalize_cases([c for f in a.cases for c in input_cases(f)], a.principal[0])
+            held = [c for c in rows if c["split"] == "held-out"]
+            if not held or any(not c.get("group") or not c.get("source_family") for c in held):
+                raise ValueError("reserve held-out cases with explicit group and source_family")
+            if any(c["principal"] not in a.principal for c in held):
+                raise ValueError("include every frozen principal with --principal")
+            data = (json.dumps({"version": 1, "cases": held}, sort_keys=True, indent=2) + "\n").encode()
+            with os.fdopen(os.open(Path(a.freeze_held_out).expanduser(),
+                                   os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out:
+                out.write(data)
+            print("held-out sha256:", hashlib.sha256(data).hexdigest())
+            return 0
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        ap.error(str(e))
 
     builds = [build_path(Path(p).expanduser().resolve()) for p in a.ask] or [build_path(HERE / "ask.py")]
     mods = [load_ask(p, f"scorecard_ask_{i}") for i, p in enumerate(builds)]
@@ -159,46 +256,67 @@ def main(argv=None) -> int:
     for m in mods:
         m.prepare_bulk.CACHE_DIR = cache
     cases = []
+    excluded_no_gold = 0
     for pr in a.principal:
         if not a.no_harvest:
             cases += merge_saved(base.state_dir(pr), harvest(base.state_dir(pr), pr))
-    for f in a.cases:
-        cases += [c for c in _jsonl(Path(f).expanduser()) if c.get("question") and c.get("gold")
-                  and c.get("principal", a.principal[0]) in a.principal]
-    # One case per question: every file recorded as holding its answer counts as right.
-    merged = {}
-    for c in cases:
-        key = (c.get("principal") or a.principal[0], c["question"])
-        m = merged.setdefault(key, {**c, "principal": key[0], "gold": []})
-        m["gold"] += [g for g in c["gold"] if g not in m["gold"]]
-    cases = list(merged.values())
+    try:
+        for f in a.cases:
+            raw = input_cases(f)
+            excluded_no_gold += sum(c.get("gold") == [] for c in raw)
+            incoming = normalize_cases([c for c in raw if c.get("gold") != []], a.principal[0])
+            cases += [c for c in incoming if c["principal"] in a.principal]
+        if reserved:
+            for c in normalize_cases(cases, a.principal[0]):
+                if c["split"] == "held-out" and c not in reserved:
+                    raise ValueError("held-out input differs from the frozen reservation")
+        cases = normalize_cases(cases + reserved, a.principal[0])
+    except (OSError, ValueError) as e:
+        ap.error(str(e))
     pointers = {pr: base.my_pointers(pr) for pr in a.principal}
 
     slots = base.FALLBACK_FILES
     ranks = [[gold_rank(m, c, pointers[c["principal"]]) for c in cases] for m in mods]
     read = lambda r: r is not None and r <= slots  # noqa: E731
-    report = {"cases": len(cases), "slots": slots, "builds": [str(b) for b in builds],
+    report = {"cases": len(cases), "excluded_no_gold": excluded_no_gold, "slots": slots, "builds": [str(b) for b in builds],
               "read": [sum(read(r) for r in rs) for rs in ranks], "rows": []}
     for i, c in enumerate(cases):
         report["rows"].append({"question": c["question"], "split": c.get("split"),
+                               "original_split": c.get("original_split"),
                                "gold": c["gold"][0], "ranks": [rs[i] for rs in ranks]})
     lost = gained = []
     if len(mods) > 1:
-        lost = [r for r in report["rows"] if read(r["ranks"][0]) and not read(r["ranks"][-1])]
+        lost = [r for r in report["rows"] if read(r["ranks"][0]) and any(not read(v) for v in r["ranks"][1:])]
         gained = [r for r in report["rows"] if not read(r["ranks"][0]) and read(r["ranks"][-1])]
         report["lost"], report["gained"] = len(lost), len(gained)
+    report["held_out_verified"] = bool(a.held_out)
+    report["held_out_sha256"] = a.held_out_sha256
+    report["splits"] = {}
+    for split in SPLITS:
+        rows = [r for r in report["rows"] if r["split"] == split]
+        report["splits"][split] = {
+            "cases": len(rows),
+            "read": [sum(read(r["ranks"][i]) for r in rows) for i in range(len(mods))],
+            "lost": sum(r in lost for r in rows), "gained": sum(r in gained for r in rows)}
     if a.json:
         print(json.dumps(report, indent=1))
     else:
         print(f"scorecard: {len(cases)} case(s); right file in the top {slots} (read by word search):")
+        if excluded_no_gold:
+            print(f"  excluded: {excluded_no_gold} cases without gold files (not graded)")
         for b, n in zip(builds, report["read"]):
             print(f"  {n}/{len(cases)}  {b}")
+        for split, result in report["splits"].items():
+            print(f"  {split}: {result['cases']} cases; read {result['read']}; {result['lost']} lost")
+        if any(r.get("original_split") for r in report["rows"]):
+            print("Unrecognized legacy split labels counted as retrospective; never as held-out.")
+        print("held-out checksum:", "verified" if a.held_out else "not supplied (labels only)")
         if len(mods) > 1:
             print(f"new vs baseline: {len(gained)} gained, {len(lost)} lost")
             for r in lost:
-                print(f"  LOST  rank {r['ranks'][0]} -> {r['ranks'][-1]}  {r['question']}")
+                print(f"  LOST  rank {' -> '.join(str(v) for v in r['ranks'])}  {r['question']}")
             for r in gained:
-                print(f"  GAINED rank {r['ranks'][0]} -> {r['ranks'][-1]}  {r['question']}")
+                print(f"  GAINED rank {' -> '.join(str(v) for v in r['ranks'])}  {r['question']}")
         print("(free word-search stage only; routing and content checks are not replayed)")
     return 1 if lost else 0
 
