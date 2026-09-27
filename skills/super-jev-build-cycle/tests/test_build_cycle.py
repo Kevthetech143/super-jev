@@ -227,9 +227,14 @@ def test_preflight_ready_writes_receipt_and_costs_nothing(env):
     assert calls(env) == []  # status is free, never a logged use
 
 
-def test_preflight_names_stale_connection_and_writes_no_receipt(env):
+def test_preflight_stale_connection_is_a_named_warning(env):
     r = run(env, "preflight", extra_env={"FAKE_STATUS": "notes: ready;old-notes: stale (preparation-required)"})
-    assert r.returncode == 2 and "old-notes is not ready" in r.stderr
+    assert r.returncode == 0 and "WARNING old-notes is stale" in r.stdout
+
+
+def test_preflight_broken_connection_writes_no_receipt(env):
+    r = run(env, "preflight", extra_env={"FAKE_STATUS": "notes: ready;bad-notes: error"})
+    assert r.returncode == 2 and "bad-notes is not ready" in r.stderr
     assert not (env["cycle"] / "01-preflight.md").exists()
 
 

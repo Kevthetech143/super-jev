@@ -172,7 +172,9 @@ def cmd_preflight(ctx, a):
         problems.append("connection status unavailable or nothing connected:\n" + out.strip())
     ready = [n for n, st in rows if st == "ready"]
     for n, st in rows:
-        if st != "ready":
+        if st.startswith("stale"):  # searchable at its last snapshot; asks refresh it in the background
+            lines.append(f"WARNING {n} is stale (its last snapshot is still searched; an ask starts a refresh): {st}")
+        elif st != "ready":
             problems.append(f"{n} is not ready: {st}")
     lines.append(f"connections: {len(ready)} of {len(rows)} ready")
     for d in a.project_dir or []:
