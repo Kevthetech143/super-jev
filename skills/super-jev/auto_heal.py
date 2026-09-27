@@ -178,8 +178,9 @@ def _acquire_lock(principal: str, pointer: str) -> str:
     return token if _publish_lock(lock, payload) else ""
 
 
-def _hold_lock(principal: str, token: str, **fields) -> bool:
-    """Refresh our own lock (matched by token): a new ts plus `fields`. False if it is not ours."""
+def _hold_lock(principal: str, token: str, expect_pid: int = None, **fields) -> bool:
+    """Refresh our own lock (matched by token, and by pid when `expect_pid` is given): a new ts
+    plus `fields`. False if it is not ours."""
     lock = _lock_path(principal)
     try:
         info = json.loads(lock.read_text())
@@ -187,11 +188,51 @@ def _hold_lock(principal: str, token: str, **fields) -> bool:
         return False
     if not token or info.get("token") != token:
         return False
+    if expect_pid is not None and info.get("pid") != expect_pid:
+        return False
     info.update(fields, ts=time.time())
     tmp = lock.parent / f".{lock.name}.hold.{os.getpid()}.{threading.get_ident()}"
     tmp.write_text(json.dumps(info))
     os.replace(tmp, lock)
     return True
+
+
+def _drain_cmd(principal: str, token: str) -> list:
+    return [sys.executable, str(HERE / "auto_heal.py"), "--drain", principal, token]
+
+
+def _child_line(cmd: list, out_log: Path, principal: str, token: str) -> str:
+    """The shell line every lock owner's child runs: the refresh, then a detached drain that
+    takes the lock over (it records its own pid), heals the queue and releases the lock by its
+    token. The line exits with the refresh's code right away, so a caller waiting on it (the
+    inline reconnect) never waits on the drain. If the drain cannot run, the lock names a pid
+    that is gone and the next lookup takes it over as dead."""
+    return (f"{shlex.join(cmd)} >{shlex.quote(str(out_log))} 2>&1; rc=$?; "
+            f"{shlex.join(_drain_cmd(principal, token))} </dev/null >/dev/null 2>&1 & exit $rc")
+
+
+def _name_child(principal: str, token: str, proc) -> None:
+    """The lock names the running child, not the lookup that started it: after the lookup exits
+    a live child must still hold the lock, or the next lookup starts a second refresh. Only
+    while the lock still names this lookup (a drain that already started names itself)."""
+    if getattr(proc, "pid", None):
+        _hold_lock(principal, token, expect_pid=os.getpid(), pid=proc.pid)
+
+
+def _hand_off(principal: str, token: str) -> None:
+    """End an inline lock owner's turn: inside a drain, nothing (the drain goes on); with
+    pointers queued, start a detached drain that takes the lock over; else release it."""
+    if principal in _DRAINING:
+        return
+    if _load_state(principal).get("pending"):
+        try:
+            subprocess.Popen(_drain_cmd(principal, token), cwd=str(HERE), start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            return
+        except OSError:
+            pass
+    _release_lock(principal, token)
 
 
 def _release_lock(principal: str, token: str = None) -> None:
@@ -274,22 +315,24 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
     if time.time() - state["pointers"].get(owner, 0) < COOLDOWN_SECS:
         _log(principal=principal, pointer=owner, action="skip-reconnect", reason="cooldown")
         return "cooldown"
-    if not _acquire_lock(principal, owner):
+    token = _acquire_lock(principal, owner)
+    if not token:
         _queue(principal, owner, "reconnect")
         return "in-progress"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
     out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
-    lock_file = str(_lock_path(principal))
-    wrapper = f"{shlex.join(cmd)} >{shlex.quote(str(out_log))} 2>&1; rc=$?; rm -f {shlex.quote(lock_file)}; exit $rc"
     try:
-        proc = subprocess.Popen(["/bin/sh", "-c", wrapper], cwd=str(HERE), start_new_session=True)
+        proc = subprocess.Popen(["/bin/sh", "-c", _child_line(cmd, out_log, principal, token)],
+                                cwd=str(HERE), start_new_session=True)
+    except OSError:
+        _hand_off(principal, token)
+        return "failed"
+    try:
         code = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _name_child(principal, token, proc)  # left running after this lookup
         _log(principal=principal, pointer=owner, action="reconnect", result="timeout", cmd=cmd)
         return "timeout"
-    except OSError:
-        _release_lock(principal)
-        return "failed"
     result = "reconnected" if code == 0 else "failed"
     if code == 0:
         # Cooldown only after a success: a failed or timed-out reconnect leaves the
@@ -326,8 +369,10 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     if time.time() - state["pointers"].get(pointer, 0) < COOLDOWN_SECS:
         _log(principal=principal, pointer=pointer, action="skip-recipe", reason="cooldown")
         return "cooldown"
-    if not _acquire_lock(principal, pointer):
+    token = _acquire_lock(principal, pointer)
+    if not token:
         return "in-progress"
+    result, preview = "failed", {}
     try:
         req = {"action": "connect", "pointer": recipe["pointer"], "dataset": recipe["dataset"],
                "principals": recipe["principals"], "structure": recipe["structure"],
@@ -352,10 +397,11 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     except Exception:
         result, preview = "failed", {}
     finally:
-        _release_lock(principal)
-    if result == "reconnected":
-        state["pointers"][pointer] = time.time()
-        _save_state(principal, state)
+        # Under the state lock, not the state read before this lock was taken: a pointer
+        # another lookup queued meanwhile must survive. Then drain that queue or release.
+        if result == "reconnected":
+            _mark(principal, pointer, time.time())
+        _hand_off(principal, token)
     _log(principal=principal, pointer=pointer, action="reconnect-recipe", result=result,
          reason=preview.get("reason") if result == "failed" else None)
     return result
@@ -366,9 +412,6 @@ def reconnect_recipe_or_queue(pointer: str, principal: str, memory=None) -> str:
     result = reconnect_recipe(pointer, principal, memory=memory)
     if result == "in-progress":
         _queue(principal, pointer, "recipe")
-    elif result == "reconnected":
-        with _state_txn(principal) as state:
-            state["pending"].pop(pointer, None)
     return result
 
 
@@ -415,19 +458,10 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     out_log = STATE_DIR / f"{principal}-{pointer}-last-refresh.log"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args]
-    lock_file = str(_lock_path(principal))
-    drain_cmd = [sys.executable, str(HERE / "auto_heal.py"), "--drain", principal, token]
-    # Detached background run: after the refresh, the child drains the pointers queued while it
-    # held the lock, then releases it (the drain releases; if the drain itself fails, the shell
-    # removes the lock), so a crashed refresh cannot wedge the principal's lock past
-    # LOCK_STALE_SECS anyway, but a clean exit releases it immediately.
-    wrapper = (f"{shlex.join(cmd)} >{shlex.quote(str(out_log))} 2>&1; rc=$?; "
-               f"{shlex.join(drain_cmd)} >/dev/null 2>&1 || rm -f {shlex.quote(lock_file)}; exit $rc")
-    proc = subprocess.Popen(["/bin/sh", "-c", wrapper], cwd=str(HERE), start_new_session=True)
-    # The lock names the child, not this lookup: after the lookup exits, a live refresh must
-    # still hold the lock, or the next lookup takes it as dead and starts a second refresh.
-    if getattr(proc, "pid", None):
-        _hold_lock(principal, token, pid=proc.pid)
+    # Detached background run; its drain heals the queue and releases the lock (see _child_line).
+    proc = subprocess.Popen(["/bin/sh", "-c", _child_line(cmd, out_log, principal, token)],
+                            cwd=str(HERE), start_new_session=True)
+    _name_child(principal, token, proc)
     _log(principal=principal, pointer=pointer, action="started", cmd=cmd)
     return "started"
 
@@ -479,6 +513,8 @@ def drain(principal: str, token: str, memory=None) -> int:
     cooling down or over the hourly cap stays queued for the next drain. Touches nothing if the
     lock is no longer this refresh's (token)."""
     tried = set()
+    if not _hold_lock(principal, token, pid=os.getpid()):
+        return 0  # the lock is no longer this refresh's: touch nothing
     _DRAINING[principal] = token
     try:
         while True:

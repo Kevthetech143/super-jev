@@ -383,3 +383,74 @@ def test_a_queued_connector_pointer_is_replayed_by_the_drain(tmp_path, monkeypat
     ah.drain("agent", token)
     assert service.pointer("structured", "agent")[1] is None
     assert not ah._lock_path("agent").exists()
+
+
+# Review of #223 (at 2e3d286): every lock owner must hand the lock to a drain, not only the
+# background refresh, and none may lose a pointer queued while it held the lock.
+
+def test_a_recipe_reconnect_keeps_a_pointer_queued_while_it_ran_and_drains_it(tmp_path, monkeypatch):
+    src, service = _path_connected(tmp_path, monkeypatch)
+    src.write_text('{"version": "1.0.9"}\n')
+    inner = ah._memory
+
+    def memory(req):
+        if req.get("action") == "connect" and not req.get("reviewed"):
+            ah._queue("agent", "another-pointer", "refresh")  # another lookup, meanwhile
+        return inner(req)
+    spawned, real = [], ah.subprocess.Popen
+    monkeypatch.setattr(ah.subprocess, "Popen", lambda cmd, **kw: spawned.append(cmd) or object()
+                        if "--drain" in cmd else real(cmd, **kw))  # the connector runs its own
+    assert ah.reconnect_recipe("structured", "agent", memory=memory) == "reconnected"
+    assert "another-pointer" in ah._load_state("agent")["pending"]
+    token = json.loads(ah._lock_path("agent").read_text())["token"]
+    assert spawned == [ah._drain_cmd("agent", token)]  # the lock goes to a drain, still held
+
+
+def test_an_inline_reconnect_hands_its_lock_to_a_drain(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first", changed=False)
+
+    class Proc:
+        pid = 4242
+
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+
+        def wait(self, timeout=None):
+            return 0
+    monkeypatch.setattr(ah.subprocess, "Popen", Proc)
+    assert ah.reconnect_now("first", "agent", cache_dir=cache_dir) == "reconnected"
+    token = json.loads(ah._lock_path("agent").read_text())["token"]
+    assert shlex_join(ah._drain_cmd("agent", token)) in calls[0][2]
+
+
+def test_a_timed_out_reconnect_leaves_the_lock_naming_its_child(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first", changed=False)
+
+    class Proc:
+        pid = 4242
+
+        def __init__(self, cmd, **kw):
+            calls.append(cmd)
+
+        def wait(self, timeout=None):
+            raise ah.subprocess.TimeoutExpired("sh", timeout)
+    monkeypatch.setattr(ah.subprocess, "Popen", Proc)
+    assert ah.reconnect_now("first", "agent", cache_dir=cache_dir, timeout=1) == "timeout"
+    assert json.loads(ah._lock_path("agent").read_text())["pid"] == 4242
+
+
+def test_the_drain_takes_the_lock_over_under_its_own_pid(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    token = ah._acquire_lock("agent", "x")
+    ah._hold_lock("agent", token, pid=999999999)  # the refresh's shell, exited
+    seen = []
+    monkeypatch.setattr(ah, "_load_state", lambda p: seen.append(
+        json.loads(ah._lock_path(p).read_text())["pid"]) or {"pointers": {}, "attempts": [], "pending": {}})
+    ah.drain("agent", token)
+    assert seen and seen[0] == os.getpid()
+    assert not ah._lock_path("agent").exists()
+
+
+def shlex_join(cmd):
+    import shlex
+    return shlex.join(cmd)
