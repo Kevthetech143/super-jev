@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- New `ask.py --principal AGENT --status` shows only that principal's registered connections, snapshot status and next steps, without a search or refresh.
 - Claim checks retain read contradictory evidence for judgment instead of dropping it as an unanswered question. Abstract worth questions no longer automatically require an exact monetary value. Misses after reading files direct the caller to inspect the files and filtering trace rather than reconnect them.
 - Explicit approvals record the caller principal instead of assuming a human approved them. Existing recorded approver labels are preserved; a cache entry without recorded identity displays unknown (legacy). Automatic check labels are unchanged.
 - Explicit approval evidence preserves distinguishing dates and numeric identifiers when selecting a supporting line. Cache replay displays the best matching line from the saved reviewed quote, rather than truncating the passage opening before the proof; it does not fetch new source text or change approval status.

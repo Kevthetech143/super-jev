@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Front door for the super-jev harness: one cache-first lookup loop, any agent.
 
+  ask.py --principal AGENT --status
+      Show this principal's connected snapshots and next steps, without a lookup.
+
   ask.py --principal AGENT "question"
       Cache-first via the harness `cached` action (zero provider calls): a hit
       prints the answer + evidence and stops. A miss navigates every visible
@@ -3285,6 +3288,45 @@ def _settle_pick(principal: str, sdir: Path, pid: str, answer, drop) -> int:
     print(f"pick {pid} {'dropped' if drop else 'confirmed'}")
     return 0
 
+def connection_status(principal: str) -> int:
+    """Read scoped registration metadata, without searching or refreshing."""
+    skill = skill_dir_for_display()
+    panel = memory({"action": "panel", "principal": principal})
+    if (not isinstance(panel, dict) or panel.get("status") == "error"
+            or not isinstance(panel.get("pointers"), list)):
+        if isinstance(panel, dict) and panel.get("reason") == "not-set-up":
+            print(f"Not set up. Next: python3 {skill / 'setup.py'}")
+        else:
+            print("Connection status unavailable. Next: check the memory connector configuration.")
+        return 1
+    pointers = panel["pointers"]
+    if not pointers:
+        print(f"Nothing connected for {principal}.")
+        print(f"Next: follow {skill.parent / 'super-jev-connect' / 'SKILL.md'} to connect a folder.")
+        return 0
+    print(f"Connections for {principal} (registered snapshots, not a freshness guarantee):")
+    for row in pointers:
+        if isinstance(row, str):
+            name, status = row, "unknown"
+        elif isinstance(row, dict) and isinstance(row.get("pointer"), str):
+            name = row["pointer"]
+            status = row.get("snapshotStatus") or row.get("status") or "unknown"
+        else:
+            print("Connection status unavailable: malformed pointer metadata.")
+            return 1
+        if status == "available":
+            print(f"  {name}: ready")
+        elif str(status).startswith(("preparation-required", "refresh-required")):
+            hint = refresh_hint(name, principal, str(status))
+            hint = hint.replace("and replaying its connect recipe failed", "and it has a recorded connect recipe")
+            print(f"  {name}: stale ({status})" + hint)
+        else:
+            print(f"  {name}: {status}")
+    print("Next: refresh stale sets with their listed instructions; inspect unknown/error sets before use. "
+          "Ready sets can be searched with ask.py --principal " + principal + ' "question".')
+    return 0
+
+
 def resolve_principal(args: list) -> tuple[str, list]:
     if "--principal" in args:
         i = args.index("--principal")
@@ -3307,6 +3349,11 @@ def _main() -> int:
         print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
               "'.', '_', '-'; no spaces or slashes)")
         return 2
+    if a[0] == "--status":
+        if len(a) != 1:
+            print("usage: --principal AGENT --status")
+            return 2
+        return connection_status(principal)
     sdir = state_dir(principal)
     if "--no-auto" in a:
         os.environ["SUPERJEV_AUTO_CACHE"] = "0"
