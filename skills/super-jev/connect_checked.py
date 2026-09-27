@@ -18,10 +18,12 @@ Any FAIL or UNCHECKED refuses the whole connect. Fix the description, split the 
 Verdicts are written next to CONNECT.json as <name>.verdicts.json with each file's sha256, so a later run
 can tell which files changed since they were last checked.
 """
-import hashlib, json, re, subprocess, sys, time
+import hashlib, json, re, subprocess, sys, time, tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+from reviewed_view import derive
 CEILING_MSG = "exceeds the 32,768-token ceiling"
 
 
@@ -84,6 +86,7 @@ def memory(req: dict) -> dict:
 
 
 def main() -> int:
+    from prepare_bulk import has_secret
     args = sys.argv[1:]
     if not args:
         print(__doc__); return 2
@@ -95,15 +98,39 @@ def main() -> int:
     if not sources or any(not s.get("description", "").strip() for s in sources):
         print("REFUSED: every source needs a non-empty description"); return 2
 
+    if any("viewTransform" not in s and any(k in s for k in ("viewSHA", "transformSHA")) for s in sources):
+        print("REFUSED: view review hashes require their viewTransform policy")
+        return 2
     verdicts, failures = [], []
+    checked_hashes = {}
     for s in sources:
-        p = Path(s["path"])
+        p = Path(s["path"]).expanduser().absolute()
         if not p.is_file():
             v = {"state": "ERROR", "reason": "file not found", "secs": 0}
         else:
-            v = gate(s["description"], str(p))
+            raw = p.read_bytes()
+            binding = {"sha256": hashlib.sha256(raw).hexdigest()}
+            if "viewTransform" in s:
+                try:
+                    view, policy_sha = derive(raw.decode("utf-8"), s["viewTransform"])
+                    if derive(s["description"], s["viewTransform"])[0].decode() != s["description"]:
+                        raise ValueError("description requires redaction")
+                    if not view.strip() or has_secret(view.decode("utf-8")) or has_secret(s["description"]):
+                        raise ValueError("empty or secret-bearing view")
+                    # Never hand the original to the description gate.
+                    with tempfile.TemporaryDirectory(prefix="superjev-view-") as folder:
+                        evidence = Path(folder) / "reviewed.txt"
+                        evidence.write_bytes(view)
+                        evidence.chmod(0o600)
+                        v = gate(s["description"], str(evidence))
+                    binding.update(viewSHA=hashlib.sha256(view).hexdigest(), transformSHA=policy_sha)
+                except (ValueError, TypeError, UnicodeError):
+                    v = {"state": "ERROR", "reason": "invalid view transform", "secs": 0}
+            else:
+                v = gate(s["description"], str(p))
+            checked_hashes[str(p)] = binding
         v["path"] = str(p)
-        v["sha256"] = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None
+        v.update(checked_hashes.get(str(p), {"sha256": None}))
         ok = v["state"] == "SUPPORTED" and v.get("confidence", 0) >= line
         v["pass"] = ok
         verdicts.append(v)
@@ -130,12 +157,21 @@ def main() -> int:
     preview = memory(req)
     if preview.get("status") != "preparation-required" or "sources" not in preview:
         print("connect preview failed:", json.dumps(preview)[:400]); return 1
-    hashes = {x["path"]: x["sha256"] for x in preview["sources"]}
+    hashes = {x["path"]: x for x in preview["sources"]}
     for s in req["sources"]:
-        s["sha256"] = hashes[s["path"]]
+        path = str(Path(s["path"]).expanduser().absolute())
+        checked = checked_hashes[path]
+        if any(hashes.get(path, {}).get(k) != v for k, v in checked.items()):
+            print("REFUSED: source or view changed after its description check")
+            return 1
+        s.update(checked)
+    if "navigationSHA" in preview:
+        req["navigationSHA"] = preview["navigationSHA"]
     req["reviewed"] = True
     reg = memory(req)
     print("connect:", reg.get("status"), "pointer:", reg.get("pointer"), "sources:", len(reg.get("sources", [])))
+    for warning in reg.get("cleanupWarnings", []):
+        print("retention review:", warning)
     return 0 if reg.get("status") == "registered" else 1
 
 

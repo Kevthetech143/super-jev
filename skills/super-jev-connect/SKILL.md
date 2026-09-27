@@ -33,6 +33,7 @@ python3 dispatch.py memory --principal NAME
 
 ## 4. Decision rule
 
+- Original files that must stay redacted → attach a reviewed declarative viewTransform policy per source; follow [reviewed-view recipes](../super-jev/references/reviewed-views.md). Never reconnect a redacted legacy dataset as raw originals.
 - A handful of hand-picked files → `python3 connect_checked.py CONNECT.json`
 - A whole folder, or an agent's whole brain across several folders → `python3 prepare_bulk.py --root DIR --pointer NAME --principal NAME`
 - A GitHub repo's history (PRs with reviews, issues, commit messages, release notes) → `python3 connect_github.py OWNER/REPO --pointer NAME --principal NAME` (or `superjev connect-github ...`); add `--refresh` after each merge to fetch only what changed. Uses your signed-in `gh`; secret-looking lines are dropped. See [connectors.md](../super-jev/references/connectors.md#github-repo-history).
