@@ -98,3 +98,52 @@ def test_a_saved_verdict_drops_when_its_proof_file_changes(tmp_path):
     Path(a).write_text("changed\n")
     assert ask.claim_cache_get(sdir, "A choice can have 255 options.") is None
     assert ask.claim_cache_get(sdir, "A choice can have 255 options.") is None
+
+
+def test_symbols_keep_claims_apart_in_the_saved_verdicts():
+    assert ask.claim_key("balance is -50") != ask.claim_key("balance is 50")
+    assert ask.claim_key("latency is < 200 ms") != ask.claim_key("latency is > 200 ms")
+    assert ask.claim_key("Jev is  Deterministic.") == ask.claim_key("jev is deterministic")
+
+
+def test_line_choices_stay_under_their_budget(tmp_path):
+    a = _f(tmp_path, "a.md", "\n".join(f"line number {i} " + "x" * 150 for i in range(60)))
+    qs, lines = ask.claim_questions("s", [a], {a: open(a).read()})
+    assert sum(len(v) for v in qs["line_1"]["criteria"].values()) <= ask.CLAIM_LINE_BUDGET + 100
+
+
+def test_a_too_big_claim_call_retries_without_line_picks(tmp_path, monkeypatch):
+    a = _f(tmp_path, "a.md", "The choice limit is 255 options.\n")
+    calls = []
+
+    def fake(state, questions):
+        calls.append(set(questions))
+        if any(k.startswith("line_") for k in questions):
+            raise RuntimeError("max_tokens_exceeded")
+        return {"answers": {"pick": {"choice": "file_1", "probabilities": {"file_1": 0.95}},
+                            "verdict_1": {"choice": "supported", "probabilities": {"supported": 0.96}}}}
+    monkeypatch.setattr(ask, "jev_choice", fake)
+    monkeypatch.setitem(ask._CLAIM, "text", "s")
+    ask._STAGE.clear()
+    assert ask.judge_listwise("s", [a]) == (a, 0.95)
+    assert len(calls) == 2 and ask._STAGE["claim_files"][a]["line"] is None
+
+
+def test_a_reply_without_verdicts_is_not_read_as_not_found(tmp_path, monkeypatch):
+    a = _f(tmp_path, "a.md", "text\n")
+    monkeypatch.setattr(ask, "jev_choice", lambda st, q: {"answers": {"pick": {"choice": "none",
+                                                                                "probabilities": {"none": 0.5}}}})
+    monkeypatch.setitem(ask._CLAIM, "text", "s")
+    ask._STAGE.clear()
+    ask.judge_listwise("s", [a])
+    assert "claim_files" not in ask._STAGE
+
+
+def test_line_number_counts_from_the_shown_passage(tmp_path):
+    text = "## Setup\nfirst\n" + "filler\n" * 10 + "## Setup\nThe limit is 255 options.\n"
+    a = _f(tmp_path, "a.md", text)
+    shown = text[text.rindex("## Setup"):]
+    answers = {"verdict_1": {"choice": "supported", "probabilities": {"supported": 0.97}},
+               "line_1": {"choice": "L1", "probabilities": {"L1": 0.9}}}
+    got = ask.read_claim_answers(answers, [a], {"file_1": ["## Setup", "The limit is 255 options."]}, {a: shown})[a]
+    assert got["line_no"] == 13
