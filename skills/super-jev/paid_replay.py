@@ -242,6 +242,20 @@ def eligible_sources(base: Path, cache: Path) -> set:
     reg = json.loads((base / "memory" / "registry.json").read_text())
     found = {o["path"] for e in (reg.get("datasets") or {}).values() if isinstance(e, dict)
              for o in e.get("originals") or [] if isinstance(o, dict) and isinstance(o.get("path"), str)}
+    # Transformed connectors direct content checks to their prepared views, not raw
+    # originals. Pin those immutable files before either build reads them too.
+    for entry in (reg.get("datasets") or {}).values():
+        if not isinstance(entry, dict) or not entry.get("manifestPath"):
+            continue
+        path = Path(entry["manifestPath"])
+        if not path.is_absolute():
+            path = base / "memory" / path
+        try:
+            manifest = json.loads(path.read_text())
+            found.update(s["path"] for s in manifest.get("sources", [])
+                         if isinstance(s, dict) and isinstance(s.get("path"), str))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue  # The preflight refuses an unavailable snapshot; never invent pins.
     for f in cache.glob("*.json") if cache.is_dir() else []:
         try:
             data = json.loads(f.read_text())

@@ -251,11 +251,17 @@ class Service:
                 manifest = self._manifest(entry)
             except (OSError, ValueError, KeyError):
                 return {'status': 'no-recipe'}
+            policies = entry.get('viewPolicies', {})
+            if any(not any(s.get('originalPath') == path and s.get('transformSHA') == digest
+                           and 'viewTransform' in s for s in manifest['sources'])
+                   for path, digest in policies.items()):
+                return {'status': 'no-recipe'}
             recipe = {'pointer': name, 'dataset': pointer['dataset'],
                       'principals': sorted(pointer['principals']),
                       'structure': entry.get('structure', 'flat-files'),
                       'sources': [{'path': s['originalPath'], 'id': s['id'],
-                                   'description': s.get('description', '')}
+                                   'description': s.get('description', ''),
+                                   **({'viewTransform': s['viewTransform']} if 'viewTransform' in s else {})}
                                   for s in manifest['sources'] if s.get('originalPath')]}
         if not recipe or not recipe.get('sources'):
             return {'status': 'no-recipe'}
@@ -643,7 +649,9 @@ class Service:
             rows.append({
                 'sourceId': source['id'], 'contentSHA': source['contentSHA'],
                 'path': source['path'],
-                **({'originalPath': source['originalPath']} if source.get('originalPath') else {}),
+                **({'originalPath': source['path'], 'upstreamPath': source['originalPath']}
+                   if source.get('viewTransform') else
+                   ({'originalPath': source['originalPath']} if source.get('originalPath') else {})),
                 'description': source.get('description', ''),
                 'lineCount': line_count,
             })
@@ -771,7 +779,8 @@ class Service:
                 return {'status': 'error', 'reason': 'Navigation returned invalid output.'}
             seen_candidates.add(candidate_node)
             source = sources[candidate['sourceId']]
-            mapped.append({**candidate, 'originalPath': source.get('originalPath', source['path']),
+            mapped.append({**candidate, 'originalPath': source['path'] if source.get('viewTransform') else source.get('originalPath', source['path']),
+                           **({'upstreamPath': source['originalPath']} if source.get('viewTransform') else {}),
                            'contentSHA': source['contentSHA'],
                            'description': source.get('description', '')})
         after, error = self.pointer(name, principal)
