@@ -11,6 +11,7 @@ from pathlib import Path
 
 from service import Service, valid_principal
 from cli import has_secret
+from reviewed_view import derive
 
 MAX_FILES = 50
 MAX_BYTES = 5 * 1024 * 1024
@@ -123,6 +124,7 @@ def _connect(request, config):
     if structure not in ('flat-files', 'folder-tree'):
         return _problem('unsupported-structure', 'Use structure "flat-files" or "folder-tree". Directories are never crawled.')
     sources, seen_paths, seen_ids, total = [], set(), set(), 0
+    view_total = 0
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get('path'), str):
             return _problem('invalid-source', 'Each source needs a path; description and stable id are optional.')
@@ -145,6 +147,22 @@ def _connect(request, config):
             return _problem('unsupported-source', 'Export non-UTF-8 or binary files into reviewed UTF-8 text first. No partial connection was created.')
         if not text.strip() or any(ord(c) < 32 and c not in '\n\r\t' for c in text):
             return _problem('unsupported-source', 'Empty or binary/control-character content cannot be connected. Supply nonempty reviewed UTF-8 text.')
+        original_sha = _hash(raw)
+        if 'viewTransform' not in item and any(k in item for k in ('viewSHA', 'transformSHA')):
+            return _problem('invalid-view-transform', 'View review hashes require the original viewTransform policy; raw fallback is refused.')
+        policy = item.get('viewTransform')
+        transform_sha = None
+        if 'viewTransform' in item:
+            try:
+                raw, transform_sha = derive(text, policy)
+                text = raw.decode('utf-8')
+            except (ValueError, TypeError):
+                return _problem('invalid-view-transform', 'Use a supported versioned declarative redaction policy. No raw-source fallback is permitted.')
+            if not text.strip():
+                return _problem('empty-view', 'The policy produced an empty view. No connection was created.')
+        view_total += len(raw)
+        if view_total > MAX_BYTES:
+            return _problem('byte-limit', 'The complete derived view set must fit within 5 MiB.')
         if has_secret(text):
             return _problem('secret-held', 'A source contains a secret (key, token, password or card number); remove it first. No partial connection was created.')
         source_id = item.get('id', 'file:' + _hash(str(given).encode())[:24])
@@ -166,7 +184,9 @@ def _connect(request, config):
         seen_ids.add(source_id)
         sources.append({'id': source_id, 'path': str(given), 'realPath': str(path), 'raw': raw, 'text': text,
                         'description': description, 'navigationPath': navigation_path,
-                        'sha256': _hash(raw), 'reviewedSHA': item.get('sha256')})
+                        'sha256': original_sha, 'viewSHA': _hash(raw), 'viewTransform': policy,
+                        'transformSHA': transform_sha, 'reviewedViewSHA': item.get('viewSHA'),
+                        'reviewedTransformSHA': item.get('transformSHA'), 'reviewedSHA': item.get('sha256')})
     if structure == 'folder-tree':
         common = Path(os.path.commonpath([str(Path(source['path']).parent)
                                          for source in sources]))
@@ -184,10 +204,15 @@ def _connect(request, config):
                            if explicit_navigation or 'navigationSHA' in request
                            else True)
     if (request.get('reviewed') is not True
-            or any(s['reviewedSHA'] != s['sha256'] for s in sources)
+            or any(s['reviewedSHA'] != s['sha256']
+                   or (s['viewTransform'] is not None and
+                       (s['reviewedViewSHA'] != s['viewSHA'] or s['reviewedTransformSHA'] != s['transformSHA']))
+                   for s in sources)
             or not navigation_reviewed):
-        return {**_problem('review-required', 'Review these local files within authorized scope. To permit their entire text for provider processing, repeat connect with reviewed:true and each returned sha256. This is not automatic privacy approval.'),
+        return {**_problem('review-required', 'Review the local files or derived views within authorized scope. Repeat with reviewed:true, each returned sha256, and for transformed sources viewSHA and transformSHA while retaining viewTransform. Only the derived view is published. This is not automatic privacy approval.'),
                 'sources': [{**{k: s[k] for k in ('path', 'id', 'description', 'sha256')},
+                             **({'viewSHA': s['viewSHA'], 'transformSHA': s['transformSHA']}
+                                if s['viewTransform'] is not None else {}),
                              **({'navigationPath': s['navigationPath']}
                                 if s['navigationPath'] is not None else {})} for s in sources],
                 'structure': structure, 'catalog': catalog,
@@ -226,6 +251,12 @@ def _connect(request, config):
         if (dataset in data['datasets'] and not old
                 and data['datasets'][dataset].get('pathConnection') != {'pointer': pointer, 'principals': sorted(principals)}):
             return _problem('unowned-dataset', 'An existing dataset cannot be overwritten by a new pointer. Choose a new dataset name.')
+        previous = data['datasets'].get(dataset) or {}
+        policies = {s['path']: s['transformSHA'] for s in sources if s['viewTransform'] is not None}
+        if any(policies.get(path) != digest for path, digest in previous.get('viewPolicies', {}).items()):
+            return _problem('view-policy-change', 'A replacement cannot remove or change an existing view policy or its source. Use a separately authorized connector for a different policy.')
+        if previous and not previous.get('pathConnection') and not all(s['viewTransform'] is not None for s in sources):
+            return _problem('legacy-view-policy-required', 'Hand-prepared datasets require an explicit reviewed view transform for every replacement source; raw replacement is refused.')
         if any(_hash(Path(s['path']).read_bytes()) != s['sha256'] for s in sources):
             return _problem('source-changed', 'A source changed after review. Review current bytes and repeat connect with their hashes.')
         # Private unless someone marked it shareable on purpose; a refresh that does not say keeps the mark.
@@ -237,9 +268,11 @@ def _connect(request, config):
         for i, (s, passages) in enumerate(zip(sources, chunks)):
             prepared_path = folder / f'{i}.txt'
             _write(prepared_path, s['raw'])
-            manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['sha256'], 'description': s['description']})
+            manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['viewSHA'], 'description': s['description'],
+                                        **({'viewTransform': s['viewTransform'], 'transformSHA': s['transformSHA'],
+                                            'originalSHA': s['sha256']} if s['viewTransform'] is not None else {})})
             for p in passages:
-                manifest['preparations'].append({'sourceId': s['id'], 'contentSHA': s['sha256'], 'chunkIndex': p['chunkIndex'], 'startLine': p['startLine'], 'endLine': p['endLine'], 'reviewedText': p['text'], 'safeHeading': p['heading'] or s['description'], 'policy': 'reviewed', 'status': 'reviewed'})
+                manifest['preparations'].append({'sourceId': s['id'], 'contentSHA': s['viewSHA'], 'chunkIndex': p['chunkIndex'], 'startLine': p['startLine'], 'endLine': p['endLine'], 'reviewedText': p['text'], 'safeHeading': p['heading'] or s['description'], 'policy': 'reviewed', 'status': 'reviewed'})
         manifest_path = folder / 'manifest.json'
         manifest_raw = json.dumps(manifest, ensure_ascii=False).encode()
         _write(manifest_path, manifest_raw)
@@ -251,12 +284,13 @@ def _connect(request, config):
             'originals': [{'path': s['path'], 'sha256': s['sha256'],
                            **({'realPath': s['realPath']} if s['realPath'] != s['path'] else {})}
                           for s in sources],
-            'shareable': shareable,
+            'shareable': shareable, 'viewPolicies': policies,
             # The connect request itself, minus the review hashes: an ask that finds this
             # pointer stale replays it (auto_heal.reconnect_recipe) at the files' current bytes.
             'recipe': {'pointer': pointer, 'dataset': dataset, 'principals': sorted(principals),
                        'structure': structure,
                        'sources': [{'path': s['path'], 'id': s['id'], 'description': s['description'],
+                                    **({'viewTransform': s['viewTransform']} if s['viewTransform'] is not None else {}),
                                     **({'navigationPath': s['navigationPath']}
                                        if s['navigationPath'] is not None else {})}
                                    for s in sources]}}

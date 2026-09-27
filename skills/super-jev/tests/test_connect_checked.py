@@ -41,6 +41,42 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_transformed_description_gate_receives_only_the_view(tmp_path, monkeypatch):
+    f = make_source_file(tmp_path, "view.md", "Alice Example wrote a note.\n")
+    policy = {"version": 1, "operations": [{"op": "redact-literals", "values": ["Alice Example"],
+                                           "replacement": "[PERSON_REDACTED]"}]}
+    req_path = make_request(tmp_path, [{"path": str(f), "description": "A note", "viewTransform": policy}])
+    seen = []
+    def gate(desc, path):
+        assert path != str(f)
+        seen.append(Path(path).read_text())
+        return {"state": "SUPPORTED", "confidence": 0.95, "secs": 0}
+    monkeypatch.setattr(cc, "gate", gate)
+    monkeypatch.setattr(sys, "argv", ["connect_checked.py", str(req_path), "--check-only"])
+    assert cc.main() == 0
+    assert seen == ["[PERSON_REDACTED] wrote a note.\n"]
+    verdict = json.loads(req_path.with_suffix(".verdicts.json").read_text())["verdicts"][0]
+    assert verdict["sha256"] == sha256_of(f)
+    assert verdict["viewSHA"] == hashlib.sha256(seen[0].encode()).hexdigest()
+
+
+def test_source_change_after_gate_cannot_get_a_fresh_unchecked_hash(tmp_path, monkeypatch):
+    f = make_source_file(tmp_path, "race.md", "Reviewed content\n")
+    req_path = make_request(tmp_path, [{"path": str(f), "description": "A note"}])
+    def gate(desc, path):
+        f.write_text("Changed while gate was running\n")
+        return {"state": "SUPPORTED", "confidence": 0.95, "secs": 0}
+    calls = []
+    def memory(req):
+        calls.append(req)
+        return {"status": "preparation-required", "sources": [{"path": str(f), "sha256": sha256_of(f)}]}
+    monkeypatch.setattr(cc, "gate", gate)
+    monkeypatch.setattr(cc, "memory", memory)
+    monkeypatch.setattr(sys, "argv", ["connect_checked.py", str(req_path)])
+    assert cc.main() == 1
+    assert len(calls) == 1
+
+
 def test_not_supported_refuses_and_never_calls_memory(tmp_path, monkeypatch, capsys):
     f = make_source_file(tmp_path, "a.md")
     req_path = make_request(tmp_path, [{"path": str(f), "description": "bad description"}])
