@@ -99,7 +99,7 @@
         "quick start",
         "new agent"
       ],
-      "answer": "Quick start: `skills` discovers configured local skills; `find` searches a selected reviewed dataset; `check` checks a claim; `verify` verifies agent work; `memory` is opt-in approved-answer reuse. For a known connection, use its tool and dataset/pointer directly. For initial setup, identify authorized scope, inspect existing setup, then reuse or prepare a reviewed dataset/pointer; inspect memory first with `python3 <skill-directory>/dispatch.py memory --describe`. Fresh results still need review and explicit approval before an exact repeat can reuse them; no semantic cache or automatic refresh is provided.",
+      "answer": "Quick start: `skills` discovers configured local skills; `find` searches a selected reviewed dataset; `check` checks a claim; `verify` verifies agent work; `memory` is opt-in approved-answer reuse. For a known connection, use its tool and dataset/pointer directly. For initial setup, identify authorized scope, inspect existing setup, then reuse or prepare a reviewed dataset/pointer; inspect memory first with `python3 <skill-directory>/dispatch.py memory --describe`. Fresh results still need review and explicit approval before an exact repeat can reuse them; there is no semantic cache; a connected pointer whose files changed refreshes itself in the background (auto-heal), and the ask names a refresh that failed.",
       "sources": [
         "connectors.md",
         "verified-reuse.md",

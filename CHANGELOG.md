@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- `superjev verify` (and `dispatch.py verify`) passes `--pr`, `--base` and repeatable `--claim` through to the verify door; before, the wrapper rejected them although the door takes them, so a report's PR state could not be gathered. The quick-start help no longer says there is no automatic refresh (auto-heal refreshes changed pointers).
 - `prepare_bulk.py`, `share_pointers.py` and `connect_github.py` check `--principal` against the same agent-name rule when parsing arguments, before building any state path from it (the memory runtime already refused to register such a name).
 - A new agent's first ask (nothing connected) prints commands that run from any folder: the skill folder it was run from, not the repo-relative `skills/super-jev/...`, and the same for the not-set-up hint. When the fleet has a shared list (`shared-pointers.json`), it also names those sets and the one `share_pointers.py --principal NAME --shared` command that joins them without any connect.
 - Agent names (`--principal`) must be letters, digits, `.`, `_` or `-`, starting with a letter or digit (at most 64). `ask.py` refuses anything else before touching state, and the memory runtime refuses to register it (connect and share). Before, a trailing space made a second, empty identity ("businessfi " beside "businessfi"), and a name such as `x/../primary` pointed its state folder at another agent's. That case was blocked only because no pointer was registered to such a name. Every name registered today already fits.
