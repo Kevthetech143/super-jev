@@ -857,11 +857,20 @@ def replay_recipe(a) -> None:
               "(pass --root/--exclude/--no-recurse to rescope)")
 
 
+def principal_name(name: str) -> str:
+    """argparse type for --principal: the memory runtime's agent-name rule, checked before any
+    state path is built from it (letters, digits, ".", "_", "-"; starts with a letter or digit)."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+        raise argparse.ArgumentTypeError(f"invalid agent name {name!r}: letters, digits, '.', '_', '-'; "
+                                         "no spaces or slashes")
+    return name
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", dest="roots", action="append")
     ap.add_argument("--pointer")
-    ap.add_argument("--principal", dest="principals", action="append", default=[],
+    ap.add_argument("--principal", dest="principals", action="append", default=[], type=principal_name,
                     help="repeatable. On --refresh, a pointer registered for several principals "
                          "(e.g. primary + primary-helper) must repeat --principal for each one it "
                          "still serves, or the harness refuses the refresh with scope-change")
