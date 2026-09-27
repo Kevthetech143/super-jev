@@ -47,7 +47,10 @@ time.sleep(p.get("sleep", 0))
 (sdir / "pointer_health.json").write_text("written by a replay")
 with sqlite3.connect(cfg["db"]) as db:
     db.execute("INSERT INTO cache VALUES ('written by a replay')")
-trace = {"kind": "trace", "lookup_id": "id-" + q[:4], "tier": p.get("tier", "confirmed"),
+if p.get("other"):
+    (root / p["other"]).mkdir(exist_ok=True)
+    (root / p["other"] / "traces.jsonl").write_text("{}")
+trace = {"kind": "trace", "lookup_id": "id-" + q[:4], "tier": p.get("tier", "confirmed"), "question": p.get("traced", q),
          "final_ranked": [{"score": s, "path": f} for s, f in p.get("final", [])],
          "content_check": {k: {"score": v} for k, v in p.get("checked", {}).items()}, "errors": p.get("errors", [])}
 with open(sdir / "traces.jsonl", "a") as f:
@@ -309,3 +312,34 @@ def test_ask_in_replay_mode_never_reconnects_or_heals_a_stale_pointer(tmp_path, 
     monkeypatch.setattr(ask.auto_heal, "reconnect_recipe", lambda *a, **k: pytest.fail("reconnect in a replay"))
     monkeypatch.setattr(ask.auto_heal, "maybe_heal", lambda *a, **k: pytest.fail("auto-heal in a replay"))
     ask.lookup("what is pending", "hf", tmp_path / "s")
+
+
+def test_a_question_that_looks_like_a_flag_is_refused_before_the_cap(tmp_path, env, capsys):
+    # Astra's repro on d6eb3b8: "--followup" ran ask.py's followup (up to 5 retries), not one lookup.
+    cases = _cases(tmp_path, [{"question": "--followup", "gold": ["/a.md"]}])
+    with pytest.raises(SystemExit) as e:
+        pr.main(["--principal", "me", "--cases", cases, "--ask", _build(tmp_path, "old", {}),
+                 "--ask", _build(tmp_path, "new", {}), "--max-asks", "0"])
+    assert e.value.code == 2 and "may not start with '-'" in capsys.readouterr().err
+    assert _log(tmp_path) == []
+
+
+def test_a_trace_for_another_question_or_principal_is_not_this_case(tmp_path, env, capsys):
+    cases = _cases(tmp_path, [{"question": q, "gold": ["/a.md"]} for q in ("mine", "theirs")])
+    old = {"mine": {"final": TOP}, "theirs": {"final": TOP}}
+    new = {"mine": {"final": [], "traced": "something else"}, "theirs": {"final": [], "other": "someone"}}
+    assert _run(tmp_path, cases, old, new) == 0
+    rows = {r["question"]: r for r in json.loads(capsys.readouterr().out)["rows"]}
+    assert rows["mine"]["result"] == rows["theirs"]["result"] == "inconclusive"
+    assert "another question" in rows["mine"]["new"]["error"]
+    assert "another principal" in rows["theirs"]["new"]["error"]
+    seen = _log(tmp_path)
+    assert all(s["q"] in ("mine", "theirs") for s in seen)
+
+
+def test_ask_reads_everything_after_a_double_dash_as_the_question(tmp_path, monkeypatch):
+    asked = []
+    monkeypatch.setattr(ask, "lookup", lambda q, principal, sdir: asked.append((q, principal)) or 0)
+    monkeypatch.setattr(ask, "followup", lambda *a, **k: pytest.fail("ran --followup"))
+    monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "alice", "--", "--followup"])
+    assert ask.main() == 0 and asked == [("--followup", "alice")]

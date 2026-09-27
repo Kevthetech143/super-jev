@@ -140,7 +140,7 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float):
         env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp / "state"), "SUPERJEV_REPLAY": "1",
                "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_TRACES": "1", "SUPERJEV_MEMORY_WRAPPER_ACTIVE": "1"}
         cmd = [sys.executable, str(ask), "--principal", pr] + (
-            ["--claim", case["question"]] if claim else [case["question"]])
+            ["--claim", case["question"]] if claim else ["--", case["question"]])
         p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              start_new_session=True)
         try:
@@ -157,6 +157,8 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float):
             p.communicate()
             return None, {"error": f"timeout after {timeout:g}s"}
         traces = [t for t in sc._jsonl(tmp / "state" / pr / "traces.jsonl") if t.get("kind") == "trace"]
+        if any((d / "traces.jsonl").exists() for d in (tmp / "state").iterdir() if d.name != pr):
+            return None, {"error": "a trace was written for another principal; not this case's lookup"}
     return (p.returncode, stdout, stderr, traces), None
 
 
@@ -174,6 +176,8 @@ def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
         out["error"] = "answered from a saved answer, not live"
     elif not traces:
         out["error"] = "no trace written"
+    elif not all(same_question(t.get("question"), case["question"]) for t in traces):
+        out["error"] = "a trace for another question was written; not this case's lookup"
     elif traces[-1].get("errors"):
         out["error"] = "; ".join(map(str, traces[-1]["errors"]))[:200]
     if "error" in out:
@@ -202,6 +206,13 @@ def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
         out["margin"] = max((s for p, s in checked.items() if p in gold), default=0) - line
     out["margin"] = round(out["margin"], 6)
     return out
+
+
+def same_question(traced, asked: str) -> bool:
+    """The trace's question is the asked one (a trace cuts long fields to a prefix)."""
+    if isinstance(traced, str) and traced.endswith("...[truncated]"):
+        return asked.startswith(traced[:-len("...[truncated]")])
+    return traced == asked
 
 
 def compare(old: dict, new: dict, wobble: float) -> str:
@@ -260,6 +271,9 @@ def main(argv=None) -> int:
     for b in builds:
         if not b.is_file():
             ap.error(f"no such build: {b}")
+    dashed = [c["question"] for c in cases if c["question"].lstrip().startswith("-")]
+    if dashed:  # ask.py would read it as a flag (--followup, --add ...), not a question
+        ap.error(f"a question may not start with '-': {dashed[0]!r}")
     need = len(cases) * len(builds)
     if not cases:
         ap.error("no cases for the given --principal")
