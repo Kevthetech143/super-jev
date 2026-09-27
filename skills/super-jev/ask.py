@@ -13,6 +13,16 @@
       --add. Any error -> "unresolved: N of M pointers errored" last, exit 1
       (even when candidates printed above); exit 0 otherwise.
 
+  ask.py --principal AGENT --claim "statement" [--claim "statement2" ...]
+      Is a statement true by our own files? One lookup per statement; the same
+      listwise Jev call also judges each shown file (supports / partly /
+      contradicts / does not state) and picks the line that shows it. Prints
+      TRUE / FALSE (>= 0.90, with the proof file, date and line), CONFLICT
+      (sure files disagree; newest first), PARTIAL, UNSURE (read these files) or
+      NOT FOUND (in the files read; may still exist), then the files found. A
+      sure TRUE/FALSE is saved and answers the same statement instantly until
+      its proof file changes.
+
   ask.py --principal AGENT --approve "question" "answer" [--rank N | --file PATH]
       Re-searches the last lookup's top pointer and approves it, quotes taken
       verbatim from reviewedText. Next ask of the same question is a cache
@@ -955,6 +965,185 @@ LISTWISE_NONE = "none"
 LEANS_NONE_NOTE = "(Jev leans none of these: read the files before answering; the answer may not be here)"
 LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, pick none."
 
+# Claim mode (ask.py --claim "statement"): is a statement true, by our own files?
+# The same listwise Jev call also asks, for each file it shows, whether that file
+# supports, partly supports, contradicts or does not state the statement, and which
+# line of it says so (picked from the file's own lines, never written). No extra
+# call. Plain code then combines the per-file answers (claim_verdict): only answers
+# at >= CLAIM_SURE count; files that disagree are a CONFLICT, newest first.
+CLAIM_SURE = 0.9
+CLAIM_LINES = 60
+CLAIM_LINE_CHARS = 160
+CLAIM_LINE_BUDGET = 4000  # characters of line choices per file, so a claim call stays well under the input ceiling
+CLAIM_CRITERIA = {
+    "supported": "the file states that the statement is true",
+    "partly": "the file states part of the statement but not all of it",
+    "contradicted": "the file states something that makes the statement false",
+    "not_stated": "the file does not say whether the statement is true",
+}
+CLAIM_VERDICT_INSTRUCTIONS = ("Statement: %s\nJudge only the file `%s.text` (%s). Does that file show the "
+                              "statement is true or false? When torn, pick not_stated.")
+CLAIM_LINE_INSTRUCTIONS = ("Statement: %s\nWhich line of the file `%s.text` (%s) shows whether the statement "
+                           "is true or false? When torn, pick none.")
+_CLAIM = {"text": None}
+
+def claim_lines(text: str) -> list:
+    """Up to CLAIM_LINES candidate lines of a passage (non-empty, 12+ characters)."""
+    out = []
+    for ln in text.splitlines():
+        t = ln.strip()
+        if len(t) >= 12 and t not in out:
+            out.append(t)
+        if len(out) >= CLAIM_LINES:
+            break
+    return out
+
+def claim_questions(claim: str, ordered: list, files: dict) -> tuple:
+    """Per shown file: a verdict question and a line-pick question. Returns (questions, lines by key)."""
+    qs, lines = {}, {}
+    for i, p in enumerate(ordered):
+        key = f"file_{i + 1}"
+        qs[f"verdict_{i + 1}"] = {"type": "choice", "criteria": CLAIM_CRITERIA,
+                                  "instructions": CLAIM_VERDICT_INSTRUCTIONS % (claim, key, Path(p).name)}
+        cand, used = [], 0
+        for t in claim_lines(files[p]):
+            used += min(len(t), CLAIM_LINE_CHARS) + 8
+            if used > CLAIM_LINE_BUDGET:
+                break
+            cand.append(t)
+        lines[key] = cand
+        if cand:
+            crit = {f"L{j + 1}": t[:CLAIM_LINE_CHARS] for j, t in enumerate(cand)}
+            crit["none"] = "no line of this file shows it"
+            qs[f"line_{i + 1}"] = {"type": "choice", "criteria": crit,
+                                   "instructions": CLAIM_LINE_INSTRUCTIONS % (claim, key, Path(p).name)}
+    return qs, lines
+
+def _answer_prob(ans: dict):
+    probs = ans.get("probabilities") if isinstance(ans, dict) else None
+    return probs.get(ans.get("choice")) if isinstance(probs, dict) else ans.get("probability")
+
+def read_claim_answers(answers: dict, ordered: list, lines: dict, shown: dict = None) -> dict:
+    """{path: {verdict, prob, line, line_no}} from one Jev response. line_no counts from the
+    passage actually shown, so a line repeated earlier in the file is not misnumbered."""
+    out = {}
+    for i, p in enumerate(ordered):
+        v = answers.get(f"verdict_{i + 1}")
+        if not isinstance(v, dict) or v.get("choice") not in CLAIM_CRITERIA:
+            continue
+        rec = {"verdict": v["choice"], "prob": _answer_prob(v), "line": None, "line_no": None}
+        ln = answers.get(f"line_{i + 1}")
+        m = re.fullmatch(r"L(\d+)", str((ln or {}).get("choice", "")))
+        cand = lines.get(f"file_{i + 1}") or []
+        if m and 1 <= int(m.group(1)) <= len(cand):
+            rec["line"] = cand[int(m.group(1)) - 1]
+            try:
+                text = Path(p).read_text(errors="replace")
+                off = max(text.find((shown or {}).get(p) or ""), 0)
+                base = text[:off].count("\n")
+                rec["line_no"] = next((base + k + 1 for k, t in enumerate(text[off:].splitlines())
+                                       if t.strip() == rec["line"]), None)
+            except OSError:
+                pass
+        out[p] = rec
+    return out
+
+def _file_date(p: str):
+    try:
+        return os.path.getmtime(p)
+    except OSError:
+        return 0
+
+def claim_verdict(files: dict, read: list) -> tuple:
+    """(word, lines) combining per-file answers. word is TRUE, FALSE, CONFLICT, PARTIAL,
+    UNSURE or NOT FOUND. Only answers at >= CLAIM_SURE decide; files that disagree
+    are a CONFLICT with the newest (by modified date) first."""
+    day = lambda p: time.strftime("%Y-%m-%d", time.localtime(_file_date(p))) if _file_date(p) else "date unknown"
+    sure = {p: f for p, f in files.items() if isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE}
+    yes = [p for p, f in sure.items() if f["verdict"] == "supported"]
+    no = [p for p, f in sure.items() if f["verdict"] == "contradicted"]
+    part = [p for p, f in sure.items() if f["verdict"] == "partly"]
+    quote = lambda p: (f'line {files[p]["line_no"]}: "{files[p]["line"]}"' if files[p].get("line_no")
+                       else f'"{files[p]["line"]}"' if files[p].get("line") else "(no single line picked)")
+    if yes and no:
+        both = sorted(yes + no, key=_file_date, reverse=True)
+        word = "CONFLICT"
+        out = [f"CONFLICT: the files disagree; the newest says {'TRUE' if both[0] in yes else 'FALSE'}. Read both before answering."]
+        out += [f"  {'TRUE ' if p in yes else 'FALSE'} {p} ({day(p)}) {quote(p)}" for p in both]
+        return word, out
+    if yes or no:
+        side = yes or no
+        word = "TRUE" if yes else "FALSE"
+        best = max(side, key=lambda p: files[p]["prob"])
+        out = [f"{word} ({files[best]['prob']:.2f})", f"Proof: {best} ({day(best)})", f"  {quote(best)}"]
+        also = [p for p in side if p != best]
+        if also:
+            out.append("Also says so: " + ", ".join(Path(p).name for p in also))
+        other = [p for p in read if p not in side]
+        if other:
+            out.append("Other files read: " + ", ".join(Path(p).name for p in other))
+        return word, out
+    if part:
+        out = ["PARTIAL: each file holds only part of it; read these before answering:"]
+        out += [f"  {p} ({day(p)}) {quote(p)}" for p in part]
+        return "PARTIAL", out
+    leaning = sorted((p for p, f in files.items() if f["verdict"] != "not_stated"),
+                     key=lambda p: -(files[p].get("prob") or 0))
+    if leaning:
+        f0 = files[leaning[0]]
+        out = [f"UNSURE ({f0['verdict']} {f0.get('prob') or 0:.2f}): read these files before answering:"]
+        out += [f"  {p}" for p in leaning]
+        return "UNSURE", out
+    if not read:
+        return "NOT FOUND", ["NOT FOUND in the connected files; it may still exist somewhere not connected."]
+    return "NOT FOUND", [f"NOT FOUND in the {len(read)} file(s) I read; it may still exist in a file that was not read."]
+
+def claim_key(claim: str) -> str:
+    """Case and spacing folded, every symbol kept: "-50" and "50", "<" and ">" stay different claims."""
+    return " ".join(claim.casefold().split()).rstrip(".!?")
+
+def claim_cache_path(sdir: Path) -> Path:
+    return sdir / "claim-verdicts.json"
+
+def claim_cache_get(sdir: Path, claim: str):
+    """A saved sure TRUE/FALSE whose proof file is unchanged, else None (a changed file drops it)."""
+    try:
+        data = json.loads(claim_cache_path(sdir).read_text())
+    except (OSError, ValueError):
+        return None
+    rec = data.get(claim_key(claim))
+    if not isinstance(rec, dict):
+        return None
+    try:
+        same = hashlib.sha256(Path(rec["path"]).read_bytes()).hexdigest() == rec.get("sha")
+    except (OSError, KeyError):
+        same = False
+    if not same:
+        data.pop(claim_key(claim), None)
+        try:
+            claim_cache_path(sdir).write_text(json.dumps(data, indent=1))
+        except OSError:
+            pass
+        return None
+    return rec
+
+def claim_cache_put(sdir: Path, claim: str, word: str, path: str, rec: dict) -> None:
+    try:
+        data = json.loads(claim_cache_path(sdir).read_text())
+    except (OSError, ValueError):
+        data = {}
+    try:
+        sha = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return
+    data[claim_key(claim)] = {"claim": claim, "verdict": word, "path": path, "sha": sha, "prob": rec.get("prob"),
+                              "line": rec.get("line"), "line_no": rec.get("line_no"), "saved": int(time.time())}
+    try:
+        sdir.mkdir(parents=True, exist_ok=True)
+        claim_cache_path(sdir).write_text(json.dumps(data, indent=1))
+    except OSError:
+        pass
+
 def best_passage(path: str):
     """The passage today's content check scored best (the file's start if it was
     never checked), or None if the file cannot be read or holds a secret."""
@@ -992,9 +1181,25 @@ def judge_listwise(question: str, paths: list):
     state = {f"file_{i + 1}": {"path": p, "text": files[p]} for i, p in enumerate(ordered)}
     crit = {f"file_{i + 1}": f"{Path(p).name} answers the question" for i, p in enumerate(ordered)}
     crit[LISTWISE_NONE] = "none of the files states the answer to the question"
+    questions = {"pick": {"type": "choice", "instructions": LISTWISE_INSTRUCTIONS % question, "criteria": crit}}
+    claim_lines_by_key = {}
+    if _CLAIM["text"]:
+        extra, claim_lines_by_key = claim_questions(_CLAIM["text"], ordered, files)
+        questions.update(extra)
+        _STAGE["claim_read"] = ordered
     try:
-        r = jev_choice(state, {"pick": {"type": "choice", "instructions": LISTWISE_INSTRUCTIONS % question,
-                                        "criteria": crit}})
+        try:
+            r = jev_choice(state, questions)
+        except Exception as e:
+            if not _CLAIM["text"] or not re.search(r"ceiling|max_tokens_exceeded", str(e)):
+                raise  # only a size refusal is retried; a timeout or auth error is not waited on twice
+            # A claim call can only be bigger than a normal one: retry once without the line picks.
+            questions = {k: v for k, v in questions.items() if not k.startswith("line_")}
+            r = jev_choice(state, questions)
+        if _CLAIM["text"]:
+            got = read_claim_answers(r.get("answers") or {}, ordered, claim_lines_by_key, files)
+            if got:  # no verdicts back means the check did not run, never "not found"
+                _STAGE["claim_files"] = got
         pick = r["answers"]["pick"]
         choice = pick["choice"]
     except Exception:
@@ -1511,7 +1716,20 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
-    cache = memory({"action": "cached", "principal": principal, "question": question})
+    if _CLAIM["text"]:
+        saved = claim_cache_get(sdir, _CLAIM["text"])
+        if saved:
+            q = f'line {saved["line_no"]}: "{saved["line"]}"' if saved.get("line_no") else (
+                f'"{saved["line"]}"' if saved.get("line") else "")
+            print(f"{saved['verdict']} ({saved.get('prob') or 0:.2f}, saved; its proof file is unchanged)")
+            print(f"Proof: {saved['path']}")
+            if q:
+                print(f"  {q}")
+            log(sdir, "claim", question=question, result="saved", verdict=saved["verdict"])
+            return 0
+        cache = {"status": "skipped (claim)"}  # saved answers answer questions, not statements
+    else:
+        cache = memory({"action": "cached", "principal": principal, "question": question})
     cache_stage = {"result": cache.get("status"), "checked": len(cache.get("checked") or [])}
     withheld = None
     if cache.get("status") == "verified-cache-hit":
@@ -1837,7 +2055,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     top = apply_near_twin_tiebreak(question, top)
     # Listwise choice step: see judge_listwise.
     listwise_winner = None
-    if top and listwise_enabled():
+    if top and (listwise_enabled() or _CLAIM["text"]):
         pool = [p for _s, p, _ptr in top if notes.get(p) != HELD_SECRET]
         _STAGE["listwise"] = {"pool": pool[:LISTWISE_MAX_FILES], "ran": bool(pool), "reordered": False}
         listwise_winner, listwise_prob = judge_listwise(question, pool) if pool else (None, None)
@@ -1937,6 +2155,22 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 final_ranked=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top],
                 tier=tier, timings={"total_secs": round(time.time() - t0, 2)}, errors=error_lines,
                 stages=stages)
+    if _CLAIM["text"]:
+        files = _STAGE.get("claim_files")
+        if top and files is None:
+            word, lines = "UNSURE", ["UNSURE: the true/false check did not run; read the files below before answering."]
+        else:
+            word, lines = claim_verdict(files or {}, _STAGE.get("claim_read") or [])
+        for line in lines:
+            print(line)
+        if word in ("TRUE", "FALSE"):
+            side = [p for p, f in (files or {}).items() if f["verdict"] == ("supported" if word == "TRUE" else "contradicted")
+                    and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE]
+            best = max(side, key=lambda p: files[p]["prob"])
+            claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
+        log(sdir, "claim", question=question, result=word)
+        if top:
+            print("Files found:")
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for name, path in skills:
@@ -2927,6 +3161,23 @@ def _main() -> int:
         return settle_pick(principal, sdir, a[1], answer=" ".join(a[2:]) or None, drop=a[0] == "--drop-pick")
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
+    if a[0] == "--claim":
+        claims, rest = [], a
+        while rest and rest[0] == "--claim" and len(rest) >= 2:
+            claims.append(rest[1]); rest = rest[2:]
+        if not claims or rest:
+            print('usage: --claim "statement" [--claim "statement2" ...]')
+            return 2
+        rc = 0
+        for i, claim in enumerate(claims):
+            if len(claims) > 1:
+                print(f"{'' if i == 0 else chr(10)}=== CLAIM {i + 1}: {claim}")
+            _CLAIM["text"] = claim
+            try:
+                rc = max(rc, lookup(claim, principal, sdir))
+            finally:
+                _CLAIM["text"] = None
+        return rc
     return lookup(" ".join(a), principal, sdir)
 
 ADD_VALUE_FLAGS = {"--source", "--subject", "--kind", "--status", "--as-of"}
