@@ -1955,6 +1955,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if errored:
         print(f"unresolved: {errored} of {len(original_pointers)} pointers errored")
         if not top and not skills:
+            # A miss with some pointers errored is still a miss on the healthy ones:
+            # say what was searched and what was skipped, not just the voice line.
+            for line in miss_report(principal, len(original_pointers), routing, content_check,
+                                    question, original_pointers):
+                print(line)
             print(VOICE_LINE)
             return 1
         # Partial failure: some pointers errored or are benched, but healthy
@@ -1966,7 +1971,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             print(f"({dropped} file(s) matched the topic but did not contain the answer on reading)")
         print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected "
               "files. It may still exist (see references/connectors.md to fill the gap).")
-        for line in miss_report(principal, len(original_pointers), routing, content_check):
+        for line in miss_report(principal, len(original_pointers), routing, content_check,
+                                question, original_pointers):
             print(line)
         print(VOICE_LINE)
         return 0
@@ -1994,7 +2000,101 @@ def skill_dir_for_display() -> Path:
     return Path(__file__).resolve().parent
 
 
-def miss_report(principal: str, total: int, routing: dict, content_check: dict) -> list:
+MISS_SKIPPED = 3
+SKIPPED_READ_BYTES = 256_000
+SKIPPED_TEXT_COVERAGE = 0.75
+SECRET_HELD = ("card/password", "secret-keyword")
+PART_RE = re.compile(r"^(.+)-\d+$")
+
+
+def skipped_files(pointers, principal: str = "") -> dict:
+    """{path: (plain reason, fix, name-only)} for files setup held or whose label
+    failed its check, across the principal's own visible pointers only. A part
+    pointer <base>-N has no cache of its own: its base is read only when the base
+    is itself visible to the principal. Local files only, no provider call."""
+    cache_dir = prepare_bulk.CACHE_DIR
+    visible = list(dict.fromkeys(pointers or ()))
+    bases = []
+    for ptr in visible:
+        base = ptr
+        if not any((cache_dir / f"{ptr}{suf}").is_file() for suf in (".json", "-report.json", "-held.txt")):
+            m = PART_RE.match(ptr)
+            base = m.group(1) if m and m.group(1) in visible else None
+        if base and base not in bases:
+            bases.append(base)
+    out = {}
+    for base in bases:
+        try:
+            report = json.loads((cache_dir / f"{base}-report.json").read_text())
+            report = report if isinstance(report, dict) else {}
+        except (OSError, ValueError):
+            report = {}
+        principals = report.get("principals") or ([report["principal"]] if report.get("principal") else [])
+        if principal and principals and principal not in principals:
+            continue  # a report naming its principals never lends its files to another one
+        cache = load_cache_files(base)
+        held = [tuple(e) for e in report.get("held") or [] if isinstance(e, list) and len(e) == 2]
+        if not report:  # the report is the newer record; -held.txt only stands in without one
+            try:
+                held += [tuple(ln.split("\t", 1)) for ln in (cache_dir / f"{base}-held.txt").read_text().splitlines()
+                         if "\t" in ln and not ln[:1].isspace()]
+            except OSError:
+                pass
+        failed = [tuple(e) for e in report.get("exceptions") or [] if isinstance(e, list) and len(e) == 2]
+        failed += [(path, str(c.get("verdict"))) for path, c in cache.items()
+                   if isinstance(c, dict) and c.get("pass") is False]
+        for path, why in held + failed:
+            if (path in out or "admitted by --allow-held" in why or (cache.get(path) or {}).get("pass")
+                    or not os.path.exists(path)):
+                continue
+            if "over size ceiling" in why:
+                m = re.search(r"\(([\d,]+) bytes, max ([\d,]+)\)", why)
+                size = (f" ({int(m.group(1).replace(',', '')) // 1000} KB, limit "
+                        f"{int(m.group(2).replace(',', '')) // 1000} KB)") if m else ""
+                out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
+            elif any(k in why for k in SECRET_HELD):
+                out[path] = ("held back: it looks like it holds a password, key or card number",
+                             "review the flagged line, then re-run setup with --allow-held", True)
+            elif "UTF-8" in why:
+                out[path] = ("not saved as UTF-8 text", "re-save it as UTF-8, then re-run setup", False)
+            elif (path, why) in failed and "no draft" in why:
+                out[path] = ("not connected: setup could not write a label for it",
+                             "re-run setup on that file", False)
+            elif (path, why) in failed:
+                out[path] = ("not connected: its label did not pass the setup check",
+                             "re-run setup on that file (its label failed the check)", False)
+    return out
+
+
+def skipped_for_question(question: str, pointers, principal: str = "") -> list:
+    """Up to MISS_SKIPPED (path, reason, fix) skipped files sharing the question's
+    words: by file name, and for a label-failed file its own local text too. A
+    secret-like file is matched on its name only and never opened; a size-held file
+    (a big log holds most questions' words) on its name only too."""
+    terms = query_terms(question or "")
+    if not terms:
+        return []
+    # Whole words, not substrings ("arc" is not in "search"); a long file holds half of
+    # most questions' words, so its text must hold most of them to count.
+    need = max(2, math.ceil(SKIPPED_TEXT_COVERAGE * len(terms))) if len(terms) > 1 else 2
+    hits = lambda ws: sum(1 for t in terms if t in ws or (len(t) > 5 and any(w.startswith(t[:5]) for w in ws)))
+    ranked = []
+    for path, (why, fix, name_only) in skipped_files(pointers, principal).items():
+        name_hits = hits(set(words(Path(path).stem)))
+        text_hits = 0
+        if not name_only and not name_hits:
+            try:
+                with open(path, "rb") as fh:
+                    text_hits = hits(set(words(fh.read(SKIPPED_READ_BYTES).decode("utf-8", "replace"))))
+            except OSError:
+                pass
+        if name_hits or text_hits >= need:
+            ranked.append((-name_hits, -text_hits, path, why, fix))
+    return [(p, why, fix) for _n, _t, p, why, fix in sorted(ranked)[:MISS_SKIPPED]]
+
+
+def miss_report(principal: str, total: int, routing: dict, content_check: dict,
+                question: str = "", pointers=()) -> list:
     """What a no-answer lookup searched, and the clean next steps, so the agent or
     human acting on a miss does not have to dig: which connected sets looked on
     topic, which files were read (closest first), and the exact commands to
@@ -2010,11 +2110,19 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict) 
                      + ", ".join("/".join(Path(p).parts[-2:]) for p in read[:MISS_CLOSEST]))
     else:
         lines.append("  - no connected file matched the question's words closely enough to read")
+    skipped = skipped_for_question(question, pointers, principal)
+    if skipped:
+        lines.append("Skipped at setup, and may hold the answer:")
+        lines += [f"    {'/'.join(Path(p).parts[-2:])}: {why} -> Fix: {fix}" for p, why, fix in skipped]
     skill_dir = skill_dir_for_display()
-    lines += ["Next step (pick one):",
-              "  - The answer is in a file you have: it is probably not connected. Connect its folder:",
-              f"      python3 {skill_dir / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}",
-              "  - You know the answer: save it for next time:",
+    lines.append("Next step (pick one):")
+    if skipped:
+        # Their folder is already connected: connecting it again would skip them again.
+        lines.append("  - The answer is in a skipped file above: apply its fix, then ask again.")
+    else:
+        lines += ["  - The answer is in a file you have: it is probably not connected. Connect its folder:",
+                  f"      python3 {skill_dir / 'prepare_bulk.py'} --root <folder> --pointer {principal}-<name> --principal {principal}"]
+    lines += ["  - You know the answer: save it for next time:",
               f"      python3 {skill_dir / 'ask.py'} --principal {principal} --add \"<question>\" \"<answer>\"",
               "  - Neither: tell your human it was not found and offer to search by hand."]
     return lines

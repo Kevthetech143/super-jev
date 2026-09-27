@@ -46,7 +46,9 @@ def test_a_stuck_stale_pointer_warns_once_a_day_not_on_every_answer(tmp_path, mo
     sdir = tmp_path / "s"
     assert ask.lookup("what is pending", "primary", sdir) == 1
     first = capsys.readouterr().out
-    assert "[bench] preparation-required" in first and "prepare_bulk.py" not in first
+    bench_line = next(ln for ln in first.splitlines() if ln.startswith("[bench]"))
+    assert "preparation-required" in bench_line and "prepare_bulk.py" not in bench_line
+    assert "What was searched:" in first  # the miss report still prints when a pointer errored
     assert ask.lookup("what is pending", "primary", sdir) == 0
     second = capsys.readouterr().out
     assert "bench" not in second and "errored" not in second

@@ -512,6 +512,8 @@ def secret_detail(p: Path):
 
 def write_held_txt(pointer: str, held: list) -> None:
     if not held:
+        # A run that holds nothing clears the last run's list, or a fixed file reads as still held.
+        (CACHE_DIR / f"{pointer}-held.txt").unlink(missing_ok=True)
         return
     lines = []
     for p, why in held:

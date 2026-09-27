@@ -36,7 +36,7 @@ When a lookup returns no usable answer, the last line `ask.py` prints is exactly
 Super Jev: I didn't have this. Want me to find it by hand and save it for next time?
 ```
 
-**A harness relaying `ask.py` output to a human must pass that line on verbatim.** Just above it, a miss prints `What was searched:` (connected sets, which had matches, files read with the closest named) and `Next step (pick one):` with exact commands. Act on it instead of guessing: if the answer lives in a file you have, connect its folder with the printed `prepare_bulk.py` command; if you know the answer, save it with the printed `--add` command; otherwise tell your human it was not found and offer a by-hand search. A hit marked `possible` is a lead, not an answer: open and check the file before using it.
+**A harness relaying `ask.py` output to a human must pass that line on verbatim.** Just above it, a miss prints `What was searched:` (connected sets, which had matches, files read with the closest named), then any `Skipped at setup` files that may hold the answer (reason and fix; apply the fix, do not reconnect the folder), and `Next step (pick one):` with exact commands, even when some pointer errored. Act on it instead of guessing: if the answer lives in a file you have, connect its folder with the printed `prepare_bulk.py` command; if you know the answer, save it with the printed `--add` command; otherwise tell your human it was not found and offer a by-hand search. A hit marked `possible` is a lead, not an answer: open and check the file before using it.
 
 ## Maturity
 
