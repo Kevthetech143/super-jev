@@ -548,10 +548,43 @@ def write_held_txt(pointer: str, held: list) -> None:
     _record_written(CACHE_DIR / f"{pointer}-held.txt")
 
 
+EXCERPT_HEADS = 15
+EXCERPT_MORE_HEADS = 10
+SAMPLE_OVER = 12_000
+SAMPLES = 8
+SAMPLE_CHARS = 350
+
+
 def excerpt(p: Path) -> dict:
+    """What the writer reads of one file: its headings and first 1,200 characters, plus, for a big
+    file, headings and short passages taken evenly across the rest. The gate judges the whole file,
+    so a writer that saw only the top described only the top (a 37 KB changelog drafted as its
+    oldest versions) and was refused. The first 15 headings and the start stay exactly as before,
+    so builtin_writer's quote rebuilds identically; the added part is bounded (at most 10 headings,
+    8 x 350 characters) whatever the file's size."""
     text = p.read_text(errors="replace")
-    heads = [l.strip() for l in text.splitlines() if l.startswith("#")][:15]
-    return {"path": str(p), "headings": heads, "start": text[:1200]}
+    all_heads = [l.strip() for l in text.splitlines() if l.startswith("#")]
+    heads = all_heads[:EXCERPT_HEADS]
+    rest = all_heads[EXCERPT_HEADS:]
+    if len(rest) > EXCERPT_MORE_HEADS:
+        rest = [rest[i * len(rest) // EXCERPT_MORE_HEADS] for i in range(EXCERPT_MORE_HEADS - 1)] + [rest[-1]]
+    heads += [h[:200] for h in rest]
+    out = {"path": str(p), "headings": heads, "start": text[:1200]}
+    if len(text) > SAMPLE_OVER:
+        samples, span = [], len(text) - 1200
+        for i in range(SAMPLES):
+            # Start each passage at a line start, so it opens on a heading or bullet, not mid-word.
+            pos = text.find("\n", 1200 + i * span // SAMPLES) + 1
+            if pos <= 0 or (samples and pos < samples[-1][0] + SAMPLE_CHARS):
+                continue
+            chunk = text[pos:pos + SAMPLE_CHARS]
+            if pos + SAMPLE_CHARS < len(text):
+                cut = max(chunk.rfind("\n"), chunk.rfind(" "))
+                chunk = chunk[:cut] if cut > 0 else chunk
+            if chunk.strip():
+                samples.append((pos, chunk.strip()))
+        out["samples"] = [c for _pos, c in samples]
+    return out
 
 
 class WriterError(RuntimeError):
@@ -568,7 +601,9 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
         "You write catalog descriptions for files. For EACH file below, return one JSON object with keys "
         "path, description, question, kind, status, as_of, subject.\n"
         "description: one factual sentence, at most 40 words, naming the main topics and purpose exactly as the file "
-        "shows them; no praise, no guessing beyond the excerpt and headings; if the file is a stub or pointer, say so.\n"
+        "shows them; no praise, no guessing beyond the excerpt and headings; if the file is a stub or pointer, say so. "
+        "A long file also has samples, short passages taken evenly across it: describe the whole file, not just "
+        "its start.\n"
         "question: one natural question a user would ask that THIS file answers better than any sibling file; mention a "
         "specific detail from it.\n"
         "kind: one of dashboard (a status/tracker page for one campaign or case), playbook, ledger (dated rows), "
