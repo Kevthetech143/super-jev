@@ -80,6 +80,11 @@ def _cases(tmp_path, rows, name="cases.jsonl"):
     return str(f)
 
 
+def _register(registry, paths):
+    """The fixture's connected originals: the paths a replay treats as pinned."""
+    Path(registry).write_text(json.dumps({"version": 1, "datasets": {"d": {"originals": [{"path": p} for p in paths]}}}))
+
+
 def _rows(db):
     with sqlite3.connect(db) as c:
         return c.execute("SELECT count(*) FROM cache").fetchone()[0]
@@ -94,7 +99,7 @@ def env(tmp_path, monkeypatch):
     mem.mkdir()
     with sqlite3.connect(mem / "answers.sqlite") as c:
         c.execute("CREATE TABLE cache (k TEXT)")
-    (mem / "datasets.json").write_text('{"version": 1, "datasets": {}}')
+    _register(mem / "datasets.json", [f"/{c}.md" for c in "abcdefghvwxyz"])
     (real / "_memory" / "config.json").write_text(json.dumps(
         {"db": str(mem / "answers.sqlite"), "registry": str(mem / "datasets.json")}))
     monkeypatch.setenv("SUPERJEV_STATE_DIR", str(real))
@@ -283,6 +288,7 @@ def test_a_file_only_the_old_run_read_that_changes_during_the_pair_is_drift(tmp_
     gold, rival = tmp_path / "gold.md", tmp_path / "rival.md"
     gold.write_text("gold")
     rival.write_text("v1")
+    _register(json.loads((env / "_memory" / "config.json").read_text())["registry"], [str(rival)])
     cases = _cases(tmp_path, [{"question": "q", "gold": [str(gold)]}])
     old = {"q": {"final": [(0.99, str(rival))]}}
     new = {"q": {"final": [(0.99, str(gold))], "write": {str(rival): "v2"}}}
@@ -296,7 +302,7 @@ def test_a_connected_file_only_the_new_run_read_that_changed_before_it_is_drift(
     gold.write_text("gold")
     rival.write_text("v1")
     registry = json.loads((env / "_memory" / "config.json").read_text())["registry"]
-    Path(registry).write_text(json.dumps({"version": 1, "datasets": {"d": {"originals": [{"path": str(rival)}]}}}))
+    _register(registry, [str(rival)])
     cases = _cases(tmp_path, [{"question": "q", "gold": [str(gold)]}])
     old = {"q": {"final": [], "write": {str(rival): "v2"}}}
     new = {"q": {"final": [(0.99, str(gold)), (0.5, str(rival))]}}
@@ -385,3 +391,24 @@ def test_ask_reads_everything_after_a_double_dash_as_the_question(tmp_path, monk
     monkeypatch.setattr(ask, "followup", lambda *a, **k: pytest.fail("ran --followup"))
     monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "alice", "--", "--followup"])
     assert ask.main() == 0 and asked == [("--followup", "alice")]
+
+
+@pytest.mark.parametrize("pinned_by", ("nothing", "prepare-cache"))
+def test_a_file_read_that_no_registry_or_cache_pins_is_unpinned(tmp_path, env, capsys, pinned_by):
+    # Astra's repro on 09a4863: a missing pre-pair hash counted as unchanged. The old run
+    # changes an unregistered competitor; the new one reads it and finds gold.
+    gold, rival = tmp_path / "gold.md", tmp_path / "rival.md"
+    gold.write_text("gold")
+    rival.write_text("v1")
+    if pinned_by == "prepare-cache":  # word search reads cache-named files: those are pinned too
+        for b in ("old", "new"):
+            cache = tmp_path / b / "skills" / "super-jev" / "prepare-cache"
+            cache.mkdir(parents=True)
+            (cache / "p.json").write_text(json.dumps({str(rival): {"pass": True}}))
+    cases = _cases(tmp_path, [{"question": "q", "gold": [str(gold)]}])
+    old = {"q": {"final": [], "write": {str(rival): "v2"}}}
+    new = {"q": {"final": [(0.99, str(gold)), (0.5, str(rival))]}}
+    assert _run(tmp_path, cases, old, new) == 0
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert row["result"] == "inconclusive"
+    assert ("unpinned source" if pinned_by == "nothing" else "changed during the pair") in row["new"]["error"]

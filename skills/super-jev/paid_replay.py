@@ -23,8 +23,9 @@ code does not declare REPLAY_PROTOCOL = 2 (all of those, and a literal question 
 --) is refused: it could start paid refresh work outside the cap. Both builds must read
 byte-identical prepare-caches (copy one release twice); the report carries the
 fingerprints, and a cache that changes mid-replay voids the run (exit 3). Every connected
-original and the gold are hashed before each pair; a case is inconclusive when a file
-either run read, or the gold, changed from then until the end of the pair.
+original, every file the prepare-cache names, and the gold are hashed before each pair;
+a case is inconclusive when a file either run read was not among them (unpinned) or
+changed from then until the end of the pair.
 
 Wobble: live Jev scores move about 0.05-0.10 run to run. A flip counts as gained or lost
 unless the passing side cleared its line by less than --wobble (default 0.10) AND the
@@ -213,21 +214,31 @@ def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
     return out
 
 
-def eligible_sources(base: Path) -> set:
-    """Every connected original the frozen registry lists: what any build may read."""
+def eligible_sources(base: Path, cache: Path) -> set:
+    """What any build may read: every original the frozen registry lists, and every file
+    a prepare-cache/<pointer>.json names (word search reads those directly)."""
     reg = json.loads((base / "memory" / "registry.json").read_text())
-    return {os.path.realpath(o["path"]) for e in (reg.get("datasets") or {}).values() if isinstance(e, dict)
-            for o in e.get("originals") or [] if isinstance(o, dict) and isinstance(o.get("path"), str)}
+    found = {o["path"] for e in (reg.get("datasets") or {}).values() if isinstance(e, dict)
+             for o in e.get("originals") or [] if isinstance(o, dict) and isinstance(o.get("path"), str)}
+    for f in cache.glob("*.json") if cache.is_dir() else []:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        found |= {k for k in data if os.path.isabs(k)} if isinstance(data, dict) else set()
+    return {os.path.realpath(p) for p in found}
 
 
-def drifted(old: dict, new: dict, before: dict) -> bool:
-    """Did any file either run read (or the gold) change from before the pair to after it,
-    or between a run reading it and the end of the pair?"""
+def drifted(old: dict, new: dict, before: dict) -> str:
+    """Why this pair's inputs cannot be trusted, or '': a file either run read (or the gold)
+    was not hashed before the pair, or changed from then, or after a run read it."""
     for p in set(old["read"]) | set(new["read"]):
+        if p not in before:
+            return f"unpinned source: {p}"
         now = file_sha(p)
-        if now != before.get(p, now) or now != old["read"].get(p, now) or now != new["read"].get(p, now):
-            return True
-    return False
+        if now != before[p] or now != old["read"].get(p, now) or now != new["read"].get(p, now):
+            return f"a file it read changed during the pair: {p}"
+    return ""
 
 
 def same_question(traced, asked: str) -> bool:
@@ -240,8 +251,8 @@ def same_question(traced, asked: str) -> bool:
 def compare(old: dict, new: dict, wobble: float, before: dict) -> str:
     if "error" in old or "error" in new:
         return "inconclusive"
-    if drifted(old, new, before):
-        old["error"] = new["error"] = "a file it read changed during the pair"
+    if why := drifted(old, new, before):
+        old["error"] = new["error"] = why
         return "inconclusive"
     if old["ok"] == new["ok"]:
         return "same"
@@ -320,7 +331,7 @@ def main(argv=None) -> int:
         except (OSError, ValueError, KeyError, sqlite3.Error) as e:
             ap.error(f"cannot snapshot state and memory: {e}")
         report["fingerprints"] = fingerprints
-        sources = eligible_sources(base)
+        sources = eligible_sources(base, caches[0])
         for c in cases:
             before = {p: file_sha(p) for p in sources | {os.path.realpath(g) for g in c["gold"]}}
             old, new = (grade(b, base, c, a.timeout) for b in builds)
