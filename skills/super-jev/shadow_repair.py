@@ -163,6 +163,7 @@ def compare(root, pin, candidate, out):
     data = validate_bundle(root, pin)
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     candidate_spec = copy_build(candidate, out / 'candidate')
+    tools_spec = copy_build(Path(__file__), out / 'tools')
     original_read = Path.read_bytes
     selected, slots = {}, {}
     def frozen_read(path):
@@ -229,8 +230,9 @@ def compare(root, pin, candidate, out):
                   controls_preserved=controls_ok, held_out_preserved=held_ok, scorecard_exit=rc,
                   snapshot_sha256=pin, baseline=data['baseline'], candidate=candidate_spec,
                   paid_stage='not checked', deployed=False,
-                  runner_sha256=digest(Path(__file__).read_bytes()),
-                  scorecard_sha256=digest(Path(scorecard.__file__).read_bytes()))
+                  tools=tools_spec,
+                  runner_sha256=tools_spec['files'][Path(__file__).name],
+                  scorecard_sha256=tools_spec['files']['scorecard.py'])
     write_json(out / 'report.json', result)
     return result
 
