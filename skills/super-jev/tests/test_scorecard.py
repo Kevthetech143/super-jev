@@ -5,6 +5,7 @@ drops a case the baseline read. No network, no Jev.
     python3 -m pytest skills/super-jev/tests/test_scorecard.py -q
 """
 import json
+import pytest
 import sys
 from pathlib import Path
 
@@ -93,3 +94,24 @@ def test_a_question_with_two_recorded_files_counts_either(tmp_path, monkeypatch,
     build = _build(tmp_path, "b", ["/b.md", "/a.md"])
     sc.main(["--principal", "me", "--no-harvest", "--cases", str(cases), "--ask", build])
     assert "1/1" in capsys.readouterr().out
+
+
+def test_a_launcher_ask_py_grades_the_real_code_beside_it(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SC_STATE", str(tmp_path / "state"))
+    cases = tmp_path / "cases.jsonl"
+    _w(cases, [{"question": "q", "gold": ["/gold.md"], "principal": "me"}])
+    d = Path(_build(tmp_path, "rel", ["/gold.md"])).parent
+    (d / "ask.py").rename(d / "ask_impl.py")
+    (d / "ask.py").write_text("raise SystemExit('the launcher must not run')\n")
+    assert sc.main(["--principal", "me", "--no-harvest", "--cases", str(cases), "--ask", str(d / "ask.py")]) == 0
+    assert "1/1" in capsys.readouterr().out
+
+
+def test_a_file_that_is_not_an_ask_module_is_refused_by_name(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SC_STATE", str(tmp_path / "state"))
+    other = tmp_path / "x" / "tool.py"
+    other.parent.mkdir()
+    other.write_text("X = 1\n")
+    with pytest.raises(SystemExit) as e:
+        sc.main(["--principal", "me", "--no-harvest", "--ask", str(other)])
+    assert e.value.code == 2 and "no word_search" in capsys.readouterr().err
