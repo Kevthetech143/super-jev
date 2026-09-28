@@ -177,7 +177,7 @@ def test_content_check_failure_is_an_error_with_reason(env, monkeypatch, capsys)
     assert "[content-check] error: Jev HTTP 401" in capsys.readouterr().out
 
 
-def test_confirm_checks_each_file_alone_and_applies_the_floor(tmp_path, monkeypatch):
+def test_confirm_checks_each_file_alone_and_respects_selection(tmp_path, monkeypatch):
     a, b = tmp_path / "a.md", tmp_path / "b.md"
     a.write_text("alpha")
     b.write_text("beta")
@@ -188,7 +188,8 @@ def test_confirm_checks_each_file_alone_and_applies_the_floor(tmp_path, monkeypa
         leaves = payload["catalog"]["nodes"][1:]
         seen.append([leaf["description"] for leaf in leaves])
         score = 0.9 if leaves[0]["description"] == "alpha" else 0.05
-        body = {"status": "candidates", "candidates": [{"sourceId": "0", "score": score}]}
+        body = ({"status": "candidates", "candidates": [{"sourceId": "0", "score": score}]}
+                if leaves[0]["description"] == "alpha" else {"status": "no-candidates", "candidates": []})
         return subprocess.CompletedProcess(cmd, 0, json.dumps(body), "")
 
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
@@ -197,7 +198,7 @@ def test_confirm_checks_each_file_alone_and_applies_the_floor(tmp_path, monkeypa
     assert sorted(seen) == [["alpha"], ["beta"]]  # one catalog per file
 
 
-def test_ask_ignores_near_zero_routing_tail(env, monkeypatch, capsys):
+def test_low_routing_tail_is_checked_but_rejected_without_content_evidence(env, monkeypatch, capsys):
     f = _nav_with(env, monkeypatch)
     junk = env / "junk.md"
     junk.write_text("x")
@@ -206,7 +207,7 @@ def test_ask_ignores_near_zero_routing_tail(env, monkeypatch, capsys):
     checked = []
     monkeypatch.setattr(ask, "confirm", lambda q, paths: checked.extend(paths) or ({str(f): 0.9}, set(), None, {}))
     assert ask.lookup("vet?", "me", env / "state" / "me") == 0
-    assert checked == [str(f)] and "junk.md" not in capsys.readouterr().out
+    assert checked == [str(f), str(env / "junk.md")] and "junk.md" not in capsys.readouterr().out
 
 
 # 8. --claims-file expands ~

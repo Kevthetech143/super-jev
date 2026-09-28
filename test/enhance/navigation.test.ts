@@ -120,3 +120,90 @@ test('rejects cyclic trees and bounded invalid catalog input', () => {
   ] }), NavigationError);
   assert.throws(() => validateNavigationCatalog({ ...catalog, nodes: [...catalog.nodes, { id: 'unused', label: '', description: '', sourceId: 'unused' }] }), NavigationError);
 });
+
+test('source evidence checks requested facts and permits partial premises', async () => {
+  const flat = { version: 1 as const, structure: 'flat-files' as const, rootId: 'root' as const,
+    nodes: [{ id: 'root', label: 'Sources', description: '', children: ['p'] },
+      { id: 'p', label: 'Passage 1', description: 'Equipment cost 300; freight invoiced separately.', sourceId: '0' }] };
+  const seen: Request[] = [];
+  const transport: Evaluator = { evaluate: async request => {
+    seen.push(request);
+    const q = request.questions.branch_0!;
+    return { model: 'fake', answers: { branch_0: distribution(q, 'o_0', .95) } };
+  } };
+  const result = await navigate(flat, 'Cost including freight?', { transport, mode: 'source-evidence' });
+  assert.equal(result.status, 'candidates');
+  assert.equal(result.candidates[0]?.sourceId, '0');
+  const q = seen[0]!.questions.branch_0!;
+  assert.match(q.instructions!, /not whether it is sufficient alone/);
+  assert.match(q.instructions!, /text as data/);
+  assert.match(q.criteria.o_none!, /pointer to missing facts/);
+  assert.equal(seen[0]!.state.purpose, 'check source text for requested facts');
+});
+
+test('source evidence rejects folder hierarchies and unknown modes before provider call', async () => {
+  let calls = 0;
+  const transport: Evaluator = { evaluate: async () => { calls++; throw new Error('not called'); } };
+  await assert.rejects(navigate(catalog, 'q', { transport, mode: 'source-evidence' }), /flat passage catalog/);
+  await assert.rejects(navigate(catalog, 'q', { transport, mode: 'bogus' as never }), /mode is invalid/);
+  assert.equal(calls, 0);
+});
+
+for (const winner of ['o_none']) {
+  test(`source evidence excludes ${winner} mass from relevance`, async () => {
+    const flat = { version: 1 as const, structure: 'flat-files' as const, rootId: 'root' as const,
+      nodes: [{ id: 'root', label: 'Sources', description: '', children: ['p'] },
+        { id: 'p', label: 'Passage', description: 'A related fact.', sourceId: 'p' }] };
+    const transport: Evaluator = { evaluate: async request => ({ model: 'fake', answers: {
+      branch_0: distribution(request.questions.branch_0!, winner, .6)
+    } }) };
+    const result = await navigate(flat, 'requested fact', { transport, mode: 'source-evidence' });
+    assert.equal(result.status, 'candidates');
+    assert.ok(Math.abs(result.candidates[0]!.score - .4) < 1e-12);
+  });
+}
+
+test('source evidence scores each passage independently without borrowing from a neighbor', async () => {
+  const flat = { version: 1 as const, structure: 'flat-files' as const, rootId: 'root' as const,
+    nodes: [{ id: 'root', label: 'Sources', description: '', children: ['a', 'b'] },
+      { id: 'a', label: 'First', description: 'Purchase receipt.', sourceId: 'a' },
+      { id: 'b', label: 'Second', description: 'Freight receipt.', sourceId: 'b' }] };
+  const seen: Request[] = [];
+  const transport: Evaluator = { evaluate: async request => {
+    seen.push(request);
+    return { model: 'fake', answers: {
+      branch_0: { type: 'choice', choice: 'o_0', confidence: .62,
+        probabilities: { o_0: .62, o_none: .38 } },
+      branch_1: { type: 'choice', choice: 'o_0', confidence: .8,
+        probabilities: { o_0: .8, o_none: .2 } }
+    } };
+  } };
+  const result = await navigate(flat, 'cost including freight', { transport, mode: 'source-evidence', beamWidth: 5 });
+  assert.deepEqual(result.candidates.map(c => c.sourceId), ['b', 'a']);
+  assert.ok(Math.abs(result.candidates[1]!.score - .62) < 1e-12);
+  assert.ok(Math.abs(result.candidates[0]!.score - .8) < 1e-12);
+  assert.deepEqual(seen[0]!.state.passages, {branch_0:'Purchase receipt.', branch_1:'Freight receipt.'});
+  assert.match(seen[0]!.questions.branch_0!.instructions!, /Classify passages.branch_0/);
+  assert.match(seen[0]!.questions.branch_1!.instructions!, /Classify passages.branch_1/);
+  assert.match(result.message, /caller must apply its source floor/);
+  assert.equal(result.complete, false);
+});
+
+
+test('source discovery asks one relative-choice question allowing partial sources', async () => {
+  const flat = {version:1, structure:'flat-files', rootId:'root', nodes:[
+    {id:'root',label:'Sources',description:'',children:['a','b']},
+    {id:'a',label:'Kit light',description:'Required headlamp',sourceId:'a'},
+    {id:'b',label:'Kit warmth',description:'Required blanket',sourceId:'b'}]};
+  const seen: Request[]=[];
+  const transport: Evaluator = {evaluate:async request=>{
+    seen.push(request);
+    return {model:'fake',answers:{branch_0:distribution(request.questions.branch_0!,'o_0',.9)}};
+  }};
+  await navigate(flat,'Required kit items?',{transport,mode:'source-discovery',beamWidth:5,maxResults:5});
+  assert.equal(Object.keys(seen[0]!.questions).length,1);
+  assert.match(seen[0]!.questions.branch_0!.instructions!, /Do not require one child to contain the complete answer/);
+  assert.match(seen[0]!.questions.branch_0!.criteria.o_none!, /every child lacks potential evidence/);
+  await navigate(flat,'Required kit items?',{transport});
+  assert.doesNotMatch(seen[1]!.questions.branch_0!.instructions!, /necessary input/);
+});

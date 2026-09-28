@@ -1,14 +1,4 @@
-#!/usr/bin/env python3
-"""Unit tests for the listwise reorder + promote gate ("Version C" in
-superjev-tests/listwise-2026-09-25/result.md): one Jev call over every file
-that reached POSSIBLE_FLOOR, asking which single one best answers the
-question. The winner reorders to #1 and is promoted to CONFIRM_FLOOR only if
-its own winning probability is itself >= LISTWISE_PROMOTE_FLOOR (0.9). It
-never demotes another file, and a failed/timed-out/off call keeps today's
-order. Nothing here makes a live provider call.
-
-    python3 -m pytest skills/super-jev/tests/test_listwise.py -q
-"""
+"""Offline source retrieval controls; provider decisions are mocked."""
 import importlib.util
 import json
 from pathlib import Path
@@ -45,7 +35,7 @@ def _run_lookup(tmp_path, question, candidates, scores, listwise_winner_prob=Non
         winner, prob = listwise_winner_prob
         monkeypatch.setattr(ask, "judge_listwise", lambda q, pool: (winner, prob))
     if listwise_enabled is not None:
-        monkeypatch.setattr(ask, "listwise_enabled", lambda: listwise_enabled)
+        monkeypatch.setenv("SUPERJEV_LISTWISE", "1" if listwise_enabled else "0")
     sdir = tmp_path / "s"
     sdir.mkdir(parents=True, exist_ok=True)
     ask.lookup(question, "me", sdir)
@@ -58,7 +48,6 @@ def _run_lookup(tmp_path, question, candidates, scores, listwise_winner_prob=Non
     raise AssertionError("no lookup log entry found")
 
 
-# ------------------------------------------------------------ judge_listwise
 
 def _fake_choice(choice, prob=None, seen=None):
     def f(state, questions):
@@ -120,194 +109,22 @@ def test_judge_listwise_returns_no_opinion_on_error(tmp_path, monkeypatch):
     assert ask.judge_listwise("q", [str(a)]) == (None, None)
 
 
-# ------------------------------------------------------------ lookup() integration
-
-def test_winner_gets_promoted_and_moved_to_top(tmp_path):
-    """A file below CONFIRM_FLOOR that wins the listwise call with >= 0.9
-    gets promoted to CONFIRM_FLOOR and moves to #1."""
+@pytest.mark.parametrize("enabled", [True, False])
+def test_ordinary_retrieval_never_invokes_answer_picker(tmp_path, monkeypatch, enabled):
     a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("routed higher but not the real answer")
-    b.write_text("the real answer, routed lower")
-    top = _run_lookup(
-        tmp_path, "what is the answer",
-        [{"score": 0.90, "originalPath": str(a)},
-         {"score": 0.70, "originalPath": str(b)}],
-        {str(a): 0.70, str(b): 0.70},
-        listwise_winner_prob=(str(b), 0.93),
-    )
-    assert top[0]["path"] == str(b)
-    assert top[0]["score"] >= ask.CONFIRM_FLOOR
-
-
-def test_winner_under_promote_floor_is_not_confirmed(tmp_path):
-    """A winner scoring below LISTWISE_PROMOTE_FLOOR (0.9) reorders to #1 but
-    is not promoted past CONFIRM_FLOOR -- it stays wherever its own content
-    score puts it (never demoted below what it already had)."""
-    a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("routed higher")
-    b.write_text("routed lower, wins listwise weakly")
-    top = _run_lookup(
-        tmp_path, "what is the answer",
-        [{"score": 0.90, "originalPath": str(a)},
-         {"score": 0.70, "originalPath": str(b)}],
-        {str(a): 0.70, str(b): 0.70},
-        listwise_winner_prob=(str(b), 0.75),
-    )
-    assert top[0]["path"] == str(b)
-    assert top[0]["score"] < ask.CONFIRM_FLOOR
-
-
-def test_failed_call_keeps_todays_order(tmp_path):
-    """judge_listwise returning (None, None) -- the call failed, timed out, or
-    was inconclusive -- leaves ranking and scores exactly as today."""
-    a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("x")
-    b.write_text("y")
-    top = _run_lookup(
-        tmp_path, "what is the answer",
-        [{"score": 0.90, "originalPath": str(a)},
-         {"score": 0.70, "originalPath": str(b)}],
-        {str(a): 0.90, str(b): 0.70},
-        listwise_winner_prob=(None, None),
-    )
+    a.write_text("equipment costs 300 credits")
+    b.write_text("freight costs 20 credits")
+    def forbidden(*args):
+        raise AssertionError("source retrieval must retain independently relevant evidence")
+    monkeypatch.setattr(ask, "judge_listwise", forbidden)
+    top = _run_lookup(tmp_path, "total purchase cost including freight",
+                      [{"score": .9, "originalPath": str(a)}, {"score": .7, "originalPath": str(b)}],
+                      {str(a): .95, str(b): .9}, listwise_enabled=enabled)
     assert [t["path"] for t in top] == [str(a), str(b)]
-
-
-def test_hub_winner_never_promotes_past_a_confirmed_source_note(tmp_path):
-    """A folder README outranked a CONFIRMED real source note beside it, because prefer_sources() correctly moved
-    the README below the note, but listwise then picked the README (Jev's
-    single-best-answer judgment landed on the index, not the note) and moved
-    it right back to #1 with no hub exemption -- unlike the near-twin
-    tiebreak, which already sits hub files out of its re-judging. A hub/copy
-    winner must never promote past a non-hub file already ranked ahead of it."""
-    readme = tmp_path / "gustavo/medical/README.md"
-    panel = tmp_path / "gustavo/medical/2026-04-09-panel.md"
-    readme.parent.mkdir(parents=True)
-    readme.write_text("index of gustavo's medical folder")
-    panel.write_text("April 2026 blood panel results")
-    top = _run_lookup(
-        tmp_path, "what were Gustavo's April 2026 blood panel results",
-        [{"score": 0.9, "originalPath": str(readme)},
-         {"score": 0.8, "originalPath": str(panel)}],
-        {str(readme): 0.98, str(panel): 0.91},
-        listwise_winner_prob=(str(readme), 0.95),
-    )
-    assert top[0]["path"] == str(panel)
-
-
-def test_off_switch_skips_the_call_entirely(tmp_path, monkeypatch):
-    """SUPERJEV_LISTWISE=0 (here via listwise_enabled() patched False) never
-    calls judge_listwise and leaves ranking unchanged."""
-    a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("x")
-    b.write_text("y")
-    called = []
-    monkeypatch.setattr(ask, "judge_listwise", lambda q, pool: called.append(1) or (str(b), 0.99))
-    top = _run_lookup(
-        tmp_path, "what is the answer",
-        [{"score": 0.90, "originalPath": str(a)},
-         {"score": 0.70, "originalPath": str(b)}],
-        {str(a): 0.90, str(b): 0.70},
-        listwise_enabled=False,
-    )
-    assert [t["path"] for t in top] == [str(a), str(b)]
-    assert not called
-
-
-def _run_lookup_top_and_trace(tmp_path, question, candidates, scores, pick):
-    top = None
-    try:
-        top = _run_lookup(tmp_path, question, candidates, scores, listwise_winner_prob=pick)
-    except AssertionError:
-        pass  # nothing kept: no lookup log entry with a top list
-    return top or []
-
-
-def test_none_pick_drops_possible_lookalike_for_made_up_question(tmp_path):
-    """A made-up CLOV verdict question returned history-recall/SKILL.md as
-    "possible". Jev picking none must drop it
-    and report not found."""
-    skill = tmp_path / "history-recall/SKILL.md"
-    skill.parent.mkdir(parents=True)
-    skill.write_text("Recall what Kelvin said last time about a topic.")
-    top = _run_lookup_top_and_trace(
-        tmp_path, "What was Kelvin's final verdict on the CLOV earnings call last week?",
-        [{"score": 0.8, "originalPath": str(skill)}], {str(skill): 0.83}, (ask.LISTWISE_NONE, 0.95))
-    assert top == []
-
-
-def test_none_pick_drops_possible_wrong_file(tmp_path):
-    """"restart-seat-opus5 steps" returned loop-job-opus5 as possible, a wrong file. Jev picking none must drop it."""
-    loop = tmp_path / "loop-job-opus5/SKILL.md"
-    loop.parent.mkdir(parents=True)
-    loop.write_text("Run a loop job on Opus 5.")
-    top = _run_lookup_top_and_trace(
-        tmp_path, "What are the steps in the restart-seat-opus5 skill?",
-        [{"score": 0.8, "originalPath": str(loop)}], {str(loop): 0.80}, (ask.LISTWISE_NONE, 0.95))
-    assert top == []
-
-
-def test_none_pick_keeps_confirmed_file_but_not_as_confirmed(tmp_path):
-    a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("x")
-    b.write_text("y")
-    sdir = tmp_path / "s"
-    top = _run_lookup(tmp_path, "what is the answer",
-                      [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
-                      {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.95))
-    assert [t["path"] for t in top] == [str(a)]
-    assert top[0]["possible"] is True
-    assert sdir.exists()
-
-
-def _two_confirmed(tmp_path, prob):
-    a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("x")
-    b.write_text("y")
-    top = _run_lookup(tmp_path, "what is the answer",
-                      [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
-                      {str(a): 0.95, str(b): 0.90}, listwise_winner_prob=(str(a), prob))
-    return [(t["path"], t["possible"]) for t in top], str(a), str(b)
-
-
-def test_strong_pick_demotes_other_confirmed(tmp_path):
-    got, a, b = _two_confirmed(tmp_path, 0.95)
-    assert got == [(a, False), (b, True)]
-
-
-def test_weak_pick_keeps_other_confirmed(tmp_path):
-    got, a, b = _two_confirmed(tmp_path, 0.71)
-    assert got == [(a, False), (b, False)]
-
-
-def test_blocked_pick_keeps_confirmed(tmp_path):
-    """A blocked hub pick must not demote the right confirmed file."""
-    readme = tmp_path / "docs/README.md"
-    note = tmp_path / "docs/cli.md"
-    readme.parent.mkdir(parents=True)
-    readme.write_text("index of docs")
-    note.write_text("cli usage")
-    top = _run_lookup(tmp_path, "how do I use the cli",
-                      [{"score": 0.9, "originalPath": str(readme)}, {"score": 0.8, "originalPath": str(note)}],
-                      {str(readme): 0.98, str(note): 0.96}, listwise_winner_prob=(str(readme), 0.95))
-    assert (top[0]["path"], top[0]["possible"]) == (str(note), False)
-
-
-def test_weak_none_keeps_files_and_prints_hint(tmp_path, capsys):
-    """A weak none once dropped the right possible file. A weak none keeps every file as it was and tells the agent Jev leans none."""
-    a, b = tmp_path / "a.md", tmp_path / "b.md"
-    a.write_text("x")
-    b.write_text("y")
-    top = _run_lookup(tmp_path, "what is the answer",
-                      [{"score": 0.9, "originalPath": str(a)}, {"score": 0.7, "originalPath": str(b)}],
-                      {str(a): 0.95, str(b): 0.70}, listwise_winner_prob=(ask.LISTWISE_NONE, 0.87))
-    assert [(t["path"], t["possible"]) for t in top] == [(str(a), False), (str(b), True)]
-    assert ask.LEANS_NONE_NOTE in capsys.readouterr().out
+    assert all(not t["possible"] for t in top)
 
 
 def test_small_file_is_judged_and_shown_whole(tmp_path, monkeypatch):
-    """A small table/list file is one passage: split, Jev's confidence spread across
-    the pieces and the file missed the bar though its answer was in it."""
     a = tmp_path / "map.md"
     a.write_text("| bot | risk |\n" + "| x | none |\n" * 400 + "| polymarket | real money |\n")
     assert len(a.read_text()) > ask.CONFIRM_CHUNK

@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-"""Offline tests for the retrieval-recall fixes from businessfi's stress test 2
-(2026-09-23): long files are judged on chosen passages instead of kept unread, a
-top-routed file scoring just under the floor is kept as "possible", and a local
-word search backs up routing when nothing survives.
-
-No network and no real key.
-
-    python3 -m pytest skills/super-jev/tests/test_retrieval_recall.py -q
-"""
+"""Offline source retrieval controls; provider decisions are mocked."""
 import hashlib
 import importlib.util
 import json
@@ -48,7 +39,6 @@ def _files(tmp_path, n):
     return out
 
 
-# 1. long files: the passages matching the question's words, within READ_CHARS, never a pass-through
 def test_long_file_reads_matching_chunks_within_budget(tmp_path, monkeypatch):
     chunks = ["intro " * 580] + ["filler " * 500] * 5 + ["the shareholder meeting is in June " * 100] + ["filler " * 500]
     f = tmp_path / "long.md"
@@ -57,7 +47,7 @@ def test_long_file_reads_matching_chunks_within_budget(tmp_path, monkeypatch):
 
     def fake_run(cmd, input, **kw):
         sent.append(json.loads(input))
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": 0.0}]}), "")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), "")
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
     score, partial, err, note = ask.confirm_one("when is the shareholder meeting", str(f))
     leaves = sent[0]["catalog"]["nodes"][1:]
@@ -75,37 +65,23 @@ def test_long_file_failing_the_check_is_not_kept(tmp_path, monkeypatch, capsys):
         cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), ""))
     ask.lookup("whens the CLOV annual shareholder meeting", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    # never kept as a result row; the miss report may name it as read-but-no-answer
     assert "no-candidates" in out
     assert not any(l.strip().endswith("[p1]") or "CLOV.md  [" in l for l in out.splitlines())
     assert "no answer confirmed. Closest:" in out and "CLOV.md" in out
 
 
-# 2. the possible tier: only the top routed files, only between the two floors
-@pytest.mark.parametrize("rank,score,shown", [(0, 0.72, True), (1, 0.61, True), (2, 0.8, True),
-                                              (0, 0.55, False)])
-def test_possible_tier(tmp_path, monkeypatch, capsys, rank, score, shown):
-    files = _files(tmp_path, 3)
-    monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9 - i / 10, "originalPath": str(p)} for i, p in enumerate(files)]))
-    target = str(files[rank])
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({target: score} if score >= ask.POSSIBLE_FLOOR else {}, set(), None, {}))
-    ask.lookup("how is it doing?", "me", tmp_path / "s")
-    out = capsys.readouterr().out
-    assert (f"{score:5.2f}  {target}  [p1]  (possible:" in out) is shown
-    assert ("no-candidates" in out) is not shown
 
 
-def test_confirmed_file_ranks_above_a_possible_one(tmp_path, monkeypatch, capsys):
+def test_only_file_meeting_evidence_threshold_is_returned(tmp_path, monkeypatch, capsys):
     a, b = _files(tmp_path, 2)
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.99, "originalPath": str(a)}, {"score": 0.5, "originalPath": str(b)}]))
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(a): 0.7, str(b): 0.9}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(b): 0.9}, set(), None, {}))
     ask.lookup("q?", "me", tmp_path / "s")
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
     assert lines[0].startswith(" 0.90") and "possible" not in lines[0]
-    assert lines[1].startswith(" 0.70") and "(possible:" in lines[1]
+    assert not any(str(a) in line for line in lines)
 
 
-# 3. word-search fallback
 def _cache(files, **over):
     return {str(p): {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "pass": True,
                      "description": over.get(p.name, ""), "question": ""} for p in files}
@@ -133,18 +109,18 @@ def test_word_search_needs_the_question_words(tmp_path, monkeypatch):
     assert ask.word_search("what is it", ["p1"]) == []
 
 
-def test_fallback_runs_the_content_check_and_marks_matches_possible(tmp_path, monkeypatch, capsys):
+def test_unrouted_lexical_match_does_not_enter_ordinary_content_check(tmp_path, monkeypatch, capsys):
     toll, other = tmp_path / "toll.md", tmp_path / "other.md"
     toll.write_text("E-ZPass vehicle account balance owed: $42.")
     other.write_text("vehicle notes")
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll, other]))
     monkeypatch.setattr(ask, "memory", _memory([]))
     checked = []
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.7}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.9}, set(), None, {}))
     assert ask.lookup("what about the vehicle account toll", "me", tmp_path / "s") == 0
     out = capsys.readouterr().out
-    assert str(toll) in checked
-    assert f" 0.70  {toll}  [p1]  (possible: word-search match" in out and str(other) not in out
+    assert checked == []
+    assert "no-candidates" in out and str(toll) not in out
 
 
 def test_fallback_that_reads_nothing_still_says_not_in_files(tmp_path, monkeypatch, capsys):
@@ -169,41 +145,39 @@ def test_fallback_skips_files_the_content_check_already_rejected(tmp_path, monke
     assert calls == [[str(toll)]]
 
 
-# 4. round 2: open questions ask "does it answer", value questions get no possible tier,
-# the word search always runs, and ties go to the file named for the question
 @pytest.mark.parametrize("q,value", [("how much is in my roth right now", True),
                                      ("whats my tesla covered call breakeven", True),
                                      ("should I sell puts on SNAP before earnings?", False),
                                      ("when do we roll the LUMN call", False)])
 def test_label_by_question_kind(q, value):
-    assert ask.is_value_question(q) is value
-    assert (ask.confirm_label(q) == ask.CONFIRM_LABEL) is value
+    assert ask.confirm_label(q) == ask.SOURCE_LABEL
 
 
 def test_value_question_has_no_possible_tier(tmp_path, monkeypatch, capsys):
     (a,) = _files(tmp_path, 1)
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(a)}]))
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(a): 0.82}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("how much is in my roth ira right now", "me", tmp_path / "s")
     out = capsys.readouterr().out
     assert str(a) not in out and "no-candidates" in out
 
 
-def test_word_search_runs_even_when_routing_has_hits(tmp_path, monkeypatch, capsys):
+def test_ordinary_lookup_checks_only_semantically_routed_candidates(tmp_path, monkeypatch, capsys):
     routed, fb = tmp_path / "routed.md", tmp_path / "feedback.md"
     routed.write_text("unrelated")
     fb.write_text("verify information before using it: read the source")
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([fb]))
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(routed)}]))
     checked = []
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(fb): 0.9, str(routed): 0.7}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(fb): 0.9}, set(), None, {}))
     ask.lookup("how should I verify information before using it", "me", tmp_path / "s")
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-    assert checked == [str(routed), str(fb)]
-    assert lines[0] == f" 0.90  {fb}  [p1]" and "(possible:" in lines[1]
+    assert checked == [str(routed)]
+    assert any("no-candidates" in line for line in lines)
+    assert not any(str(fb) in line for line in lines)
 
 
-def test_tie_prefers_named_file_then_brain_copy_over_reuse(tmp_path, monkeypatch, capsys):
+def test_exact_ties_have_stable_path_order(tmp_path, monkeypatch, capsys):
     reuse = tmp_path / "global" / "reuse" / "sendmessage-revives-teammate.md"
     local = tmp_path / "brain" / "notebook" / "sendmessage-revives-teammate.md"
     other = tmp_path / "brain" / "notes.md"
@@ -214,17 +188,10 @@ def test_tie_prefers_named_file_then_brain_copy_over_reuse(tmp_path, monkeypatch
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(p): 0.9 for p in ps}, set(), None, {}))
     ask.lookup("does sendmessage revive a stopped teammate?", "me", tmp_path / "s")
     rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
-    assert rows == [str(local), str(reuse), str(other)]
+    assert rows == sorted([str(local), str(reuse), str(other)], reverse=True)
 
 
-# 5. round 3: routing counts in the final order, strong routes survive opinion asks,
-# and the word search sees headings and a few synonyms
 def test_content_score_wins_over_routing_when_not_a_true_tie(tmp_path, monkeypatch, capsys):
-    """recall80-r3a: confirmed files rank by content score first. 0.88 vs 0.90
-    round to different 2-decimal values, so this is not a tie -- the higher
-    content score wins even though its routing score is far lower. (Previously
-    this used the 0.6/0.4 rank_score blend, which let routing override a real
-    content difference; that blend is gone for the confirmed group.)"""
     lower_content, higher_content = _files(tmp_path, 2)
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(lower_content)},
                                                  {"score": 0.5, "originalPath": str(higher_content)}]))
@@ -235,7 +202,6 @@ def test_content_score_wins_over_routing_when_not_a_true_tie(tmp_path, monkeypat
 
 
 def test_routing_score_breaks_true_content_tie(tmp_path, monkeypatch, capsys):
-    """Equal (rounded to 2dp) confirmed content scores fall back to routing."""
     right, sibling = _files(tmp_path, 2)
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(right)},
                                                  {"score": 0.5, "originalPath": str(sibling)}]))
@@ -245,17 +211,17 @@ def test_routing_score_breaks_true_content_tie(tmp_path, monkeypatch, capsys):
     assert rows == [str(right), str(sibling)]
 
 
-@pytest.mark.parametrize("q,route,kept", [("should I invest in PLUG?", 0.99, True),
+@pytest.mark.parametrize("q,route,kept", [("should I invest in PLUG?", 0.99, False),
                                           ("should I invest in PLUG?", 0.7, False),
                                           ("when is the PLUG meeting", 0.99, False),
                                           ("should I sell, how much is it right now", 0.99, False)])
-def test_strong_route_kept_as_possible_on_opinion_asks(tmp_path, monkeypatch, capsys, q, route, kept):
+def test_strong_route_does_not_rescue_opinion_misses(tmp_path, monkeypatch, capsys, q, route, kept):
     (a,) = _files(tmp_path, 1)
     monkeypatch.setattr(ask, "memory", _memory([{"score": route, "originalPath": str(a)}]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup(q, "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert (f"{ask.POSSIBLE_FLOOR:5.2f}  {a}  [p1]  (possible:" in out) is kept
+    assert (f"{ask.SOURCE_FLOOR:5.2f}  {a}  [p1]  (possible:" in out) is kept
     assert ("no-candidates" in out) is not kept
 
 
@@ -280,12 +246,11 @@ def test_value_question_owed_gets_no_possible_tier(tmp_path, monkeypatch, capsys
     toll.write_text("E-ZPass vehicle account balance owed: $42.")
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll]))
     monkeypatch.setattr(ask, "memory", _memory([]))
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(toll): 0.7}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 0
     assert "no-candidates" in capsys.readouterr().out
 
 
-# 4. big notes: a strongly routed file too long to read whole stays possible (2026-09-24)
 def _big_pending(tmp_path):
     f = tmp_path / "pending.md"
     f.write_text("".join(("## Section %d\n" % i + "item " * 700)[:ask.CONFIRM_CHUNK - 1] + "\n"
@@ -293,13 +258,13 @@ def _big_pending(tmp_path):
     return f
 
 
-@pytest.mark.parametrize("route,judge,kept", [(0.96, 0.57, True), (0.7, 0.57, False),
+@pytest.mark.parametrize("route,judge,kept", [(0.96, 0.57, False), (0.7, 0.57, False),
                                               (0.96, 0.3, False)])
-def test_big_strongly_routed_file_kept_possible(tmp_path, monkeypatch, capsys, route, judge, kept):
+def test_big_rejected_file_is_not_rescued(tmp_path, monkeypatch, capsys, route, judge, kept):
     f = _big_pending(tmp_path)
     monkeypatch.setattr(ask, "memory", _memory([{"score": route, "originalPath": str(f)}]))
     monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
-        cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": judge, "sourceId": "5"}]}), ""))
+        cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), ""))
     ask.lookup("what is on the health-fitness pending to-do list", "me", tmp_path / "s")
     out = capsys.readouterr().out
     assert (str(f) in out) is kept
@@ -311,23 +276,22 @@ def test_big_file_not_kept_for_live_value_ask(tmp_path, monkeypatch, capsys):
     f = _big_pending(tmp_path)
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.97, "originalPath": str(f)}]))
     monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
-        cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": 0.57, "sourceId": "1"}]}), ""))
+        cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), ""))
     ask.lookup("what is the balance right now", "me", tmp_path / "s")
     assert str(f) not in capsys.readouterr().out
 
 
-# 5. list asks get the open "does it answer" wording, not exact-value
 @pytest.mark.parametrize("q,label", [
     ("what is on the health-fitness pending to-do list", "ANSWER_LABEL"),
     ("what's on my todo list", "ANSWER_LABEL"),
     ("what car do I have", "CONFIRM_LABEL"),
     ("what is the list price", "CONFIRM_LABEL"),
     ("what is the phone number for NYP ENT on Kelvin's referral options list", "CONFIRM_LABEL")])
-def test_list_questions_use_open_wording(q, label):
-    assert ask.confirm_label(q) == getattr(ask, label)
+def test_list_questions_get_same_criterion(q, label):
+    assert ask.confirm_label(q) == ask.SOURCE_LABEL
 
 
-def test_big_kept_file_never_outranks_a_content_scored_possible(tmp_path, monkeypatch, capsys):
+def test_file_length_does_not_rescue_rejected_content(tmp_path, monkeypatch, capsys):
     big, small = _big_pending(tmp_path), tmp_path / "small.md"
     small.write_text("to-do: call the clinic")
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.98, "originalPath": str(big)},
@@ -340,4 +304,4 @@ def test_big_kept_file_never_outranks_a_content_scored_possible(tmp_path, monkey
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
     ask.lookup("what is on the pending to-do list", "me", tmp_path / "s")
     lines = [l for l in capsys.readouterr().out.splitlines() if "(possible:" in l]
-    assert str(small) in lines[0] and str(big) in lines[1]
+    assert lines == []
