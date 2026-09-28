@@ -218,3 +218,21 @@ def test_unlistable_pointer_blocks(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "error"} if r["action"] == "sources" else base(r))
     rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]))
     assert rc == 1 and "could not list the registered files of notes" in out
+
+
+def test_failed_ask_output_is_never_strong(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R(" 0.99  /n/design.md  [notes]\n", "boom", 1))
+    rc, out = run(monkeypatch, capsys, "--about", "x", "--json")
+    assert json.loads(out)["new_ground"] is None
+
+
+def test_md_alias_to_other_suffix_counts_as_md(world, monkeypatch, capsys, tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text("# t\n")
+    (world["proj"] / "alias.md").symlink_to(target)
+    REGISTERED["notes"] = REGISTERED["notes"] + [str(target)]  # the backend echoes real paths
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]), "--json")
+    f = json.loads(out)["folders"][0]
+    assert f["connectable"] == 4 and f["connected"] == 3
