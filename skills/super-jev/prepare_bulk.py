@@ -222,7 +222,8 @@ URL_RE = re.compile(_PAT["url"], re.A)
 # A whole run in USPS layout (TRACKING_RE: starts 91-95, groups of 4 then a final 2, one separator)
 # with a valid check digit is removed before the card check only. The exact layout matters: a loose
 # run would let a short 91-95 number in front of a card turn "number + card" into a tracking number.
-# A run with a Luhn-valid window after its first group is not removed (about 1 in 50 real numbers).
+# A run with a Luhn-valid window after its first group is not removed; about 1 in 100 real 22-digit
+# numbers (1 in 50 for 26 digits) are then still held by the card rule, down from 1 in 10.
 TRACKING_RE = re.compile(_PAT["tracking"], re.A)
 _CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
