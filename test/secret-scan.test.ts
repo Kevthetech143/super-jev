@@ -46,5 +46,9 @@ test('an escaped quote before a placeholder is not a secret; a real value after 
     `password=${q}$3cret!Pass9${q}`, `password=${q}$uperSecret9${q}`, `API_KEY=${q}$9qP7vK2mR8wL6z${q}`,
     `password=${q}$(LiteralSecret9${q}`, `password=${q}\${LiteralSecret9${q}`, `password=${q}<LiteralSecret9${q}`,
     `API_KEY=${q}$(LiteralSecret9${q}`, `API_KEY=${q}\${LiteralSecret9${q}`, `API_KEY=${q}<LiteralSecret9${q}`,
-    `password=${q}$(LiteralSecret9}${q}`]) assert.equal(hasSecret(t), true, t);
+    `password=${q}$(LiteralSecret9}${q}`, `password=${q}\${VAR}hunter2xyz9${q}`, `password=${q}$(cat f)hunter2xyz9${q}`,
+    `password=${q}<x>hunter2xyz9${q}`, 'password="${VAR}hunter2xyz9"', 'password="$(cat f)hunter2xyz9"',
+    'password="<x>hunter2xyz9"', 'password=${VAR}hunter2xyz9', 'api_key="${VAR}Zx9Qp2Lm8Rt4"']) assert.equal(hasSecret(t), true, t);
+  for (const t of ['password="${VAR}"', 'password=$VAR', 'password=$VAR;', 'api_key=${VAR}', 'password: <your password>',
+    `api_key=${q}\${VAR}${q}, x`]) assert.equal(hasSecret(t), false, t);
 });

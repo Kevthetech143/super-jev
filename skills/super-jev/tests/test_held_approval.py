@@ -30,6 +30,9 @@ PLACEHOLDERS = [
     "password=" + BS + '"$(pass show mail)' + BS + '"',
     "aws_secret_access_key=" + BS + '"$(cat creds)' + BS + '"',
     'print("export OPENAI_API_KEY=' + BS + '"$(cat ~/.key)' + BS + '"")',
+    # A whole-value placeholder, plain quote or none, followed by a value boundary.
+    'password="${VAR}"', "password=$VAR", "password=$VAR;", "api_key=${VAR}", "password: <your password>",
+    'API_KEY="$(cat f)", other', "api_key=" + BS + '"${VAR}' + BS + '", x',
 ]
 # Real values behind the same escaped quote must still be held.
 REAL = [
@@ -51,6 +54,16 @@ REAL = [
     "API_KEY=" + BS + '"' + "<Literal" + "Secret9" + BS + '"',
     "password=" + BS + '"' + "$(Literal" + "Secret9}" + BS + '"',
     "password=" + BS + '"' + "$(" + "x" * 201 + ")" + BS + '"',
+    # A placeholder must be the whole value: literal text glued after it is held (escaped quote, plain, none).
+    "password=" + BS + '"${VAR}' + "hunter2" + "xyz9" + BS + '"',
+    "password=" + BS + '"$(cat f)' + "hunter2" + "xyz9" + BS + '"',
+    "password=" + BS + '"<x>' + "hunter2" + "xyz9" + BS + '"',
+    "API_KEY=" + BS + '"${VAR}' + "Zx9Qp2Lm8" + "Rt4" + BS + '"',
+    'password="${VAR}' + "hunter2" + 'xyz9"',
+    'password="$(cat f)' + "hunter2" + 'xyz9"',
+    'password="<x>' + "hunter2" + 'xyz9"',
+    "password=${VAR}" + "hunter2" + "xyz9",
+    'api_key="${VAR}' + "Zx9Qp2Lm8" + 'Rt4"',
 ]
 
 
