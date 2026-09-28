@@ -57,5 +57,6 @@ test('a spaced USPS tracking number is not a card; a card next to digits still i
   const trk = '9302 2110 4790 0005 3721 11'; // made-up, valid check digit; its first 16 digits pass Luhn
   for (const t of [trk, trk.replaceAll(' ', '-'), `tracking ${trk} delivered`]) assert.equal(hasSecret(t), false, t);
   for (const t of ['9302 2110 4790 0005 3721 12', `${trk} 5`, `${trk} ١`, 'card 4111 1111 1111 1111 123',
-    `4111 1111 1111 1111 ${trk}`, `tracking ${trk}, card 4111 1111 1111 1111`]) assert.equal(hasSecret(t), true, t);
+    `4111 1111 1111 1111 ${trk}`, `tracking ${trk}, card 4111 1111 1111 1111`,
+    'call 9100000001 4111 1111 1111 1111 thanks', 'ref 920000 4111 1111 1111 1111']) assert.equal(hasSecret(t), true, t);
 });

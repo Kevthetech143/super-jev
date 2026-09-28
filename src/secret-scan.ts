@@ -48,7 +48,7 @@ function luhn(digits: string): boolean {
   return total % 10 === 0;
 }
 
-/** Twin of Python _usps_tracking: a whole USPS IMpb number (22 or 26 digits, 91-95, valid GS1 mod-10 check digit). */
+/** Twin of Python _usps_tracking: a TRACKING run (prefix and USPS layout already checked) with a valid GS1 mod-10 check digit. */
 function uspsTracking(run: string): boolean {
   const d = run.replace(/\D/g, '');
   if (d.length !== 22 && d.length !== 26) return false;
