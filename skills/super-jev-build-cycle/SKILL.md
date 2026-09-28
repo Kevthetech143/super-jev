@@ -32,6 +32,8 @@ Then: `mark USE_ID helped|neutral|missed [--note ...]` for each Super Jev use, `
 
 New code, a worker's report or a one-off file is not on Super Jev's shelves. Claims about it looked up on the shelves come back NOT FOUND. Pass `--worktree DIR` (its diff against origin/main, committed and uncommitted) or `--evidence FILE` and Super Jev judges those files directly (`dispatch.py check`, no connecting; a diff is judged as code). With neither, claims are looked up on the connected shelves.
 
+Secret-shaped text never blocks the check: a file of the diff that holds any (a test's fake card number or sample key, or a real one) is withheld whole and named, and the rest is judged; a plain `--evidence` file that holds any is dropped. A claim about a withheld file cannot be checked, and a claim that itself holds a secret is refused.
+
 ## Rules
 
 - A listed file is a lead, not an answer: open it before you rely on it.

@@ -479,9 +479,184 @@ def has_secret(text: str) -> bool:
             or _token_hit(text))
 
 
+# Evidence that is judged (a worktree diff, a file a claim is checked against) may carry
+# secret-shaped test fixtures: a card scanner's fake card numbers, a redaction test's sample
+# key. Refusing the whole request left such a change uncheckable. The scanner finds where a
+# secret starts (a card number, a token, a password assignment, a key's BEGIN line) but not
+# its extent: the rest of it can sit beside the hit, on the lines after it (a wrapped token, a
+# key body, a concatenated value) or before it in a hunk. No span inside a file is provably
+# clean, so evidence is judged file by file: every section of a file, across all the evidence
+# (a diff may show one file twice, committed and uncommitted, under an old and a new name, or
+# in two patches), is withheld whole when any of them scans as a secret, real and fake values
+# alike, and every other file is sent as it is. An evidence item that is not exactly git's diff
+# output (text outside a diff, a hunk that ends early) counts as one file. The promise is per file: a file's changes go out only when the
+# scanner passes all of them. A secret cut into two files, with no marker in the second, is out
+# of reach of any per-file scan, as it was before. Claims and drafts are never masked (they are
+# refused), and ask() keeps its full scan.
+SECRET_WITHHELD = "[secret-shaped text: {n} line(s) withheld here; nothing in them can be checked]"
+_FILE_START_RE = re.compile(r"diff --(?:git|cc|combined) ")
+_FILE_NAME_RE = re.compile(r"^(?:--- |\+\+\+ |rename from |rename to |copy from |copy to |diff --(?:cc|combined) )(.+)$")
+# The lines git writes before a file's first hunk; a held file keeps only these.
+_HEADER_RE = re.compile(r"(?:index |--- |\+\+\+ |new file mode |deleted file mode |old mode |new mode "
+                        r"|similarity index |dissimilarity index |rename from |rename to |copy from |copy to "
+                        r"|Binary files )")
+_HUNK_RE = re.compile(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def _flagged(text: str, luhn: bool) -> bool:
+    """has_secret, with the card check's Luhn test off when the whole evidence had it off (a
+    non-ASCII digit anywhere), so a part is flagged whenever it adds to the evidence's hit."""
+    return has_secret(text) or (not luhn and card_hit(normalize_for_scan(text), False))
+
+
+def _diff_parts(lines: list) -> list:
+    """One text cut into ("file", lines, head) sections, each exactly as git writes one (the
+    diff line, header lines, then hunks read by the line counts in their @@ lines; a combined
+    @@@ hunk runs to the next diff line), and ("prose", lines, []) runs of anything else. A
+    section whose hunk ends before its counts do is ("broken", lines, head): what follows it
+    may still be its text."""
+    parts, prose, i, n = [], [], 0, len(lines)
+    while i < n:
+        if not _FILE_START_RE.match(lines[i]):
+            prose.append(lines[i])
+            i += 1
+            continue
+        if prose:
+            parts.append(("prose", prose, []))
+            prose = []
+        j = i + 1
+        while j < n and _HEADER_RE.match(lines[j]):
+            j += 1
+        head_end, old, new = j, 0, 0
+        while j < n:
+            if lines[j].startswith("@@@") and not lines[i].startswith("diff --git "):
+                j += 1
+                while j < n and not _FILE_START_RE.match(lines[j]):
+                    j += 1
+                break
+            m = _HUNK_RE.match(lines[j])
+            if not m:
+                break
+            old, new = int(m.group(1) or 1), int(m.group(2) or 1)
+            j += 1
+            while j < n and (old > 0 or new > 0):
+                c = lines[j][:1]
+                if c in (" ", ""):  # a context line (its space stripped by some tools)
+                    old, new = old - 1, new - 1
+                elif c == "-":
+                    old -= 1
+                elif c == "+":
+                    new -= 1
+                elif c != "\\":
+                    break
+                j += 1
+            while j < n and lines[j].startswith("\\"):  # "\ No newline at end of file"
+                j += 1
+            if old > 0 or new > 0:
+                break
+        kind = "broken" if (old > 0 or new > 0) else "file"
+        parts.append((kind, lines[i:j], lines[i:head_end]))
+        i = j
+    if prose:
+        parts.append(("prose", prose, []))
+    return parts
+
+
+def _file_keys(head: list) -> set:
+    """What ties diff sections to one file: the diff line itself, the two names of a diff --git
+    line (split at each " b/", or in the middle when both halves match, as with no prefix), and
+    every name in the header (---, +++, rename, copy and diff --cc lines), with and without a
+    one-letter a/, b/, i/, w/ prefix. Sharing any key joins two sections; joining too much only
+    withholds more."""
+    keys = {head[0]}
+    if head[0].startswith("diff --git "):
+        rest = head[0][len("diff --git "):].rstrip("\r")
+        cuts = [m.start() for m in re.finditer(r" [a-z]/", rest)]
+        if len(rest) % 2 and rest[:len(rest) // 2] == rest[len(rest) // 2 + 1:]:
+            cuts.append(len(rest) // 2)
+        for cut in cuts:
+            for name in (rest[:cut], rest[cut + 1:]):
+                keys |= {name.strip('"'), re.sub(r"^[a-z]/", "", name.strip('"'))}
+    for line in head:
+        m = _FILE_NAME_RE.match(line)
+        if m:
+            name = m.group(1).rstrip("\t\r").strip('"')
+            if name != "/dev/null":
+                keys |= {name, re.sub(r"^[a-z]/", "", name)}
+    return keys
+
+
+def _file_name(head: list) -> str:
+    name = next((m.group(1).rstrip("\t\r").strip('"') for line in reversed(head)
+                 if (m := _FILE_NAME_RE.match(line)) and "/dev/null" not in line), "a file")
+    return re.sub(r"^[a-z]/", "", name)
+
+
+def mask_evidence(items: list):
+    """([(path, masked_text or None)], withheld) for evidence items [(path, text)], judged
+    together: each file whose text anywhere in the evidence scans as a secret is replaced, in
+    every section, by its clean header lines and one SECRET_WITHHELD line; an item's text
+    outside any diff is one file. withheld names what was held back. An item left with nothing
+    judgeable, or still scanning as a secret, comes back as None: the caller drops it."""
+    luhn = not any(NON_ASCII_DIGIT_RE.search(text or "") for _, text in items)
+    if not any(_flagged(text or "", luhn) for _, text in items):
+        return list(items), []
+    split = []
+    for path, text in items:
+        text = text or ""
+        ends_in_newline = text.endswith("\n")
+        split.append((ends_in_newline, _diff_parts((text[:-1] if ends_in_newline else text).split("\n"))))
+    flat = [(k, part) for k, (_nl, parts) in enumerate(split) for part in parts]
+    group = list(range(len(flat)))
+
+    def root(g):
+        while group[g] != g:
+            group[g] = group[group[g]]
+            g = group[g]
+        return g
+
+    # An item that is not exactly git's diff output (text outside a diff: a notes file, tool
+    # output around a diff; or a hunk that ends before its counts) is one file: any text in it
+    # may belong to any file in it. A build-cycle worktree diff never has such text.
+    loose = {k for k, (kind, _l, _h) in flat if kind != "file"}
+    owner = {}
+    for g, (k, (kind, _lines, head)) in enumerate(flat):
+        keys = {("item", k)} if k in loose else set()
+        for key in keys | (_file_keys(head) if kind != "prose" else set()):
+            group[root(g)] = root(owner.setdefault(key, g))
+    held = {root(g) for g, (_k, (_kind, lines, _h)) in enumerate(flat) if _flagged("\n".join(lines), luhn)}
+    out, withheld, g = [], [], 0
+    for (path, _text), (ends_in_newline, parts) in zip(items, split):
+        lines, kept = [], False
+        for kind, part, head in parts:
+            if root(g) in held:
+                head = [] if any(_flagged(line, luhn) for line in head) else head
+                name = _file_name(head) if kind != "prose" else path
+                if name not in withheld:
+                    withheld.append(name)
+                lines += head + [SECRET_WITHHELD.format(n=len(part) - len(head))]
+            else:
+                lines += part
+                kept = True
+            g += 1
+        masked = "\n".join(lines) + ("\n" if ends_in_newline else "")
+        if not kept or has_secret(masked):
+            masked = None
+            if path not in withheld:
+                withheld.append(path)
+        out.append((path, masked))
+    return out, withheld
+
+
+def mask_secrets(text: str, path: str = "the text"):
+    """mask_evidence for one text: (masked_text or None, withheld)."""
+    items, withheld = mask_evidence([(path, text)])
+    return items[0][1], withheld
+
+
 # The WORD_RE/GENERIC_RE keyword checks above only fire in a key=value, key:value,
 # or "key is value" shape -- prose or a plain word is not a secret. A file NAME or
-# PATH is different: nobody writes "password: hunter2xyz" as a filename, they write
+# PATH is different: nobody writes a "password: <value>" line as a filename, they write
 # password-hunter2xyz-notes.md, so the same keywords glued to other characters with
 # a "-"/"_" joiner are treated as secret-shaped there. Requires a non-alnum (or
 # start-of-segment) boundary before the keyword (so "tokenizer.py" does not

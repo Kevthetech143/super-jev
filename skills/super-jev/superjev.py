@@ -4208,6 +4208,21 @@ def _has_secret(text):
     return has_secret(text)
 
 
+def _mask_evidence(evidence_items):
+    """(items, withheld): the evidence as the judge may see it (prepare_bulk.mask_evidence,
+    all items judged together): each file whose text scans as a secret (a test's fake card
+    number, a sample key, or a real one) is withheld whole, so the rest can still be judged.
+    An item left with nothing judgeable is dropped; withheld names what was held back.
+    Raises when every item was dropped; the gate reports that as a refusal."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prepare_bulk import mask_evidence
+    masked, withheld = mask_evidence(list(evidence_items))
+    out = [(path, text) for path, text in masked if text is not None]
+    if evidence_items and not out:
+        raise ValueError("evidence %s contains a secret; not sent" % ", ".join(withheld))
+    return out, withheld
+
+
 def _code_ask(state, questions):
     """The live call code mode makes. Monkeypatched in tests — no network."""
     return _load_jev_lib().ask(state, questions)
@@ -4220,12 +4235,14 @@ class _CodeLibMissing(Exception):
     """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
-def run_code_gate(evidence_items, claims, ask_fn=None):
+def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_items=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
-    Pattern claims are answered deterministically; the rest go out as one
-    batch of Noul questions. `ask_fn` is injected by tests (a fake judge);
-    production calls the live door.
+    Pattern claims are answered deterministically, on the local text; the rest
+    go out as one batch of Noul questions, asked of `state_items` (the gate's
+    masked, then truncated, evidence; `evidence_items` when not given) with each
+    file holding secret-shaped text withheld (named in `mask_info["withheld"]`).
+    `ask_fn` is injected by tests (a fake judge); production calls the live door.
     """
     evidence_text = "\n\n".join(t for _, t in evidence_items)
     rows = []
@@ -4254,7 +4271,11 @@ def run_code_gate(evidence_items, claims, ask_fn=None):
             raise _CodeLibMissing(
                 "no judge client at %s — restore lib/jev_client.py "
                 "or inject a judge" % JEV_LIB)
-        res = ask(code_state(evidence_items), questions)
+        state_items, withheld = _mask_evidence(
+            evidence_items if state_items is None else state_items)
+        if mask_info is not None:
+            mask_info["withheld"] = withheld
+        res = ask(code_state(state_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
             p = answers.get("c%d" % i, {}).get("noul")
@@ -4321,17 +4342,29 @@ def cmd_gate(a):
     ev_items = []
     for p in a.evidence:
         try:
-            ev_items.append((p, Path(p).read_text(encoding="utf-8", errors="replace")))
+            # newline="": a lone CR stays inside its line, so it cannot turn diff-shaped text
+            # after it into a line of its own (a fake file section when masking)
+            with open(p, encoding="utf-8", errors="replace", newline="") as fh:
+                ev_items.append((p, fh.read()))
         except OSError:
             ev_items.append((p, ""))
+    # Mask BEFORE truncating: a cut can drop a file's secret marker and leave the rest of
+    # that file scanning clean. The raw items stay local (claim mode, the pattern arm); only
+    # the masked ones are truncated and sent. With nothing judgeable left, the raw paths go
+    # on and the sender refuses them, as before.
+    try:
+        sent_ev, withheld = _mask_evidence(ev_items)
+    except ValueError:
+        sent_ev, withheld = None, []
     kept_ev, truncated, est_tok, cap_tok = cap_check_and_truncate(
-        ev_items, draft_text_for_cap, "gate")
+        sent_ev if sent_ev is not None else ev_items, draft_text_for_cap, "gate")
     evidence_tmp_paths = []
-    if truncated:
+    if sent_ev is not None and (truncated or sent_ev != ev_items):
         evidence_paths = []
         for orig_path, text in kept_ev:
-            tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
-                                                 encoding="utf-8")
+            tmp_ev = tempfile.NamedTemporaryFile(mode="w", prefix=Path(orig_path).name[:80] + ".",
+                                                 suffix=".md", delete=False, encoding="utf-8",
+                                                 newline="")
             tmp_ev.write(text)
             tmp_ev.close()
             evidence_tmp_paths.append(tmp_ev.name)
@@ -4339,7 +4372,10 @@ def cmd_gate(a):
     else:
         evidence_paths = list(a.evidence)
     extra_ledger = {"truncated": truncated, "est_input_tok": est_tok,
-                    "input_cap_tok": cap_tok}
+                    "input_cap_tok": cap_tok, "withheld": withheld}
+    withheld_note = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
+                     "a claim about them cannot be checked\n" % (len(withheld), ", ".join(withheld))
+                     if withheld else "")
 
     # Claim mode: explicit --claim-mode wins; otherwise a unified-diff-looking
     # evidence auto-selects code. Code mode needs per-claim questions, so with
@@ -4385,7 +4421,11 @@ def cmd_gate(a):
     if mode == "code":
         try:
             try:
-                rows, code = run_code_gate(kept_ev, claims_for_check)
+                mask_info = {}
+                rows, code = run_code_gate(
+                    ev_items, claims_for_check, mask_info=mask_info,
+                    state_items=kept_ev if sent_ev is not None else None)
+                withheld += [w for w in mask_info.get("withheld", []) if w not in withheld]
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)
@@ -4416,6 +4456,10 @@ def cmd_gate(a):
                 reason = reason[0] if reason else type(exc).__name__
                 return 3, "gate: code-mode judge call failed: " + reason, ""
             text = _render_code_gate(mode, rows, code)
+            if withheld:
+                text = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
+                        "a claim about them cannot be checked\n"
+                        % (len(withheld), ", ".join(withheld))) + text
         finally:
             for pth in evidence_tmp_paths:
                 try:
@@ -4428,7 +4472,7 @@ def cmd_gate(a):
         if json_mode:
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       _code_summary(rows),
-                      {"claim_mode": mode, "rows": rows}, [])
+                      {"claim_mode": mode, "rows": rows, "withheld": withheld}, [])
             return code
         print(text, end="")
         return code
@@ -4473,7 +4517,7 @@ def cmd_gate(a):
             code = gate_fail_closed(code, out, n_claims)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       gate_verdict_line(code, out, err),
-                      {"stdout": out, "stderr": err, "claim_mode": mode}, cmd)
+                      {"stdout": out, "stderr": err, "claim_mode": mode, "withheld": withheld}, cmd)
             return code
         if hook_mode:
             # Captured and NOT printed: cmd_hook builds its own one-line
@@ -4493,7 +4537,7 @@ def cmd_gate(a):
             # in `out` (_hook_block_reasons); it never reads exit 0 as a verdict
             # beyond "no block".
             return code, out, err
-        print("$ " + shlex.join(str(c) for c in cmd))
+        print(withheld_note + "$ " + shlex.join(str(c) for c in cmd))
         sys.stdout.flush()
         code, out, err = run_door(cmd, capture=True, door="gate", hook_mode=hook_mode,
                                   timeout=timeout, extra_ledger=extra_ledger)
