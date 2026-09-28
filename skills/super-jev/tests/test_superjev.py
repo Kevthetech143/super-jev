@@ -12254,3 +12254,20 @@ def test_gate_part_rejected_with_a_table_stays_reject(tmp_path, monkeypatch, cap
     monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
     assert sj.main(["gate", str(ev), "--claim", "the big file is filler"]) == 2
     assert "CONTRADICTED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("claim_args", [["--claim", "the big file is filler"], ["--draft", "DRAFT"]])
+def test_gate_split_side_row_no_answer_is_not_clean(tmp_path, monkeypatch, capsys, claim_args):
+    """The third review: a part's overclaim NO_ANSWER (the judge exits 3 for it) was
+    merged away and the split check said CLEAN; one call said READ."""
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    draft = tmp_path / "d.md"
+    draft.write_text("the big file is filler text.")
+    table = ("\n  c1   SUPPORTED      0.97  the big file is filler\n\n"
+             "  leaked_internal    CLEAN                0.99\n"
+             "  overclaim          NO_ANSWER            0.00\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=table))
+    argv = [x if x != "DRAFT" else str(draft) for x in claim_args]
+    assert sj.main(["gate", str(ev), *argv]) == 3
+    assert "NO_ANSWER" in capsys.readouterr().out
