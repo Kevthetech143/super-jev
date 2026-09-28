@@ -287,20 +287,14 @@ def main(argv=None):
         evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace").read())
                     for f in a.evidence]
         # Evidence goes to the Jev API, so it gets the same secret scan connect uses: each file
-        # of a diff that scans as a secret (a test fixture's fake card number too) is withheld
-        # whole; a file left with nothing judgeable is dropped, and none left is refused.
+        # that scans as a secret anywhere in the evidence (a test fixture's fake card number too)
+        # is withheld whole; an item left with nothing judgeable is dropped, none left is refused.
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from prepare_bulk import has_secret, mask_secrets
-        kept, withheld = [], []
-        for f, text in evidence:
-            text, held = mask_secrets(text)
-            if text is None:
-                withheld.append(f)
-            else:
-                kept.append((f, text))
-                withheld += held
+        from prepare_bulk import has_secret, mask_evidence
+        masked, withheld = mask_evidence(evidence)
+        kept = [(f, text) for f, text in masked if text is not None]
         if not kept:
-            raise JevError(f"evidence file {withheld[0]} contains a secret; not sent")
+            raise JevError(f"evidence file {masked[0][0]} contains a secret; not sent")
         if withheld:
             print(f"jev: withheld {len(withheld)} file(s) holding secret-shaped text, not sent: "
                   f"{', '.join(withheld)}; a claim about them cannot be checked", file=sys.stderr)

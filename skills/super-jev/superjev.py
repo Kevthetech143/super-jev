@@ -4209,22 +4209,16 @@ def _has_secret(text):
 
 
 def _mask_evidence(evidence_items):
-    """(items, withheld): the evidence as the judge may see it (prepare_bulk.mask_secrets):
-    each file of a diff whose text scans as a secret (a test's fake card number, a sample key,
-    or a real one) is withheld whole, so the rest of the change can still be judged. A text
-    left with nothing judgeable is dropped; withheld names what was held back. Raises when no
-    evidence is left; the gate reports that as a refusal."""
+    """(items, withheld): the evidence as the judge may see it (prepare_bulk.mask_evidence,
+    all items judged together): each file whose text scans as a secret (a test's fake card
+    number, a sample key, or a real one) is withheld whole, so the rest can still be judged.
+    An item left with nothing judgeable is dropped; withheld names what was held back.
+    Raises when every item was dropped; the gate reports that as a refusal."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from prepare_bulk import mask_secrets
-    out, withheld = [], []
-    for path, text in evidence_items:
-        masked, held = mask_secrets(text)
-        if masked is None:
-            withheld.append(path)
-            continue
-        out.append((path, masked))
-        withheld += held
-    if not out:
+    from prepare_bulk import mask_evidence
+    masked, withheld = mask_evidence(list(evidence_items))
+    out = [(path, text) for path, text in masked if text is not None]
+    if evidence_items and not out:
         raise ValueError("evidence %s contains a secret; not sent" % ", ".join(withheld))
     return out, withheld
 
@@ -4381,7 +4375,7 @@ def cmd_gate(a):
     # no checkable claims it falls back to the evidence reply kit.
     mode = getattr(a, "claim_mode", None)
     if mode is None:
-        mode = ("code" if any(looks_like_unified_diff(t) for _, t in ev_items)
+        mode = ("code" if any(looks_like_unified_diff(t) for _, t in kept_ev)
                 else "evidence")
     if mode == "code" and not claims_for_check:
         mode = "evidence"
@@ -4420,9 +4414,11 @@ def cmd_gate(a):
     if mode == "code":
         try:
             try:
+                mask_info = {}
                 rows, code = run_code_gate(
-                    ev_items, claims_for_check,
+                    ev_items, claims_for_check, mask_info=mask_info,
                     state_items=kept_ev if sent_ev is not None else None)
+                withheld += [w for w in mask_info.get("withheld", []) if w not in withheld]
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)
