@@ -742,3 +742,20 @@ def test_rerouted_code_claims_flagged_side_row_is_not_clean(monkeypatch, evfile)
                        "  overclaim          NO_ANSWER            0.00\n", stderr=""))
     code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
     assert code == 3 and "flagged overclaim NO_ANSWER" in out, out
+
+
+def test_rerouted_code_claim_holding_a_secret_is_refused(monkeypatch, evfile):
+    monkeypatch.setattr(sj, "_code_ask", sj._code_ask_live)
+    calls = []
+    monkeypatch.setattr(sj.subprocess, "run", lambda cmd, *a, **kw: calls.append(cmd))
+    secret_claim = "x.py sets pass" + "word: Hunter2xyz9!"
+    code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", secret_claim])
+    assert code == 1 and not calls
+
+
+def test_rerouted_big_code_with_no_judge_client_is_advisory(monkeypatch, evfile, tmp_path):
+    monkeypatch.setattr(sj, "JEV_LIB", tmp_path / "missing.py")
+    monkeypatch.delenv(sj.GATE_CMD_ENV)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
+    code, out = _run_text(["gate", evfile(BIG_DIFF, "big.diff"), "--claim", "x.py now says new"])
+    assert code == 3 and "judge unavailable" in out, out

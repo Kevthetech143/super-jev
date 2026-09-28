@@ -661,6 +661,10 @@ def cap_check_and_truncate(evidence_items, draft_text, door):
     return kept_rev, True, total, cap
 
 
+# A direct check needing more judge calls than this is refused (nothing sent), not cut.
+MAX_PARTS_ENV = "SUPERJEV_MAX_PARTS"
+DEFAULT_MAX_PARTS = 40
+
 # One judge call's input, as lib/jev_client.py counts it: bytes/2, deliberately high,
 # under Jev's 32,768-token ceiling. A direct check whose evidence is bigger is split
 # into parts of this size, one call each, and nothing is cut. Cutting it instead let a
@@ -4420,20 +4424,36 @@ _DOOR_ROW_RE = re.compile(
 _FAVORABLE_SIDE = {"CLEAN", "NOT_TIME_SENSITIVE", "CONSISTENT", "HONEST"}
 
 
-def merge_part_tables(outs):
+def _door_table(out, code=0):
+    """{key: (verdict, score, subject)} from one door run's verdict table. The door
+    prints scores to 2 decimals, so a SUPPORTED 0.797 it flagged reads "0.80": from
+    a run that exited non-zero, a SUPPORTED row printed at or under 0.80 is taken
+    as under the line (0.79)."""
+    rows = {}
+    for m in _DOOR_ROW_RE.finditer(out or ""):
+        verdict, score = m.group("verdict"), float(m.group("score"))
+        if code and verdict == "SUPPORTED" and score <= 0.80:
+            score = 0.79
+        rows.setdefault(m.group("key"), (verdict, score, (m.group("subject") or "").strip()))
+    return rows
+
+
+def _row_flagged(key, verdict, score, advisory=()):
+    """Whether the gate reads this row as needing a human."""
+    if key.startswith("c"):
+        return verdict != "SUPPORTED" or score < 0.80
+    return verdict not in _FAVORABLE_SIDE and key not in advisory
+
+
+def merge_part_tables(outs, codes=None):
     """One row per question across the parts' verdict tables, the rule
     lib/jev_client.merge_rows uses: a contradiction (for a draft-level
     question, any red label) in any part wins, since it must be read; else a
     claim any part supports is supported. The highest confidence of the
-    winning label is kept, with the part that gave it. None when a part has
-    no table or the parts disagree on which questions they answered."""
-    tables = []
-    for out in outs:
-        rows = {}
-        for m in _DOOR_ROW_RE.finditer(out or ""):
-            rows.setdefault(m.group("key"), (m.group("verdict"), float(m.group("score")),
-                                             (m.group("subject") or "").strip()))
-        tables.append(rows)
+    winning label is kept, with the part that gave it. `codes` are the parts'
+    exit codes (see _door_table). None when a part has no table or the parts
+    disagree on which questions they answered."""
+    tables = [_door_table(out, (codes or [0] * len(outs))[i]) for i, out in enumerate(outs)]
     if not tables or not tables[0] or any(set(t) != set(tables[0]) for t in tables):
         return None
     if any(t[k][2] != tables[0][k][2] for t in tables for k in t if k.startswith("c")):
@@ -4461,7 +4481,15 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     quoted span it does not hold, which another part may: it is REJECT only
     when every part refuses, and otherwise READ (exit 3), never CLEAN, since
     the refused part's evidence was not judged."""
-    outs, errs, refused, judged, rejected = [], [], [], [], False
+    try:
+        max_parts = max(1, int(os.environ.get(MAX_PARTS_ENV, DEFAULT_MAX_PARTS)))
+    except ValueError:
+        max_parts = DEFAULT_MAX_PARTS
+    if len(parts) > max_parts:
+        return 1, ("jev: the evidence needs %d judge calls, over %s=%d; nothing was sent. "
+                   "Name only the files the claims are about, or raise %s\n"
+                   % (len(parts), MAX_PARTS_ENV, max_parts, MAX_PARTS_ENV)), ""
+    outs, codes, errs, refused, judged, rejected = [], [], [], [], [], False
     for i, part in enumerate(parts, 1):
         tmp = tempfile.NamedTemporaryFile(mode="w", prefix="evidence-part%dof%d." % (i, len(parts)),
                                           suffix=".md", delete=False, encoding="utf-8", newline="")
@@ -4479,6 +4507,7 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
                 i, len(parts), _part_names(part), err)
         rejected = rejected or code == 2
         outs.append(out)
+        codes.append(code)
         errs.append(err)
         judged.append(i)
     if refused and not outs:
@@ -4487,9 +4516,18 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
              "check cannot be CLEAN; read that part yourself: %s\n" % (
                  i, len(parts), _part_names(parts[i - 1]), " ".join((out or err).split())[:160])
              for i, out, err in refused]
-    merged = merge_part_tables(outs)
+    merged = merge_part_tables(outs, codes)
     if merged is None:
         return GATE_UNREADABLE_EXIT, "\n".join(outs), "".join(errs)
+    advisory = _CLAIM_ADVISORY_KEYS if "--claim" in claim_args else set()
+    # A part the door flagged (exit 3) with no row the gate reads as flagged: the door
+    # saw something its table does not show, so the check keeps its READ.
+    for i, (out, code) in enumerate(zip(outs, codes)):
+        if code and not any(_row_flagged(k, v, sc, advisory)
+                            for k, (v, sc, _t) in _door_table(out, code).items()):
+            notes.append("gate: part %d of %d (%s): the judge flagged it (exit %d) without a "
+                         "row saying why, so this check cannot be CLEAN\n"
+                         % (judged[i], len(parts), _part_names(parts[judged[i] - 1]), code))
     lines = [""]
     for key, verdict, score, subject, part in merged:
         if key.startswith("c"):
@@ -4502,9 +4540,8 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     # gate_fail_closed blocks only on the known red labels; a merged side row with any
     # other unfavorable label (NO_ANSWER) must not read as clean either. An explicit
     # --claim check keeps its advisory rows advisory, as the judge's own exit does.
-    advisory = _CLAIM_ADVISORY_KEYS if "--claim" in claim_args else set()
-    side_red = any(not k.startswith("c") and v not in _FAVORABLE_SIDE and k not in advisory
-                   for k, v, _s, _t, _p in merged)
+    side_red = any(not k.startswith("c") and _row_flagged(k, v, sc, advisory)
+                   for k, v, sc, _t, _p in merged)
     code = 2 if rejected else 3 if (notes or side_red) else 0
     return code, "".join(notes) + "\n".join(lines) + "\n", "".join(errs)
 
@@ -4643,6 +4680,11 @@ def cmd_gate(a):
 
         def door_judge(items, claims):
             """The evidence judge (the gate's door), over parts that each fit one call."""
+            if not os.environ.get(GATE_CMD_ENV) and not JEV_LIB.exists():
+                raise _CodeLibMissing("no judge client at %s — restore lib/jev_client.py "
+                                      "or set %s" % (JEV_LIB, GATE_CMD_ENV))
+            if any(_has_secret(c) for c in claims):
+                raise ValueError("a claim contains a secret; not sent")
             parts = split_evidence(items, _judge_room(claims))
             if len(parts) > 1:
                 judge_info["parts"] = [_part_names(pt) for pt in parts]
@@ -4686,7 +4728,8 @@ def cmd_gate(a):
                 if hook_mode:
                     return 3, reason, ""
                 if json_mode:
-                    emit_json("gate", "ERROR", exc.code, reason, {"claim_mode": mode}, [])
+                    emit_json("gate", GATE_VERDICT_WORD.get(exc.code, "ERROR"), exc.code, reason,
+                              {"claim_mode": mode}, [])
                     return exc.code
                 print((code_judge_note or "") + reason + "\n\nVERDICT: " + (
                     GATE_VERDICT[2] if exc.code == 2 else "ERROR — not checked. Treated as NOT clean."))

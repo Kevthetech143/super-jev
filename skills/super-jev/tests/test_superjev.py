@@ -12271,3 +12271,31 @@ def test_gate_split_side_row_no_answer_is_not_clean(tmp_path, monkeypatch, capsy
     argv = [x if x != "DRAFT" else str(draft) for x in claim_args]
     assert sj.main(["gate", str(ev), *argv]) == 3
     assert "NO_ANSWER" in capsys.readouterr().out
+
+
+def _big_log(tmp_path):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    return ev
+
+
+def test_gate_split_keeps_a_part_flag_its_rounded_score_hides(tmp_path, monkeypatch, capsys):
+    """The fifth review: jev_client prints SUPPORTED 0.797 as "0.80" and exits 3; a
+    split check re-read "0.80" as over the line and said CLEAN."""
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_table([("c1", "SUPPORTED", 0.797)])))
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 3
+    assert "0.79" in capsys.readouterr().out
+
+
+def test_gate_split_part_flag_without_a_row_is_not_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_table([("c1", "SUPPORTED", 0.95)])))
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 3
+    assert "without a row saying why" in capsys.readouterr().out
+
+
+def test_gate_over_the_part_cap_sends_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_MAX_PARTS", "2")
+    door = FakeDoor(0, stdout=_table([("c1", "SUPPORTED", 0.95)]))
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 1
+    assert not door.calls and "SUPERJEV_MAX_PARTS=2" in capsys.readouterr().out
