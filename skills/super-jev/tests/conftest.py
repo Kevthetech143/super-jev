@@ -25,3 +25,9 @@ def _no_live_shared_list(monkeypatch, tmp_path):
     """prepare_bulk shares the deployment's shared-pointers.json after a connect; tests never read
     the live list. test_share_pointers.py points it at its own file."""
     monkeypatch.setenv("SUPERJEV_SHARED_POINTERS", str(tmp_path / "no-shared-pointers.json"))
+
+
+@pytest.fixture(autouse=True)
+def _no_new_file_scan(monkeypatch):
+    """Lookups never start the background new-file scan in tests; test_auto_heal.py calls it directly."""
+    monkeypatch.setenv("SUPERJEV_NEW_FILE_SCAN", "0")
