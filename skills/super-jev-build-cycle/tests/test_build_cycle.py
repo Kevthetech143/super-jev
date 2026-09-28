@@ -347,3 +347,47 @@ def test_core_skill_search_is_a_marked_use(env):
     assert r.returncode == 0 and "x-poster" in r.stdout
     uses = (env["cycle"] / "uses.jsonl").read_text().splitlines()
     assert len(uses) == 1 and "existing skill for: posts things" in uses[0]
+
+
+def _repo_with_change(env):
+    """A git repo whose origin/main is the first commit, plus one committed and one uncommitted change."""
+    repo = env["tmp"] / "repo"
+    repo.mkdir()
+    g = lambda *a: subprocess.run(["git", "-C", str(repo)] + list(a), check=True, capture_output=True)
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (repo / "a.py").write_text("x = 1\n"); g("add", "."); g("commit", "-qm", "base")
+    g("update-ref", "refs/remotes/origin/main", "HEAD")
+    (repo / "a.py").write_text("x = 2\n"); g("commit", "-qam", "change")
+    (repo / "b.py").write_text("y = 3\n"); g("add", "b.py")
+    return repo
+
+
+def test_reply_check_with_worktree_checks_claims_against_the_diff(env):
+    repo = _repo_with_change(env)
+    claims = f(env, "claims.txt", "x is now 2\ny is 3\n")
+    r = run(env, "reply-check", "--claims", claims, "--worktree", str(repo))
+    assert r.returncode == 0, r.stderr
+    c = calls(env)[-1]
+    assert c[:2] == ["dispatch.py", "check"] and c.count("--claim") == 2 and "ask.py" not in c[0]
+    patch = Path(c[2]).read_text()
+    assert "x = 2" in patch and "y = 3" in patch  # committed and uncommitted changes both reach Super Jev
+
+
+def test_evidence_files_are_checked_directly(env):
+    ev = f(env, "notes.md", "the answer is 42\n")
+    claims = f(env, "claims.txt", "the answer is 42\n")
+    report = f(env, "report.md", "done\n")
+    assert run(env, "check-report", "--report", report, "--claims", claims, "--evidence", ev).returncode == 0
+    c = calls(env)[-1]
+    assert c[:3] == ["dispatch.py", "check", ev] and c[-2:] == ["--claim", "the answer is 42"]
+
+
+def test_worktree_without_changes_is_refused_not_silently_skipped(env):
+    repo = env["tmp"] / "clean"
+    repo.mkdir()
+    g = lambda *a: subprocess.run(["git", "-C", str(repo)] + list(a), check=True, capture_output=True)
+    g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t")
+    (repo / "a.py").write_text("x\n"); g("add", "."); g("commit", "-qm", "base")
+    g("update-ref", "refs/remotes/origin/main", "HEAD")
+    r = run(env, "reply-check", "--claims", f(env, "c.txt", "x\n"), "--worktree", str(repo))
+    assert r.returncode != 0 and "no changes" in (r.stdout + r.stderr)

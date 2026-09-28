@@ -22,10 +22,10 @@ python3 build_cycle.py --dir CYCLE_DIR --principal YOUR_AGENT STEP ...
 | 2 | target | `target --goal "..." --evidence "lookup id / log line / user report" [--ask]` | optional ask for related past misses |
 | 3 | cause | `cause --cause "..." [--file PATH ...] [--ask "question" ...] [--trace last]` | lookups on the cause; `--trace` shows a Super Jev ask's trace when the failure is an ask |
 | 4 | brief | `brief` | prints a block to paste into any helper's task, so helpers start briefed |
-| 5 | check-report | `check-report --report FILE [--claims FILE] [--worktree DIR] [--test-cmd CMD]` | `dispatch.py verify` on the report, `ask.py --claim` on each line of the claims file |
+| 5 | check-report | `check-report --report FILE [--claims FILE] [--worktree DIR] [--evidence FILE ...] [--test-cmd CMD]` | `dispatch.py verify` on the report; each line of the claims file is checked against the worktree's diff and any `--evidence` files (`dispatch.py check`, no connecting needed), or on the connected shelves when neither is given |
 | 6 | prove | `prove --cmd "the test command" --output FILE [--output FILE] [--note "old vs new"]` | none; the output file must exist |
-| 7 | review | `review --reviewer NAME --verdict "..." --file REVIEW_FILE [--claims FILE]` | `--claim` on the reviewer's key claims |
-| 8 | reply-check | `reply-check --claims FILE` | `--claim` on each key fact of the draft reply (one per line) |
+| 7 | review | `review --reviewer NAME --verdict "..." --file REVIEW_FILE [--claims FILE] [--worktree DIR] [--evidence FILE ...]` | the reviewer's key claims, checked the same way |
+| 8 | reply-check | `reply-check --claims FILE [--worktree DIR] [--evidence FILE ...]` | each key fact of the draft reply (one per line), checked the same way. New code is not connected yet: pass `--worktree` or `--evidence`, or every claim about it comes back NOT FOUND |
 | 9 | learn | `learn [--note FILE ...] [--fact "question" "answer" [--source PATH]]` | teach back: notes must sit in a connected folder; facts are saved with `ask.py --add` |
 
 Then:

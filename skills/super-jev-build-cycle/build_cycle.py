@@ -120,11 +120,44 @@ def ask(ctx, step, question):
     return run_sj(ctx, step, "ask.py", ["--principal", ctx.principal, "--", question], question)
 
 
-def claims(ctx, step, path: Path, label: str):
+def worktree_diff(ctx, step: str, worktree: str) -> Path:
+    """The worktree's uncommitted and committed changes against origin/main, saved in the cycle folder:
+    new code is not on Super Jev's shelves yet, so claims about it are checked against this diff."""
+    wt = Path(worktree).expanduser()
+    diffs = []
+    for args in (["diff", "origin/main...HEAD"], ["diff", "HEAD"]):
+        r = subprocess.run(["git", "-C", str(wt)] + args, capture_output=True, text=True)
+        if r.returncode:
+            raise CycleError(f"git {' '.join(args)} failed in {wt}: {r.stderr.strip()[:200]}")
+        diffs.append(r.stdout)
+    text = "".join(diffs)
+    if not text.strip():
+        raise CycleError(f"no changes in {wt} against origin/main; pass --evidence FILE instead")
+    out = ctx.dir / f"{step}-diff.patch"
+    out.write_text(text, encoding="utf-8")
+    return out.absolute()
+
+
+def claims(ctx, step, path: Path, label: str, evidence: list = None):
+    """Check each line of a claims file. With evidence files, Super Jev judges them directly
+    (dispatch.py check: no connecting, so new or unconnected files work; a diff is judged as code).
+    Without, the claims are looked up on its connected shelves (ask.py --claims-file)."""
     if not path.is_file() or not path.read_text(encoding="utf-8").strip():
         raise CycleError(f"{label} file missing or empty: {path}")
+    if evidence:
+        lines = [l.strip() for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        args = ["check"] + [str(e) for e in evidence] + [x for c in lines for x in ("--claim", c)]
+        return run_sj(ctx, step, "dispatch.py", args, f"claims in {path} against {len(evidence)} evidence file(s)")
     return run_sj(ctx, step, "ask.py", ["--principal", ctx.principal, "--claims-file", str(path.absolute())],
                   f"claims in {path}")
+
+
+def evidence_files(ctx, step, a) -> list:
+    """--evidence files plus, with --worktree, the worktree's diff."""
+    ev = [need_file(e, "--evidence") for e in (getattr(a, "evidence", None) or [])]
+    if getattr(a, "worktree", None):
+        ev.append(worktree_diff(ctx, step, a.worktree))
+    return ev
 
 
 def need_file(p: str, label: str) -> Path:
@@ -327,7 +360,7 @@ def cmd_check_report(ctx, a):
     uid, out = run_sj(ctx, "check-report", "dispatch.py", ["verify", str(rep)] + extra, f"verify {rep}")
     outs.append((f"[{uid}] verify report", out))
     if a.claims:
-        uid, out = claims(ctx, "check-report", Path(a.claims), "--claims")
+        uid, out = claims(ctx, "check-report", Path(a.claims), "--claims", evidence_files(ctx, "check-report", a))
         outs.append((f"[{uid}] claim verdicts", out))
     return {"report": rep}, outs
 
@@ -341,13 +374,13 @@ def cmd_review(ctx, a):
     rev = need_file(a.file, "--file")
     outs = []
     if a.claims:
-        uid, out = claims(ctx, "review", Path(a.claims), "--claims")
+        uid, out = claims(ctx, "review", Path(a.claims), "--claims", evidence_files(ctx, "review", a))
         outs.append((f"[{uid}] reviewer claim verdicts", out))
     return {"reviewer": a.reviewer, "verdict": a.verdict, "review file": rev}, outs
 
 
 def cmd_reply_check(ctx, a):
-    uid, out = claims(ctx, "reply-check", Path(a.claims), "--claims")
+    uid, out = claims(ctx, "reply-check", Path(a.claims), "--claims", evidence_files(ctx, "reply-check", a))
     return {"claims": Path(a.claims).absolute()}, [(f"[{uid}] draft reply claim verdicts", out)]
 
 
@@ -499,12 +532,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--trace", help="lookup id or 'last': show a Super Jev ask's trace")
     sub.add_parser("brief")
     s = sub.add_parser("check-report"); s.add_argument("--report", required=True); s.add_argument("--claims")
-    s.add_argument("--worktree"); s.add_argument("--test-cmd")
+    s.add_argument("--worktree", help="the worktree; its diff also becomes evidence for --claims"); s.add_argument("--test-cmd"); s.add_argument("--evidence", action="append", help="a file to check the claims against directly (repeatable)")
     s = sub.add_parser("prove"); s.add_argument("--cmd", required=True)
     s.add_argument("--output", action="append", required=True); s.add_argument("--note")
     s = sub.add_parser("review"); s.add_argument("--reviewer", required=True); s.add_argument("--verdict", required=True)
-    s.add_argument("--file", required=True); s.add_argument("--claims")
-    s = sub.add_parser("reply-check"); s.add_argument("--claims", required=True)
+    s.add_argument("--file", required=True); s.add_argument("--claims"); s.add_argument("--worktree"); s.add_argument("--evidence", action="append", help="a file to check the claims against directly (repeatable)")
+    s = sub.add_parser("reply-check"); s.add_argument("--claims", required=True); s.add_argument("--worktree"); s.add_argument("--evidence", action="append", help="a file to check the claims against directly (repeatable)")
     s = sub.add_parser("learn"); s.add_argument("--note", action="append")
     s.add_argument("--fact", nargs=2, action="append", metavar=("QUESTION", "ANSWER"))
     s.add_argument("--source", help="file the facts come from")
