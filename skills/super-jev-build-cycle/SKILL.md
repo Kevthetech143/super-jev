@@ -40,3 +40,6 @@ Secret-shaped text never blocks the check: a file of the diff that holds any (a 
 - A non-zero exit from Super Jev is kept in the receipt, not hidden; act on its printed next step.
 - Each ask and each claim check is a Super Jev call and may be paid.
 - The tool only calls `ask.py`, `dispatch.py` and `git`; no daemon, no other network.
+- Step back after two FIX reviews on the same change. Before the next round, write in the cycle dir why each fix failed, and ask whether the design itself is wrong. Prefer a simpler rule that closes the whole class of failure (fail safe, no keyword lists) over another patch.
+- Marks are honest grades of Super Jev's help: `helped` only when what it returned or checked changed your work; a fact saved in `learn` is `neutral`; a tool crash (missing key, timeout) is `neutral` with a note naming the fault, not `missed`. `missed` means the answer existed and Super Jev did not find it.
+- Before a PR merges, update its description to the final state: review rounds, what changed after the PR opened, and any known gap.
