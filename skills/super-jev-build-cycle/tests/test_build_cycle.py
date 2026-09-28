@@ -91,7 +91,7 @@ def do_all(env, skip=()):
         "brief": ["brief"],
         "check-report": ["check-report", "--report", report, "--claims", claims],
         "prove": ["prove", "--cmd", "pytest tests/test_x.py", "--output", out],
-        "review": ["review", "--reviewer", "rev-a", "--verdict", "approve", "--file", review, "--claims", claims],
+        "review": ["review", "--reviewer", "rev-a", "--verdict", "SHIP looks right", "--file", review, "--claims", claims],
         "reply-check": ["reply-check", "--claims", claims],
     }
     for s in STEPS:
@@ -122,13 +122,13 @@ def test_principal_from_env(env):
     assert all(c[c.index("--principal") + 1] == "agent-env" for c in calls(env))
 
 
-def test_start_runs_four_asks_from_sibling_folder(env):
+def test_start_asks_one_question_plus_your_own(env):
     run(env, "preflight")
-    r = run(env, "start", "retry on timeout", "--project", "demo")
+    r = run(env, "start", "retry on timeout", "--project", "demo", "--ask", "where are timeouts retried")
     assert r.returncode == 0, r.stderr
     cs = calls(env)
-    assert len(cs) == 4 and all(c[0] == "ask.py" and c[1:3] == ["--principal", "agent-1"] for c in cs)
-    assert all("retry on timeout in demo" in c[-1] for c in cs)
+    assert len(cs) == 2 and all(c[0] == "ask.py" and c[1:3] == ["--principal", "agent-1"] for c in cs)
+    assert "retry on timeout in demo" in cs[0][-1] and cs[1][-1] == "where are timeouts retried"
     receipt = (env["cycle"] / "02-start.md").read_text()
     assert "0.91  /notes/design.md" in receipt and "- idea: retry on timeout" in receipt
 
@@ -167,16 +167,17 @@ def test_close_refuses_missing_and_names_them(env):
     mark_all(env)
     r = run(env, "close")
     assert r.returncode == 1
-    assert "prove" in r.stdout and "review" in r.stdout and "start" not in r.stdout.split("for:")[1]
+    named = r.stdout.split("for:")[1]
+    assert "review" in named and "prove" not in named and "start" not in named  # prove is optional now
     assert not (env["cycle"] / "summary.md").exists()
 
 
 def test_close_refuses_empty_receipt(env):
     do_all(env)
     mark_all(env)
-    (env["cycle"] / "07-prove.md").write_text("")
+    (env["cycle"] / "08-review.md").write_text("")
     r = run(env, "close")
-    assert r.returncode == 1 and "prove" in r.stdout
+    assert r.returncode == 1 and "review" in r.stdout
 
 
 def test_close_refuses_unmarked_uses(env):
@@ -205,13 +206,13 @@ def test_close_default_log_in_cycle_dir(env):
 
 
 def test_skip_is_recorded_and_shown_at_close(env):
-    do_all(env, skip=("review",))
-    r = run(env, "skip", "review", "--reason", "solo fix, no reviewer free")
+    do_all(env, skip=("check-report",))
+    r = run(env, "skip", "check-report", "--reason", "solo fix, no helper")
     assert r.returncode == 0
     mark_all(env)
     r = run(env, "close")
     assert r.returncode == 0, r.stdout
-    assert "review: SKIPPED (solo fix, no reviewer free)" in (env["cycle"] / "summary.md").read_text()
+    assert "check-report: SKIPPED (solo fix, no helper)" in (env["cycle"] / "summary.md").read_text()
 
 
 def test_skip_needs_known_step_and_reason(env):
@@ -284,7 +285,7 @@ def test_start_known_topic_is_not_new_ground(env):
     assert "new ground" not in (env["cycle"] / "02-start.md").read_text()
 
 
-@pytest.mark.parametrize("step", ["start", "check-report", "reply-check"])
+@pytest.mark.parametrize("step", ["start", "review", "reply-check"])
 def test_unskippable_steps(env, step):
     r = run(env, "skip", step, "--reason", "busy")
     assert r.returncode == 2 and "cannot be skipped" in r.stderr
@@ -391,3 +392,28 @@ def test_worktree_without_changes_is_refused_not_silently_skipped(env):
     g("update-ref", "refs/remotes/origin/main", "HEAD")
     r = run(env, "reply-check", "--claims", f(env, "c.txt", "x\n"), "--worktree", str(repo))
     assert r.returncode != 0 and "no changes" in (r.stdout + r.stderr)
+
+
+def test_review_needs_ship_or_fix_and_a_different_reviewer(env):
+    rev = f(env, "rev.md", "SHIP\n")
+    assert run(env, "review", "--reviewer", "agent-1", "--verdict", "SHIP", "--file", rev).returncode == 2
+    assert run(env, "review", "--reviewer", "fresh", "--verdict", "looks fine", "--file", rev).returncode == 2
+    assert run(env, "review", "--reviewer", "fresh", "--verdict", "SHIP ok", "--file", rev).returncode == 0
+
+
+def test_close_refuses_while_latest_review_says_fix(env):
+    do_all(env)
+    rev = f(env, "rev2.md", "FIX: off by one\n")
+    assert run(env, "review", "--reviewer", "fresh", "--verdict", "FIX off by one", "--file", rev).returncode == 0
+    mark_all(env)
+    r = run(env, "close")
+    assert r.returncode == 1 and "FIX off by one" in r.stdout
+
+
+def test_review_brief_carries_goal_and_diff(env):
+    repo = _repo_with_change(env)
+    run(env, "preflight"); run(env, "start", "make x two")
+    r = run(env, "review-brief", "--worktree", str(repo), "--test-cmd", "pytest -q")
+    assert r.returncode == 0, r.stderr
+    brief = (env["cycle"] / "review-brief.md").read_text()
+    assert "make x two" in brief and "x = 2" in brief and "pytest -q" in brief and "SHIP or FIX" in brief
