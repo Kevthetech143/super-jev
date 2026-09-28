@@ -808,3 +808,14 @@ def test_hook_mode_rerouted_code_makes_at_most_one_judge_call(monkeypatch, evfil
     assert "not judged" in out
     code, out, err = sj.cmd_gate(_hook_ns(evfile(DIFF, "wt.diff"), ["x.py now says new"]))
     assert code == 0 and len(door.calls) == 1, out
+
+
+def test_pattern_arm_reads_the_claim_exactly_on_the_rerouted_path(monkeypatch, evfile):
+    """Only line breaks are collapsed, and only for the judge: a tab or a double
+    space inside a pattern claim's token still counts."""
+    monkeypatch.setattr(sj, "_code_ask", sj._code_ask_live)
+    monkeypatch.setattr(sj.subprocess, "run", EchoDoor({}))
+    ev = evfile(DIFF.replace("+new", '+new\n TAB_RE = re.compile(r"\\t")\n SPACES_RE = r"  "'), "wt.diff")
+    for claim in ("`a\tb` is not caught by TAB_RE", "`x  y` is not caught by SPACES_RE"):
+        code, out = _run_text(["gate", ev, "--claim", claim])
+        assert code == 3 and "CONTRADICTED" in out, (claim, out)

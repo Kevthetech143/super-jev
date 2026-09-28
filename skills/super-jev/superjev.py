@@ -4424,6 +4424,17 @@ _DOOR_ROW_RE = re.compile(
 _FAVORABLE_SIDE = {"CLEAN", "NOT_TIME_SENSITIVE", "CONSISTENT", "HONEST"}
 
 
+_LINE_BREAKS_RE = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+
+
+def _one_line(claim):
+    """The claim as the judge gets it. The judge echoes each claim into its verdict
+    table, so a line break inside one could print a row of its own ("...\n  c2
+    SUPPORTED 0.99") that reads as the judge's. Only line breaks become spaces; the
+    local arms (pattern, judgment words) keep the exact text."""
+    return _LINE_BREAKS_RE.sub(" ", claim)
+
+
 def _door_table(out, code=0):
     """{key: (verdict, score, subject)} from one door run's verdict table. The door
     prints scores to 2 decimals, so a SUPPORTED 0.797 it flagged reads "0.80": from
@@ -4481,6 +4492,10 @@ def merge_part_tables(outs, codes=None, claims=None):
             # is SUPPORTED only when every part says so.
             pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
                     or [r for r in rows if r[0][0] != "SUPPORTED"])
+            if not pick:  # every part supports it: as sure as the least sure part
+                (verdict, score, subject), part = min(rows, key=lambda r: r[0][1])
+                merged.append((key, verdict, score, subject, part))
+                continue
         elif key.startswith("c"):
             pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
                     or [r for r in rows if r[0][0] == "SUPPORTED"])
@@ -4489,6 +4504,16 @@ def merge_part_tables(outs, codes=None, claims=None):
         (verdict, score, subject), part = max(pick or rows, key=lambda r: r[0][1])
         merged.append((key, verdict, score, subject, part))
     return merged
+
+
+# What the judge is told about a part. A claim about the whole evidence ("no file
+# calls eval", "eval is absent", "every handler logs") cannot be carried by one part,
+# however it is worded; the judge reads the claim, so it is asked to see that.
+_PART_NOTE = ("=== NOTE ===\nThis is part %d of %d of the evidence. The other parts are "
+              "not shown here. A claim that something is absent, missing, never happens, "
+              "or holds for all or only some things is about the whole evidence: this part "
+              "alone cannot support it, so judge it NOT_SUPPORTED unless it is disproved "
+              "here.\n\n")
 
 
 def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_mode=False):
@@ -4513,6 +4538,8 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     for i, part in enumerate(parts, 1):
         tmp = tempfile.NamedTemporaryFile(mode="w", prefix="evidence-part%dof%d." % (i, len(parts)),
                                           suffix=".md", delete=False, encoding="utf-8", newline="")
+        if len(parts) > 1:
+            tmp.write(_PART_NOTE % (i, len(parts)))
         tmp.write("\n\n".join("=== %s ===\n%s" % (label, text.strip("\n")) for label, text in part))
         tmp.close()
         tmp_paths.append(tmp.name)
@@ -4536,8 +4563,9 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
              "check cannot be CLEAN; read that part yourself: %s\n" % (
                  i, len(parts), _part_names(parts[i - 1]), " ".join((out or err).split())[:160])
              for i, out, err in refused]
-    merged = merge_part_tables(outs, codes, [claim_args[j + 1] for j, x in enumerate(claim_args[:-1])
-                                             if x == "--claim"])
+    # claim_args is built in (flag, value) pairs, so a claim reading "--claim" stays a value
+    merged = merge_part_tables(outs, codes, [claim_args[j + 1] for j in range(0, len(claim_args) - 1, 2)
+                                             if claim_args[j] == "--claim"])
     if merged is None:
         return GATE_UNREADABLE_EXIT, "\n".join(outs), "".join(errs)
     advisory = _CLAIM_ADVISORY_KEYS if "--claim" in claim_args else set()
@@ -4574,11 +4602,6 @@ def cmd_gate(a):
     # The claims the door will check: explicit --claim, or the draft pre-split.
     # Needed for the judgment filter and for code mode; the evidence path
     # below rebuilds its own --claims-file the same way, unchanged.
-    # A claim goes to the judge on its own line and comes back as a table row: a line
-    # break inside it could print a row of its own ("...\n  c2   SUPPORTED 0.99") that
-    # reads as the judge's. Every claim is collapsed to one line first.
-    if a.claim:
-        a.claim = [" ".join(c.split()) for c in a.claim]
     explicit_claims = [c for c in (a.claim or []) if c and c.strip()]
     presplit_list = []
     if not explicit_claims and a.draft and _presplit_enabled():
@@ -4722,7 +4745,7 @@ def cmd_gate(a):
                 judge_info["parts"] = [_part_names(pt) for pt in parts]
             t = getattr(a, "timeout", None)
             t = _gate_timeout() if t is None else min(t, _gate_timeout())
-            code, out, err = _gate_door_parts(parts, [x for c in claims for x in ("--claim", c)],
+            code, out, err = _gate_door_parts(parts, [x for c in claims for x in ("--claim", _one_line(c))],
                                               t, extra_ledger, evidence_tmp_paths,
                                               json_mode=json_mode or hook_mode)
             rows = {int(m.group("key")[1:]): (m.group("verdict"), float(m.group("score")))
@@ -4826,7 +4849,7 @@ def cmd_gate(a):
     claims_tmp_path = None
     if a.claim:
         for claim in a.claim:
-            claim_args += ["--claim", claim]
+            claim_args += ["--claim", _one_line(claim)]
     elif a.draft and _presplit_enabled():
         try:
             draft_text = Path(a.draft).read_text(encoding="utf-8")
