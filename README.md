@@ -9,32 +9,13 @@ One judge (Jev) between your agent and your data: the agent asks in its own word
 - One judge sits between your agent and your data: the agent asks in its own words, Jev finds the file, checks the claim, permits the action, and remembers what you approved. Your agent stays responsible for the answer.
 - Agents burn whole LLM turns on lookups, re-hunt the same answers daily, and state things the files never said. Jev is a fast, cheap judge for yes/no and which-one questions; the LLM keeps the writing.
 - The daily loop: ask → read the top file → answer → approve / miss / add. Connectors are how your data gets in; the cache fills only from your own approvals — nothing is cached that you did not approve.
-- 1.0 promises the proven core: skill search, file navigate, connect + bulk prepare, check gate, permit gate, the harness loop. The core works well when it works; edges still want an agent in the seat — see KNOWN-QUIRKS.md and AGENT-GUIDE.md.
+- 1.0 promises the proven core: skill search, file navigate, connect + bulk prepare, check gate, permit gate, the harness loop. The core works well when it works; edges still want an agent in the seat — see KNOWN-QUIRKS.md and AGENTS.md.
 - 1.0 does not promise unattended answering, semantic cache matching, automatic sync, or live browsing. Next: auto-catch, recipes, a Jev-decided browser driver — each ships only after its own live bench.
 
 ## Quick start
 
-**Agents: read [AGENTS.md](AGENTS.md) first.** It is a numbered path from a
-fresh clone to a working ask and check, about 10 minutes with a TypeSafe key.
-
-```bash
-export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"   # needed for connect, ask and check
-python3 skills/super-jev/setup.py                              # safe to rerun; prints the next step
-python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal me --writer builtin
-python3 skills/super-jev/ask.py --principal me "your question"
-python3 skills/super-jev/ask.py --principal me --approve "your question" "the answer you gave"   # after a good hit
-python3 skills/super-jev/dispatch.py check --claim "a claim" /path/to/file-you-read.md
-```
-
-No key yet? `npm run demo` runs the loop once offline. The test suites also
-need no key: `npm test` (under a minute) and
-`python3 -m pytest skills/super-jev/tests -q` (about 4 to 6 minutes).
-
-Next: [GETTING-STARTED](docs/GETTING-STARTED.md) — the full operating manual
-(prerequisites → key → setup → connect → ask → approve/miss/add → check → refresh → uninstall).
-For agents: [wire-into-claude-code](docs/wire-into-claude-code.md) (the retrieval rule card
-and Stop-hook claim gate), [AGENT-GUIDE](docs/AGENT-GUIDE.md) (the daily loop), and
-[KNOWN-QUIRKS](docs/KNOWN-QUIRKS.md) (what breaks and the workaround).
+People: [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — the full operating manual.
+Agents: [AGENTS.md](AGENTS.md) — the numbered path and daily loop.
 
 ## The loop
 
