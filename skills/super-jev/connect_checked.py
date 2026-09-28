@@ -24,7 +24,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from reviewed_view import derive
-CEILING_MSG = "exceeds the 32,768-token ceiling"
+from judge_profile import PROFILE
+CEILING_MSG = f"exceeds {PROFILE.ceiling_text}"  # the gate's refusal text (lib/jev_client.ask)
 
 
 # The gate's c1 line can carry any verdict token the reply kit's claim question
@@ -44,7 +45,7 @@ def gate(description: str, path: str) -> dict:
     txt = r.stdout + r.stderr
     secs = round(time.time() - t, 1)
     if CEILING_MSG in txt:
-        return {"state": "UNCHECKED", "reason": "over 32k-token ceiling; split the file", "secs": secs}
+        return {"state": "UNCHECKED", "reason": f"over {PROFILE.window_tokens // 1000}k-token ceiling; split the file", "secs": secs}
     m = re.search(r"\bc1\s+(\S+)\s+([\d.]+)", txt)
     if not m or m.group(1) not in KNOWN_VERDICTS:
         tail = txt.strip().splitlines()[-1:] or ["no output"]
