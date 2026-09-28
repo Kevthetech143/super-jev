@@ -10,6 +10,7 @@ const TOKEN = new RegExp(PAT.token, 'i');
 const GENERIC = new RegExp(PAT.generic, 'gi');
 const ISO_DATE = new RegExp(PAT.iso_date, 'g');
 const URL_RE = new RegExp(PAT.url, 'g');
+const TRACKING = new RegExp(PAT.tracking, 'g');
 
 function entropy(s: string): number {
   let h = 0;
@@ -47,9 +48,24 @@ function luhn(digits: string): boolean {
   return total % 10 === 0;
 }
 
-/** Twin of Python card_hit: a standalone 16-digit run (dates/URLs scrubbed) that passes Luhn. */
+/** Twin of Python _usps_tracking: a TRACKING run (prefix and USPS layout already checked) with a valid GS1 mod-10
+ * check digit and no Luhn-valid 16-digit window starting at its 2nd or 3rd group (a card behind a short 91-95 number). */
+function uspsTracking(run: string): boolean {
+  const d = run.replace(/\D/g, '');
+  if (d.length !== 22 && d.length !== 26) return false;
+  let total = 0;
+  for (let i = 0; i < d.length - 1; i++) total += Number(d[d.length - 2 - i]) * (i % 2 ? 1 : 3);
+  if ((10 - total % 10) % 10 !== Number(d[d.length - 1])) return false;
+  for (let i = 4; i + 16 <= d.length; i += 4) if (luhn(d.slice(i, i + 16))) return false;
+  return true;
+}
+
+/** Twin of Python card_hit: a standalone 16-digit run (dates/URLs and whole USPS tracking numbers scrubbed)
+ * that passes Luhn. Without Luhn (non-ASCII digits folded to 0) no run is exempted as a tracking number. */
 function cardHit(text: string, checkLuhn: boolean): boolean {
-  for (const m of text.replace(URL_RE, ' ').replace(ISO_DATE, ' ').matchAll(CARD)) if (!checkLuhn || luhn(m[0].replace(/\D/g, ''))) return true;
+  text = text.replace(URL_RE, ' ').replace(ISO_DATE, ' ');
+  if (checkLuhn) text = text.replace(TRACKING, (m) => uspsTracking(m) ? ' ' : m);
+  for (const m of text.matchAll(CARD)) if (!checkLuhn || luhn(m[0].replace(/\D/g, ''))) return true;
   return false;
 }
 

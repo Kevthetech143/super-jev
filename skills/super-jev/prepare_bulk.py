@@ -217,6 +217,14 @@ SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}"
 # always runs against the original, unscrubbed text.
 ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
 URL_RE = re.compile(_PAT["url"], re.A)
+# A spaced USPS tracking number (22 or 26 digits in groups of 4) starts with a card-shaped
+# 16-digit run, and about one in ten such numbers passes Luhn there by chance.
+# A whole run in USPS layout (TRACKING_RE: starts 91-95, groups of 4 then a final 2, one separator)
+# with a valid check digit is removed before the card check only. The exact layout matters: a loose
+# run would let a short 91-95 number in front of a card turn "number + card" into a tracking number.
+# A run with a Luhn-valid window after its first group is not removed; about 1 in 100 real 22-digit
+# numbers (1 in 50 for 26 digits) are then still held by the card rule, down from 1 in 10.
+TRACKING_RE = re.compile(_PAT["tracking"], re.A)
 _CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
 _FOLD = {}
@@ -386,10 +394,25 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
+def _usps_tracking(run: str) -> bool:
+    """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check
+    digit, and no Luhn-valid 16-digit window starting at its 2nd or 3rd group, where a card could sit behind a
+    short 91-95 number ("9100 4111 1111 1111 1111 01"). Such a run is not exempt and the card rule decides."""
+    d = re.sub(r"\D", "", run)
+    if len(d) not in (22, 26):
+        return False
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(d[:-1])))
+    return (10 - total % 10) % 10 == int(d[-1]) and not any(_luhn(d[i:i + 16]) for i in range(4, len(d) - 15, 4))
+
+
 def card_hit(text: str, luhn: bool = True) -> bool:
-    """A standalone 16-digit run (dates/URLs scrubbed) that passes the Luhn check. luhn=False when the
-    raw text had non-ASCII digits: normalizing folds them to 0, so their true value is lost."""
-    return any(not luhn or _luhn(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(_scrub_dates_and_urls(text)))
+    """A standalone 16-digit run (dates/URLs and whole USPS tracking numbers scrubbed) that passes the Luhn
+    check. luhn=False when the raw text had non-ASCII digits: normalizing folds them to 0, so their true value
+    is lost and no run is exempted as a tracking number either."""
+    text = _scrub_dates_and_urls(text)
+    if luhn:
+        text = TRACKING_RE.sub(lambda m: " " if _usps_tracking(m.group()) else m.group(), text)
+    return any(not luhn or _luhn(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(text))
 
 
 def has_secret(text: str) -> bool:
