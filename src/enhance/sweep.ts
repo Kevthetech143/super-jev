@@ -22,6 +22,7 @@ import { CostMeter } from './cost.ts';
 import { validateEvaluation } from '../jev.ts';
 import type { Answer, BatchPlan, ContextBudget, CostAccount, CoverageManifest, EnhanceRecord, Evaluation, OutcomeKind, Question, RecordOutcome, RecordRef, Request } from './types.ts';
 import type { Evaluator } from '../types.ts';
+import { JUDGE_PROFILE } from '../judge-profile.ts';
 
 /**
  * The provider accepts at most this many questions in one request.
@@ -29,11 +30,12 @@ import type { Evaluator } from '../types.ts';
  * DOCUMENTED by the brief that commissioned this feature, not measured by this
  * repository and not stated anywhere in `docs/provider-contract.md`. It is a
  * named constant and a configurable knob rather than a buried literal, so a
- * corrected figure is a one-line change. Treating it as a hard planning bound
+ * corrected figure is a one-line change: the judge profile's
+ * `max_questions_per_call` in skills/super-jev/judge_profiles.json. Treating it as a hard planning bound
  * is the safe direction: planning under the real cap wastes a little window,
  * planning over it loses a whole call.
  */
-export const MAX_QUESTIONS_PER_CALL = 255;
+export const MAX_QUESTIONS_PER_CALL = JUDGE_PROFILE.maxQuestionsPerCall;
 
 /** Default accept gate for a sweep. Stricter than the 0.75 organizer gate. */
 export const DEFAULT_SWEEP_GATE = 0.80;
