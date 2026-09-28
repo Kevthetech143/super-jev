@@ -7,6 +7,10 @@ description: "Onboard and refresh Super Jev connectors: register skills, brain n
 
 Onboarding and refresh for [Super Jev](../super-jev/SKILL.md). Scripts live in `skills/super-jev/`; run them by relative path from here, e.g. `../super-jev/prepare_bulk.py`.
 
+
+## What to connect
+
+Connect what agents will search again: notes, lessons, decisions, runbooks, a code library they keep asking about. Don't connect one-off material (a single report, a draft, today's diff, a pasted page); check it directly with `dispatch.py check FILE --claim "..."` from the super-jev skill instead. Connecting costs writer and Jev calls up front and keeps the files in every lookup; a direct check costs one call and keeps nothing.
 ## 1. What a connector is
 
 A connector is one named set of reviewed files, registered as one pointer, for one or more principals (agents). "Connected" means registered and prepared for search — never automatically synced to the live source. Update a connector by refreshing it (section 8), not by assuming it tracks its source.
