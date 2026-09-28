@@ -53,7 +53,7 @@ A pointer stuck `preparation-required`/`refresh-required` is just waiting on its
 
 ## Banned patterns
 
-Do not: treat "preparation required" as an answer; repeat a failed search instead of connecting or refreshing; say "your whole brain is connected" or "always up to date" without evidence of that exact capability; bury a pointer error under a "no results" summary; approve an answer without reading its evidence; wrap `ask.py`/`dispatch.py` in `timeout` (macOS has no `timeout` command, so the call dies before Super Jev runs; use your harness's own time limit); fall back to a by-hand search because a call printed an error or nothing (rerun it and read the error first).
+Do not: treat "preparation required" as an answer; repeat a failed search instead of connecting or refreshing; say "your whole brain is connected" or "always up to date" without evidence of that exact capability; bury a pointer error under a "no results" summary; approve an answer without reading its evidence; wrap `ask.py`/`dispatch.py` in `timeout` (it is not available by default on macOS, so the call can die before Super Jev runs; use your harness's own time limit); fall back to a by-hand search because a call printed an error or nothing: inspect its exit status and stderr (poll it if still running, never start a second copy), fix the reported cause, then retry once; if still blocked, report it rather than loop.
 
 ## Deeper guides
 
