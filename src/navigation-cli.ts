@@ -20,10 +20,11 @@ async function stdin(): Promise<string> {
   return body.toString('utf8');
 }
 
-function checkedInput(input: unknown): { question?: unknown; catalog?: unknown; limits?: unknown } {
+function checkedInput(input: unknown): { question?: unknown; catalog?: unknown; limits?: unknown; mode?: 'navigation' | 'source-evidence' | 'source-discovery' } {
   if (!input || typeof input !== 'object') throw new NavigationError('Navigation input is invalid');
-  const value = input as { question?: unknown; catalog?: unknown; limits?: unknown };
-  if (Object.keys(value).some(key => !['question', 'catalog', 'limits'].includes(key)) || (value.limits !== undefined && (!value.limits || typeof value.limits !== 'object' || Array.isArray(value.limits) || Object.keys(value.limits).some(key => !['beamWidth', 'maxRounds', 'maxResults'].includes(key))))) throw new NavigationError('Navigation input is invalid');
+  const value = input as { question?: unknown; catalog?: unknown; limits?: unknown; mode?: 'navigation' | 'source-evidence' | 'source-discovery' };
+  if (Object.keys(value).some(key => !['question', 'catalog', 'limits', 'mode'].includes(key)) || (value.limits !== undefined && (!value.limits || typeof value.limits !== 'object' || Array.isArray(value.limits) || Object.keys(value.limits).some(key => !['beamWidth', 'maxRounds', 'maxResults'].includes(key))))) throw new NavigationError('Navigation input is invalid');
+  if (value.mode !== undefined && value.mode !== 'navigation' && value.mode !== 'source-evidence' && value.mode !== 'source-discovery') throw new NavigationError('Navigation mode is invalid');
   return value;
 }
 
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
     const results = await Promise.all(batch.map(async item => {
       try {
         const value = checkedInput(item);
-        return await navigate(value.catalog, value.question, { ...(value.limits as object | undefined), timeoutMs, transport });
+        return await navigate(value.catalog, value.question, { ...(value.limits as object | undefined), timeoutMs, transport, mode: value.mode });
       } catch (error) {
         return { status: 'error', reason: error instanceof NavigationError ? error.message : `Navigation failed: ${providerFailureReason(error)}` };
       }
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
     process.stdout.write(JSON.stringify({ results, calls: transport.calls }) + '\n');
     return;
   }
-  const result = await navigate(single!.catalog, single!.question, { ...(single!.limits as object | undefined), timeoutMs, transport });
+  const result = await navigate(single!.catalog, single!.question, { ...(single!.limits as object | undefined), timeoutMs, transport, mode: single!.mode });
   process.stdout.write(JSON.stringify(result) + '\n');
 }
 

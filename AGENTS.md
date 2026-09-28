@@ -52,8 +52,9 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    Success: ranked lines like `0.99  /path/to/file.md  [my-notes]`. This is
    where the answer is, not the answer itself: open the top file, read it, and
    answer from what it says, naming that file. `ask` only ranks files; it
-   never reads the value out for you. Find the exact value in the file
-   yourself; if the file only mentions the topic, the answer is not there.
+   never reads the value out for you. Read every relevant returned file yourself: a component may need another source
+   or calculation. Topic overlap alone is insufficient. See
+   [source retrieval](skills/super-jev/references/source-retrieval.md) for scope and limits.
 
 6. **Ask for a fact that is not in the files.** Success: `no-candidates across
    1 pointers: Super Jev couldn't find it in the connected files.` Tell your

@@ -24,7 +24,7 @@ spec.loader.exec_module(ask)
 
 @pytest.fixture(autouse=True)
 def no_content_check(monkeypatch):
-    monkeypatch.setattr(ask, "confirm", lambda question, paths: ({}, set(paths), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda question, paths: ({p: .9 for p in paths}, set(), None, {}))
 
 
 def test_pointer_benched_after_threshold_consecutive_failures():

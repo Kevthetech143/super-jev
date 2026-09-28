@@ -2,7 +2,7 @@
 """Word matching is Unicode- and accent-aware. Real failure (PR #175 review): the
 ASCII-only WORD_RE split "¿Cuántas medicinas toma mi papá?" into cu/ntas/pap, so
 the right Spanish file got word coverage 0.04 and a confirm would be capped to
-possible by cover_gate. Nothing here makes a live provider call.
+eligible for word-search discovery. Nothing here makes a live provider call.
 
     python3 -m pytest skills/super-jev/tests/test_unicode_words.py -q
 """
@@ -61,8 +61,7 @@ def test_english_words_unchanged():
 def test_spanish_question_ranks_and_keeps_its_file(tmp_path, question):
     right, wrong, ranked = _search(tmp_path, question)
     assert ranked[0][1] == right and ranked[0][0] > dict((p, s) for s, p, _ in ranked).get(wrong, 0)
-    scores = {right: 0.9}
-    assert ask.cover_gate(scores) == [] and scores[right] == 0.9
+    assert ask._STAGE["word"]["cover"][right] > 0
 
 
 def test_term_hits_folds_the_text():

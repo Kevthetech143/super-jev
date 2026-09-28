@@ -8,11 +8,11 @@ import ask
 
 def test_abstract_worth_is_not_an_exact_money_question():
     q = "What should I remember about someone's worth depending on helping others?"
-    assert not ask.is_value_question(q)
-    assert ask.confirm_label(q) == ask.ANSWER_LABEL
-    assert not ask.is_value_question("What is worth reading?")
+    assert ask.confirm_label(q) == ask.SOURCE_LABEL
+    assert ask.confirm_label(q) == ask.SOURCE_LABEL
+    assert ask.confirm_label("What is worth reading?") == ask.SOURCE_LABEL
     for q in ("What is the boat worth?", "What is our net worth?", "How much is it worth?", "What’s my car worth?"):
-        assert ask.is_value_question(q)
+        assert ask.confirm_label(q) == ask.SOURCE_LABEL
 
 
 def test_read_but_rejected_file_does_not_get_reconnect_advice(monkeypatch):

@@ -125,8 +125,9 @@ def test_big_file_on_topic_records_its_section_heading(tmp_path, monkeypatch):
         cmd, 0, json.dumps({"status": "candidates", "candidates": [{"score": 0.5, "sourceId": str(rule_i)}]}), ""))
     monkeypatch.setattr(ask, "_STAGE", {})
     ask.confirm_one("does a split part heal through its parent's recipe", str(f))
-    section = ask._STAGE["checks"][str(f)]["section"]
-    assert section.startswith("v1.0.") and f"## {section}\n" in "".join(parts[:rule_i + 1])
+    detail = ask._STAGE["checks"][str(f)]
+    assert detail["best_chunk"] == rule_i
+    assert detail["best_line"] >= 1 + sum(p.count("\n") for p in parts[:rule_i])
 
 
 def test_middle_passage_keeps_the_file_title():
