@@ -17,7 +17,7 @@ python3 build_cycle.py --dir CYCLE_DIR --principal YOUR_AGENT STEP ...
 
 | # | Step | Command | Super Jev use |
 |---|---|---|---|
-| 0 | preflight | `preflight [--project-dir DIR ...] [--skill "what the new skill does"]` | free: Super Jev reachable, every connection ready, project folders connected; names each fix. `--skill` searches for an existing skill first (reuse beats a duplicate). No receipt until ready. |
+| 0 | preflight | `preflight [--project-dir DIR ...] [--skill "what the new skill does"]` | free: Super Jev reachable, every connection ready, project folders connected; names each fix. `--skill` searches for an existing skill first (reuse beats a duplicate). No receipt until ready. Uses Super Jev's own `ask.py --preflight` when present. |
 | 1 | start | `start "the idea in plain words" [--project NAME]` | 4 asks: tried before? design rules? known traps? which files and tests? Open the files it lists. No strong hit = NEW GROUND: research outside first. |
 | 2 | target | `target --goal "..." --evidence "lookup id / log line / user report" [--ask]` | optional ask for related past misses |
 | 3 | cause | `cause --cause "..." [--file PATH ...] [--ask "question" ...] [--trace last]` | lookups on the cause; `--trace` shows a Super Jev ask's trace when the failure is an ask |
