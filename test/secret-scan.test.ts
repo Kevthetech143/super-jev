@@ -53,6 +53,17 @@ test('an escaped quote before a placeholder is not a secret; a real value after 
     `api_key=${q}\${VAR}${q}, x`]) assert.equal(hasSecret(t), false, t);
 });
 
+test('a card after another digit group and a 15-digit Amex are held; ordinary numbers are not', () => {
+  for (const t of ['order 1234 4111 1111 1111 1111', 'order 1234-5678-4111-1111-1111-1111', '1234 4111111111111111',
+    '3782 822463 10005', 'amex 3782-822463-10005', '378282246310005', 'card 3782 822463 10005 exp 09/28',
+    '3782 822463 10005 ١']) assert.equal(hasSecret(t), true, t);
+  for (const t of ['order 1234 5678 9012 3456 7890', '3782 822463 10006', '3882 822463 10005', 'x3782 822463 10005',
+    '3782 822463-10005', 'call +1 (555) 123-4567', 'imei 356938035643809', 'fedex 123456789012']) assert.equal(hasSecret(t), false, t);
+  // A hit inside the overlapping scan must not leave lastIndex on a shared regex for the next call.
+  assert.equal(hasSecret('order 1234 4111 1111 1111 1111'), true);
+  assert.equal(hasSecret('card 4111 1111 1111 1111'), true);
+});
+
 test('a spaced USPS tracking number is not a card; a card next to digits still is', () => {
   const trk = '9302 2110 4790 0005 3721 11'; // made-up, valid check digit; its first 16 digits pass Luhn
   for (const t of [trk, trk.replaceAll(' ', '-'), `tracking ${trk} delivered`]) assert.equal(hasSecret(t), false, t);

@@ -207,6 +207,8 @@ def _record_written(path: Path) -> None:
 # a password (digit lookbehind). GENERIC keywords start a word and their tail is capped.
 _PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").read_text())
 CARD_RE = re.compile(_PAT["card"], re.A)
+CARD_IIN_RE = re.compile(_PAT["card_iin"], re.A)
+AMEX_RE = re.compile(_PAT["amex"], re.A)
 WORD_RE = re.compile(_PAT["word"], re.I | re.A)
 TOKEN_RE = re.compile(_PAT["token"], re.I | re.A)
 GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
@@ -224,6 +226,12 @@ URL_RE = re.compile(_PAT["url"], re.A)
 # run would let a short 91-95 number in front of a card turn "number + card" into a tracking number.
 # A run with a Luhn-valid window after its first group is not removed; about 1 in 100 real 22-digit
 # numbers (1 in 50 for 26 digits) are then still held by the card rule, down from 1 in 10.
+# CARD_RE.finditer never overlaps, so it tests only the first 16-digit window of a longer grouped run and
+# missed "order 1234 4111 1111 1111 1111". Later windows are tested too, but only with a card-network prefix
+# (CARD_IIN_RE) on top of Luhn and with 1 to 4 digit groups before and at most 4 after them in the run, at most
+# 2 of 4+ digits on each side (an order number, phone or date, then an expiry and CVV; _near_ok), so a long
+# row of 4-digit numbers is not held for its many windows by chance. They are read with every
+# check-digit-valid USPS run removed, so a USPS number standing alone is held exactly as often as before.
 TRACKING_RE = re.compile(_PAT["tracking"], re.A)
 _CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
@@ -394,25 +402,72 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
-def _usps_tracking(run: str) -> bool:
-    """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check
-    digit, and no Luhn-valid 16-digit window starting at its 2nd or 3rd group, where a card could sit behind a
-    short 91-95 number ("9100 4111 1111 1111 1111 01"). Such a run is not exempt and the card rule decides."""
+def _usps_check_ok(run: str) -> bool:
+    """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check digit."""
     d = re.sub(r"\D", "", run)
     if len(d) not in (22, 26):
         return False
     total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(d[:-1])))
-    return (10 - total % 10) % 10 == int(d[-1]) and not any(_luhn(d[i:i + 16]) for i in range(4, len(d) - 15, 4))
+    return (10 - total % 10) % 10 == int(d[-1])
+
+
+def _usps_tracking(run: str) -> bool:
+    """A _usps_check_ok run with no Luhn-valid 16-digit window starting at its 2nd or 3rd group, where a card
+    could sit behind a short 91-95 number ("9100 4111 1111 1111 1111 01"). Such a run is not exempt and the
+    first-window card rule decides."""
+    d = re.sub(r"\D", "", run)
+    return _usps_check_ok(run) and not any(_luhn(d[i:i + 16]) for i in range(4, len(d) - 15, 4))
+
+
+def _groups_near(text: str, start: int, end: int) -> tuple:
+    """Digit groups, joined by single spaces or dashes, running up to start and on from end: (all, 4+ digits)
+    before, then after. Each side stops after 5 groups."""
+    counts = []
+    for step in (-1, 1):
+        i, total, long = (start - 1, 0, 0) if step < 0 else (end, 0, 0)
+        while total < 5 and 0 <= i + step < len(text) and text[i] in "- " and "0" <= text[i + step] <= "9":
+            j = i + step
+            while 0 <= j + step < len(text) and "0" <= text[j + step] <= "9":
+                j += step
+            total += 1
+            long += abs(j - i) >= 4
+            i = j + step
+        counts += [total, long]
+    return tuple(counts)
+
+
+def _near_ok(before: int, before_long: int, after: int, after_long: int) -> bool:
+    """A later card window: 1 to 4 digit groups before it and at most 4 after, at most 2 of 4+ digits on each side,
+    so an order number, phone number or date before it and an expiry and CVV after it are allowed, and a long
+    row of 4-digit numbers is not tested window by window."""
+    return 1 <= before <= 4 and after <= 4 and before_long <= 2 and after_long <= 2
+
+
+def _overlapping(rx, text: str):
+    m = rx.search(text)
+    while m:
+        yield m
+        m = rx.search(text, m.start() + 1)
 
 
 def card_hit(text: str, luhn: bool = True) -> bool:
-    """A standalone 16-digit run (dates/URLs and whole USPS tracking numbers scrubbed) that passes the Luhn
-    check. luhn=False when the raw text had non-ASCII digits: normalizing folds them to 0, so their true value
-    is lost and no run is exempted as a tracking number either."""
+    """A standalone 16-digit run or 15-digit Amex number (dates/URLs and whole USPS tracking numbers scrubbed)
+    that passes the Luhn check, or a 16-digit window after other digit groups ("1234 4111 1111 1111 1111"; see
+    _near_ok) that passes Luhn and starts with a card-network prefix; the later window is read with every
+    check-digit-valid USPS run removed. luhn=False when the raw text had non-ASCII digits: normalizing folds them
+    to 0, so their true value is lost, any card-shaped run is held and no run is exempted as a tracking number."""
     text = _scrub_dates_and_urls(text)
-    if luhn:
-        text = TRACKING_RE.sub(lambda m: " " if _usps_tracking(m.group()) else m.group(), text)
-    return any(not luhn or _luhn(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(text))
+    if not luhn:
+        return bool(CARD_RE.search(text) or AMEX_RE.search(text))
+    plain = TRACKING_RE.sub(lambda m: " " if _usps_check_ok(m.group()) else m.group(), text)
+    text = TRACKING_RE.sub(lambda m: " " if _usps_tracking(m.group()) else m.group(), text)
+    if any(_luhn(re.sub(r"\D", "", m.group())) for m in (*CARD_RE.finditer(text), *AMEX_RE.finditer(text))):
+        return True
+    for m in _overlapping(CARD_RE, plain):
+        d = re.sub(r"\D", "", m.group())
+        if CARD_IIN_RE.match(d) and _luhn(d) and _near_ok(*_groups_near(plain, m.start(), m.end())):
+            return True
+    return False
 
 
 def has_secret(text: str) -> bool:
