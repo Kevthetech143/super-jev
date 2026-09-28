@@ -284,14 +284,22 @@ def main(argv=None):
     try:
         if not a.evidence:
             raise JevError("needs at least one evidence file")
-        evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace").read())
+        # newline="": a lone CR stays inside its line (see prepare_bulk.mask_evidence)
+        evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace", newline="").read())
                     for f in a.evidence]
-        # Evidence goes to the Jev API, so it gets the same secret scan connect uses.
+        # Evidence goes to the Jev API, so it gets the same secret scan connect uses: each file
+        # that scans as a secret anywhere in the evidence (a test fixture's fake card number too)
+        # is withheld whole; an item left with nothing judgeable is dropped, none left is refused.
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from prepare_bulk import has_secret
-        for f, text in evidence:
-            if has_secret(text):
-                raise JevError(f"evidence file {f} contains a secret; not sent")
+        from prepare_bulk import has_secret, mask_evidence
+        masked, withheld = mask_evidence(evidence)
+        kept = [(f, text) for f, text in masked if text is not None]
+        if not kept:
+            raise JevError(f"evidence file {masked[0][0]} contains a secret; not sent")
+        if withheld:
+            print(f"jev: withheld {len(withheld)} file(s) holding secret-shaped text, not sent: "
+                  f"{', '.join(withheld)}; a claim about them cannot be checked", file=sys.stderr)
+        evidence = kept
         claims = list(a.claim)
         if a.claims_file:
             claims += [l.strip() for l in open(os.path.expanduser(a.claims_file), encoding="utf-8") if l.strip()]
