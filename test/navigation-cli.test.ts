@@ -59,7 +59,7 @@ test('source-evidence mode reaches the evaluator in single and batched CLI reque
     { id: 'root', label: 'Sources', description: '', children: ['p'] },
     { id: 'p', label: 'Passage', description: 'Some context.', sourceId: 'p' }
   ] };
-  const env = { TYPESAFE_API_KEY: 'offline-test-key', NODE_OPTIONS: `--require=${hook}` };
+  const env = { TYPESAFE_API_KEY: 'x', NODE_OPTIONS: `--require=${hook}` };
   try {
     const single = runCli(JSON.stringify({ question: 'fact?', catalog, mode: 'source-evidence' }), env);
     assert.equal(single.code, 0, single.stderr);
