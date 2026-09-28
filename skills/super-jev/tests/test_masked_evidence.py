@@ -61,8 +61,19 @@ PRODUCT = ("diff --git a/src/scan.py b/src/scan.py\n--- a/src/scan.py\n+++ b/src
 
 
 def test_file(body, name="tests/test_scan.py"):
-    return (f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n"
-            f"@@ -1,2 +1,{body.count(chr(10)) + 1} @@\n{body}")
+    """A file's diff section as git writes it: each hunk's @@ line counts its own lines (a body
+    may hold more @@ lines; they are rewritten with the right counts)."""
+    hunks = [[]]
+    for line in body[:-1].split("\n") if body.endswith("\n") else body.split("\n"):
+        if line.startswith("@@"):
+            hunks.append([])
+        else:
+            hunks[-1].append(line)
+    out = f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n"
+    for hunk in hunks:
+        old, new = sum(l[:1] in " -" for l in hunk), sum(l[:1] in " +" for l in hunk)
+        out += f"@@ -1,{old} +1,{new} @@\n" + "".join(l + "\n" for l in hunk)
+    return out
 
 
 test_file.__test__ = False  # a helper, not a test
@@ -176,7 +187,7 @@ def test_a_held_section_without_a_hunk_keeps_only_header_lines():
     first = test_file("+" + PEM + "\n", "k.pem")
     no_hunk = "diff --git a/k.pem b/k.pem\nindex 1..2 100644\n" + KEY_BODY[0] + "\n"
     out, _ = pb.mask_secrets(first + no_hunk + PRODUCT)
-    assert KEY_BODY[0] not in out and out.endswith(PRODUCT)
+    assert out is None or KEY_BODY[0] not in out  # git never writes text there: the rest goes with k.pem
 
 
 def test_gate_masks_before_it_truncates(tmp_path):
@@ -237,6 +248,66 @@ def test_cli_entries_withhold_a_file_split_over_two_evidence_files(tmp_path):
         assert sent, argv
         assert not any(b in sent or b[::-1] in sent for b in KEY_BODY), argv
         (tmp_path / "sent.log").unlink()
+
+
+def test_a_lone_cr_cannot_start_a_fake_file(tmp_path):
+    """Text mode reads a lone CR as a line break, so "+log 100%\\rdiff --git a/zz b/zz" became a
+    file of its own, judged apart from the key it sat in. Readers now keep the CR in its line,
+    and a hunk that ends before its counts joins the rest of its evidence item."""
+    fake = f"+fetching 100%\rdiff --git a/zz b/zz\n"
+    body = "".join(f"+{b}\n" for b in KEY_BODY)
+    text = test_file("+" + PEM + "\n" + fake + body + "+" + PEM_END + "\n", "tests/fixture.log") + PRODUCT
+    for as_read in (text, text.replace("\r", "\n")):  # kept by the readers, and split by text mode
+        out, _ = pb.mask_secrets(as_read)
+        assert out is None or not any(b in out for b in KEY_BODY)
+    out, _ = pb.mask_secrets(text)
+    assert out.endswith(PRODUCT)  # with the CR kept, nothing else is lost
+    ev = tmp_path / "wt.diff"
+    ev.write_bytes(text.encode())
+    for argv in ([str(SKILL / "superjev.py"), "gate", str(ev), "--claim", "scan returns card_hit(text)"],
+                 [str(SKILL / "lib" / "jev_client.py"), str(ev), "--claim", "scan returns card_hit(text)"]):
+        p, sent = run_cli(tmp_path, argv)
+        assert sent and not any(b in sent for b in KEY_BODY), argv
+        (tmp_path / "sent.log").unlink()
+
+
+def test_worktree_diff_keeps_a_lone_cr_in_its_line(tmp_path):
+    bc = load("build_cycle_cr", SKILL.parent / "super-jev-build-cycle" / "build_cycle.py")
+    origin, wt = tmp_path / "origin", tmp_path / "wt"
+
+    def git(cwd, *args):
+        subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                       check=True, capture_output=True)
+
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    (origin / "README").write_text("x\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-qm", "init")
+    subprocess.run(["git", "clone", "-q", str(origin), str(wt)], check=True)
+    (wt / "log.txt").write_bytes(b"a 100%\rdiff --git a/zz b/zz\nb\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "log")
+    text = bc.worktree_diff(type("Ctx", (), {"dir": tmp_path})(), "t", str(wt)).read_bytes()
+    assert b"+a 100%\rdiff --git a/zz b/zz\n" in text
+
+
+def test_gate_evidence_mode_names_what_it_withheld(tmp_path):
+    notes, other = tmp_path / "notes.md", tmp_path / "other.md"
+    notes.write_text(f"card {CARD}\n")
+    other.write_text("scan returns card_hit(text)\n")
+    p, sent = run_cli(tmp_path, [str(SKILL / "superjev.py"), "gate", str(notes), str(other),
+                                 "--claim", "scan returns card_hit(text)"])
+    assert "4111" not in sent and "card_hit" in sent
+    assert "withheld 1 file(s)" in p.stdout and str(notes) in p.stdout
+
+
+def test_non_ascii_digit_in_another_item_still_masks():
+    # the Luhn switch is evidence-wide: a digit run that is only a card with Luhn off must not
+    # slip through the "nothing to mask" check and get the whole request refused later
+    items, withheld = pb.mask_evidence([("notes.md", "label \u0663\n"),
+                                        ("wt.diff", test_file("+n = '1234 5678 9012 3456'\n", "t.py") + PRODUCT)])
+    assert withheld == ["t.py"] and items[1][1].endswith(PRODUCT)
 
 
 def test_text_that_is_not_a_diff_is_not_judged():

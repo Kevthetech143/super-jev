@@ -137,15 +137,17 @@ def worktree_diff(ctx, step: str, worktree: str) -> Path:
     wt = Path(worktree).expanduser()
     diffs = []
     for args in (["diff", "origin/main...HEAD"], ["diff", "HEAD"]):
-        r = subprocess.run(["git", "-C", str(wt)] + args, capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", str(wt)] + args, capture_output=True)
         if r.returncode:
-            raise CycleError(f"git {' '.join(args)} failed in {wt}: {r.stderr.strip()[:200]}")
-        diffs.append(r.stdout)
+            raise CycleError(f"git {' '.join(args)} failed in {wt}: "
+                             f"{r.stderr.decode('utf-8', 'replace').strip()[:200]}")
+        # bytes as git wrote them: text mode would turn a lone CR in a file into a line break
+        diffs.append(r.stdout.decode("utf-8", "replace"))
     text = "".join(diffs)
     if not text.strip():
         raise CycleError(f"no changes in {wt} against origin/main; pass --evidence FILE instead")
     out = ctx.dir / f"{step}-diff.patch"
-    out.write_text(text, encoding="utf-8")
+    out.write_text(text, encoding="utf-8", newline="")
     return out.absolute()
 
 
