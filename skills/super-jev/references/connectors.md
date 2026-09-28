@@ -158,7 +158,14 @@ dates and URLs first, so a long numeric id in a URL or a run of dates on one
 line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
-operator decision; it never lifts the size-ceiling hold. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
+operator decision for one run (never replayed); it never lifts the size-ceiling hold.
+`--approve-held PATH` (repeatable) admits one reviewed held file and records
+`{path, sha256}` as `approvedHeld` in the report; `--refresh` and auto-heal
+replay it only while the file's bytes match, otherwise it is held again with
+a reason naming the old approval. It also admits a size-held file up to
+1,000,000 bytes (gated in parts); credential/key suffixes can never be approved.
+A backslash-escaped quote before a placeholder (`KEY=\"$(cat file)\"` inside a
+code string) counts as a plain quote, so it is not held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,

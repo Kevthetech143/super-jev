@@ -5,7 +5,8 @@ Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT [--principal AGENT2 ...]
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
-                          [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
+                          [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--approve-held PATH ...]
+                          [--no-connect]
                           [--findability] [--refresh] [--no-shared] [--shareable]
 
   Prints a `writer: <command>` banner at the start of every run: the resolved --writer-command
@@ -36,7 +37,11 @@ Pipeline per run:
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
      one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
      a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
-     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. A first connect
+     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. --approve-held PATH
+     (repeatable) admits one held file after a person reviewed it and records its path and sha256 in the report;
+     --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file is held
+     again naming the old approval. It also lifts a size hold up to APPROVE_MAX_BYTES (1,000,000); a credential
+     suffix can never be approved. --allow-held is never replayed. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
      already-cached pointer instead guards on files that actually need a writer call this run (unchanged
      cached files are free and reused); raise --max-files to opt into a larger writer cost.
@@ -240,6 +245,8 @@ SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 # list and knowledge file over it unsearchable. 250,000 bytes keeps one file's gate to about 5 Jev
 # calls; a bigger file is still held with a split hint.
 CEILING_BYTES = 250_000
+# A reviewed --approve-held file may go over CEILING_BYTES up to this hard cap (about 20 gate calls).
+APPROVE_MAX_BYTES = 1_000_000
 # One connect (a part pointer) may hold at most 5 MiB (path_connect.MAX_BYTES); parts close early
 # before that. Under the old 90,000-byte file limit 50 files never reached it, so parts are unchanged.
 PART_BYTES = 4_500_000
@@ -487,11 +494,14 @@ def walk_md(root: Path, no_recurse: bool = False, extensions=CONNECTABLE_EXTENSI
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
-              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS):
+              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS,
+              approvals: dict = None, approved_out: set = None):
     """Union of selected text suffixes under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
-    since an oversized file cannot be gated regardless.
+    since an oversized file cannot be gated regardless. `approvals` ({path: sha256}, from --approve-held)
+    admits a held file only while its bytes hash to the reviewed sha256, and lifts a size hold up to
+    APPROVE_MAX_BYTES; each approval key used is added to `approved_out`.
     A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
     folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
     logins.md or any other file the roots would never have admitted."""
@@ -534,11 +544,23 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if not b.strip():
                 continue
             seen.add(rp)
+            key = next((k for k in (str(p), str(rp)) if k in (approvals or {})), None)
+            approved, note, admitted = None, "", []
+            if key:
+                digest = hashlib.sha256(b).hexdigest()
+                if approvals[key] == digest:
+                    approved = digest
+                else:
+                    note = (f"; changed since its --approve-held review (approved sha256 {approvals[key][:12]}), "
+                            "review it again")
             if len(b) > CEILING_BYTES:
                 split_hint = ("split it into smaller .md files, e.g. one per ## section"
                               if p.suffix.lower() == '.md' else "split it into smaller text files")
-                held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
-                                      f"{split_hint}")); continue
+                why = f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,})"
+                if not (approved and len(b) <= APPROVE_MAX_BYTES):
+                    too_big = f"; too big to approve (max {APPROVE_MAX_BYTES:,})" if approved else ""
+                    held.append((str(p), f"{why}; {split_hint}{too_big}{note}")); continue
+                admitted.append(why)
             if b"\x00" in b:
                 held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
             try:
@@ -548,15 +570,23 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                 held.append((str(p), "binary/control-character content, not text; skipped")); continue
             if has_secret(b.decode("utf-8", "replace")):
-                if allow_held:
+                if approved:
+                    admitted.append("card/password-like text")
+                elif allow_held:
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
                 else:
-                    held.append((str(p), "card/password-like text; review before onboarding")); continue
+                    held.append((str(p), f"card/password-like text; review before onboarding{note}")); continue
             if path_has_secret(p.name) or path_has_secret(rp.name):
-                if allow_held:
+                if approved:
+                    admitted.append("secret-keyword-like file name")
+                elif allow_held:
                     held.append((str(p), "secret-keyword-like file name; admitted by --allow-held"))
                 else:
-                    held.append((str(p), "secret-keyword-like file name; review before onboarding")); continue
+                    held.append((str(p), f"secret-keyword-like file name; review before onboarding{note}")); continue
+            if admitted:
+                held.append((str(p), f"{'; '.join(admitted)}; admitted by --approve-held (sha256 {approved[:12]})"))
+                if approved_out is not None:
+                    approved_out.add(key)
             files.append(p)
     if test_skips:
         print(f"  SKIP  {test_skips} test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); name one exactly with --name to connect it")
@@ -946,10 +976,15 @@ def replay_recipe(a) -> None:
     a.names = a.names or rep.get("names") or []
     a.allow_targets = a.allow_targets or rep.get("allowTargets") or []
     # --allow-held is never replayed: it would admit NEW secret-looking files without review.
+    # --approve-held approvals are: each admits only the exact bytes a person reviewed (sha256).
+    a.recorded_approvals = {e["path"]: e["sha256"] for e in rep.get("approvedHeld") or []
+                            if isinstance(e, dict) and isinstance(e.get("path"), str)
+                            and isinstance(e.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", e["sha256"])}
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, part size {a.limit or 50}; --allow-held is never replayed)")
+          f"no-recurse {a.no_recurse}, part size {a.limit or 50}; --allow-held is never replayed, "
+          f"{len(a.recorded_approvals)} --approve-held file(s) replayed while unchanged)")
     # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
     # the whole (possibly grown) folder, so its recorded file list is the scope instead.
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
@@ -1003,6 +1038,10 @@ def main() -> int:
     ap.add_argument("--allow-held", action="store_true",
                     help="admit files the secret scan would hold (still listed in the held file, noting the override); "
                          "the size-ceiling hold is unaffected")
+    ap.add_argument("--approve-held", dest="approve_held", action="append", default=[], metavar="PATH",
+                    help="admit this held file after a person reviewed it (repeatable); its sha256 is recorded and "
+                         "--refresh replays the approval only while the file is unchanged. Lifts a size hold up to "
+                         f"{APPROVE_MAX_BYTES:,} bytes; never a credential/key suffix")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--findability", action="store_true",
@@ -1022,6 +1061,9 @@ def main() -> int:
     a = ap.parse_args()
     a.extensions = list(dict.fromkeys((*CONNECTABLE_EXTENSIONS, *(e for group in a.ext for e in group)))) if a.ext is not None else None
     a.no_findability = a.no_findability or not a.findability
+    for path in a.approve_held:
+        if credential_suffix(given_path(path).name) or credential_suffix(given_path(path).resolve().name):
+            print(f"REFUSED: --approve-held {path}: credential/key file suffixes can never be approved"); return 2
 
     if a.list:
         if not a.pointer and not a.principals:
@@ -1084,7 +1126,17 @@ def main() -> int:
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
         print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions)
+    approvals = dict(getattr(a, "recorded_approvals", {}))
+    given = {}
+    for path in a.approve_held:
+        gp = given_path(path)
+        if gp.is_file():
+            approvals[str(gp)] = given[str(gp)] = sha(gp)
+        else:
+            print(f"  --approve-held {path}: no such file; nothing approved")
+    used = set()
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions,
+                            approvals, used)
     scope = getattr(a, "legacy_scope", None)
     if scope is not None:
         files = [p for p in files if str(p) in scope]
@@ -1093,6 +1145,16 @@ def main() -> int:
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
+    for p, why in held:
+        if "admitted by --approve-held" in why:
+            print(f"  APPROVED  {relstr(p, roots)}  ({why})")
+    for path in given:
+        if path not in used:
+            print(f"  --approve-held {path}: not held in this pointer's scope; nothing approved or recorded")
+    # Recorded approvals persist while their file exists (a stale one keeps naming itself in the hold reason);
+    # one given now is recorded only when it admitted a held file.
+    approved_held = {k: v for k, v in getattr(a, "recorded_approvals", {}).items() if Path(k).exists()}
+    approved_held.update({k: approvals[k] for k in used})
     if not files and not held:
         print(f"ERROR: no {','.join(a.extensions)} files found under {', '.join(str(r) for r in roots)} "
               "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
@@ -1266,14 +1328,18 @@ def main() -> int:
               f"      to include it: check the file says what it should, then run: {rerun}"
               + ("" if use_builtin else " --writer builtin"))
     for p, why in held:
-        if "admitted by --allow-held" in why:
+        if "admitted by --allow-held" in why or "admitted by --approve-held" in why:
             continue
         print(f"  HELD  {relstr(p, roots)}  ({why})")
         if "review before onboarding" in why:
             print(f"      to include it (and any other held secret-looking file) after checking it: "
                   f"{rerun} --allow-held")
+            print(f"      or keep it approved across refreshes while unchanged: {rerun} --approve-held {shlex.quote(p)}")
         elif "binary" not in why:
             print(f"      then run: {rerun}")
+            if "over size ceiling" in why and Path(p).is_file() and Path(p).stat().st_size <= APPROVE_MAX_BYTES:
+                print(f"      or, after checking it, connect it whole (gated in parts): "
+                      f"{rerun} --approve-held {shlex.quote(p)}")
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
@@ -1282,6 +1348,7 @@ def main() -> int:
               "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
               "approved": [str(p) for p in connect_set],
+              "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
