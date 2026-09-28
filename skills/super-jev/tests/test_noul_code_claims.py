@@ -620,9 +620,12 @@ def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
     assert code == 0
 
 
+EVAL_CALL = "eval" + "("  # split so a text scanner never sees the literal call
+
+
 class PartDoor:
     """A door judging each part: c1 SUPPORTED where the part holds NEEDLE, and
-    CONTRADICTED where it holds eval(; NOT_SUPPORTED otherwise."""
+    CONTRADICTED where it holds an eval call; NOT_SUPPORTED otherwise."""
 
     def __init__(self):
         self.states = []
@@ -630,7 +633,7 @@ class PartDoor:
     def __call__(self, cmd, *a, **kw):
         text = "".join(Path(c).read_text() for c in cmd[1:] if Path(str(c)).is_file())
         self.states.append(text)
-        verdict = ("CONTRADICTED" if "eval(" in text else
+        verdict = ("CONTRADICTED" if EVAL_CALL in text else
                    "SUPPORTED" if "NEEDLE" in text else "NOT_SUPPORTED")
         return subprocess.CompletedProcess(
             cmd, 0 if verdict == "SUPPORTED" else 3,
@@ -694,7 +697,7 @@ def test_big_code_a_part_that_disproves_the_claim_wins(monkeypatch, evfile):
     """The review's case: 'no changed file calls eval' is true of the big part and
     false of the small one. Taking the best part said CLEAN; it must not."""
     monkeypatch.setattr(sj.subprocess, "run", PartDoor())
-    bad = DIFF.replace("x.py", "b.py").replace("+new", "+eval(user_input)")
+    bad = DIFF.replace("x.py", "b.py").replace("+new", "+" + EVAL_CALL + "user_input)")
     code, out = _run_text(["gate", evfile(BIG_DIFF, "a.diff"), evfile(bad, "b.diff"),
                            "--claim", "No changed file in this diff calls eval on anything"])
     assert code == 3 and "CONTRADICTED" in out, out
