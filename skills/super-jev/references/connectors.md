@@ -158,7 +158,20 @@ dates and URLs first, so a long numeric id in a URL or a run of dates on one
 line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
-operator decision; it never lifts the size-ceiling hold. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
+operator decision for one run (never replayed); it never lifts the size-ceiling hold.
+`--approve-held PATH` (repeatable) admits one reviewed size-held file of at most
+1,000,000 bytes (gated in parts) and records `{path, sha256}` as `approvedHeld`
+in the report; `--refresh` and auto-heal replay it only while the file's bytes
+match, otherwise it is held again with a reason naming the old approval (the
+file is read once and verified before the writer, which gets exactly those bytes, and the hash is rechecked before gating, caching and at the connect preview, so a
+mid-run edit is held). A file held for secret-like text or name, or with a
+credential/key suffix, is refused: "held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect."
+A backslash-escaped quote before a placeholder (`KEY=\"$(cat file)\"` inside a
+code string) counts as a plain quote, so it is not held; after an escaped quote
+only a closed `$(...)`, `${...}` or `<...>` (at most 200 characters) is a placeholder,
+so a literal `\"$3cret9\"` or an unclosed `\"$(Secret9\"` is held. With any quote or none, a placeholder
+must be the whole value (a quote, space, comma, semicolon or end follows it), so
+`"${VAR}hunter2xyz9"` is held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,
