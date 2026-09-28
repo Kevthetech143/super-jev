@@ -38,10 +38,11 @@ Pipeline per run:
      one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
      a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
      never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. --approve-held PATH
-     (repeatable) admits one held file after a person reviewed it and records its path and sha256 in the report;
+     (repeatable) admits one size-held file after a person reviewed it and records its path and sha256 in the report;
      --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file is held
-     again naming the old approval. It also lifts a size hold up to APPROVE_MAX_BYTES (1,000,000); a credential
-     suffix can never be approved. --allow-held is never replayed. A first connect
+     again naming the old approval. It lifts only a size hold, up to APPROVE_MAX_BYTES (1,000,000); a file held
+     for secret-like text or name, or with a credential suffix, can never be approved. --allow-held is never
+     replayed. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
      already-cached pointer instead guards on files that actually need a writer call this run (unchanged
      cached files are free and reused); raise --max-files to opt into a larger writer cost.
@@ -246,7 +247,10 @@ SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 # calls; a bigger file is still held with a split hint.
 CEILING_BYTES = 250_000
 # A reviewed --approve-held file may go over CEILING_BYTES up to this hard cap (about 20 gate calls).
+# Only a size hold can be approved: secret-like text is never sent, so approving it could not connect it.
 APPROVE_MAX_BYTES = 1_000_000
+SECRET_NOT_APPROVABLE = ("held for secret-like text; Super Jev never sends that text. "
+                         "Remove or move the value, then reconnect.")
 # One connect (a part pointer) may hold at most 5 MiB (path_connect.MAX_BYTES); parts close early
 # before that. Under the old 90,000-byte file limit 50 files never reached it, so parts are unchanged.
 PART_BYTES = 4_500_000
@@ -500,8 +504,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
     since an oversized file cannot be gated regardless. `approvals` ({path: sha256}, from --approve-held)
-    admits a held file only while its bytes hash to the reviewed sha256, and lifts a size hold up to
-    APPROVE_MAX_BYTES; each approval key used maps to the admitted path in `approved_out`.
+    lifts a size hold (up to APPROVE_MAX_BYTES) only while the file's bytes hash to the reviewed sha256;
+    a secret-like file stays held with SECRET_NOT_APPROVABLE; each approval key used maps to the admitted path in `approved_out`.
     A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
     folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
     logins.md or any other file the roots would never have admitted."""
@@ -570,17 +574,17 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                 held.append((str(p), "binary/control-character content, not text; skipped")); continue
             if has_secret(b.decode("utf-8", "replace")):
-                if approved:
-                    admitted.append("card/password-like text")
-                elif allow_held:
+                if allow_held:
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
+                elif approved:
+                    held.append((str(p), f"card/password-like text; {SECRET_NOT_APPROVABLE}")); continue
                 else:
                     held.append((str(p), f"card/password-like text; review before onboarding{note}")); continue
             if path_has_secret(p.name) or path_has_secret(rp.name):
-                if approved:
-                    admitted.append("secret-keyword-like file name")
-                elif allow_held:
+                if allow_held:
                     held.append((str(p), "secret-keyword-like file name; admitted by --allow-held"))
+                elif approved:
+                    held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
                 else:
                     held.append((str(p), f"secret-keyword-like file name; review before onboarding{note}")); continue
             if admitted:
@@ -1047,9 +1051,9 @@ def main() -> int:
                     help="admit files the secret scan would hold (still listed in the held file, noting the override); "
                          "the size-ceiling hold is unaffected")
     ap.add_argument("--approve-held", dest="approve_held", action="append", default=[], metavar="PATH",
-                    help="admit this held file after a person reviewed it (repeatable); its sha256 is recorded and "
-                         "--refresh replays the approval only while the file is unchanged. Lifts a size hold up to "
-                         f"{APPROVE_MAX_BYTES:,} bytes; never a credential/key suffix")
+                    help="admit this size-held file after a person reviewed it (repeatable), up to "
+                         f"{APPROVE_MAX_BYTES:,} bytes; its sha256 is recorded and --refresh replays the approval only "
+                         "while the file is unchanged. Never a secret-like or credential/key file")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--findability", action="store_true",
@@ -1072,6 +1076,9 @@ def main() -> int:
     for path in a.approve_held:
         if credential_suffix(given_path(path).name) or credential_suffix(given_path(path).resolve().name):
             print(f"REFUSED: --approve-held {path}: credential/key file suffixes can never be approved"); return 2
+        gp = given_path(path)
+        if path_has_secret(gp.name) or (gp.is_file() and has_secret(gp.read_bytes().decode("utf-8", "replace"))):
+            print(f"REFUSED: --approve-held {path}: {SECRET_NOT_APPROVABLE}"); return 2
 
     if a.list:
         if not a.pointer and not a.principals:
@@ -1182,7 +1189,7 @@ def main() -> int:
         cache.pop(str(p), None)
         base = next((w for h, w in held if h == str(p)), "").split("; admitted by --approve-held")[0]
         held[:] = [(h, w) for h, w in held if h != str(p)] + [
-            (str(p), f"{base}; review before onboarding; changed since its --approve-held review "
+            (str(p), f"{base}; changed since its --approve-held review "
                      f"(approved sha256 {want[:12]}), review it again")]
         write_held_txt(a.pointer, held)
         print(f"  HELD  {relstr(p, roots)}  (changed after its approval was checked this run; not cached or connected)")
@@ -1371,7 +1378,6 @@ def main() -> int:
         if "review before onboarding" in why:
             print(f"      to include it (and any other held secret-looking file) after checking it: "
                   f"{rerun} --allow-held")
-            print(f"      or keep it approved across refreshes while unchanged: {rerun} --approve-held {shlex.quote(p)}")
         elif "binary" not in why:
             print(f"      then run: {rerun}")
             if "over size ceiling" in why and Path(p).is_file() and Path(p).stat().st_size <= APPROVE_MAX_BYTES:
