@@ -219,7 +219,9 @@ ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
 URL_RE = re.compile(_PAT["url"], re.A)
 # A spaced USPS tracking number (22 or 26 digits in groups of 4) starts with a card-shaped
 # 16-digit run, and about one in ten such numbers passes Luhn there by chance.
-# A whole run that is a valid USPS IMpb number is removed before the card check only.
+# A whole run in USPS layout (TRACKING_RE: starts 91-95, groups of 4 then a final 2, one separator)
+# with a valid check digit is removed before the card check only. The exact layout matters: a loose
+# run would let a short 91-95 number in front of a card turn "number + card" into a tracking number.
 TRACKING_RE = re.compile(_PAT["tracking"], re.A)
 _CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
@@ -391,7 +393,7 @@ def _luhn(digits: str) -> bool:
 
 
 def _usps_tracking(run: str) -> bool:
-    """A whole USPS IMpb number: 22 or 26 digits, starting 91-95, with a valid GS1 mod-10 check digit."""
+    """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check digit."""
     d = re.sub(r"\D", "", run)
     if len(d) not in (22, 26):
         return False

@@ -20,7 +20,7 @@ import pytest
 SKILL = Path(__file__).resolve().parent.parent
 REPO = SKILL.parent.parent
 sys.path.insert(0, str(SKILL))
-from prepare_bulk import CARD_RE, card_hit, has_secret, secret_detail  # noqa: E402
+from prepare_bulk import CARD_RE, _usps_tracking, card_hit, has_secret, secret_detail  # noqa: E402
 
 
 def _gs1(body: str) -> str:
@@ -53,6 +53,10 @@ def _tracking(rng, n=22) -> str:
 def _held_by_window(d: str) -> bool:
     """A card-pattern match in the spaced number passes Luhn (what tripped the old scan)."""
     return any(_luhn_ok(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(_spaced(d)))
+
+
+def _old_card(text: str) -> bool:
+    return any(_luhn_ok(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(text))
 
 
 EXAMPLE = "9302 2110 4790 0005 3721 11"  # made-up, same shape as the real one; valid check digit
@@ -97,6 +101,30 @@ def test_card_near_or_inside_a_digit_run_still_held():
         assert has_secret(line), line
 
 
+def test_short_91_95_number_before_a_card_never_hides_it():
+    # Found in review: a loose run rule read "9100000001 4111 1111 1111 1111" (26 digits) as a tracking
+    # number whenever the card's last digit happened to be a valid check digit. Only USPS layout counts.
+    rng = random.Random(26)
+    for line in ["call 9100000001 4111 1111 1111 1111 thanks", "ref 920000 4111 1111 1111 1111"]:
+        assert has_secret(line), line
+    lines = []
+    for _ in range(3000):
+        card = _card(rng, rng.choice(["4", "51", "6011"]))
+        pre = rng.choice(["91", "92", "93", "94", "95"]) + "".join(rng.choice("0123456789") for _ in range(rng.choice([4, 8])))
+        sep = rng.choice([" ", "-"])
+        lines += [f"ref {pre}{sep}{_spaced(card, sep)}", f"ref {_spaced(pre, sep)}{sep}{_spaced(card, sep)}"]
+    assert sum(_usps_tracking(re.sub(r"\D", "", x)) for x in lines) > 300  # the loose rule would exempt these
+    assert [x for x in lines if not has_secret(x)] == []
+
+
+def test_91_95_card_then_expiry_still_held():
+    rng = random.Random(95)
+    for _ in range(500):
+        card = _card(rng, rng.choice(["91", "95"]))
+        for tail in [" 12 2027", " 12 27", " 123", " 1227 123"]:
+            assert has_secret(f"card {_spaced(card)}{tail}"), card + tail
+
+
 def test_only_whole_valid_usps_runs_are_exempt():
     rng = random.Random(7)
     bad = []
@@ -110,6 +138,10 @@ def test_only_whole_valid_usps_runs_are_exempt():
     for n in [x for x in (_tracking(rng) for _ in range(500)) if _held_by_window(x)][:50]:
         assert has_secret(_spaced(n) + " 5"), n  # the run is longer than the number
         assert has_secret("5 " + _spaced(n)), n
+        for x in [" ".join([n[:6], n[6:10], n[10:14], n[14:18], n[18:]]),  # not USPS layout
+                  " ".join([n[:4], n[4:8], n[8:12], n[12:16], n[16:]]),  # final group of 6
+                  _spaced(n)[:14] + "-" + _spaced(n)[15:]]:  # mixed separators
+            assert has_secret(x) == _old_card(x), x  # not exempt: the plain card rule decides
     for prefix in ["90", "96", "42", "41"]:  # not a 91-95 prefix
         body = [prefix + "".join(rng.choice("0123456789") for _ in range(19)) for _ in range(500)]
         n = next(d for d in (b + _gs1(b) for b in body) if _held_by_window(d))
@@ -137,10 +169,13 @@ def _node(inputs):
 @pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")
 def test_python_and_node_agree():
     rng = random.Random(99)
-    inputs = [EXAMPLE, EXAMPLE.replace(" ", "-"), f"{EXAMPLE} ١", f"{EXAMPLE} 5"]
+    inputs = [EXAMPLE, EXAMPLE.replace(" ", "-"), f"{EXAMPLE} ١", f"{EXAMPLE} 5",
+              "call 9100000001 4111 1111 1111 1111 thanks", "ref 920000 4111 1111 1111 1111"]
     for _ in range(300):
         trk, card = _tracking(rng, rng.choice([20, 22, 26])), _card(rng)
+        pre = trk[:rng.choice([6, 10])]
         inputs += [_spaced(trk), _spaced(trk[:-1] + str((int(trk[-1]) + 1) % 10)), f"{_spaced(card)} 123",
-                   f"{_spaced(card)} {_spaced(trk)}", _spaced(card, "-")]
+                   f"{_spaced(card)} {_spaced(trk)}", _spaced(card, "-"), f"{pre} {_spaced(card)}",
+                   " ".join([trk[:6], trk[6:10], trk[10:14], trk[14:]])]
     py, js = [has_secret(s) for s in inputs], _node(inputs)
     assert [s for s, a, b in zip(inputs, py, js) if a != b] == []
