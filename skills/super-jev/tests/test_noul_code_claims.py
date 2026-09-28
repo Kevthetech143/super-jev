@@ -12,6 +12,7 @@ import argparse
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 from contextlib import redirect_stdout
@@ -617,3 +618,54 @@ def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
     assert rows[0]["confidence"] == pytest.approx(0.93)
     assert rows[0]["arm"] == "noul:code"
     assert code == 0
+
+
+class NeedleJudge(FakeJudge):
+    """p(yes) 0.95 for c1 only when the state holds NEEDLE; 0.1 otherwise."""
+
+    def __call__(self, state, questions):
+        self.calls.append({"state": state, "questions": questions})
+        return {"answers": {"c1": {"noul": 0.95 if "NEEDLE" in state else 0.1}}}
+
+
+def test_code_bigger_than_one_call_is_asked_in_parts_never_cut(monkeypatch, evfile):
+    """A big diff used to be cut before the call; a claim about the file it
+    pushed out came back NOT_SUPPORTED. Now every part is asked."""
+    judge = NeedleJudge({})
+    monkeypatch.setattr(sj, "_code_ask", judge)
+    big = DIFF + "".join("+filler_%d = %d  # a line of a big generated file\n" % (i, i)
+                         for i in range(6000))
+    small = DIFF.replace("x.py", "y.py").replace("+new", "+NEEDLE = 1")
+    code, out = _run_text(["gate", evfile(big, "big.diff"), evfile(small, "small.diff"),
+                           "--claim", "y.py sets the NEEDLE constant to one"])
+    assert code == 0, out
+    assert len(judge.calls) > 1
+    assert all(sj._judge_tokens(c["state"]) <= sj.JUDGE_CALL_TOKENS for c in judge.calls)
+    assert "nothing was cut" in out and "small.diff" in out
+
+
+def test_diff_check_without_env_key_uses_the_configured_judge(monkeypatch, evfile):
+    """No TYPESAFE_API_KEY in the environment, but a configured judge
+    (SUPERJEV_GATE_CMD, as prose checks use): a diff check goes to that judge
+    instead of dying with "TYPESAFE_API_KEY is not set"."""
+    monkeypatch.setattr(sj, "_code_ask", sj._code_ask_live)
+    seen = []
+
+    def door(cmd, *a, **kw):
+        seen.append([str(c) for c in cmd])
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="  c1   SUPPORTED      0.97  x.py now says new\n", stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
+    assert code == 0, out
+    assert seen and seen[-1][0] == os.environ[sj.GATE_CMD_ENV]
+    assert "configured judge" in out and "is not set" not in out
+
+
+def test_diff_check_with_env_key_keeps_the_code_judge(monkeypatch, evfile):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
+    judge = FakeJudge({"c1": 0.9})
+    monkeypatch.setattr(sj, "_code_ask", judge)
+    code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
+    assert code == 0 and len(judge.calls) == 1 and "claim-mode: code" in out

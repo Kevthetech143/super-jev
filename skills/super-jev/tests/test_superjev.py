@@ -5123,9 +5123,11 @@ def test_cap_check_never_touches_the_draft(monkeypatch):
     assert kept == []  # every evidence item dropped; draft itself never touched by this function
 
 
-def test_cmd_gate_warns_and_truncates_over_cap(tmp_path, monkeypatch, capsys):
+def test_cmd_gate_direct_check_never_truncates_over_cap(tmp_path, monkeypatch, capsys):
+    """The cap is the Stop hook's; a direct check sends every file whole."""
     monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "5")
-    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=_jev_header() + CLEAN_GATE_TABLE))
+    door = FakeDoor(0, stdout=_jev_header() + CLEAN_GATE_TABLE)
+    monkeypatch.setattr(sj.subprocess, "run", door)
     ev = tmp_path / "ev.md"
     ev.write_text("x" * 500, encoding="utf-8")
     draft = tmp_path / "d.md"
@@ -5133,10 +5135,98 @@ def test_cmd_gate_warns_and_truncates_over_cap(tmp_path, monkeypatch, capsys):
     code = sj.main(["gate", str(ev), "--draft", str(draft), "--json"])
     capsys.readouterr()
     assert code == 0
-    lines = sj._ledger_lines()
-    rec = json.loads(lines[-1])
-    assert rec["truncated"] is True
-    assert rec["input_cap_tok"] == 5
+    assert str(ev) in door.argv  # the original file, not a cut copy
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["truncated"] is False
+
+
+def test_cap_check_names_the_files_it_drops_and_cuts(monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "10")  # 40 chars
+    items = [("old.md", "A" * 100), ("mid.md", "M" * 30), ("new.md", "B" * 20)]
+    kept, truncated, _est, _cap = sj.cap_check_and_truncate(items, "", "gate")
+    err = capsys.readouterr().err
+    assert truncated and [p for p, _ in kept] == ["mid.md", "new.md"]
+    assert "dropped, not sent: old.md" in err and "cut to its tail: mid.md" in err
+
+
+def test_split_evidence_keeps_every_character_and_fits_each_part():
+    big = "".join(f"line {i} of the big file\n" for i in range(3000))
+    items = [("big.py", big), ("small.md", "the small file\n"), ("one-line.txt", "z" * 9000)]
+    parts = sj.split_evidence(items, 2000)
+    assert len(parts) > 1
+    for part in parts:
+        assert sum(sj._judge_tokens(t) for _, t in part) <= 2000
+    by_file = {}
+    for part in parts:
+        for label, text in part:
+            by_file.setdefault(label.split(" (part ")[0], []).append(text)
+    assert {k: "".join(v) for k, v in by_file.items()} == dict(items)
+    assert sj.split_evidence(items[1:2], 2000) == [[items[1]]]
+
+
+def _table(rows):
+    return "\n" + _jev_header() + "\n\n" + "".join(
+        f"  {k:4s} {v:14s} {s:.2f}  claim {k}\n" for k, v, s in rows) + (
+        "\n  leaked_internal    CLEAN                0.99\n"
+        "  overclaim          HONEST               0.95\n")
+
+
+class PartDoor(FakeDoor):
+    """A door that supports c1 only in the part holding NEEDLE, and c2 in every part."""
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        if _is_git_call(cmd):
+            return _REAL_RUN(cmd, cwd=cwd, env=env, **kw)
+        self.calls.append({"cmd": [str(c) for c in cmd]})
+        text = "".join(Path(c).read_text() for c in cmd if str(c).endswith(".md") and Path(c).is_file())
+        self.states = getattr(self, "states", []) + [text]
+        c1 = ("SUPPORTED", 0.97) if "NEEDLE" in text else ("NOT_SUPPORTED", 0.93)
+        out = _table([("c1", *c1), ("c2", "SUPPORTED", 0.91)])
+        return subprocess.CompletedProcess(cmd, 3 if c1[0] != "SUPPORTED" else 0, stdout=out, stderr="")
+
+
+def test_gate_over_one_call_checks_every_part_and_merges(tmp_path, monkeypatch, capsys):
+    """A big file used to push the small one out; its true claim came back NOT_SUPPORTED."""
+    big, small = tmp_path / "big.log", tmp_path / "small.md"
+    big.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    small.write_text("NEEDLE: the small file holds the fact.\n")
+    door = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    code = sj.main(["gate", str(big), str(small), "--claim", "the small file holds the fact",
+                    "--claim", "the big file is filler"])
+    out = capsys.readouterr().out
+    assert len(door.calls) > 1 and code == 0, out
+    assert all(sj._judge_tokens(s) <= sj.JUDGE_CALL_TOKENS for s in door.states)
+    assert "".join(door.states).count("NEEDLE") == 1
+    assert "checked in %d parts and nothing was cut" % len(door.calls) in out
+    assert str(small) in out and "(part 1/" in out
+    assert "CLEAN" in out.split("VERDICT:")[-1]
+
+
+def test_gate_over_one_call_contradiction_in_any_part_wins(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    outs = iter([_table([("c1", "SUPPORTED", 0.99)]), _table([("c1", "CONTRADICTED", 0.90)])]
+                + [_table([("c1", "NOT_SUPPORTED", 0.90)])] * 10)
+
+    class SeqDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            self.calls.append({"cmd": cmd})
+            return subprocess.CompletedProcess(cmd, 0, stdout=next(outs), stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
+    code = sj.main(["gate", str(ev), "--claim", "the big file is filler"])
+    out = capsys.readouterr().out
+    assert code == 3 and "CONTRADICTED" in out and "[part 2]" in out
+
+
+def test_gate_part_error_fails_the_whole_check(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(1, stdout="", stderr="jev: HTTP 500\n"))
+    code = sj.main(["gate", str(ev), "--claim", "the big file is filler"])
+    captured = capsys.readouterr()
+    assert code == 1 and "part 1 of" in captured.err
 
 
 # ------------------------------------------------------------ feedback + calibration

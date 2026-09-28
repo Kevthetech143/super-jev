@@ -632,17 +632,14 @@ def cap_check_and_truncate(evidence_items, draft_text, door):
     if total <= cap:
         return list(evidence_items), False, total, cap
 
-    print(f"super-jev: estimated input ~{total} tok exceeds "
-          f"{INPUT_CAP_TOK_ENV}={cap} — truncating oldest evidence for {door}",
-          file=sys.stderr)
-
     budget_chars = max(0, (cap - draft_tok) * 4)
-    kept_rev = []
+    kept_rev, dropped, cut = [], [], []
     running = 0
     for path, text in reversed(evidence_items):     # newest first while trimming
         remaining = budget_chars - running
         if remaining <= 0:
-            continue                                 # drop this older item entirely
+            dropped.append(path)                     # drop this older item entirely
+            continue
         if len(text) <= remaining:
             kept_rev.append((path, text))
             running += len(text)
@@ -650,9 +647,76 @@ def cap_check_and_truncate(evidence_items, draft_text, door):
             # keep the TAIL (its most recent content) of this, the oldest
             # item that still fits at all
             kept_rev.append((path, text[-remaining:]))
+            cut.append(path)
             running += remaining
     kept_rev.reverse()                               # back to oldest-first
+    # Name what was lost: a claim about a dropped or cut file is judged without it.
+    named = "; ".join(s for s in (
+        "dropped, not sent: " + ", ".join(reversed(dropped)) if dropped else "",
+        "cut to its tail: " + ", ".join(cut) if cut else "") if s)
+    print(f"super-jev: estimated input ~{total} tok exceeds "
+          f"{INPUT_CAP_TOK_ENV}={cap} — truncating oldest evidence for {door} "
+          f"({named}); a claim about those files may come back NOT_SUPPORTED "
+          "because its evidence was not sent", file=sys.stderr)
     return kept_rev, True, total, cap
+
+
+# One judge call's input, as lib/jev_client.py counts it: bytes/2, deliberately high,
+# under Jev's 32,768-token ceiling. A direct check whose evidence is bigger is split
+# into parts of this size, one call each, and nothing is cut. Cutting it instead let a
+# big file push the others out, and true claims about them came back NOT_SUPPORTED.
+JUDGE_CALL_TOKENS = 30_000
+
+
+def _judge_tokens(text):
+    return (len((text or "").encode("utf-8")) + 1) // 2
+
+
+def _judge_room(claims, draft_text=""):
+    """Evidence tokens one judge call can hold beside its longest question and the draft."""
+    longest = max((_judge_tokens(c) for c in claims), default=0) + 400  # + instructions
+    return max(1000, JUDGE_CALL_TOKENS - longest - _judge_tokens(draft_text) - 200)
+
+
+def split_evidence(evidence_items, room):
+    """Group (path, text) items into parts of at most `room` judge tokens each.
+
+    A file too big for one part is cut at line breaks into pieces labeled
+    "path (part i/n)"; a single line too long for one part is hard-cut. Every
+    character of every item lands in exactly one part: nothing is dropped.
+    Returns [[(label, text), ...], ...]; one part when everything fits.
+    """
+    pieces = []
+    for path, text in evidence_items:
+        cuts, cur = [], ""
+        for line in (text or "").splitlines(keepends=True):
+            while _judge_tokens(line) > room:        # one enormous line: hard cut
+                if cur:
+                    cuts.append(cur)
+                    cur = ""
+                cuts.append(line[:room // 2])         # 4 UTF-8 bytes a character at most
+                line = line[room // 2:]
+            if cur and _judge_tokens(cur + line) > room:
+                cuts.append(cur)
+                cur = ""
+            cur += line
+        cuts.append(cur)
+        n = len(cuts)
+        pieces += [(f"{path} (part {i}/{n})" if n > 1 else path, c)
+                   for i, c in enumerate(cuts, 1)]
+    parts, cur, used = [], [], 0
+    for label, text in pieces:
+        size = _judge_tokens(text) + _judge_tokens(label) + 10   # + its "=== label ===" line
+        if cur and used + size > room:
+            parts.append(cur)
+            cur, used = [], 0
+        cur.append((label, text))
+        used += size
+    return parts + [cur] if cur else parts
+
+
+def _part_names(part):
+    return ", ".join(label for label, _ in part)
 
 # ---------------------------------------------------- claim pre-split (gate v2)
 #
@@ -4275,11 +4339,21 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_ite
             evidence_items if state_items is None else state_items)
         if mask_info is not None:
             mask_info["withheld"] = withheld
-        res = ask(code_state(state_items), questions)
-        answers = res.get("answers", {})
+        # Code bigger than one call is asked in parts, never cut; a claim is as
+        # true as the part that shows it best (a part without the code says "false").
+        room = _judge_room([c for _, c in pending])
+        parts = split_evidence(state_items, room) or [[]]
+        if mask_info is not None and len(parts) > 1:
+            mask_info["parts"] = [_part_names(p) for p in parts]
+        best = {}
+        for part in parts:
+            answers = ask(code_state(part), questions).get("answers", {})
+            for i, _claim in pending:
+                p = (answers.get("c%d" % i) or {}).get("noul")
+                if p is not None and float(p) > best.get(i, -1.0):
+                    best[i] = float(p)
         for i, claim in pending:
-            p = answers.get("c%d" % i, {}).get("noul")
-            p = 0.5 if p is None else float(p)
+            p = best.get(i, 0.5)
             verdict, conf = code_verdict(p)
             rows.append({
                 "key": "c%d" % i, "claim": claim, "verdict": verdict,
@@ -4311,6 +4385,81 @@ def _render_code_gate(mode, rows, code):
     lines.append("")
     lines.append("VERDICT: %s" % GATE_VERDICT.get(code, "ERROR — code %d" % code))
     return "\n".join(lines) + "\n"
+
+
+def _parts_note(names):
+    """The line a split check prints first: how many parts, and which files are in each."""
+    return ("gate: the evidence is bigger than one judge call, so it was checked in %d parts "
+            "and nothing was cut: %s\n" % (len(names), "; ".join(
+                "part %d: %s" % (i, n) for i, n in enumerate(names, 1))))
+
+
+_DOOR_ROW_RE = re.compile(
+    r'^\s*(?P<key>c\d+|leaked_internal|time_sensitive|self_contradictory|overclaim)\s+'
+    r'(?P<verdict>[A-Z][A-Z_]*)\s+(?P<score>\d+\.\d+)(?:[ \t]+(?P<subject>.*))?$', re.MULTILINE)
+
+
+def merge_part_tables(outs):
+    """One row per question across the parts' verdict tables, the rule
+    lib/jev_client.merge_rows uses: a contradiction (for a draft-level
+    question, any red label) in any part wins, since it must be read; else a
+    claim any part supports is supported. The highest confidence of the
+    winning label is kept, with the part that gave it. None when a part has
+    no table or the parts disagree on which questions they answered."""
+    tables = []
+    for out in outs:
+        rows = {}
+        for m in _DOOR_ROW_RE.finditer(out or ""):
+            rows.setdefault(m.group("key"), (m.group("verdict"), float(m.group("score")),
+                                             (m.group("subject") or "").strip()))
+        tables.append(rows)
+    if not tables or not tables[0] or any(set(t) != set(tables[0]) for t in tables):
+        return None
+    merged = []
+    for key in tables[0]:
+        rows = [(t[key], i) for i, t in enumerate(tables, 1)]
+        if key.startswith("c"):
+            pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
+                    or [r for r in rows if r[0][0] == "SUPPORTED"])
+        else:
+            pick = [r for r in rows if r[0][0] in NOTABLE_VERDICTS]
+        (verdict, score, subject), part = max(pick or rows, key=lambda r: r[0][1])
+        merged.append((key, verdict, score, subject, part))
+    return merged
+
+
+def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_mode=False):
+    """Run the door once per evidence part and merge the tables. Returns
+    (code, out, err) shaped like one door run: `out` holds only the merged
+    table, so gate_fail_closed reads the merged verdicts, not a part's. A part
+    that errors (exit other than 0 or 3) makes the whole check that error."""
+    outs, errs = [], []
+    for i, part in enumerate(parts, 1):
+        tmp = tempfile.NamedTemporaryFile(mode="w", prefix="evidence-part%dof%d." % (i, len(parts)),
+                                          suffix=".md", delete=False, encoding="utf-8", newline="")
+        tmp.write("\n\n".join("=== %s ===\n%s" % (label, text.strip()) for label, text in part))
+        tmp.close()
+        tmp_paths.append(tmp.name)
+        cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), tmp.name, "--kit", "reply", *claim_args]
+        code, out, err = run_door(cmd, capture=True, door="gate", json_mode=json_mode,
+                                  timeout=timeout, extra_ledger=extra_ledger)
+        if code not in (0, 3):
+            return code, out, "gate: part %d of %d (%s) failed\n%s" % (
+                i, len(parts), _part_names(part), err)
+        outs.append(out)
+        errs.append(err)
+    merged = merge_part_tables(outs)
+    if merged is None:
+        return GATE_UNREADABLE_EXIT, "\n".join(outs), "".join(errs)
+    lines = [""]
+    for key, verdict, score, subject, part in merged:
+        if key.startswith("c"):
+            lines.append("  %-4s %-14s %.2f  %s  [part %d]" % (key, verdict, score, subject[:70], part))
+    lines.append("")
+    for key, verdict, score, _subject, part in merged:
+        if not key.startswith("c"):
+            lines.append("  %-18s %-20s %.2f  [part %d]" % (key, verdict, score, part))
+    return 0, "\n".join(lines) + "\n", "".join(errs)
 
 
 def cmd_gate(a):
@@ -4356,8 +4505,15 @@ def cmd_gate(a):
         sent_ev, withheld = _mask_evidence(ev_items)
     except ValueError:
         sent_ev, withheld = None, []
-    kept_ev, truncated, est_tok, cap_tok = cap_check_and_truncate(
-        sent_ev if sent_ev is not None else ev_items, draft_text_for_cap, "gate")
+    if hook_mode:
+        # The Stop hook has a wall-clock budget, so its window is capped (and the
+        # cut files named); a direct check is split into parts instead, never cut.
+        kept_ev, truncated, est_tok, cap_tok = cap_check_and_truncate(
+            sent_ev if sent_ev is not None else ev_items, draft_text_for_cap, "gate")
+    else:
+        kept_ev = list(sent_ev if sent_ev is not None else ev_items)
+        truncated, cap_tok = False, None
+        est_tok = _estimate_tokens(draft_text_for_cap) + sum(_estimate_tokens(t) for _, t in kept_ev)
     evidence_tmp_paths = []
     if sent_ev is not None and (truncated or sent_ev != ev_items):
         evidence_paths = []
@@ -4386,6 +4542,16 @@ def cmd_gate(a):
                 else "evidence")
     if mode == "code" and not claims_for_check:
         mode = "evidence"
+    # The code judge runs the built-in client in-process, which reads the key only
+    # from TYPESAFE_API_KEY. A shell whose key comes through a configured judge
+    # (SUPERJEV_GATE_CMD, as prose checks use) has none, and every diff check died
+    # "TYPESAFE_API_KEY is not set". There the claims go to that judge instead.
+    code_via_door = None
+    if (mode == "code" and _code_ask is _code_ask_live and os.environ.get(GATE_CMD_ENV)
+            and not os.environ.get("TYPESAFE_API_KEY", "").strip()):
+        mode = "evidence"
+        code_via_door = ("gate: TYPESAFE_API_KEY is not in the environment, so the code "
+                         "claims go to the configured judge (%s) as evidence claims\n" % GATE_CMD_ENV)
 
     # The door subprocess is an evidence-mode requirement only: code mode
     # must not refuse (exit 5) for a lib file the CI runner does not have.
@@ -4456,6 +4622,8 @@ def cmd_gate(a):
                 reason = reason[0] if reason else type(exc).__name__
                 return 3, "gate: code-mode judge call failed: " + reason, ""
             text = _render_code_gate(mode, rows, code)
+            if mask_info.get("parts"):
+                text = _parts_note(mask_info["parts"]) + text
             if withheld:
                 text = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
                         "a claim about them cannot be checked\n"
@@ -4477,11 +4645,11 @@ def cmd_gate(a):
         print(text, end="")
         return code
 
-    cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), *evidence_paths, "--kit", "reply"]
+    claim_args = []
     claims_tmp_path = None
     if a.claim:
         for claim in a.claim:
-            cmd += ["--claim", claim]
+            claim_args += ["--claim", claim]
     elif a.draft and _presplit_enabled():
         try:
             draft_text = Path(a.draft).read_text(encoding="utf-8")
@@ -4494,11 +4662,18 @@ def cmd_gate(a):
             claims_tmp_path = tmp.name
             tmp.write("\n".join(claims) + "\n")
             tmp.close()
-            cmd += ["--claims-file", claims_tmp_path]
+            claim_args += ["--claims-file", claims_tmp_path]
         else:
-            cmd += ["--draft", a.draft]
+            claim_args += ["--draft", a.draft]
     elif a.draft:
-        cmd += ["--draft", a.draft]
+        claim_args += ["--draft", a.draft]
+    cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), *evidence_paths, "--kit", "reply", *claim_args]
+    # A direct check whose evidence is bigger than one judge call goes in parts, one
+    # call each, merged below; the door is never left to cut or chunk it on its own.
+    parts = [] if hook_mode else split_evidence(
+        kept_ev, _judge_room(claims_for_check, "" if a.claim else draft_text_for_cap))
+    if len(parts) < 2:
+        parts = []
     # An explicit `timeout` on the namespace is the Stop hook's own
     # wall-clock budget (see StopBudget.timeout_for) — a child call must
     # never outlive the event it is part of, so the smaller wins.
@@ -4510,10 +4685,18 @@ def cmd_gate(a):
         # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
         # inherit straight from this process regardless of contextlib redirects.
         n_claims = len(a.claim or [])
+        note = code_via_door or ""
+        if parts:
+            note += _parts_note([_part_names(pt) for pt in parts])
         if json_mode:
-            code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
-                                      hook_mode=hook_mode, timeout=timeout,
-                                      extra_ledger=extra_ledger)
+            if parts:
+                code, out, err = _gate_door_parts(parts, claim_args, timeout, extra_ledger,
+                                                  evidence_tmp_paths, json_mode=True)
+            else:
+                code, out, err = run_door(cmd, capture=True, door="gate", json_mode=True,
+                                          hook_mode=hook_mode, timeout=timeout,
+                                          extra_ledger=extra_ledger)
+            out = note + out
             code = gate_fail_closed(code, out, n_claims)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       gate_verdict_line(code, out, err),
@@ -4537,10 +4720,16 @@ def cmd_gate(a):
             # in `out` (_hook_block_reasons); it never reads exit 0 as a verdict
             # beyond "no block".
             return code, out, err
-        print(withheld_note + "$ " + shlex.join(str(c) for c in cmd))
-        sys.stdout.flush()
-        code, out, err = run_door(cmd, capture=True, door="gate", hook_mode=hook_mode,
-                                  timeout=timeout, extra_ledger=extra_ledger)
+        if parts:
+            print(withheld_note + note, end="")
+            sys.stdout.flush()
+            code, out, err = _gate_door_parts(parts, claim_args, timeout, extra_ledger,
+                                              evidence_tmp_paths)
+        else:
+            print(withheld_note + note + "$ " + shlex.join(str(c) for c in cmd))
+            sys.stdout.flush()
+            code, out, err = run_door(cmd, capture=True, door="gate", hook_mode=hook_mode,
+                                      timeout=timeout, extra_ledger=extra_ledger)
         sys.stdout.write(out)
         sys.stderr.write(err)
         code = gate_fail_closed(code, out, n_claims)
