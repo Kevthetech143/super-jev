@@ -4741,7 +4741,8 @@ def cmd_gate(a):
         if json_mode:
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       _code_summary(rows),
-                      {"claim_mode": mode, "rows": rows, "withheld": withheld}, [])
+                      {"claim_mode": mode, "rows": rows, "withheld": withheld,
+                       "notes": (code_judge_note or "") + judge_info.get("notes", "")}, [])
             return code
         print(text, end="")
         return code
@@ -4771,7 +4772,10 @@ def cmd_gate(a):
     cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), *evidence_paths, "--kit", "reply", *claim_args]
     # A direct check whose evidence is bigger than one judge call goes in parts, one
     # call each, merged below; the door is never left to cut or chunk it on its own.
-    parts = [] if hook_mode else split_evidence(
+    # Evidence that masking left nothing of (every file scans as a secret) is never
+    # split: a part of such a file can scan clean on its own. It goes whole, as before,
+    # and the door refuses it.
+    parts = [] if hook_mode or sent_ev is None else split_evidence(
         kept_ev, _judge_room(claims_for_check, "" if a.claim else draft_text_for_cap))
     if len(parts) < 2:
         parts = []
