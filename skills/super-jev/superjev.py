@@ -4238,13 +4238,13 @@ class _CodeLibMissing(Exception):
     """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
-def run_code_gate(evidence_items, claims, ask_fn=None, state_items=None):
+def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
     Pattern claims are answered deterministically, on the local text; the rest
-    go out as one batch of Noul questions, asked of `state_items` (the evidence
-    with secret-shaped text masked; masked here when not given). `ask_fn` is
-    injected by tests (a fake judge); production calls the live door.
+    go out as one batch of Noul questions, asked of the evidence with its
+    secret-shaped text masked (the count lands in `mask_info["lines"]`).
+    `ask_fn` is injected by tests (a fake judge); production calls the live door.
     """
     evidence_text = "\n\n".join(t for _, t in evidence_items)
     rows = []
@@ -4273,8 +4273,9 @@ def run_code_gate(evidence_items, claims, ask_fn=None, state_items=None):
             raise _CodeLibMissing(
                 "no judge client at %s — restore lib/jev_client.py "
                 "or inject a judge" % JEV_LIB)
-        if state_items is None:
-            state_items = _mask_evidence(evidence_items)[0]
+        state_items, n_masked = _mask_evidence(evidence_items)
+        if mask_info is not None:
+            mask_info["lines"] = n_masked
         res = ask(code_state(state_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
@@ -4406,9 +4407,10 @@ def cmd_gate(a):
     if mode == "code":
         try:
             try:
-                state_ev, n_masked = _mask_evidence(kept_ev)
+                mask_info = {}
                 rows, code = run_code_gate(kept_ev, claims_for_check,
-                                           state_items=state_ev)
+                                           mask_info=mask_info)
+                n_masked = mask_info.get("lines", 0)
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)
