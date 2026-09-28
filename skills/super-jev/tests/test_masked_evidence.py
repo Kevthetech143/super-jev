@@ -46,6 +46,7 @@ AWS_ID = "AKIA" + "ABCDEFGHIJKLMNOP"
 AWS_SK = "wJalrXUtnFEMI/" + "K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
 VALUE = "Hunter2" + "Hunter2Xy9"
 PWD = "pass" + "word"  # the keyword, so no line of this file scans as a secret
+TOK = "TO" + "KEN"  # likewise
 PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
 PEM_END = "-----END RSA " + "PRIVATE KEY-----"
 KEY_BODY = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
@@ -99,7 +100,7 @@ def test_the_reported_case_is_judged_without_its_fixtures():
 LEAKS = {
     "card-with-cvv": (f"+CARD = '{CARD} 12/29 737'\n", ["12/29 737"]),
     "stripe-concat": (f"+KEY = ('{STRIPE}'\n+       'TAILabcdef99')\n", ["TAILabcdef99"]),
-    "jwt-signature": (f"+TOKEN = '{JWT_HEAD}.{JWT_BODY}.{JWT_SIG}'\n", [JWT_SIG]),
+    "jwt-signature": (f"+{TOK} = '{JWT_HEAD}.{JWT_BODY}.{JWT_SIG}'\n", [JWT_SIG]),
     "jwt-wrapped": (f"+curl -H 'Authorization: Bearer {JWT_HEAD}.{JWT_BODY}.\\\n+{JWT_SIG}'\n", [JWT_SIG]),
     "basic-wrapped": ("+H = ('Authorization: Basic " + BASIC[:12] + "'\n+     '" + BASIC[12:] + "')\n", [BASIC[12:]]),
     "aws-csv-row": (f"+deploy,{AWS_ID},{AWS_SK}\n", [AWS_SK]),
