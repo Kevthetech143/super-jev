@@ -29,7 +29,7 @@ def _setup(tmp_path, monkeypatch, name="moving", principal="agent", changed=True
     f.write_text(f"# {name}\n")
     sha = hashlib.sha256(f.read_bytes()).hexdigest()
     (cache_dir / f"{name}.json").write_text(json.dumps(
-        {} if changed else {str(f): {"sha256": sha, "pass": True}}))
+        {} if changed else {str(f): {"sha256": sha, "pass": True, "checkedAt": "2026-01-01T00:00:00"}}))
     report = {"pointer": name, "roots": [str(root)], "approved": [str(f)],
               "excludes": [], "noRecurse": True, "principal": principal, "principals": [principal]}
     (cache_dir / f"{name}-report.json").write_text(json.dumps(report))
@@ -479,3 +479,111 @@ def test_a_lookup_naming_its_child_never_overwrites_a_drain_that_already_took_th
     ah._name_child("agent", token, Shell)
     drain[0].join()
     assert json.loads(ah._lock_path("agent").read_text())["pid"] == 333333333
+
+
+def test_scan_refreshes_a_pointer_whose_folder_holds_a_new_file(tmp_path, monkeypatch):
+    # Fleet 2026-09: notes written into a connected folder after its connect were never found,
+    # because nothing marks a pointer stale for a file it has never seen.
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=False)
+    assert ah.scan("agent", ["moving"]) == {}  # nothing new: nothing started
+    (cache_dir.parent / "brain" / "added.md").write_text("# added after connect\n")
+    assert ah.scan("agent", ["moving", "moving"]) == {"moving": "started"}
+    assert len(calls) == 1 and "prepare_bulk.py" in calls[0][2] and "--refresh" in calls[0][2]
+    entry = [json.loads(l) for l in ah.LOG_PATH.read_text().splitlines() if '"scan-new"' in l][-1]
+    assert entry["new"] == 1 and entry["first"] == "added.md"
+
+
+def _legacy_no_principal(cache_dir):
+    rp = cache_dir / "moving-report.json"
+    rep = json.loads(rp.read_text())
+    for k in ("principal", "principals", "noRecurse", "excludes"):
+        rep.pop(k)
+    rp.write_text(json.dumps(rep))
+
+
+def test_scan_uses_the_asking_agent_for_a_legacy_report_with_no_principal(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=False)
+    _legacy_no_principal(cache_dir)
+    assert ah.scan("amazon", ["moving"]) == {}  # first look: the growth snapshot, nothing new yet
+    time.sleep(0.02)
+    (cache_dir.parent / "brain" / "added.md").write_text("# added after the snapshot\n")
+    assert ah.scan("amazon", ["moving"]) == {"moving": "started"}
+    assert "--principal amazon" in calls[0][2] and "--asker-fallback" in calls[0][2]
+
+
+def test_a_changed_file_never_heals_a_report_with_no_principal(tmp_path, monkeypatch):
+    # Review of PR #239: the asker fallback let every old no-principal pointer auto-heal on any
+    # changed file (a writer run and rotated answers each time); before scans, those were skipped.
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=True)
+    _legacy_no_principal(cache_dir)
+    assert ah.maybe_heal("moving", "amazon") == "no-report"
+    ah._queue("amazon", "moving", "refresh")
+    assert ah._drain_prepare("moving", "amazon", "refresh") == "no-report"
+    assert calls == []
+
+
+def test_a_scan_queued_behind_the_lock_is_refreshed_by_the_drain(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    _add_pointer(cache_dir, "second")
+    (cache_dir / "second.json").write_text(json.dumps(  # unchanged: only a new file
+        {str(cache_dir.parent / "brain" / "second.md"): {
+            "sha256": hashlib.sha256((cache_dir.parent / "brain" / "second.md").read_bytes()).hexdigest()}}))
+    runs = _fake_run(monkeypatch)
+    assert ah.maybe_heal("first", "agent") == "started"
+    assert ah.maybe_heal("second", "agent", new=True) == "in-progress"
+    assert ah._load_state("agent")["pending"]["second"]["kind"] == "new"
+    (cache_dir.parent / "brain" / "added.md").write_text("# added after connect\n")
+    ah.drain("agent", _token(calls[0]))
+    assert runs == ["second"]
+
+
+def test_maybe_scan_runs_at_most_once_per_interval_and_never_blocks(tmp_path, monkeypatch):
+    calls, _ = _setup(tmp_path, monkeypatch)
+    assert ah.maybe_scan("agent", ["moving"]) == "started"
+    assert ah.maybe_scan("agent", ["moving"]) == "recent"
+    assert ah.maybe_scan("other-agent", ["moving"]) == "started"
+    assert ah.maybe_scan("agent", ["moving"], scan_secs=0) == "started"
+    assert [c[-3:] for c in calls] == [["--scan", "agent", "moving"], ["--scan", "other-agent", "moving"],
+                                       ["--scan", "agent", "moving"]]
+
+
+def test_a_queued_scan_is_dropped_when_its_new_file_was_taken_in_meanwhile(tmp_path, monkeypatch):
+    # Review 2026-09-28: a refresh reconnects with replace:true (rotating approved answers), so a
+    # drain must not run one for a new file another refresh already took in.
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    _add_pointer(cache_dir, "second")
+    second = cache_dir.parent / "brain" / "second.md"
+    (cache_dir / "second.json").write_text(json.dumps(
+        {str(second): {"sha256": hashlib.sha256(second.read_bytes()).hexdigest()}}))
+    runs = _fake_run(monkeypatch)
+    assert ah.maybe_heal("first", "agent") == "started"
+    assert ah.maybe_heal("second", "agent", new=True) == "in-progress"
+    ah.drain("agent", _token(calls[0]))
+    assert runs == []  # nothing new on disk any more (or ever): no refresh, no rotation
+    assert ah._load_state("agent")["pending"] == {}
+
+
+def test_a_scan_never_downgrades_a_queued_reconnect(tmp_path, monkeypatch):
+    # Review 2026-09-28: "new" overwrote a queued "reconnect", and a "new" whose file was taken in
+    # meanwhile is dropped, so the reconnect the stale pointer needed never ran.
+    calls, cache_dir = _setup(tmp_path, monkeypatch, name="first")
+    _add_pointer(cache_dir, "second")
+    assert ah.maybe_heal("first", "agent") == "started"
+    ah._queue("agent", "second", "reconnect")
+    assert ah.maybe_heal("second", "agent", new=True) == "in-progress"
+    assert ah._load_state("agent")["pending"]["second"]["kind"] == "reconnect"
+
+
+def test_a_queued_scan_never_refreshes_a_no_principal_report_for_a_changed_file_alone(tmp_path, monkeypatch):
+    # Review 6: the drain named the asking agent for kind "new" even when the new file had been taken
+    # in meanwhile and only an edited file was left (writer run, answers rotated).
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=True)
+    _legacy_no_principal(cache_dir)
+    (cache_dir / "growth").mkdir()
+    (cache_dir / "growth" / "moving.json").write_text(json.dumps({"since": time.time() + 3600, "present": []}))
+    runs = _fake_run(monkeypatch, principal="amazon")
+    token = ah._acquire_lock("amazon", "moving")
+    ah._queue("amazon", "moving", "new")
+    ah.drain("amazon", token)
+    assert runs == [] and calls == []
+    assert ah._drain_prepare("moving", "amazon", "new") == "no-report"

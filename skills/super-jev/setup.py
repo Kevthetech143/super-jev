@@ -162,6 +162,11 @@ def uninstall() -> int:
             if f.is_file() and not f.is_symlink() and f in ours:
                 f.unlink()
                 removed.append(str(f))
+            elif (f.name == "growth" and f in ours and f.is_dir() and not f.is_symlink()
+                  and all(g.is_file() and not g.is_symlink() and ".json" in g.name for g in f.iterdir())):
+                # prepare_bulk's new-file snapshots (one <pointer>.json each; they name file paths)
+                shutil.rmtree(f)
+                removed.append(str(f))
             else:
                 repo_kept.append(str(f))
         if not any(d.iterdir()):

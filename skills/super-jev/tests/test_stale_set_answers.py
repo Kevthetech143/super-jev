@@ -102,6 +102,23 @@ def test_an_edited_file_a_refresh_would_hold_is_not_read(tmp_path, monkeypatch, 
     assert str(log_md) not in confirmed and str(log_md) not in out
 
 
+def test_a_lookup_starts_the_new_file_scan_for_every_visible_set(tmp_path, monkeypatch, capsys):
+    # A note written into a connected folder after its connect never marks its set stale, so the
+    # lookup looks for new files itself (background, at most once per interval; see auto_heal.scan).
+    _setup(tmp_path, monkeypatch)
+    scans = []
+    monkeypatch.setattr(ah, "maybe_scan", lambda principal, ptrs: scans.append((principal, list(ptrs))) or "started")
+    ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
+    assert scans == []  # SUPERJEV_NEW_FILE_SCAN=0 (tests, or a user opting out)
+    monkeypatch.setenv("SUPERJEV_NEW_FILE_SCAN", "1")
+    ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
+    assert scans == [("primary", ["notes"])]
+    monkeypatch.setenv("SUPERJEV_REPLAY", "1")
+    ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
+    assert len(scans) == 1  # a replay never starts paid work
+    capsys.readouterr()
+
+
 def _claim(monkeypatch, proof):
     """A --claim ask whose claim judge finds `proof` supports it; returns the saved verdicts."""
     claim = "We tried the cache warmer."
