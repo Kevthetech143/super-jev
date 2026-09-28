@@ -479,6 +479,76 @@ def has_secret(text: str) -> bool:
             or _token_hit(text))
 
 
+# Evidence that is judged (a worktree diff, a file a claim is checked against) may carry
+# secret-shaped test fixtures: a card scanner's fake card numbers, a redaction test's sample
+# key. Refusing the whole request left such a change uncheckable, so evidence is masked
+# instead: every secret-shaped span, real or fake, is replaced before anything is sent.
+# Claims and drafts are never masked (they are refused), and ask() keeps its full scan.
+SECRET_MASK = "[secret-shaped text masked]"
+
+
+def _blank(m) -> str:
+    return " " * len(m.group())
+
+
+def _secret_line_spans(line: str) -> list:
+    """(start, end) spans of secret-shaped text in one ASCII line, from the patterns has_secret
+    uses. normalize_for_scan keeps an ASCII line's length, so the spans index the line itself.
+    A card number is its own 16 digits; a keyword or token hit runs to the end of the line,
+    since the match can stop at 'key=' and leave the value after it."""
+    norm = normalize_for_scan(line)
+    scrubbed = ISO_DATE_RE.sub(_blank, URL_RE.sub(_blank, norm))
+    spans = [m.span() for m in CARD_RE.finditer(scrubbed) if _luhn(re.sub(r"\D", "", m.group()))]
+    hits = [m.start() for m in WORD_RE.finditer(norm)] + [m.start() for m in TOKEN_RE.finditer(norm)]
+    hits += [m.start() for m in GENERIC_RE.finditer(norm)
+             if _entropy(m.group(4)) >= 3.5 and re.search(r"\d", m.group(4))
+             and re.search(r"[A-Za-z]", m.group(4))]
+    if hits:
+        spans.append((min(hits), len(line)))
+    return spans
+
+
+def _mask_line(line: str) -> str:
+    out = line
+    if line.isascii():
+        spans = _secret_line_spans(line)
+        if spans:
+            spans.sort()
+            merged = [list(spans[0])]
+            for s, e in spans[1:]:
+                if s <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], e)
+                else:
+                    merged.append([s, e])
+            for s, e in reversed(merged):
+                out = out[:s] + SECRET_MASK + out[e:]
+    if out == line or has_secret(out):
+        # A non-ASCII line, or one the span rules missed: mask it whole, keeping a diff marker.
+        out = (line[:1] if line[:1] in "+- " else "") + SECRET_MASK
+    return out
+
+
+def mask_secrets(text: str):
+    """(masked_text, lines_masked). Each line has_secret flags loses its secret-shaped spans (or
+    the whole line); a secret spread over two lines masks both. Returns (None, n) when the result
+    still scans as a secret, and the caller must refuse. Text with no secret comes back as is."""
+    if not text or not has_secret(text):
+        return text, 0
+    lines = text.split("\n")
+    masked = set()
+    for i, line in enumerate(lines):
+        if has_secret(line):
+            lines[i] = _mask_line(line)
+            masked.add(i)
+    for i in range(len(lines) - 1):
+        if has_secret(lines[i] + "\n" + lines[i + 1]):
+            for j in (i, i + 1):
+                lines[j] = (lines[j][:1] if lines[j][:1] in "+- " else "") + SECRET_MASK
+                masked.add(j)
+    out = "\n".join(lines)
+    return (None if has_secret(out) else out), len(masked)
+
+
 # The WORD_RE/GENERIC_RE keyword checks above only fire in a key=value, key:value,
 # or "key is value" shape -- prose or a plain word is not a secret. A file NAME or
 # PATH is different: nobody writes "password: hunter2xyz" as a filename, they write
