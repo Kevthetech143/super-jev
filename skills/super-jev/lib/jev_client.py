@@ -26,14 +26,18 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from judge_profile import PROFILE  # noqa: E402
+
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
-# Jev's input ceiling is 32,768 tokens for the state plus the longest question. A
-# character cap sized for prose let number-dense text (IDs, dates, amounts) through
-# over the ceiling, so tokens are estimated on the high side instead.
-MAX_INPUT_TOKENS = 30_000
+# The judge's input ceiling (the profile's window; Jev: 32,768 tokens) covers the
+# state plus the longest question. A character cap sized for prose let number-dense
+# text (IDs, dates, amounts) through over the ceiling, so tokens are estimated on the
+# high side instead.
+MAX_INPUT_TOKENS = PROFILE.call_tokens
 LINE = 0.80                 # under this confidence a human reads the source
-MAX_QUESTIONS = 255
+MAX_QUESTIONS = PROFILE.max_questions_per_call
 MIN_CLAIM_WORDS = 4
 
 CLAIM_CRITERIA = {"SUPPORTED": "The evidence confirms it.",
@@ -124,7 +128,7 @@ def ask(state, questions, timeout=120, attempts=4):
                        "(export TYPESAFE_API_KEY=\"$(cat /path/to/your/key-file)\")")
     longest = max((estimate_tokens(q) for q in questions.values()), default=0)
     if estimate_tokens(state) + longest > MAX_INPUT_TOKENS:
-        raise JevError("evidence exceeds the 32,768-token ceiling -- split the file; "
+        raise JevError(f"evidence exceeds {PROFILE.ceiling_text} -- split the file; "
                        "it is never truncated")
     body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
     # The TypeSafe edge rejects the default "Python-urllib" user agent with 403.
