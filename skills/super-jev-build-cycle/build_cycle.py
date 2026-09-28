@@ -5,7 +5,7 @@ Usage: build_cycle.py --dir CYCLE_DIR [--principal NAME] [--super-jev DIR] STEP 
 
 Required steps (receipts are CYCLE_DIR/NN-step.md; Super Jev uses go to CYCLE_DIR/uses.jsonl):
   preflight [--project-dir DIR ...] [--skill "what the new skill does"]   free readiness check
-  start "idea" [--project NAME] [--ask Q ...]   one ask (what we already know) plus your own
+  start "idea" [--topic "subject"] [--project NAME] [--ask Q ...]   one ask (what we already know) plus your own
   check-report --report FILE [--claims FILE] [--worktree DIR] [--evidence FILE ...] [--test-cmd CMD]
   review-brief --worktree DIR [--test-cmd CMD]   brief for a fresh reviewer agent (no receipt)
   review --reviewer NAME --verdict "SHIP|FIX ..." --file FILE [--claims FILE] [--worktree DIR] [--evidence FILE ...]
@@ -39,7 +39,11 @@ UNSKIPPABLE = ("start", "review", "reply-check")
 STRONG = 0.85  # a hit at or above this, not marked "possible", counts as Super Jev knowing the topic
 VERDICTS = ("helped", "neutral", "missed")
 NAME_RE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"  # same agent-name rule as ask.py
-START_QUESTION = "what have we already tried, decided or learned about {idea}"
+START_QUESTION = "what have we already tried, decided or learned about {topic}"
+# The history question names the subject, not the whole idea: a long, detailed question makes a passage
+# answer all of it, so notes on the subject come back weak or not at all. An idea longer than this needs
+# --topic; the tool never shortens it itself (the words it would keep are not the subject's).
+TOPIC_MAX_WORDS = 12
 REVIEW_BRIEF = """INDEPENDENT REVIEW. You have not seen this work before; keep it that way: judge only what is below
 and what you can run or read yourself.
 
@@ -298,13 +302,22 @@ def strong_hits(out: str) -> int:
 def cmd_start(ctx, a):
     if step_state(ctx.dir, "preflight") == "missing":
         raise CycleError("run preflight first (or: skip preflight --reason \"why\")")
-    idea = a.idea + (f" in {a.project}" if a.project else "")
+    idea = " ".join(a.idea.split())  # one line: brief and review-brief read it back from the receipt
+    topic = idea if a.topic is None else " ".join(a.topic.split())
+    if not idea or not topic:
+        raise CycleError("start needs an idea, and --topic cannot be empty")
+    if len(topic.split()) > TOPIC_MAX_WORDS:
+        which = "--topic" if a.topic is not None else f"the idea ({len(topic.split())} words)"
+        raise CycleError(f"{which} is too long for the history question (at most {TOPIC_MAX_WORDS} words): a long "
+                         "question finds fewer notes. Rerun with --topic \"the subject in a few words\" (the problem "
+                         "or feature, as you would name it when searching your notes; details stay in the idea), "
+                         "e.g. --topic \"secret scan holding files over numbers read as card numbers\"")
     outs, strong = [], 0
-    for q in [START_QUESTION.format(idea=idea)] + (a.ask or []):
+    for q in [START_QUESTION.format(topic=topic + (f" in {a.project}" if a.project else ""))] + (a.ask or []):
         uid, out = ask(ctx, "start", q)
         strong += strong_hits(out)
         outs.append((f"[{uid}] {q}", out))
-    fields = {"idea": a.idea, "project": a.project}
+    fields = {"idea": idea, "topic": topic if topic != idea else None, "project": a.project}
     if not strong:
         fields["new ground"] = ("YES: Super Jev has no strong note on this. Research outside (official docs, "
                                 "maintained open-source projects) before building, and teach what you learn back "
@@ -559,6 +572,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("preflight"); s.add_argument("--project-dir", action="append")
     s.add_argument("--skill", help="building a skill: what it does (searches for an existing one first)")
     s = sub.add_parser("start"); s.add_argument("idea"); s.add_argument("--project")
+    s.add_argument("--topic", help=f"the subject in at most {TOPIC_MAX_WORDS} words (needed when the idea is longer)")
     s.add_argument("--ask", action="append", help="a sharper question of your own (repeatable)")
     s = sub.add_parser("target"); s.add_argument("--goal", required=True); s.add_argument("--evidence", required=True)
     s.add_argument("--ask", action="store_true", help="also ask for related past misses")
