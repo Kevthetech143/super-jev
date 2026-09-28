@@ -34,18 +34,13 @@ jc = load("jev_client_r5", SKILL / "lib" / "jev_client.py")
 setup = load("setup_r5", SKILL / "setup.py")
 
 
-# 1. check never sends an evidence file's secret: the secret is masked, the rest is judged
-def test_check_masks_a_secret_in_evidence(tmp_path, monkeypatch, capsys):
+# 1. check refuses an evidence file holding a secret and never calls Jev
+def test_check_refuses_evidence_with_a_secret(tmp_path, monkeypatch, capsys):
     f = tmp_path / "notes.md"
-    key = "sk_" + "live_" + "abcdefghij1234567890"
-    f.write_text("The rate is 4%.\nstripe " + key + "\n")
-    sent = []
-    monkeypatch.setattr(jc, "check", lambda ev, *a, **k: sent.append(ev) or ([], {}, 0))
-    monkeypatch.setattr(jc, "print_table", lambda *a, **k: None)
-    assert jc.main([str(f), "--claim", "The rate is 4%"]) == 0
-    (path, text), = sent[0]
-    assert key not in text and "The rate is 4%." in text and not pb.has_secret(text)
-    assert f"masked 1 secret-shaped line(s) in {f}" in capsys.readouterr().err
+    f.write_text("The rate is 4%.\nstripe " + "sk_" + "live_" + "abcdefghij1234567890\n")
+    monkeypatch.setattr(jc, "check", lambda *a, **k: pytest.fail("evidence was sent"))
+    assert jc.main([str(f), "--claim", "The rate is 4%"]) == 1
+    assert f"evidence file {f} contains a secret; not sent" in capsys.readouterr().err
 
 
 # 2. new token shapes are held; 1Password prose is not
