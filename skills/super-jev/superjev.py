@@ -4428,13 +4428,16 @@ def _door_table(out, code=0):
     """{key: (verdict, score, subject)} from one door run's verdict table. The door
     prints scores to 2 decimals, so a SUPPORTED 0.797 it flagged reads "0.80": from
     a run that exited non-zero, a SUPPORTED row printed at or under 0.80 is taken
-    as under the line (0.79)."""
+    as under the line (0.79). None when a key has two rows: one of them is not the
+    judge's, and which is cannot be told."""
     rows = {}
     for m in _DOOR_ROW_RE.finditer(out or ""):
         verdict, score = m.group("verdict"), float(m.group("score"))
         if code and verdict == "SUPPORTED" and score <= 0.80:
             score = 0.79
-        rows.setdefault(m.group("key"), (verdict, score, (m.group("subject") or "").strip()))
+        if m.group("key") in rows:
+            return None
+        rows[m.group("key")] = (verdict, score, (m.group("subject") or "").strip())
     return rows
 
 
@@ -4445,7 +4448,14 @@ def _row_flagged(key, verdict, score, advisory=()):
     return verdict not in _FAVORABLE_SIDE and key not in advisory
 
 
-def merge_part_tables(outs, codes=None):
+# A claim about the whole evidence (absence, universal, exclusive): no single part can
+# carry it. Read on the claim's own text (--claim), else on the text the judge echoes.
+_SCOPE_CLAIM_RE = re.compile(
+    r"\b(?:no|none|nothing|nowhere|never|not|every|everything|all|each|any|only|"
+    r"always|without|neither|nor)\b|n't\b", re.IGNORECASE)
+
+
+def merge_part_tables(outs, codes=None, claims=None):
     """One row per question across the parts' verdict tables, the rule
     lib/jev_client.merge_rows uses: a contradiction (for a draft-level
     question, any red label) in any part wins, since it must be read; else a
@@ -4454,6 +4464,8 @@ def merge_part_tables(outs, codes=None):
     exit codes (see _door_table). None when a part has no table or the parts
     disagree on which questions they answered."""
     tables = [_door_table(out, (codes or [0] * len(outs))[i]) for i, out in enumerate(outs)]
+    if any(t is None for t in tables):
+        return None
     if not tables or not tables[0] or any(set(t) != set(tables[0]) for t in tables):
         return None
     if any(t[k][2] != tables[0][k][2] for t in tables for k in t if k.startswith("c")):
@@ -4461,7 +4473,15 @@ def merge_part_tables(outs, codes=None):
     merged = []
     for key in tables[0]:
         rows = [(t[key], i) for i, t in enumerate(tables, 1)]
-        if key.startswith("c"):
+        n = int(key[1:]) if key.startswith("c") else 0
+        text = claims[n - 1] if claims and 0 < n <= len(claims) else tables[0][key][2] if n else ""
+        if n and _SCOPE_CLAIM_RE.search(text):
+            # "no file calls eval", "every handler logs": a part without the code can
+            # support it while the part with it only says NOT_SUPPORTED. Such a claim
+            # is SUPPORTED only when every part says so.
+            pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
+                    or [r for r in rows if r[0][0] != "SUPPORTED"])
+        elif key.startswith("c"):
             pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
                     or [r for r in rows if r[0][0] == "SUPPORTED"])
         else:
@@ -4516,7 +4536,8 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
              "check cannot be CLEAN; read that part yourself: %s\n" % (
                  i, len(parts), _part_names(parts[i - 1]), " ".join((out or err).split())[:160])
              for i, out, err in refused]
-    merged = merge_part_tables(outs, codes)
+    merged = merge_part_tables(outs, codes, [claim_args[j + 1] for j, x in enumerate(claim_args[:-1])
+                                             if x == "--claim"])
     if merged is None:
         return GATE_UNREADABLE_EXIT, "\n".join(outs), "".join(errs)
     advisory = _CLAIM_ADVISORY_KEYS if "--claim" in claim_args else set()
@@ -4553,6 +4574,11 @@ def cmd_gate(a):
     # The claims the door will check: explicit --claim, or the draft pre-split.
     # Needed for the judgment filter and for code mode; the evidence path
     # below rebuilds its own --claims-file the same way, unchanged.
+    # A claim goes to the judge on its own line and comes back as a table row: a line
+    # break inside it could print a row of its own ("...\n  c2   SUPPORTED 0.99") that
+    # reads as the judge's. Every claim is collapsed to one line first.
+    if a.claim:
+        a.claim = [" ".join(c.split()) for c in a.claim]
     explicit_claims = [c for c in (a.claim or []) if c and c.strip()]
     presplit_list = []
     if not explicit_claims and a.draft and _presplit_enabled():
@@ -4686,6 +4712,12 @@ def cmd_gate(a):
             if any(_has_secret(c) for c in claims):
                 raise ValueError("a claim contains a secret; not sent")
             parts = split_evidence(items, _judge_room(claims))
+            if hook_mode and len(parts) > 1:
+                # One judge call per Stop event, inside its budget: a window too big
+                # for one call is not judged, never judged in several calls.
+                raise _JudgeFailed(3, "code-mode judge unavailable: the capped window needs "
+                                      "%d judge calls; the Stop hook makes one, so it was "
+                                      "not judged" % len(parts))
             if len(parts) > 1:
                 judge_info["parts"] = [_part_names(pt) for pt in parts]
             t = getattr(a, "timeout", None)
