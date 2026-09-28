@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""Guards for the 2026-09-25 full-eval misses: a summary/copy (hub README/PROFILE,
-_staging copy, PR-history write-up) must not outrank the real note, and a question
-about one person must not read or confirm another person's records.
-
-    python3 -m pytest skills/super-jev/tests/test_source_over_copy.py -q
+"""Source content controls ranking; word overlap and filenames do not override it.
+Person-scoped discovery and admission still apply. No live calls.
 """
 import importlib.util
 import json
@@ -49,30 +46,27 @@ def _run(tmp_path, question, files, candidates, scores, caches=None):
     return rec["top"], checked, navigated
 
 
-def test_folder_readme_yields_to_a_confirmed_note_beside_it(tmp_path):
-    """q50: pending/README 0.99 (a one-line index) beat the confirmed fincen note 0.94."""
+def test_folder_readme_uses_content_order(tmp_path):
     readme, note = str(tmp_path / "pending/README.md"), str(tmp_path / "pending/stamps-com-auto-charges.md")
     top, _, _ = _run(tmp_path, "why is stamps.com charging me automatically?",
                      {readme: "- stamps-com-auto-charges.md", note: "auto charges"},
                      [{"score": 0.9, "originalPath": readme}, {"score": 0.8, "originalPath": note}],
                      {readme: 0.99, note: 0.94})
-    assert [t["path"] for t in top] == [note, readme]
-    assert top[1]["possible"]
+    assert [t["path"] for t in top] == [readme, note]
+    assert not any(t["possible"] for t in top)
 
 
-def test_profile_yields_to_the_dedicated_note(tmp_path):
-    """q24: a person's PROFILE summary 0.98 beat the travel-coverage note 0.93."""
+def test_profile_uses_content_order(tmp_path):
     prof = str(tmp_path / "documents/esteban/medical/PROFILE.md")
     note = str(tmp_path / "documents/esteban/medical/insurance/healthfirst-travel-coverage.md")
     top, _, _ = _run(tmp_path, "does the Healthfirst plan cover travel abroad?",
                      {prof: "summary", note: "travel coverage"},
                      [{"score": 0.9, "originalPath": prof}, {"score": 0.8, "originalPath": note}],
                      {prof: 0.98, note: 0.93})
-    assert top[0]["path"] == note
+    assert top[0]["path"] == prof
 
 
 def test_dashboard_readme_keeps_top_over_an_unrelated_note(tmp_path):
-    """q30: campaigns/clov/README.md IS the answer; a note elsewhere must not push it down."""
     readme = str(tmp_path / "investing/campaigns/clov/README.md")
     other = str(tmp_path / "notebook/read-campaign-numbers-live-not-memory.md")
     top, _, _ = _run(tmp_path, "what's our all-in breakeven on the CLOV wheel",
@@ -82,26 +76,23 @@ def test_dashboard_readme_keeps_top_over_an_unrelated_note(tmp_path):
     assert top[0]["path"] == readme and not top[0]["possible"]
 
 
-def test_staging_copy_yields_to_the_real_note(tmp_path):
-    """q10: a _staging/ split copy 0.92 would beat the bp-wearables note 0.84."""
+def test_staging_copy_uses_content_order(tmp_path):
     copy = str(tmp_path / "brain/_staging/events-split/events-part1.md")
     note = str(tmp_path / "brain/practice/bp-wearables-2026.md")
     top, _, _ = _run(tmp_path, "which blood pressure watch can I trust?",
                      {copy: "watch", note: "watch"},
                      [{"score": 0.9, "originalPath": copy}, {"score": 0.8, "originalPath": note}],
                      {copy: 0.92, note: 0.84})
-    assert [t["path"] for t in top] == [note, copy]
+    assert [t["path"] for t in top] == [copy, note]
 
 
-def test_pr_writeup_yields_only_to_a_confirmed_doc(tmp_path):
-    """q59: the pr-19 survey 0.93 beat docs/wire-into-claude-code.md 0.86 (both confirmed);
-    q56: a pr-history note stays #1 over a merely possible doc."""
+def test_pr_writeup_uses_content_order(tmp_path):
     pr = str(tmp_path / "brain/superjev-pr-history/pr-19-hooks.md")
     doc = str(tmp_path / "docs/wire-into-claude-code.md")
     q = "how do I wire super jev into claude code hooks?"
     cands = [{"score": 0.9, "originalPath": pr}, {"score": 0.8, "originalPath": doc}]
     top, _, _ = _run(tmp_path, q, {pr: "hooks", doc: "hooks"}, cands, {pr: 0.93, doc: 0.86})
-    assert top[0]["path"] == doc
+    assert top[0]["path"] == pr
     top, _, _ = _run(tmp_path, q, {pr: "hooks", doc: "hooks"}, cands, {pr: 0.88, doc: 0.61})
     assert top[0]["path"] == pr
 
@@ -118,13 +109,12 @@ def _family(tmp_path):
 
 
 def test_my_dad_never_confirms_my_own_file(tmp_path):
-    """q16: 'my dad' ranked Kelvin's medications (0.80) over the father's (0.60)."""
     files, caches = _family(tmp_path)
     mine = str(tmp_path / "agents/global/documents/kelvin/medical/medications/current.md")
     dads = str(tmp_path / "agents/global/documents/esteban/medical/medications/current.md")
     top, checked, navigated = _run(tmp_path, "how many prescriptions is my dad on?", files,
                                    [{"score": 0.9, "originalPath": mine}, {"score": 0.8, "originalPath": dads}],
-                                   {mine: 0.80, dads: 0.60}, caches)
+                                   {mine: 0.90, dads: 0.80}, caches)
     assert [t["path"] for t in top] == [dads]
     assert mine not in checked
     assert "kelvin-medical" not in navigated and "iris-medical" not in navigated
@@ -151,7 +141,6 @@ def test_question_people():
 
 
 def test_readme_keeps_confirm_over_possible_sibling(tmp_path):
-    """A confirmed dashboard README is never un-confirmed for a merely possible note in its folder."""
     readme = str(tmp_path / "campaigns/clov/README.md")
     ledger = str(tmp_path / "campaigns/clov/ledger.md")
     top, _, _ = _run(tmp_path, "what's our all-in breakeven on the CLOV wheel",

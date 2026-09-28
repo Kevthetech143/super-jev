@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-"""A file never confirms while holding almost none of the question's words
-(cover_gate, CONFIRM_MIN_COVER). Real failure, night-0603: a made-up question
-about Kelvin's CLOV verdict confirmed history-recall/SKILL.md at 0.87, a
-one-passage skill that holds only "kelvin" and "last". Nothing here makes a
-live provider call.
-
-    python3 -m pytest skills/super-jev/tests/test_cover_gate.py -q
+"""Source content controls ranking; word overlap and filenames do not override it.
+Person-scoped discovery and admission still apply. No live calls.
 """
 import hashlib
 import importlib.util
@@ -57,12 +52,12 @@ def _lookup(tmp_path, routed, scores, cached):
     return []
 
 
-def test_file_without_the_questions_words_is_not_even_possible(tmp_path):
-    # night-0803 q18: capped at 0.84 it still came back "possible" for a made-up
-    # question; it must drop out so the answer is "not found".
+def test_semantically_selected_file_is_not_vetoed_by_lexical_coverage(tmp_path):
+    # Semantic decisions are mocked; this tests removal of the lexical veto,
+    # not whether the provider classifies this particular text correctly.
     recall, clov, others = _files(tmp_path)
     top = _lookup(tmp_path, [recall], {str(recall): 0.87}, [recall, clov, *others])
-    assert str(recall) not in [t["path"] for t in top]
+    assert str(recall) in [t["path"] for t in top]
 
 
 def test_file_holding_the_questions_words_still_confirms(tmp_path):
@@ -71,7 +66,7 @@ def test_file_holding_the_questions_words_still_confirms(tmp_path):
     assert top[0]["path"] == str(clov) and top[0]["score"] >= ask.CONFIRM_FLOOR and not top[0]["possible"]
 
 
-def test_file_word_search_never_indexed_gets_no_opinion(tmp_path):
+def test_routed_file_outside_word_index_can_supply_evidence(tmp_path):
     recall, clov, others = _files(tmp_path)
     top = _lookup(tmp_path, [recall], {str(recall): 0.87}, [clov, *others])
     assert top[0]["path"] == str(recall) and top[0]["score"] >= ask.CONFIRM_FLOOR

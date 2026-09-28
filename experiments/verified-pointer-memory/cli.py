@@ -236,8 +236,13 @@ def run(request, config):
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return {'status': 'error', 'reason': 'Retrieval failed or returned invalid JSON.'}
 
+    mode = request.get('mode')
+    if mode is not None and (request.get('action') not in ('navigate', 'navigate-many')
+                             or mode not in ('navigation', 'source-discovery')):
+        raise ValueError('Navigation mode is invalid.')
+
     def navigate_provider(question, catalog, limits):
-        payload = {'question': question, 'catalog': catalog}
+        payload = {'question': question, 'catalog': catalog, **({'mode': mode} if mode is not None else {})}
         if limits is not None:
             payload['limits'] = limits
         try:
@@ -255,7 +260,7 @@ def run(request, config):
             return {'status': 'error', 'reason': 'Navigation failed or returned invalid JSON.'}
 
     def navigate_many_provider(question, catalogs, limits):
-        batch = [{'question': question, 'catalog': catalog, **({'limits': limits} if limits is not None else {})}
+        batch = [{'question': question, 'catalog': catalog, **({'mode': mode} if mode is not None else {}), **({'limits': limits} if limits is not None else {})}
                  for catalog in catalogs]
         try:
             process = subprocess.run(

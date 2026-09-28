@@ -24,10 +24,8 @@ spec.loader.exec_module(ask)
 
 @pytest.fixture(autouse=True)
 def no_content_check(monkeypatch):
-    """Same stub test_ask.py uses: pass every routed file through with its
-    routing score so a lookup's outcome only depends on what `navigate` (via
-    `memory`) returns, not the live content-check call."""
-    monkeypatch.setattr(ask, "confirm", lambda question, paths: ({}, set(paths), None, {}))
+    """Stub completed evidence so these tests isolate routing and queue behavior."""
+    monkeypatch.setattr(ask, "confirm", lambda question, paths: ({p: .9 for p in paths}, set(), None, {}))
 
 
 def confident_memory(question="where is it?", path="/found.md", pointer="p1"):

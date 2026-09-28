@@ -40,7 +40,7 @@ def test_value_question_near_miss_not_shown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
                         {"pointers": ["p1"]} if r["action"] == "panel" else
                         {"status": "candidates", "candidates": [{"score": 0.5, "originalPath": str(f)}]})
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(f): 0.8}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("what price did we pay for the Dell after the refund", "me", tmp_path / "s")
     assert "no-candidates" in capsys.readouterr().out
 
@@ -52,7 +52,7 @@ def test_approve_ignores_possible_only_lookup(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
                         {"pointers": ["p1"]} if r["action"] == "panel" else
                         {"status": "candidates", "candidates": [{"score": 0.5, "originalPath": str(f)}]})
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(f): 0.65}, set(), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {str(f): ask.INCONCLUSIVE}))
     sdir = tmp_path / "s"; sdir.mkdir(parents=True, exist_ok=True)
     ask.lookup("how is the plan going", "me", sdir)
     assert ask.find_pointer(sdir, "how is the plan going") is None

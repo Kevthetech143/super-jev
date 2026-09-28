@@ -355,7 +355,7 @@ def trace_show(sdir: Path, which: str) -> int:
         if not st:
             print("(no stage detail: this trace predates --trace-show)")
         return 0
-    print("2 routing (name + description only; floor %s):" % ROUTE_FLOOR)
+    print("2 routing (name + description only; floor %s):" % st.get("routing_floor", ROUTE_FLOOR))
     for ptr, r in st["routing"].items():
         none = f" none={r['none']}" if r.get("none") is not None else ""
         files = ", ".join(f"{Path(f['path']).name} {f['score']}{'' if f.get('kept') else ' (under floor)'}"
@@ -371,7 +371,7 @@ def trace_show(sdir: Path, which: str) -> int:
         mark = " (edited since connect: current text)" if f["path"] in edited else ""
         print(f"  {i:2}. {f['score']:7.3f}  {f['path']}{mark}  -> {f['fate']}")
     print(f"4 read list ({len(st.get('read_list', []))}): " + ", ".join(Path(p).name for p in st.get("read_list", [])))
-    print("5 content check (confirm >= %s, possible >= %s):" % (CONFIRM_FLOOR, POSSIBLE_FLOOR))
+    print("5 content check (selected source evidence; unfinished checks are inconclusive):")
     for path, d in (st.get("content_check") or {}).items():
         chunks = f"chunks {d.get('read')} of {d.get('chunks')}" if d.get("chunks") is not None else "not sent"
         print(f"  {Path(path).name}: {d.get('verdict')}  best={d.get('best')} none={d.get('none')} "
@@ -617,52 +617,24 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
     return True, remaining, fails
 # Content check: routing picks files from their one-line descriptions only, so it
 # can match an absent fact on topic alone and miss a present one. Each top routed
-# file (routing score >= ROUTE_FLOOR) is re-offered ALONE with its own text, so it
-# must beat "none of these" on its own merits, not merely out-rank weaker siblings;
-# it survives only with a content score >= CONFIRM_FLOOR. One Jev call per file.
-# A lone file only needs to out-score "none" to come back at all. With a plain file
-# label, an on-topic file lacking the fact scored 0.64-0.69 (a present fact as low
-# as 0.62), so absent facts passed on some runs. The label now tells the judge to
-# pick a passage only if it states the answer: measured 2026-09-22, absent facts
-# 0 (one near-answer 0.55-0.56), present facts 0.63-0.97. Near misses still passed
-# (a flight's date for its departure time; another event's odometer figure), so the
-# label now asks for the exact value for the exact event: measured 2026-09-22 on 10
-# near-miss and 10 present questions x2, near misses 0-0.64, present 0.91-0.98.
-# A later breaker set still passed near misses at 0.70-0.83, so the floor is 0.85:
-# re-measured 2026-09-22 on 8 near-miss and 8 present x2, near misses 0-0.87 (one,
-# "current APY after the rate change", 0.86-0.87 still passes), present 0.90-0.96.
-# A file too long to send whole (over READ_CHARS) is judged on the line-aligned
-# passages that best match the question's words (pick_chunks), never
-# kept on its routing score alone: that bypass returned CLOV.md at 0.97 for a
-# meeting it does not mention (businessfi stress test 2, 2026-09-23).
-#
-# Two tiers. >= CONFIRM_FLOOR is a confirmed match. The same stress test found owner
-# questions (how/why/should/status) scoring 0.60-0.84 on the right file, so any
-# checked file scoring >= POSSIBLE_FLOOR is kept as "possible"
-# (printed with that note, the caller reads the file before answering) instead of
-# being reported as not in the files. Replayed on the test's 196 traced asks: the
-# near-miss negatives' top-routed files scored 0-0.55, so no negative gained a hit.
+# file is checked against its own text. Ordinary retrieval accepts a selected
+# requested fact at SOURCE_FLOOR, including evidence that supplies only part of
+# the answer. The same rule applies to every query; route confidence, filenames
+# and complete-answer comparisons do not override it. Unfinished checks remain
+# explicit. Claim mode retains its separate support/contradiction judgment.
 CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
 READ_CHARS = CONFIRM_CHUNK * CONFIRM_CHUNKS_PER_FILE  # most text one file's check sends
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
 ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.85
-POSSIBLE_FLOOR = 0.6
-# Round 2 (same stress test, 17 bad results): any file the check read scoring
-# >= POSSIBLE_FLOOR may be possible, not just the top 2; open questions (how/should/
-# why/when) are judged on "does it answer" instead of "does it state the exact
-# value" (VALUE_RE picks the exact-value wording); live-number questions (LIVE_RE)
-# get no possible tier at all, since on-topic files at 0.81 gave two false hits.
-VALUE_RE = re.compile(r"\b(how much|how many|balance|breakeven|break even|right now|"
-                      r"net worth|owe|owed|price|cost|total)\b", re.I)
-WORTH_VALUE_RE = re.compile(r"\bwhat(?:['’]s| is| are| was| were)\s+(?!worth\b).{1,80}\bworth\b|"
-                            r"\bworth\s+(?:in|of)\b", re.I)
+SOURCE_FLOOR = 0.7
+CLAIM_CONTENT_FLOOR = 0.6
 POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file before answering)"
 # Word search: on every lookup the
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
 # searched locally for the question's words (typo-tolerant), and the best
-# FALLBACK_FILES get the same content check (kept below CONFIRM_FLOOR as possible).
+# FALLBACK_FILES get the same source-evidence check as routed files.
 FALLBACK_FILES, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 # Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
@@ -700,115 +672,18 @@ QUERY_STOPWORDS = SUBJECT_STOPWORDS | {
     "unas", "mis", "tus", "sus", "esta", "este", "estos", "estas", "esa", "ese", "eso",
     "fue", "muy", "pero", "tiene", "tengo",
 }
-CONFIRM_LABEL = ("Passage {n}, choose only if it states the exact value asked for, for the exact "
-                 "event asked about (a value for another event, or only the topic, is none)")
-ANSWER_LABEL = ("Passage {n}, choose only if it answers the question: a rule, plan, reason, "
-                "date, status or view on what is asked (a passage that only shares a word "
-                "with the question is none)")
-# Live-number asks: no possible tier, a file must confirm at CONFIRM_FLOOR.
-# "how much" alone used to be enough (any bare "how much X" counted as live),
-# but that caught non-money asks like "how much cheaper and faster is this"
-# (EXPLORE.md, recall80 bench, dropped at 0.80 with no possible tier). "how
-# much" now only counts as live when it names a money word too; the plain
-# live markers (balance/breakeven/right now) still gate on their own.
-LIVE_RE = re.compile(r"\b(balance|breakeven|break even|right now)\b", re.I)
-LIVE_HOWMUCH_RE = re.compile(
-    r"\bhow much\b.{0,40}\b(balance|owe|owed|worth|cost|price|due|total|left|"
-    r"remaining|money|cash|pay|paid|spend|spent|charge|charged|fee|fees|bill|"
-    r"dollars?|bucks)\b", re.I)
-
-# Routing score at/above which a read file stays "possible" even when the content
-# check finds no answer (opinion asks like "should I invest" rarely read as answered).
-ROUTE_KEEP = 0.8
-# A file too big to read whole (health-fitness pending.md: 80 KB, 24 chunks) is
-# judged on 4 chunks, so the answer may sit in a chunk never read. When routing
-# is sure (>= BIG_ROUTE_KEEP) and the read passages were on topic (>= BIG_ON_TOPIC),
-# it stays possible. A big file scoring under BIG_ON_TOPIC (CLOV.md for a
-# meeting it never mentions) is still dropped.
-BIG_ROUTE_KEEP, BIG_ON_TOPIC = 0.85, 0.5
-BIG_NOTE = "  (possible: strongly routed, file too long to read whole; start at section: %s)"
-# Final order blends content and routing so a strong route is not thrown away.
-CONTENT_WEIGHT, ROUTE_WEIGHT = 0.6, 0.4
+SOURCE_LABEL = "Passage {n}: source text"
 # Word search only: vague words that name a file's topic in other words.
 SYNONYMS = {"verify": ["check", "feedback"], "rebalance": ["watchlist", "allocation"],
             "holdings": ["positions", "watchlist"], "money": ["funding", "revenue", "cash"]}
 
-# Opinion asks ("should I invest", "who is winning", "can I sell calls") rarely read
-# as answered; only these get the route-keep.
-OPINION_RE = re.compile(r"\b(should|can i|could i|who is winning|whos winning|worth it|good idea)\b", re.I)
-# A question whose main ask is a stance ("our take on X", "what do we think of X")
-# wants a view, which rarely reads as one exact value: it gets the "does it answer"
-# wording and the route-keep. Anchored at the start, so a fact question that only
-# mentions a take ("what date did we publish our take on X") stays exact-value, and
-# any value cue (date, when, percentage, number, amount...) keeps the exact wording.
-STANCE_RE = re.compile(r"\s*(?:(?:so|and|ok|okay|hey)[,\s]+)?(?:what(?:'s|s|\u2019s| is| are)\s+)?"
-                       r"(?:our|my|your)\s+(?:take|view|views|opinion|thoughts|stance)\s+(?:on|about)\b|"
-                       r"\s*what\s+do\s+(?:we|i|you)\s+think\s+(?:of|about)\b|"
-                       r"\s*how\s+do\s+(?:we|i|you)\s+feel\s+about\b", re.I)
-STANCE_VALUE_CUE_RE = re.compile(r"%|\b(date|when|percent|percentage|number|amount|how much|how many|"
-                                 r"revenue|share of|cut of|price|cost|total|deadline)\b", re.I)
-
-def is_stance_question(question: str) -> bool:
-    return bool(STANCE_RE.match(question)) and not STANCE_VALUE_CUE_RE.search(question) \
-        and not is_value_question(question)
-
-def rank_score(content: float, route: float) -> float:
-    return CONTENT_WEIGHT * content + ROUTE_WEIGHT * route
-
-def is_value_question(question: str) -> bool:
-    # Bare "worth" also describes dignity, usefulness and meaning, not a price.
-    return bool(VALUE_RE.search(question) or WORTH_VALUE_RE.search(question))
-
-def is_live_value_question(question: str) -> bool:
-    return bool(LIVE_RE.search(question)) or bool(LIVE_HOWMUCH_RE.search(question))
-
-# The narrower slice of VALUE_RE this round loosens for the possible tier: "how
-# many" and "how much" only. worth/owe/owed/price/cost/total stay excluded --
-# those are exactly the near-miss shapes ("what is owed", "what price did we
-# pay") the 0.85 confirm floor was raised to block, per test_retrieval_recall
-# and test_review_recall_holes.
-HOWCOUNT_RE = re.compile(r"\b(how many|how much)\b", re.I)
-
-def is_howcount_question(question: str) -> bool:
-    return bool(HOWCOUNT_RE.search(question))
-
-OPEN_RE = re.compile(r"\s*(how|should|shall|why|when|can|could|would|do|does|is|are|"
-                     r"which|where)\b", re.I)
-# "what" is not in OPEN_RE outright: "what car do I have" and "what time does it
-# depart" are "what" questions that DO want one exact value, and treating every
-# "what" as open reintroduced the near-miss false hits the exact-value label was
-# built to stop (test_hardening_round3/4). Only "what ... <answer verb>" -- a
-# casual ask about what a file says/covers/means, not a fact lookup -- gets the
-# open treatment (idea B, 2026-09-23, recall80 bench: tools-audit's "what swap
-# path services did we discover" was one of the 7 rejections this targets).
-# "what steps / process / procedure" asks want a sequence that spans passages; the
-# exact-value wording split Jev's pick across them and held the right file's best
-# passage near POSSIBLE_FLOOR, so the same file ranked first on one run and was
-# dropped on the next.
-WHAT_ANSWER_RE = re.compile(
-    r"\bwhat\b.{0,40}\b(say|says|said|cover|covers|mean|means|discover|discovered|"
-    r"discuss|discusses|find|found|include|includes|show|shows|about|"
-    r"steps?|process|procedure)\b", re.I)
-# "what is on the pending to-do list" wants the list, not one exact value: the
-# exact-value wording scored the right 80 KB pending.md 0.57 (live trace
-# 2026-09-24), so list/to-do/backlog asks get the open wording too.
-# Only "what is on ... list": "what is the phone number ... on the referral list"
-# still wants one exact value.
-LIST_RE = re.compile(r"\bwhat('?s|s| is| are)?\s+on\b.{0,50}\b(list|lists|to-?dos?|backlog|checklist)\b",
-                     re.I)
-
 def confirm_label(question: str) -> str:
-    """Open how/should/why/when/which/where questions, and "what ... say/cover/mean"
-    style casual asks, ask "does it answer"; the rest (and any value question) ask
-    for the exact value."""
+    """Retrieval selects evidence; claim mode tests support or contradiction."""
     if _CLAIM["text"]:
         return ("Passage {n}, choose if it provides evidence supporting OR contradicting "
                 "the statement; disagreement is relevant evidence, not absence. "
                 "A passage only sharing the topic is none.")
-    open_q = (OPEN_RE.match(question) or WHAT_ANSWER_RE.search(question)
-              or LIST_RE.search(question) or is_stance_question(question)) \
-        and not is_value_question(question)
-    return ANSWER_LABEL if open_q else CONFIRM_LABEL
+    return SOURCE_LABEL
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
 # navigation-cli's reason when a provider call ran past its timeout (src/enhance/navigation.ts)
@@ -830,11 +705,10 @@ SPREAD_CREDIT, SPREAD_CAP = 0.5, 0.84
 
 def file_score(best: float, none, passages: int, live: bool = False) -> float:
     """Content score for one file from its best passage and Jev's "none" probability.
-    The spread credit only orders files within a tier: a file is possible only when
-    its best passage alone reaches POSSIBLE_FLOOR and confirms only when it reaches
-    CONFIRM_FLOOR (capped just under it otherwise); live-value asks (balance, right
-    now...) get no credit at all."""
-    if live or passages <= 1 or not isinstance(none, (int, float)) or best < POSSIBLE_FLOOR:
+    Spread credit ranks accepted evidence but cannot make a below-threshold
+    passage pass. The optional live flag remains for callers requesting no
+    spread credit; ordinary retrieval applies the same scoring to every query."""
+    if live or passages <= 1 or not isinstance(none, (int, float)) or best < CLAIM_CONTENT_FLOOR:
         return best
     blended = max(best, best + SPREAD_CREDIT * (1 - none - best))
     return blended if best >= CONFIRM_FLOOR else min(blended, SPREAD_CAP)
@@ -888,7 +762,7 @@ def confirm_start(question: str, path: str):
     picked = pick_chunks(question, chunks, prefer)
     detail = _STAGE.setdefault("checks", {})[path] = {
         "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
-        "wording": "exact-value" if label == CONFIRM_LABEL else "answers"}
+        "wording": "claim-evidence" if _CLAIM["text"] else "source-evidence"}
     leaves = [{"id": f"c{i}", "label": label.format(n=i + 1), "description": with_subject(chunks, i),
                "sourceId": str(i)} for i in picked]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
@@ -896,6 +770,8 @@ def confirm_start(question: str, path: str):
                            "nodes": [{"id": "root", "label": "Sources",
                                       "description": "Full text of candidate files",
                                       "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
+    if not _CLAIM["text"]:
+        payload["mode"] = "source-evidence"
     if payload_has_secret(payload):  # the question rides in the payload too
         return (None, partial, None, HELD_SECRET), None
     return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked,
@@ -920,18 +796,20 @@ def confirm_finish(question: str, ctx: dict, body, error):
         detail["best_chunk"] = int(top_c["sourceId"])
         if int(top_c["sourceId"]) < len(chunks):
             detail["best_line"] = best_line(question, chunks, int(top_c["sourceId"]))
-    # A file too big to read whole whose chosen passages were on topic but under
-    # the possible floor records its best section; lookup keeps it as possible
-    # only if it was strongly routed (BIG_ROUTE_KEEP).
-    if len(picked) < len(chunks) and BIG_ON_TOPIC <= best < POSSIBLE_FLOOR:
-        top = max((c for c in body.get("candidates") or [] if isinstance(c, dict)
-                   and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"])
-        head = "".join(chunks[:int(top.get("sourceId") or 0) + 1])
-        detail["section"] = next((ln.lstrip("# ").strip() for ln in reversed(head.splitlines())
-                                  if ln.startswith("#")), "")[:80]
-    score = file_score(best, detail["none"], len(picked), is_live_value_question(question))
+    if not _CLAIM["text"]:
+        # Evidence mode scores each passage as requested property or required component.
+        # The shared source floor admits leads, not proven answers; unlike the
+        # old answer threshold it does not depend on the query shape.
+        if body["status"] == "no-candidates":
+            detail["score"] = 0
+            return None, partial, None, None
+        if top_c is None or type(best) not in (int, float) or not 0 <= best <= 1:
+            return None, partial, "content check returned invalid evidence selection", None
+        detail["score"] = round(best, 3)
+        return (best if best >= SOURCE_FLOOR else None), partial, None, None
+    score = file_score(best, detail["none"], len(picked))
     detail["score"] = round(score, 3)
-    return (score if score >= POSSIBLE_FLOOR else None), partial, None, None
+    return (score if score >= CLAIM_CONTENT_FLOOR else None), partial, None, None
 
 # --- Near-twin tie-break -----------------------------------------------
 # When the top 2-3 ranked files are near-twins -- scores within a small gap,
@@ -1010,10 +888,7 @@ def judge_near_twin(question: str, candidates: list):
 # only when the pick is that strong and not blocked. "none" at >= the same floor
 # drops every possible hit, so a made-up question reports not found instead of an
 # on-topic lookalike; a weaker "none" keeps the files and prints LEANS_NONE_NOTE. A failed call changes nothing.
-# SUPERJEV_LISTWISE=0 turns the step off (same style as SUPERJEV_BATCH_JEV).
-def listwise_enabled() -> bool:
-    return os.environ.get("SUPERJEV_LISTWISE", "1") != "0"
-
+# Claim mode always runs its verdict judge when evidence is available.
 LISTWISE_MAX_FILES = 4
 LISTWISE_PROMOTE_FLOOR = 0.9
 LISTWISE_NONE = "none"
@@ -1342,7 +1217,7 @@ def apply_near_twin_tiebreak(question: str, top: list) -> list:
     # to 2 when a new marginal candidate formed a near-twin with the hub
     # README that answered the question) is more likely to override a correct
     # call than fix a wrong one, so hub files sit out the tie-break entirely;
-    # so do copies and write-ups (copy_kind), already ordered by prefer_sources.
+    # so do copies and write-ups (copy_kind).
     _STAGE["tiebreak"] = {"result": "skipped: a hub file is in the cluster"}
     if any(is_hub_file(p) or copy_kind(p) for _, p, _ in cluster):
         return top
@@ -1663,27 +1538,6 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     floor = rest[0][0] * FALLBACK_REL_FLOOR if rest else 0
     return [r for r in rest if r[0] >= floor][:limit]
 
-# A confirmed file must hold at least CONFIRM_MIN_COVER of the question's
-# weighted words (word_search's idf-weighted coverage). Replayed on 165 traced
-# confirmed pairs (night-0603): every right confirm held 0.26 or more.
-CONFIRM_MIN_COVER = 0.2
-
-def cover_gate(scores: dict) -> list:
-    """Drop any confirmed file that holds almost none of the question's words. A one-passage file is judged as that passage against
-    "none", so a short on-topic-looking file can pass the 0.85 check for an event it
-    never names: history-recall/SKILL.md confirmed at 0.87 for Kelvin's CLOV verdict
-    holding only "kelvin" and "last" (coverage 0.12). Capping it at SPREAD_CAP
-    (0.84) still kept it as "possible" for a made-up question, so it is dropped
-    (score 0, and no route or big-file keep) instead. A file word search did not
-    index gets no opinion. Returns the demoted paths."""
-    cover = (_STAGE.get("word") or {}).get("cover") or {}
-    demoted = [p for p, sc in scores.items()
-               if sc >= CONFIRM_FLOOR and cover.get(p, 1) < CONFIRM_MIN_COVER]
-    for p in demoted:
-        scores[p] = 0.0
-    _STAGE["cover_gate"] = demoted[:STAGE_LIST_CAP]
-    return demoted
-
 def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
     set of paths too long to read whole, first error or None, {path: note})."""
@@ -1859,8 +1713,8 @@ def is_hub_file(path: str) -> bool:
 # at the notes in its folder; a "copy" (_staging/ split, _TEMPLATE) repeats one;
 # a "writeup" (PR-history note) retells a change. Each can pass the content check
 # above the note itself (pending/README 0.99 over the stamps.com note beside it;
-# pr-19's hook survey over docs/wire-into-claude-code.md), so prefer_sources()
-# ranks the source first.
+# pr-19's hook survey over docs/wire-into-claude-code.md). Claim-mode
+# ranking uses these categories; ordinary retrieval ranks evidence alone.
 WRITEUP_DIRS = {"superjev-pr-history", "pr-history"}
 
 def copy_kind(path: str):
@@ -1873,34 +1727,6 @@ def copy_kind(path: str):
     if any(x in WRITEUP_DIRS for x in parts):
         return "writeup"
     return None
-
-def prefer_sources(ranked: list, scores: dict, possible: dict) -> list:
-    """Move each hub/copy/writeup just below the lowest real note it yields to.
-    A copy yields to any note that passed the content check (>= POSSIBLE_FLOOR);
-    a hub yields to a note under its own folder that is confirmed or scored
-    higher than the hub; the hub or copy then counts as possible itself -- it
-    is the pointer or duplicate, not the evidence. A writeup yields only to a confirmed note: pr-history notes are
-    the source for "which PR did X". With nothing to yield to, a hub, copy or
-    writeup keeps its place (it may be the only answer; clov/README is the
-    campaign dashboard)."""
-    out = list(ranked)
-    for m in list(ranked):
-        kind = copy_kind(m[1])
-        if not kind:
-            continue
-        targets = [x for x in out if not copy_kind(x[1])
-                   and (scores.get(x[1], 0) >= POSSIBLE_FLOOR if kind == "copy"
-                        else x[1] not in possible and scores.get(x[1], 0) >= CONFIRM_FLOOR
-                        or kind == "hub" and scores.get(x[1], 0) > scores.get(m[1], 0))
-                   and (kind != "hub" or Path(x[1]).is_relative_to(Path(m[1]).parent))]
-        last = max((out.index(x) for x in targets), default=-1)
-        if last > out.index(m):
-            out.remove(m)
-            out.insert(last, m)
-            _STAGE.setdefault("source_moves", []).append({"path": m[1], "kind": kind, "below": out[last - 1][1]})
-            if kind != "writeup":
-                possible[m[1]] = POSSIBLE_NOTE
-    return out
 
 # A folder documents/<name>/ holds one person's records. Its PROFILE's
 # "Relation:" line (father / mother / self ...) lets "my dad" find that folder.
@@ -1960,6 +1786,8 @@ def question_people(question: str, folks: dict) -> set:
     return who | self_ if words & {"i", "me", "myself"} else who
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
+    # Relative route mass ranks candidates; it is not ordinary evidence confidence.
+    route_floor = ROUTE_FLOOR if _CLAIM["text"] else 0
     if len(question) > MAX_QUESTION:
         print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
         return 2
@@ -2100,6 +1928,13 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             stale_served.pop(ptr, None)
         if status == "candidates" and out.get("candidates"):
+            rows = out["candidates"]
+            if not isinstance(rows, list) or any(
+                    not isinstance(c, dict) or type(c.get("score")) not in (int, float)
+                    or not 0 <= c["score"] <= 1
+                    or not isinstance(c.get("originalPath"), str) or not c["originalPath"]
+                    for c in rows):
+                return ptr, "error: invalid routing candidate", [], elapsed, False
             return ptr, "candidates", out["candidates"], elapsed, True
         if status in ("candidates", "no-candidates"):
             return ptr, "no-candidates", [], elapsed, True
@@ -2110,23 +1945,27 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         return (out.get("status") not in ("candidates", "no-candidates")
                 and _is_overloaded(f"{out.get('status')} {out.get('reason', '')}"))
 
+    # Match the five-source result bound on every routing path. Claim checks
+    # retain their existing navigation defaults.
+    routing_limits = {} if _CLAIM["text"] else {"mode": "source-discovery", "limits": {"beamWidth": 5, "maxResults": 5}}
+
     def nav(ptr):
         t_start = time.time()
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
-                      "lastGood": True})
+                      "lastGood": True, **routing_limits})
         # One backoff retry for an overloaded provider (HTTP 529) -- not counted
         # as a failure unless the retry also fails.
         if failed_overloaded(out):
             time.sleep(OVERLOAD_BACKOFF_SECS)
             out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
-                          "lastGood": True})
+                          "lastGood": True, **routing_limits})
         return classify(ptr, out, time.time() - t_start)
 
     def nav_many(ptrs):
         """{pointer: navigate result}: one navigation-cli run whose Jev questions for
         every pointer share as few calls as fit under Jev's input ceiling."""
         out = memory({"action": "navigate-many", "pointers": ptrs, "principal": principal, "question": question,
-                      "lastGood": True})
+                      "lastGood": True, **routing_limits})
         rows = out.get("results") if out.get("status") == "ok" else None
         if not isinstance(rows, dict):  # an older runtime, or the batch itself failed
             return None
@@ -2143,7 +1982,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if retry:  # one backoff retry for the pointers an overloaded provider (HTTP 529) failed
             time.sleep(OVERLOAD_BACKOFF_SECS)
             outs.update(nav_many(retry) or {ptr: memory({"action": "navigate", "pointer": ptr, "principal": principal,
-                                                         "question": question, "lastGood": True}) for ptr in retry})
+                                                         "question": question, "lastGood": True, **routing_limits}) for ptr in retry})
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
@@ -2199,7 +2038,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # A big file connected in sections routes by section: its check reads the routed
             # sections' passages first, and the result names the section.
             for c in rows:
-                if isinstance(c.get("lines"), list) and c.get("score", 0) >= ROUTE_FLOOR:
+                if isinstance(c.get("lines"), list) and c.get("score", 0) >= route_floor:
                     _STAGE.setdefault("section_routes", {}).setdefault(c.get("originalPath", ""), []).append(
                         (c.get("score", 0), tuple(c["lines"])))
         elif kind in ("candidates", "no-candidates"):
@@ -2263,7 +2102,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # other pointer (prepare_bulk.is_bench_dataset), so a path that reaches here came from its
     # own registered pointer and must not be dropped by where it lives.
     names_of = {ptr: connector_names(ptr) for ptr in {m[2] for m in merged}}
-    merged = sorted((m for m in merged if m[0] >= ROUTE_FLOOR
+    merged = sorted((m for m in merged if m[0] >= route_floor
                      and not prepare_bulk.is_test_material(
                          m[1], prepare_bulk.named_exactly(Path(m[1]).name, names_of[m[2]]))
                      and not other_person(m[1])), reverse=True)
@@ -2272,9 +2111,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     for s, p, _ in merged:
         route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
-    # Always add the word search's best few: routing alone missed 7 of 30 right files.
-    found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
+    # Ordinary source lookup checks only routed candidates. Lexical topic overlap
+    # must not reintroduce files that semantic routing rejected. Claim checking
+    # retains its broader evidence discovery for support and contradiction.
+    found = (word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
                         | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
+             if _CLAIM["text"] else [])
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
@@ -2283,114 +2125,25 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if check_error:
             errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
-        off_topic = set(cover_gate(scores))
-        # Only files the check actually read may stay: a file past the first
-        # CONFIRM_FILES was never read, so it is not evidence of anything.
-        # Value questions need a confirmed score; no possible tier -- except
-        # "how many" / non-live "how much" (is_howcount_question), which get the
-        # possible tier back same as any other question. wheel-radar (0.67, "how
-        # many put opportunities") and EXPLORE (0.80, "how much cheaper and
-        # faster") were both dropped here even though neither is a live-money ask
-        # (idea A, 2026-09-23, recall80 bench). Other value words (worth/owe/
-        # owed/price/cost/total) and any live figure stay gated: those are the
-        # near-miss shapes the 0.85 confirm floor exists to block.
-        if not is_value_question(question) or (is_howcount_question(question)
-                                                 and not is_live_value_question(question)):
-            possible = {p: (FALLBACK_NOTE if p in wpaths else POSSIBLE_NOTE) for p in to_check
-                        if POSSIBLE_FLOOR <= scores.get(p, 0) < CONFIRM_FLOOR}
-            # A strongly routed file that was read keeps a possible slot even if the
-            # answer check found nothing (opinion asks); never for live-value asks.
-            # Never for any value question (count or money) -- only plain opinion asks.
-            for p in (routed[:CONFIRM_FILES] if (OPINION_RE.search(question) or is_stance_question(question))
-                      and not is_value_question(question) else []):
-                if route.get(p, 0) >= ROUTE_KEEP and p not in notes and p not in possible \
-                        and scores.get(p, 0) < CONFIRM_FLOOR and p not in off_topic:
-                    possible[p] = POSSIBLE_NOTE
-            for p in to_check:
-                section = _STAGE.get("checks", {}).get(p, {}).get("section")
-                if section is not None and route.get(p, 0) >= BIG_ROUTE_KEEP \
-                        and p not in notes and p not in possible and p not in off_topic:
-                    possible[p] = BIG_NOTE % (section or "top of file")
-        def demoted(p: str) -> bool:
-            """A hub file (is_hub_file) ranks as a table of contents -- except a
-            README whose own content check CONFIRMED the answer: that README is
-            the folder's dashboard (campaigns/clov/README.md holds the $3.94
-            breakeven and was ranked 3rd behind notes without it, businessfi
-            hand test 2026-09-24). INDEX/catalog/tools-used/handoff/template stay
-            demoted at any score: replaying the fleet's 199 traces, promoting
-            those would flip correct top notes (PeakMonsters, TD SMS codes)."""
-            return is_hub_file(p) and not (Path(p).stem.lower() == "readme"
-                                           and scores.get(p, 0) >= CONFIRM_FLOOR)
-
+        # One source-evidence floor for all questions. Routing discovers candidates;
+        # it cannot rescue a file the content check rejected. Unfinished checks
+        # remain explicitly inconclusive rather than being reported as absence.
         cands = merged + [(0, p, ptr) for p, ptr in wpaths.items()]
         keep = {}
-        for s, p, ptr in cands:
-            if p in keep:
+        for routed_score, p, ptr in cands:
+            if p in keep or p not in checked or notes.get(p) == HELD_SECRET:
                 continue
-            if p in off_topic:
-                continue
-            if (scores.get(p, 0) >= CONFIRM_FLOOR or p in possible or p in partial
-                    or (notes.get(p) == INCONCLUSIVE and p not in wpaths)):
-                # A route-kept file shows no content score above the possible floor.
-                keep[p] = (scores.get(p, POSSIBLE_FLOOR if p in possible else s), p, ptr)
-            # An index/catalog/handoff file is a table of contents, not evidence
-            # itself; move it into the possible group so the real note it points
-            # to (which has a real content score) always outranks it.
-            if p in keep and p not in possible and demoted(p):
+            content = scores.get(p)
+            if type(content) in (int, float) and SOURCE_FLOOR <= content <= 1:
+                keep[p] = (content, p, ptr)
+            elif notes.get(p) == INCONCLUSIVE:
+                keep[p] = (routed_score, p, ptr)
                 possible[p] = POSSIBLE_NOTE
         dropped = len(checked - set(keep) - {p for p, n in notes.items() if n == HELD_SECRET})
-
-        def metric_of(p: str) -> tuple:
-            """(has_content, content_or_0, route) for a kept path. A route-kept
-            path that was never given a real content score (scores has no entry
-            for it) reports has_content=False so it never outranks a path that
-            does have one, no matter how high its routing score is."""
-            c = scores.get(p)
-            return (c is not None, c if c is not None else 0.0, route.get(p, 0))
-
-        def better(a: str, b: str) -> bool:
-            """True if path a should rank above path b within the possible
-            group: any real content score beats route-only; between two real
-            scores the higher one wins unless they round to a near-tie, in
-            which case routing breaks it; two route-only paths fall back to
-            routing alone."""
-            ha, ca, ra = metric_of(a)
-            hb, cb, rb = metric_of(b)
-            if ha != hb:
-                return ha
-            if not ha:
-                return ra > rb
-            if round(ca, 2) == round(cb, 2):
-                return ra > rb
-            return ca > cb
-
-        def sort_metric(m: tuple) -> tuple:
-            """Sort key for every kept file, confirmed or possible alike:
-            content score first (rounded to 2 decimals, so a near-tie falls
-            through to the route component), then routing only to break that
-            near-tie, then the name tie-break. A hub-type file (see
-            is_hub_file) ranks below every other kept file regardless of its
-            content score, since it is a table of contents, not evidence."""
-            s, p, ptr = m
-            if p in possible:
-                has_content, content, r = metric_of(p)
-            else:
-                c = scores.get(p)
-                has_content, content, r = (c is not None, c if c is not None else s, route.get(p, 0))
-            # Groups: notes with a content score, then a possible README with a
-            # real content score, then route-only notes, then other hubs. The
-            # README still yields to any scored note (#149), but no longer sits
-            # below route-only 0.60 files (businessfi retest 2026-09-24).
-            readme_scored = (Path(p).stem.lower() == "readme" and p in possible
-                             and scores.get(p, 0) >= POSSIBLE_FLOOR)
-            group = 0 if demoted(p) and not readme_scored else \
-                2 if readme_scored else 3 if has_content else 1
-            return (group, has_content, round(content, 2), r, path_rank(question, p))
-
-        # Non-hub files first (sort_metric's leading True), then content score
-        # alone with routing only as a near-tie breaker (see metric_of/better/
-        # sort_metric above), then the name tie-break.
-        merged = prefer_sources(sorted(keep.values(), key=sort_metric, reverse=True), scores, possible)
+        # Completed evidence first, then unfinished checks. Routing only breaks
+        # content-score ties; stable paths break the remaining ties.
+        merged = sorted(keep.values(), key=lambda m: (
+            notes.get(m[1]) != INCONCLUSIVE, m[0], route.get(m[1], 0), m[1]), reverse=True)
     if _CLAIM["text"] and to_check:
         # The answer filter is not a claim verdict. Let the bounded claim judge
         # inspect read evidence even when it does not affirm the statement.
@@ -2400,10 +2153,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         merged.sort(key=lambda item: (scores.get(item[1], 0), route.get(item[1], 0)), reverse=True)
         possible.update({p: POSSIBLE_NOTE for _s, p, _ptr in merged})
     top = merged[:5]
-    top = apply_near_twin_tiebreak(question, top)
+    if _CLAIM["text"]:
+        top = apply_near_twin_tiebreak(question, top)
     # Listwise choice step: see judge_listwise.
     listwise_winner = None
-    if top and (listwise_enabled() or _CLAIM["text"]):
+    if top and _CLAIM["text"]:
         pool = [p for _s, p, _ptr in top if notes.get(p) != HELD_SECRET]
         _STAGE["listwise"] = {"pool": pool[:LISTWISE_MAX_FILES], "ran": bool(pool), "reordered": False}
         listwise_winner, listwise_prob = judge_listwise(question, pool) if pool else (None, None)
@@ -2423,8 +2177,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     elif listwise_winner:
         winner_idx = next((i for i, (_s, p, _ptr) in enumerate(top) if p == listwise_winner), None)
         # A hub/copy/writeup winner never promotes past a non-hub file already
-        # ranked ahead of it: prefer_sources already made that source-over-hub
-        # call (a folder README once promoted itself back over the confirmed
+        # ranked ahead of it (a folder README once promoted itself over the confirmed
         # panel note beside it).
         blocked = winner_idx is None or ((is_hub_file(listwise_winner) or copy_kind(listwise_winner))
                                          and any(not (is_hub_file(p) or copy_kind(p))
@@ -2462,24 +2215,26 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
-    content_check = {p: {"score": scores.get(p),
+    content_check = {p: {"score": scores.get(p) if type(scores.get(p)) in (int, float) and 0 <= scores[p] <= 1 else None,
                          "label": ("held-secret" if notes.get(p) == HELD_SECRET
                                    else "inconclusive" if notes.get(p) == INCONCLUSIVE
                                    else "possible" if p in possible
-                                   else "confirmed" if scores.get(p, 0) >= CONFIRM_FLOOR
+                                   else "evidence-selected" if type(scores.get(p)) in (int, float)
+                                   and SOURCE_FLOOR <= scores[p] <= 1
                                    else "dropped")}
                      for p in checked}
-    tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed")
+    tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed" if _CLAIM["text"] else "sources")
     try:  # trace detail is best-effort; it must never fail the ask
         wsearch = _STAGE.get("word") or {}
         fates = {p: "read" for p in wpaths}
         stages = {
             "cache": cache_stage,
+            "routing_floor": route_floor,
             "routing": {ptr: {"status": kind + (" (stale: last refresh)" if ptr in stale_served else ""),
                               "none": nav_none.get(ptr, (None,))[0],
                               "secs": nav_none.get(ptr, (None, None))[1],
                               "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0),
-                                         "kept": c.get("score", 0) >= ROUTE_FLOOR} for c in rows][:STAGE_LIST_CAP]}
+                                         "kept": c.get("score", 0) >= route_floor} for c in rows][:STAGE_LIST_CAP]}
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
             "stale_held": stale_held[:STAGE_LIST_CAP],
@@ -2504,11 +2259,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             "skills": _STAGE.get("skills"),
             "final": [{"score": s, "path": p,
                        "rule": ("inconclusive: routing score" if notes.get(p) == INCONCLUSIVE
-                                else "hub, ranked last" if p in possible and demoted(p)
-                                and not (Path(p).stem.lower() == "readme" and scores.get(p, 0) >= POSSIBLE_FLOOR)
                                 else "possible (word search)" if p in possible and p in wpaths
                                 else "possible" if p in possible
-                                else "confirmed >= %s" % CONFIRM_FLOOR)} for s, p, ptr in top],
+                                else "claim evidence" if _CLAIM["text"] else "evidence-selected")} for s, p, ptr in top],
             "cut_after_top5": [p for _s, p, _ptr in merged[5:5 + STAGE_LIST_CAP]],
         }
     except Exception as e:

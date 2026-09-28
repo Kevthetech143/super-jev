@@ -1,0 +1,52 @@
+# Source retrieval
+
+Ask one focused English source-finding question against explicitly connected,
+reviewed files under the intended principal. Use a meaningful title, one topic
+per note, and explicit names and dates. The bounded validation scope is UTF-8
+Markdown notes of at most 12,000 characters. Larger notes are searched by selected
+passages and have additional recall limits.
+
+The retrieval stage returns up to five source files. Each completed content check
+uses the same rule: the text must supply a fact requested about the specified
+subject. A cost component or list item can be useful without containing the full
+answer. A related topic, different event, or pointer saying the answer exists
+elsewhere does not itself supply the requested fact.
+
+Ordinary source discovery asks which catalog child may supply any requested fact
+or necessary input; it does not require a complete answer in one child. It uses
+one relative-choice question per branch and retains the existing none-win rule.
+Default catalog and claim navigation keep their original routing prompt.
+Source discovery ranks candidates within a five-candidate beam and result bound
+per pointer. Ordinary lookup does not reject a candidate merely because its
+relative routing probability is small, and does not add lexical matches.
+A routing no-match or error retains its distinct meaning. At most five routed files
+are content-checked across pointers, so dense collections can hide a useful note
+behind that bound. Meaningful titles and focused notes matter for discovery.
+The content stage judges each passage against one predicate: it states a requested
+fact or supplies a necessary input to determining that fact. An arithmetic
+operand or list member can qualify while other required inputs are missing.
+Subject, property, event and modality must match; a related measurement or a
+pointer alone does not qualify. The same source floor applies to every query.
+It was chosen during development; the score is not a calibrated probability that
+an answer is true. The judge remains sensitive to wording.
+
+Passages from one file share an evaluation; different files receive independent
+checks through the batch CLI. There is no second answer-picking pass.
+Routing retains its catalog navigation task. Reading more candidates can
+increase provider calls and tokens; batching does not make file checks free.
+Accepted files rank by content, then routing
+on exact ties. File names, query keywords and a second single-answer picker do not
+rescue or demote ordinary retrieval results.
+
+Read the sources before answering. Combine evidence, calculate totals, resolve
+dates and state uncertainty yourself. A returned file is a lead, not a guarantee
+that the final answer is true or complete. No match means not found in this bounded
+search, not proof of absence. Preparation requirements, secret holds, unfinished
+checks and operational errors remain distinct from an ordinary no-match result.
+
+Claim checking is a separate task: `--claim` checks support and contradiction and
+retains its claim judge. This change does not redefine claim verdicts, source
+admission, principal authorization or approved-answer reuse.
+
+Keep scope fixed during a test round. Change the contract explicitly between
+rounds when needed; do not relabel observed failures as out of scope.

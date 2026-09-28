@@ -153,21 +153,43 @@ class NavigationTests(unittest.TestCase):
 
     def test_navigation_subprocess_integration(self):
         fake = self.root / 'fake_navigation.py'
+        log = self.root / 'provider-input.json'
         fake.write_text(
             'import json,sys\n'
-            'p=json.load(sys.stdin); root=next(n for n in p["catalog"]["nodes"] if n["id"]=="root"); leaf=next(n for n in p["catalog"]["nodes"] if "sourceId" in n and n["id"] in root["children"])\n'
-            'print(json.dumps({"status":"candidates","candidates":[{"sourceId":leaf["sourceId"],"nodeId":leaf["id"],"path":["root",leaf["id"]],"score":1}],"calls":1,"trace":[],"complete":False,"message":"ok"}))\n')
+            'raw=json.load(sys.stdin);open(sys.argv[1],"w").write(json.dumps(raw))\n'
+            'def row(p):\n'
+            ' root=next(n for n in p["catalog"]["nodes"] if n["id"]=="root")\n'
+            ' leaf=next(n for n in p["catalog"]["nodes"] if "sourceId" in n and n["id"] in root["children"])\n'
+            ' return {"status":"candidates","candidates":[{"sourceId":leaf["sourceId"],"nodeId":leaf["id"],"path":["root",leaf["id"]],"score":1}],"calls":1,"trace":[],"complete":False,"message":"ok"}\n'
+            'print(json.dumps({"results":[row(p) for p in raw["batch"]],"calls":1} if "batch" in raw else row(raw)))\n')
         preview = connect(self.request, self.config)
         connect(self.confirm(preview), self.config)
         config_path = self.root / 'config.json'
         config_path.write_text(json.dumps({**self.config,
-                                           'navigationCommand': [sys.executable, str(fake)]}))
-        result = run({'action': 'navigate', 'pointer': 'records',
-                      'principal': 'owner', 'question': 'where'},
-                     load_config(config_path))
-        self.assertEqual(result['status'], 'candidates')
-        self.assertEqual(result['candidates'][0]['originalPath'], os.path.abspath(self.two))
-        self.assertEqual(result['complete'], False)
+            'navigationCommand': [sys.executable, str(fake), str(log)]}))
+        config = load_config(config_path)
+        for mode in (None, 'source-discovery'):
+            for action in ('navigate', 'navigate-many'):
+                request = {'action': action, 'principal': 'owner', 'question': 'where',
+                    **({'pointer': 'records'} if action == 'navigate' else {'pointers': ['records']}),
+                    **({'mode': mode} if mode else {})}
+                result = run(request, config)
+                row = result if action == 'navigate' else result['results']['records']
+                self.assertEqual(row['status'], 'candidates', row)
+                self.assertEqual(row['candidates'][0]['originalPath'], os.path.abspath(self.two))
+                self.assertEqual(row['complete'], False)
+                sent = json.loads(log.read_text())
+                payload = sent if action == 'navigate' else sent['batch'][0]
+                self.assertEqual(payload.get('mode'), mode)
+                log.unlink()
+                request['principal'] = 'intruder'
+                refused = run(request, config)
+                row = refused if action == 'navigate' else refused['results']['records']
+                self.assertEqual(row['status'], 'access-denied')
+                self.assertFalse(log.exists())
+        with self.assertRaisesRegex(ValueError, 'mode is invalid'):
+            run({'action':'navigate', 'pointer':'records', 'principal':'owner',
+                 'question':'where', 'mode':'source-evidence'}, config)
 
 
 if __name__ == '__main__':
