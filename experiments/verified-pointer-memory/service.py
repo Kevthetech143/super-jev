@@ -261,7 +261,8 @@ class Service:
                       'structure': entry.get('structure', 'flat-files'),
                       'sources': [{'path': s['originalPath'], 'id': s['id'],
                                    'description': s.get('description', ''),
-                                   **({'viewTransform': s['viewTransform']} if 'viewTransform' in s else {})}
+                                   **({'viewTransform': s['viewTransform']} if 'viewTransform' in s else {}),
+                                   **({'lines': s['lines']} if s.get('lines') else {})}
                                   for s in manifest['sources'] if s.get('originalPath')]}
         if not recipe or not recipe.get('sources'):
             return {'status': 'no-recipe'}
@@ -684,6 +685,7 @@ class Service:
                    ({'originalPath': source['originalPath']} if source.get('originalPath') else {})),
                 'description': source.get('description', ''),
                 'lineCount': line_count,
+                **({'lines': source['lines']} if source.get('lines') else {}),
             })
         page = rows[offset:offset + limit]
         result = {'status': 'ok', 'sources': page, 'offset': offset,
@@ -772,7 +774,8 @@ class Service:
             nodes.extend({'id': 'source:' + digest(source_id)[:24],
                           'label': ('Reviewed source ' + digest(source_id)[:12]
                                     if source.get('viewTransform') else
-                                    Path(source.get('originalPath', source['path'])).name),
+                                    Path(source.get('originalPath', source['path'])).name
+                                    + (' (lines {}-{})'.format(*source['lines']) if source.get('lines') else '')),
                           'description': source.get('description', ''),
                           'sourceId': source_id}
                          for source_id, source in sorted(sources.items()))
@@ -835,6 +838,7 @@ class Service:
             mapped.append({**candidate, 'originalPath': source['path'] if source.get('viewTransform') else source.get('originalPath', source['path']),
                            **({'upstreamPath': source['originalPath']} if source.get('viewTransform') else {}),
                            'contentSHA': source['contentSHA'],
+                           **({'lines': source['lines']} if source.get('lines') else {}),
                            'description': source.get('description', '')})
         if stale:
             # What changed is taken again after the provider call: a file edited or deleted

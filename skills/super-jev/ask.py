@@ -876,7 +876,14 @@ def confirm_start(question: str, path: str):
         chunks = split_passages(text)
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
-    picked = pick_chunks(question, chunks)
+    routed = [lines for _s, lines in sorted((_STAGE.get("section_routes") or {}).get(path) or [], reverse=True)]
+    prefer, first = set(), 1
+    for i, c in enumerate(chunks):
+        last = first + c.count("\n") - (1 if c.endswith("\n") else 0)
+        if any(a <= last and first <= b for a, b in routed):
+            prefer.add(i)
+        first += c.count("\n")  # a passage cut mid-line leaves the next one on the same line
+    picked = pick_chunks(question, chunks, prefer)
     detail = _STAGE.setdefault("checks", {})[path] = {
         "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
         "wording": "exact-value" if label == CONFIRM_LABEL else "answers"}
@@ -909,6 +916,8 @@ def confirm_finish(question: str, ctx: dict, body, error):
                  and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"], default=None)
     if top_c and str(top_c.get("sourceId", "")).isdigit():
         detail["best_chunk"] = int(top_c["sourceId"])
+        if int(top_c["sourceId"]) < len(chunks):
+            detail["best_line"] = best_line(question, chunks, int(top_c["sourceId"]))
     # A file too big to read whole whose chosen passages were on topic but under
     # the possible floor records its best section; lookup keeps it as possible
     # only if it was strongly routed (BIG_ROUTE_KEEP).
@@ -1379,13 +1388,15 @@ def with_subject(chunks: list, i: int) -> str:
     title = next((ln.strip() for ln in chunks[0].splitlines() if ln.strip()), "")[:SUBJECT_CHARS]
     return f"{title}{SUBJECT_SEP}{chunks[i]}" if title else chunks[i]
 
-def pick_chunks(question: str, chunks: list) -> list:
+def pick_chunks(question: str, chunks: list, prefer=()) -> list:
     """Indexes to read, in file order: every passage if they fit in READ_CHARS, else
     the passages scoring best by BM25 on the question's words (each word weighted by
     how rare it is within this file; earlier passages win ties, so a file with few
     matches is read from its top) until READ_CHARS is spent. Counting distinct words,
     with the first chunk always read, spent the slots on the intro and on passages
-    full of the file's common words, missing the one section that answered."""
+    full of the file's common words, missing the one section that answered. `prefer` (the
+    passages of the sections routing chose, for a file connected in sections) are read
+    first when they match any question word."""
     # A passage after the first is sent led by the file's title (with_subject).
     cost = [len(c) + (SUBJECT_CHARS + len(SUBJECT_SEP) if i else 0) for i, c in enumerate(chunks)]
     if sum(cost) <= READ_CHARS:
@@ -1405,7 +1416,7 @@ def pick_chunks(question: str, chunks: list) -> list:
     score = [sum(idf[t] * f[t] * 2.2 / (f[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
              for f, size in zip(tfs, sizes)]
     picked, used = [], 0
-    for i in sorted(range(len(chunks)), key=lambda i: (-score[i], i)):
+    for i in sorted(range(len(chunks)), key=lambda i: (not (i in prefer and score[i]), -score[i], i)):
         if used + cost[i] <= READ_CHARS:
             picked.append(i)
             used += cost[i]
@@ -1553,7 +1564,7 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
     failed by its last review, under the size ceiling, no secret-looking line, and still inside
     the pointer's recorded scope."""
     return (isinstance(entry, dict) and bool(entry.get("pass")) and bool(entry.get("sha256"))
-            and len(raw) <= prepare_bulk.CEILING_BYTES
+            and len(raw) <= (prepare_bulk.SECTION_MAX_BYTES if entry.get("sections") else prepare_bulk.CEILING_BYTES)
             and not has_secret(text) and refresh_would_admit(path, ptr))
 
 
@@ -1701,6 +1712,30 @@ def confirm_results(paths: list, results: list):
     # score, and the other files are still filtered on their own results.
     notes = {p: note or INCONCLUSIVE for p, (_, _, e, note) in zip(paths, results) if note or e}
     return scores, partial, (errors[0] if errors else None), notes
+
+def best_line(question: str, chunks: list, i: int) -> int:
+    """The file line (1-based) in passage i sharing the most question words, earliest on a tie:
+    a 3,500-character passage often starts in the section before the one it is about."""
+    first = 1 + sum(c.count("\n") for c in chunks[:i])
+    terms = query_terms(question)
+    rows = chunks[i].split("\n")
+    hits = [term_hits(terms, row) for row in rows]
+    return first + max(range(len(rows)), key=lambda k: (hits[k], -k)) if rows else first
+
+def section_shown(path: str, ptr: str):
+    """For a file connected in sections: (first, last) of the section to open, the one holding
+    the passage the content check scored best, else the best-routed one; else None."""
+    routed = sorted((_STAGE.get("section_routes") or {}).get(path) or [], reverse=True)
+    secs = []
+    for name in dict.fromkeys((ptr, re.sub(r"-\d+$", "", ptr))):
+        entry = load_cache_files(name).get(path)
+        if isinstance(entry, dict) and entry.get("sections"):
+            # Where to read in the file: any section, connected or not (the check read the file itself).
+            secs = [tuple(x["lines"]) for x in entry["sections"] if x.get("lines")]
+            break
+    line = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
+    hit = next((x for x in secs if line and x[0] <= line <= x[1]), None)
+    return hit or (routed[0][1] if routed else None)
 
 def refresh_hint(ptr: str, principal: str, kind: str) -> str:
     """A stale pointer's files changed since connect; say the exact command that re-prepares it."""
@@ -2122,7 +2157,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
         _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
     merged, errored, statuses, stale_held = [], 0, {}, []
-    _STAGE["stale_changed"] = []
+    _STAGE["stale_changed"], _STAGE["section_routes"] = [], {}
     for ptr, kind, rows, elapsed, ok in results:
         served = stale_served.get(ptr)
         record_pointer_outcome(health, ptr, ok, elapsed, stale=_is_stale_kind(kind) or bool(served))
@@ -2147,6 +2182,12 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if kind == "candidates" and rows:
             statuses[ptr] = "candidates"
             merged += [(c.get("score", 0), c.get("originalPath", ""), ptr) for c in rows]
+            # A big file connected in sections routes by section: its check reads the routed
+            # sections' passages first, and the result names the section.
+            for c in rows:
+                if isinstance(c.get("lines"), list) and c.get("score", 0) >= ROUTE_FLOOR:
+                    _STAGE.setdefault("section_routes", {}).setdefault(c.get("originalPath", ""), []).append(
+                        (c.get("score", 0), tuple(c["lines"])))
         elif kind in ("candidates", "no-candidates"):
             statuses[ptr] = "no-candidates"
         else:
@@ -2487,7 +2528,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     for s, p, ptr in top:
         note = ("  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE
                 else possible.get(p, ""))
-        print(f"{s:5.2f}  {p}  [{ptr}]{note}")
+        lines = section_shown(p, ptr)
+        print(f"{s:5.2f}  {p}  [{ptr}]" + (f"  (section: lines {lines[0]}-{lines[1]})" if lines else "") + note)
     if top and (_STAGE.get("listwise") or {}).get("leans_none"):
         print(LEANS_NONE_NOTE)
     for p, note in notes.items():
@@ -2593,10 +2635,15 @@ def skipped_files(pointers, principal: str = "") -> dict:
                     or (cache.get(path) or {}).get("pass") or not os.path.exists(path)):
                 continue
             if "over size ceiling" in why:
-                m = re.search(r"\(([\d,]+) bytes, max ([\d,]+)\)", why)
+                m = re.search(r"\(([\d,]+) bytes, max ([\d,]+)", why)
                 size = (f" ({int(m.group(1).replace(',', '')) // 1000} KB, limit "
                         f"{int(m.group(2).replace(',', '')) // 1000} KB)") if m else ""
-                out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
+                if m and int(m.group(1).replace(",", "")) <= prepare_bulk.SECTION_MAX_BYTES:
+                    # Held under an older, lower limit: its pointer's next refresh connects it in sections.
+                    out[path] = ("held as too big at its last setup" + size,
+                                 "re-run setup with --refresh: a file this size now connects in sections", "name")
+                else:
+                    out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
             elif any(k in why for k in SECRET_HELD):
                 out[path] = ("held back: it looks like it holds a password, key or card number",
                              "review the flagged line, then re-run setup with --allow-held", True)
@@ -2754,7 +2801,7 @@ def best_evidence_line(text: str, answer: str, question: str = "") -> str:
 
 
 def file_evidence(principal: str, pointer: str, question: str, answer: str, path: str,
-                  sid, out: dict) -> tuple:
+                  sid, out: dict, lines=None) -> tuple:
     """(search/assist result holding only passages from `path`, best-supporting first, or
     None, why). Search's passages are used when one comes from the file; otherwise the
     file's own reviewed lines that best match the answer are cited via assisted review,
@@ -2764,9 +2811,11 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
     passages = [p for p in out.get("passages") or [] if sid is not None and p.get("sourceId") == sid]
     if not any(p.get("reviewedText") for p in passages) and sid is not None and out.get("attemptId"):
         try:
-            lines = Path(path).read_text(errors="replace").splitlines()
+            text = Path(path).read_text(errors="replace")
         except OSError:
-            lines = []
+            text = ""
+        # A section of a big file is its own source, numbered from its first line.
+        lines = (prepare_bulk.section_text(text, lines) if lines else text).splitlines()
         best = max(range(len(lines)), key=lambda i: evidence_line_rank(lines[i], answer, question), default=None)
         if best is not None and evidence_line_rank(lines[best], answer, question)[0] <= 0:
             return None, f"no line in {path} shares a word with the answer"
@@ -2788,20 +2837,39 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
         return None, f"no passage from {path} itself could be cited"
     return {**out, "passages": sorted(passages, key=support, reverse=True)}, None
 
-def source_row(principal: str, pointer: str, path: str):
-    """(the pointer's sources row for path or None, sources status); pages past 100."""
-    offset = 0
+def source_row(principal: str, pointer: str, path: str, answer: str = "", question: str = ""):
+    """(the pointer's sources row for path or None, sources status); pages past 100. A file
+    connected in sections has one row per section: the one holding the file's line that best
+    matches the answer (evidence_line_rank) is returned, else its first."""
+    offset, rows = 0, []
     while True:
         listed = memory({"action": "sources", "pointer": pointer, "principal": principal,
                          "offset": offset, "limit": 100})
         if listed.get("status") != "ok":
             return None, listed.get("status")
-        row = next((s for s in listed.get("sources") or [] if s.get("originalPath") == path), None)
-        if row or listed.get("nextOffset") is None:
-            return row, "ok"
+        rows += [s for s in listed.get("sources") or [] if s.get("originalPath") == path]
+        if (rows and not rows[0].get("lines")) or listed.get("nextOffset") is None:
+            break
         offset = listed["nextOffset"]
+    if len(rows) > 1 and answer:
+        try:
+            lines = Path(path).read_text(errors="replace").split("\n")
+        except OSError:
+            lines = []
+        best = max(range(len(lines)), key=lambda i: evidence_line_rank(lines[i], answer, question), default=None)
+        if best is not None:
+            rows.sort(key=lambda r: not (r.get("lines") and r["lines"][0] <= best + 1 <= r["lines"][1]))
+    return (rows[0] if rows else None), "ok"
 
-def ask_evidence(principal: str, pointer: str, question: str, answer: str, path: str, sid) -> tuple:
+def live_sha(path: str, row: dict) -> str:
+    """sha256 of what a sources row publishes now: the file, or its section's lines."""
+    raw = Path(path).read_bytes()
+    if row and row.get("lines"):
+        raw = prepare_bulk.section_text(raw.decode("utf-8", "replace"), row["lines"]).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def ask_evidence(principal: str, pointer: str, question: str, answer: str, path: str, sid,
+                 lines=None) -> tuple:
     """(ticket result citing only `path`, None) or (None, why). The file is the one ask()
     already ranked, so its own passage is cited through assist; memory's separate
     retrieval (description-only ranking) never decides whether it can be saved. An older
@@ -2819,7 +2887,7 @@ def ask_evidence(principal: str, pointer: str, question: str, answer: str, path:
         if out.get("status") not in ("ready", "no-match", "refused") or not out.get("attemptId"):
             return None, f"cannot open {pointer}: {out.get('status')}"
     return file_evidence(principal, pointer, question, answer, path, sid,
-                         {"attemptId": out["attemptId"]})
+                         {"attemptId": out["attemptId"]}, lines)
 
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
                   approved_by: str = None, **fields) -> int:
@@ -2921,12 +2989,13 @@ def auto_approve(principal: str, question: str, answer: str, sdir: Path,
         return not_saved(sdir, question, f"cannot read {evidence_file}: {e.strerror or e}")
     if has_secret(text) or has_secret(question) or has_secret(answer):
         return not_saved(sdir, question, f"secret-held: {HELD_SECRET}")
-    row, status = source_row(principal, pointer, evidence_file)
+    row, status = source_row(principal, pointer, evidence_file, answer, question)
     if status != "ok":
         return not_saved(sdir, question, f"stale: pointer {pointer} is {status}")
-    if not row or row.get("contentSHA") != sha256_file(Path(evidence_file)):
+    if not row or row.get("contentSHA") != live_sha(evidence_file, row):
         return not_saved(sdir, question, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
-    out, why = ask_evidence(principal, pointer, question, answer, evidence_file, row.get("sourceId"))
+    out, why = ask_evidence(principal, pointer, question, answer, evidence_file, row.get("sourceId"),
+                            row.get("lines"))
     if out and out.get("status") == "verified-cache-hit":
         print("already cached")
         return 0
@@ -3112,17 +3181,17 @@ def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None
         # Evidence comes from the file ask() ranked (or the lead picked) itself, matched by
         # full path so a same-name file in the same tree never stands in (businessfi
         # retest 2026-09-24); memory's own search ranking plays no part.
-        row, _ = source_row(principal, pointer, chosen["path"])
+        row, _ = source_row(principal, pointer, chosen["path"], answer, question)
         try:
-            live_sha = sha256_file(Path(chosen["path"]))
+            now_sha = live_sha(chosen["path"], row)
         except OSError:
-            live_sha = None
-        if row and row.get("contentSHA") and row["contentSHA"] != live_sha:
+            now_sha = None
+        if row and row.get("contentSHA") and row["contentSHA"] != now_sha:
             print(f"cannot approve: stale: {chosen['path']} changed since connect; refresh the pointer first.")
             log(sdir, "approve", question=question, pointer=pointer, result="stale")
             return 1
         out, why = ask_evidence(principal, pointer, question, answer, chosen["path"],
-                                (row or {}).get("sourceId"))
+                                (row or {}).get("sourceId"), (row or {}).get("lines"))
     else:
         # No file known (--approve with an explicit pointer only): search is the fallback.
         out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})

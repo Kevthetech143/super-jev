@@ -126,9 +126,10 @@ def test_approved_file_survives_refresh_until_its_bytes_change(run, capsys):
     f = run.root / "fixture.py"
     f.write_text(BIG)
     code, rep = run()
-    assert code == 0 and str(f) not in rep["approved"]
+    # Unapproved, a file over the ceiling connects in sections (tests/test_bigfile_connect_sections.py).
+    assert code == 0 and str(f) in rep["approved"] and str(f) in rep["sections"]
     code, rep = run("--approve-held", str(f))
-    assert code == 0 and str(f) in rep["approved"]
+    assert code == 0 and str(f) in rep["approved"] and str(f) not in rep["sections"]
     assert rep["approvedHeld"] == [{"path": str(f), "sha256": _sha(f)}]
     out = capsys.readouterr().out
     assert "APPROVED" in out and "fixture.py" in out
@@ -136,14 +137,11 @@ def test_approved_file_survives_refresh_until_its_bytes_change(run, capsys):
     code, rep = run(refresh=True)
     assert code == 0 and str(f) in rep["approved"]
     assert rep["approvedHeld"] == [{"path": str(f), "sha256": _sha(f)}]
-    # A changed file is held again, and the reason names the old approval.
-    old = _sha(f)
+    # A changed file is no longer connected whole: it falls back to sections, never held.
     f.write_text(BIG + "# edited\n")
     code, rep = run(refresh=True)
-    assert str(f) not in rep["approved"]
-    why = dict(rep["held"])[str(f)]
-    assert "over size ceiling" in why and old[:12] in why and "changed since" in why
-    assert "--approve-held" in capsys.readouterr().out
+    assert code == 0 and str(f) in rep["approved"] and str(f) in rep["sections"]
+    assert str(f) not in dict(rep["held"])
 
 
 def test_allow_held_is_still_never_replayed(run):
@@ -193,7 +191,7 @@ def test_size_held_file_can_be_approved_under_the_hard_cap(run):
     big.write_text("x = 1\n" * (pb.CEILING_BYTES // 6 + 100))
     assert pb.CEILING_BYTES < big.stat().st_size < 1_000_000
     code, rep = run()
-    assert "over size ceiling" in dict(rep["held"])[str(big)]
+    assert str(big) in rep["sections"] and str(big) not in dict(rep["held"])
     code, rep = run("--approve-held", str(big))
     assert str(big) in rep["approved"]
     assert rep["approvedHeld"] == [{"path": str(big), "sha256": _sha(big)}]
@@ -201,15 +199,23 @@ def test_size_held_file_can_be_approved_under_the_hard_cap(run):
     assert str(big) in rep["approved"]
 
 
-def test_size_over_the_hard_cap_stays_held_with_split_hint(run):
+def test_size_over_the_hard_cap_connects_in_sections_never_whole(run):
     huge = run.root / "huge.py"
     huge.write_text("x = 1\n" * (1_000_000 // 6 + 10))
     assert huge.stat().st_size > 1_000_000
     code, rep = run("--approve-held", str(huge))
+    assert str(huge) in rep["approved"] and str(huge) in rep["sections"]
+    assert not rep.get("approvedHeld")
+
+
+def test_size_over_the_section_limit_stays_held_with_split_hint(run, monkeypatch):
+    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", pb.CEILING_BYTES + 1000)
+    huge = run.root / "huge.py"
+    huge.write_text(BIG * 2)
+    code, rep = run()
     assert str(huge) not in rep["approved"]
     why = dict(rep["held"])[str(huge)]
-    assert "over size ceiling" in why and "split it into smaller text files" in why
-    assert not rep.get("approvedHeld")
+    assert "over size ceiling" in why and "even in sections" in why and "split it into smaller text files" in why
 
 
 def test_unheld_or_unknown_path_is_not_recorded(run, capsys):

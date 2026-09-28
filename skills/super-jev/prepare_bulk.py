@@ -31,16 +31,19 @@ Pipeline per run:
      another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
      keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc. Files matching
-     card/password-like patterns or over the size ceiling (250,000 bytes; files over one Jev call are gated in parts) are HELD and never sent to the writer; a
+     card/password-like patterns or over SECTION_MAX_BYTES (2,000,000) are HELD and never sent to the writer. A file over the size
+     ceiling (250,000 bytes) connects in sections: line ranges cut at headings / top-level declarations (split_sections), each
+     drafted, gated, cached (by its text's sha256) and connected as the file's path plus its lines, the file itself unchanged; a
+     refresh re-gates only the sections whose text changed. For a held file, a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
      one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
      a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
-     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. --approve-held PATH
-     (repeatable) admits one size-held file after a person reviewed it and records its path and sha256 in the report;
-     --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file is held
-     again naming the old approval. It lifts only a size hold, up to APPROVE_MAX_BYTES (1,000,000); a file held
+     never lifts a size hold. --approve-held PATH (repeatable) connects one file over the ceiling whole (not in
+     sections) after a person reviewed it and records its path and sha256 in the report;
+     --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file connects
+     in sections instead. It applies only up to APPROVE_MAX_BYTES (1,000,000); a file held
      for secret-like text or name, or with a credential suffix, can never be approved. --allow-held is never
      replayed. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
@@ -89,7 +92,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, fnmatch, functools, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
+import argparse, atexit, fnmatch, functools, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, tempfile, time, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -138,6 +141,92 @@ def code_heading(line: str, suffix: str) -> bool:
     if suffix in {'.sh', '.bash'}:
         return bool(re.match(r'^\s*(?:function\s+\w+|[a-zA-Z_]\w*\s*\(\s*\))', line))
     return False
+# A file over CEILING_BYTES (and at most SECTION_MAX_BYTES) connects as sections: line ranges
+# cut at natural edges, each drafted, gated and described like a file of its own. The file on
+# disk is never changed; the connector reads each range from it. Cuts are content-defined (a
+# heading or top-level def/class whose text hashes to 0 mod SECTION_EDGE_MOD, once a section
+# holds SECTION_MIN bytes), so an edit moves only the cuts around it and a refresh re-gates
+# only the sections whose text changed.
+SECTION_MAX_BYTES = 2_000_000
+SECTION_MIN, SECTION_MAX, SECTION_EDGE_MOD = 6_000, 20_000, 4
+_MD_HEADING_RE = re.compile(r"#{1,6}\s+\S")
+_FENCE_RE = re.compile(r"(`{3,}|~{3,})")
+
+
+def _section_edges(lines: list, suffix: str, keys: dict = None) -> dict:
+    """{line index: rank} of the places a section may start: 2 = a heading (outside a code
+    fence) or a top-level declaration, moved up over the decorators/comments right above it;
+    1 = the first line after a blank line. Line 0 is never an edge (a section starts there).
+    `keys` gets {edge: the heading/declaration line's own text} for each rank-2 edge."""
+    edges, fence, code = {}, None, suffix in CODE_EXTENSIONS
+    for i, line in enumerate(lines):
+        if not code:
+            m = _FENCE_RE.match(line.lstrip())
+            if m:
+                fence = None if fence and m.group(1)[0] == fence else (fence or m.group(1)[0])
+                continue
+            if fence:
+                continue
+        top = (code_heading(line, suffix) and not line[:1].isspace()) if code else bool(_MD_HEADING_RE.match(line))
+        if top:
+            j = i
+            while code and j > 0 and lines[j - 1].strip() and lines[j - 1].lstrip()[:1] in "@#/" \
+                    and not lines[j - 1][:1].isspace():
+                j -= 1
+            if j:
+                edges[j] = 2
+                if keys is not None:
+                    keys[j] = line.strip()
+        elif i and not lines[i - 1].strip() and line.strip() and i not in edges:
+            edges[i] = 1
+    return edges
+
+
+def file_lines(text: str) -> list:
+    """text cut after each \n only (str.splitlines also cuts at \u2028, \x85 ...), so section
+    line numbers are the ones an editor shows. "".join(file_lines(t)) == t."""
+    return re.findall(r"[^\n]*\n|[^\n]+\Z", text)
+
+
+def split_sections(text: str, suffix: str = ".md") -> list:
+    """[(first line, last line)], 1-based and inclusive, covering the whole text in order.
+    A section ends before a rank-2 edge chosen by its own line's hash once it holds SECTION_MIN
+    bytes; one that reaches SECTION_MAX first is cut at its last heading/declaration past
+    SECTION_MIN, else its last paragraph break, else its last line boundary (a single line
+    longer than SECTION_MAX is a section of its own). A short tail joins the section before it."""
+    lines = file_lines(text)
+    if not lines:
+        return []
+    pre = [0]
+    for line in lines:
+        pre.append(pre[-1] + len(line.encode("utf-8", "replace")))
+    keys = {}
+    edges = _section_edges(lines, suffix.lower(), keys)
+    # Chosen by the declaration/heading text itself, not a decorator above it ("@pytest.fixture").
+    marked = {i for i, key in keys.items()
+              if int(hashlib.sha1(key.encode("utf-8", "replace")).hexdigest(), 16) % SECTION_EDGE_MOD == 0}
+    cuts = [0]
+    for i in range(1, len(lines)):
+        start = cuts[-1]
+        held = pre[i] - pre[start]  # bytes of lines start..i-1, the section so far
+        if i in marked and held >= SECTION_MIN:
+            cuts.append(i)
+        elif held + pre[i + 1] - pre[i] > SECTION_MAX:
+            fit = [j for j in range(start + 1, i + 1) if j in edges and pre[j] - pre[start] >= SECTION_MIN]
+            cuts.append(max((j for j in fit if edges[j] == 2), default=None)
+                        or max((j for j in fit if edges[j] == 1), default=None) or i)
+    if len(cuts) > 1 and pre[-1] - pre[cuts[-1]] < SECTION_MIN // 2 and pre[-1] - pre[cuts[-2]] <= SECTION_MAX:
+        cuts.pop()
+    ends = cuts[1:] + [len(lines)]
+    return [(a + 1, b) for a, b in zip(cuts, ends)]
+
+
+def section_text(text: str, lines) -> str:
+    """Lines a..b (1-based, inclusive) of text, line ends kept: what the connector reads."""
+    a, b = lines
+    return "".join(file_lines(text)[a - 1:b])
+
+
 sys.path.insert(0, str(HERE))
 from connect_checked import gate, gate_many, memory  # noqa: E402
 
@@ -813,13 +902,15 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                     note = (f"; changed since its --approve-held review (approved sha256 {approvals[key][:12]}), "
                             "review it again")
             if len(b) > CEILING_BYTES:
-                split_hint = ("split it into smaller .md files, e.g. one per ## section"
-                              if p.suffix.lower() == '.md' else "split it into smaller text files")
                 why = f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,})"
-                if not (approved and len(b) <= APPROVE_MAX_BYTES):
-                    too_big = f"; too big to approve (max {APPROVE_MAX_BYTES:,})" if approved else ""
-                    held.append((str(p), f"{why}; {split_hint}{too_big}{note}")); continue
-                admitted.append(why)
+                if approved and len(b) <= APPROVE_MAX_BYTES:
+                    admitted.append(why)  # a reviewed approval still connects it whole while it matches
+                elif len(b) > SECTION_MAX_BYTES:
+                    split_hint = ("split it into smaller .md files, e.g. one per ## section"
+                                  if p.suffix.lower() == '.md' else "split it into smaller text files")
+                    held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {SECTION_MAX_BYTES:,} "
+                                         f"even in sections); {split_hint}{note}")); continue
+                # else: connected in sections (main), after the same text and secret checks below
             if b"\x00" in b:
                 held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
             try:
@@ -871,12 +962,13 @@ def secret_detail(p: Path):
     return None
 
 
-def split_parts(ordered: list, limit: int, part_bytes: int = None) -> list:
-    """Files in order, cut into parts of at most `limit` files and `part_bytes` bytes (PART_BYTES)."""
+def split_parts(ordered: list, limit: int, part_bytes: int = None, size_of=None) -> list:
+    """Files (or other connect units, sized by `size_of`) in order, cut into parts of at most
+    `limit` units and `part_bytes` bytes (PART_BYTES)."""
     part_bytes = PART_BYTES if part_bytes is None else part_bytes
     parts, cur, size = [], [], 0
     for p in ordered:
-        n = Path(p).stat().st_size if Path(p).exists() else 0
+        n = size_of(p) if size_of else Path(p).stat().st_size if Path(p).exists() else 0
         if cur and (len(cur) >= limit or size + n > part_bytes):
             parts.append(cur); cur, size = [], 0
         cur.append(p); size += n
@@ -1045,10 +1137,17 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     refuses with "scope-change".
 
     `pinned` ({path: sha256}) holds --approve-held files: when the preview's hash for one differs,
-    the reviewed connect is not sent and the paths come back as `drifted`."""
-    sources = []
-    for p in part_files:
-        c = cache[str(p)]
+    the reviewed connect is not sent and the paths come back as `drifted`.
+
+    A unit (path, i) is section i of a file connected in sections (cache[path]["sections"][i]):
+    it is sent as the file's path with its line range, and the preview's hash of those lines
+    must be the one gated, or nothing is sent and the paths come back as `changed`."""
+    sources, gated = [], {}
+    for u in part_files:
+        p, i = u if isinstance(u, tuple) else (u, None)
+        c = cache[str(p)] if i is None else cache[str(p)]["sections"][i]
+        if i is not None:
+            gated[(os.path.realpath(p), tuple(c["lines"]))] = (str(p), c["sha256"])
         if c.get("labels_ok", True):
             desc = labeled_description(c["description"], {
                 "kind": c.get("kind", "unknown"),
@@ -1058,7 +1157,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
             })
         else:
             desc = c["description"]
-        sources.append({"path": str(p), "description": desc})
+        sources.append({"path": str(p), "description": desc, **({"lines": list(c["lines"])} if i is not None else {})})
     held = [s["path"] for s in sources if payload_has_secret(s)]
     if held:
         print(f"connect held for {pointer}: secret-like text in {', '.join(held)}; not sent")
@@ -1086,8 +1185,17 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     # The backend echoes each path in realpath form: a symlinked file (a skill folder whose SKILL.md
     # links into tools/) came back under its target and crashed the skills reconnect with a KeyError.
     hashes = {os.path.realpath(x["path"]): x["sha256"] for x in prev["sources"]}
+    views = {(os.path.realpath(x["path"]), tuple(x["lines"])): x.get("viewSHA")
+             for x in prev["sources"] if x.get("lines")}
     for s in req["sources"]:
         s["sha256"] = hashes[os.path.realpath(s["path"])]
+        if "lines" in s:
+            s["viewSHA"] = views.get((os.path.realpath(s["path"]), tuple(s["lines"])))
+    changed = sorted({path for key, (path, want) in gated.items() if views.get(key) != want})
+    if changed:
+        print(f"connect held for {pointer}: file(s) changed since their sections were gated: "
+              f"{', '.join(changed)}; not sent (refresh again)")
+        return {"connected": False, "changed": changed}
     drifted = [s["path"] for s in req["sources"] if s["path"] in (pinned or {}) and s["sha256"] != pinned[s["path"]]]
     if drifted:
         print(f"connect held for {pointer}: approved file(s) changed since approval: {', '.join(drifted)}; not sent")
@@ -1157,7 +1265,8 @@ def list_cmd(pointer: str, status: str = None, kind: str = None,
     entries = load_cache_files(pointer)
     today = date.today()
     rows, excluded = [], 0
-    for path, c in entries.items():
+    for path, c in [(f"{k} (lines {x['lines'][0]}-{x['lines'][1]})" if "lines" in x else k, x)
+                    for k, e in entries.items() for x in (e.get("sections") or [e])]:
         if not c.get("pass"):
             continue
         c_kind = c.get("kind", "unknown"); c_status = c.get("status", "unknown")
@@ -1657,22 +1766,84 @@ def main() -> int:
     if out_of_scope:
         print(f"cache: {len(out_of_scope)} entries outside the current scope dropped")
 
+    # A file over the size ceiling that no matching --approve-held review connects whole is
+    # drafted and gated section by section (split_sections): each section to draft is a private
+    # temporary copy of its lines, and a section whose text passed before is reused wherever
+    # its lines moved. The file itself is never changed.
+    sectioned, sec_of, sec_dir, unsafe = {}, {}, None, set()
+    for p in files:
+        if str(p) in pinned or p.stat().st_size <= CEILING_BYTES:
+            continue
+        b = p.read_bytes()
+        text = b.decode("utf-8", "replace")
+        if has_secret(text) and not len(b) > SECTION_MAX_BYTES:
+            # Secret-like text holds a file over the ceiling whole, even with --allow-held (which,
+            # as before, never lifts a size hold): no section of it is drafted or sent.
+            unsafe.add(str(p))
+            held[:] = [(h, w) for h, w in held if h != str(p)] + [
+                (str(p), "card/password-like text in a file over the size ceiling; never connected in sections, "
+                         "even with --allow-held: review it, then remove or move the value")]
+            write_held_txt(a.pointer, held)
+            print(f"  HELD  {relstr(p, roots)}  (card/password-like text; a file over the ceiling is never "
+                  "connected in sections while it holds any)")
+            continue
+        if len(b) > SECTION_MAX_BYTES:
+            unsafe.add(str(p))  # grew past the section limit since the inventory read it
+            print(f"  SKIP  {relstr(p, roots)}  (changed while this run read it; not prepared)")
+            continue
+        before = {x["sha256"]: x for x in (cache.get(str(p)) or {}).get("sections") or [] if x.get("pass")}
+        secs = []
+        for lines in split_sections(text, p.suffix):
+            raw = section_text(text, lines).encode("utf-8")
+            h = hashlib.sha256(raw).hexdigest()
+            if h in before:
+                secs.append({**before[h], "lines": list(lines), "bytes": len(raw)})
+                continue
+            if not raw.strip():  # only blank lines: nothing to describe, never drafted or sent
+                secs.append({"lines": list(lines), "sha256": h, "bytes": len(raw), "pass": False, "verdict": "blank"})
+                continue
+            if sec_dir is None:
+                sec_dir = tempfile.mkdtemp(prefix="superjev-sections-")
+                atexit.register(shutil.rmtree, sec_dir, True)
+            tmp = Path(sec_dir) / str(len(sec_of)) / f"{p.stem}.lines-{lines[0]}-{lines[1]}{p.suffix}"
+            tmp.parent.mkdir()
+            tmp.write_bytes(raw)
+            sec_of[str(tmp)] = (str(p), len(secs))
+            secs.append({"lines": list(lines), "sha256": h, "bytes": len(raw), "pass": False})
+        sectioned[str(p)] = {"sha256": hashlib.sha256(b).hexdigest(), "sections": secs}
+    files = [p for p in files if str(p) not in unsafe]
+
+    def shown(p) -> str:
+        if str(p) in sec_of:
+            key, i = sec_of[str(p)]
+            return "{} lines {}-{}".format(relstr(key, roots), *sectioned[key]["sections"][i]["lines"])
+        return relstr(p, roots)
+
     todo, reused = [], []
     for p in files:
+        if str(p) in sectioned:
+            continue
         c = cache.get(str(p))
-        if c and c.get("sha256") == sha(p) and c.get("pass"):
+        if c and c.get("sha256") == sha(p) and c.get("pass") and "sections" not in c:
             reused.append(p)
         else:
             todo.append(p)
     print(f"cache: {len(reused)} unchanged and already passing, {len(todo)} to draft")
+    if sectioned:
+        n = sum(len(e["sections"]) for e in sectioned.values())
+        print(f"sections: {len(sectioned)} file(s) over the {CEILING_BYTES:,}-byte ceiling connect in {n} sections; "
+              f"{n - len(sec_of)} unchanged and already passing, {len(sec_of)} to draft")
+        todo += [Path(t) for t in sec_of]
 
     if a.refresh and cache and len(files) > a.max_files:
         print(f"refresh: {len(files)} files total (over --max-files {a.max_files}), "
               f"but only {len(todo)} need a writer call this run (cost); the rest are unchanged and reused for free")
-        if len(todo) > a.max_files:
-            print(f"REFUSED: {len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
-                  "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
-            return 2
+    if len(todo) > a.max_files:
+        # Each section is drafted and gated like a file: one big file can need hundreds of calls.
+        print(f"REFUSED: {len(todo)} files and sections need drafting ({len(sec_of)} sections of "
+              f"{len(sectioned)} file(s) over the size ceiling), which exceeds --max-files {a.max_files}; "
+              "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
+        return 2
 
     # An approved file is read once here and its hash verified; the writer gets exactly those bytes,
     # so an edit after inventory never reaches the writer.
@@ -1775,7 +1946,7 @@ def main() -> int:
                              "verdict": v["state"], "confidence": v.get("confidence"), "pass": False,
                              "labels_ok": False,
                              "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
-            print(f"  {v['state']:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
+            print(f"  {v['state']:14}{v.get('confidence', ''):>5}  {shown(p)}")
             exceptions.append((str(p), f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip()))
             continue
 
@@ -1801,11 +1972,31 @@ def main() -> int:
                          "labels_confidence": v_labels.get("confidence"),
                          "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
         if labels_ok:
-            print(f"  PASS {fmt_conf(v)} | labels ok {fmt_conf(v_labels)}  {relstr(p, roots)}")
+            print(f"  PASS {fmt_conf(v)} | labels ok {fmt_conf(v_labels)}  {shown(p)}")
         else:
-            print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {relstr(p, roots)}")
+            print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {shown(p)}")
         passing.append(p)
-    connect_set = [p for p in reused + passing if not drifted(p)]
+    # Each drafted section's verdict goes back into its file's entry; a file connects when at
+    # least one of its sections passed (the rest are listed as exceptions, like files).
+    for tmp, (key, i) in sec_of.items():
+        got = cache.pop(tmp, None)
+        sec = sectioned[key]["sections"][i]
+        if got:
+            sec.update({k: v for k, v in got.items() if k != "sha256"})
+    # Keyed by the real path (refresh_changed.known_files and the miss report read it), the
+    # section named in the reason.
+    exceptions = [(sec_of[p][0], "lines {}-{}: {}".format(*sectioned[sec_of[p][0]]["sections"][sec_of[p][1]]["lines"], why))
+                  if p in sec_of else (p, why) for p, why in exceptions]
+    passing = [p for p in passing if str(p) not in sec_of]
+    for key, entry in sectioned.items():
+        n_ok = sum(1 for x in entry["sections"] if x.get("pass"))
+        cache[key] = {**entry, "description": f"{Path(key).name}, connected in {len(entry['sections'])} sections",
+                      "question": "", "kind": "unknown", "status": "unknown", "as_of": "unknown",
+                      "subject": "unknown", "pass": n_ok > 0, "labels_ok": False,
+                      "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+        print(f"  SECTIONS {n_ok}/{len(entry['sections'])} passing  {relstr(key, roots)}")
+    connect_set = [p for p in reused + passing if not drifted(p)] + [
+        p for p in files if cache.get(str(p), {}).get("pass") and str(p) in sectioned]
     cache_path.write_text(json.dumps(cache, indent=1))
     _record_written(cache_path)
 
@@ -1824,9 +2015,6 @@ def main() -> int:
                   f"{rerun} --allow-held")
         elif "binary" not in why:
             print(f"      then run: {rerun}")
-            if "over size ceiling" in why and Path(p).is_file() and Path(p).stat().st_size <= APPROVE_MAX_BYTES:
-                print(f"      or, after checking it, connect it whole (gated in parts): "
-                      f"{rerun} --approve-held {shlex.quote(p)}")
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
@@ -1836,6 +2024,8 @@ def main() -> int:
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
 
               "approved": [str(p) for p in connect_set],
+              "sections": {str(p): [x["lines"] for x in cache[str(p)]["sections"] if x.get("pass")]
+                           for p in connect_set if "sections" in cache.get(str(p), {})},
               "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
@@ -1857,9 +2047,19 @@ def main() -> int:
         return 1
 
     ordered = sorted(connect_set, key=str)
-    parts = split_parts(ordered, a.limit)
+    # A file in sections is one connect unit per passing section, each counted like a file.
+    units = [u for p in ordered for u in
+             ([(p, i) for i, x in enumerate(cache[str(p)]["sections"]) if x.get("pass")]
+              if "sections" in cache[str(p)] else [p])]
+
+    def unit_bytes(u) -> int:
+        if isinstance(u, tuple):
+            return cache[str(u[0])]["sections"][u[1]].get("bytes", 0)
+        return Path(u).stat().st_size if Path(u).exists() else 0
+    parts = split_parts(units, a.limit, size_of=unit_bytes)
     if len(parts) > 1:
-        print(f"splitting {len(ordered)} approved files into {len(parts)} parts of at most {a.limit}")
+        counted = f" ({len(units)} connect units, one per section)" if len(units) != len(ordered) else ""
+        print(f"splitting {len(ordered)} approved files{counted} into {len(parts)} parts of at most {a.limit}")
 
     all_connected = True
     hits, total, misses = 0, 0, []
@@ -1870,13 +2070,16 @@ def main() -> int:
             hold_changed(p)
             report["approved"] = [x for x in report["approved"] if x != str(p)]
             cache_path.write_text(json.dumps(cache, indent=1))
+        for p in result.get("changed", []):
+            print(f"  CHANGED  {relstr(p, roots)}  (edited after its sections were gated; refresh again)")
         report["parts"].append({"pointer": pname, "count": len(part_files), "connected": result["connected"]})
         if not result["connected"]:
             all_connected = False
             continue
         if not a.no_findability:
-            for p in part_files:
-                q = cache[str(p)].get("question") or ""
+            for u in part_files:
+                p, i = u if isinstance(u, tuple) else (u, None)
+                q = (cache[str(p)] if i is None else cache[str(p)]["sections"][i]).get("question") or ""
                 total += 1
                 if not q:
                     misses.append((str(p), "no question")); continue

@@ -72,7 +72,8 @@ def fake_memory(pointers, errored=()):
     return memory
 
 
-def test_size_held_file_named_with_split_fix_and_no_connect_step(cache):
+def test_size_held_file_named_with_split_fix_and_no_connect_step(cache, monkeypatch):
+    monkeypatch.setattr(prepare_bulk, "SECTION_MAX_BYTES", 100_000)  # 109 KB: too big even in sections
     lines = ask.miss_report("alice", 1, {}, {}, "How much was the villa roof repair quote?", ["alice-notes"])
     joined = "\n".join(lines)
     assert "Skipped at setup, and may hold the answer:" in lines
@@ -84,6 +85,12 @@ def test_size_held_file_named_with_split_fix_and_no_connect_step(cache):
     assert "apply its fix, then ask again" in joined
     assert "roof-ok.md" not in joined  # connected file is not skipped
     assert "0.28" not in joined
+
+
+def test_file_held_under_an_older_limit_says_a_refresh_connects_it_in_sections(cache):
+    lines = ask.miss_report("alice", 1, {}, {}, "How much was the villa roof repair quote?", ["alice-notes"])
+    assert ("    notes/roof-quote.md: held as too big at its last setup (109 KB, limit 90 KB) -> "
+            "Fix: re-run setup with --refresh: a file this size now connects in sections") in lines
 
 
 def test_secret_held_matched_on_name_only_and_never_read(cache, monkeypatch):
@@ -114,7 +121,7 @@ def test_part_pointer_reads_base_only_when_base_visible(cache):
     assert "garden" not in "\n".join(ask.miss_report("alice", 1, {}, {}, "garden gate notes", ["alice-brain-2"]))
     lines = ask.miss_report("alice", 1, {}, {}, "garden gate notes", ["alice-brain-2", "alice-brain"])
     joined = "\n".join(lines)
-    assert "notes/brain-garden.md: too big to connect (95 KB, limit 90 KB)" in joined
+    assert "notes/brain-garden.md: held as too big at its last setup (95 KB, limit 90 KB)" in joined
     assert "notes/gate.md: not connected" in joined
     assert "masked" not in joined
 
@@ -139,7 +146,7 @@ def test_errored_pointer_still_prints_miss_report(cache, tmp_path, monkeypatch, 
     assert rc == 1
     assert "unresolved: 1 of 2 pointers errored" in out
     assert "What was searched:" in out and "Next step (pick one):" in out
-    assert any("notes/roof-quote.md: too big to connect" in line for line in out)
+    assert any("notes/roof-quote.md: held as too big at its last setup" in line for line in out)
     assert out.index("unresolved: 1 of 2 pointers errored") < out.index("What was searched:")
     assert out[-1] == ask.VOICE_LINE
 
