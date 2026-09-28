@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,36 @@ def test_bad_extension_refused_before_inventory(tmp_path, monkeypatch, ext):
     with pytest.raises(SystemExit) as exc:
         pb.main()
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize('ext', ['env', '.PEM', 'key', 'p12', 'pfx', 'jks', 'kdbx', 'keystore', 'pem.txt'])
+def test_credential_extensions_cannot_be_opted_in(tmp_path, monkeypatch, ext):
+    monkeypatch.setattr(sys, 'argv', ['prepare_bulk.py', '--root', str(tmp_path), '--pointer', 'code',
+                                    '--principal', 'reader', '--ext', ext, '--allow-held'])
+    with pytest.raises(SystemExit) as exc:
+        pb.main()
+    assert exc.value.code == 2
+
+
+def test_declaration_matchers_agree_between_writer_and_chunker():
+    root = Path(__file__).resolve().parents[3]
+    cases = {'.py': ['class Demo:', '    async def run(self):', 'def f():', 'not a declaration'],
+             '.ts': ['export default class Demo {}', 'export async function go() {}', 'interface Thing {}', 'type Id = string', 'const ordinary = 1'],
+             '.js': ['function* generate() {}', 'export function run() {}'],
+             '.sh': ['work() {', 'function other {', 'echo ordinary']}
+    rows = [{'id': str(i), 'text': line, 'codeExtension': ext}
+            for i, (ext, line) in enumerate((ext, line) for ext, lines in cases.items() for line in lines)]
+    result = subprocess.run(['node', str(root / 'experiments/verified-pointer-memory/chunk_paths.mjs')],
+                            input=json.dumps(rows), text=True, capture_output=True, check=True)
+    for row, chunks in zip(rows, json.loads(result.stdout)):
+        assert bool(chunks[0]['heading']) == pb.code_heading(row['text'], row['codeExtension'])
+
+
+def test_credential_target_and_compound_name_held_even_with_override(tmp_path):
+    target = tmp_path / 'server.pem'
+    target.write_text('an unrecognized credential encoding')
+    (tmp_path / 'ordinary.txt').symlink_to(target)
+    (tmp_path / 'backup.key.txt').write_text('another unrecognized encoding')
+    files, held = pb.inventory([tmp_path], extensions=('.txt',), allow_held=True)
+    assert not files
+    assert len(held) == 2 and all('cannot be overridden' in why for _, why in held)
