@@ -68,3 +68,41 @@ test('a 529 or 429 is retried with backoff, then answers', async () => {
   const out = await navigate(flat(['alpha', 'beta']), 'alpha', { transport: new BatchingEvaluator(flaky), timeoutMs: 10_000 });
   assert.equal(out.candidates[0]?.sourceId, 'alpha');
 });
+
+test('a shared call every caller has given up on is stopped, not waited on', async () => {
+  // Each navigate times out on its own; the provider call they shared must then be
+  // aborted, or navigation-cli sits waiting for an answer nobody will read.
+  let innerSignal: AbortSignal | undefined;
+  const hanging = { evaluate(_r: Request, s: AbortSignal) { innerSignal = s; return new Promise<never>((_, reject) => s.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true })); } };
+  const batched = new BatchingEvaluator(hanging);
+  const out = await Promise.allSettled([flat(['alpha', 'beta']), flat(['alpha', 'gamma'])].map(c => navigate(c, 'alpha', { transport: batched, timeoutMs: 30 })));
+  assert.equal(batched.calls, 1);
+  assert.ok(out.every(r => r.status === 'rejected' && /timed out/.test(String(r.reason?.message))));
+  assert.equal(innerSignal?.aborted, true);
+});
+
+test('a shared call is not stopped while one caller still waits for it', async () => {
+  let innerSignal: AbortSignal | undefined;
+  let answer: (() => void) | undefined;
+  const inner = fake();
+  const slow = { evaluate(r: Request, s: AbortSignal) { innerSignal = s; return new Promise(resolve => { answer = () => resolve(inner.evaluate(r, s)); }); } } as Evaluator;
+  const batched = new BatchingEvaluator(slow);
+  const quick = navigate(flat(['alpha', 'beta']), 'alpha', { transport: batched, timeoutMs: 20 });
+  const patient = navigate(flat(['alpha', 'gamma']), 'alpha', { transport: batched, timeoutMs: 10_000 });
+  await assert.rejects(quick, /timed out/);
+  assert.equal(batched.calls, 1);
+  assert.equal(innerSignal?.aborted, false);
+  answer!();
+  assert.equal((await patient).candidates[0]?.sourceId, 'alpha');
+});
+
+test('a 429/529 backoff ends when every caller has given up, with no further call', async () => {
+  let sent = 0;
+  const busy = { async evaluate() { sent++; throw new Error('Jev HTTP 529'); } };
+  const batched = new BatchingEvaluator(busy);
+  const out = await Promise.allSettled([flat(['alpha', 'beta']), flat(['alpha', 'gamma'])].map(c => navigate(c, 'alpha', { transport: batched, timeoutMs: 50 })));
+  assert.ok(out.every(r => r.status === 'rejected'));
+  // Past the first 1s backoff: a retry that ignored the abort would have been sent by now.
+  await new Promise(resolve => setTimeout(resolve, 1_300));
+  assert.equal(sent, 1);
+});
