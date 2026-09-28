@@ -51,7 +51,7 @@ def test_a_stuck_stale_pointer_warns_once_a_day_not_on_every_answer(tmp_path, mo
     assert "What was searched:" in first  # the miss report still prints when a pointer errored
     assert ask.lookup("what is pending", "primary", sdir) == 0
     second = capsys.readouterr().out
-    assert "bench" not in second and "errored" not in second
+    assert "benched" not in second and "errored" not in second  # "bench" alone matches a checkout path
     assert '"stale-quiet"' in (sdir / "lookups.jsonl").read_text()
 
 
