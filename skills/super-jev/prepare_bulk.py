@@ -1840,8 +1840,9 @@ def main() -> int:
               f"but only {len(todo)} need a writer call this run (cost); the rest are unchanged and reused for free")
     if len(todo) > a.max_files:
         # Each section is drafted and gated like a file: one big file can need hundreds of calls.
-        print(f"REFUSED: {len(todo)} files and sections need drafting ({len(sec_of)} sections of "
-              f"{len(sectioned)} file(s) over the size ceiling), which exceeds --max-files {a.max_files}; "
+        counted = (f" (counting {len(sec_of)} sections of {len(sectioned)} file(s) over the size ceiling)"
+                   if sec_of else "")
+        print(f"REFUSED: {len(todo)} files need drafting{counted}, which itself exceeds --max-files {a.max_files}; "
               "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
         return 2
 
