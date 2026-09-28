@@ -4241,12 +4241,13 @@ class _CodeLibMissing(Exception):
     """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
-def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None):
+def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_items=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
     Pattern claims are answered deterministically, on the local text; the rest
-    go out as one batch of Noul questions, asked of the evidence with each file
-    holding secret-shaped text withheld (named in `mask_info["withheld"]`).
+    go out as one batch of Noul questions, asked of `state_items` (the gate's
+    masked, then truncated, evidence; `evidence_items` when not given) with each
+    file holding secret-shaped text withheld (named in `mask_info["withheld"]`).
     `ask_fn` is injected by tests (a fake judge); production calls the live door.
     """
     evidence_text = "\n\n".join(t for _, t in evidence_items)
@@ -4276,7 +4277,8 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None):
             raise _CodeLibMissing(
                 "no judge client at %s — restore lib/jev_client.py "
                 "or inject a judge" % JEV_LIB)
-        state_items, withheld = _mask_evidence(evidence_items)
+        state_items, withheld = _mask_evidence(
+            evidence_items if state_items is None else state_items)
         if mask_info is not None:
             mask_info["withheld"] = withheld
         res = ask(code_state(state_items), questions)
@@ -4349,10 +4351,18 @@ def cmd_gate(a):
             ev_items.append((p, Path(p).read_text(encoding="utf-8", errors="replace")))
         except OSError:
             ev_items.append((p, ""))
+    # Mask BEFORE truncating: a cut can drop a file's secret marker and leave the rest of
+    # that file scanning clean. The raw items stay local (claim mode, the pattern arm); only
+    # the masked ones are truncated and sent. With nothing judgeable left, the raw paths go
+    # on and the sender refuses them, as before.
+    try:
+        sent_ev, withheld = _mask_evidence(ev_items)
+    except ValueError:
+        sent_ev, withheld = None, []
     kept_ev, truncated, est_tok, cap_tok = cap_check_and_truncate(
-        ev_items, draft_text_for_cap, "gate")
+        sent_ev if sent_ev is not None else ev_items, draft_text_for_cap, "gate")
     evidence_tmp_paths = []
-    if truncated:
+    if sent_ev is not None and (truncated or sent_ev != ev_items):
         evidence_paths = []
         for orig_path, text in kept_ev:
             tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
@@ -4371,7 +4381,7 @@ def cmd_gate(a):
     # no checkable claims it falls back to the evidence reply kit.
     mode = getattr(a, "claim_mode", None)
     if mode is None:
-        mode = ("code" if any(looks_like_unified_diff(t) for _, t in kept_ev)
+        mode = ("code" if any(looks_like_unified_diff(t) for _, t in ev_items)
                 else "evidence")
     if mode == "code" and not claims_for_check:
         mode = "evidence"
@@ -4410,10 +4420,9 @@ def cmd_gate(a):
     if mode == "code":
         try:
             try:
-                mask_info = {}
-                rows, code = run_code_gate(kept_ev, claims_for_check,
-                                           mask_info=mask_info)
-                withheld = mask_info.get("withheld", [])
+                rows, code = run_code_gate(
+                    ev_items, claims_for_check,
+                    state_items=kept_ev if sent_ev is not None else None)
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)

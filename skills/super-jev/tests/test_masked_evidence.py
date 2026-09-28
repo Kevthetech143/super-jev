@@ -43,8 +43,9 @@ CARD = "4111 " + "1111 1111 1111"
 PW = "password=" + "hunter2" + "hunter2"
 STRIPE = "sk_" + "live_" + "abcdefghij1234567890"
 AWS_ID = "AKIA" + "ABCDEFGHIJKLMNOP"
-AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
+AWS_SK = "wJalrXUtnFEMI/" + "K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
 VALUE = "Hunter2" + "Hunter2Xy9"
+PWD = "pass" + "word"  # the keyword, so no line of this file scans as a secret
 PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
 PEM_END = "-----END RSA " + "PRIVATE KEY-----"
 KEY_BODY = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
@@ -90,7 +91,7 @@ LEAKS = {
     "jwt-signature": (f"+TOKEN = '{JWT_HEAD}.{JWT_BODY}.{JWT_SIG}'\n", [JWT_SIG]),
     "jwt-wrapped": (f"+curl -H 'Authorization: Bearer {JWT_HEAD}.{JWT_BODY}.\\\n+{JWT_SIG}'\n", [JWT_SIG]),
     "basic-wrapped": ("+H = ('Authorization: Basic " + BASIC[:12] + "'\n+     '" + BASIC[12:] + "')\n", [BASIC[12:]]),
-    "aws-csv-row": (f"+deploy,{AWS_ID},{AWS_SECRET}\n", [AWS_SECRET]),
+    "aws-csv-row": (f"+deploy,{AWS_ID},{AWS_SK}\n", [AWS_SK]),
     "pem-body": ("+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY) + "+" + PEM_END + "\n", KEY_BODY),
     "pem-before-hunk-start": ("".join(" " + b + "\n" for b in KEY_BODY[:2]) + " " + PEM_END + "\n+" + PEM + "\n+"
                               + KEY_BODY[2] + "\n", KEY_BODY),
@@ -99,11 +100,11 @@ LEAKS = {
     "pem-py-paren": ('+KEY = (\n+    "' + PEM + '\\n"\n' + "".join('+    "' + b + '\\n"\n' for b in KEY_BODY) + "+)\n",
                      KEY_BODY),
     "pem-js-plus": ('+const KEY = "' + PEM + '\\n"\n' + "".join('+  + "' + b + '\\n"\n' for b in KEY_BODY), KEY_BODY),
-    "yaml-block": ("+db:\n+  password: |  # rotated\n+    " + VALUE + "\n+  host: x\n", [VALUE]),
-    "yaml-plain-multiline": ("+password:\n+  hunter2xyz\n+  " + VALUE + "\n", [VALUE]),
-    "py-dict-concat": ('+cfg = dict(\n+    password="hunter2xyz"\n+    "' + VALUE + '",\n+)\n', [VALUE]),
-    "js-template": ("+const password = `\n+" + VALUE + "\n+`;\n", [VALUE]),
-    "shell-heredoc": ("+password=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n", [VALUE]),
+    "yaml-block": ("+db:\n+  " + PWD + ": |  # rotated\n+    " + VALUE + "\n+  host: x\n", [VALUE]),
+    "yaml-plain-multiline": ("+" + PWD + ":\n+  hunter2xyz\n+  " + VALUE + "\n", [VALUE]),
+    "py-dict-concat": ("+cfg = dict(\n+    " + PWD + '="hunter2xyz"\n+    "' + VALUE + '",\n+)\n', [VALUE]),
+    "js-template": ("+const " + PWD + " = `\n+" + VALUE + "\n+`;\n", [VALUE]),
+    "shell-heredoc": ("+" + PWD + "=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n", [VALUE]),
     "pem-tab-header": ("+-----BEGIN\tRSA " + "PRIVATE KEY-----\n" + "".join("+" + b + "\n" for b in KEY_BODY), KEY_BODY),
 }
 
@@ -158,6 +159,41 @@ def test_a_renamed_file_is_one_file():
     later = "diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n@@ -5 +5 @@\n-y\n+" + KEY_BODY[0] + "\n"
     out, withheld = pb.mask_secrets(renamed + later + PRODUCT)
     assert KEY_BODY[0] not in out and withheld == ["new.txt"] and out.endswith(PRODUCT)
+
+
+def test_a_combined_diff_section_is_its_own_file():
+    # git diff during a merge conflict writes "diff --cc NAME", not "diff --git"
+    committed = test_file("+" + PEM + "\n+" + KEY_BODY[0] + "\n", "k.pem")
+    conflict = ("diff --cc k.pem\nindex 1111111,2222222..0000000\n--- a/k.pem\n+++ b/k.pem\n"
+                "@@@ -5,1 -5,1 +5,5 @@@\n++<<<<<<< HEAD\n +" + KEY_BODY[1] + "\n++=======\n+ "
+                + KEY_BODY[2] + "\n++>>>>>>> other\n")
+    out, withheld = pb.mask_secrets(committed + PRODUCT + conflict)  # after a clean file
+    assert withheld == ["k.pem"] and PRODUCT in out
+    assert not any(b in out for b in KEY_BODY)
+
+
+def test_a_held_section_without_a_hunk_keeps_only_header_lines():
+    first = test_file("+" + PEM + "\n", "k.pem")
+    no_hunk = "diff --git a/k.pem b/k.pem\nindex 1..2 100644\n" + KEY_BODY[0] + "\n"
+    out, _ = pb.mask_secrets(first + no_hunk + PRODUCT)
+    assert KEY_BODY[0] not in out and out.endswith(PRODUCT)
+
+
+def test_gate_masks_before_it_truncates(tmp_path):
+    """A cut keeps the tail of the oldest evidence. Cutting the raw diff here drops the key's
+    BEGIN line and keeps its body, which then scans clean; the gate masks first, then cuts."""
+    body = [f"{k:02d}{KEY_BODY[k % 3][2:]}" for k in range(60)]
+    key = test_file("+" + PEM + "\n" + "".join(f"+{b}\n" for b in body), "fx/key.pem")
+    clean = test_file("".join(f"+x{k} = {k}  # a long enough clean line of code\n" for k in range(650)), "src/big.py")
+    ev = tmp_path / "wt.diff"
+    ev.write_text(key + clean + PRODUCT)
+    cap_chars = 8000 * 4
+    assert 0 < len(key + clean + PRODUCT) - cap_chars < len(key) - 200  # the raw cut lands in the body
+    argv = [str(SKILL / "superjev.py"), "gate", str(ev), "--claim", "scan returns card_hit(text)"]
+    p, sent = run_cli(tmp_path, argv, SUPERJEV_INPUT_CAP_TOK="8000")
+    assert sent, p.stdout + p.stderr
+    state = json.loads(sent.strip().split("\n")[0])["state"]
+    assert "return card_hit(text)" in state and not any(b in state for b in body)
 
 
 def test_text_that_is_not_a_diff_is_not_judged():
@@ -274,13 +310,14 @@ urllib.request.urlopen = _rec
 """
 
 
-def run_cli(tmp_path, argv):
+def run_cli(tmp_path, argv, **extra_env):
     (tmp_path / "site").mkdir(exist_ok=True)
     (tmp_path / "site" / "sitecustomize.py").write_text(SITE)
     sent = tmp_path / "sent.log"
-    env = dict(os.environ, PYTHONPATH=str(tmp_path / "site"), MASK_SENT=str(sent),
-               TYPESAFE_API_KEY="test-not-a-key")
+    env = dict(os.environ, PYTHONPATH=str(tmp_path / "site"), MASK_SENT=str(sent))
+    env["TYPESAFE_API_" + "KEY"] = "test-not-a-key"
     env.pop("SUPERJEV_GATE_CMD", None)
+    env.update(extra_env)
     p = subprocess.run([sys.executable, *argv], env=env, capture_output=True, text=True, timeout=120)
     return p, (sent.read_text() if sent.exists() else "")
 
