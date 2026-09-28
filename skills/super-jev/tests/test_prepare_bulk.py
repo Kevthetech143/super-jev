@@ -85,6 +85,7 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
     (root / "big.md").write_text("x" * 100)
 
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
+    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", 50)  # too big even to connect in sections
 
     files, held = pb.inventory([root])
 
@@ -1413,6 +1414,7 @@ def test_allow_held_does_not_lift_size_ceiling_hold(tmp_path, monkeypatch):
     root.mkdir()
     (root / "big.md").write_text("x" * 100)
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
+    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", 50)  # too big even to connect in sections
 
     files, held = pb.inventory([root], allow_held=True)
 

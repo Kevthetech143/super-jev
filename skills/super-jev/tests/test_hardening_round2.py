@@ -228,5 +228,6 @@ def test_claims_file_expands_home(tmp_path, monkeypatch):
 def test_oversize_hold_says_how_to_split(tmp_path, monkeypatch):
     (tmp_path / "big.md").write_text("x" * 100)
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
+    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", 60)  # too big even to connect in sections
     _, held = pb.inventory([tmp_path])
     assert "split it into smaller .md files" in held[0][1] and "100 bytes" in held[0][1]
