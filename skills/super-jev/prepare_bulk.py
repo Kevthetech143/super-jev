@@ -5,7 +5,8 @@ Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT [--principal AGENT2 ...]
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
-                          [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--no-connect]
+                          [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--approve-held PATH ...]
+                          [--no-connect]
                           [--findability] [--refresh] [--no-shared] [--shareable]
 
   Prints a `writer: <command>` banner at the start of every run: the resolved --writer-command
@@ -36,7 +37,12 @@ Pipeline per run:
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
      one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
      a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
-     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. A first connect
+     never lifts the size-ceiling hold, since an oversized file cannot be gated regardless. --approve-held PATH
+     (repeatable) admits one size-held file after a person reviewed it and records its path and sha256 in the report;
+     --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file is held
+     again naming the old approval. It lifts only a size hold, up to APPROVE_MAX_BYTES (1,000,000); a file held
+     for secret-like text or name, or with a credential suffix, can never be approved. --allow-held is never
+     replayed. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
      already-cached pointer instead guards on files that actually need a writer call this run (unchanged
      cached files are free and reused); raise --max-files to opt into a larger writer cost.
@@ -240,6 +246,11 @@ SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 # list and knowledge file over it unsearchable. 250,000 bytes keeps one file's gate to about 5 Jev
 # calls; a bigger file is still held with a split hint.
 CEILING_BYTES = 250_000
+# A reviewed --approve-held file may go over CEILING_BYTES up to this hard cap (about 20 gate calls).
+# Only a size hold can be approved: secret-like text is never sent, so approving it could not connect it.
+APPROVE_MAX_BYTES = 1_000_000
+SECRET_NOT_APPROVABLE = ("held for secret-like text; Super Jev never sends that text. "
+                         "Remove or move the value, then reconnect.")
 # One connect (a part pointer) may hold at most 5 MiB (path_connect.MAX_BYTES); parts close early
 # before that. Under the old 90,000-byte file limit 50 files never reached it, so parts are unchanged.
 PART_BYTES = 4_500_000
@@ -487,11 +498,14 @@ def walk_md(root: Path, no_recurse: bool = False, extensions=CONNECTABLE_EXTENSI
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
-              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS):
+              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS,
+              approvals: dict = None, approved_out: dict = None):
     """Union of selected text suffixes under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
-    since an oversized file cannot be gated regardless.
+    since an oversized file cannot be gated regardless. `approvals` ({path: sha256}, from --approve-held)
+    lifts a size hold (up to APPROVE_MAX_BYTES) only while the file's bytes hash to the reviewed sha256;
+    a secret-like file stays held with SECRET_NOT_APPROVABLE; each approval key used maps to the admitted path in `approved_out`.
     A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
     folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
     logins.md or any other file the roots would never have admitted."""
@@ -534,11 +548,23 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if not b.strip():
                 continue
             seen.add(rp)
+            key = next((k for k in (str(p), str(rp)) if k in (approvals or {})), None)
+            approved, note, admitted = None, "", []
+            if key:
+                digest = hashlib.sha256(b).hexdigest()
+                if approvals[key] == digest:
+                    approved = digest
+                else:
+                    note = (f"; changed since its --approve-held review (approved sha256 {approvals[key][:12]}), "
+                            "review it again")
             if len(b) > CEILING_BYTES:
                 split_hint = ("split it into smaller .md files, e.g. one per ## section"
                               if p.suffix.lower() == '.md' else "split it into smaller text files")
-                held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
-                                      f"{split_hint}")); continue
+                why = f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,})"
+                if not (approved and len(b) <= APPROVE_MAX_BYTES):
+                    too_big = f"; too big to approve (max {APPROVE_MAX_BYTES:,})" if approved else ""
+                    held.append((str(p), f"{why}; {split_hint}{too_big}{note}")); continue
+                admitted.append(why)
             if b"\x00" in b:
                 held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
             try:
@@ -550,13 +576,21 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if has_secret(b.decode("utf-8", "replace")):
                 if allow_held:
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
+                elif approved:
+                    held.append((str(p), f"card/password-like text; {SECRET_NOT_APPROVABLE}")); continue
                 else:
-                    held.append((str(p), "card/password-like text; review before onboarding")); continue
+                    held.append((str(p), f"card/password-like text; review before onboarding{note}")); continue
             if path_has_secret(p.name) or path_has_secret(rp.name):
                 if allow_held:
                     held.append((str(p), "secret-keyword-like file name; admitted by --allow-held"))
+                elif approved:
+                    held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
                 else:
-                    held.append((str(p), "secret-keyword-like file name; review before onboarding")); continue
+                    held.append((str(p), f"secret-keyword-like file name; review before onboarding{note}")); continue
+            if admitted:
+                held.append((str(p), f"{'; '.join(admitted)}; admitted by --approve-held (sha256 {approved[:12]})"))
+                if approved_out is not None:
+                    approved_out[key] = str(p)
             files.append(p)
     if test_skips:
         print(f"  SKIP  {test_skips} test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); name one exactly with --name to connect it")
@@ -619,14 +653,15 @@ SAMPLES = 8
 SAMPLE_CHARS = 350
 
 
-def excerpt(p: Path) -> dict:
+def excerpt(p: Path, text: str = None) -> dict:
     """What the writer reads of one file: its headings and first 1,200 characters, plus, for a big
     file, headings and short passages taken evenly across the rest. The gate judges the whole file,
     so a writer that saw only the top described only the top (a 37 KB changelog drafted as its
     oldest versions) and was refused. The first 15 headings and the start stay exactly as before,
     so builtin_writer's quote rebuilds identically; the added part is bounded (at most 10 headings,
-    8 x 350 characters) whatever the file's size."""
-    text = p.read_text(errors="replace")
+    8 x 350 characters) whatever the file's size. `text` is a snapshot already read and verified
+    (an --approve-held file's reviewed bytes), used instead of reading the path again."""
+    text = p.read_text(errors="replace") if text is None else text
     all_heads = [l.strip() for l in text.splitlines()
                  if l.startswith("#") or code_heading(l, p.suffix.lower())]
     heads = all_heads[:EXCERPT_HEADS]
@@ -741,7 +776,8 @@ def navigate(pointer: str, principal: str, question: str) -> list:
     return [c.get("originalPath") for c in out.get("candidates", [])]
 
 
-def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False) -> dict:
+def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False,
+                 pinned: dict = None) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
     Labels ride in the bracketed description only for a file whose stage-2 label gate passed
     (cache["labels_ok"]); a cache entry without that key (pre-two-stage cache) defaults to
@@ -751,7 +787,10 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     `principals` carries every principal this pointer must stay registered for -- a pointer
     connected under several principals (e.g. primary + primary-helper) must repeat all of
     them on every reconnect, or the harness sees the request as narrowing its scope and
-    refuses with "scope-change"."""
+    refuses with "scope-change".
+
+    `pinned` ({path: sha256}) holds --approve-held files: when the preview's hash for one differs,
+    the reviewed connect is not sent and the paths come back as `drifted`."""
     sources = []
     for p in part_files:
         c = cache[str(p)]
@@ -794,6 +833,10 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     hashes = {os.path.realpath(x["path"]): x["sha256"] for x in prev["sources"]}
     for s in req["sources"]:
         s["sha256"] = hashes[os.path.realpath(s["path"])]
+    drifted = [s["path"] for s in req["sources"] if s["path"] in (pinned or {}) and s["sha256"] != pinned[s["path"]]]
+    if drifted:
+        print(f"connect held for {pointer}: approved file(s) changed since approval: {', '.join(drifted)}; not sent")
+        return {"connected": False, "drifted": drifted}
     req["reviewed"] = True
     reg = memory(req)
     wider = reg.get("registeredPrincipals") if reg.get("reason") == "scope-change" else None
@@ -946,10 +989,15 @@ def replay_recipe(a) -> None:
     a.names = a.names or rep.get("names") or []
     a.allow_targets = a.allow_targets or rep.get("allowTargets") or []
     # --allow-held is never replayed: it would admit NEW secret-looking files without review.
+    # --approve-held approvals are: each admits only the exact bytes a person reviewed (sha256).
+    a.recorded_approvals = {e["path"]: e["sha256"] for e in rep.get("approvedHeld") or []
+                            if isinstance(e, dict) and isinstance(e.get("path"), str)
+                            and isinstance(e.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", e["sha256"])}
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, part size {a.limit or 50}; --allow-held is never replayed)")
+          f"no-recurse {a.no_recurse}, part size {a.limit or 50}; --allow-held is never replayed, "
+          f"{len(a.recorded_approvals)} --approve-held file(s) replayed while unchanged)")
     # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
     # the whole (possibly grown) folder, so its recorded file list is the scope instead.
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
@@ -1003,6 +1051,10 @@ def main() -> int:
     ap.add_argument("--allow-held", action="store_true",
                     help="admit files the secret scan would hold (still listed in the held file, noting the override); "
                          "the size-ceiling hold is unaffected")
+    ap.add_argument("--approve-held", dest="approve_held", action="append", default=[], metavar="PATH",
+                    help="admit this size-held file after a person reviewed it (repeatable), up to "
+                         f"{APPROVE_MAX_BYTES:,} bytes; its sha256 is recorded and --refresh replays the approval only "
+                         "while the file is unchanged. Never a secret-like or credential/key file")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--findability", action="store_true",
@@ -1022,6 +1074,12 @@ def main() -> int:
     a = ap.parse_args()
     a.extensions = list(dict.fromkeys((*CONNECTABLE_EXTENSIONS, *(e for group in a.ext for e in group)))) if a.ext is not None else None
     a.no_findability = a.no_findability or not a.findability
+    for path in a.approve_held:
+        if credential_suffix(given_path(path).name) or credential_suffix(given_path(path).resolve().name):
+            print(f"REFUSED: --approve-held {path}: credential/key file suffixes can never be approved"); return 2
+        gp = given_path(path)
+        if path_has_secret(gp.name) or (gp.is_file() and has_secret(gp.read_bytes().decode("utf-8", "replace"))):
+            print(f"REFUSED: --approve-held {path}: {SECRET_NOT_APPROVABLE}"); return 2
 
     if a.list:
         if not a.pointer and not a.principals:
@@ -1084,7 +1142,17 @@ def main() -> int:
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
         print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions)
+    approvals = dict(getattr(a, "recorded_approvals", {}))
+    given = {}
+    for path in a.approve_held:
+        gp = given_path(path)
+        if gp.is_file():
+            approvals[str(gp)] = given[str(gp)] = sha(gp)
+        else:
+            print(f"  --approve-held {path}: no such file; nothing approved")
+    used = {}
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions,
+                            approvals, used)
     scope = getattr(a, "legacy_scope", None)
     if scope is not None:
         files = [p for p in files if str(p) in scope]
@@ -1093,6 +1161,39 @@ def main() -> int:
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
+    for p, why in held:
+        if "admitted by --approve-held" in why:
+            print(f"  APPROVED  {relstr(p, roots)}  ({why})")
+    for path in given:
+        if path not in used:
+            print(f"  --approve-held {path}: not held in this pointer's scope; nothing approved or recorded")
+    # Recorded approvals persist while their file exists (a stale one keeps naming itself in the hold reason);
+    # one given now is recorded only when it admitted a held file.
+    approved_held = {k: v for k, v in getattr(a, "recorded_approvals", {}).items() if Path(k).exists()}
+    approved_held.update({k: approvals[k] for k in used})
+    # The reviewed bytes are pinned: every later stage re-reads the path, so an approved file whose
+    # sha256 no longer matches before it is cached or connected is held again, never cached or sent.
+    pinned, dropped = {path: approvals[k] for k, path in used.items()}, set()
+
+    def drifted(p) -> bool:
+        want = pinned.get(str(p))
+        if str(p) in dropped:
+            return True
+        if want is None or sha(p) == want:
+            return False
+        hold_changed(p)
+        return True
+
+    def hold_changed(p) -> None:
+        want = pinned[str(p)]
+        dropped.add(str(p))
+        cache.pop(str(p), None)
+        base = next((w for h, w in held if h == str(p)), "").split("; admitted by --approve-held")[0]
+        held[:] = [(h, w) for h, w in held if h != str(p)] + [
+            (str(p), f"{base}; changed since its --approve-held review "
+                     f"(approved sha256 {want[:12]}), review it again")]
+        write_held_txt(a.pointer, held)
+        print(f"  HELD  {relstr(p, roots)}  (changed after its approval was checked this run; not cached or connected)")
     if not files and not held:
         print(f"ERROR: no {','.join(a.extensions)} files found under {', '.join(str(r) for r in roots)} "
               "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
@@ -1144,16 +1245,30 @@ def main() -> int:
                   "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
             return 2
 
+    # An approved file is read once here and its hash verified; the writer gets exactly those bytes,
+    # so an edit after inventory never reaches the writer.
+    snapshot = {}
+    for p in [p for p in todo if str(p) in pinned]:
+        b = p.read_bytes()
+        if hashlib.sha256(b).hexdigest() == pinned[str(p)]:
+            snapshot[str(p)] = b.decode("utf-8", "replace")
+        else:
+            hold_changed(p)
+    todo = [p for p in todo if str(p) not in dropped]
+
+    def ex(p) -> dict:
+        return excerpt(p, snapshot.get(str(p)))
+
     drafts = {}
     for i in range(0, len(todo), a.batch):
         batch = todo[i:i + a.batch]
         try:
             if use_builtin:
-                got = builtin_writer([excerpt(p) for p in batch])
+                got = builtin_writer([ex(p) for p in batch])
             elif writer_command:
-                got = writer([excerpt(p) for p in batch], a.writer_model, command=writer_command)
+                got = writer([ex(p) for p in batch], a.writer_model, command=writer_command)
             else:
-                got = writer([excerpt(p) for p in batch], a.writer_model)
+                got = writer([ex(p) for p in batch], a.writer_model)
         except WriterError as e:
             print(f"ERROR: description writer failed: {e}")
             if not writer_command:
@@ -1177,7 +1292,7 @@ def main() -> int:
                 sizes[str(p)] = len(Path(p).read_text(errors="replace"))
             except OSError:
                 pass
-        ready = [p for p in todo if (drafts.get(str(p)) or {}).get("description")]
+        ready = [p for p in todo if (drafts.get(str(p)) or {}).get("description") and not drifted(p)]
         for group in pack_groups(ready, sizes):
             items = [(p, drafts[str(p)]["description"].strip(),
                       claim_sentence(validate_labels(drafts[str(p)]))) for p in group]
@@ -1187,6 +1302,8 @@ def main() -> int:
 
     exceptions, passing = [], []
     for p in todo:
+        if drifted(p):  # never gate bytes nobody reviewed
+            continue
         d = drafts.get(str(p))
         if not d or not d.get("description"):
             exceptions.append((str(p), "writer returned no draft")); continue
@@ -1194,7 +1311,7 @@ def main() -> int:
         # Stage 1: gate the description alone -- exactly the pre-labels claim. A label
         # problem must never cost a file its place; only a description problem does.
         desc = d["description"].strip()
-        if use_builtin and d["description"] == builtin_writer([excerpt(p)])[str(p)]["description"]:
+        if use_builtin and d["description"] == builtin_writer([ex(p)])[str(p)]["description"]:
             # A built-in description is only the file's own headings and words, quoted; rebuilding
             # it from the file proves that exactly. The judge scored such quotes 0.29-0.89, so a
             # plain note could fall under the line and be set aside for no real reason.
@@ -1210,9 +1327,9 @@ def main() -> int:
                 if use_builtin:
                     redo = None  # a quoted description has nothing to rewrite
                 elif writer_command:
-                    redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
+                    redo = writer([ex(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
                 else:
-                    redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
+                    redo = writer([ex(p)], a.writer_model, feedback=fb).get(str(p))
             except WriterError as e:
                 print(f"ERROR: description writer failed: {e}"); return 1
             if redo and redo.get("description"):
@@ -1221,8 +1338,10 @@ def main() -> int:
                 if v2["state"] == "SUPPORTED" and v2.get("confidence", 0) >= a.line:
                     d, desc, v, ok = redo, redo_desc, v2, True
 
+        if drifted(p):
+            continue
         if not ok:
-            cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
+            cache[str(p)] = {"sha256": pinned.get(str(p)) or sha(p), "description": d["description"], "question": d.get("question", ""),
                              "kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown",
                              "verdict": v["state"], "confidence": v.get("confidence"), "pass": False,
                              "labels_ok": False,
@@ -1243,8 +1362,10 @@ def main() -> int:
         if not labels_ok:
             labels = {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown"}
 
-        cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
-                         "kind": labels["kind"], "status": labels["status"], "as_of": labels["as_of"],
+        if drifted(p):
+            continue
+        cache[str(p)] = {"sha256": pinned.get(str(p)) or sha(p), "description": d["description"],
+                         "question": d.get("question", ""), "kind": labels["kind"], "status": labels["status"], "as_of": labels["as_of"],
                          "subject": labels["subject"],
                          "verdict": v["state"], "confidence": v.get("confidence"), "pass": True,
                          "labels_ok": labels_ok, "labels_verdict": v_labels["state"],
@@ -1255,10 +1376,10 @@ def main() -> int:
         else:
             print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {relstr(p, roots)}")
         passing.append(p)
+    connect_set = [p for p in reused + passing if not drifted(p)]
     cache_path.write_text(json.dumps(cache, indent=1))
     _record_written(cache_path)
 
-    connect_set = reused + passing
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
     rerun = "python3 " + shlex.join(sys.argv)
     for p, why in exceptions:
@@ -1266,7 +1387,7 @@ def main() -> int:
               f"      to include it: check the file says what it should, then run: {rerun}"
               + ("" if use_builtin else " --writer builtin"))
     for p, why in held:
-        if "admitted by --allow-held" in why:
+        if "admitted by --allow-held" in why or "admitted by --approve-held" in why:
             continue
         print(f"  HELD  {relstr(p, roots)}  ({why})")
         if "review before onboarding" in why:
@@ -1274,6 +1395,9 @@ def main() -> int:
                   f"{rerun} --allow-held")
         elif "binary" not in why:
             print(f"      then run: {rerun}")
+            if "over size ceiling" in why and Path(p).is_file() and Path(p).stat().st_size <= APPROVE_MAX_BYTES:
+                print(f"      or, after checking it, connect it whole (gated in parts): "
+                      f"{rerun} --approve-held {shlex.quote(p)}")
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
@@ -1282,6 +1406,7 @@ def main() -> int:
               "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
               "approved": [str(p) for p in connect_set],
+              "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
@@ -1306,7 +1431,11 @@ def main() -> int:
     hits, total, misses = 0, 0, []
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
-        result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable)
+        result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable, pinned=pinned)
+        for p in result.get("drifted", []):
+            hold_changed(p)
+            report["approved"] = [x for x in report["approved"] if x != str(p)]
+            cache_path.write_text(json.dumps(cache, indent=1))
         report["parts"].append({"pointer": pname, "count": len(part_files), "connected": result["connected"]})
         if not result["connected"]:
             all_connected = False

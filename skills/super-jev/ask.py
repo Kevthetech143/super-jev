@@ -2525,8 +2525,8 @@ def skipped_files(pointers, principal: str = "") -> dict:
         failed += [(path, str(c.get("verdict"))) for path, c in cache.items()
                    if isinstance(c, dict) and c.get("pass") is False]
         for path, why in held + failed:
-            if (path in out or "admitted by --allow-held" in why or (cache.get(path) or {}).get("pass")
-                    or not os.path.exists(path)):
+            if (path in out or "admitted by --allow-held" in why or "admitted by --approve-held" in why
+                    or (cache.get(path) or {}).get("pass") or not os.path.exists(path)):
                 continue
             if "over size ceiling" in why:
                 m = re.search(r"\(([\d,]+) bytes, max ([\d,]+)\)", why)

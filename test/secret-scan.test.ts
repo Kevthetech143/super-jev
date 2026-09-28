@@ -37,3 +37,18 @@ test('2000 random sha256 digests never trip the scan; real cards and keys still 
   for (const t of ['card 4111 1111 1111 1111', '4111111111111111', '5500-0000-0000-0004', 'api_key = x', 'ghp_' + 'a1'.repeat(18)]) assert.equal(hasSecret(t), true, t);
   assert.equal(payloadHasSecret({ sources: [{ description: 'card 4111111111111111', sha256: 'ab' }] }), true);
 });
+
+test('an escaped quote before a placeholder is not a secret; a real value after one still is', () => {
+  const q = '\\"';
+  for (const t of [`export TYPESAFE_API_KEY=${q}$(cat /path/to/key-file)${q}`, `API_KEY=${q}\${VAR}${q}`,
+    "api_key=\\'<your key>\\'", `password=${q}$(pass show mail)${q}`]) assert.equal(hasSecret(t), false, t);
+  for (const t of [`API_KEY=${q}sk-live-9fQ2xZ7pL0aBcD3eF4${q}`, `password=${q}hunter2xyz9${q}`,
+    `password=${q}$3cret!Pass9${q}`, `password=${q}$uperSecret9${q}`, `API_KEY=${q}$9qP7vK2mR8wL6z${q}`,
+    `password=${q}$(LiteralSecret9${q}`, `password=${q}\${LiteralSecret9${q}`, `password=${q}<LiteralSecret9${q}`,
+    `API_KEY=${q}$(LiteralSecret9${q}`, `API_KEY=${q}\${LiteralSecret9${q}`, `API_KEY=${q}<LiteralSecret9${q}`,
+    `password=${q}$(LiteralSecret9}${q}`, `password=${q}\${VAR}hunter2xyz9${q}`, `password=${q}$(cat f)hunter2xyz9${q}`,
+    `password=${q}<x>hunter2xyz9${q}`, 'password="${VAR}hunter2xyz9"', 'password="$(cat f)hunter2xyz9"',
+    'password="<x>hunter2xyz9"', 'password=${VAR}hunter2xyz9', 'api_key="${VAR}Zx9Qp2Lm8Rt4"']) assert.equal(hasSecret(t), true, t);
+  for (const t of ['password="${VAR}"', 'password=$VAR', 'password=$VAR;', 'api_key=${VAR}', 'password: <your password>',
+    `api_key=${q}\${VAR}${q}, x`]) assert.equal(hasSecret(t), false, t);
+});
