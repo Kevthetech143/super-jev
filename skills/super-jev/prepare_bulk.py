@@ -482,31 +482,55 @@ def has_secret(text: str) -> bool:
 # Evidence that is judged (a worktree diff, a file a claim is checked against) may carry
 # secret-shaped test fixtures: a card scanner's fake card numbers, a redaction test's sample
 # key. Refusing the whole request left such a change uncheckable, so evidence is masked
-# instead: every secret-shaped span, real or fake, is replaced before anything is sent.
+# instead, real and fake values alike. The scanner finds two kinds of hit:
+#   - whole: the match is the secret (a card number, a token shape such as sk_live_..., a
+#     private key with BEGIN and END on one line); only the match is masked.
+#   - marker: the match only says a secret follows (a password or api key assignment, a key's
+#     BEGIN line), and the value may run on over any number of lines in any syntax. Its extent cannot be
+#     proven, so everything from that line to the end of its file is withheld: the next
+#     "diff --git" line in a diff, else the end of the text. A value never runs into another file.
 # Claims and drafts are never masked (they are refused), and ask() keeps its full scan.
 SECRET_MASK = "[secret-shaped text masked]"
+_KEY_BEGIN_RE = re.compile(r"-----begin[a-z ]*private key[a-z ]*-----")
+_KEY_END_RE = re.compile(r"-----end[a-z ]*private key[a-z ]*-----")
+_FILE_START = "diff --git "
 
 
 def _blank(m) -> str:
     return " " * len(m.group())
 
 
-def _secret_line_spans(line: str) -> list:
-    """(start, end) spans of secret-shaped text in one ASCII line, from the patterns has_secret
-    uses. normalize_for_scan keeps an ASCII line's length, so the spans index the line itself.
-    A card number is its own 16 digits; a keyword or token hit runs to the end of the line,
-    since the match can stop at 'key=' and leave the value after it."""
+def _flagged(line: str, luhn: bool) -> bool:
+    """has_secret on one line, with the card check's Luhn test off when the whole text had it
+    off (a non-ASCII digit anywhere), so a line is flagged exactly when it adds to the text's hit."""
+    return has_secret(line) or (not luhn and card_hit(normalize_for_scan(line), False))
+
+
+def _line_hits(line: str, luhn: bool):
+    """(spans, marker) for one flagged line. spans are the whole hits' (start, end) in the line,
+    or None when the line is not ASCII (normalize_for_scan then shifts offsets); marker is True
+    when any hit is a marker (see the note above SECRET_MASK)."""
     norm = normalize_for_scan(line)
     scrubbed = ISO_DATE_RE.sub(_blank, URL_RE.sub(_blank, norm))
-    scrubbed = TRACKING_RE.sub(lambda m: _blank(m) if _usps_tracking(m.group()) else m.group(), scrubbed)
-    spans = [m.span() for m in CARD_RE.finditer(scrubbed) if _luhn(re.sub(r"\D", "", m.group()))]
-    hits = [m.start() for m in WORD_RE.finditer(norm)] + [m.start() for m in TOKEN_RE.finditer(norm)]
-    hits += [m.start() for m in GENERIC_RE.finditer(norm)
-             if _entropy(m.group(4)) >= 3.5 and re.search(r"\d", m.group(4))
-             and re.search(r"[A-Za-z]", m.group(4))]
-    if hits:
-        spans.append((min(hits), len(line)))
-    return spans
+    if luhn:
+        scrubbed = TRACKING_RE.sub(lambda m: _blank(m) if _usps_tracking(m.group()) else m.group(), scrubbed)
+    spans = [m.span() for m in CARD_RE.finditer(scrubbed)
+             if not luhn or _luhn(re.sub(r"\D", "", m.group()))]
+    marker = bool(WORD_RE.search(norm)) or any(
+        _entropy(m.group(4)) >= 3.5 and re.search(r"\d", m.group(4)) and re.search(r"[A-Za-z]", m.group(4))
+        for m in GENERIC_RE.finditer(norm))
+    for m in TOKEN_RE.finditer(norm):
+        if _KEY_BEGIN_RE.search(m.group()):
+            end = _KEY_END_RE.search(norm, m.end())
+            if end:
+                spans.append((m.start(), end.end()))
+            else:
+                marker = True
+        elif m.group().rstrip().endswith((":", "=")):
+            marker = True  # an assignment form: the value comes after the match
+        else:
+            spans.append(m.span())
+    return (spans if line.isascii() else None), marker
 
 
 def _masked_whole(line: str) -> str:
@@ -514,150 +538,60 @@ def _masked_whole(line: str) -> str:
     return (line[:1] if line[:1] in "+- " else "") + SECRET_MASK + ("\r" if line.endswith("\r") else "")
 
 
-def _mask_line(line: str) -> str:
+def _mask_spans(line: str, spans) -> str:
     out = line
-    if line.isascii():
-        spans = _secret_line_spans(line)
-        if spans:
-            spans.sort()
-            merged = [list(spans[0])]
-            for s, e in spans[1:]:
-                if s <= merged[-1][1]:
-                    merged[-1][1] = max(merged[-1][1], e)
-                else:
-                    merged.append([s, e])
-            for s, e in reversed(merged):
-                out = out[:s] + SECRET_MASK + out[e:]
-            if line.endswith("\r") and not out.endswith("\r"):
-                out += "\r"
-    if out == line or has_secret(out):
-        # A non-ASCII line, or one the span rules missed: mask it whole.
-        out = _masked_whole(line)
+    if spans:
+        spans = sorted(spans)
+        merged = [list(spans[0])]
+        for s, e in spans[1:]:
+            if s <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        for s, e in reversed(merged):
+            out = out[:s] + SECRET_MASK + out[e:]
     return out
 
 
-# A private key's BEGIN line is the only line has_secret flags; its body must go with it.
-# Matched on normalize_for_scan's text, the text has_secret reads (a tab is a space there).
-_KEY_BEGIN_RE = re.compile(r"-----begin[a-z ]*private key[a-z ]*-----")
-_KEY_END_RE = re.compile(r"-----end[a-z ]*private key[a-z ]*-----")
-# Where a diff's section ends: masking a value never runs past it.
-_SECTION_RE = re.compile(r"(?:@@ |diff --git )")
-# Code ending in one of these continues on the next line (a YAML block marker is handled apart).
-_CONTINUES_RE = re.compile(r"[\\+(\[{=]$")
-_YAML_BLOCK_RE = re.compile(r"[|>][-+]?\d*$")
-
-
-def _scan(line: str, quote: str = "", depth: int = 0):
-    """(quote, depth, code) after reading one line from the given state: the quote (", ', `)
-    still open, bracket depth, and the code outside quotes, a trailing # or // comment dropped."""
-    code, prev, k = [], " ", 0
-    while k < len(line):
-        c = line[k]
-        if quote:
-            if c == "\\":
-                k += 1
-            elif c == quote:
-                quote = ""
-        elif c in "\"'`":
-            quote = c
-        elif (c == "#" or line.startswith("//", k)) and prev.isspace():
-            break
-        elif c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth -= 1
-        code.append(c)
-        prev = c
-        k += 1
-    return quote, depth, "".join(code).rstrip()
-
-
-def _content(line: str) -> str:
-    """The line without a diff marker or CR, for comparing indents (plain text loses one
-    leading space or dash on every line alike, so its indents still compare)."""
-    return (line[1:] if line[:1] in "+- " else line).rstrip("\r")
-
-
-def _section_end(lines: list, i: int) -> int:
-    """The first diff section header after line i (@@ or diff --git), else the end of the text."""
-    return next((j for j in range(i + 1, len(lines)) if _SECTION_RE.match(lines[j])), len(lines))
-
-
-def _value_end(lines: list, i: int) -> int:
-    """The last line of the statement flagged line i starts, within its diff section: followed
-    while a quote or bracket is open or a line ends in a continuation (backslash, +, =, an
-    opening bracket); a YAML block (key: | or >) runs over its deeper-indented lines; a
-    heredoc, or a statement still open at the section's end, runs to that end."""
-    stop = _section_end(lines, i)
-    quote, depth, code = _scan(_content(lines[i]))
-    if "<<" in code:
-        return stop - 1
-    if not quote and depth <= 0 and _YAML_BLOCK_RE.search(code):
-        first = _content(lines[i])
-        indent = len(first) - len(first.lstrip())
-        j = i + 1
-        while j < stop and (not _content(lines[j]).strip()
-                            or len(_content(lines[j])) - len(_content(lines[j]).lstrip()) > indent):
-            j += 1
-        return j - 1
-    j = i
-    while quote or depth > 0 or _CONTINUES_RE.search(code):
-        j += 1
-        if j >= stop:
-            return stop - 1
-        quote, depth, code = _scan(_content(lines[j]), quote, depth)
-        if "<<" in code:
-            return stop - 1
-    return j
-
-
-def _key_in_closed_string(line: str) -> bool:
-    """True when a private key header on this line sits inside a string closed on the same line
-    (a scanner test's fixture), so no key body follows it."""
-    m = _KEY_BEGIN_RE.search(normalize_for_scan(line))
-    if not m or not line.isascii():
-        return False
-    return bool(_scan(line[:m.start()])[0]) and not _scan(line)[0]
-
-
 def mask_secrets(text: str):
-    """(masked_text, lines_masked). A line has_secret flags loses its secret-shaped spans (or is
-    masked whole); when its value runs on (see _value_end) the lines carrying it are masked whole.
-    A private key is masked from BEGIN to END within its section, unless its header is a string
-    closed on its own line; a secret spread over two lines masks both. Returns (None, n) when the
-    result still scans as a secret, and the caller must refuse. Text with no secret comes back as is."""
+    """(masked_text, lines_masked): text with each whole hit masked in place and, from each
+    marker hit (or a secret spread over two lines), the rest of its file withheld line by line
+    (see the note above SECRET_MASK). Returns (None, n) when the result still scans as a
+    secret, and the caller must refuse. Text with no secret comes back as is."""
     if not text or not has_secret(text):
         return text, 0
+    luhn = not NON_ASCII_DIGIT_RE.search(text)
     lines = text.split("\n")
-    flagged, whole = set(), set()
+    file_end, nxt = [0] * len(lines), len(lines)
+    for i in range(len(lines) - 1, -1, -1):
+        file_end[i] = nxt
+        if lines[i].startswith(_FILE_START):
+            nxt = i
+    masked = set()
+
+    def withhold(i):
+        for j in range(i, file_end[i]):
+            lines[j] = _masked_whole(lines[j])
+            masked.add(j)
+        return file_end[i]
+
     i = 0
     while i < len(lines):
-        norm = normalize_for_scan(lines[i])
-        if (_KEY_BEGIN_RE.search(norm) and not _KEY_END_RE.search(norm)
-                and not _key_in_closed_string(lines[i])):
-            stop = _section_end(lines, i)
-            j = next((j for j in range(i + 1, stop) if _KEY_END_RE.search(normalize_for_scan(lines[j]))), stop - 1)
-            whole.update(range(i, j + 1))
-            i = j + 1
-            continue
-        if has_secret(lines[i]):
-            j = _value_end(lines, i)
-            if j > i:
-                whole.update(range(i, j + 1))
-                i = j + 1
+        if _flagged(lines[i], luhn):
+            spans, marker = _line_hits(lines[i], luhn)
+            if marker:
+                i = withhold(i)
                 continue
-            flagged.add(i)
+            out = _mask_spans(lines[i], spans) if spans is not None else lines[i]
+            lines[i] = _masked_whole(lines[i]) if out == lines[i] or _flagged(out, luhn) else out
+            masked.add(i)
         i += 1
-    for i in flagged - whole:
-        lines[i] = _mask_line(lines[i])
-    for i in whole:
-        lines[i] = _masked_whole(lines[i])
-    masked = flagged | whole
-    for i in range(len(lines) - 1):
-        if has_secret(lines[i] + "\n" + lines[i + 1]):
-            for j in (i, i + 1):
-                lines[j] = _masked_whole(lines[j])
-                masked.add(j)
+    i = 0
+    while i < len(lines) - 1:
+        if _flagged(lines[i] + "\n" + lines[i + 1], luhn):
+            i = withhold(i)
+            continue
+        i += 1
     out = "\n".join(lines)
     return (None if has_secret(out) else out), len(masked)
 
