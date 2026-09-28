@@ -93,6 +93,22 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
   question and your answer: `python3 skills/super-jev/ask.py --principal me --approve "question" "answer"`.
 - If something breaks: [docs/KNOWN-QUIRKS.md](docs/KNOWN-QUIRKS.md).
 
+## Before real work: preflight, remember vs. one-off, claims, and the build cycle
+
+- **Check readiness first, for free.** `ask.py --principal me --preflight` reports connections
+  ready and per-folder coverage with no paid call. Add `--about "the work"` for what's already
+  known (tried before, rules, traps, files) and `--skill "what a new skill would do"` to find an
+  existing skill before building one.
+- **Remember vs. one-off.** Connect a folder (step 4) only if you will ask it more than once. For
+  a one-off file, a diff, or a worker's report, skip connecting and check it directly:
+  `dispatch.py check FILE... --claim "..."` or `dispatch.py verify REPORT --worktree DIR`.
+- **Check a claim against connected files.** `ask.py --principal me --claim "statement"` answers
+  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`;
+  `--claims-file FILE` checks one statement per line.
+- **Building something bigger than one answer:** use the `super-jev-build-cycle` skill. Six steps —
+  preflight, start, check-report, review, reply-check, learn — and the review step must come from a
+  fresh, independent agent, never the builder; it refuses to close while the latest review says FIX.
+
 ---
 
 # Reference: using super-jev from an LLM agent
