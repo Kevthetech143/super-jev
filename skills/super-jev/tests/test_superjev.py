@@ -5195,12 +5195,15 @@ def test_gate_over_one_call_checks_every_part_and_merges(tmp_path, monkeypatch, 
     code = sj.main(["gate", str(big), str(small), "--claim", "the small file holds the fact",
                     "--claim", "the big file is filler"])
     out = capsys.readouterr().out
-    assert len(door.calls) > 1 and code == 0, out
+    # c1 is found in the small file's part only: never CLEAN, never a false
+    # NOT_SUPPORTED either; the part holding it is named for a person to read.
+    assert len(door.calls) > 1 and code == 3, out
     assert all(sj._judge_tokens(s) <= sj.JUDGE_CALL_TOKENS for s in door.states)
     assert "".join(door.states).count("NEEDLE") == 1
     assert "checked in %d parts and nothing was cut" % len(door.calls) in out
     assert str(small) in out and "(part 1/" in out
-    assert "CLEAN" in out.split("VERDICT:")[-1]
+    assert "c1   SUPPORTED_IN_PART" in out and "c1 is supported only in part" in out
+    assert "c2   SUPPORTED " in out  # every part supports c2
 
 
 def test_gate_over_one_call_contradiction_in_any_part_wins(tmp_path, monkeypatch, capsys):
@@ -12237,7 +12240,8 @@ def test_merge_part_tables_refuses_rows_for_different_claims():
     a = "  c1   SUPPORTED      0.97  the sky is blue\n"
     b = "  c1   NOT_SUPPORTED  0.90  the grass is green\n"
     assert sj.merge_part_tables([a, b]) is None
-    assert sj.merge_part_tables([a, a.replace("SUPPORTED     ", "NOT_SUPPORTED")])[0][1] == "SUPPORTED"
+    assert sj.merge_part_tables([a, a.replace("SUPPORTED     ", "NOT_SUPPORTED")])[0][1] == "SUPPORTED_IN_PART"
+    assert sj.merge_part_tables([a, a])[0][1] == "SUPPORTED"
 
 
 def test_gate_part_rejected_with_a_table_stays_reject(tmp_path, monkeypatch, capsys):
@@ -12321,7 +12325,11 @@ class HalfDoor(FakeDoor):
 @pytest.mark.parametrize("claim, code", [
     ("no file in this log calls eval on user input", 3),
     ("every row of the big file is filler text", 3),
-    ("the big file holds filler rows", 0)])
+    ("the big file holds filler rows", 3),
+    # the second outside review's wordings, which no keyword list caught
+    ("eval is absent from the code", 3), ("the code is free of eval", 3),
+    ("zero handlers call eval", 3), ("the module lacks eval", 3),
+    ("eval was removed", 3), ("the parser exclusively uses json.loads", 3)])
 def test_gate_split_scope_claim_needs_every_part(tmp_path, monkeypatch, capsys, claim, code):
     """The outside review: an absence or universal claim was SUPPORTED by a part
     lacking the code while the part holding it said only NOT_SUPPORTED."""
@@ -12359,3 +12367,39 @@ def test_gate_split_scope_claim_is_as_sure_as_its_least_sure_part(tmp_path, monk
     monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
     assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "no row of the log calls eval"]) == 3
     assert "0.50" in capsys.readouterr().out
+
+
+class FirstPartDoor(FakeDoor):
+    """Echoes the draft's or claims file's claims: SUPPORTED 0.95 in part 1,
+    NOT_SUPPORTED in every later part, as jev_client prints them (cut to 70)."""
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        self.calls.append({"cmd": cmd})
+        if "--draft" in cmd:
+            claims = sj._split_draft_for_test(Path(cmd[cmd.index("--draft") + 1]).read_text())
+        else:
+            claims = [l.strip() for l in Path(cmd[cmd.index("--claims-file") + 1]).read_text().splitlines() if l.strip()]
+        v = "SUPPORTED" if len(self.calls) == 1 else "NOT_SUPPORTED"
+        out = "".join("  c%d   %-14s 0.95  %s\n" % (n, v, c[:70]) for n, c in enumerate(claims, 1))
+        return subprocess.CompletedProcess(cmd, 0 if v == "SUPPORTED" else 3, stdout=out, stderr="")
+
+
+LONG_NEVER = "After the refactor the request handler in server.py validates tokens and never calls eval."
+
+
+@pytest.mark.parametrize("presplit", ["0", "1"])  # 1: the draft reaches the judge as --claims-file
+def test_gate_split_draft_or_claims_file_supported_in_one_part_is_not_clean(tmp_path, monkeypatch, capsys, presplit):
+    """The second outside review: a split --draft check looked for "never" in the
+    judge's 70-character echo and said CLEAN; the rule now needs no claim text."""
+    notes = tmp_path / "notes.txt"
+    notes.write_text("".join(f"line {i}: notes about the refactor of the service\n" for i in range(9000)))
+    f = tmp_path / "input.txt"
+    f.write_text(LONG_NEVER + "\n")
+    monkeypatch.setenv("SUPERJEV_PRESPLIT", presplit)
+    monkeypatch.setattr(sj, "_split_draft_for_test", lambda t: [LONG_NEVER], raising=False)
+    door = FirstPartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    assert sj.main(["gate", str(notes), "--draft", str(f)]) == 3
+    assert any(("--claims-file" if presplit == "1" else "--draft") in c["cmd"] for c in door.calls)
+    out = capsys.readouterr().out
+    assert len(door.calls) >= 8 and "SUPPORTED_IN_PART" in out and "VERDICT: CLEAN" not in out

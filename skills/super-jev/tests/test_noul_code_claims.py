@@ -652,11 +652,12 @@ def test_code_bigger_than_one_call_is_judged_as_evidence_in_parts(monkeypatch, e
     small = DIFF.replace("x.py", "y.py").replace("+new", "+NEEDLE = 1")
     code, out = _run_text(["gate", evfile(BIG_DIFF, "big.diff"), evfile(small, "small.diff"),
                            "--claim", "y.py sets the NEEDLE constant to one"])
-    assert code == 0, out
+    assert code == 3, out  # shown in one part only: a person reads that part
     assert not judge.calls and len(door.states) > 1
     assert all(sj._judge_tokens(t) <= sj.JUDGE_CALL_TOKENS for t in door.states)
     assert "judged as evidence claims, in parts" in out and "small.diff" in out
     assert "claim-mode: code" in out and "[reply:judge]" in out
+    assert "SUPPORTED_IN_PART" in out and "supported only in part" in out
 
 
 PATTERN_DIFF = DIFF.replace("+new", "+new\n DANGER_RE = re.compile(r\"rm\\s+-rf\")")

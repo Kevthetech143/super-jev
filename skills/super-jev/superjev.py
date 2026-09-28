@@ -4459,21 +4459,24 @@ def _row_flagged(key, verdict, score, advisory=()):
     return verdict not in _FAVORABLE_SIDE and key not in advisory
 
 
-# A claim about the whole evidence (absence, universal, exclusive): no single part can
-# carry it. Read on the claim's own text (--claim), else on the text the judge echoes.
-_SCOPE_CLAIM_RE = re.compile(
-    r"\b(?:no|none|nothing|nowhere|never|not|every|everything|all|each|any|only|"
-    r"always|without|neither|nor)\b|n't\b", re.IGNORECASE)
+# A claim some parts support and others do not show. It may be one located fact (the
+# supporting part is its proof) or a claim about all the evidence ("no file calls
+# eval", "eval is absent", "exclusively uses json.loads") that the part lacking the
+# code supports and the part holding it only fails to show; no rule on the claim's
+# words tells these apart, so it is never CLEAN: a person reads the named part.
+SUPPORTED_IN_PART = "SUPPORTED_IN_PART"
 
 
-def merge_part_tables(outs, codes=None, claims=None):
-    """One row per question across the parts' verdict tables, the rule
-    lib/jev_client.merge_rows uses: a contradiction (for a draft-level
-    question, any red label) in any part wins, since it must be read; else a
-    claim any part supports is supported. The highest confidence of the
-    winning label is kept, with the part that gave it. `codes` are the parts'
-    exit codes (see _door_table). None when a part has no table or the parts
-    disagree on which questions they answered."""
+def merge_part_tables(outs, codes=None):
+    """One row per question across the parts' verdict tables: (key, verdict,
+    score, subject, parts), `parts` the 1-based parts behind the row.
+
+    A claim: CONTRADICTED in any part wins, since it must be read; SUPPORTED in
+    every part is SUPPORTED, as sure as its least sure part; SUPPORTED in some
+    parts only is SUPPORTED_IN_PART (never clean), naming those parts; else the
+    most confident other row. A draft-level question: any red label wins.
+    `codes` are the parts' exit codes (see _door_table). None when a part has no
+    table or the parts disagree on which questions they answered."""
     tables = [_door_table(out, (codes or [0] * len(outs))[i]) for i, out in enumerate(outs)]
     if any(t is None for t in tables):
         return None
@@ -4484,25 +4487,23 @@ def merge_part_tables(outs, codes=None, claims=None):
     merged = []
     for key in tables[0]:
         rows = [(t[key], i) for i, t in enumerate(tables, 1)]
-        n = int(key[1:]) if key.startswith("c") else 0
-        text = claims[n - 1] if claims and 0 < n <= len(claims) else tables[0][key][2] if n else ""
-        if n and _SCOPE_CLAIM_RE.search(text):
-            # "no file calls eval", "every handler logs": a part without the code can
-            # support it while the part with it only says NOT_SUPPORTED. Such a claim
-            # is SUPPORTED only when every part says so.
-            pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
-                    or [r for r in rows if r[0][0] != "SUPPORTED"])
-            if not pick:  # every part supports it: as sure as the least sure part
-                (verdict, score, subject), part = min(rows, key=lambda r: r[0][1])
-                merged.append((key, verdict, score, subject, part))
+        if key.startswith("c"):
+            contra = [r for r in rows if r[0][0] == "CONTRADICTED"]
+            yes = [r for r in rows if r[0][0] == "SUPPORTED"]
+            if contra:
+                (verdict, score, subject), part = max(contra, key=lambda r: r[0][1])
+            elif yes and len(yes) == len(rows):
+                (verdict, score, subject), part = min(yes, key=lambda r: r[0][1])
+            elif yes:
+                (_v, score, subject), _p = max(yes, key=lambda r: r[0][1])
+                merged.append((key, SUPPORTED_IN_PART, score, subject, tuple(i for _r, i in yes)))
                 continue
-        elif key.startswith("c"):
-            pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
-                    or [r for r in rows if r[0][0] == "SUPPORTED"])
+            else:
+                (verdict, score, subject), part = max(rows, key=lambda r: r[0][1])
         else:
             pick = [r for r in rows if r[0][0] not in _FAVORABLE_SIDE]
-        (verdict, score, subject), part = max(pick or rows, key=lambda r: r[0][1])
-        merged.append((key, verdict, score, subject, part))
+            (verdict, score, subject), part = max(pick or rows, key=lambda r: r[0][1])
+        merged.append((key, verdict, score, subject, (part,)))
     return merged
 
 
@@ -4563,9 +4564,7 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
              "check cannot be CLEAN; read that part yourself: %s\n" % (
                  i, len(parts), _part_names(parts[i - 1]), " ".join((out or err).split())[:160])
              for i, out, err in refused]
-    # claim_args is built in (flag, value) pairs, so a claim reading "--claim" stays a value
-    merged = merge_part_tables(outs, codes, [claim_args[j + 1] for j in range(0, len(claim_args) - 1, 2)
-                                             if claim_args[j] == "--claim"])
+    merged = merge_part_tables(outs, codes)
     if merged is None:
         return GATE_UNREADABLE_EXIT, "\n".join(outs), "".join(errs)
     advisory = _CLAIM_ADVISORY_KEYS if "--claim" in claim_args else set()
@@ -4577,15 +4576,24 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
             notes.append("gate: part %d of %d (%s): the judge flagged it (exit %d) without a "
                          "row saying why, so this check cannot be CLEAN\n"
                          % (judged[i], len(parts), _part_names(parts[judged[i] - 1]), code))
+    def where(ps):
+        return "part%s %s" % ("s" if len(ps) > 1 else "", ", ".join(str(judged[x - 1]) for x in ps))
+
+    for key, verdict, _sc, _t, ps in merged:
+        if verdict == SUPPORTED_IN_PART:
+            notes.append("gate: %s is supported only in %s (%s); the other parts do not show it. "
+                         "If it is one located fact, that is its proof; if it says something of all "
+                         "the evidence (absent, never, every, only), it is not shown. Read it before "
+                         "you rely on it\n" % (key, where(ps), "; ".join(
+                             _part_names(parts[judged[x - 1] - 1]) for x in ps)))
     lines = [""]
-    for key, verdict, score, subject, part in merged:
+    for key, verdict, score, subject, ps in merged:
         if key.startswith("c"):
-            lines.append("  %-4s %-14s %.2f  %s  [part %d]" % (
-                key, verdict, score, subject[:70], judged[part - 1]))
+            lines.append("  %-4s %-14s %.2f  %s  [%s]" % (key, verdict, score, subject[:70], where(ps)))
     lines.append("")
-    for key, verdict, score, _subject, part in merged:
+    for key, verdict, score, _subject, ps in merged:
         if not key.startswith("c"):
-            lines.append("  %-18s %-20s %.2f  [part %d]" % (key, verdict, score, judged[part - 1]))
+            lines.append("  %-18s %-20s %.2f  [%s]" % (key, verdict, score, where(ps)))
     # gate_fail_closed blocks only on the known red labels; a merged side row with any
     # other unfavorable label (NO_ANSWER) must not read as clean either. An explicit
     # --claim check keeps its advisory rows advisory, as the judge's own exit does.
@@ -4762,7 +4770,7 @@ def cmd_gate(a):
                        and m.group("key") not in _CLAIM_ADVISORY_KEYS
                        and m.group("verdict") not in _FAVORABLE_SIDE]
             judge_info["notes"] = "".join(l + "\n" for l in (out or "").splitlines()
-                                          if l.startswith("gate: part ")) + "".join(
+                                          if l.startswith("gate: ")) + "".join(
                                               l + "\n" for l in flagged)
             judge_info["floor"] = 2 if code == 2 else (3 if code == 3 or flagged else 0)
             return rows
