@@ -196,21 +196,65 @@ def test_gate_masks_before_it_truncates(tmp_path):
     assert "return card_hit(text)" in state and not any(b in state for b in body)
 
 
+def test_one_file_in_two_evidence_items_is_withheld_in_both():
+    """A committed patch and an uncommitted diff given as two evidence files: the second holds a
+    hunk from the middle of the key, with no marker, and alone scans clean."""
+    committed = test_file("+" + PEM + "\n" + "".join(f"+{b}\n" for b in KEY_BODY), "fx/key.pem") + PRODUCT
+    uncommitted = test_file(f" {KEY_BODY[1]}\n-{KEY_BODY[2]}\n+{KEY_BODY[2][::-1]}\n", "fx/key.pem")
+    assert not pb.has_secret(uncommitted)
+    items, withheld = pb.mask_evidence([("c.diff", committed), ("u.diff", uncommitted)])
+    assert items[1] == ("u.diff", None) and "fx/key.pem" in withheld
+    assert items[0][1].endswith(PRODUCT) and not any(b in items[0][1] for b in KEY_BODY)
+
+
+def test_text_around_a_diff_is_one_file_with_it():
+    """The Stop hook's window mixes tool output: a read showing a key's BEGIN line, a diff, then a
+    read of the key's body alone, which by itself scans clean."""
+    window = ("Read fx/key.pem 1-2:\n" + PEM + "\n" + PRODUCT + "Read fx/key.pem 3-5:\n"
+              + "\n".join(KEY_BODY) + "\n")
+    out, _ = pb.mask_secrets(window)
+    assert out is None or not any(b in out for b in KEY_BODY)
+
+
+def test_gate_with_no_evidence_left_after_the_cap_is_not_a_secret_refusal(tmp_path):
+    ev, draft = tmp_path / "clean.diff", tmp_path / "draft.md"
+    ev.write_text(PRODUCT)
+    draft.write_text("scan returns card_hit(text). " * 800)
+    p, _sent = run_cli(tmp_path, [str(SKILL / "superjev.py"), "gate", str(ev), "--draft", str(draft),
+                                  "--claim", "scan returns card_hit(text)"], SUPERJEV_INPUT_CAP_TOK="1000")
+    assert "contains a secret" not in p.stdout + p.stderr
+
+
+def test_cli_entries_withhold_a_file_split_over_two_evidence_files(tmp_path):
+    committed, uncommitted = tmp_path / "c.diff", tmp_path / "u.diff"
+    committed.write_text(test_file("+" + PEM + "\n" + "".join(f"+{b}\n" for b in KEY_BODY), "fx/key.pem") + PRODUCT)
+    uncommitted.write_text(test_file(f" {KEY_BODY[1]}\n-{KEY_BODY[2]}\n+{KEY_BODY[2][::-1]}\n", "fx/key.pem"))
+    claim = ["--claim", "scan returns card_hit(text)"]
+    for argv in ([str(SKILL / "superjev.py"), "gate", str(committed), str(uncommitted), *claim],
+                 [str(SKILL / "lib" / "jev_client.py"), str(committed), str(uncommitted), *claim],
+                 [str(SKILL / "dispatch.py"), "check", str(committed), str(uncommitted), *claim]):
+        p, sent = run_cli(tmp_path, argv)
+        assert sent, argv
+        assert not any(b in sent or b[::-1] in sent for b in KEY_BODY), argv
+        (tmp_path / "sent.log").unlink()
+
+
 def test_text_that_is_not_a_diff_is_not_judged():
-    assert pb.mask_secrets(f"notes\nthe card is {CARD}\n") == (None, ["the whole text"])
+    assert pb.mask_secrets(f"notes\nthe card is {CARD}\n") == (None, ["the text"])
 
 
 def test_a_secret_shaped_header_is_withheld_too():
     name = "password: " + "hunter2xyz9"
     text = f"diff --git a/x b/x {name}\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+x = 1\n"
     assert pb.has_secret(text)
-    out, withheld = pb.mask_secrets(text)
-    assert out == pb.SECRET_WITHHELD.format(n=5) + "\n" and withheld == ["a file"]
+    out, withheld = pb.mask_secrets(text + PRODUCT)
+    assert out == pb.SECRET_WITHHELD.format(n=5) + "\n" + PRODUCT and withheld == ["a file"]
+    assert pb.mask_secrets(text) == (None, ["a file", "the text"])  # nothing judgeable left
 
 
 def test_text_before_the_first_file_is_judged_on_its_own():
     out, withheld = pb.mask_secrets(f"summary: rotate {PW}\n" + PRODUCT)
-    assert withheld == ["a file"] and out == pb.SECRET_WITHHELD.format(n=1) + "\n" + PRODUCT
+    assert withheld == ["the text"] and out == pb.SECRET_WITHHELD.format(n=1) + "\n" + PRODUCT
 
 
 def test_non_ascii_digit_in_one_file_keeps_the_others_judged():
