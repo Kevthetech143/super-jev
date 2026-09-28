@@ -3,7 +3,7 @@ name: super-jev-build-cycle
 description: "Walk a build, fix or new skill through six steps with Super Jev inside each one: preflight, start (what we already know), check helpers' reports, an independent review by a fresh agent, check your reply, teach back. One receipt per step; close refuses until the required steps are done and the latest review says SHIP. Works for any agent that can run a shell."
 ---
 
-# Super Jev build cycle
+# Super Jev build cycle (v1, stable)
 
 One command, `build_cycle.py`, in this folder. It needs the `super-jev` skill installed next to this one (`../super-jev/`), or `--super-jev DIR`. Every call names a cycle folder and the agent:
 
