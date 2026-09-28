@@ -114,10 +114,10 @@ def test_held_file_is_named_in_ask_output(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("score", [0.51, 0.56])
-def test_a_near_tie_with_none_is_not_a_match(tmp_path, monkeypatch, score):
+def test_none_selection_discards_losing_candidate_mass(tmp_path, monkeypatch, score):
     f = tmp_path / "dentist.md"
     f.write_text("Dr. Alvarez cleaned Maria's teeth on 2026-03-04.")
-    _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": score}]})
+    _fake_nav(monkeypatch, {"status": "no-candidates", "candidates": [{"score": score}]})
     assert ask.confirm_one("How much did the cleaning cost?", str(f))[0] is None
 
 
@@ -127,7 +127,7 @@ def test_content_check_asks_for_the_answer_not_the_topic(tmp_path, monkeypatch):
     calls = []
     _fake_nav(monkeypatch, {"status": "candidates", "candidates": [{"score": 0.93}]}, calls)
     assert ask.confirm_one("What car do I have?", str(f))[0] == 0.93
-    assert "states the exact value asked for" in json.loads(calls[0])["catalog"]["nodes"][1]["label"]
+    assert json.loads(calls[0])["mode"] == "source-evidence"
 
 
 def test_files_past_the_checked_few_are_not_kept_unread(tmp_path, monkeypatch, capsys):

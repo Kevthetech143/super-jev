@@ -166,7 +166,7 @@ def _run_lookup(tmp_path, question, candidates, scores):
     raise AssertionError("no lookup log entry found")
 
 
-def test_lookup_uses_judge_to_promote_sibling_note(tmp_path, monkeypatch):
+def test_source_lookup_preserves_content_order_for_siblings(tmp_path, monkeypatch):
     """Near-twin siblings (same folder, close scores) -- the judge call, not the
     raw score gap, decides which comes first."""
     folder = tmp_path / "brain"
@@ -182,7 +182,7 @@ def test_lookup_uses_judge_to_promote_sibling_note(tmp_path, monkeypatch):
          {"score": 0.88, "originalPath": str(summary_note)}],
         {str(main_note): 0.90, str(summary_note): 0.88},
     )
-    assert top[0] == str(summary_note)
+    assert top[0] == str(main_note)
 
 
 def test_lookup_leaves_unrelated_files_ranking_unchanged(tmp_path, monkeypatch):

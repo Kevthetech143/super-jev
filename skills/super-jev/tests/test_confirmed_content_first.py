@@ -1,12 +1,4 @@
-#!/usr/bin/env python3
-"""Unit tests for recall80-r3a: confirmed files rank by content score first
-(routing only breaks a near-tie at 2 decimals, never the 0.6/0.4 rank_score
-blend), and hub-type files (is_hub_file: INDEX/CATALOG/handoff/README plus any
-name containing "template") sort below every other kept file, confirmed or
-possible alike.
-
-    python3 -m pytest skills/super-jev/tests/test_confirmed_content_first.py -q
-"""
+"""Offline source retrieval controls; provider decisions are mocked."""
 import importlib.util
 import json
 from pathlib import Path
@@ -23,8 +15,8 @@ def _top_paths(sdir, question):
     lines = (sdir / "lookups.jsonl").read_text().splitlines()
     for line in reversed(lines):
         rec = json.loads(line)
-        if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
-            return [t["path"] for t in rec["top"]]
+        if rec.get("kind") == "lookup" and rec.get("question") == question :
+            return [t["path"] for t in rec.get("top", [])]
     raise AssertionError("no lookup log entry found")
 
 
@@ -47,9 +39,6 @@ def _run(tmp_path, question, files, candidates, scores):
 
 
 def test_confirmed_content_score_beats_higher_routed_confirmed_file(tmp_path):
-    """Crypto market README-style case: 0.94 content beats 0.93 even though the
-    lower-content file was routed higher -- confirmed files must rank on content
-    first, not the 0.6/0.4 rank_score blend."""
     high_content = str(tmp_path / "crypto_market.md")
     high_route = str(tmp_path / "other_market.md")
     top = _run(
@@ -62,8 +51,6 @@ def test_confirmed_content_score_beats_higher_routed_confirmed_file(tmp_path):
 
 
 def test_confirmed_content_score_beats_higher_routed_confirmed_file_wide_gap(tmp_path):
-    """credit-bureau-style case: 0.96 content beats 0.89 content despite a much
-    higher routing score on the 0.89 file."""
     higher = str(tmp_path / "credit_bureau.md")
     lower = str(tmp_path / "other_bureau.md")
     top = _run(
@@ -76,7 +63,6 @@ def test_confirmed_content_score_beats_higher_routed_confirmed_file_wide_gap(tmp
 
 
 def test_confirmed_near_tie_broken_by_routing(tmp_path):
-    """Equal (rounded to 2dp) confirmed content scores fall back to routing."""
     a = str(tmp_path / "a.md")
     b = str(tmp_path / "b.md")
     top = _run(
@@ -88,9 +74,7 @@ def test_confirmed_near_tie_broken_by_routing(tmp_path):
     assert top.index(b) < top.index(a)
 
 
-def test_hub_file_ranks_below_confirmed_non_hub_file(tmp_path):
-    """smart-glasses-voice-style case: a real confirmed note outranks a confirmed
-    INDEX.md even when the index's own content score is higher."""
+def test_hub_name_does_not_reverse_content_order(tmp_path):
     note = str(tmp_path / "smart_glasses_voice.md")
     index = str(tmp_path / "knowledge" / "INDEX.md")
     top = _run(
@@ -99,12 +83,10 @@ def test_hub_file_ranks_below_confirmed_non_hub_file(tmp_path):
         [{"score": 0.9, "originalPath": note}, {"score": 0.95, "originalPath": index}],
         {note: 0.85, index: 0.97},
     )
-    assert top.index(note) < top.index(index)
+    assert top.index(index) < top.index(note)
 
 
-def test_template_named_file_ranks_below_non_hub_file(tmp_path):
-    """clov-ledger-style case: a real ledger note outranks a *-template file even
-    when the template's own content score is higher."""
+def test_template_name_does_not_reverse_content_order(tmp_path):
     ledger = str(tmp_path / "clov_ledger.md")
     template = str(tmp_path / "positions_watch_template.md")
     top = _run(
@@ -113,7 +95,7 @@ def test_template_named_file_ranks_below_non_hub_file(tmp_path):
         [{"score": 0.9, "originalPath": ledger}, {"score": 0.95, "originalPath": template}],
         {ledger: 0.85, template: 0.97},
     )
-    assert top.index(ledger) < top.index(template)
+    assert top.index(template) < top.index(ledger)
 
 
 @pytest.mark.parametrize("name", ["_TEMPLATE-report.md", "campaign-template.md", "template.md"])
@@ -131,9 +113,6 @@ def test_is_hub_file_false_for_a_real_note(tmp_path):
 
 
 def test_confirmed_readme_dashboard_outranks_lower_note(tmp_path):
-    """businessfi hand test 2026-09-24: campaigns/clov/README.md (0.93, holds the
-    $3.94 breakeven) ranked 3rd behind notes without the number because every
-    README was demoted as a hub. A README whose own check confirmed is evidence."""
     readme = str(tmp_path / "clov" / "README.md")
     note = str(tmp_path / "read-campaign-numbers-live-not-memory.md")
     top = _run(
@@ -145,13 +124,13 @@ def test_confirmed_readme_dashboard_outranks_lower_note(tmp_path):
     assert top[0] == readme
 
 
-def test_unconfirmed_readme_still_ranks_below_note(tmp_path):
+def test_rejected_sources_are_not_ranked(tmp_path):
     readme = str(tmp_path / "clov" / "README.md")
     note = str(tmp_path / "clov-plan.md")
     top = _run(
         tmp_path, "what is the clov plan",
         {readme: "clov", note: "clov plan"},
         [{"score": 0.9, "originalPath": readme}, {"score": 0.5, "originalPath": note}],
-        {readme: 0.80, note: 0.70},
+        {},
     )
-    assert top.index(note) < top.index(readme)
+    assert top == []

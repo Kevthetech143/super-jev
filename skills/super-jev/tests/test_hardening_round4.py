@@ -131,7 +131,7 @@ def test_unfavorable_or_weak_main_verdict_still_blocks(monkeypatch, claim, side)
 
 
 # 4. the confirm label asks for the exact value for the exact event
-def test_confirm_label_asks_for_the_exact_value(tmp_path, monkeypatch):
+def test_content_check_uses_source_evidence_mode(tmp_path, monkeypatch):
     f = tmp_path / "trip.md"
     f.write_text("Return flight TP201 is on 2026-10-12.")
     calls = []
@@ -139,12 +139,13 @@ def test_confirm_label_asks_for_the_exact_value(tmp_path, monkeypatch):
     def fake_run(cmd, input, **kw):
         calls.append(input)
         return subprocess.CompletedProcess(cmd, 0, json.dumps(
-            {"status": "candidates", "candidates": [{"score": 0.64}]}), "")
+            {"status": "candidates", "candidates": [{"score": 0.74}]}), "")
     monkeypatch.setattr(ask.subprocess, "run", fake_run)
-    # 0.64 is not confirmed (it may only show as "possible", see test_retrieval_recall.py)
-    assert ask.confirm_one("What time does TP201 depart?", str(f))[0] < ask.CONFIRM_FLOOR
+    # Selected source evidence can pass below the old complete-answer floor.
+    assert ask.confirm_one("What time does TP201 depart?", str(f))[0] == .74
     label = json.loads(calls[0])["catalog"]["nodes"][1]["label"]
-    assert "exact value asked for" in label and "another event" in label
+    assert label == ask.SOURCE_LABEL.format(n=1)
+    assert json.loads(calls[0])["mode"] == "source-evidence"
 
 
 def test_client_sends_explicit_user_agent(monkeypatch):

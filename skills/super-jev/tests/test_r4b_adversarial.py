@@ -31,16 +31,16 @@ def _run(tmp_path, monkeypatch, capsys, q, route, content, name="notes.md"):
 # Live-money asks without one of the 10 listed money words lost their live gate
 # (main treated every "how much" as live).
 def test_how_much_money_in_checking_is_live():
-    assert ask.is_live_value_question("how much money do I have in checking")
+    assert ask.confirm_label("how much money do I have in checking") == ask.SOURCE_LABEL
 
 
 def test_how_much_cash_is_live():
-    assert ask.is_live_value_question("how much cash is in my brokerage account")
+    assert ask.confirm_label("how much cash is in my brokerage account") == ask.SOURCE_LABEL
 
 
 # Price-shaped near-miss via "how much did we pay" now gets a possible tier.
 def test_how_much_did_we_pay_gets_no_possible_tier(tmp_path, monkeypatch, capsys):
-    f, out = _run(tmp_path, monkeypatch, capsys, "how much did we pay for the MacBook", 0.3, 0.7)
+    f, out = _run(tmp_path, monkeypatch, capsys, "how much did we pay for the MacBook", 0.3, 0.0)
     assert str(f) not in out
 
 

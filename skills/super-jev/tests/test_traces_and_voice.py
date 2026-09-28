@@ -145,7 +145,7 @@ def test_live_miss_lookup_writes_a_trace_line_with_tier_none(tmp_path, monkeypat
     assert tr["lookup_id"]
 
 
-def test_live_hit_lookup_writes_a_trace_line_with_tier_confirmed_and_ranked_list(tmp_path, monkeypatch):
+def test_live_hit_lookup_writes_source_evidence_trace_and_ranked_list(tmp_path, monkeypatch):
     note = tmp_path / "hit.md"
     note.write_text("The car is blue.\n")
 
@@ -166,9 +166,9 @@ def test_live_hit_lookup_writes_a_trace_line_with_tier_confirmed_and_ranked_list
     recs = read_jsonl(tmp_path / "traces.jsonl")
     traces = [r for r in recs if r.get("kind") == "trace"]
     assert len(traces) == 1
-    assert traces[0]["tier"] == "confirmed"
+    assert traces[0]["tier"] == "sources"
     assert traces[0]["final_ranked"][0]["path"] == str(note)
-    assert traces[0]["content_check"][str(note)]["label"] == "confirmed"
+    assert traces[0]["content_check"][str(note)]["label"] == "evidence-selected"
 
 
 def test_trace_redacts_secret_shaped_fields_and_truncates_long_ones(tmp_path):
@@ -462,16 +462,16 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
     st = read_jsonl(tmp_path / "traces.jsonl")[-1]["stages"]
     assert st["cache"] == {"result": "cache-miss", "checked": 1}
     assert st["routing"]["p1"]["none"] == 0.2
-    assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, False]
+    assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, True]
     fates = [f["fate"] for f in st["word_search"]["top"]]
-    assert fates == ["already routed", "read", "read", "read", "not read: past top 5"]
-    assert st["read_list"] == ["/a.md", "/w.md", "/x.md", "/y.md"]
+    assert fates == []  # lexical discovery is claim-only
+    assert st["read_list"] == ["/a.md", "/b.md"]
     assert st["content_check"]["/a.md"]["read"] == [0, 1, 2, 9]
-    assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"].startswith("confirmed")
+    assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"] == "evidence-selected"
 
     assert ask.trace_show(tmp_path, "last") == 0
     out = capsys.readouterr().out
-    assert "/z.md  -> not read: past top 5" in out
-    assert "b.md 0.02 (under floor)" in out
+    assert "/z.md" not in out
+    assert "b.md 0.02" in out and "under floor" not in out
     assert "chunks [0, 1, 2, 9] of 11" in out
     assert ask.trace_show(tmp_path, "nope") == 1

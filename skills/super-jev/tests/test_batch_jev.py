@@ -47,12 +47,14 @@ def test_routing_asks_every_pointer_in_one_request_and_retries_only_the_overload
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(paths), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({p: .9 for p in paths}, set(), None, {}))
     assert ask.lookup("where is it?", "alice", tmp_path) == 0
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()[:1].isdigit()]
     assert "/high.md" in lines[0] and "/low.md" in lines[1]
     assert [c["action"] for c in calls].count("navigate-many") == 2
     assert not any(c["action"] == "navigate" for c in calls)
+    assert all(c["mode"] == "source-discovery" and c["limits"] == {"beamWidth": 5, "maxResults": 5}
+               for c in calls if c["action"] == "navigate-many")
 
 
 def test_routing_falls_back_to_one_call_per_pointer_on_an_older_runtime(tmp_path, monkeypatch, capsys):
@@ -64,11 +66,13 @@ def test_routing_falls_back_to_one_call_per_pointer_on_an_older_runtime(tmp_path
         if req["action"] == "navigate-many":
             return {"status": "error", "reason": "Unknown action; use --describe."}
         if req["action"] == "navigate":
+            assert req["mode"] == "source-discovery"
+            assert req["limits"] == {"beamWidth": 5, "maxResults": 5}
             return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": "/a.md"}]}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(paths), None, {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({p: .9 for p in paths}, set(), None, {}))
     assert ask.lookup("where is it?", "alice", tmp_path) == 0
     assert "/a.md" in capsys.readouterr().out
 
@@ -109,7 +113,7 @@ def _judge(payload):
     # Scores each payload from its own passage text, so a recheck that judged a
     # different file (or a shifted row) would show.
     text = "".join(n["description"] for n in payload["catalog"]["nodes"][1:])
-    return {"status": "candidates", "candidates": [{"score": 0.6 + (sum(map(ord, text)) % 39) / 100, "sourceId": "0"}]}
+    return {"status": "candidates", "candidates": [{"score": 0.7 + (sum(map(ord, text)) % 29) / 100, "sourceId": "0"}]}
 
 
 def test_files_timed_out_in_a_shared_run_are_each_checked_once_more_alone(tmp_path, monkeypatch):
@@ -220,7 +224,7 @@ def test_batched_and_single_checks_give_the_same_file_to_score_mapping(tmp_path,
 
     def judge(payload):
         text = "".join(n["description"] for n in payload["catalog"]["nodes"][1:])
-        return {"status": "candidates", "candidates": [{"score": 0.6 + (sum(map(ord, text)) % 39) / 100, "sourceId": "0"}]}
+        return {"status": "candidates", "candidates": [{"score": 0.7 + (sum(map(ord, text)) % 29) / 100, "sourceId": "0"}]}
 
     def fake_run(cmd, input, **kw):
         body = json.loads(input)

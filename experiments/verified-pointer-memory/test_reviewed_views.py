@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from path_connect import connect
+from path_connect import connect, prepare_bulk
 from service import Service
 
 
@@ -206,7 +206,6 @@ def test_unicode_separator_cannot_detach_text_from_its_drop_marker(setup, separa
 @pytest.mark.parametrize('suffix', ['.json', '-report.json'])
 def test_raw_bulk_artifact_blocks_view_conversion(setup, monkeypatch, suffix):
     _, config, req = setup
-    import prepare_bulk
     cache = Path(config['db']).parent / 'cache'
     cache.mkdir()
     (cache / ('notes' + suffix)).write_text('{}')
