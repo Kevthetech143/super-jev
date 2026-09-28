@@ -42,6 +42,15 @@ REAL = [
     "password=" + BS + '"' + "$uper" + "Secret9" + BS + '"',
     "API_KEY=" + BS + '"' + "$9qP7vK2" + "mR8wL6z" + BS + '"',
     "api_key=" + BS + "'" + "$abc" + "Def123" + BS + "'",
+    # Only a closed placeholder is exempt: an unclosed or malformed opening is a literal value.
+    "password=" + BS + '"' + "$(Literal" + "Secret9" + BS + '"',
+    "password=" + BS + '"' + "${Literal" + "Secret9" + BS + '"',
+    "password=" + BS + '"' + "<Literal" + "Secret9" + BS + '"',
+    "API_KEY=" + BS + '"' + "$(Literal" + "Secret9" + BS + '"',
+    "API_KEY=" + BS + '"' + "${Literal" + "Secret9" + BS + '"',
+    "API_KEY=" + BS + '"' + "<Literal" + "Secret9" + BS + '"',
+    "password=" + BS + '"' + "$(Literal" + "Secret9}" + BS + '"',
+    "password=" + BS + '"' + "$(" + "x" * 201 + ")" + BS + '"',
 ]
 
 
@@ -246,3 +255,34 @@ def test_connect_preview_hash_mismatch_holds_approved_file_and_sends_no_reviewed
     why = dict(rep["held"])[str(f)]
     assert "over size ceiling" in why and "changed since its --approve-held review" in why and reviewed[:12] in why
     assert any(r["action"] == "connect" for r in sent)
+
+
+@pytest.mark.parametrize("edit", [True, False])
+def test_writer_only_ever_sees_the_approved_bytes(run, monkeypatch, edit):
+    f = run.root / "big.py"
+    f.write_text(BIG)
+    run("--approve-held", str(f))
+    (run.root.parent / "cache" / "code.json").unlink()  # force a writer call on refresh
+    real_inventory, seen = pb.inventory, []
+
+    def inventory_then_edit(*a, **k):
+        out = real_inventory(*a, **k)
+        if edit:
+            f.write_text("pass" + "word: Synthetic" + "Unreviewed9\n" + BIG)
+        return out
+
+    def capture(items, *a, **k):
+        seen.extend(items)
+        return {}
+    monkeypatch.setattr(pb, "inventory", inventory_then_edit)
+    monkeypatch.setattr(pb, "writer", capture)
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--refresh", "--pointer", "code", "--principal", "reader",
+                                      "--writer-command", "cat", "--no-connect"])
+    pb.main()
+    assert not any("Unreviewed9" in json.dumps(item) for item in seen)
+    if edit:
+        assert str(f) not in [i["path"] for i in seen]
+        rep = json.loads((run.root.parent / "cache" / "code-report.json").read_text())
+        assert str(f) not in rep["approved"] and "changed since" in dict(rep["held"])[str(f)]
+    else:
+        assert str(f) in [i["path"] for i in seen]

@@ -653,14 +653,15 @@ SAMPLES = 8
 SAMPLE_CHARS = 350
 
 
-def excerpt(p: Path) -> dict:
+def excerpt(p: Path, text: str = None) -> dict:
     """What the writer reads of one file: its headings and first 1,200 characters, plus, for a big
     file, headings and short passages taken evenly across the rest. The gate judges the whole file,
     so a writer that saw only the top described only the top (a 37 KB changelog drafted as its
     oldest versions) and was refused. The first 15 headings and the start stay exactly as before,
     so builtin_writer's quote rebuilds identically; the added part is bounded (at most 10 headings,
-    8 x 350 characters) whatever the file's size."""
-    text = p.read_text(errors="replace")
+    8 x 350 characters) whatever the file's size. `text` is a snapshot already read and verified
+    (an --approve-held file's reviewed bytes), used instead of reading the path again."""
+    text = p.read_text(errors="replace") if text is None else text
     all_heads = [l.strip() for l in text.splitlines()
                  if l.startswith("#") or code_heading(l, p.suffix.lower())]
     heads = all_heads[:EXCERPT_HEADS]
@@ -1244,16 +1245,30 @@ def main() -> int:
                   "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
             return 2
 
+    # An approved file is read once here and its hash verified; the writer gets exactly those bytes,
+    # so an edit after inventory never reaches the writer.
+    snapshot = {}
+    for p in [p for p in todo if str(p) in pinned]:
+        b = p.read_bytes()
+        if hashlib.sha256(b).hexdigest() == pinned[str(p)]:
+            snapshot[str(p)] = b.decode("utf-8", "replace")
+        else:
+            hold_changed(p)
+    todo = [p for p in todo if str(p) not in dropped]
+
+    def ex(p) -> dict:
+        return excerpt(p, snapshot.get(str(p)))
+
     drafts = {}
     for i in range(0, len(todo), a.batch):
         batch = todo[i:i + a.batch]
         try:
             if use_builtin:
-                got = builtin_writer([excerpt(p) for p in batch])
+                got = builtin_writer([ex(p) for p in batch])
             elif writer_command:
-                got = writer([excerpt(p) for p in batch], a.writer_model, command=writer_command)
+                got = writer([ex(p) for p in batch], a.writer_model, command=writer_command)
             else:
-                got = writer([excerpt(p) for p in batch], a.writer_model)
+                got = writer([ex(p) for p in batch], a.writer_model)
         except WriterError as e:
             print(f"ERROR: description writer failed: {e}")
             if not writer_command:
@@ -1296,7 +1311,7 @@ def main() -> int:
         # Stage 1: gate the description alone -- exactly the pre-labels claim. A label
         # problem must never cost a file its place; only a description problem does.
         desc = d["description"].strip()
-        if use_builtin and d["description"] == builtin_writer([excerpt(p)])[str(p)]["description"]:
+        if use_builtin and d["description"] == builtin_writer([ex(p)])[str(p)]["description"]:
             # A built-in description is only the file's own headings and words, quoted; rebuilding
             # it from the file proves that exactly. The judge scored such quotes 0.29-0.89, so a
             # plain note could fall under the line and be set aside for no real reason.
@@ -1312,9 +1327,9 @@ def main() -> int:
                 if use_builtin:
                     redo = None  # a quoted description has nothing to rewrite
                 elif writer_command:
-                    redo = writer([excerpt(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
+                    redo = writer([ex(p)], a.writer_model, feedback=fb, command=writer_command).get(str(p))
                 else:
-                    redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
+                    redo = writer([ex(p)], a.writer_model, feedback=fb).get(str(p))
             except WriterError as e:
                 print(f"ERROR: description writer failed: {e}"); return 1
             if redo and redo.get("description"):
