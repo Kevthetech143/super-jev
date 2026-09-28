@@ -441,7 +441,9 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
     the pointer's folders hold files it has never seen, so it needs a refresh with no file changed."""
     cache_dir = cache_dir or rc.CACHE_DIR
     report, owner = _report_for(pointer, cache_dir)
-    args = rc.prepare_args(report, principal) if isinstance(report, dict) else None
+    # The asking agent stands in for a report with no recorded principal only for a new-file
+    # refresh: such a report's changed files are still skipped ("no-report"), as before scans.
+    args = rc.prepare_args(report, principal if new else None) if isinstance(report, dict) else None
     if args is None:
         _log(principal=principal, pointer=pointer, action="skip", reason="no-report")
         return "no-report"
@@ -541,7 +543,14 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
     reconnect; one queued by scan ("new") gets the refresh that admits its new files. Returns
     "refreshed", "reconnected", or why not."""
     report, owner = _report_for(pointer, rc.CACHE_DIR)
-    args = rc.prepare_args(report, principal) if isinstance(report, dict) else None
+    if not isinstance(report, dict):
+        return "no-report"
+    # A pointer scan queued for new files is refreshed like a changed one, unless they were taken
+    # in since it was queued: a refresh reconnects with replace:true, rotating approved answers.
+    new = kind == "new" and bool(rc.new_files(report, rc.known_across(rc.CACHE_DIR)))
+    # The asking agent stands in for a report with no recorded principal only while a new file is
+    # still waiting: changed files alone never refresh such a report ("no-report"), as in maybe_heal.
+    args = rc.prepare_args(report) or (rc.prepare_args(report, principal) if new else None)
     if args is None:
         return "no-report"
     cache_path = rc.CACHE_DIR / f"{owner}.json"
@@ -549,10 +558,7 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
         cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     except ValueError:
         cache = {}
-    # A pointer scan queued for new files is refreshed like a changed one, unless they were taken
-    # in since it was queued: a refresh reconnects with replace:true, rotating approved answers.
-    changed = bool(rc.changed_files(report, cache)) or (
-        kind == "new" and bool(rc.new_files(report, rc.known_across(rc.CACHE_DIR))))
+    changed = bool(rc.changed_files(report, cache)) or new
     if not changed and kind != "reconnect":
         return "no-change"  # refreshed since it was queued
     state, now = _load_state(principal), time.time()

@@ -493,16 +493,33 @@ def test_scan_refreshes_a_pointer_whose_folder_holds_a_new_file(tmp_path, monkey
     assert entry["new"] == 1 and entry["first"] == "added.md"
 
 
-def test_scan_uses_the_asking_agent_for_a_legacy_report_with_no_principal(tmp_path, monkeypatch):
-    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=False)
+def _legacy_no_principal(cache_dir):
     rp = cache_dir / "moving-report.json"
     rep = json.loads(rp.read_text())
     for k in ("principal", "principals", "noRecurse", "excludes"):
         rep.pop(k)
     rp.write_text(json.dumps(rep))
-    (cache_dir.parent / "brain" / "added.md").write_text("# added after connect\n")
+
+
+def test_scan_uses_the_asking_agent_for_a_legacy_report_with_no_principal(tmp_path, monkeypatch):
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=False)
+    _legacy_no_principal(cache_dir)
+    assert ah.scan("amazon", ["moving"]) == {}  # first look: the growth snapshot, nothing new yet
+    time.sleep(0.02)
+    (cache_dir.parent / "brain" / "added.md").write_text("# added after the snapshot\n")
     assert ah.scan("amazon", ["moving"]) == {"moving": "started"}
-    assert "--principal amazon" in calls[0][2]
+    assert "--principal amazon" in calls[0][2] and "--asker-fallback" in calls[0][2]
+
+
+def test_a_changed_file_never_heals_a_report_with_no_principal(tmp_path, monkeypatch):
+    # Review of PR #239: the asker fallback let every old no-principal pointer auto-heal on any
+    # changed file (a writer run and rotated answers each time); before scans, those were skipped.
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=True)
+    _legacy_no_principal(cache_dir)
+    assert ah.maybe_heal("moving", "amazon") == "no-report"
+    ah._queue("amazon", "moving", "refresh")
+    assert ah._drain_prepare("moving", "amazon", "refresh") == "no-report"
+    assert calls == []
 
 
 def test_a_scan_queued_behind_the_lock_is_refreshed_by_the_drain(tmp_path, monkeypatch):
@@ -555,3 +572,18 @@ def test_a_scan_never_downgrades_a_queued_reconnect(tmp_path, monkeypatch):
     ah._queue("agent", "second", "reconnect")
     assert ah.maybe_heal("second", "agent", new=True) == "in-progress"
     assert ah._load_state("agent")["pending"]["second"]["kind"] == "reconnect"
+
+
+def test_a_queued_scan_never_refreshes_a_no_principal_report_for_a_changed_file_alone(tmp_path, monkeypatch):
+    # Review 6: the drain named the asking agent for kind "new" even when the new file had been taken
+    # in meanwhile and only an edited file was left (writer run, answers rotated).
+    calls, cache_dir = _setup(tmp_path, monkeypatch, changed=True)
+    _legacy_no_principal(cache_dir)
+    (cache_dir / "growth").mkdir()
+    (cache_dir / "growth" / "moving.json").write_text(json.dumps({"since": time.time() + 3600, "present": []}))
+    runs = _fake_run(monkeypatch, principal="amazon")
+    token = ah._acquire_lock("amazon", "moving")
+    ah._queue("amazon", "moving", "new")
+    ah.drain("amazon", token)
+    assert runs == [] and calls == []
+    assert ah._drain_prepare("moving", "amazon", "new") == "no-report"
