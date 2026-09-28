@@ -498,6 +498,7 @@ def _secret_line_spans(line: str) -> list:
     since the match can stop at 'key=' and leave the value after it."""
     norm = normalize_for_scan(line)
     scrubbed = ISO_DATE_RE.sub(_blank, URL_RE.sub(_blank, norm))
+    scrubbed = TRACKING_RE.sub(lambda m: _blank(m) if _usps_tracking(m.group()) else m.group(), scrubbed)
     spans = [m.span() for m in CARD_RE.finditer(scrubbed) if _luhn(re.sub(r"\D", "", m.group()))]
     hits = [m.start() for m in WORD_RE.finditer(norm)] + [m.start() for m in TOKEN_RE.finditer(norm)]
     hits += [m.start() for m in GENERIC_RE.finditer(norm)
@@ -536,12 +537,39 @@ def _mask_line(line: str) -> str:
 
 
 # A private key's BEGIN line is the only line has_secret flags; its body must go with it.
-_KEY_BEGIN_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY[A-Z ]*-----", re.I)
-_KEY_END_RE = re.compile(r"-----END[A-Z ]*PRIVATE KEY[A-Z ]*-----", re.I)
-# A flagged line ending in an opener or a bare "key:"/"key=" carries its value on the lines
-# after it: a YAML block (password: |), a bracket (KEY = ( ...), a backslash, a triple quote.
-_OPENS_VALUE_RE = re.compile(r"(?:[:=]\s*[\"']?|[(\[{\\]|[|>][-+]?\d*|\"\"\"|''')\s*$")
-_CLOSER_RE = re.compile(r"^\s*(?:[)\]}]|\"\"\"|''')")
+# Matched on normalize_for_scan's text, the text has_secret reads (a tab is a space there).
+_KEY_BEGIN_RE = re.compile(r"-----begin[a-z ]*private key[a-z ]*-----")
+_KEY_END_RE = re.compile(r"-----end[a-z ]*private key[a-z ]*-----")
+# Where a diff's section ends: masking a value never runs past it.
+_SECTION_RE = re.compile(r"(?:@@ |diff --git )")
+# Code ending in one of these continues on the next line (a YAML block marker is handled apart).
+_CONTINUES_RE = re.compile(r"[\\+(\[{=]$")
+_YAML_BLOCK_RE = re.compile(r"[|>][-+]?\d*$")
+
+
+def _scan(line: str, quote: str = "", depth: int = 0):
+    """(quote, depth, code) after reading one line from the given state: the quote (", ', `)
+    still open, bracket depth, and the code outside quotes, a trailing # or // comment dropped."""
+    code, prev, k = [], " ", 0
+    while k < len(line):
+        c = line[k]
+        if quote:
+            if c == "\\":
+                k += 1
+            elif c == quote:
+                quote = ""
+        elif c in "\"'`":
+            quote = c
+        elif (c == "#" or line.startswith("//", k)) and prev.isspace():
+            break
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        code.append(c)
+        prev = c
+        k += 1
+    return quote, depth, "".join(code).rstrip()
 
 
 def _content(line: str) -> str:
@@ -550,53 +578,75 @@ def _content(line: str) -> str:
     return (line[1:] if line[:1] in "+- " else line).rstrip("\r")
 
 
-def _continuation(lines: list, i: int) -> list:
-    """Indexes of the lines after flagged line i that carry its value: a backslash chain, or
-    every following line indented deeper than line i, plus a closing bracket or quote line."""
-    first = _content(lines[i]).rstrip()
-    if not _OPENS_VALUE_RE.search(first):
-        return []
-    out, j = [], i + 1
-    if first.endswith("\\"):
-        while j < len(lines):
-            out.append(j)
-            if not _content(lines[j]).rstrip().endswith("\\"):
-                break
+def _section_end(lines: list, i: int) -> int:
+    """The first diff section header after line i (@@ or diff --git), else the end of the text."""
+    return next((j for j in range(i + 1, len(lines)) if _SECTION_RE.match(lines[j])), len(lines))
+
+
+def _value_end(lines: list, i: int) -> int:
+    """The last line of the statement flagged line i starts, within its diff section: followed
+    while a quote or bracket is open or a line ends in a continuation (backslash, +, =, an
+    opening bracket); a YAML block (key: | or >) runs over its deeper-indented lines; a
+    heredoc, or a statement still open at the section's end, runs to that end."""
+    stop = _section_end(lines, i)
+    quote, depth, code = _scan(_content(lines[i]))
+    if "<<" in code:
+        return stop - 1
+    if not quote and depth <= 0 and _YAML_BLOCK_RE.search(code):
+        first = _content(lines[i])
+        indent = len(first) - len(first.lstrip())
+        j = i + 1
+        while j < stop and (not _content(lines[j]).strip()
+                            or len(_content(lines[j])) - len(_content(lines[j]).lstrip()) > indent):
             j += 1
-        return out
-    indent = len(first) - len(first.lstrip())
-    while j < len(lines):
-        c = _content(lines[j])
-        if c.strip() and len(c) - len(c.lstrip()) <= indent:
-            if _CLOSER_RE.match(c):
-                out.append(j)
-            break
-        out.append(j)
+        return j - 1
+    j = i
+    while quote or depth > 0 or _CONTINUES_RE.search(code):
         j += 1
-    return out
+        if j >= stop:
+            return stop - 1
+        quote, depth, code = _scan(_content(lines[j]), quote, depth)
+        if "<<" in code:
+            return stop - 1
+    return j
+
+
+def _key_in_closed_string(line: str) -> bool:
+    """True when a private key header on this line sits inside a string closed on the same line
+    (a scanner test's fixture), so no key body follows it."""
+    m = _KEY_BEGIN_RE.search(normalize_for_scan(line))
+    if not m or not line.isascii():
+        return False
+    return bool(_scan(line[:m.start()])[0]) and not _scan(line)[0]
 
 
 def mask_secrets(text: str):
-    """(masked_text, lines_masked). Each line has_secret flags loses its secret-shaped spans (or
-    the whole line); a private key block, a value continued on the lines after its key, and a
-    secret spread over two lines are masked whole. Returns (None, n) when the result still scans
-    as a secret, and the caller must refuse. Text with no secret comes back as is."""
+    """(masked_text, lines_masked). A line has_secret flags loses its secret-shaped spans (or is
+    masked whole); when its value runs on (see _value_end) the lines carrying it are masked whole.
+    A private key is masked from BEGIN to END within its section, unless its header is a string
+    closed on its own line; a secret spread over two lines masks both. Returns (None, n) when the
+    result still scans as a secret, and the caller must refuse. Text with no secret comes back as is."""
     if not text or not has_secret(text):
         return text, 0
     lines = text.split("\n")
     flagged, whole = set(), set()
     i = 0
     while i < len(lines):
-        if _KEY_BEGIN_RE.search(lines[i]):
-            j = i + 1
-            while j < len(lines) and not _KEY_END_RE.search(lines[j]):
-                j += 1
-            whole.update(range(i, min(j + 1, len(lines))))
+        norm = normalize_for_scan(lines[i])
+        if (_KEY_BEGIN_RE.search(norm) and not _KEY_END_RE.search(norm)
+                and not _key_in_closed_string(lines[i])):
+            stop = _section_end(lines, i)
+            j = next((j for j in range(i + 1, stop) if _KEY_END_RE.search(normalize_for_scan(lines[j]))), stop - 1)
+            whole.update(range(i, j + 1))
             i = j + 1
             continue
         if has_secret(lines[i]):
+            j = _value_end(lines, i)
+            if j > i:
+                whole.update(range(i, j + 1))
+                i = j + 1
+                continue
             flagged.add(i)
-            whole.update(_continuation(lines, i))
         i += 1
     for i in flagged - whole:
         lines[i] = _mask_line(lines[i])

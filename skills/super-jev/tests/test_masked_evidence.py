@@ -112,6 +112,47 @@ def test_value_on_the_lines_after_its_key_is_masked(name, text):
         assert "after" in out  # the block ends; the rest of the file stays readable
 
 
+# Found by the second review: shapes whose value runs on without a plain opener at the end.
+@pytest.mark.parametrize("name,text", [
+    ("yaml-block-comment", "+db:\n+  password: |  # rotated\n+    " + VALUE + "\n+  host: x\n"),
+    ("py-paren-comment", "+PASSWORD = (  # noqa\n+    \"" + VALUE + "\"\n+)\n+after = 1\n"),
+    ("js-template", "+const password = `\n+" + VALUE + "\n+`;\n+after = 1\n"),
+    ("py-implicit-concat", "+PASSWORD = ('abc'\n+    '" + VALUE + "')\n+after = 1\n"),
+    ("js-plus-concat", "+password = 'abc' +\n+    '" + VALUE + "';\n+after = 1\n"),
+    ("shell-heredoc", "+password=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n"),
+    ("yaml-dq-split", '+password: "abc\n+  ' + VALUE + '"\n+after: 1\n'),
+    ("pem-tab-header", "-----BEGIN\tRSA " + "PRIVATE KEY-----\n" + KEY_BODY[0] + "\n"),
+    ("pem-nbsp-header", "-----BEGIN\u00a0RSA " + "PRIVATE KEY-----\n" + KEY_BODY[0] + "\n"),
+])
+def test_value_that_runs_on_is_masked(name, text):
+    assert pb.has_secret(text)
+    out, _ = pb.mask_secrets(text)
+    assert out is not None and not pb.has_secret(out)
+    assert VALUE not in out and KEY_BODY[0] not in out, (name, out)
+
+
+TAIL = "".join(f"+def test_unrelated_{k}():\n+    assert add({k}, 1) == {k + 1}\n" for k in range(20))
+
+
+@pytest.mark.parametrize("name,fixture,most", [
+    ("header-in-string", '+HEADER = "' + PEM + '"\n', 1),
+    ("one-line-pem", '+PEM = "' + PEM + "\\n" + KEY_BODY[0] + "\\n-----END RSA " + 'PRIVATE KEY-----"\n', 1),
+    ("dict-paren", "+CFG = {\n+    'api_key': (\n+        'x'),\n+}\n", 3),
+    ("fixture-list", '+CASES = [\n+    "' + PW + '",\n+    "' + CARD + '",\n+    "plain",\n+]\n', 2),
+])
+def test_a_fixture_masks_only_its_own_lines(name, fixture, most):
+    """A scanner or redaction test's fixture must not hide the rest of the file from the judge."""
+    out, n = pb.mask_secrets("@@ -0,0 +1,60 @@\n" + fixture + TAIL)
+    assert out is not None and n <= most and "test_unrelated_19" in out, (name, out)
+
+
+def test_key_without_end_stops_at_the_next_diff_section():
+    text = ("@@ -0,0 +1,3 @@\n+" + PEM + "\n+" + KEY_BODY[0] + "\n"
+            "diff --git a/b.py b/b.py\n@@ -1 +1 @@\n+visible = 1\n")
+    out, _ = pb.mask_secrets(text)
+    assert KEY_BODY[0] not in out and "+visible = 1" in out
+
+
 def test_crlf_line_keeps_its_cr():
     out, _ = pb.mask_secrets(f'x = "{CARD}"\r\nok\r\n')
     assert out == f'x = "{pb.SECRET_MASK}"\r\nok\r\n'
