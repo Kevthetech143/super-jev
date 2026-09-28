@@ -50,7 +50,6 @@ DIFF = f'''diff --git a/tests/test_scan.py b/tests/test_scan.py
 
 
 @pytest.mark.parametrize("secret", [CARD, PW, STRIPE, AWS, "api_key = abcDEF123456",
-                                    "-----BEGIN RSA " + "PRIVATE KEY-----",
                                     "token = " + "Zx9Qw8Er7Ty6Ui5Op4As3Df2"])
 def test_mask_removes_every_secret_shape_and_keeps_the_rest(secret):
     text = f"+    check(x)\n+    assert f(\"{secret}\")  # fixture\n+    done()\n"
@@ -83,6 +82,39 @@ def test_secret_split_over_two_lines_masks_both():
     out, n = pb.mask_secrets(text)
     assert out is not None and not pb.has_secret(out) and n == 2
     assert out.startswith("ok\n") and out.endswith("\nok")
+
+
+# A multi-line secret: has_secret flags only its first line, so the value on the lines after
+# it must be masked by shape. Each test checks the VALUE is gone, not just has_secret(out).
+VALUE = "Hunter2" + "Hunter2Xy9"
+KEY_BODY = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
+            "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK",
+            "LxoS2tFczGkPLPgizskuemMghRniWaoLcyehkd3qqGElvW/VDL5AaWTg0nLVkjRo"]
+PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
+
+
+@pytest.mark.parametrize("name,text", [
+    ("pem-diff", "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY)
+                 + "+-----END RSA " + "PRIVATE KEY-----\n+after = 1\n"),
+    ("pem-no-end", PEM + "\n" + "\n".join(KEY_BODY) + "\n"),
+    ("yaml-block", "+db:\n+  password: |\n+    " + VALUE + "\n+  host: x\n"),
+    ("py-paren", "+PASSWORD = (\n+    \"" + VALUE + "\"\n+)\n+after = 1\n"),
+    ("py-backslash", "+API_KEY = \\\n+    \"" + VALUE + "\"\n+after = 1\n"),
+    ("bare-colon", "password:\n  " + VALUE + "\nafter: 1\n"),
+])
+def test_value_on_the_lines_after_its_key_is_masked(name, text):
+    assert pb.has_secret(text)
+    out, _ = pb.mask_secrets(text)
+    assert out is not None and not pb.has_secret(out)
+    for secret in [VALUE, *KEY_BODY]:
+        assert secret not in out, (name, out)
+    if "after" in text:
+        assert "after" in out  # the block ends; the rest of the file stays readable
+
+
+def test_crlf_line_keeps_its_cr():
+    out, _ = pb.mask_secrets(f'x = "{CARD}"\r\nok\r\n')
+    assert out == f'x = "{pb.SECRET_MASK}"\r\nok\r\n'
 
 
 def test_clean_text_is_returned_unchanged():
@@ -122,6 +154,14 @@ def test_code_gate_pattern_arm_still_reads_the_local_text():
     assert judge.calls == [] and rows[0]["verdict"] == "SUPPORTED"
 
 
+def test_pattern_only_claims_never_need_the_mask(monkeypatch):
+    # nothing goes to the judge, so evidence that could not be masked does not refuse them
+    monkeypatch.setattr(sj, "_mask_evidence", lambda items: pytest.fail("masked for nothing"))
+    ev = 'import re\nFOO_RE = re.compile(r"foo")\n'
+    rows, code = sj.run_code_gate([("ev", ev)], ["`foo` matches FOO_RE"], ask_fn=Judge())
+    assert rows[0]["verdict"] == "SUPPORTED" and code == 0
+
+
 def test_ask_still_refuses_raw_secret_text(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
     monkeypatch.setattr(jc, "transport", lambda *a: pytest.fail("secret was sent"))
@@ -148,12 +188,18 @@ def run_cli(tmp_path, argv):
     return p, (sent.read_text() if sent.exists() else "")
 
 
+KEY_DIFF = ("diff --git a/deploy/id_rsa b/deploy/id_rsa\n--- /dev/null\n+++ b/deploy/id_rsa\n"
+            "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY)
+            + "+-----END RSA " + "PRIVATE KEY-----\n")
+
+
 @pytest.mark.parametrize("entry", ["gate-code", "check"])
 def test_cli_sends_the_diff_masked_never_refuses_it(tmp_path, entry):
     """The live failure: a worktree diff with test card numbers was refused whole, so the
-    change could not be checked. Now the request goes out, with no secret-shaped text in it."""
+    change could not be checked. Now the request goes out, with no secret-shaped text in it,
+    and no line of a private key's body either (has_secret alone flags only its BEGIN line)."""
     ev = tmp_path / "wt.diff"
-    ev.write_text(DIFF)
+    ev.write_text(DIFF + KEY_DIFF)
     claim = ["--claim", "the new test checks that a fake visa number is held"]
     argv = {"gate-code": [str(SKILL / "superjev.py"), "gate", str(ev), *claim],
             "check": [str(SKILL / "lib" / "jev_client.py"), str(ev), *claim]}[entry]
@@ -163,6 +209,7 @@ def test_cli_sends_the_diff_masked_never_refuses_it(tmp_path, entry):
         state = json.loads(body)["state"]
         assert pb.SECRET_MASK in state and not pb.has_secret(state)
         assert CARD not in state and STRIPE not in state and "hunter2" not in state
+        assert not any(b in state for b in KEY_BODY)
     assert "contains a secret; not sent" not in p.stdout + p.stderr
 
 

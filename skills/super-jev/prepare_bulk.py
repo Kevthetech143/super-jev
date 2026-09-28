@@ -508,6 +508,11 @@ def _secret_line_spans(line: str) -> list:
     return spans
 
 
+def _masked_whole(line: str) -> str:
+    """The whole line masked, keeping a diff marker and a CRLF ending."""
+    return (line[:1] if line[:1] in "+- " else "") + SECRET_MASK + ("\r" if line.endswith("\r") else "")
+
+
 def _mask_line(line: str) -> str:
     out = line
     if line.isascii():
@@ -522,28 +527,86 @@ def _mask_line(line: str) -> str:
                     merged.append([s, e])
             for s, e in reversed(merged):
                 out = out[:s] + SECRET_MASK + out[e:]
+            if line.endswith("\r") and not out.endswith("\r"):
+                out += "\r"
     if out == line or has_secret(out):
-        # A non-ASCII line, or one the span rules missed: mask it whole, keeping a diff marker.
-        out = (line[:1] if line[:1] in "+- " else "") + SECRET_MASK
+        # A non-ASCII line, or one the span rules missed: mask it whole.
+        out = _masked_whole(line)
+    return out
+
+
+# A private key's BEGIN line is the only line has_secret flags; its body must go with it.
+_KEY_BEGIN_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY[A-Z ]*-----", re.I)
+_KEY_END_RE = re.compile(r"-----END[A-Z ]*PRIVATE KEY[A-Z ]*-----", re.I)
+# A flagged line ending in an opener or a bare "key:"/"key=" carries its value on the lines
+# after it: a YAML block (password: |), a bracket (KEY = ( ...), a backslash, a triple quote.
+_OPENS_VALUE_RE = re.compile(r"(?:[:=]\s*[\"']?|[(\[{\\]|[|>][-+]?\d*|\"\"\"|''')\s*$")
+_CLOSER_RE = re.compile(r"^\s*(?:[)\]}]|\"\"\"|''')")
+
+
+def _content(line: str) -> str:
+    """The line without a diff marker or CR, for comparing indents (plain text loses one
+    leading space or dash on every line alike, so its indents still compare)."""
+    return (line[1:] if line[:1] in "+- " else line).rstrip("\r")
+
+
+def _continuation(lines: list, i: int) -> list:
+    """Indexes of the lines after flagged line i that carry its value: a backslash chain, or
+    every following line indented deeper than line i, plus a closing bracket or quote line."""
+    first = _content(lines[i]).rstrip()
+    if not _OPENS_VALUE_RE.search(first):
+        return []
+    out, j = [], i + 1
+    if first.endswith("\\"):
+        while j < len(lines):
+            out.append(j)
+            if not _content(lines[j]).rstrip().endswith("\\"):
+                break
+            j += 1
+        return out
+    indent = len(first) - len(first.lstrip())
+    while j < len(lines):
+        c = _content(lines[j])
+        if c.strip() and len(c) - len(c.lstrip()) <= indent:
+            if _CLOSER_RE.match(c):
+                out.append(j)
+            break
+        out.append(j)
+        j += 1
     return out
 
 
 def mask_secrets(text: str):
     """(masked_text, lines_masked). Each line has_secret flags loses its secret-shaped spans (or
-    the whole line); a secret spread over two lines masks both. Returns (None, n) when the result
-    still scans as a secret, and the caller must refuse. Text with no secret comes back as is."""
+    the whole line); a private key block, a value continued on the lines after its key, and a
+    secret spread over two lines are masked whole. Returns (None, n) when the result still scans
+    as a secret, and the caller must refuse. Text with no secret comes back as is."""
     if not text or not has_secret(text):
         return text, 0
     lines = text.split("\n")
-    masked = set()
-    for i, line in enumerate(lines):
-        if has_secret(line):
-            lines[i] = _mask_line(line)
-            masked.add(i)
+    flagged, whole = set(), set()
+    i = 0
+    while i < len(lines):
+        if _KEY_BEGIN_RE.search(lines[i]):
+            j = i + 1
+            while j < len(lines) and not _KEY_END_RE.search(lines[j]):
+                j += 1
+            whole.update(range(i, min(j + 1, len(lines))))
+            i = j + 1
+            continue
+        if has_secret(lines[i]):
+            flagged.add(i)
+            whole.update(_continuation(lines, i))
+        i += 1
+    for i in flagged - whole:
+        lines[i] = _mask_line(lines[i])
+    for i in whole:
+        lines[i] = _masked_whole(lines[i])
+    masked = flagged | whole
     for i in range(len(lines) - 1):
         if has_secret(lines[i] + "\n" + lines[i + 1]):
             for j in (i, i + 1):
-                lines[j] = (lines[j][:1] if lines[j][:1] in "+- " else "") + SECRET_MASK
+                lines[j] = _masked_whole(lines[j])
                 masked.add(j)
     out = "\n".join(lines)
     return (None if has_secret(out) else out), len(masked)
