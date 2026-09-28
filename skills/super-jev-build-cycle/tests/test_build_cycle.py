@@ -257,6 +257,46 @@ def test_preflight_status_failure_is_not_ready(env):
     assert r.returncode == 2 and "status unavailable" in r.stderr
 
 
+LONG_IDEA = ("Secret scan card_hit in prepare_bulk.py holds a whole file as card-like text when a line contains "
+             "a spaced shipping tracking number; stop digit runs reading as card numbers without weakening the guard")
+
+
+def test_start_long_idea_needs_a_topic_before_any_ask(env):
+    run(env, "preflight")
+    r = run(env, "start", LONG_IDEA)
+    assert r.returncode == 2 and "--topic" in r.stderr and "at most 12 words" in r.stderr
+    assert calls(env) == [] and not (env["cycle"] / "02-start.md").exists()
+
+
+def test_start_asks_about_the_topic_and_keeps_the_whole_idea(env):
+    run(env, "preflight")
+    r = run(env, "start", LONG_IDEA, "--topic", "secret scan holding files over tracking numbers",
+            "--project", "demo", "--ask", "how does card_hit work")
+    assert r.returncode == 0, r.stderr
+    cs = calls(env)
+    assert [c[-1] for c in cs] == ["what have we already tried, decided or learned about secret scan holding "
+                                   "files over tracking numbers in demo", "how does card_hit work"]
+    receipt = (env["cycle"] / "02-start.md").read_text()
+    assert f"- idea: {LONG_IDEA}\n" in receipt and "- topic: secret scan holding files over tracking numbers" in receipt
+    assert run(env, "brief").returncode == 0  # brief still reads the whole idea back
+    assert LONG_IDEA in (env["cycle"] / "05-brief.md").read_text()
+
+
+@pytest.mark.parametrize("topic", ["", "   ", " ".join(["word"] * 13)])
+def test_start_refuses_an_empty_or_long_topic(env, topic):
+    run(env, "preflight")
+    r = run(env, "start", "retry on timeout", "--topic", topic)
+    assert r.returncode == 2 and ("cannot be empty" in r.stderr or "at most 12 words" in r.stderr)
+    assert calls(env) == []
+
+
+def test_start_multiline_idea_is_kept_on_one_line(env):
+    run(env, "preflight")
+    assert run(env, "start", "retry\non   timeout").returncode == 0
+    assert "- idea: retry on timeout\n" in (env["cycle"] / "02-start.md").read_text()
+    assert calls(env)[0][-1].endswith("about retry on timeout")
+
+
 def test_preflight_skill_search_runs_dispatch(env):
     r = run(env, "preflight", "--skill", "turns meeting notes into tasks")
     assert r.returncode == 0, r.stderr
