@@ -620,28 +620,52 @@ def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
     assert code == 0
 
 
-class NeedleJudge(FakeJudge):
-    """p(yes) 0.95 for c1 only when the state holds NEEDLE; 0.1 otherwise."""
+class PartDoor:
+    """A door judging each part: c1 SUPPORTED where the part holds NEEDLE, and
+    CONTRADICTED where it holds eval(; NOT_SUPPORTED otherwise."""
 
-    def __call__(self, state, questions):
-        self.calls.append({"state": state, "questions": questions})
-        return {"answers": {"c1": {"noul": 0.95 if "NEEDLE" in state else 0.1}}}
+    def __init__(self):
+        self.states = []
+
+    def __call__(self, cmd, *a, **kw):
+        text = "".join(Path(c).read_text() for c in cmd[1:] if Path(str(c)).is_file())
+        self.states.append(text)
+        verdict = ("CONTRADICTED" if "eval(" in text else
+                   "SUPPORTED" if "NEEDLE" in text else "NOT_SUPPORTED")
+        return subprocess.CompletedProcess(
+            cmd, 0 if verdict == "SUPPORTED" else 3,
+            stdout="  c1   %-14s 0.95  the claim\n" % verdict, stderr="")
 
 
-def test_code_bigger_than_one_call_is_asked_in_parts_never_cut(monkeypatch, evfile):
+BIG_DIFF = DIFF + "".join("+filler_%d = %d  # a line of a big generated file\n" % (i, i)
+                          for i in range(6000))
+
+
+def test_code_bigger_than_one_call_is_judged_as_evidence_in_parts(monkeypatch, evfile):
     """A big diff used to be cut before the call; a claim about the file it
-    pushed out came back NOT_SUPPORTED. Now every part is asked."""
-    judge = NeedleJudge({})
+    pushed out came back NOT_SUPPORTED. Now every part is judged, by the
+    evidence kit, which tells "not in this part" from "disproved"."""
+    judge = FakeJudge({"c1": 0.9})
     monkeypatch.setattr(sj, "_code_ask", judge)
-    big = DIFF + "".join("+filler_%d = %d  # a line of a big generated file\n" % (i, i)
-                         for i in range(6000))
+    door = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
     small = DIFF.replace("x.py", "y.py").replace("+new", "+NEEDLE = 1")
-    code, out = _run_text(["gate", evfile(big, "big.diff"), evfile(small, "small.diff"),
+    code, out = _run_text(["gate", evfile(BIG_DIFF, "big.diff"), evfile(small, "small.diff"),
                            "--claim", "y.py sets the NEEDLE constant to one"])
     assert code == 0, out
-    assert len(judge.calls) > 1
-    assert all(sj._judge_tokens(c["state"]) <= sj.JUDGE_CALL_TOKENS for c in judge.calls)
-    assert "nothing was cut" in out and "small.diff" in out
+    assert not judge.calls and len(door.states) > 1
+    assert all(sj._judge_tokens(t) <= sj.JUDGE_CALL_TOKENS for t in door.states)
+    assert "judged as evidence claims, in parts" in out and "small.diff" in out
+
+
+def test_big_code_a_part_that_disproves_the_claim_wins(monkeypatch, evfile):
+    """The review's case: 'no changed file calls eval' is true of the big part and
+    false of the small one. Taking the best part said CLEAN; it must not."""
+    monkeypatch.setattr(sj.subprocess, "run", PartDoor())
+    bad = DIFF.replace("x.py", "b.py").replace("+new", "+eval(user_input)")
+    code, out = _run_text(["gate", evfile(BIG_DIFF, "a.diff"), evfile(bad, "b.diff"),
+                           "--claim", "No changed file in this diff calls eval on anything"])
+    assert code == 3 and "CONTRADICTED" in out, out
 
 
 def test_diff_check_without_env_key_uses_the_configured_judge(monkeypatch, evfile):

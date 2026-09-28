@@ -4339,21 +4339,11 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_ite
             evidence_items if state_items is None else state_items)
         if mask_info is not None:
             mask_info["withheld"] = withheld
-        # Code bigger than one call is asked in parts, never cut; a claim is as
-        # true as the part that shows it best (a part without the code says "false").
-        room = _judge_room([c for _, c in pending])
-        parts = split_evidence(state_items, room) or [[]]
-        if mask_info is not None and len(parts) > 1:
-            mask_info["parts"] = [_part_names(p) for p in parts]
-        best = {}
-        for part in parts:
-            answers = ask(code_state(part), questions).get("answers", {})
-            for i, _claim in pending:
-                p = (answers.get("c%d" % i) or {}).get("noul")
-                if p is not None and float(p) > best.get(i, -1.0):
-                    best[i] = float(p)
+        res = ask(code_state(state_items), questions)
+        answers = res.get("answers", {})
         for i, claim in pending:
-            p = best.get(i, 0.5)
+            p = answers.get("c%d" % i, {}).get("noul")
+            p = 0.5 if p is None else float(p)
             verdict, conf = code_verdict(p)
             rows.append({
                 "key": "c%d" % i, "claim": claim, "verdict": verdict,
@@ -4415,6 +4405,8 @@ def merge_part_tables(outs):
         tables.append(rows)
     if not tables or not tables[0] or any(set(t) != set(tables[0]) for t in tables):
         return None
+    if any(t[k][2] != tables[0][k][2] for t in tables for k in t if k.startswith("c")):
+        return None  # a door that split a draft differently per part: rows are not one claim
     merged = []
     for key in tables[0]:
         rows = [(t[key], i) for i, t in enumerate(tables, 1)]
@@ -4432,8 +4424,13 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     """Run the door once per evidence part and merge the tables. Returns
     (code, out, err) shaped like one door run: `out` holds only the merged
     table, so gate_fail_closed reads the merged verdicts, not a part's. A part
-    that errors (exit other than 0 or 3) makes the whole check that error."""
-    outs, errs = [], []
+    that errors (exit other than 0, 2 or 3) makes the whole check that error.
+    Exit 2 with a table is merged like any table (its contradiction wins); exit
+    2 with no table is a door's own refusal of that part's evidence, such as a
+    quoted span it does not hold, which another part may: it is REJECT only
+    when every part refuses, and otherwise READ (exit 3), never CLEAN, since
+    the refused part's evidence was not judged."""
+    outs, errs, refused, judged = [], [], [], []
     for i, part in enumerate(parts, 1):
         tmp = tempfile.NamedTemporaryFile(mode="w", prefix="evidence-part%dof%d." % (i, len(parts)),
                                           suffix=".md", delete=False, encoding="utf-8", newline="")
@@ -4443,23 +4440,34 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
         cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), tmp.name, "--kit", "reply", *claim_args]
         code, out, err = run_door(cmd, capture=True, door="gate", json_mode=json_mode,
                                   timeout=timeout, extra_ledger=extra_ledger)
-        if code not in (0, 3):
+        if code == 2 and not _DOOR_ROW_RE.search(out or ""):
+            refused.append((i, out, err))
+            continue
+        if code not in (0, 2, 3):
             return code, out, "gate: part %d of %d (%s) failed\n%s" % (
                 i, len(parts), _part_names(part), err)
         outs.append(out)
         errs.append(err)
+        judged.append(i)
+    if refused and not outs:
+        return 2, refused[0][1], "".join(e for _, _, e in refused)
+    notes = ["gate: part %d of %d (%s) was refused by the judge and not judged, so this "
+             "check cannot be CLEAN; read that part yourself: %s\n" % (
+                 i, len(parts), _part_names(parts[i - 1]), " ".join((out or err).split())[:160])
+             for i, out, err in refused]
     merged = merge_part_tables(outs)
     if merged is None:
         return GATE_UNREADABLE_EXIT, "\n".join(outs), "".join(errs)
     lines = [""]
     for key, verdict, score, subject, part in merged:
         if key.startswith("c"):
-            lines.append("  %-4s %-14s %.2f  %s  [part %d]" % (key, verdict, score, subject[:70], part))
+            lines.append("  %-4s %-14s %.2f  %s  [part %d]" % (
+                key, verdict, score, subject[:70], judged[part - 1]))
     lines.append("")
     for key, verdict, score, _subject, part in merged:
         if not key.startswith("c"):
-            lines.append("  %-18s %-20s %.2f  [part %d]" % (key, verdict, score, part))
-    return 0, "\n".join(lines) + "\n", "".join(errs)
+            lines.append("  %-18s %-20s %.2f  [part %d]" % (key, verdict, score, judged[part - 1]))
+    return (3 if notes else 0), "".join(notes) + "\n".join(lines) + "\n", "".join(errs)
 
 
 def cmd_gate(a):
@@ -4552,6 +4560,14 @@ def cmd_gate(a):
         mode = "evidence"
         code_via_door = ("gate: TYPESAFE_API_KEY is not in the environment, so the code "
                          "claims go to the configured judge (%s) as evidence claims\n" % GATE_CMD_ENV)
+    # Code bigger than one judge call is judged as evidence claims, in parts. The code
+    # question's "false" means false OR not shown, so per part it cannot tell a part
+    # that lacks the code from one that disproves the claim; the evidence kit can.
+    if (mode == "code" and not hook_mode
+            and len(split_evidence(kept_ev, _judge_room(claims_for_check))) > 1):
+        mode = "evidence"
+        code_via_door = ("gate: the code is bigger than one judge call, so its claims are "
+                         "judged as evidence claims, in parts\n")
 
     # The door subprocess is an evidence-mode requirement only: code mode
     # must not refuse (exit 5) for a lib file the CI runner does not have.
@@ -4622,8 +4638,6 @@ def cmd_gate(a):
                 reason = reason[0] if reason else type(exc).__name__
                 return 3, "gate: code-mode judge call failed: " + reason, ""
             text = _render_code_gate(mode, rows, code)
-            if mask_info.get("parts"):
-                text = _parts_note(mask_info["parts"]) + text
             if withheld:
                 text = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
                         "a claim about them cannot be checked\n"
