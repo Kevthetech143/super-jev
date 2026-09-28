@@ -493,8 +493,12 @@ def has_secret(text: str) -> bool:
 # scan, as it was before. Claims and drafts are never masked (they are refused), and ask()
 # keeps its full scan.
 SECRET_WITHHELD = "[secret-shaped text: {n} line(s) of this file withheld; nothing in them can be checked]"
-_FILE_START = "diff --git "
-_FILE_NAME_RE = re.compile(r"^(?:--- |\+\+\+ |rename from |rename to |copy from |copy to )(.+)$")
+_FILE_START_RE = re.compile(r"diff --(?:git|cc|combined) ")
+_FILE_NAME_RE = re.compile(r"^(?:--- |\+\+\+ |rename from |rename to |copy from |copy to |diff --(?:cc|combined) )(.+)$")
+# The lines git writes before a file's first hunk; a held file keeps only these.
+_HEADER_RE = re.compile(r"(?:diff --|index |--- |\+\+\+ |new file mode |deleted file mode |old mode |new mode "
+                        r"|similarity index |dissimilarity index |rename from |rename to |copy from |copy to "
+                        r"|Binary files )")
 
 
 def _flagged(text: str, luhn: bool) -> bool:
@@ -504,14 +508,18 @@ def _flagged(text: str, luhn: bool) -> bool:
 
 
 def _file_keys(head: list) -> set:
-    """What ties diff sections to one file: the diff --git line, and every name in the header
-    (---, +++, rename and copy lines), with and without a one-letter a/, b/, i/, w/ prefix.
-    Sharing any key joins two sections; joining too much only withholds more."""
+    """What ties diff sections to one file: the diff line itself, each word of a diff --git
+    line, and every name in the header (---, +++, rename, copy and diff --cc lines), with and
+    without a one-letter a/, b/, i/, w/ prefix. Sharing any key joins two sections; joining too
+    much only withholds more."""
     keys = {head[0]}
+    if head[0].startswith("diff --git "):
+        for word in head[0][len("diff --git "):].split(" "):
+            keys |= {word.strip('"\r'), re.sub(r"^[a-z]/", "", word.strip('"\r'))}
     for line in head:
         m = _FILE_NAME_RE.match(line)
         if m:
-            name = m.group(1).rstrip("\t").strip('"')
+            name = m.group(1).rstrip("\t\r").strip('"')
             if name != "/dev/null":
                 keys |= {name, re.sub(r"^[a-z]/", "", name)}
     return keys
@@ -519,22 +527,23 @@ def _file_keys(head: list) -> set:
 
 def mask_secrets(text: str):
     """(masked_text, withheld): a diff with each file whose text scans as a secret (in any of
-    its sections) replaced by its header lines (up to the first @@, when they are clean) and one
+    its sections) replaced by its header lines (git's lines before a hunk, when clean) and one
     SECRET_WITHHELD line per section; withheld names those files. Text with no secret comes back
-    as is. Returns (None, withheld) when nothing judgeable is left: text with no diff --git
-    line, or a result that still scans as a secret. The caller then drops or refuses it."""
+    as is. Returns (None, withheld) when nothing judgeable is left: text with no diff --git,
+    --cc or --combined line, or a result that still scans as a secret. The caller then drops or
+    refuses it."""
     if not text or not has_secret(text):
         return text, []
     ends_in_newline = text.endswith("\n")
     lines = (text[:-1] if ends_in_newline else text).split("\n")
-    starts = [i for i, line in enumerate(lines) if line.startswith(_FILE_START)]
+    starts = [i for i, line in enumerate(lines) if _FILE_START_RE.match(line)]
     if not starts:
         return None, ["the whole text"]
     luhn = not NON_ASCII_DIGIT_RE.search(text)
     bounds = ([0] if starts[0] else []) + starts + [len(lines)]
     parts = [lines[a:b] for a, b in zip(bounds, bounds[1:])]
-    heads = [next((p[:k] for k, line in enumerate(p) if line.startswith("@@")), p)
-             if p[0].startswith(_FILE_START) else [] for p in parts]
+    heads = [next((p[:k] for k, line in enumerate(p) if not _HEADER_RE.match(line)), p)
+             if _FILE_START_RE.match(p[0]) else [] for p in parts]
     group = list(range(len(parts)))
 
     def root(k):
@@ -555,7 +564,7 @@ def mask_secrets(text: str):
             continue
         if any(_flagged(line, luhn) for line in head):
             head = []
-        name = next((m.group(1).rstrip("\t").strip('"') for line in reversed(head)
+        name = next((m.group(1).rstrip("\t\r").strip('"') for line in reversed(head)
                      if (m := _FILE_NAME_RE.match(line)) and "/dev/null" not in line), "a file")
         name = re.sub(r"^[a-z]/", "", name)
         if name not in withheld:
