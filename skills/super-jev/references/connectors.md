@@ -163,12 +163,13 @@ operator decision for one run (never replayed); it never lifts the size-ceiling 
 1,000,000 bytes (gated in parts) and records `{path, sha256}` as `approvedHeld`
 in the report; `--refresh` and auto-heal replay it only while the file's bytes
 match, otherwise it is held again with a reason naming the old approval (the
-hash is rechecked before gating, caching and at the connect preview, so a
+file is read once and verified before the writer, which gets exactly those bytes, and the hash is rechecked before gating, caching and at the connect preview, so a
 mid-run edit is held). A file held for secret-like text or name, or with a
 credential/key suffix, is refused: "held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect."
 A backslash-escaped quote before a placeholder (`KEY=\"$(cat file)\"` inside a
 code string) counts as a plain quote, so it is not held; after an escaped quote
-only `$(`, `${` and `<` are placeholders, so a literal `\"$3cret9\"` is held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
+only a closed `$(...)`, `${...}` or `<...>` (at most 200 characters) is a placeholder,
+so a literal `\"$3cret9\"` or an unclosed `\"$(Secret9\"` is held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,
