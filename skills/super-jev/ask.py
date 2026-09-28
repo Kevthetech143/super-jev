@@ -2116,6 +2116,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # so a background refresh can land mid-call): ask it once more at its new generation.
             results[i] = nav(ptr)
     _STAGE["reconnect"] = reconnected
+    # A note written into a connected folder after its connect is not in the pointer's file list,
+    # so nothing marks the pointer stale: look for such files now and then (background, bounded)
+    # and refresh their pointers, so a later lookup finds them without a hand reconnect.
+    if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
+        _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
     merged, errored, statuses, stale_held = [], 0, {}, []
     _STAGE["stale_changed"] = []
     for ptr, kind, rows, elapsed, ok in results:
