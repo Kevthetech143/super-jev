@@ -3412,10 +3412,12 @@ def _connected_files(principal: str, pointer: str) -> tuple:
     return files, exts, True
 
 
-def _folder_files(root: Path) -> set:
-    """Every file under root, real paths, walking into symlinked folders like prepare_bulk.walk_md
-    (os.walk followlinks, each real folder once so a link loop ends); hidden and generated dirs skipped."""
-    out, walked = set(), set()
+def _folder_files(root: Path) -> dict:
+    """{real path: presented names} for every file under root, walking into symlinked folders like
+    prepare_bulk.walk_md (os.walk followlinks, each real folder once so a link loop ends); hidden and
+    generated dirs skipped. The suffix is judged on the presented name (alias.md -> target.txt is a .md
+    source, as inventory treats it); identity is the real path, so two routes to one file count once."""
+    out, walked = {}, set()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in walked:
@@ -3423,15 +3425,19 @@ def _folder_files(root: Path) -> set:
             continue
         walked.add(real)
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in PREFLIGHT_SKIP_DIRS]
-        out |= {os.path.realpath(os.path.join(dirpath, n)) for n in filenames if not n.startswith(".")}
-    return {f for f in out if os.path.isfile(f)}
+        for n in filenames:
+            f = os.path.join(dirpath, n)
+            if not n.startswith(".") and os.path.isfile(f):
+                out.setdefault(os.path.realpath(f), set()).add(n.lower())
+    return out
 
 
 def _folder_coverage(folder: Path, principal: str, ready: list) -> dict:
     """How many of the folder's connectable files a ready pointer of this principal has registered.
     Connectable = the default suffixes plus any a pointer registered here opted into (name endswith,
     so compound suffixes like .schema.json match)."""
-    on_disk = _folder_files(folder.expanduser())
+    names = _folder_files(folder.expanduser())
+    on_disk = set(names)
     exts, connected, unread = set(getattr(prepare_bulk, "CONNECTABLE_EXTENSIONS", (".md",))), set(), []
     for name in ready:
         files, opted, ok = _connected_files(principal, name)
@@ -3442,7 +3448,7 @@ def _folder_coverage(folder: Path, principal: str, ready: list) -> dict:
             connected |= mine
             exts |= set(opted)
     exts = {e.lower() for e in exts}
-    connectable = {f for f in on_disk if f.lower().endswith(tuple(exts))}
+    connectable = {f for f, ns in names.items() if any(n.endswith(tuple(exts)) for n in ns)}
     return {"folder": str(folder), "connectable": len(connectable), "connected": len(connected & connectable),
             "unsupported": len(on_disk) - len(connectable), "extensions": sorted(exts), "unread": unread}
 
@@ -3531,8 +3537,9 @@ def preflight(principal: str, args: list) -> int:
             q = q.format(about=about)
             out, err = _run_ask([sys.executable, str(skill_dir_for_display() / "ask.py"), "--principal", principal, "--", q])
             hits = [l.strip() for l in out.splitlines() if _HIT_LINE.match(l)][:5]
-            strong += sum(1 for h in hits if float(_HIT_LINE.match(h).group(1)) >= PREFLIGHT_STRONG
-                          and not _QUALIFIED.search(h))
+            # a failed ask's output is never evidence, whatever it printed before failing
+            strong += 0 if err else sum(1 for h in hits if float(_HIT_LINE.match(h).group(1)) >= PREFLIGHT_STRONG
+                                        and not _QUALIFIED.search(h))
             answers.append({"question": q, "hits": hits, **({"error": err} if err else {})})
             if err:
                 failed += 1
