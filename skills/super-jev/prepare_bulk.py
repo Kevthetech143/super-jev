@@ -488,8 +488,8 @@ def has_secret(text: str) -> bool:
 # clean, so evidence is judged file by file: every section of a file, across all the evidence
 # (a diff may show one file twice, committed and uncommitted, under an old and a new name, or
 # in two patches), is withheld whole when any of them scans as a secret, real and fake values
-# alike, and every other file is sent as it is. Text that is not part of a diff counts as one
-# file per evidence item, joined to the file just before it. The promise is per file: a file's changes go out only when the
+# alike, and every other file is sent as it is. An evidence item that is not exactly git's diff
+# output (text outside a diff, a hunk that ends early) counts as one file. The promise is per file: a file's changes go out only when the
 # scanner passes all of them. A secret cut into two files, with no marker in the second, is out
 # of reach of any per-file scan, as it was before. Claims and drafts are never masked (they are
 # refused), and ask() keeps its full scan.
@@ -563,14 +563,20 @@ def _diff_parts(lines: list) -> list:
 
 
 def _file_keys(head: list) -> set:
-    """What ties diff sections to one file: the diff line itself, each word of a diff --git
-    line, and every name in the header (---, +++, rename, copy and diff --cc lines), with and
-    without a one-letter a/, b/, i/, w/ prefix. Sharing any key joins two sections; joining too
-    much only withholds more."""
+    """What ties diff sections to one file: the diff line itself, the two names of a diff --git
+    line (split at each " b/", or in the middle when both halves match, as with no prefix), and
+    every name in the header (---, +++, rename, copy and diff --cc lines), with and without a
+    one-letter a/, b/, i/, w/ prefix. Sharing any key joins two sections; joining too much only
+    withholds more."""
     keys = {head[0]}
     if head[0].startswith("diff --git "):
-        for word in head[0][len("diff --git "):].split(" "):
-            keys |= {word.strip('"\r'), re.sub(r"^[a-z]/", "", word.strip('"\r'))}
+        rest = head[0][len("diff --git "):].rstrip("\r")
+        cuts = [m.start() for m in re.finditer(r" [a-z]/", rest)]
+        if len(rest) % 2 and rest[:len(rest) // 2] == rest[len(rest) // 2 + 1:]:
+            cuts.append(len(rest) // 2)
+        for cut in cuts:
+            for name in (rest[:cut], rest[cut + 1:]):
+                keys |= {name.strip('"'), re.sub(r"^[a-z]/", "", name.strip('"'))}
     for line in head:
         m = _FILE_NAME_RE.match(line)
         if m:
@@ -609,19 +615,15 @@ def mask_evidence(items: list):
             g = group[g]
         return g
 
-    owner, broken = {}, None
+    # An item that is not exactly git's diff output (text outside a diff: a notes file, tool
+    # output around a diff; or a hunk that ends before its counts) is one file: any text in it
+    # may belong to any file in it. A build-cycle worktree diff never has such text.
+    loose = {k for k, (kind, _l, _h) in flat if kind != "file"}
+    owner = {}
     for g, (k, (kind, _lines, head)) in enumerate(flat):
-        for key in (_file_keys(head) if kind != "prose" else {("prose", k)}):
+        keys = {("item", k)} if k in loose else set()
+        for key in keys | (_file_keys(head) if kind != "prose" else set()):
             group[root(g)] = root(owner.setdefault(key, g))
-        prev = flat[g - 1] if g else None
-        if prev and prev[0] == k and (kind == "prose" or prev[1][0] == "prose" and g > 1 and flat[g - 2][0] == k):
-            # stray text after a file may still be that file's, and git never writes text between
-            # two files, so a file after such text joins it too
-            group[root(g)] = root(g - 1)
-        if broken is not None and flat[broken][0] == k:
-            group[root(g)] = root(broken)  # a hunk ended early: the rest of the item may be its text
-        if kind == "broken":
-            broken = g
     held = {root(g) for g, (_k, (_kind, lines, _h)) in enumerate(flat) if _flagged("\n".join(lines), luhn)}
     out, withheld, g = [], [], 0
     for (path, _text), (ends_in_newline, parts) in zip(items, split):
