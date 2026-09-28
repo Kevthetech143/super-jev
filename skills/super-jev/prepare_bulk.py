@@ -495,13 +495,13 @@ def walk_md(root: Path, no_recurse: bool = False, extensions=CONNECTABLE_EXTENSI
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
               names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS,
-              approvals: dict = None, approved_out: set = None):
+              approvals: dict = None, approved_out: dict = None):
     """Union of selected text suffixes under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
     since an oversized file cannot be gated regardless. `approvals` ({path: sha256}, from --approve-held)
     admits a held file only while its bytes hash to the reviewed sha256, and lifts a size hold up to
-    APPROVE_MAX_BYTES; each approval key used is added to `approved_out`.
+    APPROVE_MAX_BYTES; each approval key used maps to the admitted path in `approved_out`.
     A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
     folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
     logins.md or any other file the roots would never have admitted."""
@@ -586,7 +586,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if admitted:
                 held.append((str(p), f"{'; '.join(admitted)}; admitted by --approve-held (sha256 {approved[:12]})"))
                 if approved_out is not None:
-                    approved_out.add(key)
+                    approved_out[key] = str(p)
             files.append(p)
     if test_skips:
         print(f"  SKIP  {test_skips} test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); name one exactly with --name to connect it")
@@ -1134,7 +1134,7 @@ def main() -> int:
             approvals[str(gp)] = given[str(gp)] = sha(gp)
         else:
             print(f"  --approve-held {path}: no such file; nothing approved")
-    used = set()
+    used = {}
     files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions,
                             approvals, used)
     scope = getattr(a, "legacy_scope", None)
@@ -1155,6 +1155,25 @@ def main() -> int:
     # one given now is recorded only when it admitted a held file.
     approved_held = {k: v for k, v in getattr(a, "recorded_approvals", {}).items() if Path(k).exists()}
     approved_held.update({k: approvals[k] for k in used})
+    # The reviewed bytes are pinned: every later stage re-reads the path, so an approved file whose
+    # sha256 no longer matches before it is cached or connected is held again, never cached or sent.
+    pinned, dropped = {path: approvals[k] for k, path in used.items()}, set()
+
+    def drifted(p) -> bool:
+        want = pinned.get(str(p))
+        if str(p) in dropped:
+            return True
+        if want is None or sha(p) == want:
+            return False
+        dropped.add(str(p))
+        cache.pop(str(p), None)
+        base = next((w for h, w in held if h == str(p)), "").split("; admitted by --approve-held")[0]
+        held[:] = [(h, w) for h, w in held if h != str(p)] + [
+            (str(p), f"{base}; review before onboarding; changed since its --approve-held review "
+                     f"(approved sha256 {want[:12]}), review it again")]
+        write_held_txt(a.pointer, held)
+        print(f"  HELD  {relstr(p, roots)}  (changed after its approval was checked this run; not cached or connected)")
+        return True
     if not files and not held:
         print(f"ERROR: no {','.join(a.extensions)} files found under {', '.join(str(r) for r in roots)} "
               "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
@@ -1239,7 +1258,7 @@ def main() -> int:
                 sizes[str(p)] = len(Path(p).read_text(errors="replace"))
             except OSError:
                 pass
-        ready = [p for p in todo if (drafts.get(str(p)) or {}).get("description")]
+        ready = [p for p in todo if (drafts.get(str(p)) or {}).get("description") and not drifted(p)]
         for group in pack_groups(ready, sizes):
             items = [(p, drafts[str(p)]["description"].strip(),
                       claim_sentence(validate_labels(drafts[str(p)]))) for p in group]
@@ -1249,6 +1268,8 @@ def main() -> int:
 
     exceptions, passing = [], []
     for p in todo:
+        if drifted(p):  # never gate bytes nobody reviewed
+            continue
         d = drafts.get(str(p))
         if not d or not d.get("description"):
             exceptions.append((str(p), "writer returned no draft")); continue
@@ -1283,8 +1304,10 @@ def main() -> int:
                 if v2["state"] == "SUPPORTED" and v2.get("confidence", 0) >= a.line:
                     d, desc, v, ok = redo, redo_desc, v2, True
 
+        if drifted(p):
+            continue
         if not ok:
-            cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
+            cache[str(p)] = {"sha256": pinned.get(str(p)) or sha(p), "description": d["description"], "question": d.get("question", ""),
                              "kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown",
                              "verdict": v["state"], "confidence": v.get("confidence"), "pass": False,
                              "labels_ok": False,
@@ -1305,8 +1328,10 @@ def main() -> int:
         if not labels_ok:
             labels = {"kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown"}
 
-        cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
-                         "kind": labels["kind"], "status": labels["status"], "as_of": labels["as_of"],
+        if drifted(p):
+            continue
+        cache[str(p)] = {"sha256": pinned.get(str(p)) or sha(p), "description": d["description"],
+                         "question": d.get("question", ""), "kind": labels["kind"], "status": labels["status"], "as_of": labels["as_of"],
                          "subject": labels["subject"],
                          "verdict": v["state"], "confidence": v.get("confidence"), "pass": True,
                          "labels_ok": labels_ok, "labels_verdict": v_labels["state"],
@@ -1317,10 +1342,10 @@ def main() -> int:
         else:
             print(f"  PASS {fmt_conf(v)} | labels unknown ({fmt_conf(v_labels)})  {relstr(p, roots)}")
         passing.append(p)
+    connect_set = [p for p in reused + passing if not drifted(p)]
     cache_path.write_text(json.dumps(cache, indent=1))
     _record_written(cache_path)
 
-    connect_set = reused + passing
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
     rerun = "python3 " + shlex.join(sys.argv)
     for p, why in exceptions:
