@@ -1,12 +1,14 @@
 import type { Evaluation, Evaluator, Request } from '../types.ts';
+import { JUDGE_PROFILE } from '../judge-profile.ts';
 
 /**
- * Estimated input budget for one batched Jev call. Jev's documented ceiling is
- * 32k tokens for the state plus the longest question. Tokens are estimated on the
+ * Estimated input budget for one batched judge call: the judge profile's
+ * callTokens (Jev: 30,000 under its 32k ceiling for the state plus the longest
+ * question). Tokens are estimated on the
  * high side so number-dense text is never under-counted, and a batch is kept under
  * this many estimated tokens.
  */
-export const BATCH_TOKEN_BUDGET = 30_000;
+export const BATCH_TOKEN_BUDGET = JUDGE_PROFILE.callTokens;
 /** Overloaded (529) and rate-limited (429) calls are retried with backoff. */
 const RETRY_ATTEMPTS = 4;
 const RETRY_FIRST_DELAY_MS = 1_000;
@@ -16,7 +18,7 @@ export function estimateTokens(value: unknown): number {
   return Math.ceil(Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8') / 2);
 }
 
-type Pending = { request: Request; resolve: (e: Evaluation) => void; reject: (e: unknown) => void; tokens: number; done: boolean };
+type Pending = { request: Request; resolve: (e: Evaluation) => void; reject: (e: unknown) => void; tokens: number; done: boolean; onDone?: () => void };
 
 /**
  * Coalesces evaluate() calls made in the same tick into as few provider calls as
@@ -69,6 +71,10 @@ export class BatchingEvaluator implements Evaluator {
     const questions: Request['questions'] = {};
     live.forEach((item, i) => { for (const [key, q] of Object.entries(item.request.questions)) questions[`b${i}_${key}`] = q; });
     const controller = new AbortController();
+    // Once every caller has given up (each one's own timeout), nobody can use the
+    // answer: stop the call so the process does not sit waiting for it.
+    const giveUp = () => { if (live.every(item => item.done)) controller.abort(); };
+    for (const item of live) item.onDone = giveUp;
     try {
       this.calls++;
       const evaluation = await this.withRetry({ state: live[0]!.request.state, questions }, controller.signal);
@@ -91,8 +97,12 @@ export class BatchingEvaluator implements Evaluator {
     for (let attempt = 1, delay = RETRY_FIRST_DELAY_MS; ; attempt++, delay *= 2) {
       try { return await this.inner.evaluate(request, signal); }
       catch (error) {
-        if (attempt >= RETRY_ATTEMPTS || !(error instanceof Error && /Jev HTTP (429|529)\b/.test(error.message))) throw error;
-        await new Promise(resolve => setTimeout(resolve, delay));
+        if (attempt >= RETRY_ATTEMPTS || signal.aborted || !(error instanceof Error && /Jev HTTP (429|529)\b/.test(error.message))) throw error;
+        await new Promise(resolve => {
+          const timer = setTimeout(resolve, delay);
+          signal.addEventListener('abort', () => { clearTimeout(timer); resolve(undefined); }, { once: true });
+        });
+        if (signal.aborted) throw error;
       }
     }
   }
@@ -102,4 +112,5 @@ function settle(item: Pending, fn: () => void): void {
   if (item.done) return;
   item.done = true;
   fn();
+  item.onDone?.();
 }

@@ -811,6 +811,8 @@ def confirm_label(question: str) -> str:
     return ANSWER_LABEL if open_q else CONFIRM_LABEL
 HELD_SECRET = "contains a secret; not sent"
 INCONCLUSIVE = "inconclusive"
+# navigation-cli's reason when a provider call ran past its timeout (src/enhance/navigation.ts)
+NAV_TIMED_OUT = "Navigation provider timed out"
 
 def navigation_command() -> list:
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
@@ -1702,6 +1704,18 @@ def confirm(question: str, paths: list):
         return confirm_results(paths, results)
     outs = iter(rows or [])
     results = [done or confirm_finish(question, ctx, next(outs), None) for done, ctx in started]
+    # The run's one shared call has one fixed timeout (SUPERJEV_NAV_TIMEOUT_MS) however
+    # many files ride in it, so a busy moment can time out every file at once. A file
+    # that timed out in a shared run is checked once more on its own, a small call, at most
+    # NAV_CONCURRENCY at once; the same payload is judged the same way, and one that fails
+    # again stays inconclusive.
+    if len(ctxs) > 1:
+        again = [i for i, (_, _, e, _) in enumerate(results) if e == NAV_TIMED_OUT]
+        for i, r in zip(again, ThreadPoolExecutor(max_workers=max(1, min(len(again), NAV_CONCURRENCY))).map(
+                lambda i: confirm_one(question, paths[i]), again)):
+            results[i] = r
+        if again:
+            _STAGE["timeout_rechecks"] = len(again)
     return confirm_results(paths, results)
 
 def confirm_results(paths: list, results: list):
@@ -2479,6 +2493,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                                     for sc, p, _ptr in wsearch.get("ranked", [])]},
             "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
             "cover_gate": _STAGE.get("cover_gate"),
+            "timeout_rechecks": _STAGE.get("timeout_rechecks"),
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},

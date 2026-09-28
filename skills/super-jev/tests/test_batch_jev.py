@@ -85,7 +85,7 @@ def test_content_checks_ride_one_run_and_one_file_error_stays_its_own(tmp_path, 
         body = json.loads(input)
         runs.append(body)
         rows = [{"status": "candidates", "candidates": [{"score": 0.95, "sourceId": "0"}]},
-                {"status": "error", "reason": "Navigation provider timed out"},
+                {"status": "error", "reason": "Navigation provider failed: Jev HTTP 500"},
                 {"status": "no-candidates", "candidates": []}]
         return subprocess.CompletedProcess(cmd, 0, json.dumps({"results": rows, "calls": 1}), "")
 
@@ -93,7 +93,69 @@ def test_content_checks_ride_one_run_and_one_file_error_stays_its_own(tmp_path, 
     scores, _, error, notes = ask.confirm("what is the gate code", files)
     assert len(runs) == 1 and len(runs[0]["batch"]) == 3
     assert scores == {files[0]: 0.95}
-    assert error == "Navigation provider timed out" and notes == {files[1]: ask.INCONCLUSIVE}
+    assert error == "Navigation provider failed: Jev HTTP 500" and notes == {files[1]: ask.INCONCLUSIVE}
+
+
+def _gate_files(tmp_path, names):
+    files = []
+    for name in names:
+        f = tmp_path / f"{name}.md"
+        f.write_text(f"{name} notes: the gate code is 4411.\n")
+        files.append(str(f))
+    return files
+
+
+def _judge(payload):
+    # Scores each payload from its own passage text, so a recheck that judged a
+    # different file (or a shifted row) would show.
+    text = "".join(n["description"] for n in payload["catalog"]["nodes"][1:])
+    return {"status": "candidates", "candidates": [{"score": 0.6 + (sum(map(ord, text)) % 39) / 100, "sourceId": "0"}]}
+
+
+def test_files_timed_out_in_a_shared_run_are_each_checked_once_more_alone(tmp_path, monkeypatch):
+    # Live 2026-09-28: ~10 files in one shared call ran past the 15s timeout and every
+    # file came back "timed out", so the whole ask fell back to routing scores.
+    files = _gate_files(tmp_path, ("a", "b", "c", "d"))
+    runs = []
+
+    def fake_run(cmd, input, **kw):
+        body = json.loads(input)
+        runs.append(body)
+        if "batch" in body:
+            rows = [_judge(body["batch"][0])] + [{"status": "error", "reason": ask.NAV_TIMED_OUT}] * 3
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"results": rows, "calls": 1}), "")
+        if "d notes" in body["catalog"]["nodes"][1]["description"]:
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"status": "error", "reason": ask.NAV_TIMED_OUT}), "")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(_judge(body)), "")
+
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    scores, _, error, notes = ask.confirm("what is the gate code", files)
+    alone = [r for r in runs if "batch" not in r]
+    # one shared run, then one single-file run per timed-out file and no more
+    assert "batch" in runs[0] and len(runs) == 4 and len(alone) == 3
+    assert sorted(r["catalog"]["nodes"][1]["description"][:6] for r in alone) == ["b note", "c note", "d note"]
+    # a recheck is judged exactly as the shared run would have judged it
+    monkeypatch.setattr(ask.subprocess, "run", lambda cmd, input, **kw: subprocess.CompletedProcess(
+        cmd, 0, json.dumps({"results": [_judge(p) for p in json.loads(input)["batch"]], "calls": 1}), ""))
+    finished = ask.confirm("what is the gate code", files)[0]
+    assert scores == {p: finished[p] for p in files[:3]}
+    # the one that timed out again stays inconclusive on its routing score
+    assert notes == {files[3]: ask.INCONCLUSIVE} and error == ask.NAV_TIMED_OUT
+
+
+def test_a_lone_file_that_timed_out_is_not_sent_again(tmp_path, monkeypatch):
+    # Alone, the recheck would be the very same call under the same timeout.
+    files = _gate_files(tmp_path, ("a",))
+    runs = []
+
+    def fake_run(cmd, input, **kw):
+        runs.append(json.loads(input))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(
+            {"results": [{"status": "error", "reason": ask.NAV_TIMED_OUT}], "calls": 1}), "")
+
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    scores, _, error, notes = ask.confirm("what is the gate code", files)
+    assert len(runs) == 1 and scores == {} and notes == {files[0]: ask.INCONCLUSIVE}
 
 
 def test_a_failed_batched_run_falls_back_to_one_check_per_file(tmp_path, monkeypatch):
@@ -170,3 +232,34 @@ def test_batched_and_single_checks_give_the_same_file_to_score_mapping(tmp_path,
     monkeypatch.setenv("SUPERJEV_BATCH_JEV", "0")
     single = ask.confirm("what is my NYSC membership plan", files)[0]
     assert batched == single and len(set(batched.values())) == len(batched) == 3
+
+
+def test_timeout_rechecks_are_counted_in_the_ask_trace(tmp_path, monkeypatch):
+    files = _gate_files(tmp_path, ("a", "b", "c"))
+
+    def fake_memory(req):
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": "p1"}]}
+        if req["action"] == "navigate-many":
+            return {"status": "ok", "results": {"p1": {"status": "candidates", "candidates": [
+                {"score": 0.8, "originalPath": f} for f in files]}}}
+        raise AssertionError(req)
+
+    def fake_run(cmd, input, **kw):
+        body = json.loads(input)
+        if "batch" in body:
+            rows = [{"status": "error", "reason": ask.NAV_TIMED_OUT} for _ in body["batch"]]
+            return subprocess.CompletedProcess(cmd, 0, json.dumps({"results": rows, "calls": 1}), "")
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(_judge(body)), "")
+
+    monkeypatch.setenv("SUPERJEV_LISTWISE", "0")
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    ask.lookup("what is the gate code", "alice", tmp_path)
+    traces = [json.loads(l) for l in (tmp_path / "traces.jsonl").read_text().splitlines()
+              if json.loads(l).get("kind") == "trace"]
+    assert traces[-1]["stages"]["timeout_rechecks"] == 3
+    assert not any(v.get("rule", "").startswith("inconclusive") for v in traces[-1]["stages"]["final"])
