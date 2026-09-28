@@ -20,7 +20,7 @@ import pytest
 SKILL = Path(__file__).resolve().parent.parent
 REPO = SKILL.parent.parent
 sys.path.insert(0, str(SKILL))
-from prepare_bulk import CARD_RE, _usps_tracking, card_hit, has_secret, secret_detail  # noqa: E402
+from prepare_bulk import CARD_RE, _usps_check_ok, _usps_tracking, card_hit, has_secret, secret_detail  # noqa: E402
 
 
 def _gs1(body: str) -> str:
@@ -119,10 +119,11 @@ def test_short_91_95_number_before_a_card_never_hides_it():
     assert [x for x in lines if not has_secret(x)] == []
 
 
-def test_card_behind_a_4_or_8_digit_91_95_group_judged_as_before():
+def test_card_behind_a_4_or_8_digit_91_95_group():
     # Found in the second review: "9100 4111 1111 1111 1111 01" is a USPS-layout run with a card at its
-    # 2nd group. A run with a Luhn-valid window after its first group is never exempt, so these lines get
-    # exactly the old card rule's answer.
+    # 2nd group. A run with a Luhn-valid window after its first group is never exempt. A run whose USPS check
+    # digit is valid gets exactly the old first-window answer (so real tracking numbers are held no more often);
+    # any other run is held, since its later card window passes Luhn and has a card-network prefix.
     rng = random.Random(8)
     lines = []
     for _ in range(3000):
@@ -131,8 +132,16 @@ def test_card_behind_a_4_or_8_digit_91_95_group_judged_as_before():
         card = _card(rng, rng.choice(["4", "51", "6011"]))
         lines.append(_spaced(pre + card + tail, rng.choice([" ", "-"])))
     assert sum(_old_card(x) for x in lines) > 100  # the old rule held these about one time in ten
-    assert [x for x in lines if has_secret(x) != _old_card(x)] == []
+    valid = [x for x in lines if _usps_check_ok(x)]
+    assert 200 < len(valid) < 400
+    assert [x for x in valid if has_secret(x) != _old_card(x)] == []
+    assert [x for x in lines if x not in valid and not has_secret(x)] == []
+    # Known limit, kept on purpose: this line is also a check-digit-valid USPS number, judged as before. Holding
+    # every such run with a card-prefixed Luhn window would hold about 4 in 100 real 22-digit tracking numbers
+    # (7 in 100 for 26 digits) instead of 1 (2).
+    assert _usps_check_ok("9100 4111 1111 1111 1111 01")
     assert has_secret("9100 4111 1111 1111 1111 01") == _old_card("9100 4111 1111 1111 1111 01")
+    assert has_secret("9100 4111 1111 1111 1111 02")  # wrong check digit: not a tracking number, held
 
 
 def test_valid_tracking_numbers_mostly_exempt():

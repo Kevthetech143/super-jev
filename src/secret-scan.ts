@@ -5,6 +5,8 @@ import { readFileSync } from 'node:fs';
 const PAT = JSON.parse(readFileSync(new URL('../skills/super-jev/secret_patterns.json', import.meta.url), 'utf8'));
 // No 'u' flag: \w, \d and \b stay ASCII-only, the twin of Python's re.ASCII. The text is ASCII after normalizing.
 const CARD = new RegExp(PAT.card, 'g');
+const CARD_IIN = new RegExp(PAT.card_iin);
+const AMEX = new RegExp(PAT.amex, 'g');
 const WORD = new RegExp(PAT.word, 'i');
 const TOKEN = new RegExp(PAT.token, 'i');
 const GENERIC = new RegExp(PAT.generic, 'gi');
@@ -48,24 +50,72 @@ function luhn(digits: string): boolean {
   return total % 10 === 0;
 }
 
-/** Twin of Python _usps_tracking: a TRACKING run (prefix and USPS layout already checked) with a valid GS1 mod-10
- * check digit and no Luhn-valid 16-digit window starting at its 2nd or 3rd group (a card behind a short 91-95 number). */
-function uspsTracking(run: string): boolean {
+/** Twin of Python _usps_check_ok: a TRACKING run (prefix and USPS layout already checked) of 22 or 26 digits
+ * with a valid GS1 mod-10 check digit. */
+function uspsCheckOk(run: string): boolean {
   const d = run.replace(/\D/g, '');
   if (d.length !== 22 && d.length !== 26) return false;
   let total = 0;
   for (let i = 0; i < d.length - 1; i++) total += Number(d[d.length - 2 - i]) * (i % 2 ? 1 : 3);
-  if ((10 - total % 10) % 10 !== Number(d[d.length - 1])) return false;
+  return (10 - total % 10) % 10 === Number(d[d.length - 1]);
+}
+
+/** Twin of Python _usps_tracking: a uspsCheckOk run with no Luhn-valid 16-digit window starting at its 2nd or
+ * 3rd group (a card behind a short 91-95 number). */
+function uspsTracking(run: string): boolean {
+  const d = run.replace(/\D/g, '');
+  if (!uspsCheckOk(run)) return false;
   for (let i = 4; i + 16 <= d.length; i += 4) if (luhn(d.slice(i, i + 16))) return false;
   return true;
 }
 
-/** Twin of Python card_hit: a standalone 16-digit run (dates/URLs and whole USPS tracking numbers scrubbed)
- * that passes Luhn. Without Luhn (non-ASCII digits folded to 0) no run is exempted as a tracking number. */
+const isDigit = (c: string | undefined) => c !== undefined && c >= '0' && c <= '9';
+
+/** Twin of Python _groups_near: digit groups, joined by single spaces or dashes, running up to start and on
+ * from end: [all, 4+ digits] before, then after. Each side stops after 5 groups. */
+function groupsNear(text: string, start: number, end: number): number[] {
+  const counts: number[] = [];
+  for (const step of [-1, 1]) {
+    let i = step < 0 ? start - 1 : end, total = 0, long = 0;
+    while (total < 5 && i + step >= 0 && i + step < text.length && '- '.includes(text[i]) && isDigit(text[i + step])) {
+      let j = i + step;
+      while (isDigit(text[j + step])) j += step;
+      total++;
+      if (Math.abs(j - i) >= 4) long++;
+      i = j + step;
+    }
+    counts.push(total, long);
+  }
+  return counts;
+}
+
+/** Twin of Python _near_ok: 1 to 4 digit groups before a later card window and at most 4 after, at most 2 of
+ * 4+ digits on each side. */
+function nearOk([before, beforeLong, after, afterLong]: number[]): boolean {
+  return before >= 1 && before <= 4 && after <= 4 && beforeLong <= 2 && afterLong <= 2;
+}
+
+/** Twin of Python _overlapping: every match of a 'g' regex, each search starting one past the last match.
+ * Runs on a copy: an early return must not leave lastIndex set on the shared regex (matchAll copies it). */
+function* overlapping(source: RegExp, text: string): Generator<RegExpExecArray> {
+  const re = new RegExp(source);
+  for (let m; (m = re.exec(text)); re.lastIndex = m.index + 1) yield m;
+}
+
+/** Twin of Python card_hit: a standalone 16-digit run or 15-digit Amex number (dates/URLs and whole USPS
+ * tracking numbers scrubbed) that passes Luhn, or a 16-digit window after other digit groups (see nearOk) that
+ * passes Luhn and starts with a card-network prefix, read with every check-digit-valid USPS run removed. Without Luhn
+ * (non-ASCII digits folded to 0) any card-shaped run is held and no run is exempted as a tracking number. */
 function cardHit(text: string, checkLuhn: boolean): boolean {
   text = text.replace(URL_RE, ' ').replace(ISO_DATE, ' ');
-  if (checkLuhn) text = text.replace(TRACKING, (m) => uspsTracking(m) ? ' ' : m);
-  for (const m of text.matchAll(CARD)) if (!checkLuhn || luhn(m[0].replace(/\D/g, ''))) return true;
+  if (!checkLuhn) return text.search(CARD) >= 0 || text.search(AMEX) >= 0;
+  const plain = text.replace(TRACKING, (m) => uspsCheckOk(m) ? ' ' : m);
+  text = text.replace(TRACKING, (m) => uspsTracking(m) ? ' ' : m);
+  for (const m of [...text.matchAll(CARD), ...text.matchAll(AMEX)]) if (luhn(m[0].replace(/\D/g, ''))) return true;
+  for (const m of overlapping(CARD, plain)) {
+    const d = m[0].replace(/\D/g, '');
+    if (CARD_IIN.test(d) && luhn(d) && nearOk(groupsNear(plain, m.index, m.index + m[0].length))) return true;
+  }
   return false;
 }
 
