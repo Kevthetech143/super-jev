@@ -193,3 +193,30 @@ def test_approved_file_edited_after_its_hash_check_is_held_not_cached(run, monke
     why = dict(rep["held"])[str(f)]
     assert "changed since its --approve-held review" in why and reviewed[:12] in why
     assert rep["approvedHeld"] == [{"path": str(f), "sha256": reviewed}]
+
+
+def test_connect_preview_hash_mismatch_holds_approved_file_and_sends_no_reviewed_connect(run, monkeypatch):
+    f = run.root / "big.py"  # size-held: its quoted description carries no secret-like text
+    f.write_text("x = 1\n" * (pb.CEILING_BYTES // 6 + 100))
+    run("--approve-held", str(f))
+    reviewed = _sha(f)
+    sent = []
+
+    def fake_memory(req):
+        sent.append(req)
+        if req["action"] == "panel":
+            return {"pointers": []}
+        assert not req.get("reviewed"), "reviewed connect sent for a changed approved file"
+        return {"status": "preparation-required",
+                "sources": [{"path": s["path"], "sha256": "0" * 64 if s["path"] == str(f) else "a" * 64}
+                            for s in req["sources"]]}
+    monkeypatch.setattr(pb, "memory", fake_memory)
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--refresh", "--pointer", "code", "--principal", "reader",
+                                      "--writer", "builtin", "--no-shared"])
+    assert pb.main() == 1
+    rep = json.loads((run.root.parent / "cache" / "code-report.json").read_text())
+    cache = json.loads((run.root.parent / "cache" / "code.json").read_text())
+    assert str(f) not in rep["approved"] and str(f) not in cache and not rep["connected"]
+    why = dict(rep["held"])[str(f)]
+    assert "over size ceiling" in why and "changed since its --approve-held review" in why and reviewed[:12] in why
+    assert any(r["action"] == "connect" for r in sent)
