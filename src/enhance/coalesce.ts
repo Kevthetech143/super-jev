@@ -1,12 +1,14 @@
 import type { Evaluation, Evaluator, Request } from '../types.ts';
+import { JUDGE_PROFILE } from '../judge-profile.ts';
 
 /**
- * Estimated input budget for one batched Jev call. Jev's documented ceiling is
- * 32k tokens for the state plus the longest question. Tokens are estimated on the
+ * Estimated input budget for one batched judge call: the judge profile's
+ * callTokens (Jev: 30,000 under its 32k ceiling for the state plus the longest
+ * question). Tokens are estimated on the
  * high side so number-dense text is never under-counted, and a batch is kept under
  * this many estimated tokens.
  */
-export const BATCH_TOKEN_BUDGET = 30_000;
+export const BATCH_TOKEN_BUDGET = JUDGE_PROFILE.callTokens;
 /** Overloaded (529) and rate-limited (429) calls are retried with backoff. */
 const RETRY_ATTEMPTS = 4;
 const RETRY_FIRST_DELAY_MS = 1_000;

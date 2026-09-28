@@ -40,9 +40,9 @@ def copy_build(ask_path, dest):
     dest.mkdir()
     hashes = {}
     paths = list(ask_path.parent.glob('*.py')) + list((ask_path.parent / 'lib').rglob('*.py'))
-    patterns = ask_path.parent / 'secret_patterns.json'
-    if patterns.is_file():
-        paths.append(patterns)
+    for shared in ('secret_patterns.json', 'judge_profiles.json'):
+        if (ask_path.parent / shared).is_file():
+            paths.append(ask_path.parent / shared)
     for source in paths:
         rel = source.relative_to(ask_path.parent)
         target = dest / rel
