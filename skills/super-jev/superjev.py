@@ -57,6 +57,11 @@ from typing import NamedTuple
 HOME = Path(os.path.expanduser("~"))
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent  # skills/super-jev/superjev.py -> repo root
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
+# The judge's limits (window, questions per call, price): judge_profiles.json via
+# SUPERJEV_JUDGE_PROFILE. Every judge-sized default below is derived from it.
+from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
 
 # The default claim-gate door: the judge client shipped in this repo. It needs
 # only TYPESAFE_API_KEY. SUPERJEV_GATE_CMD, when set, replaces it.
@@ -527,20 +532,18 @@ HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
 # out of a door's CAPTURED stdout+stderr and folds the totals into that
 # call's ledger entry — nothing here makes a network call of its own.
 #
-# The $/Mtok rate is TypeSafe's own published number (see CAPABILITIES.md,
-# "OPERATIONS" section, checked against docs.typesafe.ai on 2026-09-16):
-# input $0.042 per million tokens, output not billed at all. It is a
-# DEFAULT, not a hardcoded constant — SUPERJEV_INPUT_USD_PER_MTOK overrides
-# it the day TypeSafe's preview pricing changes, with no code edit needed.
+# The $/Mtok rate is the judge profile's published input price (TypeSafe Jev:
+# $0.042 per million tokens, output not billed; CAPABILITIES.md "OPERATIONS",
+# checked against docs.typesafe.ai on 2026-09-16). It is a DEFAULT —
+# SUPERJEV_INPUT_USD_PER_MTOK overrides it the day the pricing changes.
 INPUT_USD_PER_MTOK_ENV = "SUPERJEV_INPUT_USD_PER_MTOK"
-DEFAULT_INPUT_USD_PER_MTOK = 0.042
+DEFAULT_INPUT_USD_PER_MTOK = JUDGE_PROFILE.input_usd_per_mtok
 
-# The measured Jev input ceiling is 32,768 tokens (CAPABILITIES.md, "HARD
-# INPUT CEILING"); this cap sits a hair under it so a door call still has
-# room for the question battery's own overhead. SUPERJEV_INPUT_CAP_TOK
-# overrides it.
+# The judge's input ceiling (Jev: 32,768 tokens, CAPABILITIES.md "HARD INPUT
+# CEILING"); this cap sits a hair under it so a door call still has room for
+# the question battery's own overhead. SUPERJEV_INPUT_CAP_TOK overrides it.
 INPUT_CAP_TOK_ENV = "SUPERJEV_INPUT_CAP_TOK"
-DEFAULT_INPUT_CAP_TOK = 32_000
+DEFAULT_INPUT_CAP_TOK = JUDGE_PROFILE.input_cap_tokens
 
 _JEV_HEADER_RE = re.compile(
     r"jev\s+(\S+)\s*\xb7\s*(\d+)\s*chunk\(s\)\s*\xb7\s*(\d+)\s*in_tok\s*\xb7\s*(\d+)ms")
@@ -666,10 +669,10 @@ MAX_PARTS_ENV = "SUPERJEV_MAX_PARTS"
 DEFAULT_MAX_PARTS = 40
 
 # One judge call's input, as lib/jev_client.py counts it: bytes/2, deliberately high,
-# under Jev's 32,768-token ceiling. A direct check whose evidence is bigger is split
+# under the judge's ceiling (the profile's call_tokens; Jev: 30,000 under 32,768). A direct check whose evidence is bigger is split
 # into parts of this size, one call each, and nothing is cut. Cutting it instead let a
 # big file push the others out, and true claims about them came back NOT_SUPPORTED.
-JUDGE_CALL_TOKENS = 30_000
+JUDGE_CALL_TOKENS = JUDGE_PROFILE.call_tokens
 
 
 def _judge_tokens(text):
