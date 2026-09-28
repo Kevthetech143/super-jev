@@ -139,7 +139,7 @@ def test_valid_tracking_numbers_mostly_exempt():
     rng = random.Random(50)
     nums = [_tracking(rng, rng.choice([22, 26])) for _ in range(5000)]
     held = sum(has_secret(_spaced(n)) for n in nums)
-    assert held < 150, held  # about 1 in 50 have a Luhn-valid inner window and stay held; before, about 1 in 10
+    assert held < 150, held  # about 1 in 100 (22 digits) to 1 in 50 (26 digits) stay held; before, about 1 in 10
 
 
 def test_91_95_card_then_expiry_still_held():
