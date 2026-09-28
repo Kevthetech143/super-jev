@@ -512,7 +512,9 @@ def _flagged(text: str, luhn: bool) -> bool:
 def _diff_parts(lines: list) -> list:
     """One text cut into ("file", lines, head) sections, each exactly as git writes one (the
     diff line, header lines, then hunks read by the line counts in their @@ lines; a combined
-    @@@ hunk runs to the next diff line), and ("prose", lines, []) runs of anything else."""
+    @@@ hunk runs to the next diff line), and ("prose", lines, []) runs of anything else. A
+    section whose hunk ends before its counts do is ("broken", lines, head): what follows it
+    may still be its text."""
     parts, prose, i, n = [], [], 0, len(lines)
     while i < n:
         if not _FILE_START_RE.match(lines[i]):
@@ -525,7 +527,7 @@ def _diff_parts(lines: list) -> list:
         j = i + 1
         while j < n and _HEADER_RE.match(lines[j]):
             j += 1
-        head_end = j
+        head_end, old, new = j, 0, 0
         while j < n:
             if lines[j].startswith("@@@") and not lines[i].startswith("diff --git "):
                 j += 1
@@ -550,7 +552,10 @@ def _diff_parts(lines: list) -> list:
                 j += 1
             while j < n and lines[j].startswith("\\"):  # "\ No newline at end of file"
                 j += 1
-        parts.append(("file", lines[i:j], lines[i:head_end]))
+            if old > 0 or new > 0:
+                break
+        kind = "broken" if (old > 0 or new > 0) else "file"
+        parts.append((kind, lines[i:j], lines[i:head_end]))
         i = j
     if prose:
         parts.append(("prose", prose, []))
@@ -587,9 +592,9 @@ def mask_evidence(items: list):
     every section, by its clean header lines and one SECRET_WITHHELD line; an item's text
     outside any diff is one file. withheld names what was held back. An item left with nothing
     judgeable, or still scanning as a secret, comes back as None: the caller drops it."""
-    if not any(has_secret(text or "") for _, text in items):
-        return list(items), []
     luhn = not any(NON_ASCII_DIGIT_RE.search(text or "") for _, text in items)
+    if not any(_flagged(text or "", luhn) for _, text in items):
+        return list(items), []
     split = []
     for path, text in items:
         text = text or ""
@@ -604,12 +609,19 @@ def mask_evidence(items: list):
             g = group[g]
         return g
 
-    owner = {}
+    owner, broken = {}, None
     for g, (k, (kind, _lines, head)) in enumerate(flat):
-        for key in (_file_keys(head) if kind == "file" else {("prose", k)}):
+        for key in (_file_keys(head) if kind != "prose" else {("prose", k)}):
             group[root(g)] = root(owner.setdefault(key, g))
-        if kind == "prose" and g and flat[g - 1][0] == k:
-            group[root(g)] = root(g - 1)  # stray text after a file may still be that file's
+        prev = flat[g - 1] if g else None
+        if prev and prev[0] == k and (kind == "prose" or prev[1][0] == "prose" and g > 1 and flat[g - 2][0] == k):
+            # stray text after a file may still be that file's, and git never writes text between
+            # two files, so a file after such text joins it too
+            group[root(g)] = root(g - 1)
+        if broken is not None and flat[broken][0] == k:
+            group[root(g)] = root(broken)  # a hunk ended early: the rest of the item may be its text
+        if kind == "broken":
+            broken = g
     held = {root(g) for g, (_k, (_kind, lines, _h)) in enumerate(flat) if _flagged("\n".join(lines), luhn)}
     out, withheld, g = [], [], 0
     for (path, _text), (ends_in_newline, parts) in zip(items, split):
@@ -617,7 +629,7 @@ def mask_evidence(items: list):
         for kind, part, head in parts:
             if root(g) in held:
                 head = [] if any(_flagged(line, luhn) for line in head) else head
-                name = _file_name(head) if kind == "file" else path
+                name = _file_name(head) if kind != "prose" else path
                 if name not in withheld:
                     withheld.append(name)
                 lines += head + [SECRET_WITHHELD.format(n=len(part) - len(head))]

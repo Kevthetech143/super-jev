@@ -4342,7 +4342,10 @@ def cmd_gate(a):
     ev_items = []
     for p in a.evidence:
         try:
-            ev_items.append((p, Path(p).read_text(encoding="utf-8", errors="replace")))
+            # newline="": a lone CR stays inside its line, so it cannot turn diff-shaped text
+            # after it into a line of its own (a fake file section when masking)
+            with open(p, encoding="utf-8", errors="replace", newline="") as fh:
+                ev_items.append((p, fh.read()))
         except OSError:
             ev_items.append((p, ""))
     # Mask BEFORE truncating: a cut can drop a file's secret marker and leave the rest of
@@ -4359,8 +4362,9 @@ def cmd_gate(a):
     if sent_ev is not None and (truncated or sent_ev != ev_items):
         evidence_paths = []
         for orig_path, text in kept_ev:
-            tmp_ev = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False,
-                                                 encoding="utf-8")
+            tmp_ev = tempfile.NamedTemporaryFile(mode="w", prefix=Path(orig_path).name + ".",
+                                                 suffix=".md", delete=False, encoding="utf-8",
+                                                 newline="")
             tmp_ev.write(text)
             tmp_ev.close()
             evidence_tmp_paths.append(tmp_ev.name)
@@ -4368,7 +4372,10 @@ def cmd_gate(a):
     else:
         evidence_paths = list(a.evidence)
     extra_ledger = {"truncated": truncated, "est_input_tok": est_tok,
-                    "input_cap_tok": cap_tok}
+                    "input_cap_tok": cap_tok, "withheld": withheld}
+    withheld_note = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
+                     "a claim about them cannot be checked\n" % (len(withheld), ", ".join(withheld))
+                     if withheld else "")
 
     # Claim mode: explicit --claim-mode wins; otherwise a unified-diff-looking
     # evidence auto-selects code. Code mode needs per-claim questions, so with
@@ -4510,7 +4517,7 @@ def cmd_gate(a):
             code = gate_fail_closed(code, out, n_claims)
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       gate_verdict_line(code, out, err),
-                      {"stdout": out, "stderr": err, "claim_mode": mode}, cmd)
+                      {"stdout": out, "stderr": err, "claim_mode": mode, "withheld": withheld}, cmd)
             return code
         if hook_mode:
             # Captured and NOT printed: cmd_hook builds its own one-line
@@ -4530,7 +4537,7 @@ def cmd_gate(a):
             # in `out` (_hook_block_reasons); it never reads exit 0 as a verdict
             # beyond "no block".
             return code, out, err
-        print("$ " + shlex.join(str(c) for c in cmd))
+        print(withheld_note + "$ " + shlex.join(str(c) for c in cmd))
         sys.stdout.flush()
         code, out, err = run_door(cmd, capture=True, door="gate", hook_mode=hook_mode,
                                   timeout=timeout, extra_ledger=extra_ledger)

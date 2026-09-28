@@ -284,7 +284,8 @@ def main(argv=None):
     try:
         if not a.evidence:
             raise JevError("needs at least one evidence file")
-        evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace").read())
+        # newline="": a lone CR stays inside its line (see prepare_bulk.mask_evidence)
+        evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace", newline="").read())
                     for f in a.evidence]
         # Evidence goes to the Jev API, so it gets the same secret scan connect uses: each file
         # that scans as a secret anywhere in the evidence (a test fixture's fake card number too)
