@@ -80,6 +80,8 @@ def test_random_valid_tracking_numbers_never_held():
     rng = random.Random(22)
     nums = [_tracking(rng, rng.choice([22, 26])) for _ in range(2000)]
     assert sum(map(_held_by_window, nums)) > 100  # the case the old scan got wrong is common
+    nums = [n for n in nums if not any(_luhn_ok(n[i:i + 16]) for i in range(4, len(n) - 15, 4))]
+    assert len(nums) > 1500
     for sep in (" ", "-"):
         assert [n for n in nums if has_secret(f"tracking {_spaced(n, sep)} ok")] == []
 
@@ -115,6 +117,29 @@ def test_short_91_95_number_before_a_card_never_hides_it():
         lines += [f"ref {pre}{sep}{_spaced(card, sep)}", f"ref {_spaced(pre, sep)}{sep}{_spaced(card, sep)}"]
     assert sum(_usps_tracking(re.sub(r"\D", "", x)) for x in lines) > 300  # the loose rule would exempt these
     assert [x for x in lines if not has_secret(x)] == []
+
+
+def test_card_behind_a_4_or_8_digit_91_95_group_judged_as_before():
+    # Found in the second review: "9100 4111 1111 1111 1111 01" is a USPS-layout run with a card at its
+    # 2nd group. A run with a Luhn-valid window after its first group is never exempt, so these lines get
+    # exactly the old card rule's answer.
+    rng = random.Random(8)
+    lines = []
+    for _ in range(3000):
+        pre = rng.choice(["91", "92", "93", "94", "95"]) + "".join(rng.choice("0123456789") for _ in range(rng.choice([2, 6])))
+        tail = "".join(rng.choice("0123456789") for _ in range(2))
+        card = _card(rng, rng.choice(["4", "51", "6011"]))
+        lines.append(_spaced(pre + card + tail, rng.choice([" ", "-"])))
+    assert sum(_old_card(x) for x in lines) > 100  # the old rule held these about one time in ten
+    assert [x for x in lines if has_secret(x) != _old_card(x)] == []
+    assert has_secret("9100 4111 1111 1111 1111 01") == _old_card("9100 4111 1111 1111 1111 01")
+
+
+def test_valid_tracking_numbers_mostly_exempt():
+    rng = random.Random(50)
+    nums = [_tracking(rng, rng.choice([22, 26])) for _ in range(5000)]
+    held = sum(has_secret(_spaced(n)) for n in nums)
+    assert held < 150, held  # about 1 in 50 have a Luhn-valid inner window and stay held; before, about 1 in 10
 
 
 def test_91_95_card_then_expiry_still_held():
