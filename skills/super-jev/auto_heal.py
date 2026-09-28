@@ -5,7 +5,9 @@ ask.py calls maybe_heal(pointer, principal) whenever a lookup hits a stale point
 runs the refresh inline and never blocks the caller: at most it starts a detached background
 process, using the exact same prepare_path (prepare_bulk.py --refresh with the pointer's own
 recorded roots/excludes/principals from refresh_changed.py's prepare_args -- same secret scan,
-same held-file behavior) that a human would run by hand.
+same held-file behavior) that a human would run by hand. It also calls maybe_scan on every
+lookup: at most once per SCAN_SECS per principal, a detached scan finds files written into a
+connected folder since its connect (which never make a pointer stale) and heals those pointers.
 
 Bounds (all per principal, state kept in autoheal-state/):
   - one refresh in flight at a time per principal (lock file, stale after LOCK_STALE_SECS)
@@ -97,8 +99,10 @@ def _mark(principal: str, pointer: str, when: float, attempts: list = None) -> N
 def _queue(principal: str, pointer: str, kind: str) -> None:
     """Queue a pointer that found the lock held; the holder's drain heals it (oldest first)."""
     with _state_txn(principal) as state:
-        first = (state["pending"].get(pointer) or {}).get("ts", time.time())
-        state["pending"][pointer] = {"kind": kind, "ts": first}
+        was = state["pending"].get(pointer) or {}
+        if kind == "new" and was.get("kind") in ("refresh", "reconnect"):
+            kind = was["kind"]  # a refresh or reconnect takes in the new files too; "new" may be dropped
+        state["pending"][pointer] = {"kind": kind, "ts": was.get("ts", time.time())}
 
 
 def _lock_path(principal: str) -> Path:
@@ -429,13 +433,15 @@ def reconnect_recipe_or_queue(pointer: str, principal: str, memory=None) -> str:
 
 
 def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
-               cooldown_secs: int = COOLDOWN_SECS, max_per_hour: int = MAX_PER_HOUR) -> str:
+               cooldown_secs: int = COOLDOWN_SECS, max_per_hour: int = MAX_PER_HOUR,
+               new: bool = False) -> str:
     """Start a bounded background refresh of `pointer` for `principal` if eligible. Returns a
     short reason string: "started", or why it was skipped ("no-report", "no-change",
-    "in-progress", "cooldown", "rate-limited"). Never raises, never blocks."""
+    "in-progress", "cooldown", "rate-limited"). Never raises, never blocks. `new` (from scan):
+    the pointer's folders hold files it has never seen, so it needs a refresh with no file changed."""
     cache_dir = cache_dir or rc.CACHE_DIR
     report, owner = _report_for(pointer, cache_dir)
-    args = rc.prepare_args(report) if isinstance(report, dict) else None
+    args = rc.prepare_args(report, principal) if isinstance(report, dict) else None
     if args is None:
         _log(principal=principal, pointer=pointer, action="skip", reason="no-report")
         return "no-report"
@@ -443,7 +449,7 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
 
     cache_path = cache_dir / f"{pointer}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
-    if not rc.changed_files(report, cache):
+    if not new and not rc.changed_files(report, cache):
         _log(principal=principal, pointer=pointer, action="skip", reason="no-change")
         return "no-change"
 
@@ -462,7 +468,7 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
 
     token = _acquire_lock(principal, pointer)
     if not token:
-        _queue(principal, pointer, "refresh")
+        _queue(principal, pointer, "new" if new else "refresh")
         _log(principal=principal, pointer=pointer, action="skip", reason="in-progress", queued=True)
         return "in-progress"
 
@@ -479,13 +485,63 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
     return "started"
 
 
+SCAN_SECS = 600           # 10 minutes per principal between new-file scans
+
+
+def maybe_scan(principal: str, pointers: list, scan_secs: int = SCAN_SECS) -> str:
+    """From a lookup: look for files written into this principal's connected folders since their
+    connect, at most once per `scan_secs`, in a detached process (a walk can take seconds), so
+    the lookup never waits. Returns "started", "recent" or "failed". Never raises."""
+    now = time.time()
+    try:
+        with _state_txn(principal) as state:
+            if now - state.get("lastScan", 0) < scan_secs:
+                return "recent"
+            state["lastScan"] = now
+        subprocess.Popen([sys.executable, str(HERE / "auto_heal.py"), "--scan", principal, *pointers],
+                         cwd=str(HERE), start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, ValueError):
+        return "failed"
+    return "started"
+
+
+def scan(principal: str, pointers: list, cache_dir: Path = None) -> dict:
+    """{pointer: maybe_heal result} for each of `pointers` (prepare_bulk-built) whose folders hold
+    a file no pointer accounts for. The refresh runs prepare_bulk --refresh, so each new file gets
+    the same secret scan, size ceiling, description review and connect gate as a hand refresh."""
+    cache_dir = cache_dir or rc.CACHE_DIR
+    reports = []
+    for rp in sorted(cache_dir.glob("*-report.json")):
+        try:
+            reports.append(json.loads(rp.read_text()))
+        except (OSError, ValueError):
+            continue
+    known = set().union(*(rc.known_files(r) for r in reports if isinstance(r, dict)))
+    out = {}
+    for ptr in pointers:
+        report, owner = _report_for(ptr, cache_dir)
+        if not isinstance(report, dict) or owner in out:
+            continue
+        try:
+            added = rc.new_files(report, known, reports)
+        except Exception:
+            continue
+        if added:
+            out[owner] = maybe_heal(owner, principal, cache_dir=cache_dir, new=True)
+            _log(principal=principal, pointer=owner, action="scan-new", new=len(added),
+                 first=Path(added[0]).name, result=out[owner])
+    return out
+
+
 def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
     """Heal one queued prepare_bulk pointer inline, under the drain's lock, with maybe_heal's and
     reconnect_now's own rules: changed files get a refresh (per-pointer cooldown, hourly cap);
     a pointer queued by reconnect_now with nothing to redraft gets the --no-findability
-    reconnect. Returns "refreshed", "reconnected", or why not."""
+    reconnect; one queued by scan ("new") gets the refresh that admits its new files. Returns
+    "refreshed", "reconnected", or why not."""
     report, owner = _report_for(pointer, rc.CACHE_DIR)
-    args = rc.prepare_args(report) if isinstance(report, dict) else None
+    args = rc.prepare_args(report, principal) if isinstance(report, dict) else None
     if args is None:
         return "no-report"
     cache_path = rc.CACHE_DIR / f"{owner}.json"
@@ -493,7 +549,10 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
         cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     except ValueError:
         cache = {}
-    changed = bool(rc.changed_files(report, cache))
+    # A pointer scan queued for new files is refreshed like a changed one, unless they were taken
+    # in since it was queued: a refresh reconnects with replace:true, rotating approved answers.
+    changed = bool(rc.changed_files(report, cache)) or (
+        kind == "new" and bool(rc.new_files(report, rc.known_across(rc.CACHE_DIR))))
     if not changed and kind != "reconnect":
         return "no-change"  # refreshed since it was queued
     state, now = _load_state(principal), time.time()
@@ -557,3 +616,6 @@ def drain(principal: str, token: str, memory=None) -> int:
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--drain"] and len(sys.argv) == 4:
     sys.exit(drain(sys.argv[2], sys.argv[3]))
+if __name__ == "__main__" and sys.argv[1:2] == ["--scan"] and len(sys.argv) >= 3:
+    scan(sys.argv[2], sys.argv[3:])
+    sys.exit(0)

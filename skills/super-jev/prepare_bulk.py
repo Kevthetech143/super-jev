@@ -90,13 +90,15 @@ A label is only as true as the file it was drafted and gated from; as_of shows s
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
 import argparse, fnmatch, functools, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 # Default connect scope, also imported by coverage/preflight callers. Extra text
 # suffixes require --ext and are persisted in that pointer's recipe.
 CONNECTABLE_EXTENSIONS = ('.md',)
+MAX_FILES = 250  # --max-files default
+UNCONNECTED_TRIES = 3  # refreshes that retry a new file whose connect failed
 CODE_EXTENSIONS = ('.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.sh', '.bash')
 # Credential containers are not ordinary text inputs; --allow-held cannot opt
 # them in. Check compound suffixes and symlink targets as well.
@@ -1026,6 +1028,10 @@ def replay_recipe(a) -> None:
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
     if rescoped:
         return
+    a.pinned_since = rep.get("pinnedSince") if isinstance(rep.get("pinnedSince"), (int, float)) else None
+    a.unconnected_new = [p for p in rep.get("unconnectedNew") or [] if isinstance(p, str)]
+    a.unconnected_tries = rep.get("unconnectedTries") if isinstance(rep.get("unconnectedTries"), int) else 0
+    a.left_out = [p for p in rep.get("leftOut") or [] if isinstance(p, str)]
     if isinstance(rep.get("scopeFiles"), list):
         a.legacy_scope = set(rep["scopeFiles"])
     elif "noRecurse" not in rep:
@@ -1034,6 +1040,63 @@ def replay_recipe(a) -> None:
     if getattr(a, "legacy_scope", None) is not None:
         print(f"refresh: legacy report without a recorded recipe; keeping its {len(a.legacy_scope)} recorded files "
               "(pass --root/--exclude/--no-recurse to rescope)")
+
+
+def pinned_folders(scope) -> set:
+    """The folders a pinned file list connects: a file written later directly in one belongs to it."""
+    return {str(Path(f).parent) for f in scope}
+
+
+def pinned_since(cache: dict, scope) -> float | None:
+    """When a pinned list was connected: its oldest reviewed file's checkedAt (None if unknown)."""
+    times = []
+    for f in scope:
+        try:
+            times.append(datetime.fromisoformat((cache.get(f) or {})["checkedAt"]).timestamp())
+        except (KeyError, TypeError, ValueError):
+            continue
+    return min(times) if times else None
+
+
+# Rebuilt automatically (SKILL.md: keep them out with --exclude so they do not stale a pointer daily).
+AUTO_REBUILT = frozenset({"links.md", "index.md"})
+
+
+def born_after(path, since: float | None) -> bool:
+    """True for a file created after `since` that may join a pinned list. A legacy report never
+    recorded its --exclude, so a file already there at connect (left out on purpose) is not new,
+    nor is an auto-rebuilt index; with no known connect time nothing is. Birth time where the
+    system has one, else last change time."""
+    if since is None or Path(path).name.casefold() in AUTO_REBUILT:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return getattr(st, "st_birthtime", st.st_ctime) > since
+
+
+def growth(scope, paths, since: float | None, left_out, others) -> tuple[list, list]:
+    """(grown, left): of inventoried `paths`, the files that join a pinned list, and the ones that
+    were there at its connect (recorded as leftOut, so a later atomic save, which resets a birth
+    time, cannot bring them back). A file joins only directly in a folder the list connects that no
+    other pointer's files sit in (`others`: every other report's files), so a new note never lands
+    in a pointer whose principals differ from its neighbours'. refresh_changed.new_files uses this too."""
+    def real(folder) -> str:  # one spelling per folder: a symlinked or re-cased path is the same folder
+        return os.path.realpath(folder).casefold()
+    folders = {real(f) for f in pinned_folders(scope)}
+    shared = {real(Path(k).parent) for k in others}
+    grown, left = [], []
+    for p in map(str, paths):
+        parent = real(Path(p).parent)
+        if (p in scope or p in left_out or parent not in folders or parent in shared
+                or p in others or os.path.realpath(p) in others):
+            continue
+        if born_after(p, since):
+            grown.append(p)
+        elif since is not None and Path(p).name.casefold() not in AUTO_REBUILT:
+            left.append(p)
+    return grown, left
 
 
 def principal_name(name: str) -> str:
@@ -1060,7 +1123,7 @@ def main() -> int:
     ap.add_argument("--name", dest="names", action="append", default=[])
     ap.add_argument("--allow-target", dest="allow_targets", action="append", default=[],
                     help="folder a symlinked file may point into besides the roots (repeatable)")
-    ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=250)
+    ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=MAX_FILES)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
                     help="builtin: no model call, descriptions quoted from each file's headings (needs only the "
@@ -1178,6 +1241,20 @@ def main() -> int:
                             approvals, used)
     scope = getattr(a, "legacy_scope", None)
     if scope is not None:
+        # A note written later into a folder the pinned list already connects joins the scope
+        # (same holds, review and connect gate as every file); files in other folders stay out.
+        from refresh_changed import known_across
+        since = a.pinned_since = getattr(a, "pinned_since", None) or pinned_since(cache, scope)
+        grown, left = growth(scope, files + [h[0] for h in held], since, set(a.left_out),
+                             known_across(CACHE_DIR, skip=a.pointer))
+        a.left_out = sorted(p for p in set(a.left_out) | set(left) if Path(p).exists())
+        if len(grown) > a.max_files:
+            print(f"refresh: {len(grown)} new files in already-connected folders exceed --max-files "
+                  f"{a.max_files}; not added (pass --root/--exclude/--no-recurse to rescope)")
+        elif grown:
+            print(f"refresh: {len(grown)} new file(s) in already-connected folders join the pinned list")
+            scope = a.legacy_scope = scope | set(grown)
+            a.grown = grown
         files = [p for p in files if str(p) in scope]
         held = [(p, why) for p, why in held if str(p) in scope]
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
@@ -1428,6 +1505,8 @@ def main() -> int:
               "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
+              **({"pinnedSince": a.pinned_since} if getattr(a, "pinned_since", None) is not None else {}),
+              **({"leftOut": a.left_out} if getattr(a, "left_out", None) else {}),
               "approved": [str(p) for p in connect_set],
               "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
@@ -1475,6 +1554,13 @@ def main() -> int:
                 else:
                     misses.append((str(p), f"ranked {'#' + str(top.index(str(p)) + 1) if str(p) in top else 'absent'}; top={Path(top[0]).name if top else 'none'}"))
     report["connected"] = all_connected
+    unsent = [p for p in dict.fromkeys(getattr(a, "grown", []) + getattr(a, "unconnected_new", []))
+              if p in report["approved"]] if not all_connected else []
+    if unsent:
+        # refresh_changed.new_files keeps them new until they connect, for UNCONNECTED_TRIES refreshes:
+        # a connect that fails every time (a held payload, a refusal) must not eat the heal budget.
+        report["unconnectedNew"] = unsent
+        report["unconnectedTries"] = getattr(a, "unconnected_tries", 0) + 1 if getattr(a, "unconnected_new", []) else 1
     if all_connected and not a.no_shared:
         # Onboarding default: every connected principal also sees the fleet's shared sets
         # (shared knowledge, skills catalog). Zero cost: register only, no writer or Jev call.

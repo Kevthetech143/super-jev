@@ -1027,6 +1027,147 @@ def test_refresh_of_legacy_report_keeps_recorded_file_set(tmp_path, monkeypatch,
     assert "inventory: 2 files to prepare" in out and "REFUSED" not in out
 
 
+def test_refresh_of_legacy_report_admits_new_files_in_its_folders_with_every_check(tmp_path, monkeypatch, capsys):
+    # Fleet 2026-09 (amazon-bm-fb, helper): notes written into already connected folders were never
+    # found, since a legacy report is pinned to its file list. A new file in a pinned folder joins it,
+    # through the same secret scan, writer review and gate; one in a folder the list never had does not.
+    root = _big_root(tmp_path, 2)
+    (root / "new-note.md").write_text("# New note\nThe supplier is Acme.\n")
+    (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
+    (root / "sub").mkdir(); (root / "sub" / "elsewhere.md").write_text("# Elsewhere\n")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 2)
+    (cache_dir / "my-records-report.json").write_text(json.dumps(
+        {"pointer": "my-records", "roots": [str(root)], "principal": "alice",
+         "approved": [str(root / "f0.md"), str(root / "f1.md")], "exceptions": [], "held": []}))
+    drafted = []
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: drafted.extend(i["path"] for i in items) or
+                        {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
+    monkeypatch.setattr(pb, "gate", lambda path, claim, *a, **k: {"state": "SUPPORTED", "confidence": 0.95, "secs": 0})
+    monkeypatch.setattr(pb, "gate_many", lambda path, claims, *a, **k: [{"state": "SUPPORTED", "confidence": 0.95, "secs": 0} for _ in claims], raising=False)
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
+                                      "--refresh", "--no-connect", "--no-findability"])
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "refresh: 2 new file(s) in already-connected folders join the pinned list" in out
+    assert "inventory: 3 files to prepare, 1 held" in out
+    assert drafted == [str(root / "new-note.md")]
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert str(root / "new-note.md") in report["approved"]
+    assert [h[0] for h in report["held"]] == [str(root / "pw.md")]  # held, never approved
+    assert str(root / "sub" / "elsewhere.md") not in report["scopeFiles"]
+    assert str(root / "new-note.md") in report["scopeFiles"]  # stays in scope on the next refresh
+
+
+def test_legacy_refresh_never_grows_into_a_folder_another_pointer_shares(tmp_path, monkeypatch, capsys):
+    # Review 2026-09-28: two pointers pinned in one folder ("team" for alice+bob, "private" for alice);
+    # growing "team" must not move private.md, nor a new note alice wrote there, to where bob sees it.
+    root = _big_root(tmp_path, 2)
+    (root / "private.md").write_text("# Private\nalice only\n")
+    (root / "new-note.md").write_text("# New note\n")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 2, pointer="team")
+    (cache_dir / "team-report.json").write_text(json.dumps(
+        {"pointer": "team", "roots": [str(root)], "approved": [str(root / "f0.md"), str(root / "f1.md")]}))
+    (cache_dir / "private-report.json").write_text(json.dumps(
+        {"pointer": "private", "roots": [str(root)], "approved": [str(root / "private.md")]}))
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
+    monkeypatch.setattr(pb, "gate", lambda path, claim, *a, **k: {"state": "SUPPORTED", "confidence": 0.95, "secs": 0})
+    monkeypatch.setattr(pb, "gate_many", lambda path, claims, *a, **k: [{"state": "SUPPORTED", "confidence": 0.95, "secs": 0} for _ in claims], raising=False)
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "team", "--principal", "bob",
+                                      "--refresh", "--no-connect", "--no-findability"])
+    assert pb.main() == 0
+    assert "join the pinned list" not in capsys.readouterr().out
+    report = json.loads((cache_dir / "team-report.json").read_text())
+    for f in ("new-note.md", "private.md"):
+        assert str(root / f) not in report["approved"] + report["scopeFiles"]
+
+
+def test_a_new_file_whose_connect_failed_stays_new_until_it_connects(tmp_path, monkeypatch, capsys):
+    # Review 2026-09-28: the service never saw the file, so nothing else would mark its pointer stale.
+    import refresh_changed as rcm
+    root = _big_root(tmp_path, 1)
+    (root / "new-note.md").write_text("# New note\n")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 1)
+    (cache_dir / "my-records-report.json").write_text(json.dumps(
+        {"pointer": "my-records", "roots": [str(root)], "approved": [str(root / "f0.md")]}))
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
+    monkeypatch.setattr(pb, "gate", lambda path, claim, *a, **k: {"state": "SUPPORTED", "confidence": 0.95, "secs": 0})
+    monkeypatch.setattr(pb, "gate_many", lambda path, claims, *a, **k: [{"state": "SUPPORTED", "confidence": 0.95, "secs": 0} for _ in claims], raising=False)
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": False})
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
+                                      "--refresh", "--no-findability", "--no-shared"])
+    pb.main()
+    capsys.readouterr()
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["unconnectedNew"] == [str(root / "new-note.md")]
+    assert rcm.new_files(report, rcm.known_files(report)) == [str(root / "new-note.md")]
+    pb.main()  # fails again: already in the pinned list now, and still kept for the retry
+    capsys.readouterr()
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["unconnectedNew"] == [str(root / "new-note.md")] and report["unconnectedTries"] == 2
+    assert rcm.new_files(report, rcm.known_files(report)) == [str(root / "new-note.md")]
+    pb.main()  # a connect that fails every time stops being retried, so it cannot eat the heal budget
+    capsys.readouterr()
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["unconnectedTries"] == 3 and rcm.new_files(report, rcm.known_files(report)) == []
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": True})
+    pb.main()
+    capsys.readouterr()
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert "unconnectedNew" not in report and rcm.new_files(report, rcm.known_files(report)) == []
+
+
+def test_legacy_refresh_leaves_out_a_file_that_was_there_at_connect(tmp_path, monkeypatch, capsys):
+    # Review 2026-09-28: a legacy report never recorded its --exclude; links.md was left out on purpose.
+    root = _big_root(tmp_path, 2)
+    (root / "links.md").write_text("# Links\n")
+    cache_dir = tmp_path / "cache"
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    _seed_cache(root, cache_dir, 2)
+    assert not pb.born_after(root / "INDEX.md", 0)  # an auto-rebuilt index never joins, even when new
+    cp = cache_dir / "my-records.json"
+    cp.write_text(cp.read_text().replace("2026-01-01T00:00:00", "2999-01-01T00:00:00"))
+    (cache_dir / "my-records-report.json").write_text(json.dumps(
+        {"pointer": "my-records", "roots": [str(root)], "approved": [str(root / "f0.md"), str(root / "f1.md")]}))
+    monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
+                                      "--refresh", "--no-connect", "--no-findability"])
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "inventory: 2 files to prepare" in out and "join the pinned list" not in out
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert str(root / "links.md") not in report["scopeFiles"]
+    assert report["pinnedSince"] > 3e10  # the connect time is kept, so a later redraft cannot move it
+    # draft.md was there at connect too; recorded as left out, an atomic save (new birth time) cannot
+    # bring it back.
+    (root / "draft.md").write_text("# Draft\n")
+    assert pb.main() == 0
+    capsys.readouterr()
+    assert json.loads((cache_dir / "my-records-report.json").read_text())["leftOut"] == [str(root / "draft.md")]
+    rep = json.loads((cache_dir / "my-records-report.json").read_text())
+    rep["pinnedSince"] = 1  # as if every file on disk were born after the connect
+    (cache_dir / "my-records-report.json").write_text(json.dumps(rep))
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "join the pinned list" not in out
+
+
+def test_growth_sees_a_folder_shared_through_a_symlink(tmp_path):
+    # Review 2026-09-28: "team" pinned the folder through a link, "private" through its real path.
+    real = tmp_path / "real"; real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    for f in ("a.md", "b.md", "new.md"):
+        (real / f).write_text(f"# {f}\n")
+    team = {str(tmp_path / "link" / "a.md")}
+    assert pb.growth(team, [tmp_path / "link" / "new.md"], 1, set(), set())[0] == [str(tmp_path / "link" / "new.md")]
+    assert pb.growth(team, [tmp_path / "link" / "new.md"], 1, set(), {str(real / "b.md")}) == ([], [])
+
+
 def test_held_txt_written_with_masked_line_and_pattern_type(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
