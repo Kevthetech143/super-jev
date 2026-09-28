@@ -95,6 +95,24 @@ def test_uninstall_leaves_a_user_folder_in_prepare_cache(tmp_path, monkeypatch, 
     assert "left in place" in out and str(cache / "mine") in out
 
 
+def test_uninstall_removes_the_new_file_snapshots_but_not_a_user_folder_named_growth(tmp_path, monkeypatch, capsys):
+    # Review 9: prepare-cache/growth/<pointer>.json (file paths) was left behind by --uninstall.
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
+    cache = tmp_path / "prepare-cache"; cache.mkdir()
+    pb.take_snapshot("notes", set(), [], set(), cache)
+    assert (cache / "growth" / "notes.json").is_file()
+    monkeypatch.setattr(setup, "IN_REPO_LEFTOVERS", (cache,))
+    assert setup.main(["--uninstall"]) == 0
+    assert not cache.exists()
+    cache.mkdir(); (cache / "growth").mkdir(); (cache / "growth" / "mine.txt").write_text("user file")
+    (cache / setup.WRITTEN_MANIFEST).write_text("growth\n")
+    assert setup.main(["--uninstall"]) == 0
+    assert (cache / "growth" / "mine.txt").read_text() == "user file"
+    capsys.readouterr()
+
+
 # 4. the confirm floor is 0.85: a 0.83 near miss is not confirmed (the lookup may
 # still show it as "possible", see test_retrieval_recall.py), a 0.90 hit is
 @pytest.mark.parametrize("score,confirmed", [(0.83, False), (0.90, True)])
