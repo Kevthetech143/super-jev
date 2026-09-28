@@ -485,12 +485,16 @@ def has_secret(text: str) -> bool:
 # secret starts (a card number, a token, a password assignment, a key's BEGIN line) but not
 # its extent: the rest of it can sit beside the hit, on the lines after it (a wrapped token, a
 # key body, a concatenated value) or before it in a hunk. No span inside a file is provably
-# clean, so a diff is judged file by file: a file whose text scans as a secret is withheld
-# whole, real and fake values alike, and every other file is sent as it is. A value never runs
-# into another file. Claims and drafts are never masked (they are refused), and ask() keeps
-# its full scan.
+# clean, so a diff is judged file by file: every section of a file (a diff may show one file
+# twice, committed and uncommitted, or under an old and a new name) is withheld whole when any
+# of them scans as a secret, real and fake values alike, and every other file is sent as it is.
+# The promise is per file: a file's changes go out only when the scanner passes all of them.
+# A secret cut into two files, with no marker in the second, is out of reach of any per-file
+# scan, as it was before. Claims and drafts are never masked (they are refused), and ask()
+# keeps its full scan.
 SECRET_WITHHELD = "[secret-shaped text: {n} line(s) of this file withheld; nothing in them can be checked]"
 _FILE_START = "diff --git "
+_FILE_NAME_RE = re.compile(r"^(?:--- |\+\+\+ |rename from |rename to |copy from |copy to )(.+)$")
 
 
 def _flagged(text: str, luhn: bool) -> bool:
@@ -499,12 +503,26 @@ def _flagged(text: str, luhn: bool) -> bool:
     return has_secret(text) or (not luhn and card_hit(normalize_for_scan(text), False))
 
 
+def _file_keys(head: list) -> set:
+    """What ties diff sections to one file: the diff --git line, and every name in the header
+    (---, +++, rename and copy lines), with and without a one-letter a/, b/, i/, w/ prefix.
+    Sharing any key joins two sections; joining too much only withholds more."""
+    keys = {head[0]}
+    for line in head:
+        m = _FILE_NAME_RE.match(line)
+        if m:
+            name = m.group(1).rstrip("\t").strip('"')
+            if name != "/dev/null":
+                keys |= {name, re.sub(r"^[a-z]/", "", name)}
+    return keys
+
+
 def mask_secrets(text: str):
-    """(masked_text, withheld): a diff with each file whose text scans as a secret replaced by
-    its header lines (up to the first @@, when they are clean) and one SECRET_WITHHELD line;
-    withheld names those files. Text with no secret comes back as is. Returns (None, withheld)
-    when nothing judgeable is left: text that is not a diff, or a result that still scans as a
-    secret. The caller then drops or refuses it."""
+    """(masked_text, withheld): a diff with each file whose text scans as a secret (in any of
+    its sections) replaced by its header lines (up to the first @@, when they are clean) and one
+    SECRET_WITHHELD line per section; withheld names those files. Text with no secret comes back
+    as is. Returns (None, withheld) when nothing judgeable is left: text with no diff --git
+    line, or a result that still scans as a secret. The caller then drops or refuses it."""
     if not text or not has_secret(text):
         return text, []
     ends_in_newline = text.endswith("\n")
@@ -514,18 +532,34 @@ def mask_secrets(text: str):
         return None, ["the whole text"]
     luhn = not NON_ASCII_DIGIT_RE.search(text)
     bounds = ([0] if starts[0] else []) + starts + [len(lines)]
+    parts = [lines[a:b] for a, b in zip(bounds, bounds[1:])]
+    heads = [next((p[:k] for k, line in enumerate(p) if line.startswith("@@")), p)
+             if p[0].startswith(_FILE_START) else [] for p in parts]
+    group = list(range(len(parts)))
+
+    def root(k):
+        while group[k] != k:
+            group[k] = group[group[k]]
+            k = group[k]
+        return k
+
+    owner = {}
+    for k, head in enumerate(heads):
+        for key in _file_keys(head) if head else ():
+            group[root(k)] = root(owner.setdefault(key, k))
+    held = {root(k) for k, p in enumerate(parts) if _flagged("\n".join(p), luhn)}
     out, withheld = [], []
-    for a, b in zip(bounds, bounds[1:]):
-        part = lines[a:b]
-        if not _flagged("\n".join(part), luhn):
+    for k, (part, head) in enumerate(zip(parts, heads)):
+        if root(k) not in held:
             out += part
             continue
-        head = []
-        if part[0].startswith(_FILE_START):
-            head = next(([*part[:k]] for k, line in enumerate(part) if line.startswith("@@")), part[:1])
-            if any(_flagged(line, luhn) for line in head):
-                head = []
-        withheld.append(head[0].split(" b/", 1)[-1] if head else "a file")
+        if any(_flagged(line, luhn) for line in head):
+            head = []
+        name = next((m.group(1).rstrip("\t").strip('"') for line in reversed(head)
+                     if (m := _FILE_NAME_RE.match(line)) and "/dev/null" not in line), "a file")
+        name = re.sub(r"^[a-z]/", "", name)
+        if name not in withheld:
+            withheld.append(name)
         out += head + [SECRET_WITHHELD.format(n=len(part) - len(head))]
     masked = "\n".join(out) + ("\n" if ends_in_newline else "")
     return (None if has_secret(masked) else masked), withheld
@@ -533,7 +567,7 @@ def mask_secrets(text: str):
 
 # The WORD_RE/GENERIC_RE keyword checks above only fire in a key=value, key:value,
 # or "key is value" shape -- prose or a plain word is not a secret. A file NAME or
-# PATH is different: nobody writes "password: hunter2xyz" as a filename, they write
+# PATH is different: nobody writes a "password: <value>" line as a filename, they write
 # password-hunter2xyz-notes.md, so the same keywords glued to other characters with
 # a "-"/"_" joiner are treated as secret-shaped there. Requires a non-alnum (or
 # start-of-segment) boundary before the keyword (so "tokenizer.py" does not

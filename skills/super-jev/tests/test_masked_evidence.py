@@ -120,6 +120,46 @@ def test_no_part_of_a_secret_reaches_the_judge(name):
     assert out.endswith(PRODUCT)
 
 
+def test_a_file_shown_twice_is_withheld_in_every_section(tmp_path):
+    """build_cycle's worktree_diff joins the committed and the uncommitted diff, so a file
+    edited in both shows twice; the later section of a key's body has no BEGIN line of its own."""
+    sys.path.insert(0, str(SKILL.parent / "super-jev-build-cycle"))
+    bc = load("build_cycle_mask", SKILL.parent / "super-jev-build-cycle" / "build_cycle.py")
+    body = [f"{k:02d}" + KEY_BODY[k % 3][2:] for k in range(25)]
+    origin, wt = tmp_path / "origin", tmp_path / "wt"
+
+    def git(cwd, *args):
+        subprocess.run(["git", "-C", str(cwd), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                       check=True, capture_output=True)
+
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    (origin / "README").write_text("x\n")
+    git(origin, "add", ".")
+    git(origin, "commit", "-qm", "init")
+    subprocess.run(["git", "clone", "-q", str(origin), str(wt)], check=True)
+    (wt / "fx").mkdir()
+    (wt / "fx/key.pem").write_text("\n".join([PEM, *body, PEM_END]) + "\n")
+    (wt / "scan.py").write_text("def scan(t):\n    return card_hit(t)\n")
+    git(wt, "add", ".")
+    git(wt, "commit", "-qm", "add")
+    edited = body[:15] + [b[::-1] for b in body[15:19]] + body[19:]
+    (wt / "fx/key.pem").write_text("\n".join([PEM, *edited, PEM_END]) + "\n")
+    text = bc.worktree_diff(type("Ctx", (), {"dir": tmp_path})(), "t", str(wt)).read_text()
+    assert text.count("diff --git a/fx/key.pem") == 2 and pb.has_secret(text)
+    out, withheld = pb.mask_secrets(text)
+    assert out is not None and withheld == ["fx/key.pem"] and "return card_hit(t)" in out
+    assert not any(line in out for line in body + edited)
+
+
+def test_a_renamed_file_is_one_file():
+    renamed = ("diff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n"
+               "@@ -1 +1 @@\n-x\n+" + PEM + "\n")
+    later = "diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n@@ -5 +5 @@\n-y\n+" + KEY_BODY[0] + "\n"
+    out, withheld = pb.mask_secrets(renamed + later + PRODUCT)
+    assert KEY_BODY[0] not in out and withheld == ["new.txt"] and out.endswith(PRODUCT)
+
+
 def test_text_that_is_not_a_diff_is_not_judged():
     assert pb.mask_secrets(f"notes\nthe card is {CARD}\n") == (None, ["the whole text"])
 
