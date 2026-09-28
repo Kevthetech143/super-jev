@@ -297,3 +297,37 @@ def test_blank_only_sections_are_never_drafted(run):
     blank = [x for x in cache[str(big)]["sections"] if x.get("verdict") == "blank"]
     assert code == 0 and blank and not any(x["pass"] for x in blank)
     assert not any("lines-{}-".format(x["lines"][0]) in n for x in blank for n in run.drafted)
+
+
+def test_parts_count_a_sectioned_files_whole_bytes_once_per_part(tmp_path):
+    big = tmp_path / "big.md"
+    big.write_text("x\n" * 5000)  # 10,000 bytes
+    small = [tmp_path / f"s{i}.md" for i in range(4)]
+    for f in small:
+        f.write_text("y" * 1000)
+    units = [(big, i) for i in range(6)] + small
+    parts = pb.split_parts(units, 50, part_bytes=12_000)
+    # big (10,000, charged once) + 2 small files fill the first part; never 10,000 per section.
+    assert [len(p) for p in parts] == [8, 2]
+    for part in parts:
+        charged = {str(u[0] if isinstance(u, tuple) else u) for u in part}
+        assert sum(Path(f).stat().st_size for f in charged) <= 12_000
+    tail = pb.split_parts([small[0], small[1], (big, 0), (big, 1)], 50, part_bytes=11_000)
+    assert tail == [[small[0], small[1]], [(big, 0), (big, 1)]]
+
+
+def test_a_refused_preview_fails_its_part_without_crashing(run, monkeypatch):
+    big = run.root / "big.py"
+    big.write_text(code_file())
+    monkeypatch.setattr(path_connect, "MAX_BYTES", 1000)  # the connector refuses: byte-limit
+    code, rep, cache = run()
+    assert code == 1 and not rep["connected"] and not any(p["connected"] for p in rep["parts"])
+
+
+def test_allow_held_never_sections_a_big_file_with_a_secret_like_name(run):
+    big = run.root / "password-hunter2xyz-notes.py"
+    big.write_text(code_file())
+    code, rep, cache = run("--allow-held")
+    assert str(big) not in rep["approved"] and str(big) not in cache
+    assert "never connected in sections" in dict(rep["held"])[str(big)]
+    assert not any("password-hunter2xyz" in n for n in run.drafted)

@@ -962,16 +962,22 @@ def secret_detail(p: Path):
     return None
 
 
-def split_parts(ordered: list, limit: int, part_bytes: int = None, size_of=None) -> list:
-    """Files (or other connect units, sized by `size_of`) in order, cut into parts of at most
-    `limit` units and `part_bytes` bytes (PART_BYTES)."""
+def split_parts(ordered: list, limit: int, part_bytes: int = None) -> list:
+    """Connect units in order, cut into parts of at most `limit` units and `part_bytes` bytes
+    (PART_BYTES). A unit is a file path, or (path, i) for section i of a file connected in
+    sections. Bytes are counted as the connector counts them: a file's whole size, once per
+    part, however many of its sections that part holds."""
     part_bytes = PART_BYTES if part_bytes is None else part_bytes
-    parts, cur, size = [], [], 0
-    for p in ordered:
-        n = size_of(p) if size_of else Path(p).stat().st_size if Path(p).exists() else 0
-        if cur and (len(cur) >= limit or size + n > part_bytes):
-            parts.append(cur); cur, size = [], 0
-        cur.append(p); size += n
+    parts, cur, size, charged = [], [], 0, set()
+    for u in ordered:
+        p = u[0] if isinstance(u, tuple) else u
+        n = Path(p).stat().st_size if Path(p).exists() else 0
+        if cur and (len(cur) >= limit or (str(p) not in charged and size + n > part_bytes)):
+            parts.append(cur); cur, size, charged = [], 0, set()
+        if str(p) not in charged:
+            size += n
+            charged.add(str(p))
+        cur.append(u)
     if cur:
         parts.append(cur)
     return parts
@@ -1179,7 +1185,8 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
             widen_to = list(principals)
             req["principals"] = seen_by
     prev = memory(req)
-    if prev.get("status") != "preparation-required":
+    if prev.get("status") != "preparation-required" or not isinstance(prev.get("sources"), list):
+        # A refusal (byte-limit, secret-held ...) is also "preparation-required", without sources.
         print(f"connect preview failed for {pointer}:", json.dumps(prev)[:300])
         return {"connected": False}
     # The backend echoes each path in realpath form: a symlinked file (a skill folder whose SKILL.md
@@ -1776,15 +1783,15 @@ def main() -> int:
             continue
         b = p.read_bytes()
         text = b.decode("utf-8", "replace")
-        if has_secret(text) and not len(b) > SECTION_MAX_BYTES:
-            # Secret-like text holds a file over the ceiling whole, even with --allow-held (which,
-            # as before, never lifts a size hold): no section of it is drafted or sent.
+        if has_secret(text) or path_has_secret(p.name) or path_has_secret(p.resolve().name):
+            # Secret-like text or name holds a file over the ceiling whole, even with --allow-held
+            # (which, as before, never lifts a size hold): no section of it is drafted or sent.
             unsafe.add(str(p))
             held[:] = [(h, w) for h, w in held if h != str(p)] + [
-                (str(p), "card/password-like text in a file over the size ceiling; never connected in sections, "
-                         "even with --allow-held: review it, then remove or move the value")]
+                (str(p), "card/password-like text or secret-keyword-like name in a file over the size ceiling; "
+                         "never connected in sections, even with --allow-held: review it, then remove or move the value")]
             write_held_txt(a.pointer, held)
-            print(f"  HELD  {relstr(p, roots)}  (card/password-like text; a file over the ceiling is never "
+            print(f"  HELD  {relstr(p, roots)}  (secret-like text or name; a file over the ceiling is never "
                   "connected in sections while it holds any)")
             continue
         if len(b) > SECTION_MAX_BYTES:
@@ -2053,11 +2060,7 @@ def main() -> int:
              ([(p, i) for i, x in enumerate(cache[str(p)]["sections"]) if x.get("pass")]
               if "sections" in cache[str(p)] else [p])]
 
-    def unit_bytes(u) -> int:
-        if isinstance(u, tuple):
-            return cache[str(u[0])]["sections"][u[1]].get("bytes", 0)
-        return Path(u).stat().st_size if Path(u).exists() else 0
-    parts = split_parts(units, a.limit, size_of=unit_bytes)
+    parts = split_parts(units, a.limit)
     if len(parts) > 1:
         counted = f" ({len(units)} connect units, one per section)" if len(units) != len(ordered) else ""
         print(f"splitting {len(ordered)} approved files{counted} into {len(parts)} parts of at most {a.limit}")

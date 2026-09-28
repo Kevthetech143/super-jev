@@ -60,7 +60,7 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 
 - **Symptom:** `skills/super-jev/superjev.py` is one 13,355-line file, far over the 250,000-byte size ceiling.
 - **Cause:** the superjev skill is still a monolith; the split into one module per door is the first 1.1 job.
-- **Workaround:** none needed — behavior is unaffected; the file is exempt in gate.json allow_paths, and a connect takes it in sections (files up to 2,000,000 bytes connect as line-range sections; see `references/connectors.md`).
+- **Workaround:** none needed — behavior is unaffected; the file is exempt in gate.json allow_paths. Files up to 2,000,000 bytes now connect as line-range sections (see `references/connectors.md`), but only when no line looks secret-like: an installed `superjev.py` with a comment naming an API key variable, and `tests/test_superjev.py` with its fake card fixtures, are still held whole by the secret scan.
 
 ## 11. Env var names from the author's harness
 **Symptom:** `superjev.py` reads `CLAW4MAC_SESSION_ID`, `CLAW4MAC_BOT_ID` and `CLAUDE_BOT_ID` to derive a principal name.
