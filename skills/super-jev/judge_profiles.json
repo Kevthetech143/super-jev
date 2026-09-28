@@ -1,0 +1,15 @@
+{
+ "_comment": "One judge profile per judge model; every size limit tied to the judge is derived from the selected one (judge_profile.py for Python, src/judge-profile.ts for Node, which apply the same rules). Pick one with SUPERJEV_JUDGE_PROFILE (default below). window_tokens is the judge's hard input ceiling for the state plus the longest question; max_questions_per_call is how many questions one call may carry; question_kinds are the answer shapes the judge supports; input_usd_per_mtok and output_usd_per_mtok are its published prices per million tokens.",
+ "default": "typesafe-jev",
+ "profiles": {
+  "typesafe-jev": {
+   "label": "TypeSafe Jev",
+   "_source": "window: CAPABILITIES.md 'HARD INPUT CEILING' (measured 32,768); questions: the per-call cap every batcher plans under; price: docs.typesafe.ai, checked 2026-09-16 (input $0.042/Mtok, output not billed)",
+   "window_tokens": 32768,
+   "max_questions_per_call": 255,
+   "question_kinds": ["noul", "choice", "score"],
+   "input_usd_per_mtok": 0.042,
+   "output_usd_per_mtok": 0
+  }
+ }
+}
