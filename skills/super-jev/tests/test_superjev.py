@@ -12299,3 +12299,32 @@ def test_gate_over_the_part_cap_sends_nothing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sj.subprocess, "run", door)
     assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 1
     assert not door.calls and "SUPERJEV_MAX_PARTS=2" in capsys.readouterr().out
+
+
+def test_gate_split_table_with_a_repeated_row_is_unreadable(tmp_path, monkeypatch, capsys):
+    table = _table([("c1", "SUPPORTED", 0.95)]) + "  c1   NOT_SUPPORTED  0.90  claim c1\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=table))
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 1
+    capsys.readouterr()
+
+
+class HalfDoor(FakeDoor):
+    """c1 SUPPORTED in the first part only, NOT_SUPPORTED (not CONTRADICTED) after."""
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        self.calls.append({"cmd": cmd})
+        v = "SUPPORTED" if len(self.calls) == 1 else "NOT_SUPPORTED"
+        return subprocess.CompletedProcess(cmd, 0 if v == "SUPPORTED" else 3,
+                                           stdout=_table([("c1", v, 0.95)]), stderr="")
+
+
+@pytest.mark.parametrize("claim, code", [
+    ("no file in this log calls eval on user input", 3),
+    ("every row of the big file is filler text", 3),
+    ("the big file holds filler rows", 0)])
+def test_gate_split_scope_claim_needs_every_part(tmp_path, monkeypatch, capsys, claim, code):
+    """The outside review: an absence or universal claim was SUPPORTED by a part
+    lacking the code while the part holding it said only NOT_SUPPORTED."""
+    monkeypatch.setattr(sj.subprocess, "run", HalfDoor())
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", claim]) == code
+    capsys.readouterr()
