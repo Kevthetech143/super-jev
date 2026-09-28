@@ -168,9 +168,10 @@ fences; top-level `def`/`class`/`function` lines with their decorators), about
 6-20 KB each. Each section is drafted, gated and described on its own like a
 file, and connected as the file's path plus its `lines` (`[first, last]`); the
 connector reads those lines from the unchanged file, secret-scans them, and
-publishes them only under their own reviewed `viewSHA`. The same secret scan,
-name, folder and text checks apply to the whole file first (one secret-like
-line still holds the whole file). A cut falls where a heading's or
+publishes them only under their own reviewed `viewSHA`. `prepare_bulk` runs the
+same secret scan, name, folder and text checks on the whole file first (one
+secret-like line or a secret-like name still holds the whole file, even with
+`--allow-held`); the connector itself scans each section's own text. A cut falls where a heading's or
 declaration's own text hashes to a fixed pattern once a section holds 6 KB, so
 an edit moves only the cuts around it: a refresh re-gates only the sections
 whose text changed (cached by the section text's sha256, wherever its lines
