@@ -4,7 +4,8 @@
 A changed or deleted connected file stales its whole pointer (preparation-required) until
 refreshed, and a file added inside a connected folder stays invisible until the pointer is
 re-prepared. This walks every prepare-cache/<pointer>-report.json, compares each approved file's
-sha256 with the cache, re-walks the recorded recipe for in-scope files the pointer has never seen,
+sha256 with the cache, re-walks the recorded recipe for in-scope files the pointer has never seen
+(for a legacy report pinned to its file list: new files directly in a folder that list connects),
 and runs prepare_bulk.py --refresh with the pointer's recorded roots, principal, excludes and
 --no-recurse ONLY for pointers with a change or a new file. Unchanged pointers are not touched,
 so their approved answers survive (a reconnect rotates them).
@@ -17,7 +18,7 @@ prepare_bulk once by hand for those. A pointer with a prepare-cache/<pointer>.js
 matching <pointer>-report.json is listed as NEEDS MANUAL PREPARE, not skipped silently.
 Exit 1 if any refresh failed.
 """
-import argparse, contextlib, hashlib, io, json, os, subprocess, sys
+import argparse, contextlib, fnmatch, hashlib, io, json, os, subprocess, sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -46,27 +47,103 @@ def known_files(report: dict) -> set[str]:
     return known | {os.path.realpath(k) for k in known}
 
 
-def new_files(report: dict, known: set) -> list[str]:
+def known_across(cache_dir: Path = None, skip: str = None) -> set[str]:
+    """known_files over every report in the cache (but `skip`'s own): a file another pointer
+    already connects is never new to this one, and never moves into it."""
+    known = set()
+    for rp in sorted((cache_dir or CACHE_DIR).glob("*-report.json")):
+        try:
+            report = json.loads(rp.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(report, dict) and report.get("pointer") != skip:
+            known |= known_files(report)
+    return known
+
+
+def pinned_list(report: dict) -> list | None:
+    """The file list a legacy report is pinned to (prepare_bulk.replay_recipe), or None for a recipe."""
+    if isinstance(report.get("scopeFiles"), list):
+        return report["scopeFiles"]
+    if "noRecurse" not in report:
+        return [str(e[0] if isinstance(e, list) else e)
+                for k in ("approved", "exceptions", "held") for e in report.get(k) or []]
+    return None
+
+
+def _maybe_new(entry, extensions: tuple, names: list, known: set) -> bool:
+    """A file in a pinned folder that the inventory might admit and no report accounts for. Names
+    the inventory always skips (dotfiles, *.bak*, logins, *-secret) never force a walk."""
+    name = entry.name.casefold()
+    stem = Path(name).stem
+    if (not name.endswith(extensions) or name.startswith(".") or ".bak" in name or stem == "logins"
+            or stem.endswith("-secret") or entry.path in known or os.path.realpath(entry.path) in known):
+        return False
+    if names and not any(fnmatch.fnmatch(name, n.lower()) for n in names):
+        return False
+    return entry.is_file() and entry.stat().st_size > 0
+
+
+def new_files(report: dict, known: set, reports: list = None) -> list[str]:
     """In-scope files on disk that no pointer has seen: a note added to a connected folder after
     its connect (or a folder the old walk missed) stayed unfindable until someone reconnected by
-    hand. Uses the recorded recipe; a legacy report pinned to its file list has no new files.
-    `known` spans every report, so a file another pointer already connects is not new."""
-    if not report.get("roots") or "noRecurse" not in report or isinstance(report.get("scopeFiles"), list):
+    hand. Uses the recorded recipe; a legacy report pinned to its file list gains only what
+    prepare_bulk.growth admits (created after its connect, directly in a folder the list connects
+    and no other pointer shares). `known` spans every report, so a file another pointer already
+    connects is not new; `reports` (every report, loaded from CACHE_DIR when not given) names the
+    other pointers' files."""
+    if not report.get("roots"):
         return []
-    from prepare_bulk import inventory
+    from prepare_bulk import (CONNECTABLE_EXTENSIONS, MAX_FILES, UNCONNECTED_TRIES, born_after, growth,
+                              inventory, pinned_folders, pinned_since)
+    # New files a refresh admitted but could not connect: the service never saw them, so nothing
+    # else marks the pointer stale; they stay new for a few refreshes, until a connect succeeds.
+    retry = [p for p in report.get("unconnectedNew") or [] if os.path.isfile(p)
+             and (report.get("unconnectedTries") or 1) < UNCONNECTED_TRIES]
+    extensions = tuple(report.get("extensions") or CONNECTABLE_EXTENSIONS)
+    pinned = pinned_list(report)
+    folders = pinned_folders(pinned) if pinned is not None else None
+    since, left_out = None, set(report.get("leftOut") or [])
+    if folders is not None:
+        since = report.get("pinnedSince")
+        if not isinstance(since, (int, float)):
+            try:
+                since = pinned_since(json.loads((CACHE_DIR / f"{report.get('pointer')}.json").read_text()), pinned)
+            except (OSError, ValueError, AttributeError):
+                since = None
+        if not any(_maybe_new(e, extensions, report.get("names"), known) and e.path not in left_out
+                   and born_after(e.path, since)
+                   for d in folders if os.path.isdir(d) for e in os.scandir(d)):
+            return retry  # a pinned folder holds nothing new: skip walking the whole root
     roots = [Path(r) for r in report["roots"] if Path(r).is_dir()]
     with contextlib.redirect_stdout(io.StringIO()):
         files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"), False,
-                                report.get("names"), report.get("allowTargets"))
-    return [str(p) for p in files + [h[0] for h in held]
-            if str(p) not in known and os.path.realpath(p) not in known]
+                                report.get("names"), report.get("allowTargets"), extensions)
+    found = [str(p) for p in files + [h[0] for h in held]]
+    if folders is not None:
+        if reports is None:
+            reports = []
+            for rp in sorted(CACHE_DIR.glob("*-report.json")):
+                try:
+                    reports.append(json.loads(rp.read_text()))
+                except (OSError, ValueError):
+                    continue
+        others = set().union(*(known_files(r) for r in reports
+                               if isinstance(r, dict) and r.get("pointer") != report.get("pointer")))
+        found = growth(set(pinned), found, since, left_out, others)[0]
+        if len(found) > MAX_FILES:  # prepare_bulk would not add them
+            return retry
+    return retry + [p for p in found if p not in known and os.path.realpath(p) not in known and p not in retry]
 
 
-def prepare_args(report: dict) -> list[str] | None:
+def prepare_args(report: dict, asker: str = None) -> list[str] | None:
     # "principals" is the current field (every principal the pointer is registered for, so a
     # --refresh repeats them all and never narrows the pointer's scope); "principal" is the
     # older single-value field, still read for reports written before this field existed.
-    principals = report.get("principals") or ([report["principal"]] if report.get("principal") else [])
+    # `asker` is the agent whose lookup sees this pointer (auto_heal), used only when the report
+    # records no principal: connect_part widens a refresh to every registered principal.
+    principals = (report.get("principals") or ([report["principal"]] if report.get("principal") else [])
+                  or ([asker] if asker else []))
     if not principals or not report.get("roots"):
         return None
     args = []
@@ -110,12 +187,12 @@ def main(argv=None) -> int:
         cp = CACHE_DIR / f"{name}.json"
         cache = json.loads(cp.read_text()) if cp.is_file() else {}
         changed = changed_files(report, cache)
-        added = new_files(report, known)
+        added = new_files(report, known, [r for r, _ in reports])
         if not changed and not added:
             continue
         args = prepare_args(report)
         if args is None:
-            print(f"SKIP  {name}: {len(changed)} changed, but its report has no recorded principal; re-run prepare_bulk once by hand")
+            print(f"SKIP  {name}: {len(changed)} changed, {len(added)} new, but its report has no recorded principal; re-run prepare_bulk once by hand")
             continue
         if a.writer:
             args += ["--writer", a.writer]
