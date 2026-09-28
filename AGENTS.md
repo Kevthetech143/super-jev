@@ -95,10 +95,10 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 
 ## Before real work: preflight, remember vs. one-off, claims, and the build cycle
 
-- **Check readiness first, for free.** `ask.py --principal me --preflight` reports connections
-  ready and per-folder coverage with no paid call. Add `--about "the work"` for what's already
-  known (tried before, rules, traps, files) and `--skill "what a new skill would do"` to find an
-  existing skill before building one.
+- **Check readiness first.** `ask.py --principal me --preflight` reports connections ready and
+  per-folder coverage with no paid call. Add `--about "the work"` for what's already known (4 paid
+  asks: tried before, rules, traps, files) or `--skill "what a new skill would do"` (one paid ask)
+  to find an existing skill before building one — both cost a call, the base preflight does not.
 - **Remember vs. one-off.** Connect a folder (step 4) only if you will ask it more than once. For
   a one-off file, a diff, or a worker's report, skip connecting and check it directly:
   `dispatch.py check FILE... --claim "..."` or `dispatch.py verify REPORT --worktree DIR`.
