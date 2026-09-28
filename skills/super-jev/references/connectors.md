@@ -162,10 +162,12 @@ operator decision for one run (never replayed); it never lifts the size-ceiling 
 `--approve-held PATH` (repeatable) admits one reviewed held file and records
 `{path, sha256}` as `approvedHeld` in the report; `--refresh` and auto-heal
 replay it only while the file's bytes match, otherwise it is held again with
-a reason naming the old approval. It also admits a size-held file up to
+a reason naming the old approval (the hash is rechecked before
+gating, caching and connecting, so a mid-run edit is held). It also admits a size-held file up to
 1,000,000 bytes (gated in parts); credential/key suffixes can never be approved.
 A backslash-escaped quote before a placeholder (`KEY=\"$(cat file)\"` inside a
-code string) counts as a plain quote, so it is not held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
+code string) counts as a plain quote, so it is not held; after an escaped quote
+only `$(`, `${` and `<` are placeholders, so a literal `\"$3cret9\"` is held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,

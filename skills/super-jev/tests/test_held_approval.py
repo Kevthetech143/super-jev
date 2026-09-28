@@ -37,6 +37,11 @@ REAL = [
     "password=" + BS + '"' + "hunter2" + "xyz9" + BS + '"',
     "api_key=" + BS + "'" + "Zx9Qp2Lm8Rt4Vb6Nc1Hs3Kd7" + BS + "'",
     "API_KEY=" + BS + '"' + "hunter2" + "xyz9" + BS + '"',
+    # A literal value that merely starts with $ is not placeholder syntax ($(...) or ${...}).
+    "password=" + BS + '"' + "$3cret!" + "Pass9" + BS + '"',
+    "password=" + BS + '"' + "$uper" + "Secret9" + BS + '"',
+    "API_KEY=" + BS + '"' + "$9qP7vK2" + "mR8wL6z" + BS + '"',
+    "api_key=" + BS + "'" + "$abc" + "Def123" + BS + "'",
 ]
 
 
@@ -163,3 +168,28 @@ def test_unheld_or_unknown_path_is_not_recorded(run, capsys):
     code, rep = run("--approve-held", str(run.root / "ok.py"))
     assert code == 0 and not rep.get("approvedHeld")
     assert "not held" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("stage", ["inventory", "excerpt"])
+def test_approved_file_edited_after_its_hash_check_is_held_not_cached(run, monkeypatch, stage):
+    f = run.root / "fixture.py"
+    f.write_text(SECRETISH)
+    code, rep = run("--approve-held", str(f))
+    reviewed = _sha(f)
+    f.write_text(SECRETISH + "# second review\n")
+    code, rep = run("--approve-held", str(f))  # re-approved: next refresh must draft it again
+    reviewed = _sha(f)
+    real = getattr(pb, stage)
+
+    def edit_after(*a, **k):
+        out = real(*a, **k)
+        f.write_text(SECRETISH + "# unreviewed edit\n")
+        return out
+    monkeypatch.setattr(pb, stage, edit_after)
+    (run.root.parent / "cache" / "code.json").unlink()  # force the writer and cache stages
+    code, rep = run(refresh=True)
+    cache = json.loads((run.root.parent / "cache" / "code.json").read_text())
+    assert str(f) not in rep["approved"] and str(f) not in cache
+    why = dict(rep["held"])[str(f)]
+    assert "changed since its --approve-held review" in why and reviewed[:12] in why
+    assert rep["approvedHeld"] == [{"path": str(f), "sha256": reviewed}]

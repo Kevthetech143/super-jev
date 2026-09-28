@@ -42,5 +42,6 @@ test('an escaped quote before a placeholder is not a secret; a real value after 
   const q = '\\"';
   for (const t of [`export TYPESAFE_API_KEY=${q}$(cat /path/to/key-file)${q}`, `API_KEY=${q}\${VAR}${q}`,
     "api_key=\\'<your key>\\'", `password=${q}$(pass show mail)${q}`]) assert.equal(hasSecret(t), false, t);
-  for (const t of [`API_KEY=${q}sk-live-9fQ2xZ7pL0aBcD3eF4${q}`, `password=${q}hunter2xyz9${q}`]) assert.equal(hasSecret(t), true, t);
+  for (const t of [`API_KEY=${q}sk-live-9fQ2xZ7pL0aBcD3eF4${q}`, `password=${q}hunter2xyz9${q}`,
+    `password=${q}$3cret!Pass9${q}`, `password=${q}$uperSecret9${q}`, `API_KEY=${q}$9qP7vK2mR8wL6z${q}`]) assert.equal(hasSecret(t), true, t);
 });
