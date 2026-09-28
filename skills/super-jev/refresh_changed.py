@@ -18,7 +18,7 @@ prepare_bulk once by hand for those. A pointer with a prepare-cache/<pointer>.js
 matching <pointer>-report.json is listed as NEEDS MANUAL PREPARE, not skipped silently.
 Exit 1 if any refresh failed.
 """
-import argparse, contextlib, fnmatch, hashlib, io, json, os, subprocess, sys
+import argparse, contextlib, fnmatch, hashlib, io, json, os, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -81,69 +81,115 @@ def _maybe_new(entry, extensions: tuple, names: list, known: set) -> bool:
         return False
     if names and not any(fnmatch.fnmatch(name, n.lower()) for n in names):
         return False
-    return entry.is_file() and entry.stat().st_size > 0
+    try:
+        return entry.is_file() and entry.stat().st_size > 0
+    except OSError:  # removed or renamed since the listing
+        return False
 
 
-def new_files(report: dict, known: set, reports: list = None) -> list[str]:
+def _entries(folder) -> list:
+    """A folder's entries; an unreadable folder (permissions, macOS privacy) has none, never a crash."""
+    try:
+        with os.scandir(folder) as it:
+            return list(it)
+    except OSError:
+        return []
+
+
+def _reports(reports: list = None) -> list:
+    if reports is not None:
+        return reports
+    out = []
+    for rp in sorted(CACHE_DIR.glob("*-report.json")):
+        try:
+            out.append(json.loads(rp.read_text()))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _others(report: dict, reports: list) -> set:
+    return set().union(*(known_files(r) for r in reports
+                         if isinstance(r, dict) and r.get("pointer") != report.get("pointer")))
+
+
+def new_files(report: dict, known: set, reports: list = None, snapshot: bool = True) -> list[str]:
     """In-scope files on disk that no pointer has seen: a note added to a connected folder after
     its connect (or a folder the old walk missed) stayed unfindable until someone reconnected by
-    hand. Uses the recorded recipe; a legacy report pinned to its file list gains only what
-    prepare_bulk.growth admits (created after its connect, directly in a folder the list connects
-    and no other pointer shares). `known` spans every report, so a file another pointer already
-    connects is not new; `reports` (every report, loaded from CACHE_DIR when not given) names the
-    other pointers' files."""
+    hand. Uses the recorded recipe. A legacy report pinned to its file list gains only what
+    prepare_bulk.growth admits: files created after its growth snapshot (taken here the first time,
+    unless `snapshot` is False) in a folder that held nothing outside the list then and that no
+    other pointer shares. `known` spans every report, so a file another pointer already connects is
+    not new; `reports` (every report, loaded from CACHE_DIR when not given) names the other
+    pointers' files."""
     if not report.get("roots"):
         return []
     from prepare_bulk import (CONNECTABLE_EXTENSIONS, MAX_FILES, UNCONNECTED_TRIES, born_after, growth,
-                              inventory, pinned_folders, pinned_since)
+                              inventory, pinned_folders, read_snapshot, take_snapshot, vault_folder)
     # New files a refresh admitted but could not connect: the service never saw them, so nothing
     # else marks the pointer stale; they stay new for a few refreshes, until a connect succeeds.
     retry = [p for p in report.get("unconnectedNew") or [] if os.path.isfile(p)
              and (report.get("unconnectedTries") or 1) < UNCONNECTED_TRIES]
     extensions = tuple(report.get("extensions") or CONNECTABLE_EXTENSIONS)
+    # A vault folder (documents/, profile/ ...) never takes in new files on its own, so it is never
+    # listed or walked for them: a root inside one (documents/<person>/medical, a recipe or a pinned
+    # report alike) has nothing new here; a person refreshes it by hand.
+    if any(vault_folder(r) for r in report["roots"]):
+        return retry
     pinned = pinned_list(report)
     folders = pinned_folders(pinned) if pinned is not None else None
-    since, left_out = None, set(report.get("leftOut") or [])
     if folders is not None:
-        since = report.get("pinnedSince")
-        if not isinstance(since, (int, float)):
-            try:
-                since = pinned_since(json.loads((CACHE_DIR / f"{report.get('pointer')}.json").read_text()), pinned)
-            except (OSError, ValueError, AttributeError):
-                since = None
-        if not any(_maybe_new(e, extensions, report.get("names"), known) and e.path not in left_out
-                   and born_after(e.path, since)
-                   for d in folders if os.path.isdir(d) for e in os.scandir(d)):
-            return retry  # a pinned folder holds nothing new: skip walking the whole root
+        folders = {d for d in folders if not vault_folder(d)}
+        if not folders:
+            return retry
+    snap = read_snapshot(report.get("pointer"), CACHE_DIR) if folders is not None else None
+    if folders is not None and snap is not None:
+        present = set(snap["present"])
+        if not any(_maybe_new(e, extensions, report.get("names"), known) and e.path not in present
+                   and born_after(e.path, snap["since"])
+                   for d in folders for e in _entries(d)):
+            return retry  # nothing created in a pinned folder since the snapshot: skip the walk
+    elif folders is not None and not snapshot:
+        return retry
     roots = [Path(r) for r in report["roots"] if Path(r).is_dir()]
+    walked_at = time.time()
     with contextlib.redirect_stdout(io.StringIO()):
         files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"), False,
                                 report.get("names"), report.get("allowTargets"), extensions)
     found = [str(p) for p in files + [h[0] for h in held]]
     if folders is not None:
-        if reports is None:
-            reports = []
-            for rp in sorted(CACHE_DIR.glob("*-report.json")):
-                try:
-                    reports.append(json.loads(rp.read_text()))
-                except (OSError, ValueError):
-                    continue
-        others = set().union(*(known_files(r) for r in reports
-                               if isinstance(r, dict) and r.get("pointer") != report.get("pointer")))
-        found = growth(set(pinned), found, since, left_out, others)[0]
+        others = _others(report, _reports(reports))
+        if snap is None:  # first look: everything outside the list now waits for a person
+            take_snapshot(report.get("pointer"), set(pinned), found, others, CACHE_DIR, since=walked_at,
+                          roots=report["roots"])  # none while a root or pinned folder is missing
+            return retry
+        found = growth(set(pinned), found, snap, others)
         if len(found) > MAX_FILES:  # prepare_bulk would not add them
             return retry
     return retry + [p for p in found if p not in known and os.path.realpath(p) not in known and p not in retry]
+
+
+def waiting(report: dict) -> list[str]:
+    """Files a legacy pinned pointer's snapshot found outside its list that are still outside it."""
+    from prepare_bulk import read_snapshot, vault_folder, waiting_files
+    if any(vault_folder(r) for r in report.get("roots") or []):
+        return []  # never grows on its own, so nothing waits on a person either
+    pinned = pinned_list(report)
+    snap = read_snapshot(report.get("pointer"), CACHE_DIR) if pinned is not None else None
+    return waiting_files(snap, set(pinned)) if snap else []
 
 
 def prepare_args(report: dict, asker: str = None) -> list[str] | None:
     # "principals" is the current field (every principal the pointer is registered for, so a
     # --refresh repeats them all and never narrows the pointer's scope); "principal" is the
     # older single-value field, still read for reports written before this field existed.
-    # `asker` is the agent whose lookup sees this pointer (auto_heal), used only when the report
-    # records no principal: connect_part widens a refresh to every registered principal.
-    principals = (report.get("principals") or ([report["principal"]] if report.get("principal") else [])
-                  or ([asker] if asker else []))
+    # `asker` is the agent whose lookup sees this pointer, given by auto_heal only for a new-file
+    # refresh and used only when the report records no principal; it is passed with
+    # --asker-fallback, so prepare_bulk does not record it (changed files still skip such a report).
+    # connect_part keeps every principal the pointer is registered for.
+    principals = report.get("principals") or ([report["principal"]] if report.get("principal") else [])
+    fallback = not principals and bool(asker)
+    principals = principals or ([asker] if asker else [])
     if not principals or not report.get("roots"):
         return None
     args = []
@@ -160,7 +206,7 @@ def prepare_args(report: dict, asker: str = None) -> list[str] | None:
     args += ["--pointer", report["pointer"]]
     for p in principals:
         args += ["--principal", p]
-    return args + ["--refresh"]
+    return args + ["--refresh"] + (["--asker-fallback"] if fallback else [])
 
 
 def main(argv=None) -> int:
@@ -187,7 +233,16 @@ def main(argv=None) -> int:
         cp = CACHE_DIR / f"{name}.json"
         cache = json.loads(cp.read_text()) if cp.is_file() else {}
         changed = changed_files(report, cache)
-        added = new_files(report, known, [r for r, _ in reports])
+        try:
+            added = new_files(report, known, [r for r, _ in reports], snapshot=not a.dry_run)
+        except OSError as e:  # one unreadable folder must not stop the other pointers' refreshes
+            print(f"NOTE  {name}: could not look for new files ({e.__class__.__name__}); changed files still count")
+            added = []
+        for w in waiting(report)[:1]:
+            n = len(waiting(report))
+            print(f"WAITING {name}: {n} file(s) were in its folders before new-file pickup started and are "
+                  f"not in it ({Path(w).name}{', ...' if n > 1 else ''}); check each, then run prepare_bulk.py "
+                  f"--pointer {name} --principal AGENT --refresh --admit PATH (their folders take in new notes after)")
         if not changed and not added:
             continue
         args = prepare_args(report)

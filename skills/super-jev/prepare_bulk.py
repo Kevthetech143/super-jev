@@ -90,7 +90,7 @@ A label is only as true as the file it was drafted and gated from; as_of shows s
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
 import argparse, fnmatch, functools, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -196,8 +196,8 @@ CACHE_DIR = HERE / "prepare-cache"
 WRITTEN_MANIFEST = ".superjev-written"
 
 
-def _record_written(path: Path) -> None:
-    m = CACHE_DIR / WRITTEN_MANIFEST
+def _record_written(path: Path, cache_dir: Path = None) -> None:
+    m = (cache_dir or CACHE_DIR) / WRITTEN_MANIFEST
     names = set(m.read_text().split("\n")) if m.is_file() else set()
     if path.name not in names:
         with m.open("a") as fh:
@@ -1028,10 +1028,8 @@ def replay_recipe(a) -> None:
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
     if rescoped:
         return
-    a.pinned_since = rep.get("pinnedSince") if isinstance(rep.get("pinnedSince"), (int, float)) else None
     a.unconnected_new = [p for p in rep.get("unconnectedNew") or [] if isinstance(p, str)]
     a.unconnected_tries = rep.get("unconnectedTries") if isinstance(rep.get("unconnectedTries"), int) else 0
-    a.left_out = [p for p in rep.get("leftOut") or [] if isinstance(p, str)]
     if isinstance(rep.get("scopeFiles"), list):
         a.legacy_scope = set(rep["scopeFiles"])
     elif "noRecurse" not in rep:
@@ -1047,28 +1045,24 @@ def pinned_folders(scope) -> set:
     return {str(Path(f).parent) for f in scope}
 
 
-def pinned_since(cache: dict, scope) -> float | None:
-    """When a pinned list was connected: its oldest reviewed file's checkedAt (None if unknown)."""
-    times = []
-    for f in scope:
-        try:
-            times.append(datetime.fromisoformat((cache.get(f) or {})["checkedAt"]).timestamp())
-        except (KeyError, TypeError, ValueError):
-            continue
-    return min(times) if times else None
-
-
 # Rebuilt automatically (SKILL.md: keep them out with --exclude so they do not stale a pointer daily).
 AUTO_REBUILT = frozenset({"links.md", "index.md"})
 
 
-def born_after(path, since: float | None) -> bool:
-    """True for a file created after `since` that may join a pinned list. A legacy report never
-    recorded its --exclude, so a file already there at connect (left out on purpose) is not new,
-    nor is an auto-rebuilt index; with no known connect time nothing is. Birth time where the
-    system has one, else last change time."""
-    if since is None or Path(path).name.casefold() in AUTO_REBUILT:
-        return False
+def _real(folder) -> str:
+    """One spelling per folder: a symlinked or re-cased path is the same folder."""
+    return os.path.realpath(folder).casefold()
+
+
+def vault_folder(folder) -> bool:
+    """A folder inside profile/, documents/ or another SKIP_PARTS folder anywhere on its real path.
+    The inventory skips those parts only below a root, so a root placed inside one (the
+    documents/<person>/medical pointers) is walked; its new files never join on their own."""
+    return any(part.casefold() in SKIP_PARTS for part in Path(os.path.realpath(folder)).parts)
+
+
+def born_after(path, since: float) -> bool:
+    """True for a file created after `since` (birth time where the system has one, else last change time)."""
     try:
         st = os.stat(path)
     except OSError:
@@ -1076,27 +1070,99 @@ def born_after(path, since: float | None) -> bool:
     return getattr(st, "st_birthtime", st.st_ctime) > since
 
 
-def growth(scope, paths, since: float | None, left_out, others) -> tuple[list, list]:
-    """(grown, left): of inventoried `paths`, the files that join a pinned list, and the ones that
-    were there at its connect (recorded as leftOut, so a later atomic save, which resets a birth
-    time, cannot bring them back). A file joins only directly in a folder the list connects that no
-    other pointer's files sit in (`others`: every other report's files), so a new note never lands
-    in a pointer whose principals differ from its neighbours'. refresh_changed.new_files uses this too."""
-    def real(folder) -> str:  # one spelling per folder: a symlinked or re-cased path is the same folder
-        return os.path.realpath(folder).casefold()
-    folders = {real(f) for f in pinned_folders(scope)}
-    shared = {real(Path(k).parent) for k in others}
-    grown, left = [], []
+def growth_path(pointer: str, cache_dir: Path = None) -> Path:
+    return (cache_dir or CACHE_DIR) / "growth" / f"{pointer}.json"
+
+
+def read_snapshot(pointer: str, cache_dir: Path = None) -> dict | None:
+    try:
+        snap = json.loads(growth_path(pointer, cache_dir).read_text())
+    except (OSError, ValueError):
+        return None
+    ok = (isinstance(snap, dict) and isinstance(snap.get("since"), (int, float))
+          and isinstance(snap.get("present"), list))
+    return snap if ok else None
+
+
+def take_snapshot(pointer: str, scope, paths, others, cache_dir: Path = None, since: float = None,
+                  roots=()) -> dict | None:
+    """The pinned list's growth snapshot, taken once, the first time its folders are looked at.
+    A legacy report never recorded its --exclude, and a birth time cannot tell a note written after
+    the connect from one left out on purpose (a write-then-rename save gives it a new one), so every
+    connectable file then in a pinned folder but not in the list ("present") is treated as possibly
+    left out on purpose: none joins on its own, and its folder only grows once a person has admitted
+    every such file (--admit PATH). Only files created after the snapshot join automatically.
+    Auto-rebuilt indexes and files another pointer connects never count. `since` is when the walk
+    that produced `paths` started, so a note written during the walk still counts as new. None
+    (nothing taken) while any of `roots` or a non-vault pinned folder is missing, or such a folder
+    holds none of its listed files."""
+    snap = read_snapshot(pointer, cache_dir)
+    if snap is not None:
+        return snap
+    # A snapshot can only list what it sees: with a root or pinned folder missing (unmounted, being
+    # restored) it would open that folder to every file later put back. Take none; look again later.
+    if any(not os.path.isdir(r) for r in roots) or any(
+            not os.path.isdir(Path(f).parent) for f in scope if not vault_folder(Path(f).parent)):
+        return None
+    # Nor while a pinned folder holds none of its listed files (a restore or sync still filling it):
+    # the files left out at connect may not be back yet either.
+    by_folder = {}
+    for f in scope:
+        if not vault_folder(Path(f).parent):
+            by_folder.setdefault(str(Path(f).parent), []).append(f)
+    if any(not any(os.path.isfile(f) for f in fs) for fs in by_folder.values()):
+        return None
+    folders = {_real(Path(f).parent) for f in scope}
+    present = sorted({str(p) for p in paths if str(p) not in scope and _real(Path(p).parent) in folders
+                      and str(p) not in others and os.path.realpath(p) not in others
+                      and Path(p).name.casefold() not in AUTO_REBUILT and not vault_folder(Path(p).parent)})
+    snap = {"since": time.time() if since is None else since, "present": present}
+    target = growth_path(pointer, cache_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _record_written(target.parent, target.parent.parent)  # setup.py --uninstall removes growth/
+    tmp = target.parent / f".{target.name}.{os.getpid()}"
+    tmp.write_text(json.dumps(snap, indent=1))
+    try:
+        os.link(tmp, target)  # first writer wins; a racing scan or refresh reads the same snapshot
+    except FileExistsError:
+        snap = read_snapshot(pointer, cache_dir) or snap
+    finally:
+        tmp.unlink(missing_ok=True)
+    return snap
+
+
+def waiting_files(snap: dict, scope) -> list:
+    """Files in a pinned folder at its snapshot that are still outside the list (a person decides)."""
+    return [p for p in snap.get("present") or [] if p not in scope and os.path.isfile(p)]
+
+
+def growth(scope, paths, snap: dict, others, admit=()) -> list:
+    """Of inventoried `paths`, the files that join a pinned list: waiting files a person admitted, and files
+    created after its snapshot directly in a folder the list connects that (a) held nothing outside
+    the list at the snapshot, or whose such files a person has all admitted since (take_snapshot),
+    and (b) no other pointer's files share (`others`: every other report's files), so a note never
+    lands in a pointer whose principals differ from its neighbours'. Never links.md/INDEX.md, and never
+    in a vault folder (vault_folder: a person reconnects those by hand).
+    refresh_changed.new_files uses this too, so both sides agree."""
+    folders = {_real(Path(f).parent) for f in scope}
+    shared = {_real(Path(k).parent) for k in others}
+    closed = {_real(Path(p).parent) for p in snap.get("present") or [] if p not in scope}
+    waiting = set(snap.get("present") or [])
+    admit = {x for x in set(admit) | {os.path.realpath(x) for x in admit} if x in waiting}
+    grown = []
     for p in map(str, paths):
-        parent = real(Path(p).parent)
-        if (p in scope or p in left_out or parent not in folders or parent in shared
-                or p in others or os.path.realpath(p) in others):
+        if p in scope:
             continue
-        if born_after(p, since):
+        if p in admit or os.path.realpath(p) in admit:
             grown.append(p)
-        elif since is not None and Path(p).name.casefold() not in AUTO_REBUILT:
-            left.append(p)
-    return grown, left
+            continue
+        parent = _real(Path(p).parent)
+        if (parent not in folders or parent in shared or parent in closed or vault_folder(Path(p).parent)
+                or p in others or os.path.realpath(p) in others or Path(p).name.casefold() in AUTO_REBUILT):
+            continue
+        if born_after(p, snap["since"]):
+            grown.append(p)
+    return grown
 
 
 def principal_name(name: str) -> str:
@@ -1120,6 +1186,11 @@ def main() -> int:
                          "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
+    ap.add_argument("--admit", action="append", default=[],
+                    help="repeatable; on --refresh of a legacy pinned pointer, add this WAITING file (only those) "
+                         "after checking it, through the usual holds, review and gate")
+    ap.add_argument("--asker-fallback", action="store_true",
+                    help="internal (auto_heal): --principal is the asking agent, not a recorded one; it is not saved")
     ap.add_argument("--name", dest="names", action="append", default=[])
     ap.add_argument("--allow-target", dest="allow_targets", action="append", default=[],
                     help="folder a symlinked file may point into besides the roots (repeatable)")
@@ -1237,17 +1308,32 @@ def main() -> int:
         else:
             print(f"  --approve-held {path}: no such file; nothing approved")
     used = {}
+    walked_at = time.time()  # a growth snapshot counts as "since" only what the walk below could miss
     files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions,
                             approvals, used)
     scope = getattr(a, "legacy_scope", None)
-    if scope is not None:
+    if a.admit and scope is None:
+        print("  --admit applies only to a --refresh of a legacy pinned pointer; nothing admitted "
+              "(every file under a recorded recipe's roots is already in scope)")
+    if scope is not None and any(vault_folder(r) for r in roots):
+        print("refresh: this pointer's root sits inside a vault folder (profile/, documents/ ...); "
+              "it never takes in new files on its own")
+    elif scope is not None:
         # A note written later into a folder the pinned list already connects joins the scope
         # (same holds, review and connect gate as every file); files in other folders stay out.
         from refresh_changed import known_across
-        since = a.pinned_since = getattr(a, "pinned_since", None) or pinned_since(cache, scope)
-        grown, left = growth(scope, files + [h[0] for h in held], since, set(a.left_out),
-                             known_across(CACHE_DIR, skip=a.pointer))
-        a.left_out = sorted(p for p in set(a.left_out) | set(left) if Path(p).exists())
+        paths = [str(p) for p in files] + [str(h[0]) for h in held]
+        others = known_across(CACHE_DIR, skip=a.pointer)
+        snap = take_snapshot(a.pointer, scope, paths, others, CACHE_DIR, since=walked_at, roots=roots)
+        if snap is None:
+            print("refresh: a folder this pointer's list connects is missing or holds none of its listed files; "
+                  "new files are not taken in until it is back (so a restored folder cannot bring back files "
+                  "left out at connect)")
+            snap = {"since": float("inf"), "present": []}  # grows nothing this run
+        admit = {str(given_path(x)) for x in a.admit} if snap["since"] != float("inf") else set()
+        grown = growth(scope, paths, snap, others, admit)
+        for x in sorted(admit - set(grown) - scope):
+            print(f"  --admit {x}: not a WAITING file of this pointer (listed below when there are any); nothing admitted")
         if len(grown) > a.max_files:
             print(f"refresh: {len(grown)} new files in already-connected folders exceed --max-files "
                   f"{a.max_files}; not added (pass --root/--exclude/--no-recurse to rescope)")
@@ -1255,6 +1341,19 @@ def main() -> int:
             print(f"refresh: {len(grown)} new file(s) in already-connected folders join the pinned list")
             scope = a.legacy_scope = scope | set(grown)
             a.grown = grown
+        waiting = waiting_files(snap, scope)
+        if waiting:
+            print(f"refresh: {len(waiting)} file(s) were in this pointer's folders before new-file pickup "
+                  "started and are not in it (a legacy connect may have left them out on purpose); their "
+                  "folders take in new notes only after a person checks each one and runs this again with "
+                  "--admit PATH:")
+            for x in waiting[:20]:
+                print(f"  WAITING  {x}")
+        gone = [x for x in snap["present"] if x not in scope and not os.path.isfile(x)]
+        if gone:
+            print(f"refresh: {len(gone)} file(s) listed at the growth snapshot are gone ({Path(gone[0]).name}"
+                  f"{', ...' if len(gone) > 1 else ''}); their folders stay closed to new notes, since whatever left "
+                  "them out may still apply. Reconnect with --root (not --refresh) to rescope.")
         files = [p for p in files if str(p) in scope]
         held = [(p, why) for p, why in held if str(p) in scope]
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
@@ -1505,12 +1604,15 @@ def main() -> int:
               "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
-              **({"pinnedSince": a.pinned_since} if getattr(a, "pinned_since", None) is not None else {}),
-              **({"leftOut": a.left_out} if getattr(a, "left_out", None) else {}),
+
               "approved": [str(p) for p in connect_set],
               "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
+    if a.asker_fallback:
+        # A legacy report records no principal; auto_heal named the asking agent only to run this
+        # new-file refresh. Keep none recorded, so changed files still do not auto-heal it.
+        report.pop("principal"); report.pop("principals")
     if a.no_connect or not connect_set:
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
         _record_written(CACHE_DIR / f"{a.pointer}-report.json")
