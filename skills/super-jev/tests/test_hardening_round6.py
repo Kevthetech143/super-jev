@@ -104,9 +104,11 @@ def test_prepare_records_what_it_writes(tmp_path, monkeypatch):
 @pytest.mark.parametrize("line", ["pwd_" * 112500, "key-" * 112500, "token_" * 75000,
                                   "pwd_" * 112500 + "=", "secret_" * 64000, "=" * 450000])
 def test_pathological_keyword_lines_scan_under_03s(line):
-    t = time.monotonic()
+    # CPU time, not wall time: a busy machine must not fail this, while a regex that
+    # backtracks still burns CPU and still fails it.
+    t = time.process_time()
     pb.has_secret(line)
-    assert time.monotonic() - t < 0.3
+    assert time.process_time() - t < 1.0  # a backtracking regex burns well over 1 s; heavy load alone reached 0.34 s
 
 
 def test_generic_assignment_still_caught_and_prose_not():

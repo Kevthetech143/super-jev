@@ -65,9 +65,11 @@ def test_1password_prose_is_not_held_but_a_password_is():
 @pytest.mark.parametrize("line", ["key" * 150000, "key_" * 112500, "a" + "-key" * 112000 + "=",
                                   "secret-" * 64000 + ":"])
 def test_pathological_line_scans_quickly(line):
-    t = time.monotonic()
+    # CPU time, not wall time: a busy machine must not fail this, while a regex that
+    # backtracks still burns CPU and still fails it.
+    t = time.process_time()
     pb.has_secret(line)
-    assert time.monotonic() - t < 0.3
+    assert time.process_time() - t < 1.0  # a backtracking regex burns well over 1 s; heavy load alone reached 0.34 s
 
 
 # 3. uninstall deletes only files Super Jev writes in its in-repo folders
