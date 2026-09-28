@@ -4299,7 +4299,16 @@ class _CodeLibMissing(Exception):
     """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
-def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_items=None):
+class _JudgeFailed(Exception):
+    """The evidence judge gave code mode no verdict table (or refused every part)."""
+
+    def __init__(self, code, reason):
+        super().__init__(reason)
+        self.code, self.reason = code, reason
+
+
+def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_items=None,
+                  evidence_judge=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
     Pattern claims are answered deterministically, on the local text; the rest
@@ -4307,6 +4316,8 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_ite
     masked, then truncated, evidence; `evidence_items` when not given) with each
     file holding secret-shaped text withheld (named in `mask_info["withheld"]`).
     `ask_fn` is injected by tests (a fake judge); production calls the live door.
+    `evidence_judge(state_items, claims)`, when given, answers the rest instead:
+    {n: (verdict, confidence)} for the n-th of `claims`, judged as evidence claims.
     """
     evidence_text = "\n\n".join(t for _, t in evidence_items)
     rows = []
@@ -4328,6 +4339,22 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_ite
             rows.append(det)
         else:
             pending.append((i, claim))
+    if pending and evidence_judge is not None:
+        state_items, withheld = _mask_evidence(
+            evidence_items if state_items is None else state_items)
+        if mask_info is not None:
+            mask_info["withheld"] = withheld
+        judged = evidence_judge(state_items, [c for _, c in pending])
+        for n, (i, claim) in enumerate(pending, 1):
+            verdict, conf = judged.get(n, ("NO_ANSWER", 0.0))
+            ok = verdict == "SUPPORTED" and conf >= 0.80
+            rows.append({
+                "key": "c%d" % i, "claim": claim, "verdict": verdict, "confidence": conf,
+                "p_yes": None, "arm": "reply:judge",
+                "action": "ok" if ok else "needs a human — " + (
+                    "under the 0.80 line" if verdict == "SUPPORTED"
+                    else verdict.lower().replace("_", " "))})
+        pending = []
     if pending:
         questions = {"c%d" % i: noul_code_question(c) for i, c in pending}
         ask = ask_fn if ask_fn is not None else _code_ask
@@ -4351,8 +4378,7 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_ite
                 "action": "ok" if verdict == "SUPPORTED"
                           else "needs a human — " + verdict.lower().replace("_", " ")})
     rows.sort(key=lambda r: int(r["key"][1:]))  # c1, c2, ..., c10 — never c1, c10, c2
-    code = 3 if any(r["verdict"] in ("CONTRADICTED", "NOT_SUPPORTED")
-                    for r in rows) else 0
+    code = 3 if any(r["action"] != "ok" for r in rows) else 0
     return rows, code
 
 
@@ -4425,16 +4451,16 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     (code, out, err) shaped like one door run: `out` holds only the merged
     table, so gate_fail_closed reads the merged verdicts, not a part's. A part
     that errors (exit other than 0, 2 or 3) makes the whole check that error.
-    Exit 2 with a table is merged like any table (its contradiction wins); exit
+    Exit 2 with a table is merged like any table and keeps the check REJECT; exit
     2 with no table is a door's own refusal of that part's evidence, such as a
     quoted span it does not hold, which another part may: it is REJECT only
     when every part refuses, and otherwise READ (exit 3), never CLEAN, since
     the refused part's evidence was not judged."""
-    outs, errs, refused, judged = [], [], [], []
+    outs, errs, refused, judged, rejected = [], [], [], [], False
     for i, part in enumerate(parts, 1):
         tmp = tempfile.NamedTemporaryFile(mode="w", prefix="evidence-part%dof%d." % (i, len(parts)),
                                           suffix=".md", delete=False, encoding="utf-8", newline="")
-        tmp.write("\n\n".join("=== %s ===\n%s" % (label, text.strip()) for label, text in part))
+        tmp.write("\n\n".join("=== %s ===\n%s" % (label, text.strip("\n")) for label, text in part))
         tmp.close()
         tmp_paths.append(tmp.name)
         cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), tmp.name, "--kit", "reply", *claim_args]
@@ -4446,6 +4472,7 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
         if code not in (0, 2, 3):
             return code, out, "gate: part %d of %d (%s) failed\n%s" % (
                 i, len(parts), _part_names(part), err)
+        rejected = rejected or code == 2
         outs.append(out)
         errs.append(err)
         judged.append(i)
@@ -4467,7 +4494,7 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     for key, verdict, score, _subject, part in merged:
         if not key.startswith("c"):
             lines.append("  %-18s %-20s %.2f  [part %d]" % (key, verdict, score, judged[part - 1]))
-    return (3 if notes else 0), "".join(notes) + "\n".join(lines) + "\n", "".join(errs)
+    return (2 if rejected else 3 if notes else 0), "".join(notes) + "\n".join(lines) + "\n", "".join(errs)
 
 
 def cmd_gate(a):
@@ -4550,24 +4577,23 @@ def cmd_gate(a):
                 else "evidence")
     if mode == "code" and not claims_for_check:
         mode = "evidence"
-    # The code judge runs the built-in client in-process, which reads the key only
-    # from TYPESAFE_API_KEY. A shell whose key comes through a configured judge
+    # Code mode's own judge runs the built-in client in-process, which reads the key
+    # only from TYPESAFE_API_KEY: a shell whose key comes through a configured judge
     # (SUPERJEV_GATE_CMD, as prose checks use) has none, and every diff check died
-    # "TYPESAFE_API_KEY is not set". There the claims go to that judge instead.
-    code_via_door = None
-    if (mode == "code" and _code_ask is _code_ask_live and os.environ.get(GATE_CMD_ENV)
-            and not os.environ.get("TYPESAFE_API_KEY", "").strip()):
-        mode = "evidence"
-        code_via_door = ("gate: TYPESAFE_API_KEY is not in the environment, so the code "
-                         "claims go to the configured judge (%s) as evidence claims\n" % GATE_CMD_ENV)
-    # Code bigger than one judge call is judged as evidence claims, in parts. The code
-    # question's "false" means false OR not shown, so per part it cannot tell a part
-    # that lacks the code from one that disproves the claim; the evidence kit can.
-    if (mode == "code" and not hook_mode
-            and len(split_evidence(kept_ev, _judge_room(claims_for_check))) > 1):
-        mode = "evidence"
-        code_via_door = ("gate: the code is bigger than one judge call, so its claims are "
-                         "judged as evidence claims, in parts\n")
+    # "TYPESAFE_API_KEY is not set". And its question's "false" means false OR not
+    # shown, so over evidence split into parts it cannot tell a part that lacks the
+    # code from one that disproves the claim. In both cases the claims the pattern
+    # arm does not settle go to the evidence judge instead, still in code mode, so
+    # the judgment-word refusal and the pattern arm apply as before.
+    code_judge_note = None
+    if mode == "code" and _code_ask is _code_ask_live and os.environ.get(GATE_CMD_ENV) \
+            and not os.environ.get("TYPESAFE_API_KEY", "").strip():
+        code_judge_note = ("gate: TYPESAFE_API_KEY is not in the environment, so the code "
+                           "claims go to the configured judge (%s) as evidence claims\n" % GATE_CMD_ENV)
+    elif mode == "code" and not hook_mode \
+            and len(split_evidence(kept_ev, _judge_room(claims_for_check))) > 1:
+        code_judge_note = ("gate: the code is bigger than one judge call, so its claims are "
+                           "judged as evidence claims, in parts\n")
 
     # The door subprocess is an evidence-mode requirement only: code mode
     # must not refuse (exit 5) for a lib file the CI runner does not have.
@@ -4601,13 +4627,50 @@ def cmd_gate(a):
 
     # Code mode: claims go through the noul question, asked of the code text.
     if mode == "code":
+        judge_info = {}
+
+        def door_judge(items, claims):
+            """The evidence judge (the gate's door), over parts that each fit one call."""
+            parts = split_evidence(items, _judge_room(claims))
+            if len(parts) > 1:
+                judge_info["parts"] = [_part_names(pt) for pt in parts]
+            t = getattr(a, "timeout", None)
+            t = _gate_timeout() if t is None else min(t, _gate_timeout())
+            code, out, err = _gate_door_parts(parts, [x for c in claims for x in ("--claim", c)],
+                                              t, extra_ledger, evidence_tmp_paths,
+                                              json_mode=json_mode or hook_mode)
+            rows = {int(m.group("key")[1:]): (m.group("verdict"), float(m.group("score")))
+                    for m in _DOOR_ROW_RE.finditer(out or "") if m.group("key").startswith("c")}
+            if code not in (0, 2, 3) or len(rows) < len(claims):
+                raise _JudgeFailed(code or 1, gate_verdict_line(GATE_UNREADABLE_EXIT, out, err)
+                                   if code in (0, 1, 3) else "the judge %s" % (
+                                       " ".join((err or out).split())[:200] or "exited %d" % code))
+            judge_info["notes"] = "".join(l + "\n" for l in (out or "").splitlines()
+                                          if l.startswith("gate: part "))
+            judge_info["floor"] = 2 if code == 2 else (3 if judge_info["notes"] else 0)
+            return rows
+
         try:
             try:
                 mask_info = {}
                 rows, code = run_code_gate(
                     ev_items, claims_for_check, mask_info=mask_info,
-                    state_items=kept_ev if sent_ev is not None else None)
+                    state_items=kept_ev if sent_ev is not None else None,
+                    evidence_judge=door_judge if code_judge_note else None)
                 withheld += [w for w in mask_info.get("withheld", []) if w not in withheld]
+                floor = judge_info.get("floor", 0)
+                if floor and (code == 0 or floor == 2):
+                    code = floor
+            except _JudgeFailed as exc:
+                reason = "gate: %s" % exc.reason
+                if hook_mode:
+                    return 3, reason, ""
+                if json_mode:
+                    emit_json("gate", "ERROR", exc.code, reason, {"claim_mode": mode}, [])
+                    return exc.code
+                print((code_judge_note or "") + reason + "\n\nVERDICT: " + (
+                    GATE_VERDICT[2] if exc.code == 2 else "ERROR — not checked. Treated as NOT clean."))
+                return exc.code
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)
@@ -4638,6 +4701,10 @@ def cmd_gate(a):
                 reason = reason[0] if reason else type(exc).__name__
                 return 3, "gate: code-mode judge call failed: " + reason, ""
             text = _render_code_gate(mode, rows, code)
+            if code_judge_note:
+                text = (code_judge_note + (_parts_note(judge_info["parts"])
+                                           if judge_info.get("parts") else "")
+                        + judge_info.get("notes", "") + text)
             if withheld:
                 text = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
                         "a claim about them cannot be checked\n"
@@ -4699,7 +4766,7 @@ def cmd_gate(a):
         # raw stdout/stderr escape onto fd 1/2, which the child would otherwise
         # inherit straight from this process regardless of contextlib redirects.
         n_claims = len(a.claim or [])
-        note = code_via_door or ""
+        note = ""
         if parts:
             note += _parts_note([_part_names(pt) for pt in parts])
         if json_mode:

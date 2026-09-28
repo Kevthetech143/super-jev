@@ -656,6 +656,37 @@ def test_code_bigger_than_one_call_is_judged_as_evidence_in_parts(monkeypatch, e
     assert not judge.calls and len(door.states) > 1
     assert all(sj._judge_tokens(t) <= sj.JUDGE_CALL_TOKENS for t in door.states)
     assert "judged as evidence claims, in parts" in out and "small.diff" in out
+    assert "claim-mode: code" in out and "[reply:judge]" in out
+
+
+PATTERN_DIFF = DIFF.replace("+new", "+new\n DANGER_RE = re.compile(r\"rm\\s+-rf\")")
+
+
+@pytest.mark.parametrize("big", [False, True])
+def test_rerouted_code_claims_keep_the_pattern_arm_and_the_judgment_refusal(monkeypatch, evfile, big):
+    """The second review: sending diff claims to the evidence judge must not skip
+    the local pattern arm or the judgment-word refusal, which need no judge."""
+    monkeypatch.setattr(sj, "_code_ask", sj._code_ask_live)
+    if big:
+        monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
+    calls = []
+
+    def yes_door(cmd, *a, **kw):  # a judge that says SUPPORTED to everything
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="".join(
+            "  c%d   SUPPORTED      0.95  x\n" % (n + 1) for n in range(sum(1 for c in cmd if c == "--claim"))),
+            stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", yes_door)
+    ev = evfile(PATTERN_DIFF + (BIG_DIFF if big else ""), "wt.diff")
+    code, out = _run_text(["gate", ev, "--claim", "`ls -la` is caught by DANGER_RE"])
+    assert code == 3 and "CONTRADICTED" in out and not calls, out
+    code, out = _run_text(["gate", ev, "--claim", "`ls -la` is caught by DANGER_RE",
+                           "--claim", "x.py adds the DANGER_RE pattern for rm"])
+    assert code == 3 and "[pattern:code]" in out and "[reply:judge]" in out and calls, out
+    calls.clear()
+    code, out = _run_json(["gate", ev, "--claim", "the change should be merged now", "--json"])
+    assert code == 2 and out["verdict"] == "REJECT" and not calls, out
 
 
 def test_big_code_a_part_that_disproves_the_claim_wins(monkeypatch, evfile):
@@ -693,3 +724,11 @@ def test_diff_check_with_env_key_keeps_the_code_judge(monkeypatch, evfile):
     monkeypatch.setattr(sj, "_code_ask", judge)
     code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
     assert code == 0 and len(judge.calls) == 1 and "claim-mode: code" in out
+
+
+def test_rerouted_code_judge_failure_is_an_error_not_a_traceback(monkeypatch, evfile):
+    monkeypatch.setattr(sj, "_code_ask", sj._code_ask_live)
+    monkeypatch.setattr(sj.subprocess, "run", lambda cmd, *a, **kw: subprocess.CompletedProcess(
+        cmd, 1, stdout="", stderr="jev: could not reach TypeSafe: URLError\n"))
+    code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
+    assert code == 1 and "could not reach TypeSafe" in out and "CLEAN" not in out, out

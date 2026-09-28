@@ -12238,3 +12238,19 @@ def test_merge_part_tables_refuses_rows_for_different_claims():
     b = "  c1   NOT_SUPPORTED  0.90  the grass is green\n"
     assert sj.merge_part_tables([a, b]) is None
     assert sj.merge_part_tables([a, a.replace("SUPPORTED     ", "NOT_SUPPORTED")])[0][1] == "SUPPORTED"
+
+
+def test_gate_part_rejected_with_a_table_stays_reject(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    outs = iter([(0, _table([("c1", "SUPPORTED", 0.99)])), (2, _table([("c1", "CONTRADICTED", 0.97)]))]
+                + [(0, _table([("c1", "NOT_SUPPORTED", 0.90)]))] * 10)
+
+    class SeqDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            code, out = next(outs)
+            return subprocess.CompletedProcess(cmd, code, stdout=out, stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
+    assert sj.main(["gate", str(ev), "--claim", "the big file is filler"]) == 2
+    assert "CONTRADICTED" in capsys.readouterr().out
