@@ -52,3 +52,10 @@ test('an escaped quote before a placeholder is not a secret; a real value after 
   for (const t of ['password="${VAR}"', 'password=$VAR', 'password=$VAR;', 'api_key=${VAR}', 'password: <your password>',
     `api_key=${q}\${VAR}${q}, x`]) assert.equal(hasSecret(t), false, t);
 });
+
+test('a spaced USPS tracking number is not a card; a card next to digits still is', () => {
+  const trk = '9302 2110 4790 0005 3721 11'; // made-up, valid check digit; its first 16 digits pass Luhn
+  for (const t of [trk, trk.replaceAll(' ', '-'), `tracking ${trk} delivered`]) assert.equal(hasSecret(t), false, t);
+  for (const t of ['9302 2110 4790 0005 3721 12', `${trk} 5`, `${trk} ١`, 'card 4111 1111 1111 1111 123',
+    `4111 1111 1111 1111 ${trk}`, `tracking ${trk}, card 4111 1111 1111 1111`]) assert.equal(hasSecret(t), true, t);
+});
