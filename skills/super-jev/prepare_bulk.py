@@ -481,119 +481,54 @@ def has_secret(text: str) -> bool:
 
 # Evidence that is judged (a worktree diff, a file a claim is checked against) may carry
 # secret-shaped test fixtures: a card scanner's fake card numbers, a redaction test's sample
-# key. Refusing the whole request left such a change uncheckable, so evidence is masked
-# instead, real and fake values alike. The scanner finds two kinds of hit:
-#   - whole: the match is the secret (a card number, a token shape such as sk_live_..., a
-#     private key with BEGIN and END on one line); only the match is masked.
-#   - marker: the match only says a secret follows (a password or api key assignment, a key's
-#     BEGIN line), and the value may run on over any number of lines in any syntax. Its extent cannot be
-#     proven, so everything from that line to the end of its file is withheld: the next
-#     "diff --git" line in a diff, else the end of the text. A value never runs into another file.
-# Claims and drafts are never masked (they are refused), and ask() keeps its full scan.
-SECRET_MASK = "[secret-shaped text masked]"
-_KEY_BEGIN_RE = re.compile(r"-----begin[a-z ]*private key[a-z ]*-----")
-_KEY_END_RE = re.compile(r"-----end[a-z ]*private key[a-z ]*-----")
+# key. Refusing the whole request left such a change uncheckable. The scanner finds where a
+# secret starts (a card number, a token, a password assignment, a key's BEGIN line) but not
+# its extent: the rest of it can sit beside the hit, on the lines after it (a wrapped token, a
+# key body, a concatenated value) or before it in a hunk. No span inside a file is provably
+# clean, so a diff is judged file by file: a file whose text scans as a secret is withheld
+# whole, real and fake values alike, and every other file is sent as it is. A value never runs
+# into another file. Claims and drafts are never masked (they are refused), and ask() keeps
+# its full scan.
+SECRET_WITHHELD = "[secret-shaped text: {n} line(s) of this file withheld; nothing in them can be checked]"
 _FILE_START = "diff --git "
 
 
-def _blank(m) -> str:
-    return " " * len(m.group())
-
-
-def _flagged(line: str, luhn: bool) -> bool:
-    """has_secret on one line, with the card check's Luhn test off when the whole text had it
-    off (a non-ASCII digit anywhere), so a line is flagged exactly when it adds to the text's hit."""
-    return has_secret(line) or (not luhn and card_hit(normalize_for_scan(line), False))
-
-
-def _line_hits(line: str, luhn: bool):
-    """(spans, marker) for one flagged line. spans are the whole hits' (start, end) in the line,
-    or None when the line is not ASCII (normalize_for_scan then shifts offsets); marker is True
-    when any hit is a marker (see the note above SECRET_MASK)."""
-    norm = normalize_for_scan(line)
-    scrubbed = ISO_DATE_RE.sub(_blank, URL_RE.sub(_blank, norm))
-    if luhn:
-        scrubbed = TRACKING_RE.sub(lambda m: _blank(m) if _usps_tracking(m.group()) else m.group(), scrubbed)
-    spans = [m.span() for m in CARD_RE.finditer(scrubbed)
-             if not luhn or _luhn(re.sub(r"\D", "", m.group()))]
-    marker = bool(WORD_RE.search(norm)) or any(
-        _entropy(m.group(4)) >= 3.5 and re.search(r"\d", m.group(4)) and re.search(r"[A-Za-z]", m.group(4))
-        for m in GENERIC_RE.finditer(norm))
-    for m in TOKEN_RE.finditer(norm):
-        if _KEY_BEGIN_RE.search(m.group()):
-            end = _KEY_END_RE.search(norm, m.end())
-            if end:
-                spans.append((m.start(), end.end()))
-            else:
-                marker = True
-        elif m.group().rstrip().endswith((":", "=")):
-            marker = True  # an assignment form: the value comes after the match
-        else:
-            spans.append(m.span())
-    return (spans if line.isascii() else None), marker
-
-
-def _masked_whole(line: str) -> str:
-    """The whole line masked, keeping a diff marker and a CRLF ending."""
-    return (line[:1] if line[:1] in "+- " else "") + SECRET_MASK + ("\r" if line.endswith("\r") else "")
-
-
-def _mask_spans(line: str, spans) -> str:
-    out = line
-    if spans:
-        spans = sorted(spans)
-        merged = [list(spans[0])]
-        for s, e in spans[1:]:
-            if s <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], e)
-            else:
-                merged.append([s, e])
-        for s, e in reversed(merged):
-            out = out[:s] + SECRET_MASK + out[e:]
-    return out
+def _flagged(text: str, luhn: bool) -> bool:
+    """has_secret, with the card check's Luhn test off when the whole text had it off (a
+    non-ASCII digit anywhere), so a part is flagged whenever it adds to the text's hit."""
+    return has_secret(text) or (not luhn and card_hit(normalize_for_scan(text), False))
 
 
 def mask_secrets(text: str):
-    """(masked_text, lines_masked): text with each whole hit masked in place and, from each
-    marker hit (or a secret spread over two lines), the rest of its file withheld line by line
-    (see the note above SECRET_MASK). Returns (None, n) when the result still scans as a
-    secret, and the caller must refuse. Text with no secret comes back as is."""
+    """(masked_text, withheld): a diff with each file whose text scans as a secret replaced by
+    its header lines (up to the first @@, when they are clean) and one SECRET_WITHHELD line;
+    withheld names those files. Text with no secret comes back as is. Returns (None, withheld)
+    when nothing judgeable is left: text that is not a diff, or a result that still scans as a
+    secret. The caller then drops or refuses it."""
     if not text or not has_secret(text):
-        return text, 0
+        return text, []
+    ends_in_newline = text.endswith("\n")
+    lines = (text[:-1] if ends_in_newline else text).split("\n")
+    starts = [i for i, line in enumerate(lines) if line.startswith(_FILE_START)]
+    if not starts:
+        return None, ["the whole text"]
     luhn = not NON_ASCII_DIGIT_RE.search(text)
-    lines = text.split("\n")
-    file_end, nxt = [0] * len(lines), len(lines)
-    for i in range(len(lines) - 1, -1, -1):
-        file_end[i] = nxt
-        if lines[i].startswith(_FILE_START):
-            nxt = i
-    masked = set()
-
-    def withhold(i):
-        for j in range(i, file_end[i]):
-            lines[j] = _masked_whole(lines[j])
-            masked.add(j)
-        return file_end[i]
-
-    i = 0
-    while i < len(lines):
-        if _flagged(lines[i], luhn):
-            spans, marker = _line_hits(lines[i], luhn)
-            if marker:
-                i = withhold(i)
-                continue
-            out = _mask_spans(lines[i], spans) if spans is not None else lines[i]
-            lines[i] = _masked_whole(lines[i]) if out == lines[i] or _flagged(out, luhn) else out
-            masked.add(i)
-        i += 1
-    i = 0
-    while i < len(lines) - 1:
-        if _flagged(lines[i] + "\n" + lines[i + 1], luhn):
-            i = withhold(i)
+    bounds = ([0] if starts[0] else []) + starts + [len(lines)]
+    out, withheld = [], []
+    for a, b in zip(bounds, bounds[1:]):
+        part = lines[a:b]
+        if not _flagged("\n".join(part), luhn):
+            out += part
             continue
-        i += 1
-    out = "\n".join(lines)
-    return (None if has_secret(out) else out), len(masked)
+        head = []
+        if part[0].startswith(_FILE_START):
+            head = next(([*part[:k]] for k, line in enumerate(part) if line.startswith("@@")), part[:1])
+            if any(_flagged(line, luhn) for line in head):
+                head = []
+        withheld.append(head[0].split(" b/", 1)[-1] if head else "a file")
+        out += head + [SECRET_WITHHELD.format(n=len(part) - len(head))]
+    masked = "\n".join(out) + ("\n" if ends_in_newline else "")
+    return (None if has_secret(masked) else masked), withheld
 
 
 # The WORD_RE/GENERIC_RE keyword checks above only fire in a key=value, key:value,

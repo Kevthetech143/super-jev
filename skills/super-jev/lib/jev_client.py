@@ -286,21 +286,25 @@ def main(argv=None):
             raise JevError("needs at least one evidence file")
         evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace").read())
                     for f in a.evidence]
-        # Evidence goes to the Jev API, so it gets the same secret scan connect uses: each
-        # secret-shaped span (a test fixture's fake card number too) is masked before sending.
+        # Evidence goes to the Jev API, so it gets the same secret scan connect uses: each file
+        # of a diff that scans as a secret (a test fixture's fake card number too) is withheld
+        # whole; a file left with nothing judgeable is dropped, and none left is refused.
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from prepare_bulk import has_secret, mask_secrets
-        masked = []
+        kept, withheld = [], []
         for f, text in evidence:
-            text, n = mask_secrets(text)
+            text, held = mask_secrets(text)
             if text is None:
-                raise JevError(f"evidence file {f} contains a secret; not sent "
-                               "(it could not be masked line by line)")
-            if n:
-                print(f"jev: masked {n} secret-shaped line(s) in {f} before sending; "
-                      "a claim about those exact values cannot be checked", file=sys.stderr)
-            masked.append((f, text))
-        evidence = masked
+                withheld.append(f)
+            else:
+                kept.append((f, text))
+                withheld += held
+        if not kept:
+            raise JevError(f"evidence file {withheld[0]} contains a secret; not sent")
+        if withheld:
+            print(f"jev: withheld {len(withheld)} file(s) holding secret-shaped text, not sent: "
+                  f"{', '.join(withheld)}; a claim about them cannot be checked", file=sys.stderr)
+        evidence = kept
         claims = list(a.claim)
         if a.claims_file:
             claims += [l.strip() for l in open(os.path.expanduser(a.claims_file), encoding="utf-8") if l.strip()]

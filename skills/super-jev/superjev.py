@@ -4209,21 +4209,24 @@ def _has_secret(text):
 
 
 def _mask_evidence(evidence_items):
-    """(items, lines_masked): each evidence text with its secret-shaped spans masked
-    (prepare_bulk.mask_secrets), so a diff whose test fixtures hold fake card numbers or
-    keys can still be judged; no secret-shaped text is sent, real or fake. Raises when a
-    text cannot be masked cleanly; the gate reports that as a refusal."""
+    """(items, withheld): the evidence as the judge may see it (prepare_bulk.mask_secrets):
+    each file of a diff whose text scans as a secret (a test's fake card number, a sample key,
+    or a real one) is withheld whole, so the rest of the change can still be judged. A text
+    left with nothing judgeable is dropped; withheld names what was held back. Raises when no
+    evidence is left; the gate reports that as a refusal."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from prepare_bulk import mask_secrets
-    out, total = [], 0
+    out, withheld = [], []
     for path, text in evidence_items:
-        masked, n = mask_secrets(text)
+        masked, held = mask_secrets(text)
         if masked is None:
-            raise ValueError("evidence %s contains a secret; not sent "
-                             "(it could not be masked line by line)" % path)
+            withheld.append(path)
+            continue
         out.append((path, masked))
-        total += n
-    return out, total
+        withheld += held
+    if not out:
+        raise ValueError("evidence %s contains a secret; not sent" % ", ".join(withheld))
+    return out, withheld
 
 
 def _code_ask(state, questions):
@@ -4242,8 +4245,8 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
     Pattern claims are answered deterministically, on the local text; the rest
-    go out as one batch of Noul questions, asked of the evidence with its
-    secret-shaped text masked (the count lands in `mask_info["lines"]`).
+    go out as one batch of Noul questions, asked of the evidence with each file
+    holding secret-shaped text withheld (named in `mask_info["withheld"]`).
     `ask_fn` is injected by tests (a fake judge); production calls the live door.
     """
     evidence_text = "\n\n".join(t for _, t in evidence_items)
@@ -4273,9 +4276,9 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None):
             raise _CodeLibMissing(
                 "no judge client at %s — restore lib/jev_client.py "
                 "or inject a judge" % JEV_LIB)
-        state_items, n_masked = _mask_evidence(evidence_items)
+        state_items, withheld = _mask_evidence(evidence_items)
         if mask_info is not None:
-            mask_info["lines"] = n_masked
+            mask_info["withheld"] = withheld
         res = ask(code_state(state_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
@@ -4410,7 +4413,7 @@ def cmd_gate(a):
                 mask_info = {}
                 rows, code = run_code_gate(kept_ev, claims_for_check,
                                            mask_info=mask_info)
-                n_masked = mask_info.get("lines", 0)
+                withheld = mask_info.get("withheld", [])
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)
@@ -4441,10 +4444,10 @@ def cmd_gate(a):
                 reason = reason[0] if reason else type(exc).__name__
                 return 3, "gate: code-mode judge call failed: " + reason, ""
             text = _render_code_gate(mode, rows, code)
-            if n_masked:
-                text = ("gate: masked %d secret-shaped line(s) in the evidence before "
-                        "sending; a claim about those exact values cannot be checked\n"
-                        % n_masked) + text
+            if withheld:
+                text = ("gate: withheld %d file(s) holding secret-shaped text, not sent: %s; "
+                        "a claim about them cannot be checked\n"
+                        % (len(withheld), ", ".join(withheld))) + text
         finally:
             for pth in evidence_tmp_paths:
                 try:
@@ -4457,7 +4460,7 @@ def cmd_gate(a):
         if json_mode:
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       _code_summary(rows),
-                      {"claim_mode": mode, "rows": rows, "masked_lines": n_masked}, [])
+                      {"claim_mode": mode, "rows": rows, "withheld": withheld}, [])
             return code
         print(text, end="")
         return code

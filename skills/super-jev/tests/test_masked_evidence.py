@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Offline tests: evidence holding secret-shaped text (a card scanner's fake card numbers,
-a redaction test's sample key) is masked before it is judged, instead of refusing the
-whole check. No secret-shaped text is ever sent, real or fake; a claim holding one is
-still refused, and jev_client.ask keeps its own full scan.
+"""Offline tests: a diff holding secret-shaped text (a card scanner's fake card numbers, a
+redaction test's sample key) is judged file by file instead of refused whole. A file whose
+text scans as a secret is withheld whole, real and fake values alike; every other file goes
+to the judge as it is. A claim holding a secret is still refused, and jev_client.ask keeps
+its own full scan.
+
+Why whole files: the scanner finds where a secret starts, never where it ends. Four review
+rounds of masking inside a file each found a part of a secret still sent (a key body, a
+wrapped token, a JWT signature, the secret beside an AWS key id, a card's CVV, a value
+concatenated over lines). Every such shape is kept below as a leak case.
 
 Token-shaped strings are built by concatenation so this file itself never holds one.
 
@@ -13,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -35,156 +42,118 @@ sj = load("superjev_mask", SKILL / "superjev.py")
 CARD = "4111 " + "1111 1111 1111"
 PW = "password=" + "hunter2" + "hunter2"
 STRIPE = "sk_" + "live_" + "abcdefghij1234567890"
-AWS = "AKIA" + "ABCDEFGHIJKLMNOP"
-PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
-DIFF = f'''diff --git a/tests/test_scan.py b/tests/test_scan.py
---- a/tests/test_scan.py
-+++ b/tests/test_scan.py
-@@ -1,2 +1,6 @@
- import scan
-+def test_card_is_held():
-+    assert scan.card_hit("{CARD}")  # a fake visa
-+def test_key_is_held():
-+    assert scan.has_secret("{STRIPE}")
-+    assert scan.has_secret('{PW}')
-'''
-
-
-# A whole hit is the secret itself: only the match is masked, the rest stays readable.
-@pytest.mark.parametrize("secret", [CARD, STRIPE, AWS])
-def test_whole_hit_is_masked_in_place(secret):
-    text = f"+    check(x)\n+    assert f(\"{secret}\")  # fixture\n+    done()\n"
-    assert pb.has_secret(text)
-    out, n = pb.mask_secrets(text)
-    assert out == f"+    check(x)\n+    assert f(\"{pb.SECRET_MASK}\")  # fixture\n+    done()\n" and n == 1
-
-
-# A marker hit only says a value follows; the value's extent cannot be proven, so the rest of
-# the file is withheld, and the lines before it stay readable.
-@pytest.mark.parametrize("secret", [PW, "api_key = abcDEF123456", "token = " + "Zx9Qw8Er7Ty6Ui5Op4As3Df2",
-                                    "the password for the router is hunter2", PEM])
-def test_marker_hit_withholds_the_rest_of_its_file(secret):
-    text = f"+    check(x)\n+    assert f(\"{secret}\")  # fixture\n+    done()\n"
-    assert pb.has_secret(text)
-    out, n = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out)
-    assert out.startswith("+    check(x)\n") and "hunter2" not in out and "done" not in out and n == 3
-
-
-def test_keyword_hit_masks_the_value_after_it():
-    # TOKEN_RE's key-assignment match stops at "api_key="; the value must not survive it
-    out, _ = pb.mask_secrets("+api_key=" + "Qw8Er7Ty6Ui5Op4As3Df2Gh1")
-    assert "Qw8Er7" not in out
-
-
-def test_non_ascii_line_with_a_whole_hit_is_masked_whole_with_its_diff_marker():
-    out, n = pb.mask_secrets(f"+ café {CARD}\n+ok")
-    assert out == "+" + pb.SECRET_MASK + "\n+ok" and n == 1
-
-
-def test_secret_split_over_two_lines_withholds_from_its_first_line():
-    text = "ok\napi_key\n= " + "abcdefghijk12345ZZZZZZ" + "\nok"
-    out, n = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out) and n == 3 and out.startswith("ok\n")
-
-
-# A multi-line secret: has_secret flags only its first line, whatever syntax carries the value
-# on. Each case checks the VALUE is gone, not just has_secret(out). All were found leaking by
-# review rounds that tried to follow the value's syntax instead of withholding the file.
+AWS_ID = "AKIA" + "ABCDEFGHIJKLMNOP"
+AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/" + "bPxRfiCYEXAMPLEKEY"
 VALUE = "Hunter2" + "Hunter2Xy9"
+PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
+PEM_END = "-----END RSA " + "PRIVATE KEY-----"
 KEY_BODY = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
             "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK",
             "LxoS2tFczGkPLPgizskuemMghRniWaoLcyehkd3qqGElvW/VDL5AaWTg0nLVkjRo"]
-PEM_END = "-----END RSA " + "PRIVATE KEY-----"
+JWT_HEAD = "ey" + "JhbGciOiJIUzI1NiJ9"
+JWT_BODY = "ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0"
+JWT_SIG = "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+BASIC = "dXNlcjpwYXNzd29y" + "ZDEyMzQ1Njc4OTA="
+
+PRODUCT = ("diff --git a/src/scan.py b/src/scan.py\n--- a/src/scan.py\n+++ b/src/scan.py\n"
+           "@@ -1 +1,2 @@\n def scan(text):\n+    return card_hit(text)\n")
 
 
-@pytest.mark.parametrize("name,text", [
-    ("pem-diff", "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY) + "+" + PEM_END + "\n"),
-    ("pem-no-end", PEM + "\n" + "\n".join(KEY_BODY) + "\n"),
-    ("pem-two-hunks", "@@ -1,3 +1,3 @@\n " + PEM + "\n-" + KEY_BODY[0] + "\n+" + KEY_BODY[1] + "\n"
-                      "@@ -20,2 +20,2 @@\n-" + KEY_BODY[2] + "\n+" + KEY_BODY[0] + "\n " + PEM_END + "\n"),
-    ("pem-py-paren", '+KEY = (\n+    "' + PEM + '\\n"\n' + "".join('+    "' + b + '\\n"\n' for b in KEY_BODY) + "+)\n"),
-    ("pem-js-plus", '+const KEY = "' + PEM + '\\n"\n' + "".join('+  + "' + b + '\\n"\n' for b in KEY_BODY)),
-    ("pem-py-list", '+LINES = [\n+    "' + PEM + '",\n' + "".join('+    "' + b + '",\n' for b in KEY_BODY) + "+]\n"),
-    ("pem-tab-header", "-----BEGIN\tRSA " + "PRIVATE KEY-----\n" + "\n".join(KEY_BODY) + "\n"),
-    ("pem-nbsp-header", "-----BEGIN\u00a0RSA " + "PRIVATE KEY-----\n" + "\n".join(KEY_BODY) + "\n"),
-    ("yaml-block", "+db:\n+  password: |\n+    " + VALUE + "\n+  host: x\n"),
-    ("yaml-block-comment", "+db:\n+  password: |  # rotated\n+    " + VALUE + "\n+  host: x\n"),
-    ("yaml-plain-multiline", "password:\n  hunter2xyz\n  " + VALUE + "\n"),
-    ("yaml-dq-split", '+password: "abc\n+  ' + VALUE + '"\n+after: 1\n'),
-    ("py-paren", "+PASSWORD = (  # noqa\n+    \"" + VALUE + "\"\n+)\n"),
-    ("py-backslash", "+API_KEY = \\\n+    \"" + VALUE + "\"\n"),
-    ("py-implicit-concat", "+PASSWORD = ('abc'\n+    '" + VALUE + "')\n"),
-    ("py-dict-concat", '+cfg = dict(\n+    password="hunter2xyz"\n+    "' + VALUE + '",\n+)\n'),
-    ("js-template", "+const password = `\n+" + VALUE + "\n+`;\n"),
-    ("js-plus-concat", "+password = 'abc' +\n+    '" + VALUE + "';\n"),
-    ("shell-heredoc", "+password=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n"),
-    ("bare-colon", "password:\n  " + VALUE + "\n"),
-])
-def test_a_value_that_runs_on_never_reaches_the_judge(name, text):
+def test_file(body, name="tests/test_scan.py"):
+    return (f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n"
+            f"@@ -1,2 +1,{body.count(chr(10)) + 1} @@\n{body}")
+
+
+test_file.__test__ = False  # a helper, not a test
+
+FIXTURES = test_file("+def test_card_is_held():\n"
+                     f'+    assert scan.card_hit("{CARD}")  # a fake visa\n'
+                     f'+    assert scan.has_secret("{STRIPE}")\n'
+                     f"+    assert scan.has_secret('{PW}')\n")
+DIFF = PRODUCT + FIXTURES
+
+
+def test_the_reported_case_is_judged_without_its_fixtures():
+    """The live failure: a worktree diff with test card numbers was refused whole."""
+    assert pb.has_secret(DIFF)
+    out, withheld = pb.mask_secrets(DIFF)
+    assert out is not None and not pb.has_secret(out) and withheld == ["tests/test_scan.py"]
+    assert out.startswith(PRODUCT)  # the product file is sent as it is
+    assert out.endswith("+++ b/tests/test_scan.py\n" + pb.SECRET_WITHHELD.format(n=5) + "\n")
+    assert "hunter2" not in out and "4111" not in out and "card_is_held" not in out
+
+
+# Every part of each secret below reached the judge under some masking-inside-a-file rule.
+LEAKS = {
+    "card-with-cvv": (f"+CARD = '{CARD} 12/29 737'\n", ["12/29 737"]),
+    "stripe-concat": (f"+KEY = ('{STRIPE}'\n+       'TAILabcdef99')\n", ["TAILabcdef99"]),
+    "jwt-signature": (f"+TOKEN = '{JWT_HEAD}.{JWT_BODY}.{JWT_SIG}'\n", [JWT_SIG]),
+    "jwt-wrapped": (f"+curl -H 'Authorization: Bearer {JWT_HEAD}.{JWT_BODY}.\\\n+{JWT_SIG}'\n", [JWT_SIG]),
+    "basic-wrapped": ("+H = ('Authorization: Basic " + BASIC[:12] + "'\n+     '" + BASIC[12:] + "')\n", [BASIC[12:]]),
+    "aws-csv-row": (f"+deploy,{AWS_ID},{AWS_SECRET}\n", [AWS_SECRET]),
+    "pem-body": ("+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY) + "+" + PEM_END + "\n", KEY_BODY),
+    "pem-before-hunk-start": ("".join(" " + b + "\n" for b in KEY_BODY[:2]) + " " + PEM_END + "\n+" + PEM + "\n+"
+                              + KEY_BODY[2] + "\n", KEY_BODY),
+    "pem-second-hunk": (" " + PEM + "\n-" + KEY_BODY[0] + "\n+" + KEY_BODY[1] + "\n@@ -20,2 +20,2 @@\n-"
+                        + KEY_BODY[2] + "\n " + PEM_END + "\n", KEY_BODY),
+    "pem-py-paren": ('+KEY = (\n+    "' + PEM + '\\n"\n' + "".join('+    "' + b + '\\n"\n' for b in KEY_BODY) + "+)\n",
+                     KEY_BODY),
+    "pem-js-plus": ('+const KEY = "' + PEM + '\\n"\n' + "".join('+  + "' + b + '\\n"\n' for b in KEY_BODY), KEY_BODY),
+    "yaml-block": ("+db:\n+  password: |  # rotated\n+    " + VALUE + "\n+  host: x\n", [VALUE]),
+    "yaml-plain-multiline": ("+password:\n+  hunter2xyz\n+  " + VALUE + "\n", [VALUE]),
+    "py-dict-concat": ('+cfg = dict(\n+    password="hunter2xyz"\n+    "' + VALUE + '",\n+)\n', [VALUE]),
+    "js-template": ("+const password = `\n+" + VALUE + "\n+`;\n", [VALUE]),
+    "shell-heredoc": ("+password=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n", [VALUE]),
+    "pem-tab-header": ("+-----BEGIN\tRSA " + "PRIVATE KEY-----\n" + "".join("+" + b + "\n" for b in KEY_BODY), KEY_BODY),
+}
+
+
+@pytest.mark.parametrize("name", sorted(LEAKS))
+def test_no_part_of_a_secret_reaches_the_judge(name):
+    body, parts = LEAKS[name]
+    text = test_file(body, "fixtures/creds.txt") + PRODUCT
+    assert pb.has_secret(text)  # origin/main refused this text whole
+    out, withheld = pb.mask_secrets(text)
+    assert out is not None and not pb.has_secret(out) and withheld == ["fixtures/creds.txt"]
+    for part in parts:
+        assert part not in out, (name, part)
+    assert out.endswith(PRODUCT)
+
+
+def test_text_that_is_not_a_diff_is_not_judged():
+    assert pb.mask_secrets(f"notes\nthe card is {CARD}\n") == (None, ["the whole text"])
+
+
+def test_a_secret_shaped_header_is_withheld_too():
+    name = "password: " + "hunter2xyz9"
+    text = f"diff --git a/x b/x {name}\n--- a/x\n+++ b/x\n@@ -0,0 +1 @@\n+x = 1\n"
     assert pb.has_secret(text)
-    out, _ = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out)
-    for secret in [VALUE, *KEY_BODY]:
-        assert secret not in out, (name, out)
+    out, withheld = pb.mask_secrets(text)
+    assert out == pb.SECRET_WITHHELD.format(n=5) + "\n" and withheld == ["a file"]
 
 
-TAIL = "".join(f"+def test_unrelated_{k}():\n+    assert add({k}, 1) == {k + 1}\n" for k in range(20))
-NEXT_FILE = "diff --git a/src/scan.py b/src/scan.py\n@@ -1 +1,2 @@\n+def scan(text):\n+    return 1\n"
+def test_text_before_the_first_file_is_judged_on_its_own():
+    out, withheld = pb.mask_secrets(f"summary: rotate {PW}\n" + PRODUCT)
+    assert withheld == ["a file"] and out == pb.SECRET_WITHHELD.format(n=1) + "\n" + PRODUCT
 
 
-@pytest.mark.parametrize("name,fixture", [
-    ("card", '+CASES = ["' + CARD + '", "plain"]\n'),
-    ("token", '+assert has_secret("' + STRIPE + '")\n'),
-    ("one-line-pem", '+PEM = "' + PEM + "\\n" + KEY_BODY[0] + "\\n" + PEM_END + '"\n'),
-])
-def test_whole_fixture_hides_nothing_else(name, fixture):
-    """The reported failure: a card scanner's test fixtures refused the whole diff."""
-    out, n = pb.mask_secrets("diff --git a/t.py b/t.py\n@@ -0,0 +1,60 @@\n" + fixture + TAIL + NEXT_FILE)
-    assert out is not None and n == 1 and "test_unrelated_19" in out and KEY_BODY[0] not in out
-
-
-@pytest.mark.parametrize("name,fixture", [
-    ("header-in-string", '+HEADER = "' + PEM + '"\n'),
-    ("keyword", '+assert has_secret("' + PW + '")\n'),
-    ("prose", '+NOTE = "the password for the router is hunter2"\n'),
-])
-def test_marker_fixture_withholds_only_its_own_file(name, fixture):
-    text = "diff --git a/t.py b/t.py\n@@ -0,0 +1,60 @@\n+import scan\n" + fixture + TAIL + NEXT_FILE
-    out, _ = pb.mask_secrets(text)
-    assert out is not None and "+import scan" in out and "test_unrelated_19" not in out
-    assert out.endswith(NEXT_FILE)  # the product file after it stays readable
-
-
-def test_non_ascii_digit_elsewhere_does_not_refuse_a_card_fixture():
-    # one non-ASCII digit turns the whole-text card check's Luhn test off; lines must match it
-    text = "+label = '\u0661\u0662'\n+CARD = '" + CARD + "'\n+TRACK = '9302 2110 4790 0005 3721 11'\n+ok = 1\n"
-    assert pb.has_secret(text)
-    out, _ = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out) and "+ok = 1" in out
-
-
-def test_many_flagged_lines_mask_in_linear_time():
-    import time
-    text = "@@ -0,0 +1 @@\n" + "".join(f'+v{k} = "{CARD}"\n+ok\n' for k in range(5000))
-    t = time.process_time()
-    out, n = pb.mask_secrets(text)
-    assert n == 5000 and time.process_time() - t < 10
-
-
-def test_crlf_line_keeps_its_cr():
-    out, _ = pb.mask_secrets(f'x = "{CARD}"\r\nok\r\n')
-    assert out == f'x = "{pb.SECRET_MASK}"\r\nok\r\n'
+def test_non_ascii_digit_in_one_file_keeps_the_others_judged():
+    # a non-ASCII digit turns the whole-text card check's Luhn test off; parts must match it
+    other = test_file("+label = '\u0661\u0662'\n+TRACK = '9302 2110 4790 0005 3721 11'\n", "labels.py")
+    out, withheld = pb.mask_secrets(FIXTURES + other + PRODUCT)
+    assert out is not None and not pb.has_secret(out) and out.endswith(PRODUCT)
 
 
 def test_clean_text_is_returned_unchanged():
     text = "commit 5f2a9c1e0b\n2026-09-28 run 1234 5678 took 12s\nhttps://x.test/?id=4111111111111111\n"
-    assert pb.mask_secrets(text) == (text, 0)
+    assert pb.mask_secrets(text) == (text, [])
 
 
-def test_unmaskable_text_is_refused(monkeypatch):
-    monkeypatch.setattr(pb, "has_secret", lambda t: True)
-    assert pb.mask_secrets("anything")[0] is None
+def test_many_files_mask_in_linear_time():
+    text = "".join(test_file(f"+v = '{CARD}'\n", f"t{k}.py") + PRODUCT for k in range(2000))
+    t = time.process_time()
+    out, withheld = pb.mask_secrets(text)
+    assert len(withheld) == 2000 and time.process_time() - t < 20
 
 
 class Judge:
@@ -196,14 +165,28 @@ class Judge:
         return {"answers": {k: {"noul": 0.9} for k in questions}}
 
 
-def test_code_gate_sends_the_masked_diff():
+def test_code_gate_judges_the_diff_without_the_withheld_file():
     judge = Judge()
-    rows, code = sj.run_code_gate([("wt.diff", DIFF)], ["the test checks a fake visa number"],
-                                  ask_fn=judge)
+    info = {}
+    rows, code = sj.run_code_gate([("wt.diff", DIFF)], ["scan returns card_hit(text)"],
+                                  ask_fn=judge, mask_info=info)
     (state, _q), = judge.calls
-    assert not pb.has_secret(state) and pb.SECRET_MASK in state
-    assert CARD not in state and STRIPE not in state and "hunter2" not in state
-    assert "test_card_is_held" in state and code == 0
+    assert not pb.has_secret(state) and "return card_hit(text)" in state
+    assert "4111" not in state and "hunter2" not in state and code == 0
+    assert info["withheld"] == ["tests/test_scan.py"]
+
+
+def test_code_gate_drops_a_plain_evidence_file_and_keeps_the_rest():
+    judge = Judge()
+    sj.run_code_gate([("notes.md", f"card {CARD}\n"), ("wt.diff", PRODUCT)],
+                     ["scan returns card_hit(text)"], ask_fn=judge)
+    (state, _q), = judge.calls
+    assert "notes.md" not in state and "return card_hit(text)" in state
+
+
+def test_code_gate_refuses_when_no_evidence_is_left():
+    with pytest.raises(ValueError, match="contains a secret; not sent"):
+        sj.run_code_gate([("notes.md", f"card {CARD}\n")], ["x is y"], ask_fn=Judge())
 
 
 def test_code_gate_pattern_arm_still_reads_the_local_text():
@@ -215,7 +198,7 @@ def test_code_gate_pattern_arm_still_reads_the_local_text():
 
 
 def test_pattern_only_claims_never_need_the_mask(monkeypatch):
-    # nothing goes to the judge, so evidence that could not be masked does not refuse them
+    # nothing goes to the judge, so evidence with nothing judgeable does not refuse them
     monkeypatch.setattr(sj, "_mask_evidence", lambda items: pytest.fail("masked for nothing"))
     ev = 'import re\nFOO_RE = re.compile(r"foo")\n'
     rows, code = sj.run_code_gate([("ev", ev)], ["`foo` matches FOO_RE"], ask_fn=Judge())
@@ -227,6 +210,20 @@ def test_ask_still_refuses_raw_secret_text(monkeypatch):
     monkeypatch.setattr(jc, "transport", lambda *a: pytest.fail("secret was sent"))
     with pytest.raises(jc.JevError, match="contains a secret; not sent"):
         jc.ask("CODE:\n" + DIFF, {"c1": {"instructions": "Is it?", "criteria": {"YES": "y"}}})
+
+
+def test_check_drops_a_secret_file_and_names_it(tmp_path, monkeypatch, capsys):
+    notes, diff = tmp_path / "notes.md", tmp_path / "wt.diff"
+    notes.write_text(f"card {CARD}\n")
+    diff.write_text(DIFF)
+    sent = []
+    monkeypatch.setattr(jc, "check", lambda ev, *a, **k: sent.append(ev) or ([], {}, 0))
+    monkeypatch.setattr(jc, "print_table", lambda *a, **k: None)
+    assert jc.main([str(notes), str(diff), "--claim", "scan returns card_hit(text)"]) == 0
+    (path, text), = sent[0]
+    assert path == str(diff) and text.startswith(PRODUCT) and not pb.has_secret(text)
+    err = capsys.readouterr().err
+    assert "withheld 2 file(s)" in err and str(notes) in err and "tests/test_scan.py" in err
 
 
 SITE = """import urllib.request, os
@@ -248,28 +245,26 @@ def run_cli(tmp_path, argv):
     return p, (sent.read_text() if sent.exists() else "")
 
 
-KEY_DIFF = ("diff --git a/deploy/id_rsa b/deploy/id_rsa\n--- /dev/null\n+++ b/deploy/id_rsa\n"
-            "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY) + "+" + PEM_END + "\n")
-
-
 @pytest.mark.parametrize("entry", ["gate-code", "check"])
-def test_cli_sends_the_diff_masked_never_refuses_it(tmp_path, entry):
-    """The live failure: a worktree diff with test card numbers was refused whole, so the
-    change could not be checked. Now the request goes out, with no secret-shaped text in it,
-    and no line of a private key's body either (has_secret alone flags only its BEGIN line)."""
+def test_cli_sends_the_diff_without_its_secret_files(tmp_path, entry):
+    """End to end, over the recorded wire: the request goes out, holding the product file
+    and no part of any leak case."""
     ev = tmp_path / "wt.diff"
-    ev.write_text(DIFF + KEY_DIFF)
-    claim = ["--claim", "the new test checks that a fake visa number is held"]
+    ev.write_text(DIFF + "".join(test_file(body, f"fx/{n}.txt") for n, (body, _p) in sorted(LEAKS.items())))
+    claim = ["--claim", "scan returns card_hit(text)"]
     argv = {"gate-code": [str(SKILL / "superjev.py"), "gate", str(ev), *claim],
             "check": [str(SKILL / "lib" / "jev_client.py"), str(ev), *claim]}[entry]
     p, sent = run_cli(tmp_path, argv)
     assert sent, p.stdout + p.stderr
     for body in sent.strip().split("\n"):
         state = json.loads(body)["state"]
-        assert pb.SECRET_MASK in state and not pb.has_secret(state)
-        assert CARD not in state and STRIPE not in state and "hunter2" not in state
-        assert not any(b in state for b in KEY_BODY)
+        assert "return card_hit(text)" in state and not pb.has_secret(state)
+        assert "4111" not in state and "hunter2" not in state
+        for _body, parts in LEAKS.values():
+            assert not any(part in state for part in parts)
     assert "contains a secret; not sent" not in p.stdout + p.stderr
+    if entry == "check":  # the gate prints its note with the verdict, which the blocked wire stops
+        assert f"withheld {len(LEAKS) + 1} file(s)" in p.stderr
 
 
 def test_cli_claim_holding_a_secret_is_still_refused(tmp_path):
