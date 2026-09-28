@@ -20,18 +20,29 @@ def world(tmp_path, monkeypatch):
     for n in ("a.md", "b.md", "sub/c.md"):
         (proj / n).write_text("# note\n")
     (proj / "tool.py").write_text("x = 1\n")
-    (cache / "notes-report.json").write_text(json.dumps(
-        {"pointer": "notes", "roots": [str(tmp_path)], "approved": [str(proj / "a.md"), str(proj / "sub/c.md")]}))
+    (cache / "notes-report.json").write_text(json.dumps({"pointer": "notes", "roots": [str(tmp_path)]}))
     monkeypatch.setattr(prepare_bulk, "CACHE_DIR", cache)
     monkeypatch.setattr(ask, "refresh_hint", lambda *a: "; refresh it")
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a[0]) or pytest.fail("no paid call"))
+    REGISTERED.clear()
+    REGISTERED.update({"notes": [str(proj / "a.md"), str(proj / "sub/c.md")]})
+    REGISTERED["notes-2"] = REGISTERED["notes"]
     return {"tmp": tmp_path, "proj": proj, "cache": cache, "calls": calls}
 
 
+REGISTERED = {}  # pointer -> the files the backend has registered for it (the `sources` action)
+
+
 def panel(*rows):
-    return lambda req: {"status": "ok", "pointers": [
-        {"pointer": n, "snapshotStatus": st} for n, st in rows]}
+    def memory(req):
+        if req["action"] == "sources":
+            files = REGISTERED.get(req["pointer"], [])
+            page = files[req["offset"]:req["offset"] + 1]  # one row per page proves paging is followed
+            nxt = req["offset"] + 1 if req["offset"] + 1 < len(files) else None
+            return {"status": "ok", "sources": [{"originalPath": f} for f in page], "nextOffset": nxt}
+        return {"status": "ok", "pointers": [{"pointer": n, "snapshotStatus": st} for n, st in rows]}
+    return memory
 
 
 def run(monkeypatch, capsys, *args):
@@ -80,7 +91,7 @@ def test_json_output_for_skills(world, monkeypatch, capsys):
     assert rep["folders"][0]["connected"] == 2 and rep["folders"][0]["connectable"] == 3
 
 
-def test_split_part_reads_parent_report(world, monkeypatch, capsys):
+def test_split_part_counts_its_own_registered_files(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", panel(("notes-2", "available")))
     rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]))
     assert "2 of 3" in out
@@ -132,9 +143,78 @@ def test_bad_arguments_never_search(world, monkeypatch, capsys):
 
 
 def test_opted_in_extensions_count_as_connectable(world, monkeypatch, capsys):
-    (world["cache"] / "code-report.json").write_text(json.dumps(
-        {"pointer": "code", "extensions": [".md", ".py"], "approved": [str(world["proj"] / "tool.py")]}))
+    (world["cache"] / "code-report.json").write_text(json.dumps({"pointer": "code", "extensions": [".md", ".py"]}))
+    REGISTERED["code"] = [str(world["proj"] / "tool.py")]
     monkeypatch.setattr(ask, "memory", panel(("notes", "available"), ("code", "available")))
     rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]), "--json")
     f = json.loads(out)["folders"][0]
     assert f["connectable"] == 4 and f["connected"] == 3 and f["unsupported"] == 0
+
+
+class _R:
+    def __init__(self, out="", err="", rc=0): self.stdout, self.stderr, self.returncode = out, err, rc
+
+
+def test_failed_asks_are_not_new_ground(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R("provider unavailable", "provider failure", 1))
+    rc, out = run(monkeypatch, capsys, "--about", "synthetic feature", "--json")
+    rep = json.loads(out)
+    assert rep["new_ground"] is None and rep["verdict"] == "READY WITH WARNINGS"
+    assert all("exit 1" in a["error"] for a in rep["knowledge"])
+
+
+def test_ask_timeout_is_a_warning_not_a_crash(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    def boom(cmd, **k):
+        raise subprocess.TimeoutExpired(cmd, 600)
+    monkeypatch.setattr(subprocess, "run", boom)
+    rc, out = run(monkeypatch, capsys, "--about", "x", "--skill", "posts things")
+    assert "NEW GROUND UNKNOWN" in out and "timed out" in out and "existing-skill search failed" in out
+
+
+def test_inconclusive_high_score_is_not_known(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    line = " 0.99  /tmp/note.md  [notes]  (inconclusive: content check did not finish; routing score)\n"
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R(line))
+    rc, out = run(monkeypatch, capsys, "--about", "x", "--json")
+    assert json.loads(out)["new_ground"] is True
+
+
+def test_failed_skill_search_is_not_none_found(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R(json.dumps({"status": "error", "candidates": []}), "", 1))
+    rc, out = run(monkeypatch, capsys, "--skill", "posts things", "--json")
+    rep = json.loads(out)
+    assert rep["existing_skills"] is None and any("existing-skill search failed" in w for w in rep["warnings"])
+
+
+def test_approved_but_unregistered_files_do_not_count(world, monkeypatch, capsys):
+    (world["cache"] / "notes-report.json").write_text(json.dumps({"connected": False, "approved": [
+        str(world["proj"] / n) for n in ("a.md", "b.md", "sub/c.md")]}))
+    REGISTERED["notes"] = [str(world["proj"] / "a.md")]
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]), "--json")
+    assert json.loads(out)["folders"][0]["connected"] == 1
+
+
+def test_symlinked_subfolder_is_walked_once(world, monkeypatch, capsys, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "linked.md").write_text("# l\n")
+    (outside / "loop").symlink_to(outside, target_is_directory=True)
+    (world["proj"] / "link").symlink_to(outside, target_is_directory=True)
+    (world["proj"] / "api.schema.json").write_text("{}")
+    (world["cache"] / "code-report.json").write_text(json.dumps({"extensions": [".schema.json"]}))
+    REGISTERED["code"] = [str(world["proj"] / "api.schema.json")]
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available"), ("code", "available")))
+    rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]), "--json")
+    f = json.loads(out)["folders"][0]
+    assert f["connectable"] == 5 and f["connected"] == 3  # a, b, c, linked.md, api.schema.json
+
+
+def test_unlistable_pointer_blocks(world, monkeypatch, capsys):
+    base = panel(("notes", "available"))
+    monkeypatch.setattr(ask, "memory", lambda r: {"status": "error"} if r["action"] == "sources" else base(r))
+    rc, out = run(monkeypatch, capsys, "--project-dir", str(world["proj"]))
+    assert rc == 1 and "could not list the registered files of notes" in out
