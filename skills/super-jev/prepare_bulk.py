@@ -92,6 +92,14 @@ HERE = Path(__file__).resolve().parent
 # suffixes require --ext and are persisted in that pointer's recipe.
 CONNECTABLE_EXTENSIONS = ('.md',)
 CODE_EXTENSIONS = ('.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.sh', '.bash')
+# Credential containers are not ordinary text inputs; --allow-held cannot opt
+# them in. Check compound suffixes and symlink targets as well.
+CREDENTIAL_SUFFIXES = frozenset({'env', 'pem', 'key', 'p12', 'pfx', 'jks', 'kdbx',
+                                 'kdb', 'keystore', 'pkcs12', 'ppk', 'p8'})
+
+
+def credential_suffix(name: str) -> bool:
+    return bool(CREDENTIAL_SUFFIXES.intersection(name.lower().split('.')[1:]))
 
 
 def extension_list(value: str) -> tuple:
@@ -101,6 +109,8 @@ def extension_list(value: str) -> tuple:
         suffix = '.' + item.strip().lower().lstrip('.')
         if not re.fullmatch(r'\.[a-z0-9]+(?:[.-][a-z0-9]+)*', suffix):
             raise argparse.ArgumentTypeError('extensions must be comma-separated literal suffixes, e.g. py,ts,js,sh,json-schema')
+        if credential_suffix(suffix):
+            raise argparse.ArgumentTypeError('credential/key suffixes cannot be connected, including with --allow-held')
         if suffix not in result:
             result.append(suffix)
     return tuple(result)
@@ -496,6 +506,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
         for p in glob_iter:
             rp = p.resolve()
             if rp in seen:
+                continue
+            if credential_suffix(p.name) or credential_suffix(rp.name):
+                held.append((str(p), 'credential/key file suffix; cannot be overridden'))
                 continue
             # Case-insensitive: 225 of 315 fleet skills name the entry file skill.md, not SKILL.md.
             if names and not any(fnmatch.fnmatch(p.name.lower(), n.lower()) for n in names):
