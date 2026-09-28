@@ -12197,3 +12197,44 @@ def test_sweep_receipt_worthy_line_count_is_zero_for_no_module_pattern():
     class _Bare:
         pass
     assert sweep._receipt_worthy_line_count(_Bare(), "42 passed\n") == 0
+
+
+def test_gate_part_refused_by_the_judge_is_read_not_reject(tmp_path, monkeypatch, capsys):
+    """A door that refuses one part (exit 2, no table: a quoted span it does not
+    hold) no longer turns a true claim into REJECT; it is READ, since that part
+    was not judged."""
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000))
+                  + 'the file says "hello world" at its end\n')
+
+    class QuoteDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            text = "".join(Path(c).read_text() for c in cmd if str(c).endswith(".md") and Path(c).is_file())
+            self.calls.append({"cmd": cmd})
+            if "hello world" not in text:
+                return subprocess.CompletedProcess(cmd, 2, stdout="\n  FABRICATED\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=_table([("c1", "SUPPORTED", 0.97)]), stderr="")
+
+    door = QuoteDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    code = sj.main(["gate", str(ev), "--claim", 'the file says "hello world"'])
+    out = capsys.readouterr().out
+    assert len(door.calls) > 1 and code == 3, out
+    assert "refused by the judge and not judged" in out
+    assert "SUPPORTED      0.97  claim c1  [part %d]" % len(door.calls) in out  # the part holding the quote
+
+
+def test_gate_every_part_refused_is_reject(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(2, stdout="\n  FABRICATED\n"))
+    assert sj.main(["gate", str(ev), "--claim", 'the file says "hello world"']) == 2
+    capsys.readouterr()
+
+
+def test_merge_part_tables_refuses_rows_for_different_claims():
+    """A door splitting a draft itself: c1 must be the same claim in every part."""
+    a = "  c1   SUPPORTED      0.97  the sky is blue\n"
+    b = "  c1   NOT_SUPPORTED  0.90  the grass is green\n"
+    assert sj.merge_part_tables([a, b]) is None
+    assert sj.merge_part_tables([a, a.replace("SUPPORTED     ", "NOT_SUPPORTED")])[0][1] == "SUPPORTED"
