@@ -12328,3 +12328,34 @@ def test_gate_split_scope_claim_needs_every_part(tmp_path, monkeypatch, capsys, 
     monkeypatch.setattr(sj.subprocess, "run", HalfDoor())
     assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", claim]) == code
     capsys.readouterr()
+
+
+def test_gate_split_parts_tell_the_judge_they_are_parts(tmp_path, monkeypatch, capsys):
+    """However an absence claim is worded ("eval is absent"), the judge is told each
+    part is only a part; one call gets no such note."""
+    door = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    sj.main(["gate", str(_big_log(tmp_path)), "--claim", "eval is absent from the log"])
+    assert len(door.states) > 1
+    assert all(("This is part %d of %d" % (i, len(door.states))) in t
+               for i, t in enumerate(door.states, 1))
+    small = tmp_path / "small.md"
+    small.write_text("NEEDLE here\n")
+    door2 = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door2)
+    sj.main(["gate", str(small), "--claim", "eval is absent from the log"])
+    assert "This is part" not in "".join(door2.states)
+    capsys.readouterr()
+
+
+def test_gate_split_scope_claim_is_as_sure_as_its_least_sure_part(tmp_path, monkeypatch, capsys):
+    outs = iter([_table([("c1", "SUPPORTED", 0.99)]), _table([("c1", "SUPPORTED", 0.50)])]
+                + [_table([("c1", "SUPPORTED", 0.99)])] * 10)
+
+    class SeqDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout=next(outs), stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "no row of the log calls eval"]) == 3
+    assert "0.50" in capsys.readouterr().out
