@@ -5123,9 +5123,11 @@ def test_cap_check_never_touches_the_draft(monkeypatch):
     assert kept == []  # every evidence item dropped; draft itself never touched by this function
 
 
-def test_cmd_gate_warns_and_truncates_over_cap(tmp_path, monkeypatch, capsys):
+def test_cmd_gate_direct_check_never_truncates_over_cap(tmp_path, monkeypatch, capsys):
+    """The cap is the Stop hook's; a direct check sends every file whole."""
     monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "5")
-    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=_jev_header() + CLEAN_GATE_TABLE))
+    door = FakeDoor(0, stdout=_jev_header() + CLEAN_GATE_TABLE)
+    monkeypatch.setattr(sj.subprocess, "run", door)
     ev = tmp_path / "ev.md"
     ev.write_text("x" * 500, encoding="utf-8")
     draft = tmp_path / "d.md"
@@ -5133,10 +5135,101 @@ def test_cmd_gate_warns_and_truncates_over_cap(tmp_path, monkeypatch, capsys):
     code = sj.main(["gate", str(ev), "--draft", str(draft), "--json"])
     capsys.readouterr()
     assert code == 0
-    lines = sj._ledger_lines()
-    rec = json.loads(lines[-1])
-    assert rec["truncated"] is True
-    assert rec["input_cap_tok"] == 5
+    assert str(ev) in door.argv  # the original file, not a cut copy
+    rec = json.loads(sj._ledger_lines()[-1])
+    assert rec["truncated"] is False
+
+
+def test_cap_check_names_the_files_it_drops_and_cuts(monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "10")  # 40 chars
+    items = [("old.md", "A" * 100), ("mid.md", "M" * 30), ("new.md", "B" * 20)]
+    kept, truncated, _est, _cap = sj.cap_check_and_truncate(items, "", "gate")
+    err = capsys.readouterr().err
+    assert truncated and [p for p, _ in kept] == ["mid.md", "new.md"]
+    assert "dropped, not sent: old.md" in err and "cut to its tail: mid.md" in err
+
+
+def test_split_evidence_keeps_every_character_and_fits_each_part():
+    big = "".join(f"line {i} of the big file\n" for i in range(3000))
+    items = [("big.py", big), ("small.md", "the small file\n"), ("one-line.txt", "z" * 9000)]
+    parts = sj.split_evidence(items, 2000)
+    assert len(parts) > 1
+    for part in parts:
+        assert sum(sj._judge_tokens(t) for _, t in part) <= 2000
+    by_file = {}
+    for part in parts:
+        for label, text in part:
+            by_file.setdefault(label.split(" (part ")[0], []).append(text)
+    assert {k: "".join(v) for k, v in by_file.items()} == dict(items)
+    assert sj.split_evidence(items[1:2], 2000) == [[items[1]]]
+
+
+def _table(rows):
+    return "\n" + _jev_header() + "\n\n" + "".join(
+        f"  {k:4s} {v:14s} {s:.2f}  claim {k}\n" for k, v, s in rows) + (
+        "\n  leaked_internal    CLEAN                0.99\n"
+        "  overclaim          HONEST               0.95\n")
+
+
+class PartDoor(FakeDoor):
+    """A door that supports c1 only in the part holding NEEDLE, and c2 in every part."""
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        if _is_git_call(cmd):
+            return _REAL_RUN(cmd, cwd=cwd, env=env, **kw)
+        self.calls.append({"cmd": [str(c) for c in cmd]})
+        text = "".join(Path(c).read_text() for c in cmd if str(c).endswith(".md") and Path(c).is_file())
+        self.states = getattr(self, "states", []) + [text]
+        c1 = ("SUPPORTED", 0.97) if "NEEDLE" in text else ("NOT_SUPPORTED", 0.93)
+        out = _table([("c1", *c1), ("c2", "SUPPORTED", 0.91)])
+        return subprocess.CompletedProcess(cmd, 3 if c1[0] != "SUPPORTED" else 0, stdout=out, stderr="")
+
+
+def test_gate_over_one_call_checks_every_part_and_merges(tmp_path, monkeypatch, capsys):
+    """A big file used to push the small one out; its true claim came back NOT_SUPPORTED."""
+    big, small = tmp_path / "big.log", tmp_path / "small.md"
+    big.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    small.write_text("NEEDLE: the small file holds the fact.\n")
+    door = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    code = sj.main(["gate", str(big), str(small), "--claim", "the small file holds the fact",
+                    "--claim", "the big file is filler"])
+    out = capsys.readouterr().out
+    # c1 is found in the small file's part only: never CLEAN, never a false
+    # NOT_SUPPORTED either; the part holding it is named for a person to read.
+    assert len(door.calls) > 1 and code == 3, out
+    assert all(sj._judge_tokens(s) <= sj.JUDGE_CALL_TOKENS for s in door.states)
+    assert "".join(door.states).count("NEEDLE") == 1
+    assert "checked in %d parts and nothing was cut" % len(door.calls) in out
+    assert str(small) in out and "(part 1/" in out
+    assert "c1   SUPPORTED_IN_PART" in out and "c1 is supported only in part" in out
+    assert "c2   SUPPORTED " in out  # every part supports c2
+
+
+def test_gate_over_one_call_contradiction_in_any_part_wins(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    outs = iter([_table([("c1", "SUPPORTED", 0.99)]), _table([("c1", "CONTRADICTED", 0.90)])]
+                + [_table([("c1", "NOT_SUPPORTED", 0.90)])] * 10)
+
+    class SeqDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            self.calls.append({"cmd": cmd})
+            return subprocess.CompletedProcess(cmd, 0, stdout=next(outs), stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
+    code = sj.main(["gate", str(ev), "--claim", "the big file is filler"])
+    out = capsys.readouterr().out
+    assert code == 3 and "CONTRADICTED" in out and "[part 2]" in out
+
+
+def test_gate_part_error_fails_the_whole_check(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(1, stdout="", stderr="jev: HTTP 500\n"))
+    code = sj.main(["gate", str(ev), "--claim", "the big file is filler"])
+    captured = capsys.readouterr()
+    assert code == 1 and "part 1 of" in captured.err
 
 
 # ------------------------------------------------------------ feedback + calibration
@@ -12107,3 +12200,206 @@ def test_sweep_receipt_worthy_line_count_is_zero_for_no_module_pattern():
     class _Bare:
         pass
     assert sweep._receipt_worthy_line_count(_Bare(), "42 passed\n") == 0
+
+
+def test_gate_part_refused_by_the_judge_is_read_not_reject(tmp_path, monkeypatch, capsys):
+    """A door that refuses one part (exit 2, no table: a quoted span it does not
+    hold) no longer turns a true claim into REJECT; it is READ, since that part
+    was not judged."""
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000))
+                  + 'the file says "hello world" at its end\n')
+
+    class QuoteDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            text = "".join(Path(c).read_text() for c in cmd if str(c).endswith(".md") and Path(c).is_file())
+            self.calls.append({"cmd": cmd})
+            if "hello world" not in text:
+                return subprocess.CompletedProcess(cmd, 2, stdout="\n  FABRICATED\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=_table([("c1", "SUPPORTED", 0.97)]), stderr="")
+
+    door = QuoteDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    code = sj.main(["gate", str(ev), "--claim", 'the file says "hello world"'])
+    out = capsys.readouterr().out
+    assert len(door.calls) > 1 and code == 3, out
+    assert "refused by the judge and not judged" in out
+    assert "SUPPORTED      0.97  claim c1  [part %d]" % len(door.calls) in out  # the part holding the quote
+
+
+def test_gate_every_part_refused_is_reject(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(2, stdout="\n  FABRICATED\n"))
+    assert sj.main(["gate", str(ev), "--claim", 'the file says "hello world"']) == 2
+    capsys.readouterr()
+
+
+def test_merge_part_tables_refuses_rows_for_different_claims():
+    """A door splitting a draft itself: c1 must be the same claim in every part."""
+    a = "  c1   SUPPORTED      0.97  the sky is blue\n"
+    b = "  c1   NOT_SUPPORTED  0.90  the grass is green\n"
+    assert sj.merge_part_tables([a, b]) is None
+    assert sj.merge_part_tables([a, a.replace("SUPPORTED     ", "NOT_SUPPORTED")])[0][1] == "SUPPORTED_IN_PART"
+    assert sj.merge_part_tables([a, a])[0][1] == "SUPPORTED"
+
+
+def test_gate_part_rejected_with_a_table_stays_reject(tmp_path, monkeypatch, capsys):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    outs = iter([(0, _table([("c1", "SUPPORTED", 0.99)])), (2, _table([("c1", "CONTRADICTED", 0.97)]))]
+                + [(0, _table([("c1", "NOT_SUPPORTED", 0.90)]))] * 10)
+
+    class SeqDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            code, out = next(outs)
+            return subprocess.CompletedProcess(cmd, code, stdout=out, stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
+    assert sj.main(["gate", str(ev), "--claim", "the big file is filler"]) == 2
+    assert "CONTRADICTED" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("claim_args", [["--claim", "the big file is filler"], ["--draft", "DRAFT"]])
+def test_gate_split_side_row_no_answer_is_not_clean(tmp_path, monkeypatch, capsys, claim_args):
+    """The third review: a part's overclaim NO_ANSWER (the judge exits 3 for it) was
+    merged away and the split check said CLEAN; one call said READ."""
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    draft = tmp_path / "d.md"
+    draft.write_text("the big file is filler text.")
+    table = ("\n  c1   SUPPORTED      0.97  the big file is filler\n\n"
+             "  leaked_internal    CLEAN                0.99\n"
+             "  overclaim          NO_ANSWER            0.00\n")
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=table))
+    argv = [x if x != "DRAFT" else str(draft) for x in claim_args]
+    assert sj.main(["gate", str(ev), *argv]) == 3
+    assert "NO_ANSWER" in capsys.readouterr().out
+
+
+def _big_log(tmp_path):
+    ev = tmp_path / "big.log"
+    ev.write_text("".join(f"row {i}: filler text of the big evidence file\n" for i in range(4000)))
+    return ev
+
+
+def test_gate_split_keeps_a_part_flag_its_rounded_score_hides(tmp_path, monkeypatch, capsys):
+    """The fifth review: jev_client prints SUPPORTED 0.797 as "0.80" and exits 3; a
+    split check re-read "0.80" as over the line and said CLEAN."""
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_table([("c1", "SUPPORTED", 0.797)])))
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 3
+    assert "0.79" in capsys.readouterr().out
+
+
+def test_gate_split_part_flag_without_a_row_is_not_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(3, stdout=_table([("c1", "SUPPORTED", 0.95)])))
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 3
+    assert "without a row saying why" in capsys.readouterr().out
+
+
+def test_gate_over_the_part_cap_sends_nothing(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("SUPERJEV_MAX_PARTS", "2")
+    door = FakeDoor(0, stdout=_table([("c1", "SUPPORTED", 0.95)]))
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 1
+    assert not door.calls and "SUPERJEV_MAX_PARTS=2" in capsys.readouterr().out
+
+
+def test_gate_split_table_with_a_repeated_row_is_unreadable(tmp_path, monkeypatch, capsys):
+    table = _table([("c1", "SUPPORTED", 0.95)]) + "  c1   NOT_SUPPORTED  0.90  claim c1\n"
+    monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0, stdout=table))
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "the big file is filler"]) == 1
+    capsys.readouterr()
+
+
+class HalfDoor(FakeDoor):
+    """c1 SUPPORTED in the first part only, NOT_SUPPORTED (not CONTRADICTED) after."""
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        self.calls.append({"cmd": cmd})
+        v = "SUPPORTED" if len(self.calls) == 1 else "NOT_SUPPORTED"
+        return subprocess.CompletedProcess(cmd, 0 if v == "SUPPORTED" else 3,
+                                           stdout=_table([("c1", v, 0.95)]), stderr="")
+
+
+@pytest.mark.parametrize("claim, code", [
+    ("no file in this log calls eval on user input", 3),
+    ("every row of the big file is filler text", 3),
+    ("the big file holds filler rows", 3),
+    # the second outside review's wordings, which no keyword list caught
+    ("eval is absent from the code", 3), ("the code is free of eval", 3),
+    ("zero handlers call eval", 3), ("the module lacks eval", 3),
+    ("eval was removed", 3), ("the parser exclusively uses json.loads", 3)])
+def test_gate_split_scope_claim_needs_every_part(tmp_path, monkeypatch, capsys, claim, code):
+    """The outside review: an absence or universal claim was SUPPORTED by a part
+    lacking the code while the part holding it said only NOT_SUPPORTED."""
+    monkeypatch.setattr(sj.subprocess, "run", HalfDoor())
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", claim]) == code
+    capsys.readouterr()
+
+
+def test_gate_split_parts_tell_the_judge_they_are_parts(tmp_path, monkeypatch, capsys):
+    """However an absence claim is worded ("eval is absent"), the judge is told each
+    part is only a part; one call gets no such note."""
+    door = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    sj.main(["gate", str(_big_log(tmp_path)), "--claim", "eval is absent from the log"])
+    assert len(door.states) > 1
+    assert all(("This is part %d of %d" % (i, len(door.states))) in t
+               for i, t in enumerate(door.states, 1))
+    small = tmp_path / "small.md"
+    small.write_text("NEEDLE here\n")
+    door2 = PartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door2)
+    sj.main(["gate", str(small), "--claim", "eval is absent from the log"])
+    assert "This is part" not in "".join(door2.states)
+    capsys.readouterr()
+
+
+def test_gate_split_scope_claim_is_as_sure_as_its_least_sure_part(tmp_path, monkeypatch, capsys):
+    outs = iter([_table([("c1", "SUPPORTED", 0.99)]), _table([("c1", "SUPPORTED", 0.50)])]
+                + [_table([("c1", "SUPPORTED", 0.99)])] * 10)
+
+    class SeqDoor(FakeDoor):
+        def __call__(self, cmd, cwd=None, env=None, **kw):
+            return subprocess.CompletedProcess(cmd, 0, stdout=next(outs), stderr="")
+
+    monkeypatch.setattr(sj.subprocess, "run", SeqDoor())
+    assert sj.main(["gate", str(_big_log(tmp_path)), "--claim", "no row of the log calls eval"]) == 3
+    assert "0.50" in capsys.readouterr().out
+
+
+class FirstPartDoor(FakeDoor):
+    """Echoes the draft's or claims file's claims: SUPPORTED 0.95 in part 1,
+    NOT_SUPPORTED in every later part, as jev_client prints them (cut to 70)."""
+
+    def __call__(self, cmd, cwd=None, env=None, **kw):
+        self.calls.append({"cmd": cmd})
+        if "--draft" in cmd:
+            claims = sj._split_draft_for_test(Path(cmd[cmd.index("--draft") + 1]).read_text())
+        else:
+            claims = [l.strip() for l in Path(cmd[cmd.index("--claims-file") + 1]).read_text().splitlines() if l.strip()]
+        v = "SUPPORTED" if len(self.calls) == 1 else "NOT_SUPPORTED"
+        out = "".join("  c%d   %-14s 0.95  %s\n" % (n, v, c[:70]) for n, c in enumerate(claims, 1))
+        return subprocess.CompletedProcess(cmd, 0 if v == "SUPPORTED" else 3, stdout=out, stderr="")
+
+
+LONG_NEVER = "After the refactor the request handler in server.py validates tokens and never calls eval."
+
+
+@pytest.mark.parametrize("presplit", ["0", "1"])  # 1: the draft reaches the judge as --claims-file
+def test_gate_split_draft_or_claims_file_supported_in_one_part_is_not_clean(tmp_path, monkeypatch, capsys, presplit):
+    """The second outside review: a split --draft check looked for "never" in the
+    judge's 70-character echo and said CLEAN; the rule now needs no claim text."""
+    notes = tmp_path / "notes.txt"
+    notes.write_text("".join(f"line {i}: notes about the refactor of the service\n" for i in range(9000)))
+    f = tmp_path / "input.txt"
+    f.write_text(LONG_NEVER + "\n")
+    monkeypatch.setenv("SUPERJEV_PRESPLIT", presplit)
+    monkeypatch.setattr(sj, "_split_draft_for_test", lambda t: [LONG_NEVER], raising=False)
+    door = FirstPartDoor()
+    monkeypatch.setattr(sj.subprocess, "run", door)
+    assert sj.main(["gate", str(notes), "--draft", str(f)]) == 3
+    assert any(("--claims-file" if presplit == "1" else "--draft") in c["cmd"] for c in door.calls)
+    out = capsys.readouterr().out
+    assert len(door.calls) >= 8 and "SUPPORTED_IN_PART" in out and "VERDICT: CLEAN" not in out

@@ -488,3 +488,17 @@ def test_cli_claim_holding_a_secret_is_still_refused(tmp_path):
     p, sent = run_cli(tmp_path, [str(SKILL / "superjev.py"), "gate", str(ev),
                                  "--claim", f"the test uses {CARD}"])
     assert sent == "" and p.returncode != 0 and "CLEAN" not in p.stdout
+
+
+@pytest.mark.parametrize("entry", ["gate", "check"])
+def test_all_secret_evidence_bigger_than_one_call_is_never_split(tmp_path, entry):
+    """The fourth review: a big log whose only secret is near its end was split raw,
+    and its clean first part went to the judge. It goes whole and is refused."""
+    log = tmp_path / "big.log"
+    log.write_text("".join(f"row {i}: an ordinary line of a long run log\n" for i in range(3000))
+                   + PEM + "\n" + "\n".join(KEY_BODY) + "\n" + PEM_END + "\n")
+    argv = {"gate": [str(SKILL / "superjev.py"), "gate"],
+            "check": [str(SKILL / "dispatch.py"), "check"]}[entry]
+    p, sent = run_cli(tmp_path, [*argv, str(log), "--claim", "the run log has three thousand rows"])
+    assert not sent, sent[:200]
+    assert "contains a secret" in p.stdout + p.stderr
