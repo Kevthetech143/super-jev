@@ -732,3 +732,13 @@ def test_rerouted_code_judge_failure_is_an_error_not_a_traceback(monkeypatch, ev
         cmd, 1, stdout="", stderr="jev: could not reach TypeSafe: URLError\n"))
     code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
     assert code == 1 and "could not reach TypeSafe" in out and "CLEAN" not in out, out
+
+
+def test_rerouted_code_claims_flagged_side_row_is_not_clean(monkeypatch, evfile):
+    """The judge's overclaim NO_ANSWER keeps a rerouted diff check from CLEAN."""
+    monkeypatch.setattr(sj, "_code_ask", sj._code_ask_live)
+    monkeypatch.setattr(sj.subprocess, "run", lambda cmd, *a, **kw: subprocess.CompletedProcess(
+        cmd, 3, stdout="  c1   SUPPORTED      0.97  x.py now says new\n\n"
+                       "  overclaim          NO_ANSWER            0.00\n", stderr=""))
+    code, out = _run_text(["gate", evfile(DIFF, "wt.diff"), "--claim", "x.py now says new"])
+    assert code == 3 and "flagged overclaim NO_ANSWER" in out, out

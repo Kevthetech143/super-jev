@@ -4415,6 +4415,11 @@ _DOOR_ROW_RE = re.compile(
     r'(?P<verdict>[A-Z][A-Z_]*)\s+(?P<score>\d+\.\d+)(?:[ \t]+(?P<subject>.*))?$', re.MULTILINE)
 
 
+# The good label of each draft-level row (lib/jev_client.FAVORABLE); any other label,
+# NO_ANSWER included, is red when parts are merged, as the judge itself treats it.
+_FAVORABLE_SIDE = {"CLEAN", "NOT_TIME_SENSITIVE", "CONSISTENT", "HONEST"}
+
+
 def merge_part_tables(outs):
     """One row per question across the parts' verdict tables, the rule
     lib/jev_client.merge_rows uses: a contradiction (for a draft-level
@@ -4440,7 +4445,7 @@ def merge_part_tables(outs):
             pick = ([r for r in rows if r[0][0] == "CONTRADICTED"]
                     or [r for r in rows if r[0][0] == "SUPPORTED"])
         else:
-            pick = [r for r in rows if r[0][0] in NOTABLE_VERDICTS]
+            pick = [r for r in rows if r[0][0] not in _FAVORABLE_SIDE]
         (verdict, score, subject), part = max(pick or rows, key=lambda r: r[0][1])
         merged.append((key, verdict, score, subject, part))
     return merged
@@ -4494,7 +4499,14 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
     for key, verdict, score, _subject, part in merged:
         if not key.startswith("c"):
             lines.append("  %-18s %-20s %.2f  [part %d]" % (key, verdict, score, judged[part - 1]))
-    return (2 if rejected else 3 if notes else 0), "".join(notes) + "\n".join(lines) + "\n", "".join(errs)
+    # gate_fail_closed blocks only on the known red labels; a merged side row with any
+    # other unfavorable label (NO_ANSWER) must not read as clean either. An explicit
+    # --claim check keeps its advisory rows advisory, as the judge's own exit does.
+    advisory = _CLAIM_ADVISORY_KEYS if "--claim" in claim_args else set()
+    side_red = any(not k.startswith("c") and v not in _FAVORABLE_SIDE and k not in advisory
+                   for k, v, _s, _t, _p in merged)
+    code = 2 if rejected else 3 if (notes or side_red) else 0
+    return code, "".join(notes) + "\n".join(lines) + "\n", "".join(errs)
 
 
 def cmd_gate(a):
@@ -4645,9 +4657,17 @@ def cmd_gate(a):
                 raise _JudgeFailed(code or 1, gate_verdict_line(GATE_UNREADABLE_EXIT, out, err)
                                    if code in (0, 1, 3) else "the judge %s" % (
                                        " ".join((err or out).split())[:200] or "exited %d" % code))
+            # Refused parts, and a draft-level row the judge flags (overclaim NO_ANSWER or
+            # OVERCLAIMS; _gate_door_parts exits 3 for them), keep the check from CLEAN.
+            flagged = ["gate: the judge flagged %s %s" % (m.group("key"), m.group("verdict"))
+                       for m in _DOOR_ROW_RE.finditer(out or "")
+                       if not m.group("key").startswith("c")
+                       and m.group("key") not in _CLAIM_ADVISORY_KEYS
+                       and m.group("verdict") not in _FAVORABLE_SIDE]
             judge_info["notes"] = "".join(l + "\n" for l in (out or "").splitlines()
-                                          if l.startswith("gate: part "))
-            judge_info["floor"] = 2 if code == 2 else (3 if judge_info["notes"] else 0)
+                                          if l.startswith("gate: part ")) + "".join(
+                                              l + "\n" for l in flagged)
+            judge_info["floor"] = 2 if code == 2 else (3 if code == 3 or flagged else 0)
             return rows
 
         try:
