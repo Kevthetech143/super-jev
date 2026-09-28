@@ -222,6 +222,7 @@ URL_RE = re.compile(_PAT["url"], re.A)
 # A whole run in USPS layout (TRACKING_RE: starts 91-95, groups of 4 then a final 2, one separator)
 # with a valid check digit is removed before the card check only. The exact layout matters: a loose
 # run would let a short 91-95 number in front of a card turn "number + card" into a tracking number.
+# A run with a Luhn-valid window after its first group is not removed (about 1 in 50 real numbers).
 TRACKING_RE = re.compile(_PAT["tracking"], re.A)
 _CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
@@ -393,12 +394,14 @@ def _luhn(digits: str) -> bool:
 
 
 def _usps_tracking(run: str) -> bool:
-    """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check digit."""
+    """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check
+    digit, and no Luhn-valid 16-digit window starting at its 2nd or 3rd group, where a card could sit behind a
+    short 91-95 number ("9100 4111 1111 1111 1111 01"). Such a run is not exempt and the card rule decides."""
     d = re.sub(r"\D", "", run)
     if len(d) not in (22, 26):
         return False
     total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(d[:-1])))
-    return (10 - total % 10) % 10 == int(d[-1])
+    return (10 - total % 10) % 10 == int(d[-1]) and not any(_luhn(d[i:i + 16]) for i in range(4, len(d) - 15, 4))
 
 
 def card_hit(text: str, luhn: bool = True) -> bool:

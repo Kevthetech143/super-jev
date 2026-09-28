@@ -48,13 +48,16 @@ function luhn(digits: string): boolean {
   return total % 10 === 0;
 }
 
-/** Twin of Python _usps_tracking: a TRACKING run (prefix and USPS layout already checked) with a valid GS1 mod-10 check digit. */
+/** Twin of Python _usps_tracking: a TRACKING run (prefix and USPS layout already checked) with a valid GS1 mod-10
+ * check digit and no Luhn-valid 16-digit window starting at its 2nd or 3rd group (a card behind a short 91-95 number). */
 function uspsTracking(run: string): boolean {
   const d = run.replace(/\D/g, '');
   if (d.length !== 22 && d.length !== 26) return false;
   let total = 0;
   for (let i = 0; i < d.length - 1; i++) total += Number(d[d.length - 2 - i]) * (i % 2 ? 1 : 3);
-  return (10 - total % 10) % 10 === Number(d[d.length - 1]);
+  if ((10 - total % 10) % 10 !== Number(d[d.length - 1])) return false;
+  for (let i = 4; i + 16 <= d.length; i += 4) if (luhn(d.slice(i, i + 16))) return false;
+  return true;
 }
 
 /** Twin of Python card_hit: a standalone 16-digit run (dates/URLs and whole USPS tracking numbers scrubbed)
