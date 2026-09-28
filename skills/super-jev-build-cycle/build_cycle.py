@@ -3,25 +3,19 @@
 
 Usage: build_cycle.py --dir CYCLE_DIR [--principal NAME] [--super-jev DIR] STEP [options]
 
-Steps (receipts are CYCLE_DIR/NN-step.md; Super Jev uses go to CYCLE_DIR/uses.jsonl):
-  preflight [--project-dir DIR ...] [--skill "what the new skill does"]
-                                       free readiness check (reachable, every connection ready, project
-                                       folders connected); --skill also searches for an existing skill
-  start "idea" [--project NAME]        4 asks: tried before / design rules / known traps / which files;
-                                       flags NEW GROUND when Super Jev knows little
-  target --goal TEXT --evidence TEXT [--ask]   the concrete failure or goal and where it came from
-  cause --cause TEXT [--ask Q ...] [--trace ID|last]   root cause + what Super Jev returned for it
-  brief                                print (and save) a block to paste into a helper's task
-  check-report --report FILE [--claims FILE] [--worktree DIR] [--test-cmd CMD]
-  prove --cmd CMD --output FILE [--output FILE ...] [--note TEXT]
-  review --reviewer NAME --verdict TEXT --file FILE [--claims FILE]
-  reply-check --claims FILE            one key fact of the draft reply per line
+Required steps (receipts are CYCLE_DIR/NN-step.md; Super Jev uses go to CYCLE_DIR/uses.jsonl):
+  preflight [--project-dir DIR ...] [--skill "what the new skill does"]   free readiness check
+  start "idea" [--project NAME] [--ask Q ...]   one ask (what we already know) plus your own
+  check-report --report FILE [--claims FILE] [--worktree DIR] [--evidence FILE ...] [--test-cmd CMD]
+  review-brief --worktree DIR [--test-cmd CMD]   brief for a fresh reviewer agent (no receipt)
+  review --reviewer NAME --verdict "SHIP|FIX ..." --file FILE [--claims FILE] [--worktree DIR] [--evidence FILE ...]
+  reply-check --claims FILE [--worktree DIR] [--evidence FILE ...]
   learn [--note FILE ...] [--fact Q A [--source PATH]]   teach back what this cycle learned
-  skip STEP --reason TEXT              recorded and shown at close, never silent
-                                       (start, check-report and reply-check cannot be skipped)
+Optional notes: target, cause, brief, prove.
+  skip STEP --reason TEXT              recorded and shown at close (start, review, reply-check cannot be skipped)
   mark USE_ID helped|neutral|missed [--note TEXT]
   status                               which steps are done, skipped or missing
-  close [--log FILE]                   exit 1 naming missing steps / unmarked uses; else summary + log lines
+  close [--log FILE]                   exit 1 naming missing steps / unmarked uses / a FIX review
 
 The principal is --principal or SUPERJEV_PRINCIPAL, never guessed. Super Jev is found at
 --super-jev DIR, else the sibling folder ../super-jev of this skill.
@@ -39,16 +33,29 @@ from pathlib import Path
 
 STEPS = ["preflight", "start", "target", "cause", "brief", "check-report", "prove", "review", "reply-check",
          "learn"]
-UNSKIPPABLE = ("start", "check-report", "reply-check")
+# The six steps close requires. target, cause, brief and prove stay available as optional notes.
+REQUIRED = ["preflight", "start", "check-report", "review", "reply-check", "learn"]
+UNSKIPPABLE = ("start", "review", "reply-check")
 STRONG = 0.85  # a hit at or above this, not marked "possible", counts as Super Jev knowing the topic
 VERDICTS = ("helped", "neutral", "missed")
 NAME_RE = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}"  # same agent-name rule as ask.py
-START_QUESTIONS = [
-    "have we already tried {idea}, and how did it go",
-    "which design rules and steps apply to {idea}",
-    "what errors, traps or quirks are known for {idea}",
-    "which code files and tests handle {idea}",
-]
+START_QUESTION = "what have we already tried, decided or learned about {idea}"
+REVIEW_BRIEF = """INDEPENDENT REVIEW. You have not seen this work before; keep it that way: judge only what is below
+and what you can run or read yourself.
+
+Goal of the change: {idea}
+Where it lives: {worktree}
+Test command: {test_cmd}
+
+Try to break it. Look for: a case the change gets wrong, a claim in the report that is not true, a test that
+passes without proving the goal, anything unsafe (secrets, money, deletion, live systems). Run the tests yourself.
+Write probes if needed; change no product files.
+
+Reply with one line starting SHIP or FIX, then each finding: what, where (file:line), and how you proved it.
+
+The change (diff against origin/main):
+{diff}
+"""
 HIT_RE = re.compile(r"^\s*[0-9]+\.[0-9]{2}\s+\S")  # a ranked hit line: "0.91  /path  [pointer]"
 STATUS_RE = re.compile(r"^\s+([A-Za-z0-9][A-Za-z0-9._-]*): (.*)$")  # "  pointer: ready" from ask.py --status
 
@@ -120,11 +127,44 @@ def ask(ctx, step, question):
     return run_sj(ctx, step, "ask.py", ["--principal", ctx.principal, "--", question], question)
 
 
-def claims(ctx, step, path: Path, label: str):
+def worktree_diff(ctx, step: str, worktree: str) -> Path:
+    """The worktree's uncommitted and committed changes against origin/main, saved in the cycle folder:
+    new code is not on Super Jev's shelves yet, so claims about it are checked against this diff."""
+    wt = Path(worktree).expanduser()
+    diffs = []
+    for args in (["diff", "origin/main...HEAD"], ["diff", "HEAD"]):
+        r = subprocess.run(["git", "-C", str(wt)] + args, capture_output=True, text=True)
+        if r.returncode:
+            raise CycleError(f"git {' '.join(args)} failed in {wt}: {r.stderr.strip()[:200]}")
+        diffs.append(r.stdout)
+    text = "".join(diffs)
+    if not text.strip():
+        raise CycleError(f"no changes in {wt} against origin/main; pass --evidence FILE instead")
+    out = ctx.dir / f"{step}-diff.patch"
+    out.write_text(text, encoding="utf-8")
+    return out.absolute()
+
+
+def claims(ctx, step, path: Path, label: str, evidence: list = None):
+    """Check each line of a claims file. With evidence files, Super Jev judges them directly
+    (dispatch.py check: no connecting, so new or unconnected files work; a diff is judged as code).
+    Without, the claims are looked up on its connected shelves (ask.py --claims-file)."""
     if not path.is_file() or not path.read_text(encoding="utf-8").strip():
         raise CycleError(f"{label} file missing or empty: {path}")
+    if evidence:
+        lines = [l.strip() for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        args = ["check"] + [str(e) for e in evidence] + [x for c in lines for x in ("--claim", c)]
+        return run_sj(ctx, step, "dispatch.py", args, f"claims in {path} against {len(evidence)} evidence file(s)")
     return run_sj(ctx, step, "ask.py", ["--principal", ctx.principal, "--claims-file", str(path.absolute())],
                   f"claims in {path}")
+
+
+def evidence_files(ctx, step, a) -> list:
+    """--evidence files plus, with --worktree, the worktree's diff."""
+    ev = [need_file(e, "--evidence") for e in (getattr(a, "evidence", None) or [])]
+    if getattr(a, "worktree", None):
+        ev.append(worktree_diff(ctx, step, a.worktree))
+    return ev
 
 
 def need_file(p: str, label: str) -> Path:
@@ -260,8 +300,7 @@ def cmd_start(ctx, a):
         raise CycleError("run preflight first (or: skip preflight --reason \"why\")")
     idea = a.idea + (f" in {a.project}" if a.project else "")
     outs, strong = [], 0
-    for q in START_QUESTIONS:
-        q = q.format(idea=idea)
+    for q in [START_QUESTION.format(idea=idea)] + (a.ask or []):
         uid, out = ask(ctx, "start", q)
         strong += strong_hits(out)
         outs.append((f"[{uid}] {q}", out))
@@ -327,7 +366,7 @@ def cmd_check_report(ctx, a):
     uid, out = run_sj(ctx, "check-report", "dispatch.py", ["verify", str(rep)] + extra, f"verify {rep}")
     outs.append((f"[{uid}] verify report", out))
     if a.claims:
-        uid, out = claims(ctx, "check-report", Path(a.claims), "--claims")
+        uid, out = claims(ctx, "check-report", Path(a.claims), "--claims", evidence_files(ctx, "check-report", a))
         outs.append((f"[{uid}] claim verdicts", out))
     return {"report": rep}, outs
 
@@ -339,15 +378,36 @@ def cmd_prove(ctx, a):
 
 def cmd_review(ctx, a):
     rev = need_file(a.file, "--file")
+    if a.reviewer == ctx.principal:
+        raise CycleError("the reviewer must be a different, fresh agent, not the builder (see review-brief)")
+    if not re.match(r"\s*(SHIP|FIX)\b", a.verdict):
+        raise CycleError("--verdict must start with SHIP or FIX")
     outs = []
     if a.claims:
-        uid, out = claims(ctx, "review", Path(a.claims), "--claims")
+        uid, out = claims(ctx, "review", Path(a.claims), "--claims", evidence_files(ctx, "review", a))
         outs.append((f"[{uid}] reviewer claim verdicts", out))
     return {"reviewer": a.reviewer, "verdict": a.verdict, "review file": rev}, outs
 
 
+def cmd_review_brief(ctx, a):
+    """Write a self-contained brief for a fresh reviewer agent: the goal, the diff, the tests, what to try."""
+    start = receipt_path(ctx.dir, "start")
+    idea = next((l[len("- idea: "):] for l in start.read_text(encoding="utf-8").splitlines()
+                 if l.startswith("- idea: ")), "") if start.exists() else ""
+    if not idea:
+        raise CycleError("no start receipt yet: run the start step first")
+    diff = worktree_diff(ctx, "review", a.worktree).read_text(encoding="utf-8")
+    out = ctx.dir / "review-brief.md"
+    out.write_text(REVIEW_BRIEF.format(idea=idea, worktree=Path(a.worktree).expanduser(),
+                                       test_cmd=a.test_cmd or "(find and run the repo's tests)", diff=diff),
+                   encoding="utf-8")
+    print(f"review brief: {out}\nStart a NEW agent with no history of this work, give it only this file, "
+          "save its answer to a file, then: review --reviewer NAME --verdict \"SHIP|FIX ...\" --file ANSWER")
+    return 0
+
+
 def cmd_reply_check(ctx, a):
-    uid, out = claims(ctx, "reply-check", Path(a.claims), "--claims")
+    uid, out = claims(ctx, "reply-check", Path(a.claims), "--claims", evidence_files(ctx, "reply-check", a))
     return {"claims": Path(a.claims).absolute()}, [(f"[{uid}] draft reply claim verdicts", out)]
 
 
@@ -435,7 +495,13 @@ def cmd_mark(ctx, a):
 
 
 def cmd_close(ctx, a):
-    missing = [s for s in STEPS if step_state(ctx.dir, s) == "missing"]
+    missing = [s for s in REQUIRED if step_state(ctx.dir, s) == "missing"]
+    rv = receipt_path(ctx.dir, "review")
+    verdict = next((l[len("- verdict: "):] for l in rv.read_text(encoding="utf-8").splitlines()
+                    if l.startswith("- verdict: ")), "") if rv.exists() else ""
+    if rv.exists() and not verdict.lstrip().startswith("SHIP"):
+        print("close refused: the latest review says " + (verdict or "nothing") + "; fix, get a new review, record it")
+        return 1
     uses, marks = load_uses(ctx.dir), load_marks(ctx.dir)
     unmarked = [u["id"] for u in uses if u["id"] not in marks]
     if missing or unmarked:
@@ -449,6 +515,8 @@ def cmd_close(ctx, a):
     lines = ["# build cycle summary", f"- closed: {now()}", f"- principal: {ctx.principal}", ""]
     for s in STEPS:
         st = step_state(ctx.dir, s)
+        if st == "missing":
+            continue  # an optional step not used
         if st == "skipped":
             reason = next((l[len("- reason: "):] for l in skip_path(ctx.dir, s).read_text(encoding="utf-8")
                            .splitlines() if l.startswith("- reason: ")), "")
@@ -491,6 +559,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("preflight"); s.add_argument("--project-dir", action="append")
     s.add_argument("--skill", help="building a skill: what it does (searches for an existing one first)")
     s = sub.add_parser("start"); s.add_argument("idea"); s.add_argument("--project")
+    s.add_argument("--ask", action="append", help="a sharper question of your own (repeatable)")
     s = sub.add_parser("target"); s.add_argument("--goal", required=True); s.add_argument("--evidence", required=True)
     s.add_argument("--ask", action="store_true", help="also ask for related past misses")
     s = sub.add_parser("cause"); s.add_argument("--cause", required=True)
@@ -499,12 +568,13 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--trace", help="lookup id or 'last': show a Super Jev ask's trace")
     sub.add_parser("brief")
     s = sub.add_parser("check-report"); s.add_argument("--report", required=True); s.add_argument("--claims")
-    s.add_argument("--worktree"); s.add_argument("--test-cmd")
+    s.add_argument("--worktree", help="the worktree; its diff also becomes evidence for --claims"); s.add_argument("--test-cmd"); s.add_argument("--evidence", action="append", help="a file to check the claims against directly (repeatable)")
     s = sub.add_parser("prove"); s.add_argument("--cmd", required=True)
     s.add_argument("--output", action="append", required=True); s.add_argument("--note")
     s = sub.add_parser("review"); s.add_argument("--reviewer", required=True); s.add_argument("--verdict", required=True)
-    s.add_argument("--file", required=True); s.add_argument("--claims")
-    s = sub.add_parser("reply-check"); s.add_argument("--claims", required=True)
+    s.add_argument("--file", required=True); s.add_argument("--claims"); s.add_argument("--worktree"); s.add_argument("--evidence", action="append", help="a file to check the claims against directly (repeatable)")
+    s = sub.add_parser("review-brief"); s.add_argument("--worktree", required=True); s.add_argument("--test-cmd")
+    s = sub.add_parser("reply-check"); s.add_argument("--claims", required=True); s.add_argument("--worktree"); s.add_argument("--evidence", action="append", help="a file to check the claims against directly (repeatable)")
     s = sub.add_parser("learn"); s.add_argument("--note", action="append")
     s.add_argument("--fact", nargs=2, action="append", metavar=("QUESTION", "ANSWER"))
     s.add_argument("--source", help="file the facts come from")
@@ -531,8 +601,9 @@ def main(argv=None) -> int:
             ctx.sj = find_super_jev(a.super_jev)
         if a.step == "skip":
             return cmd_skip(ctx, argparse.Namespace(step=a.skip_step, reason=a.reason))
-        if a.step in ("mark", "status", "close"):
-            return {"mark": cmd_mark, "status": cmd_status, "close": cmd_close}[a.step](ctx, a)
+        if a.step in ("mark", "status", "close", "review-brief"):
+            return {"mark": cmd_mark, "status": cmd_status, "close": cmd_close,
+                    "review-brief": cmd_review_brief}[a.step](ctx, a)
         fields, outs = RECEIPT_STEPS[a.step](ctx, a)
         p = write_receipt(ctx.dir, a.step, ctx.principal, fields, outs)
         print(f"receipt: {p}")
