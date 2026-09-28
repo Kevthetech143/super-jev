@@ -164,8 +164,47 @@ def status_rows(ctx) -> tuple[int, str, list]:
     return r.returncode, out, [m.groups() for m in map(STATUS_RE.match, out.splitlines()) if m]
 
 
+def core_preflight(ctx, a):
+    """Ask Super Jev's own preflight (ask.py --preflight --json). None when this Super Jev predates it."""
+    args = ["--principal", ctx.principal, "--preflight", "--json"]
+    for d in a.project_dir or []:
+        args += ["--project-dir", d]
+    if a.skill:
+        args += ["--skill", a.skill]
+    try:
+        r = subprocess.run([sys.executable, str(ctx.sj / "ask.py")] + args, capture_output=True, text=True,
+                           timeout=ctx.timeout)
+        rep = json.loads(r.stdout)
+    except (subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(rep, dict) or "verdict" not in rep:
+        return None
+    if a.skill:  # the skill search is a Jev call: log it as a use to mark
+        uid = next_use_id(ctx.dir)
+        with open(ctx.dir / "uses.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({"id": uid, "step": "preflight", "time": now(), "tool": "ask.py --preflight",
+                                "what": f"existing skill for: {a.skill}", "exit": r.returncode},
+                               ensure_ascii=False) + "\n")
+    return rep
+
+
 def cmd_preflight(ctx, a):
-    """Free readiness check. No receipt unless every check passes; fix what it names, or skip with a reason."""
+    """Readiness check. No receipt unless every check passes; fix what it names, or skip with a reason."""
+    rep = core_preflight(ctx, a)
+    if rep is not None:
+        if rep["problems"]:
+            raise CycleError("preflight NOT READY (no receipt written):\n- " + "\n- ".join(rep["problems"])
+                             + "\nFix these and rerun, or: skip preflight --reason \"why\"")
+        lines = [f"{rep['verdict']} (Super Jev's own preflight)"] + [f"WARNING {w}" for w in rep["warnings"]]
+        lines += [f"folder {c['folder']}: {c['connected']} of {c['connectable']} connectable files connected"
+                  for c in rep.get("folders", [])]
+        if "existing_skills" in rep:
+            lines.append("existing skills that may already do this: " + (", ".join(rep["existing_skills"]) or "none")
+                         + " (reuse or extend a match instead of building a duplicate)")
+        print("\n".join(["preflight " + lines[0]] + lines[1:]))
+        return {"checks": "; ".join(lines), "project dirs": ", ".join(a.project_dir or [])}, [
+            ("Super Jev preflight (json)", json.dumps(rep, indent=2, ensure_ascii=False))]
+    # Older Super Jev without --preflight: the skill's own checks.
     problems, lines = [], [f"Super Jev found: {ctx.sj}", f"principal: {ctx.principal}"]
     code, out, rows = status_rows(ctx)
     if code != 0 or not rows:

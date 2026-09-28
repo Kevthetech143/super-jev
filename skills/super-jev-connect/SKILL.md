@@ -43,6 +43,8 @@ python3 dispatch.py memory --principal NAME
 
 Cost: each connected file gets its description and labels checked by Jev; small files are checked several to one call (`SUPERJEV_BATCH_JEV=0` checks one file per call). The findability report (each file's own sample question searched after connecting) is off by default; add `--findability` for it, one paid search per file.
 
+Before connecting a folder, `python3 ../super-jev/ask.py --principal NAME --preflight --project-dir DIR` shows how many of its files are already connected (free), so you do not connect it twice.
+
 ## 5. Cheap writer model — required
 
 Bulk labeling drafts descriptions, sample questions and labels with a cheap writer model, via `--writer-command` (or the `SUPERJEV_WRITER_COMMAND` env var). Before the first bulk run on any project, confirm the writer command and its cost with the operator once, and record the choice. A proven example: `claude -p --model haiku` (Claude Code CLI, Haiku) — this is `prepare_bulk.py`'s own default when neither flag nor env var is set and the `claude` CLI is installed, and it prints a `writer:` banner naming whichever command actually runs. With no `claude` CLI, or with `--writer builtin`, a no-model writer quotes each file's headings instead (labels stay unknown). The writer reads an excerpt, not the whole file: the headings (evenly sampled past 15) and the first 1,200 characters, plus, for a file over 12,000 characters, 8 short passages spread across it; the gate still judges the whole file. Any command that reads the prompt on stdin and prints a JSON array works. Never run bulk labeling on a premium model.

@@ -4,6 +4,13 @@
   ask.py --principal AGENT --status
       Show this principal's connected snapshots and next steps, without a lookup.
 
+  ask.py --principal AGENT --preflight [--project-dir DIR ...] [--about "the work"]
+         [--skill "what a new skill would do"] [--json]
+      Before work starts. Free part: connections ready, and per folder how many
+      connectable files are connected. With --about: 4 asks (tried before, rules,
+      traps, files) and NEW GROUND when nothing strong is known; --skill searches
+      for an existing skill. Verdict READY / READY WITH WARNINGS / NOT READY (exit 1).
+
   ask.py --principal AGENT "question"
       Cache-first via the harness `cached` action (zero provider calls): a hit
       prints the answer + evidence and stops. A miss navigates every visible
@@ -3366,6 +3373,225 @@ def connection_status(principal: str) -> int:
     return 0
 
 
+PREFLIGHT_QUESTIONS = (
+    "have we already tried {about}, and how did it go",
+    "which design rules and steps apply to {about}",
+    "what errors, traps or quirks are known for {about}",
+    "which code files and tests handle {about}",
+)
+PREFLIGHT_SKIP_DIRS = {"__pycache__", "node_modules", "prepare-cache", "autoheal-state"}  # generated, never notes
+PREFLIGHT_STRONG = 0.85  # a confirmed hit at or above this means the topic is known
+_HIT_LINE = re.compile(r"^\s*([0-9]+\.[0-9]{2})\s+\S")
+_QUALIFIED = re.compile(r"\]\s+\(")  # "(possible: ...)", "(inconclusive: ...)": an unconfirmed hit
+
+
+def _connected_files(principal: str, pointer: str) -> tuple:
+    """(files, extensions, ok) for one pointer. files = the sources the backend has REGISTERED for it
+    now (paged `sources`), never a prepare report's approved list, which a --no-connect or failed run
+    also writes. extensions = the suffixes the pointer opted into (its report, or its split parent's)."""
+    files, offset = set(), 0
+    while True:
+        out = memory({"action": "sources", "pointer": pointer, "principal": principal, "offset": offset, "limit": 100})
+        if not isinstance(out, dict) or out.get("status") != "ok":
+            return set(), (), False
+        files |= {os.path.realpath(os.path.expanduser(s["originalPath"])) for s in out.get("sources") or []
+                  if isinstance(s, dict) and isinstance(s.get("originalPath"), str)}
+        nxt = out.get("nextOffset")
+        if not isinstance(nxt, int) or nxt <= offset:
+            break
+        offset = nxt
+    exts = ()
+    for n in [pointer] + ([re.sub(r"-[0-9]+$", "", pointer)] if re.search(r"-[0-9]+$", pointer) else []):
+        try:
+            rep = json.loads((prepare_bulk.CACHE_DIR / f"{n}-report.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(rep, dict):
+            exts = tuple(str(e).lower() for e in rep.get("extensions") or [] if isinstance(e, str))
+        break
+    return files, exts, True
+
+
+def _folder_files(root: Path) -> dict:
+    """{real path: presented names} for every file under root, walking into symlinked folders like
+    prepare_bulk.walk_md (os.walk followlinks, each real folder once so a link loop ends); hidden and
+    generated dirs skipped. The suffix is judged on the presented name (alias.md -> target.txt is a .md
+    source, as inventory treats it); identity is the real path, so two routes to one file count once."""
+    out, walked = {}, set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in walked:
+            dirnames[:] = []
+            continue
+        walked.add(real)
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in PREFLIGHT_SKIP_DIRS]
+        for n in filenames:
+            f = os.path.join(dirpath, n)
+            if not n.startswith(".") and os.path.isfile(f):
+                out.setdefault(os.path.realpath(f), set()).add(n.lower())
+    return out
+
+
+def _folder_coverage(folder: Path, principal: str, ready: list) -> dict:
+    """How many of the folder's connectable files a ready pointer of this principal has registered.
+    Connectable = the default suffixes plus any a pointer registered here opted into (name endswith,
+    so compound suffixes like .schema.json match)."""
+    names = _folder_files(folder.expanduser())
+    on_disk = set(names)
+    exts, connected, unread = set(getattr(prepare_bulk, "CONNECTABLE_EXTENSIONS", (".md",))), set(), []
+    for name in ready:
+        files, opted, ok = _connected_files(principal, name)
+        if not ok:
+            unread.append(name)
+        mine = files & on_disk
+        if mine:
+            connected |= mine
+            exts |= set(opted)
+    exts = {e.lower() for e in exts}
+    connectable = {f for f, ns in names.items() if any(n.endswith(tuple(exts)) for n in ns)}
+    return {"folder": str(folder), "connectable": len(connectable), "connected": len(connected & connectable),
+            "unsupported": len(on_disk) - len(connectable), "extensions": sorted(exts), "unread": unread}
+
+
+def _run_ask(cmd: list) -> tuple:
+    """(stdout, failure or ""): a nonzero exit or a timeout is a failure, never an empty answer."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return "", "timed out after 600s"
+    except OSError as e:
+        return "", str(e)
+    if r.returncode:
+        return r.stdout, f"exit {r.returncode}: " + (r.stderr or r.stdout).strip()[-200:]
+    return r.stdout, ""
+
+
+def preflight(principal: str, args: list) -> int:
+    """Before work starts: am I ready (free), and what do I already know (asks, only with --about)."""
+    dirs, about, skill, as_json, i = [], "", "", False, 0
+    while i < len(args):
+        flag = args[i]
+        if flag == "--json":
+            as_json, i = True, i + 1
+            continue
+        if flag not in ("--project-dir", "--about", "--skill") or i + 1 >= len(args):
+            print('usage: --principal AGENT --preflight [--project-dir DIR ...] [--about "the work"] '
+                  '[--skill "what a new skill would do"] [--json]')
+            return 2
+        val = args[i + 1]
+        if flag == "--project-dir":
+            dirs.append(val)
+        elif flag == "--about":
+            about = val
+        else:
+            skill = val
+        i += 2
+    problems, warnings, report = [], [], {"principal": principal}
+    panel = memory({"action": "panel", "principal": principal})
+    rows = panel.get("pointers") if isinstance(panel, dict) and panel.get("status") != "error" else None
+    if not isinstance(rows, list):
+        problems.append("connection status unavailable" + (": not set up (run setup.py)"
+                        if isinstance(panel, dict) and panel.get("reason") == "not-set-up" else ""))
+        rows = []
+    elif not rows:
+        problems.append("nothing connected for this principal (see super-jev-connect/SKILL.md)")
+    ready, states = [], {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("pointer"), str):
+            name, st = row["pointer"], str(row.get("snapshotStatus") or row.get("status") or "unknown")
+        elif isinstance(row, str):
+            name, st = row, "unknown"
+        else:
+            problems.append("malformed pointer metadata")
+            continue
+        states[name] = st
+        if st == "available":
+            ready.append(name)
+        elif st.startswith(("preparation-required", "refresh-required")):
+            warnings.append(f"{name} is stale (its last snapshot is still searched; an ask refreshes it)"
+                            + refresh_hint(name, principal, st))
+        else:
+            problems.append(f"{name} is not ready: {st}")
+    report["connections"] = {"ready": len(ready), "total": len(states)}
+    report["folders"] = []
+    for d in dirs:
+        folder = Path(d)
+        if not folder.expanduser().is_dir():
+            problems.append(f"not a folder: {d}")
+            continue
+        cov = _folder_coverage(folder, principal, ready)
+        report["folders"].append(cov)
+        if cov["unread"]:
+            problems.append(f"{d}: could not list the registered files of {', '.join(cov['unread'])}")
+        if not cov["connected"]:
+            problems.append(f"{d}: 0 of {cov['connectable']} connectable files are connected; connect the folder "
+                            f"(see {skill_dir_for_display().parent / 'super-jev-connect' / 'SKILL.md'})")
+        elif cov["connected"] < cov["connectable"]:
+            warnings.append(f"{d}: {cov['connected']} of {cov['connectable']} connectable files are connected")
+        if cov["unsupported"]:
+            warnings.append(f"{d}: {cov['unsupported']} files of other types are not connected "
+                            f"(connected types here: {', '.join(cov['extensions'])})")
+    if about and not problems:
+        answers, strong, failed = [], 0, 0
+        for q in PREFLIGHT_QUESTIONS:
+            q = q.format(about=about)
+            out, err = _run_ask([sys.executable, str(skill_dir_for_display() / "ask.py"), "--principal", principal, "--", q])
+            hits = [l.strip() for l in out.splitlines() if _HIT_LINE.match(l)][:5]
+            # a failed ask's output is never evidence, whatever it printed before failing
+            strong += 0 if err else sum(1 for h in hits if float(_HIT_LINE.match(h).group(1)) >= PREFLIGHT_STRONG
+                                        and not _QUALIFIED.search(h))
+            answers.append({"question": q, "hits": hits, **({"error": err} if err else {})})
+            if err:
+                failed += 1
+                warnings.append(f"knowledge ask failed ({err}): {q}")
+        report["knowledge"] = answers
+        # New ground only when every ask ran and none found a confirmed strong note; a failed ask proves nothing.
+        report["new_ground"] = False if strong else (None if failed else True)
+    if skill and not problems:
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"request": f"a skill that {skill}", "context": []}, f)
+        out, err = _run_ask([sys.executable, str(skill_dir_for_display() / "dispatch.py"), "skills", "--request-file", f.name])
+        os.unlink(f.name)
+        found = None
+        if not err:
+            try:
+                data = json.loads(out)
+                found = [c.get("name") for c in data.get("candidates", []) if isinstance(c, dict)]
+                if data.get("status") == "error" or data.get("error"):
+                    found, err = None, str(data.get("error") or data.get("reason") or "status error")[:200]
+            except (ValueError, AttributeError):
+                err = "unreadable output: " + out.strip()[:200]
+        if err:
+            warnings.append(f"existing-skill search failed ({err}); not proof that no skill does this")
+        report["existing_skills"] = found
+    verdict = "NOT READY" if problems else ("READY WITH WARNINGS" if warnings else "READY")
+    report.update(verdict=verdict, problems=problems, warnings=warnings)
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False))
+        return 1 if problems else 0
+    print(f"PREFLIGHT {verdict} (principal {principal}; {len(ready)} of {len(states)} connections ready)")
+    for c in report["folders"]:
+        print(f"  folder {c['folder']}: {c['connected']} of {c['connectable']} connectable files connected")
+    for p in problems:
+        print(f"  NOT READY: {p}")
+    for w in warnings:
+        print(f"  WARNING: {w}")
+    for a in report.get("knowledge", []):
+        print(f"  asked: {a['question']}")
+        print("\n".join(f"    {h}" for h in a["hits"]) or "    (nothing found)")
+    if report.get("new_ground") is None and "knowledge" in report:
+        print("  NEW GROUND UNKNOWN: a knowledge ask failed; rerun before treating this as new ground.")
+    if report.get("new_ground"):
+        print("  NEW GROUND: no strong note on this; research outside (official docs, maintained projects) "
+              "first, and teach what you learn back afterwards.")
+    if report.get("existing_skills") is not None:
+        print("  existing skills that may already do this: " + (", ".join(report["existing_skills"]) or "none")
+              + " (reuse or extend a match instead of building a duplicate)")
+    if problems:
+        print("Next: fix each NOT READY line and rerun --preflight.")
+    return 1 if problems else 0
+
+
 def resolve_principal(args: list) -> tuple[str, list]:
     if "--principal" in args:
         i = args.index("--principal")
@@ -3393,6 +3619,8 @@ def _main() -> int:
             print(__doc__)
             return 2
         return lookup(" ".join(a[1:]), principal, state_dir(principal))
+    if a[0] == "--preflight":
+        return preflight(principal, a[1:])
     if a[0] == "--status":
         if len(a) != 1:
             print("usage: --principal AGENT --status")
