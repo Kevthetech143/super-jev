@@ -69,7 +69,7 @@ def test_pathological_line_scans_quickly(line):
     # backtracks still burns CPU and still fails it.
     t = time.process_time()
     pb.has_secret(line)
-    assert time.process_time() - t < 0.3
+    assert time.process_time() - t < 1.0  # a backtracking regex burns well over 1 s; heavy load alone reached 0.34 s
 
 
 # 3. uninstall deletes only files Super Jev writes in its in-repo folders
