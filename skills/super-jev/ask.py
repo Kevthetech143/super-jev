@@ -2641,7 +2641,8 @@ def skipped_files(pointers, principal: str = "") -> dict:
                 if m and int(m.group(1).replace(",", "")) <= prepare_bulk.SECTION_MAX_BYTES:
                     # Held under an older, lower limit: its pointer's next refresh connects it in sections.
                     out[path] = ("held as too big at its last setup" + size,
-                                 "re-run setup with --refresh: a file this size now connects in sections", "name")
+                                 "re-run setup with --refresh: a file this size now connects in sections "
+                                 "(unless the refresh holds it for secret-like text)", "name")
                 else:
                     out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
             elif any(k in why for k in SECRET_HELD):

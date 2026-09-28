@@ -90,7 +90,8 @@ def test_size_held_file_named_with_split_fix_and_no_connect_step(cache, monkeypa
 def test_file_held_under_an_older_limit_says_a_refresh_connects_it_in_sections(cache):
     lines = ask.miss_report("alice", 1, {}, {}, "How much was the villa roof repair quote?", ["alice-notes"])
     assert ("    notes/roof-quote.md: held as too big at its last setup (109 KB, limit 90 KB) -> "
-            "Fix: re-run setup with --refresh: a file this size now connects in sections") in lines
+            "Fix: re-run setup with --refresh: a file this size now connects in sections "
+            "(unless the refresh holds it for secret-like text)") in lines
 
 
 def test_secret_held_matched_on_name_only_and_never_read(cache, monkeypatch):
