@@ -159,12 +159,13 @@ line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
 operator decision for one run (never replayed); it never lifts the size-ceiling hold.
-`--approve-held PATH` (repeatable) admits one reviewed held file and records
-`{path, sha256}` as `approvedHeld` in the report; `--refresh` and auto-heal
-replay it only while the file's bytes match, otherwise it is held again with
-a reason naming the old approval (the hash is rechecked before
-gating, caching and connecting, so a mid-run edit is held). It also admits a size-held file up to
-1,000,000 bytes (gated in parts); credential/key suffixes can never be approved.
+`--approve-held PATH` (repeatable) admits one reviewed size-held file of at most
+1,000,000 bytes (gated in parts) and records `{path, sha256}` as `approvedHeld`
+in the report; `--refresh` and auto-heal replay it only while the file's bytes
+match, otherwise it is held again with a reason naming the old approval (the
+hash is rechecked before gating, caching and at the connect preview, so a
+mid-run edit is held). A file held for secret-like text or name, or with a
+credential/key suffix, is refused: "held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect."
 A backslash-escaped quote before a placeholder (`KEY=\"$(cat file)\"` inside a
 code string) counts as a plain quote, so it is not held; after an escaped quote
 only `$(`, `${` and `<` are placeholders, so a literal `\"$3cret9\"` is held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one

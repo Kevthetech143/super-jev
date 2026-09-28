@@ -69,9 +69,10 @@ def test_node_scanner_agrees_on_escaped_quotes():
     assert _node(PLACEHOLDERS + REAL) == [False] * len(PLACEHOLDERS) + [True] * len(REAL)
 
 
-# --approve-held: a reviewed approval pinned to the file's bytes.
+# --approve-held: a reviewed approval of a size-held file, pinned to the file's bytes.
 
 SECRETISH = "# fixture\nFAKE = 'pass" + "word: hunter2" + "xyz'\n"
+BIG = "x = 1\n" * (pb.CEILING_BYTES // 6 + 100)
 
 
 def _sha(p):
@@ -101,7 +102,7 @@ def run(tmp_path, monkeypatch):
 
 def test_approved_file_survives_refresh_until_its_bytes_change(run, capsys):
     f = run.root / "fixture.py"
-    f.write_text(SECRETISH)
+    f.write_text(BIG)
     code, rep = run()
     assert code == 0 and str(f) not in rep["approved"]
     code, rep = run("--approve-held", str(f))
@@ -115,11 +116,11 @@ def test_approved_file_survives_refresh_until_its_bytes_change(run, capsys):
     assert rep["approvedHeld"] == [{"path": str(f), "sha256": _sha(f)}]
     # A changed file is held again, and the reason names the old approval.
     old = _sha(f)
-    f.write_text(SECRETISH + "# edited\n")
+    f.write_text(BIG + "# edited\n")
     code, rep = run(refresh=True)
     assert str(f) not in rep["approved"]
     why = dict(rep["held"])[str(f)]
-    assert "card/password-like text" in why and old[:12] in why and "changed since" in why
+    assert "over size ceiling" in why and old[:12] in why and "changed since" in why
     assert "--approve-held" in capsys.readouterr().out
 
 
@@ -130,6 +131,31 @@ def test_allow_held_is_still_never_replayed(run):
     assert str(f) in rep["approved"] and not rep.get("approvedHeld")
     code, rep = run(refresh=True)
     assert str(f) not in rep["approved"]
+
+
+@pytest.mark.parametrize("name, text", [("fixture.py", SECRETISH), ("big.py", BIG + SECRETISH),
+                                        ("password-hunter2xyz.py", BIG)])
+def test_secret_held_file_can_never_be_approved(run, capsys, name, text):
+    f = run.root / name
+    f.write_text(text)
+    code, rep = run("--approve-held", str(f))
+    assert code == 2 and rep is None
+    assert "held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect." \
+        in capsys.readouterr().out
+
+
+def test_replayed_approval_never_admits_a_file_that_now_holds_secret_text(run, monkeypatch):
+    f = run.root / "big.py"
+    f.write_text(BIG)
+    run("--approve-held", str(f))
+    rep_path = run.root.parent / "cache" / "code-report.json"
+    rep = json.loads(rep_path.read_text())
+    f.write_text(BIG + SECRETISH)  # recorded hash matches the new bytes: the secret check still wins
+    rep["approvedHeld"] = [{"path": str(f), "sha256": _sha(f)}]
+    rep_path.write_text(json.dumps(rep))
+    code, rep = run(refresh=True)
+    assert str(f) not in rep["approved"]
+    assert "held for secret-like text" in dict(rep["held"])[str(f)]
 
 
 @pytest.mark.parametrize("name", ["deploy.pem", "prod.env", "a.key.py"])
@@ -173,17 +199,17 @@ def test_unheld_or_unknown_path_is_not_recorded(run, capsys):
 @pytest.mark.parametrize("stage", ["inventory", "excerpt"])
 def test_approved_file_edited_after_its_hash_check_is_held_not_cached(run, monkeypatch, stage):
     f = run.root / "fixture.py"
-    f.write_text(SECRETISH)
+    f.write_text(BIG)
     code, rep = run("--approve-held", str(f))
     reviewed = _sha(f)
-    f.write_text(SECRETISH + "# second review\n")
+    f.write_text(BIG + "# second review\n")
     code, rep = run("--approve-held", str(f))  # re-approved: next refresh must draft it again
     reviewed = _sha(f)
     real = getattr(pb, stage)
 
     def edit_after(*a, **k):
         out = real(*a, **k)
-        f.write_text(SECRETISH + "# unreviewed edit\n")
+        f.write_text(BIG + "# unreviewed edit\n")
         return out
     monkeypatch.setattr(pb, stage, edit_after)
     (run.root.parent / "cache" / "code.json").unlink()  # force the writer and cache stages
