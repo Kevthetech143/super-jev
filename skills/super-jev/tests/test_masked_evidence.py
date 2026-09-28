@@ -36,6 +36,7 @@ CARD = "4111 " + "1111 1111 1111"
 PW = "password=" + "hunter2" + "hunter2"
 STRIPE = "sk_" + "live_" + "abcdefghij1234567890"
 AWS = "AKIA" + "ABCDEFGHIJKLMNOP"
+PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
 DIFF = f'''diff --git a/tests/test_scan.py b/tests/test_scan.py
 --- a/tests/test_scan.py
 +++ b/tests/test_scan.py
@@ -49,16 +50,25 @@ DIFF = f'''diff --git a/tests/test_scan.py b/tests/test_scan.py
 '''
 
 
-@pytest.mark.parametrize("secret", [CARD, PW, STRIPE, AWS, "api_key = abcDEF123456",
-                                    "token = " + "Zx9Qw8Er7Ty6Ui5Op4As3Df2"])
-def test_mask_removes_every_secret_shape_and_keeps_the_rest(secret):
+# A whole hit is the secret itself: only the match is masked, the rest stays readable.
+@pytest.mark.parametrize("secret", [CARD, STRIPE, AWS])
+def test_whole_hit_is_masked_in_place(secret):
     text = f"+    check(x)\n+    assert f(\"{secret}\")  # fixture\n+    done()\n"
     assert pb.has_secret(text)
     out, n = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out) and n == 1
-    assert secret not in out and pb.SECRET_MASK in out
-    assert "+    check(x)" in out and "+    done()" in out
-    assert out.split("\n")[1].startswith("+    assert f(")  # the code before the secret stays
+    assert out == f"+    check(x)\n+    assert f(\"{pb.SECRET_MASK}\")  # fixture\n+    done()\n" and n == 1
+
+
+# A marker hit only says a value follows; the value's extent cannot be proven, so the rest of
+# the file is withheld, and the lines before it stay readable.
+@pytest.mark.parametrize("secret", [PW, "api_key = abcDEF123456", "token = " + "Zx9Qw8Er7Ty6Ui5Op4As3Df2",
+                                    "the password for the router is hunter2", PEM])
+def test_marker_hit_withholds_the_rest_of_its_file(secret):
+    text = f"+    check(x)\n+    assert f(\"{secret}\")  # fixture\n+    done()\n"
+    assert pb.has_secret(text)
+    out, n = pb.mask_secrets(text)
+    assert out is not None and not pb.has_secret(out)
+    assert out.startswith("+    check(x)\n") and "hunter2" not in out and "done" not in out and n == 3
 
 
 def test_keyword_hit_masks_the_value_after_it():
@@ -67,90 +77,99 @@ def test_keyword_hit_masks_the_value_after_it():
     assert "Qw8Er7" not in out
 
 
-def test_card_mask_keeps_the_rest_of_the_line():
-    out, n = pb.mask_secrets(f'+    assert card_hit("{CARD}")  # a fake visa')
-    assert out == f'+    assert card_hit("{pb.SECRET_MASK}")  # a fake visa' and n == 1
+def test_non_ascii_line_with_a_whole_hit_is_masked_whole_with_its_diff_marker():
+    out, n = pb.mask_secrets(f"+ café {CARD}\n+ok")
+    assert out == "+" + pb.SECRET_MASK + "\n+ok" and n == 1
 
 
-def test_non_ascii_line_is_masked_whole_with_its_diff_marker():
-    out, n = pb.mask_secrets(f"+ café {CARD}")
-    assert out == "+" + pb.SECRET_MASK and n == 1
-
-
-def test_secret_split_over_two_lines_masks_both():
+def test_secret_split_over_two_lines_withholds_from_its_first_line():
     text = "ok\napi_key\n= " + "abcdefghijk12345ZZZZZZ" + "\nok"
     out, n = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out) and n == 2
-    assert out.startswith("ok\n") and out.endswith("\nok")
+    assert out is not None and not pb.has_secret(out) and n == 3 and out.startswith("ok\n")
 
 
-# A multi-line secret: has_secret flags only its first line, so the value on the lines after
-# it must be masked by shape. Each test checks the VALUE is gone, not just has_secret(out).
+# A multi-line secret: has_secret flags only its first line, whatever syntax carries the value
+# on. Each case checks the VALUE is gone, not just has_secret(out). All were found leaking by
+# review rounds that tried to follow the value's syntax instead of withholding the file.
 VALUE = "Hunter2" + "Hunter2Xy9"
 KEY_BODY = ["MIIEowIBAAKCAQEAu1SU1LfVLPHCozMxH2Mo4lgOEePzNm0tRgeLezV6ffAt0gun",
             "VTLw7onLRnrq0/IzW7yWR7QkrmBL7jTKEn5u+qKhbwKfBstIs+bMY2Zkp18gnTxK",
             "LxoS2tFczGkPLPgizskuemMghRniWaoLcyehkd3qqGElvW/VDL5AaWTg0nLVkjRo"]
-PEM = "-----BEGIN RSA " + "PRIVATE KEY-----"
+PEM_END = "-----END RSA " + "PRIVATE KEY-----"
 
 
 @pytest.mark.parametrize("name,text", [
-    ("pem-diff", "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY)
-                 + "+-----END RSA " + "PRIVATE KEY-----\n+after = 1\n"),
+    ("pem-diff", "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY) + "+" + PEM_END + "\n"),
     ("pem-no-end", PEM + "\n" + "\n".join(KEY_BODY) + "\n"),
+    ("pem-two-hunks", "@@ -1,3 +1,3 @@\n " + PEM + "\n-" + KEY_BODY[0] + "\n+" + KEY_BODY[1] + "\n"
+                      "@@ -20,2 +20,2 @@\n-" + KEY_BODY[2] + "\n+" + KEY_BODY[0] + "\n " + PEM_END + "\n"),
+    ("pem-py-paren", '+KEY = (\n+    "' + PEM + '\\n"\n' + "".join('+    "' + b + '\\n"\n' for b in KEY_BODY) + "+)\n"),
+    ("pem-js-plus", '+const KEY = "' + PEM + '\\n"\n' + "".join('+  + "' + b + '\\n"\n' for b in KEY_BODY)),
+    ("pem-py-list", '+LINES = [\n+    "' + PEM + '",\n' + "".join('+    "' + b + '",\n' for b in KEY_BODY) + "+]\n"),
+    ("pem-tab-header", "-----BEGIN\tRSA " + "PRIVATE KEY-----\n" + "\n".join(KEY_BODY) + "\n"),
+    ("pem-nbsp-header", "-----BEGIN\u00a0RSA " + "PRIVATE KEY-----\n" + "\n".join(KEY_BODY) + "\n"),
     ("yaml-block", "+db:\n+  password: |\n+    " + VALUE + "\n+  host: x\n"),
-    ("py-paren", "+PASSWORD = (\n+    \"" + VALUE + "\"\n+)\n+after = 1\n"),
-    ("py-backslash", "+API_KEY = \\\n+    \"" + VALUE + "\"\n+after = 1\n"),
-    ("bare-colon", "password:\n  " + VALUE + "\nafter: 1\n"),
+    ("yaml-block-comment", "+db:\n+  password: |  # rotated\n+    " + VALUE + "\n+  host: x\n"),
+    ("yaml-plain-multiline", "password:\n  hunter2xyz\n  " + VALUE + "\n"),
+    ("yaml-dq-split", '+password: "abc\n+  ' + VALUE + '"\n+after: 1\n'),
+    ("py-paren", "+PASSWORD = (  # noqa\n+    \"" + VALUE + "\"\n+)\n"),
+    ("py-backslash", "+API_KEY = \\\n+    \"" + VALUE + "\"\n"),
+    ("py-implicit-concat", "+PASSWORD = ('abc'\n+    '" + VALUE + "')\n"),
+    ("py-dict-concat", '+cfg = dict(\n+    password="hunter2xyz"\n+    "' + VALUE + '",\n+)\n'),
+    ("js-template", "+const password = `\n+" + VALUE + "\n+`;\n"),
+    ("js-plus-concat", "+password = 'abc' +\n+    '" + VALUE + "';\n"),
+    ("shell-heredoc", "+password=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n"),
+    ("bare-colon", "password:\n  " + VALUE + "\n"),
 ])
-def test_value_on_the_lines_after_its_key_is_masked(name, text):
+def test_a_value_that_runs_on_never_reaches_the_judge(name, text):
     assert pb.has_secret(text)
     out, _ = pb.mask_secrets(text)
     assert out is not None and not pb.has_secret(out)
     for secret in [VALUE, *KEY_BODY]:
         assert secret not in out, (name, out)
-    if "after" in text:
-        assert "after" in out  # the block ends; the rest of the file stays readable
-
-
-# Found by the second review: shapes whose value runs on without a plain opener at the end.
-@pytest.mark.parametrize("name,text", [
-    ("yaml-block-comment", "+db:\n+  password: |  # rotated\n+    " + VALUE + "\n+  host: x\n"),
-    ("py-paren-comment", "+PASSWORD = (  # noqa\n+    \"" + VALUE + "\"\n+)\n+after = 1\n"),
-    ("js-template", "+const password = `\n+" + VALUE + "\n+`;\n+after = 1\n"),
-    ("py-implicit-concat", "+PASSWORD = ('abc'\n+    '" + VALUE + "')\n+after = 1\n"),
-    ("js-plus-concat", "+password = 'abc' +\n+    '" + VALUE + "';\n+after = 1\n"),
-    ("shell-heredoc", "+password=$(cat <<EOF\n+" + VALUE + "\n+EOF\n+)\n"),
-    ("yaml-dq-split", '+password: "abc\n+  ' + VALUE + '"\n+after: 1\n'),
-    ("pem-tab-header", "-----BEGIN\tRSA " + "PRIVATE KEY-----\n" + KEY_BODY[0] + "\n"),
-    ("pem-nbsp-header", "-----BEGIN\u00a0RSA " + "PRIVATE KEY-----\n" + KEY_BODY[0] + "\n"),
-])
-def test_value_that_runs_on_is_masked(name, text):
-    assert pb.has_secret(text)
-    out, _ = pb.mask_secrets(text)
-    assert out is not None and not pb.has_secret(out)
-    assert VALUE not in out and KEY_BODY[0] not in out, (name, out)
 
 
 TAIL = "".join(f"+def test_unrelated_{k}():\n+    assert add({k}, 1) == {k + 1}\n" for k in range(20))
+NEXT_FILE = "diff --git a/src/scan.py b/src/scan.py\n@@ -1 +1,2 @@\n+def scan(text):\n+    return 1\n"
 
 
-@pytest.mark.parametrize("name,fixture,most", [
-    ("header-in-string", '+HEADER = "' + PEM + '"\n', 1),
-    ("one-line-pem", '+PEM = "' + PEM + "\\n" + KEY_BODY[0] + "\\n-----END RSA " + 'PRIVATE KEY-----"\n', 1),
-    ("dict-paren", "+CFG = {\n+    'api_key': (\n+        'x'),\n+}\n", 3),
-    ("fixture-list", '+CASES = [\n+    "' + PW + '",\n+    "' + CARD + '",\n+    "plain",\n+]\n', 2),
+@pytest.mark.parametrize("name,fixture", [
+    ("card", '+CASES = ["' + CARD + '", "plain"]\n'),
+    ("token", '+assert has_secret("' + STRIPE + '")\n'),
+    ("one-line-pem", '+PEM = "' + PEM + "\\n" + KEY_BODY[0] + "\\n" + PEM_END + '"\n'),
 ])
-def test_a_fixture_masks_only_its_own_lines(name, fixture, most):
-    """A scanner or redaction test's fixture must not hide the rest of the file from the judge."""
-    out, n = pb.mask_secrets("@@ -0,0 +1,60 @@\n" + fixture + TAIL)
-    assert out is not None and n <= most and "test_unrelated_19" in out, (name, out)
+def test_whole_fixture_hides_nothing_else(name, fixture):
+    """The reported failure: a card scanner's test fixtures refused the whole diff."""
+    out, n = pb.mask_secrets("diff --git a/t.py b/t.py\n@@ -0,0 +1,60 @@\n" + fixture + TAIL + NEXT_FILE)
+    assert out is not None and n == 1 and "test_unrelated_19" in out and KEY_BODY[0] not in out
 
 
-def test_key_without_end_stops_at_the_next_diff_section():
-    text = ("@@ -0,0 +1,3 @@\n+" + PEM + "\n+" + KEY_BODY[0] + "\n"
-            "diff --git a/b.py b/b.py\n@@ -1 +1 @@\n+visible = 1\n")
+@pytest.mark.parametrize("name,fixture", [
+    ("header-in-string", '+HEADER = "' + PEM + '"\n'),
+    ("keyword", '+assert has_secret("' + PW + '")\n'),
+    ("prose", '+NOTE = "the password for the router is hunter2"\n'),
+])
+def test_marker_fixture_withholds_only_its_own_file(name, fixture):
+    text = "diff --git a/t.py b/t.py\n@@ -0,0 +1,60 @@\n+import scan\n" + fixture + TAIL + NEXT_FILE
     out, _ = pb.mask_secrets(text)
-    assert KEY_BODY[0] not in out and "+visible = 1" in out
+    assert out is not None and "+import scan" in out and "test_unrelated_19" not in out
+    assert out.endswith(NEXT_FILE)  # the product file after it stays readable
+
+
+def test_non_ascii_digit_elsewhere_does_not_refuse_a_card_fixture():
+    # one non-ASCII digit turns the whole-text card check's Luhn test off; lines must match it
+    text = "+label = '\u0661\u0662'\n+CARD = '" + CARD + "'\n+TRACK = '9302 2110 4790 0005 3721 11'\n+ok = 1\n"
+    assert pb.has_secret(text)
+    out, _ = pb.mask_secrets(text)
+    assert out is not None and not pb.has_secret(out) and "+ok = 1" in out
+
+
+def test_many_flagged_lines_mask_in_linear_time():
+    import time
+    text = "@@ -0,0 +1 @@\n" + "".join(f'+v{k} = "{CARD}"\n+ok\n' for k in range(5000))
+    t = time.process_time()
+    out, n = pb.mask_secrets(text)
+    assert n == 5000 and time.process_time() - t < 10
 
 
 def test_crlf_line_keeps_its_cr():
@@ -230,8 +249,7 @@ def run_cli(tmp_path, argv):
 
 
 KEY_DIFF = ("diff --git a/deploy/id_rsa b/deploy/id_rsa\n--- /dev/null\n+++ b/deploy/id_rsa\n"
-            "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY)
-            + "+-----END RSA " + "PRIVATE KEY-----\n")
+            "@@ -0,0 +1,5 @@\n+" + PEM + "\n" + "".join("+" + b + "\n" for b in KEY_BODY) + "+" + PEM_END + "\n")
 
 
 @pytest.mark.parametrize("entry", ["gate-code", "check"])
