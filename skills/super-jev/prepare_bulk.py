@@ -771,7 +771,8 @@ def navigate(pointer: str, principal: str, question: str) -> list:
     return [c.get("originalPath") for c in out.get("candidates", [])]
 
 
-def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False) -> dict:
+def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False,
+                 pinned: dict = None) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
     Labels ride in the bracketed description only for a file whose stage-2 label gate passed
     (cache["labels_ok"]); a cache entry without that key (pre-two-stage cache) defaults to
@@ -781,7 +782,10 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     `principals` carries every principal this pointer must stay registered for -- a pointer
     connected under several principals (e.g. primary + primary-helper) must repeat all of
     them on every reconnect, or the harness sees the request as narrowing its scope and
-    refuses with "scope-change"."""
+    refuses with "scope-change".
+
+    `pinned` ({path: sha256}) holds --approve-held files: when the preview's hash for one differs,
+    the reviewed connect is not sent and the paths come back as `drifted`."""
     sources = []
     for p in part_files:
         c = cache[str(p)]
@@ -824,6 +828,10 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     hashes = {os.path.realpath(x["path"]): x["sha256"] for x in prev["sources"]}
     for s in req["sources"]:
         s["sha256"] = hashes[os.path.realpath(s["path"])]
+    drifted = [s["path"] for s in req["sources"] if s["path"] in (pinned or {}) and s["sha256"] != pinned[s["path"]]]
+    if drifted:
+        print(f"connect held for {pointer}: approved file(s) changed since approval: {', '.join(drifted)}; not sent")
+        return {"connected": False, "drifted": drifted}
     req["reviewed"] = True
     reg = memory(req)
     wider = reg.get("registeredPrincipals") if reg.get("reason") == "scope-change" else None
@@ -1165,6 +1173,11 @@ def main() -> int:
             return True
         if want is None or sha(p) == want:
             return False
+        hold_changed(p)
+        return True
+
+    def hold_changed(p) -> None:
+        want = pinned[str(p)]
         dropped.add(str(p))
         cache.pop(str(p), None)
         base = next((w for h, w in held if h == str(p)), "").split("; admitted by --approve-held")[0]
@@ -1173,7 +1186,6 @@ def main() -> int:
                      f"(approved sha256 {want[:12]}), review it again")]
         write_held_txt(a.pointer, held)
         print(f"  HELD  {relstr(p, roots)}  (changed after its approval was checked this run; not cached or connected)")
-        return True
     if not files and not held:
         print(f"ERROR: no {','.join(a.extensions)} files found under {', '.join(str(r) for r in roots)} "
               "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
@@ -1398,7 +1410,11 @@ def main() -> int:
     hits, total, misses = 0, 0, []
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
-        result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable)
+        result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable, pinned=pinned)
+        for p in result.get("drifted", []):
+            hold_changed(p)
+            report["approved"] = [x for x in report["approved"] if x != str(p)]
+            cache_path.write_text(json.dumps(cache, indent=1))
         report["parts"].append({"pointer": pname, "count": len(part_files), "connected": result["connected"]})
         if not result["connected"]:
             all_connected = False
