@@ -329,10 +329,12 @@ def run(request, config):
                               request.get('context', ''), freshness=request.get('freshness'))
     if action == 'navigate':
         return service.navigate(request['pointer'], request['principal'],
-                                request['question'], request.get('limits'))
+                                request['question'], request.get('limits'),
+                                request.get('lastGood', False))
     if action == 'navigate-many':
         return service.navigate_many(request['pointers'], request['principal'],
-                                     request['question'], request.get('limits'))
+                                     request['question'], request.get('limits'),
+                                     request.get('lastGood', False))
     if action == 'cached':
         return service.cached(request['principal'], request['question'],
                               request.get('pointer'), request.get('context', ''))

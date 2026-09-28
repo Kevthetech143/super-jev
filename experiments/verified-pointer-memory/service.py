@@ -319,6 +319,36 @@ class Service:
             return None, {'status': 'preparation-required'}
         return pointer, None
 
+    def _last_good(self, name: str, principal: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+        """A stale pointer's registered binding and what changed since it was registered.
+
+        Navigation only: the registered catalog holds the descriptions reviewed at connect,
+        so routing on it sends the provider nothing new. Reviewed passages, tickets and the
+        cache stay behind pointer(), which refuses a stale pointer."""
+        stored = self._stored_pointer(name, principal)
+        if stored is None:
+            return None, {}
+        snapshot = stored.get('snapshot') or {}
+        changed, missing = set(), set()
+        for original in (snapshot.get('entry') or {}).get('originals') or []:
+            try:
+                if sha(original['path']) != original['sha256']:
+                    changed.add(original['path'])
+            except OSError:
+                missing.add(original['path'])
+            except (KeyError, TypeError):
+                continue
+        for source in snapshot.get('sources') or []:
+            try:
+                if sha(source['path']) != source['contentSHA']:
+                    changed.add(source.get('originalPath', source['path']))
+            except OSError:
+                missing.add(source.get('originalPath', source['path']))
+            except (KeyError, TypeError):
+                continue
+        return stored, {'status': 'preparation-required', 'changed': sorted(changed - missing),
+                        'missing': sorted(missing)}
+
     def key(
         self, pointer: dict[str, Any], question: str, principal: str, context: str,
         freshness: dict[str, Any] | None = None,
@@ -664,9 +694,14 @@ class Service:
 
     def navigate(
         self, name: str, principal: str, question: str, limits: Any = None,
+        last_good: bool = False,
     ) -> dict[str, Any]:
-        """Return source candidates only after checking pointer state around navigation."""
-        begun = self._navigate_begin(name, principal, question, limits)
+        """Return source candidates only after checking pointer state around navigation.
+
+        last_good=True routes a stale pointer on the catalog it was registered with instead
+        of refusing it: the result carries 'stale' (its status plus the files changed or
+        missing since), and a missing file is never a candidate."""
+        begun = self._navigate_begin(name, principal, question, limits, last_good)
         if 'status' in begun:
             return begun
         if self.navigate_provider is None:
@@ -676,13 +711,14 @@ class Service:
 
     def navigate_many(
         self, names: list[str], principal: str, question: str, limits: Any = None,
+        last_good: bool = False,
     ) -> dict[str, Any]:
         """navigate() for several pointers whose Jev questions share provider calls.
         Each pointer gets its own result, exactly as navigate() would return it."""
         if (not isinstance(names, list) or not names or len(names) > 200
                 or any(not isinstance(n, str) or not n for n in names) or len(set(names)) != len(names)):
             raise ValueError('pointers must be a list of 1 to 200 distinct names')
-        begun = {name: self._navigate_begin(name, principal, question, limits) for name in names}
+        begun = {name: self._navigate_begin(name, principal, question, limits, last_good) for name in names}
         ready = [name for name in names if 'status' not in begun[name]]
         results = {name: begun[name] for name in names if name not in ready}
         if ready:
@@ -701,7 +737,7 @@ class Service:
         return {'status': 'ok', 'results': results}
 
     def _navigate_begin(
-        self, name: str, principal: str, question: str, limits: Any,
+        self, name: str, principal: str, question: str, limits: Any, last_good: bool = False,
     ) -> dict[str, Any]:
         """The pointer check and catalog for one navigation, or its error status."""
         require_text('pointer', name)
@@ -709,10 +745,23 @@ class Service:
         require_text('question', question)
         if limits is not None and not isinstance(limits, dict):
             raise ValueError('limits must be an object')
+        if not isinstance(last_good, bool):
+            raise ValueError('lastGood must be a boolean')
         pointer, error = self.pointer(name, principal)
+        stale = None
         if error:
-            return error
-        manifest = self._manifest(pointer['snapshot']['entry'])
+            if not (last_good and error['status'] == 'preparation-required'):
+                return error
+            pointer, stale = self._last_good(name, principal)
+            if pointer is None:
+                return error
+        try:
+            manifest = self._manifest(pointer['snapshot']['entry'])
+        except (OSError, ValueError, KeyError, TypeError):
+            if stale is None:
+                raise
+            # Re-prepared since registration: the snapshot still holds its reviewed sources.
+            manifest = {'sources': pointer['snapshot'].get('sources') or []}
         sources = {source['id']: source for source in manifest['sources']}
         catalog = manifest.get('catalog')
         if catalog is None:
@@ -729,13 +778,14 @@ class Service:
                          for source_id, source in sorted(sources.items()))
             catalog = {'version': 1, 'structure': 'flat-files',
                        'rootId': 'root', 'nodes': nodes}
-        return {'pointer': pointer, 'sources': sources, 'catalog': catalog}
+        return {'pointer': pointer, 'sources': sources, 'catalog': catalog, 'stale': stale}
 
     def _navigate_end(
         self, name: str, principal: str, begun: dict[str, Any], result: Any,
     ) -> dict[str, Any]:
         """Validate one navigation result against its catalog and re-check the pointer."""
         pointer, sources, catalog = begun['pointer'], begun['sources'], begun['catalog']
+        stale = begun.get('stale')
         if (isinstance(result, dict) and result.get('status') == 'error'
                 and isinstance(result.get('reason'), str) and result['reason']):
             return {'status': 'error', 'reason': result['reason']}
@@ -750,7 +800,7 @@ class Service:
                 or result.get('complete') is not False
                 or not isinstance(result.get('message'), str)):
             return {'status': 'error', 'reason': 'Navigation returned invalid output.'}
-        mapped = []
+        mapped, keys = [], []
         catalog_nodes = {node.get('id'): node for node in catalog.get('nodes', [])
                          if isinstance(node, dict) and isinstance(node.get('id'), str)}
         seen_candidates = set()
@@ -781,16 +831,31 @@ class Service:
                 return {'status': 'error', 'reason': 'Navigation returned invalid output.'}
             seen_candidates.add(candidate_node)
             source = sources[candidate['sourceId']]
+            keys.append(source.get('originalPath', source['path']))
             mapped.append({**candidate, 'originalPath': source['path'] if source.get('viewTransform') else source.get('originalPath', source['path']),
                            **({'upstreamPath': source['originalPath']} if source.get('viewTransform') else {}),
                            'contentSHA': source['contentSHA'],
                            'description': source.get('description', '')})
-        after, error = self.pointer(name, principal)
-        if error:
-            return error
+        if stale:
+            # What changed is taken again after the provider call: a file edited or deleted
+            # while Jev routed must still count as changed or missing.
+            after, stale = self._last_good(name, principal)
+            if after is None:
+                return {'status': 'access-denied'}
+        else:
+            after, error = self.pointer(name, principal)
+            if error:
+                return error
         if (after['generation'] != pointer['generation']
                 or after['fingerprint'] != pointer['fingerprint']):
             return {'status': 'pointer-changed'}
+        if stale:
+            # A file deleted since registration has nothing left to read.
+            mapped = [c for c, key in zip(mapped, keys) if key not in stale['missing']]
+            status = result['status']
+            if status == 'candidates' and not mapped:
+                status = 'no-candidates'
+            return {**result, 'status': status, 'candidates': mapped, 'stale': stale}
         return {**result, 'candidates': mapped}
 
     def _cache_lookup(
