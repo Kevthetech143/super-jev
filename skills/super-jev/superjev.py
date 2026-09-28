@@ -4208,6 +4208,24 @@ def _has_secret(text):
     return has_secret(text)
 
 
+def _mask_evidence(evidence_items):
+    """(items, lines_masked): each evidence text with its secret-shaped spans masked
+    (prepare_bulk.mask_secrets), so a diff whose test fixtures hold fake card numbers or
+    keys can still be judged; no secret-shaped text is sent, real or fake. Raises when a
+    text cannot be masked cleanly; the gate reports that as a refusal."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from prepare_bulk import mask_secrets
+    out, total = [], 0
+    for path, text in evidence_items:
+        masked, n = mask_secrets(text)
+        if masked is None:
+            raise ValueError("evidence %s contains a secret; not sent "
+                             "(it could not be masked line by line)" % path)
+        out.append((path, masked))
+        total += n
+    return out, total
+
+
 def _code_ask(state, questions):
     """The live call code mode makes. Monkeypatched in tests — no network."""
     return _load_jev_lib().ask(state, questions)
@@ -4220,12 +4238,13 @@ class _CodeLibMissing(Exception):
     """JEV_LIB is absent while the live code-mode judge needs it."""
 
 
-def run_code_gate(evidence_items, claims, ask_fn=None):
+def run_code_gate(evidence_items, claims, ask_fn=None, state_items=None):
     """Check each claim about the code. Returns (rows, exit_code).
 
-    Pattern claims are answered deterministically; the rest go out as one
-    batch of Noul questions. `ask_fn` is injected by tests (a fake judge);
-    production calls the live door.
+    Pattern claims are answered deterministically, on the local text; the rest
+    go out as one batch of Noul questions, asked of `state_items` (the evidence
+    with secret-shaped text masked; masked here when not given). `ask_fn` is
+    injected by tests (a fake judge); production calls the live door.
     """
     evidence_text = "\n\n".join(t for _, t in evidence_items)
     rows = []
@@ -4254,7 +4273,9 @@ def run_code_gate(evidence_items, claims, ask_fn=None):
             raise _CodeLibMissing(
                 "no judge client at %s — restore lib/jev_client.py "
                 "or inject a judge" % JEV_LIB)
-        res = ask(code_state(evidence_items), questions)
+        if state_items is None:
+            state_items = _mask_evidence(evidence_items)[0]
+        res = ask(code_state(state_items), questions)
         answers = res.get("answers", {})
         for i, claim in pending:
             p = answers.get("c%d" % i, {}).get("noul")
@@ -4385,7 +4406,9 @@ def cmd_gate(a):
     if mode == "code":
         try:
             try:
-                rows, code = run_code_gate(kept_ev, claims_for_check)
+                state_ev, n_masked = _mask_evidence(kept_ev)
+                rows, code = run_code_gate(kept_ev, claims_for_check,
+                                           state_items=state_ev)
             except _CodeLibMissing as exc:
                 # advisory, never the door's refusal: exit 3 with a one-line
                 # reason, in every output shape (text/json/hook)
@@ -4416,6 +4439,10 @@ def cmd_gate(a):
                 reason = reason[0] if reason else type(exc).__name__
                 return 3, "gate: code-mode judge call failed: " + reason, ""
             text = _render_code_gate(mode, rows, code)
+            if n_masked:
+                text = ("gate: masked %d secret-shaped line(s) in the evidence before "
+                        "sending; a claim about those exact values cannot be checked\n"
+                        % n_masked) + text
         finally:
             for pth in evidence_tmp_paths:
                 try:
@@ -4428,7 +4455,7 @@ def cmd_gate(a):
         if json_mode:
             emit_json("gate", GATE_VERDICT_WORD.get(code, "ERROR"), code,
                       _code_summary(rows),
-                      {"claim_mode": mode, "rows": rows}, [])
+                      {"claim_mode": mode, "rows": rows, "masked_lines": n_masked}, [])
             return code
         print(text, end="")
         return code
