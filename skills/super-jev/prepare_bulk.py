@@ -24,7 +24,7 @@ Usage:
     Never calls the writer, the gate, or memory.
 
 Pipeline per run:
-  1. Inventory *.md under the union of one or more --root directories, in the order given (repeat --root for
+  1. Inventory *.md (plus explicit --ext text suffixes) under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
      hidden directories, git worktree copies (any .claude/worktrees/ folder, or a checkout whose .git file points into
      another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
@@ -88,6 +88,48 @@ from datetime import date
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+# Default connect scope, also imported by coverage/preflight callers. Extra text
+# suffixes require --ext and are persisted in that pointer's recipe.
+CONNECTABLE_EXTENSIONS = ('.md',)
+CODE_EXTENSIONS = ('.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.sh', '.bash')
+# Credential containers are not ordinary text inputs; --allow-held cannot opt
+# them in. Check compound suffixes and symlink targets as well.
+CREDENTIAL_SUFFIXES = frozenset({'env', 'pem', 'key', 'p12', 'pfx', 'jks', 'kdbx',
+                                 'kdb', 'keystore', 'pkcs12', 'ppk', 'p8'})
+
+
+def credential_suffix(name: str) -> bool:
+    return bool(CREDENTIAL_SUFFIXES.intersection(name.lower().split('.')[1:]))
+
+
+def extension_list(value: str) -> tuple:
+    """Explicit literal suffixes only; no globs, paths or empty entries."""
+    result = []
+    for item in value.split(','):
+        suffix = '.' + item.strip().lower().lstrip('.')
+        if not re.fullmatch(r'\.[a-z0-9]+(?:[.-][a-z0-9]+)*', suffix):
+            raise argparse.ArgumentTypeError('extensions must be comma-separated literal suffixes, e.g. py,ts,js,sh,json-schema')
+        if credential_suffix(suffix):
+            raise argparse.ArgumentTypeError('credential/key suffixes cannot be connected, including with --allow-held')
+        if suffix not in result:
+            result.append(suffix)
+    return tuple(result)
+
+
+def given_path(value) -> Path:
+    """Absolute spelling without dereferencing a release-switching symlink."""
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
+
+
+def code_heading(line: str, suffix: str) -> bool:
+    """Best-effort declaration boundaries, not a parser or code execution."""
+    if suffix == '.py':
+        return bool(re.match(r'^\s*(?:async\s+def|def|class)\s+\w+', line))
+    if suffix in {'.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'}:
+        return bool(re.match(r'^\s*(?:export\s+(?:default\s+)?)?(?:(?:async|abstract)\s+)?(?:function\s*\*?\s+|class\s+|interface\s+|type\s+)\w+', line))
+    if suffix in {'.sh', '.bash'}:
+        return bool(re.match(r'^\s*(?:function\s+\w+|[a-zA-Z_]\w*\s*\(\s*\))', line))
+    return False
 sys.path.insert(0, str(HERE))
 from connect_checked import gate, gate_many, memory  # noqa: E402
 
@@ -424,13 +466,13 @@ def is_worktree_copy(path: Path) -> bool:
     return _worktree_dir(str(path.parent))
 
 
-def walk_md(root: Path, no_recurse: bool = False):
-    """*.md files under `root`, sorted, plus the resolved targets of folder symlinks walked into.
+def walk_md(root: Path, no_recurse: bool = False, extensions=CONNECTABLE_EXTENSIONS):
+    """Selected text suffixes under `root`, sorted, plus resolved folder symlink targets.
     Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
     symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
     loop is walked once."""
     if no_recurse:
-        return sorted(root.glob("*.md")), []
+        return sorted(p for p in root.iterdir() if p.is_file() and p.name.lower().endswith(tuple(extensions))), []
     out, linked, walked = [], [], set()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
@@ -440,13 +482,13 @@ def walk_md(root: Path, no_recurse: bool = False):
         walked.add(real)
         linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
                    if os.path.islink(os.path.join(dirpath, d))]
-        out += [Path(dirpath) / n for n in filenames if n.endswith(".md")]
+        out += [Path(dirpath) / n for n in filenames if n.lower().endswith(tuple(extensions))]
     return sorted(out), linked
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
-              names: list = None, allow_targets: list = None):
-    """Union of *.md files under `roots`, in root order then sorted-per-root order. Each file is counted once
+              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS):
+    """Union of selected text suffixes under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
     hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
     since an oversized file cannot be gated regardless.
@@ -457,13 +499,16 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen, worktree_skips, test_skips = [], [], set(), 0, 0
     for root in roots:
-        glob_iter, linked = walk_md(root, no_recurse)
+        glob_iter, linked = walk_md(root, no_recurse, extensions)
         # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
         # skills into ~/.claude/skills), so its target is admitted like a root, unless it is a vault folder.
         bases += [t for t in linked if not SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
         for p in glob_iter:
             rp = p.resolve()
             if rp in seen:
+                continue
+            if credential_suffix(p.name) or credential_suffix(rp.name):
+                held.append((str(p), 'credential/key file suffix; cannot be overridden'))
                 continue
             # Case-insensitive: 225 of 315 fleet skills name the entry file skill.md, not SKILL.md.
             if names and not any(fnmatch.fnmatch(p.name.lower(), n.lower()) for n in names):
@@ -472,7 +517,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if base is None:
                 print(f"  SKIP  {p}  (links to {rp}, outside every --root/--allow-target)")
                 continue
-            if any(".bak" in n or n == "logins.md" or n.endswith("-secret.md") for n in (p.name.casefold(), rp.name.casefold())):
+            if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret") for n in (p.name.casefold(), rp.name.casefold())):
                 continue
             if any(part.casefold() in SKIP_PARTS or part.startswith(".")
                    for part in p.relative_to(root).parts + rp.relative_to(base).parts):
@@ -490,14 +535,18 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
                 continue
             seen.add(rp)
             if len(b) > CEILING_BYTES:
+                split_hint = ("split it into smaller .md files, e.g. one per ## section"
+                              if p.suffix.lower() == '.md' else "split it into smaller text files")
                 held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
-                                      "split it into smaller .md files, e.g. one per ## section")); continue
+                                      f"{split_hint}")); continue
             if b"\x00" in b:
                 held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
             try:
-                b.decode("utf-8")
+                text = b.decode("utf-8")
             except UnicodeDecodeError:
                 held.append((str(p), "not UTF-8 text; re-save it as UTF-8 to connect it")); continue
+            if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
+                held.append((str(p), "binary/control-character content, not text; skipped")); continue
             if has_secret(b.decode("utf-8", "replace")):
                 if allow_held:
                     held.append((str(p), "card/password-like text; admitted by --allow-held"))
@@ -578,7 +627,8 @@ def excerpt(p: Path) -> dict:
     so builtin_writer's quote rebuilds identically; the added part is bounded (at most 10 headings,
     8 x 350 characters) whatever the file's size."""
     text = p.read_text(errors="replace")
-    all_heads = [l.strip() for l in text.splitlines() if l.startswith("#")]
+    all_heads = [l.strip() for l in text.splitlines()
+                 if l.startswith("#") or code_heading(l, p.suffix.lower())]
     heads = all_heads[:EXCERPT_HEADS]
     rest = all_heads[EXCERPT_HEADS:]
     if len(rest) > EXCERPT_MORE_HEADS:
@@ -875,11 +925,19 @@ def replay_recipe(a) -> None:
         return
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
-    new_roots = bool(a.roots and sorted(str(Path(r).resolve()) for r in a.roots) != sorted(rep.get("roots") or []))
+    new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
+    supplied_ext = getattr(a, 'extensions', None)
+    recorded_ext = rep.get('extensions', list(CONNECTABLE_EXTENSIONS))
+    # Validate recorded scope as strictly as CLI input before using it.
+    if not isinstance(recorded_ext, list) or not recorded_ext or any(not isinstance(e, str) for e in recorded_ext):
+        raise ValueError('invalid recorded extensions')
+    recorded_ext = list(extension_list(','.join(recorded_ext)))
     rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
                     or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
+                    or (supplied_ext is not None and sorted(supplied_ext) != sorted(recorded_ext))
                     or new_roots)
+    a.extensions = supplied_ext if supplied_ext is not None else recorded_ext
     a.roots = a.roots or rep.get("roots") or None
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []
@@ -919,6 +977,8 @@ def principal_name(name: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", dest="roots", action="append")
+    ap.add_argument('--ext', action='append', type=extension_list,
+                    help='opt into extra UTF-8 text/code suffixes; comma-separated, repeatable (default: md only)')
     ap.add_argument("--pointer")
     ap.add_argument("--principal", dest="principals", action="append", default=[], type=principal_name,
                     help="repeatable. On --refresh, a pointer registered for several principals "
@@ -960,6 +1020,7 @@ def main() -> int:
     ap.add_argument("--subject", default=None)
     ap.add_argument("--within-days", type=int, default=None)
     a = ap.parse_args()
+    a.extensions = list(dict.fromkeys((*CONNECTABLE_EXTENSIONS, *(e for group in a.ext for e in group)))) if a.ext is not None else None
     a.no_findability = a.no_findability or not a.findability
 
     if a.list:
@@ -981,7 +1042,12 @@ def main() -> int:
         return 0
 
     if a.refresh and a.pointer:
-        replay_recipe(a)
+        try:
+            replay_recipe(a)
+        except (ValueError, argparse.ArgumentTypeError) as e:
+            print(f'REFUSED: {e}'); return 2
+    if a.extensions is None:
+        a.extensions = list(CONNECTABLE_EXTENSIONS)
     if a.limit is None:
         a.limit = 50
     if not a.roots or not a.principals or not a.pointer:
@@ -1009,7 +1075,7 @@ def main() -> int:
               "is claude -p --model haiku (the Claude Code Haiku command) -- set --writer-command or "
               "SUPERJEV_WRITER_COMMAND for another adapter that reads the prompt on stdin and prints JSON")
 
-    roots = [Path(r).resolve() for r in a.roots]
+    roots = [given_path(r) for r in a.roots]
     CACHE_DIR.mkdir(exist_ok=True)
     cache_path = CACHE_DIR / f"{a.pointer}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
@@ -1018,7 +1084,7 @@ def main() -> int:
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
         print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets)
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions)
     scope = getattr(a, "legacy_scope", None)
     if scope is not None:
         files = [p for p in files if str(p) in scope]
@@ -1028,7 +1094,7 @@ def main() -> int:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
     if not files and not held:
-        print(f"ERROR: no .md files found under {', '.join(str(r) for r in roots)} "
+        print(f"ERROR: no {','.join(a.extensions)} files found under {', '.join(str(r) for r in roots)} "
               "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
 
     # First connect (no cache yet) has no way to know how many files would actually need a
@@ -1211,6 +1277,7 @@ def main() -> int:
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
+              "extensions": a.extensions,
               "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),

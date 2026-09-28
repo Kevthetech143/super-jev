@@ -67,6 +67,26 @@ class PathConnectTests(unittest.TestCase):
         self.assertFalse(Path(self.config['db']).exists())
         self.assertFalse(list(self.root.glob('.prepared-*')))
 
+    def test_code_manifest_keeps_chunk_mode_across_symlink_refresh(self):
+        first, second = self.root / 'v1', self.root / 'v2'
+        first.mkdir(); second.mkdir()
+        (first / 'module.py').write_text('class Demo:\n    def old(self):\n        return 1\n')
+        (second / 'module.py').write_text('class Demo:\n    def fresh(self):\n        return 2\n')
+        link = self.root / 'current'
+        link.symlink_to(first, target_is_directory=True)
+        self.request['sources'] = [{'path': str(link / 'module.py')}]
+        self.assertEqual(connect(self.reviewed(), self.config)['status'], 'registered')
+        manifest = json.loads(Path(self.service().snapshot('records')['entry']['manifestPath']).read_text())
+        self.assertEqual(manifest['sources'][0]['codeExtension'], '.py')
+        self.assertEqual(manifest['sources'][0]['originalPath'], str(link / 'module.py'))
+        self.assertEqual([p['safeHeading'] for p in manifest['preparations']], ['class Demo:', 'def old(self):'])
+        link.unlink(); link.symlink_to(second, target_is_directory=True)
+        self.assertEqual(self.service().pointer('records', 'owner')[1]['status'], 'preparation-required')
+        self.request['replace'] = True
+        self.assertEqual(connect(self.reviewed(), self.config)['status'], 'registered')
+        manifest = json.loads(Path(self.service().snapshot('records')['entry']['manifestPath']).read_text())
+        self.assertEqual([p['safeHeading'] for p in manifest['preparations']], ['class Demo:', 'def fresh(self):'])
+
     def test_hash_change_requires_new_review(self):
         request = self.reviewed()
         self.source.write_text('new text')
