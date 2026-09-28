@@ -217,6 +217,10 @@ SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}"
 # always runs against the original, unscrubbed text.
 ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
 URL_RE = re.compile(_PAT["url"], re.A)
+# A spaced USPS tracking number (22 or 26 digits in groups of 4) starts with a card-shaped
+# 16-digit run, and about one in ten such numbers passes Luhn there by chance.
+# A whole run that is a valid USPS IMpb number is removed before the card check only.
+TRACKING_RE = re.compile(_PAT["tracking"], re.A)
 _CTRL_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 _NON_ASCII_RE = re.compile(r"[^\x00-\x7f]+")
 _FOLD = {}
@@ -386,10 +390,23 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
+def _usps_tracking(run: str) -> bool:
+    """A whole USPS IMpb number: 22 or 26 digits, starting 91-95, with a valid GS1 mod-10 check digit."""
+    d = re.sub(r"\D", "", run)
+    if len(d) not in (22, 26):
+        return False
+    total = sum(int(c) * (3 if i % 2 == 0 else 1) for i, c in enumerate(reversed(d[:-1])))
+    return (10 - total % 10) % 10 == int(d[-1])
+
+
 def card_hit(text: str, luhn: bool = True) -> bool:
-    """A standalone 16-digit run (dates/URLs scrubbed) that passes the Luhn check. luhn=False when the
-    raw text had non-ASCII digits: normalizing folds them to 0, so their true value is lost."""
-    return any(not luhn or _luhn(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(_scrub_dates_and_urls(text)))
+    """A standalone 16-digit run (dates/URLs and whole USPS tracking numbers scrubbed) that passes the Luhn
+    check. luhn=False when the raw text had non-ASCII digits: normalizing folds them to 0, so their true value
+    is lost and no run is exempted as a tracking number either."""
+    text = _scrub_dates_and_urls(text)
+    if luhn:
+        text = TRACKING_RE.sub(lambda m: " " if _usps_tracking(m.group()) else m.group(), text)
+    return any(not luhn or _luhn(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(text))
 
 
 def has_secret(text: str) -> bool:
