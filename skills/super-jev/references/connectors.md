@@ -150,7 +150,7 @@ folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktr
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`; a file named
 exactly with `--name` is judged by its folder only) and vault-style
 subdirectories, and holds back any file that looks like it carries
-card/password text or sits over the 250,000-byte size ceiling (a bigger-than-one-call file is gated in parts), writing a
+card/password text or sits over 2,000,000 bytes, writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
 secret-pattern case, the pattern type, line number and a digit-masked line so
 a human can review without opening the file. The card-number check ignores ISO
@@ -161,11 +161,28 @@ in the same digit run (`order 1234 4111 1111 1111 1111`, checked with a
 card-network prefix as well as Luhn) and a 15-digit Amex number (`3782 822463
 10005`). `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
-operator decision for one run (never replayed); it never lifts the size-ceiling hold.
-`--approve-held PATH` (repeatable) admits one reviewed size-held file of at most
-1,000,000 bytes (gated in parts) and records `{path, sha256}` as `approvedHeld`
+operator decision for one run (never replayed); it never lifts a size hold.
+A file over the 250,000-byte size ceiling (and at most 2,000,000 bytes) connects
+in sections: line ranges cut at natural edges (Markdown headings outside code
+fences; top-level `def`/`class`/`function` lines with their decorators), about
+6-20 KB each. Each section is drafted, gated and described on its own like a
+file, and connected as the file's path plus its `lines` (`[first, last]`); the
+connector reads those lines from the unchanged file, secret-scans them, and
+publishes them only under their own reviewed `viewSHA`. `prepare_bulk` runs the
+same secret scan, name, folder and text checks on the whole file first (one
+secret-like line or a secret-like name still holds the whole file, even with
+`--allow-held`); the connector itself scans each section's own text. A cut falls where a heading's or
+declaration's own text hashes to a fixed pattern once a section holds 6 KB, so
+an edit moves only the cuts around it: a refresh re-gates only the sections
+whose text changed (cached by the section text's sha256, wherever its lines
+moved). Any edit stales the pointer like any file. `ask.py` lists such a file
+once, naming the section to open (`(section: lines 401-760)`), and reads the
+routed section's passages first. Sections count one each toward `--limit`,
+so a big file can span part pointers.
+`--approve-held PATH` (repeatable) is no longer needed for size: it still admits one reviewed size-held file of at most
+1,000,000 bytes whole (gated in parts) and records `{path, sha256}` as `approvedHeld`
 in the report; `--refresh` and auto-heal replay it only while the file's bytes
-match, otherwise it is held again with a reason naming the old approval (the
+match, otherwise the file connects in sections (the
 file is read once and verified before the writer, which gets exactly those bytes, and the hash is rechecked before gating, caching and at the connect preview, so a
 mid-run edit is held). A file held for secret-like text or name, or with a
 credential/key suffix, is refused: "held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect."
@@ -174,7 +191,7 @@ code string) counts as a plain quote, so it is not held; after an escaped quote
 only a closed `$(...)`, `${...}` or `<...>` (at most 200 characters) is a placeholder,
 so a literal `\"$3cret9\"` or an unclosed `\"$(Secret9\"` is held. With any quote or none, a placeholder
 must be the whole value (a quote, space, comma, semicolon or end follows it), so
-`"${VAR}hunter2xyz9"` is held. To connect an oversized file, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
+`"${VAR}hunter2xyz9"` is held. To connect a file over 2,000,000 bytes, split it into smaller `.md` files (one per `##` section is usually enough) and connect the folder again. Binary or non-UTF-8 files are held too; re-save them as UTF-8 text. A cheap writer model drafts one
 description and one sample question per remaining file; the same claim gate
 used by `connect_checked.py` checks each description against its own file,
 with one rewrite retry on a failure. Only the passing set is connected,

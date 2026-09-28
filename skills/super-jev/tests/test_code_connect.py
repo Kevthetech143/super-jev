@@ -27,6 +27,7 @@ def test_code_holds_before_writer(tmp_path, monkeypatch):
                        'ok.py': b'def add(a, b):\n    return a + b\n'}.items():
         (tmp_path / name).write_bytes(data)
     monkeypatch.setattr(pb, 'CEILING_BYTES', 100)
+    monkeypatch.setattr(pb, 'SECTION_MAX_BYTES', 100)  # over the ceiling connects in sections up to this
     files, held = pb.inventory([tmp_path], extensions=('.py',))
     assert [p.name for p in files] == ['ok.py']
     assert len(held) == 5
