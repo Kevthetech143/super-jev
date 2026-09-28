@@ -328,7 +328,9 @@ def _connect(request, config):
         return _problem('invalid-shareable', 'shareable must be true or false.')
     chunks = json.loads(subprocess.run(
         ['node', str(Path(__file__).with_name('chunk_paths.mjs'))],
-        input=json.dumps([{'id': s['id'], 'text': s['text']} for s in sources]),
+        input=json.dumps([{'id': s['id'], 'text': s['text'],
+                           'codeExtension': Path(s['path']).suffix.lower() if Path(s['path']).suffix.lower() in prepare_bulk.CODE_EXTENSIONS else None}
+                          for s in sources]),
         text=True, capture_output=True, check=True, timeout=60).stdout)
     if len(chunks) != len(sources) or any(not c for c in chunks):
         return _problem('empty-preparation', 'All files must yield readable passages; no partial connection was created.')
@@ -376,6 +378,7 @@ def _connect(request, config):
             prepared_path = folder / f'{i}.txt'
             _write(prepared_path, s['raw'])
             manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['viewSHA'], 'description': s['description'],
+                                        **({'codeExtension': Path(s['path']).suffix.lower()} if Path(s['path']).suffix.lower() in prepare_bulk.CODE_EXTENSIONS else {}),
                                         **({'viewTransform': s['viewTransform'], 'transformSHA': s['transformSHA'],
                                             'originalSHA': s['sha256']} if s['viewTransform'] is not None else {})})
             for p in passages:

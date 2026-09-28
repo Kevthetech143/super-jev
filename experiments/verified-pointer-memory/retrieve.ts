@@ -34,7 +34,7 @@ async function main() {
       if (typeof source.id !== 'string' || !source.id || ids.has(source.id) || typeof source.description !== 'string') throw new Error('invalid source');
       ids.add(source.id);
       const text = (await checkedFile(source.path, source.contentSHA)).toString('utf8');
-      sources.push({ id: source.id, description: source.description, text });
+      sources.push({ id: source.id, description: source.description, text, codeExtension: source.codeExtension });
     }
   } catch {
     return { status: 'preparation-required', reason: 'Missing, stale or unreviewed dataset; no provider call made.' };
