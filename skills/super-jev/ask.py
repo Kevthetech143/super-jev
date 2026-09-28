@@ -1547,6 +1547,16 @@ def connector_names(ptr: str) -> list:
     return (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("names") or []
 
 
+def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
+    """May a reviewed file edited since connect be read at its current text while its pointer
+    waits on the refresh? Only as a refresh would admit it: reviewed at a known version and not
+    failed by its last review, under the size ceiling, no secret-looking line, and still inside
+    the pointer's recorded scope."""
+    return (isinstance(entry, dict) and bool(entry.get("pass")) and bool(entry.get("sha256"))
+            and len(raw) <= prepare_bulk.CEILING_BYTES
+            and not has_secret(text) and refresh_would_admit(path, ptr))
+
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -1582,8 +1592,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
                 # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
                 # search its current text, held back only as a refresh would hold it.
-                if (not entry.get("sha256") or len(raw) > prepare_bulk.CEILING_BYTES or has_secret(text)
-                        or not refresh_would_admit(path, ptr)):
+                if not edited_readable(path, ptr, entry, raw, text):
                     continue  # never reviewed at a known version, or a refresh would hold it
                 changed.append(path)
             heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
@@ -2030,10 +2039,17 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         learner.start()
 
     nav_none = {}
+    # A stale set is routed on the catalog of its last refresh (memory navigate lastGood), so
+    # a refresh cooldown never hides the whole set: {pointer: {"changed": [...], "missing": [...]}}.
+    stale_served = {}
 
     def classify(ptr, out, elapsed):
         status, reason = out.get("status"), out.get("reason", "")
         nav_none[ptr] = (_root_none(out), round(elapsed, 2))
+        if isinstance(out.get("stale"), dict) and status in ("candidates", "no-candidates"):
+            stale_served[ptr] = out["stale"]
+        else:
+            stale_served.pop(ptr, None)
         if status == "candidates" and out.get("candidates"):
             return ptr, "candidates", out["candidates"], elapsed, True
         if status in ("candidates", "no-candidates"):
@@ -2047,18 +2063,21 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
 
     def nav(ptr):
         t_start = time.time()
-        out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
+        out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
+                      "lastGood": True})
         # One backoff retry for an overloaded provider (HTTP 529) -- not counted
         # as a failure unless the retry also fails.
         if failed_overloaded(out):
             time.sleep(OVERLOAD_BACKOFF_SECS)
-            out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question})
+            out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
+                          "lastGood": True})
         return classify(ptr, out, time.time() - t_start)
 
     def nav_many(ptrs):
         """{pointer: navigate result}: one navigation-cli run whose Jev questions for
         every pointer share as few calls as fit under Jev's input ceiling."""
-        out = memory({"action": "navigate-many", "pointers": ptrs, "principal": principal, "question": question})
+        out = memory({"action": "navigate-many", "pointers": ptrs, "principal": principal, "question": question,
+                      "lastGood": True})
         rows = out.get("results") if out.get("status") == "ok" else None
         if not isinstance(rows, dict):  # an older runtime, or the batch itself failed
             return None
@@ -2075,7 +2094,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if retry:  # one backoff retry for the pointers an overloaded provider (HTTP 529) failed
             time.sleep(OVERLOAD_BACKOFF_SECS)
             outs.update(nav_many(retry) or {ptr: memory({"action": "navigate", "pointer": ptr, "principal": principal,
-                                                         "question": question}) for ptr in retry})
+                                                         "question": question, "lastGood": True}) for ptr in retry})
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
@@ -2084,7 +2103,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     reconnected, deadline = {}, time.time() + auto_heal.RECONNECT_TIMEOUT_SECS
     for i, (ptr, kind, *_rest) in enumerate(results):
         left = int(deadline - time.time())
-        if auto_heal.is_stale_kind(kind) and left >= 1 and not replay:
+        if (auto_heal.is_stale_kind(kind) or ptr in stale_served) and left >= 1 and not replay:
             reconnected[ptr] = ("no-report" if ptr in view_pointers else
                                 auto_heal.reconnect_now(ptr, principal, timeout=left))
             if reconnected[ptr] == "no-report":
@@ -2092,20 +2111,48 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                 reconnected[ptr] = auto_heal.reconnect_recipe_or_queue(ptr, principal, memory=memory)
             if reconnected[ptr] == "reconnected":
                 results[i] = nav(ptr)
+        elif kind == "pointer-changed":
+            # A refresh re-registered the set while Jev routed it (a stale set is routed now,
+            # so a background refresh can land mid-call): ask it once more at its new generation.
+            results[i] = nav(ptr)
     _STAGE["reconnect"] = reconnected
-    merged, errored, statuses = [], 0, {}
+    merged, errored, statuses, stale_held = [], 0, {}, []
+    _STAGE["stale_changed"] = []
     for ptr, kind, rows, elapsed, ok in results:
-        record_pointer_outcome(health, ptr, ok, elapsed, stale=_is_stale_kind(kind))
-        if kind == "candidates":
+        served = stale_served.get(ptr)
+        record_pointer_outcome(health, ptr, ok, elapsed, stale=_is_stale_kind(kind) or bool(served))
+        if served:
+            # A file edited since the last refresh is read at its current text only as the
+            # refresh would admit it (edited_readable), exactly like word search's edited files.
+            edited, files = set(served.get("changed") or []), load_cache_files(ptr)
+            kept = []
+            for c in rows:
+                path = c.get("originalPath", "")
+                if path in edited:
+                    try:
+                        raw = Path(path).read_bytes()
+                    except OSError:
+                        continue
+                    if not edited_readable(path, ptr, files.get(path), raw, raw.decode("utf-8", "replace")):
+                        stale_held.append(path)
+                        continue
+                    _STAGE["stale_changed"].append(path)
+                kept.append(c)
+            rows = kept
+        if kind == "candidates" and rows:
             statuses[ptr] = "candidates"
             merged += [(c.get("score", 0), c.get("originalPath", ""), ptr) for c in rows]
-        elif kind == "no-candidates":
+        elif kind in ("candidates", "no-candidates"):
             statuses[ptr] = "no-candidates"
         else:
             errored += 1
             statuses[ptr] = kind
+        if served:
+            statuses[ptr] += " (stale: last refresh)"
+        if served or kind not in ("candidates", "no-candidates"):
+            stale_kind = served.get("status", "preparation-required") if served else kind
             hint = ("; refresh through the recorded view recipe; raw bulk refresh is disabled"
-                    if ptr in view_pointers else refresh_hint(ptr, principal, kind))
+                    if ptr in view_pointers else refresh_hint(ptr, principal, stale_kind))
             # A stale pointer never has to wait on a human to run the refresh hint above by
             # hand: this starts the exact same prepare_bulk.py --refresh in the background,
             # bounded (one in flight per principal, the rest queued behind it, per-pointer
@@ -2113,7 +2160,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # and never changes what this lookup reports for the pointer that triggered it;
             # it only means the *next* lookup may no longer hit it.
             heal_note = ""
-            stale = auto_heal.is_stale_kind(kind)
+            stale = bool(served) or auto_heal.is_stale_kind(kind)
             result = None
             if stale and not replay:
                 result = (reconnected.get(ptr, "no-recipe") if ptr in view_pointers else
@@ -2134,8 +2181,17 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # text so it never changes what those already say.
             if stale and result == "no-report" and reconnected.get(ptr) != "reconnected" \
                     and not warn_stale_today(sdir, ptr):
-                errored -= 1
-                log(sdir, "stale-quiet", pointer=ptr, status=kind)
+                if not served:
+                    errored -= 1
+                log(sdir, "stale-quiet", pointer=ptr, status=stale_kind)
+                continue
+            if served:
+                # Not an error: this set answered from its last refresh. Say so, and how much is newer.
+                gone = len(served.get("missing") or [])
+                error_lines.append(f"[{ptr}] stale: searched as of its last refresh "
+                                   f"({len(served.get('changed') or [])} file(s) changed since"
+                                   + (f", {gone} removed" if gone else "") + ")"
+                                   + hint + heal_note + " [STALE]")
                 continue
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
     save_pointer_health(sdir, health)
@@ -2359,14 +2415,17 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         fates = {p: "read" for p in wpaths}
         stages = {
             "cache": cache_stage,
-            "routing": {ptr: {"status": kind, "none": nav_none.get(ptr, (None,))[0],
+            "routing": {ptr: {"status": kind + (" (stale: last refresh)" if ptr in stale_served else ""),
+                              "none": nav_none.get(ptr, (None,))[0],
                               "secs": nav_none.get(ptr, (None, None))[1],
                               "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0),
                                          "kept": c.get("score", 0) >= ROUTE_FLOOR} for c in rows][:STAGE_LIST_CAP]}
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
+            "stale_held": stale_held[:STAGE_LIST_CAP],
             "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
-                            "changed_since_connect": _STAGE.get("word_changed") or [],
+                            "changed_since_connect": sorted(set(_STAGE.get("word_changed") or [])
+                                                            | set(_STAGE.get("stale_changed") or [])),
                             "passed_coverage": wsearch.get("passed_coverage"),
                             "top": [{"score": sc, "path": p,
                                      "fate": fates.get(p) or ("already routed" if p in routed[:CONFIRM_FILES]
@@ -2411,7 +2470,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                     and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE]
             best = max(side, key=lambda p: files[p]["prob"])
             # never save from text no refresh has passed, nor from a replay
-            if best not in (_STAGE.get("word_changed") or []) and not replay:
+            if best not in (_STAGE.get("word_changed") or []) + (_STAGE.get("stale_changed") or []) and not replay:
                 claim_cache_put(sdir, _CLAIM["text"], word, best, files[best])
         log(sdir, "claim", question=question, result=word)
         if top:
