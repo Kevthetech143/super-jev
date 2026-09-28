@@ -156,7 +156,10 @@ secret-pattern case, the pattern type, line number and a digit-masked line so
 a human can review without opening the file. The card-number check ignores ISO
 dates and URLs first, so a long numeric id in a URL or a run of dates on one
 line cannot trigger a false hold; the password/api-key keyword check is
-unaffected. `--allow-held` admits a file the secret scan alone would hold --
+unaffected. It also holds a card after an order number, phone number or date
+in the same digit run (`order 1234 4111 1111 1111 1111`, checked with a
+card-network prefix as well as Luhn) and a 15-digit Amex number (`3782 822463
+10005`). `--allow-held` admits a file the secret scan alone would hold --
 it is still listed in the held file, noting the override -- as an explicit
 operator decision for one run (never replayed); it never lifts the size-ceiling hold.
 `--approve-held PATH` (repeatable) admits one reviewed size-held file of at most
