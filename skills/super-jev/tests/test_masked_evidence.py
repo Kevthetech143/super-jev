@@ -186,8 +186,8 @@ def test_a_combined_diff_section_is_its_own_file():
 def test_a_held_section_without_a_hunk_keeps_only_header_lines():
     first = test_file("+" + PEM + "\n", "k.pem")
     no_hunk = "diff --git a/k.pem b/k.pem\nindex 1..2 100644\n" + KEY_BODY[0] + "\n"
-    out, _ = pb.mask_secrets(first + no_hunk + PRODUCT)
-    assert out is None or KEY_BODY[0] not in out  # git never writes text there: the rest goes with k.pem
+    out, withheld = pb.mask_secrets(first + no_hunk + PRODUCT)
+    assert out is None and "k.pem" in withheld  # not git's output: the whole item is one file
 
 
 def test_gate_masks_before_it_truncates(tmp_path):
@@ -223,8 +223,15 @@ def test_text_around_a_diff_is_one_file_with_it():
     read of the key's body alone, which by itself scans clean."""
     window = ("Read fx/key.pem 1-2:\n" + PEM + "\n" + PRODUCT + "Read fx/key.pem 3-5:\n"
               + "\n".join(KEY_BODY) + "\n")
-    out, _ = pb.mask_secrets(window)
-    assert out is None or not any(b in out for b in KEY_BODY)
+    assert pb.mask_secrets(window)[0] is None
+
+
+def test_a_read_of_a_diffed_key_is_one_file_with_its_diff():
+    """The Stop hook's window: a diff of a key (its BEGIN line as context), another file, then a
+    Read of the key's tail, which alone scans clean."""
+    key = test_file(" " + PEM + "\n-" + KEY_BODY[0] + "\n+" + KEY_BODY[0][::-1] + "\n", "fx/key.pem")
+    window = key + PRODUCT + "Read fx/key.pem offset=20:\n" + "\n".join(KEY_BODY[1:]) + "\n"
+    assert pb.mask_secrets(window)[0] is None
 
 
 def test_gate_with_no_evidence_left_after_the_cap_is_not_a_secret_refusal(tmp_path):
@@ -310,6 +317,20 @@ def test_non_ascii_digit_in_another_item_still_masks():
     assert withheld == ["t.py"] and items[1][1].endswith(PRODUCT)
 
 
+def test_paths_with_spaces_join_only_their_own_file():
+    held = test_file(f"+x = '{CARD}'\n", "dir with space/a.py")
+    clean = test_file("+y = 1\n", "dir with space/b.py")
+    out, withheld = pb.mask_secrets(held + clean)
+    assert withheld == ["dir with space/a.py"] and out.endswith(clean)
+
+
+def test_a_long_evidence_name_does_not_crash_the_gate(tmp_path):
+    ev = tmp_path / ("x" * 240 + ".diff")
+    ev.write_text(FIXTURES + PRODUCT)
+    p, sent = run_cli(tmp_path, [str(SKILL / "superjev.py"), "gate", str(ev), "--claim", "scan returns card_hit(text)"])
+    assert sent and "File name too long" not in p.stderr
+
+
 def test_text_that_is_not_a_diff_is_not_judged():
     assert pb.mask_secrets(f"notes\nthe card is {CARD}\n") == (None, ["the text"])
 
@@ -323,9 +344,10 @@ def test_a_secret_shaped_header_is_withheld_too():
     assert pb.mask_secrets(text) == (None, ["a file", "the text"])  # nothing judgeable left
 
 
-def test_text_before_the_first_file_is_judged_on_its_own():
+def test_text_outside_a_diff_makes_its_item_one_file():
     out, withheld = pb.mask_secrets(f"summary: rotate {PW}\n" + PRODUCT)
-    assert withheld == ["the text"] and out == pb.SECRET_WITHHELD.format(n=1) + "\n" + PRODUCT
+    assert out is None and "the text" in withheld
+    assert pb.mask_secrets("summary: all clean\n" + PRODUCT) == ("summary: all clean\n" + PRODUCT, [])
 
 
 def test_non_ascii_digit_in_one_file_keeps_the_others_judged():
@@ -340,7 +362,7 @@ def test_clean_text_is_returned_unchanged():
     assert pb.mask_secrets(text) == (text, [])
 
 
-def test_many_files_mask_in_linear_time():
+def test_many_files_mask_quickly():
     text = "".join(test_file(f"+v = '{CARD}'\n", f"t{k}.py") + PRODUCT for k in range(2000))
     t = time.process_time()
     out, withheld = pb.mask_secrets(text)

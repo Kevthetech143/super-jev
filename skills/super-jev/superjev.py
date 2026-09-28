@@ -4362,7 +4362,7 @@ def cmd_gate(a):
     if sent_ev is not None and (truncated or sent_ev != ev_items):
         evidence_paths = []
         for orig_path, text in kept_ev:
-            tmp_ev = tempfile.NamedTemporaryFile(mode="w", prefix=Path(orig_path).name + ".",
+            tmp_ev = tempfile.NamedTemporaryFile(mode="w", prefix=Path(orig_path).name[:80] + ".",
                                                  suffix=".md", delete=False, encoding="utf-8",
                                                  newline="")
             tmp_ev.write(text)
