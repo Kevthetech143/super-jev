@@ -13,6 +13,12 @@ STEPS = ["preflight", "start", "target", "cause", "brief", "check-report", "prov
          "learn"]
 
 FAKE = '''import json, os, sys
+if "--preflight" in sys.argv:  # an older Super Jev has no --preflight unless FAKE_CORE holds its JSON answer
+    if os.environ.get("FAKE_CORE"):
+        print(os.environ["FAKE_CORE"])
+        sys.exit(1 if json.loads(os.environ["FAKE_CORE"])["problems"] else 0)
+    print("usage: ...")
+    sys.exit(2)
 if "--status" in sys.argv:  # free status: never logged as a Super Jev use
     print("Connections for x (registered snapshots, not a freshness guarantee):")
     for row in os.environ.get("FAKE_STATUS", "notes: ready").split(";"):
@@ -315,3 +321,29 @@ def test_preflight_root_alone_is_not_connected(env):
     lone.mkdir()
     r = run(env, "preflight", "--project-dir", str(lone))
     assert r.returncode == 2 and "not on Super Jev's shelves" in r.stderr
+
+
+def core(verdict="READY", problems=(), warnings=(), **extra):
+    return json.dumps(dict(verdict=verdict, problems=list(problems), warnings=list(warnings), folders=[
+        {"folder": "/p", "connected": 2, "connectable": 3}], **extra))
+
+
+def test_preflight_uses_super_jevs_own_preflight_when_present(env):
+    r = run(env, "preflight", extra_env={"FAKE_CORE": core("READY WITH WARNINGS", warnings=["2 of 3 connected"])})
+    assert r.returncode == 0, r.stderr
+    assert "Super Jev's own preflight" in r.stdout and "2 of 3 connectable files connected" in r.stdout
+    assert "Super Jev preflight (json)" in (env["cycle"] / "01-preflight.md").read_text()
+
+
+def test_core_not_ready_blocks_with_its_problems(env):
+    r = run(env, "preflight", extra_env={"FAKE_CORE": core("NOT READY", problems=["bad is not ready: error"])})
+    assert r.returncode == 2 and "bad is not ready" in r.stderr
+    assert not (env["cycle"] / "01-preflight.md").exists()
+
+
+def test_core_skill_search_is_a_marked_use(env):
+    r = run(env, "preflight", "--skill", "posts things",
+            extra_env={"FAKE_CORE": core(existing_skills=["x-poster"])})
+    assert r.returncode == 0 and "x-poster" in r.stdout
+    uses = (env["cycle"] / "uses.jsonl").read_text().splitlines()
+    assert len(uses) == 1 and "existing skill for: posts things" in uses[0]
