@@ -4,7 +4,7 @@
  "profiles": {
   "typesafe-jev": {
    "label": "TypeSafe Jev",
-   "_source": "window: CAPABILITIES.md 'HARD INPUT CEILING' (measured 32,768); questions: the per-call cap every batcher plans under; price: docs.typesafe.ai, checked 2026-09-16 (input $0.042/Mtok, output not billed)",
+   "_source": "window: the measured hard input ceiling; questions: the per-call cap every batcher plans under; price: docs.typesafe.ai, checked 2026-09-16",
    "window_tokens": 32768,
    "max_questions_per_call": 255,
    "question_kinds": ["noul", "choice", "score"],
