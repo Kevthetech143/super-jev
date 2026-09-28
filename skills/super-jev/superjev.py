@@ -4686,14 +4686,15 @@ def cmd_gate(a):
                 else "evidence")
     if mode == "code" and not claims_for_check:
         mode = "evidence"
-    # Code mode's own judge runs the built-in client in-process, which reads the key
-    # only from TYPESAFE_API_KEY: a shell whose key comes through a configured judge
-    # (SUPERJEV_GATE_CMD, as prose checks use) has none, and every diff check died
-    # "TYPESAFE_API_KEY is not set". And its question's "false" means false OR not
-    # shown, so over evidence split into parts it cannot tell a part that lacks the
-    # code from one that disproves the claim. In both cases the claims the pattern
-    # arm does not settle go to the evidence judge instead, still in code mode, so
-    # the judgment-word refusal and the pattern arm apply as before.
+    # Code mode's own judge runs the built-in client in-process, which reads the
+    # TYPESAFE_API_KEY environment variable and nothing else; a shell whose key
+    # comes through a configured judge (SUPERJEV_GATE_CMD, as prose checks use)
+    # has none, and every diff check died "TYPESAFE_API_KEY is not set". And its
+    # question's "false" means false OR not shown, so over evidence split into
+    # parts it cannot tell a part that lacks the code from one that disproves
+    # the claim. In both cases the claims the pattern arm does not settle go to
+    # the evidence judge instead, still in code mode, so the judgment-word
+    # refusal and the pattern arm apply as before.
     code_judge_note = None
     if mode == "code" and _code_ask is _code_ask_live and os.environ.get(GATE_CMD_ENV) \
             and not os.environ.get("TYPESAFE_API_KEY", "").strip():
