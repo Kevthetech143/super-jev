@@ -228,6 +228,13 @@ def _child_line(cmd: list, out_log: Path, principal: str, token: str) -> str:
             f"{shlex.join(_drain_cmd(principal, token))} </dev/null >/dev/null 2>&1 & exit $rc")
 
 
+def _spawn_detached(argv: list) -> "subprocess.Popen":
+    """The one way every background launch starts: its own session and no inherited stdin/stdout/
+    stderr, so a caller reading the ask's output to EOF never waits on a refresh."""
+    return subprocess.Popen(argv, cwd=str(HERE), start_new_session=True, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def _name_child(principal: str, token: str, proc) -> None:
     """The lock names the running child, not the lookup that started it: after the lookup exits
     a live child must still hold the lock, or the next lookup starts a second refresh. Only
@@ -243,9 +250,7 @@ def _hand_off(principal: str, token: str) -> None:
         return
     if _load_state(principal).get("pending"):
         try:
-            subprocess.Popen(_drain_cmd(principal, token), cwd=str(HERE), start_new_session=True,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+            _spawn_detached(_drain_cmd(principal, token))
             return
         except OSError:
             pass
@@ -341,8 +346,7 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
     out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
     try:
-        proc = subprocess.Popen(["/bin/sh", "-c", _child_line(cmd, out_log, principal, token)],
-                                cwd=str(HERE), start_new_session=True)
+        proc = _spawn_detached(["/bin/sh", "-c", _child_line(cmd, out_log, principal, token)])
     except OSError:
         _hand_off(principal, token)
         return "failed"
@@ -488,8 +492,7 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
     out_log = STATE_DIR / f"{principal}-{pointer}-last-refresh.log"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args]
     # Detached background run; its drain heals the queue and releases the lock (see _child_line).
-    proc = subprocess.Popen(["/bin/sh", "-c", _child_line(cmd, out_log, principal, token)],
-                            cwd=str(HERE), start_new_session=True)
+    proc = _spawn_detached(["/bin/sh", "-c", _child_line(cmd, out_log, principal, token)])
     _name_child(principal, token, proc)
     _log(principal=principal, pointer=pointer, action="started", cmd=cmd)
     return "started"
@@ -508,9 +511,7 @@ def maybe_scan(principal: str, pointers: list, scan_secs: int = SCAN_SECS) -> st
             if now - state.get("lastScan", 0) < scan_secs:
                 return "recent"
             state["lastScan"] = now
-        subprocess.Popen([sys.executable, str(HERE / "auto_heal.py"), "--scan", principal, *pointers],
-                         cwd=str(HERE), start_new_session=True, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _spawn_detached([sys.executable, str(HERE / "auto_heal.py"), "--scan", principal, *pointers])
     except (OSError, ValueError):
         return "failed"
     return "started"
