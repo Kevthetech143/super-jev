@@ -8,10 +8,10 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 - **Cause:** the connector for that source has not been onboarded yet — a setup state, not a failed search.
 - **Workaround:** run the connect flow for the source (AGENTS.md step 4), then ask again. "Not set up yet" means run `python3 skills/super-jev/setup.py` first.
 
-## 2. Cache hits are exact wording only
+## 2. Cache hits need the same question (case, spacing and trailing punctuation aside)
 
 - **Symptom:** you approved an answer, but asking again in different words misses.
-- **Cause:** the cache matches exact wording; paraphrases go through the search lane.
+- **Cause:** the cache matches the question after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier, so paraphrases go through the search lane.
 - **Workaround:** approve the new wording once with `--approve`, or let it search.
 
 ## 3. A true claim can still come back READ
