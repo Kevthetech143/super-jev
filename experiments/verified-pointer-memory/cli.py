@@ -30,7 +30,7 @@ NEXT = {
     'pointer-changed': 'resubmit-after-review',
     'registered': 'search', 'removed': 'done', 'saved': 'continue', 'ok': 'choose-action',
 }
-DEFAULTS = {'cacheTtlSeconds': 86400, 'reviewTtlSeconds': 600, 'providerTimeoutSeconds': 120}
+DEFAULTS = {'cacheTtlSeconds': None, 'reviewTtlSeconds': 600, 'providerTimeoutSeconds': 120}
 ACTIONS = {
     'describe': [], 'panel': ['principal'],
     'connect': ['pointer', 'sources', 'principals'],
@@ -202,6 +202,8 @@ def load_config(path):
         config[name] = str(p if p.is_absolute() else location.parent / p)
     for name, default in DEFAULTS.items():
         value = config.setdefault(name, default)
+        if value is None and name == 'cacheTtlSeconds':
+            continue  # no clock expiry: a saved answer lasts until its source changes
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             raise ValueError('Time settings must be positive finite seconds.')
     command = config.setdefault('retrievalCommand', ['node', str(Path(__file__).with_name('retrieve.ts').resolve())])
