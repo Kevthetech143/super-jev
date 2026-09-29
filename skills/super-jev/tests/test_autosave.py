@@ -315,3 +315,55 @@ def test_outcome_count_on_a_hit_is_the_number_of_saved_files(world, tmp_path):
     ask_once(world); ask_once(world)
     hit, _ = ask_once(world)
     assert hit.startswith("OUTCOME: found - 3 files; saved answer, sources unchanged")
+
+
+def test_an_inconclusive_rank_two_file_records_no_win(world, tmp_path, monkeypatch):
+    extra = _three_files(world, tmp_path)
+    monkeypatch.setattr(ask, "confirm", lambda q, paths: ({p: 0.9 - 0.05 * i for i, p in enumerate(paths)}, set(), None,
+                                                          {extra[0]: ask.INCONCLUSIVE}))
+    for _ in range(3):
+        out, _n = ask_once(world)
+        assert "Saved for next time" not in out
+    assert not world["cache"]
+    assert not any(json.loads(l).get("win") for l in (world["sdir"] / "lookups.jsonl").read_text().splitlines())
+
+
+def test_a_file_that_cannot_be_hashed_records_no_win(world, tmp_path):
+    ghost = str(tmp_path / "gone.md")
+    assert ask.win_of([(0.9, str(world["note"]), "acme"), (0.8, ghost, "acme")], {}, {}) is None
+
+
+def test_a_principal_that_lost_the_pointer_of_the_third_file_gets_no_hit(world, tmp_path):
+    _three_files(world, tmp_path)
+    ask_once(world); ask_once(world)
+    path = world["sdir"] / "approvals.jsonl"
+    rec = json.loads(path.read_text().splitlines()[-1])
+    rec["files"][2]["pointer"] = "acme-old"
+    path.write_text(json.dumps(rec) + "\n")
+    out, n = ask_once(world)
+    assert "STALE" in out and "acme-old" in out and "CACHE HIT" not in out and n == 1
+
+
+def test_a_hit_prints_the_skill_suggestions_and_the_leans_none_note_like_live(world, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_SKILLS", "1")
+    monkeypatch.setattr(ask, "skill_catalog", lambda q: [("acme-refunds", "/skills/acme-refunds/SKILL.md")])
+    q = "Which skill covers the Acme refund window?"
+    live, _ = ask_once(world, q)
+    assert "skill  /skills/acme-refunds/SKILL.md" in live
+    ask_once(world, q)
+    hit, n = ask_once(world, q)
+    assert n == 0 and "skill  /skills/acme-refunds/SKILL.md  [skills: acme-refunds]" in hit
+    assert hit.startswith("OUTCOME: found - 1 file; 1 skill suggestion; saved answer")
+    win = ask.win_of([(0.9, str(world["note"]), "acme")], {}, {}, [("s", "/p")], True)
+    assert win["skills"] == [{"name": "s", "path": "/p"}] and win["leans_none"] is True
+
+
+def test_an_older_single_file_save_prints_saved_not_a_score(world):
+    ask_once(world); ask_once(world)
+    path = world["sdir"] / "approvals.jsonl"
+    rec = json.loads(path.read_text().splitlines()[-1])
+    for k in ("files", "skills", "leans_none"):
+        rec.pop(k, None)
+    path.write_text(json.dumps(rec) + "\n")
+    out, _ = ask_once(world)
+    assert f"saved  {world['note']}  [acme]" in out and "0.00" not in out
