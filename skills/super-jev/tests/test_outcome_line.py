@@ -192,3 +192,37 @@ def test_a_note_over_12000_chars_is_found_by_a_passage_past_char_12000(tmp_path,
     assert any(needle in leaf["description"] for leaf in sent[0]["catalog"]["nodes"][1:])
     assert needle in ask.best_passage(str(f))
     assert ask._STAGE["checks"][str(f)]["best_line"] >= 1 + text[:text.index(needle)].count("\n")
+
+
+# --- review round 1 fixes ---------------------------------------------------------------------
+
+def test_found_with_a_failed_content_check_says_the_files_are_unconfirmed(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch, ["notes"], _cands)
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), "judge unreachable", {OK: ask.INCONCLUSIVE}))
+    rc, lines = _ask(tmp_path)
+    assert rc == 0  # table: found is 0 (candidates exist); the line says they are unconfirmed
+    assert lines[0].startswith("OUTCOME: found") and "unconfirmed: content check failed" in lines[0]
+    assert any(OK in ln and "inconclusive" in ln for ln in lines[1:])
+    assert len(_outcomes(lines)) == 1
+
+
+def test_a_200kb_note_is_found_by_a_passage_near_its_end(tmp_path, monkeypatch):
+    needle = "Acme's warranty period is 24 months from delivery."
+    filler = "".join(f"Acme shipping detail number {i} is logged here.\n" for i in range(4000))
+    text = "# Acme notes\n\n" + filler + "\n## Warranty\n\n" + needle + "\n"
+    assert 190_000 < len(text.encode()) < 250_000 and text.index(needle) > len(text) - 200
+    f = tmp_path / "big.md"
+    f.write_text(text)
+    parts = ask.split_passages(text)
+    idx = next(i for i, p in enumerate(parts) if needle in p)
+    sent = []
+
+    def fake_run(cmd, input, **kw):
+        sent.append(json.loads(input))
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(
+            {"status": "candidates", "candidates": [{"score": 0.93, "sourceId": str(idx)}]}), "")
+    monkeypatch.setattr(ask.subprocess, "run", fake_run)
+    score, _, err, _ = ask.confirm_one("what is Acme's warranty period", str(f))
+    assert err is None and score == 0.93
+    assert any(needle in leaf["description"] for call in sent for leaf in call["catalog"]["nodes"][1:])
+    assert needle in ask.best_passage(str(f))

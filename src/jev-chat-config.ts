@@ -123,7 +123,7 @@ export type MissCandidate = { score: number; path: string; pointer: string };
 const CANDIDATE_LINE = /^\s*([\d.]+)\s+(\S+)\s+\[([^\]]+)\]/;
 
 /** Top ranked candidate from a miss (no CACHE HIT) ask.py run, or null when
- * there truly are none (no-candidates, all pointers errored, etc). Never
+ * there truly are none (OUTCOME not-found, needs-setup or error). Never
  * called on a cache hit -- callers check parseHit first. */
 export function parseMissCandidate(stdout: string): MissCandidate | null {
   if (stdout.startsWith('CACHE HIT')) return null;
@@ -187,7 +187,7 @@ export function parseAnyPointers(stdout: string): boolean | null {
 }
 
 // ---------------------------------------------------------------------------
-// True-miss report parsing -- ask.py's no-candidates miss prints a
+// True-miss report parsing -- ask.py's `OUTCOME: not-found` miss (exit 1) prints a
 // "What was searched:" / "Next step (pick one):" block (see ask.py's
 // miss_report()) before its closing voice line. The chat CLI shows that
 // block to the user instead of making a paid live call that cannot answer
