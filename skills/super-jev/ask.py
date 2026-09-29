@@ -37,9 +37,10 @@
       (blank lines and # comments skipped): a draft's facts, or a worker
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
 
-SAVED ANSWERS (one promise). --approve, --answer, --used, --confirm-pick and --add
-all save through one function: the same secret scan and claim check (CLEAN, score
-0.80 or higher) run first; --add with no file gets the secret scan only and is
+SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
+save by hand. All save through one function and run the secret scan. A repeat-question
+save stores the file, and its N wins stand in for the claim check; only --approve and
+--add run the claim check (CLEAN, score 0.80 or higher). --add with no file gets the secret scan only and is
 marked "no source file"; a --source that does not exist is refused (exit 2). A saved
 answer lasts until its source file changes (no clock expiry); a fact with no file lasts
 until --miss (wrong) removes it. "The same question" = lowercased, spaces collapsed,
@@ -83,16 +84,19 @@ saved DATE" (or "no source file"); a changed source says STALE and searches live
       the connect description in the same bracket format bulk prepare uses
       and `prepare_bulk.py --list --principal AGENT` reads them back.
 
-  ask.py --principal AGENT --answer "question" "answer" [--no-auto]
-      Auto-cache: a machine approval that needs evidence. Runs the check gate
-      (superjev.py gate) on the answer against the last lookup's top file. Only
-      a CLEAN verdict (every claim SUPPORTED at or above 0.80; the claim rows
-      decide, HAS_LEAKS/SELF_CONTRADICTORY rows are advisory) on a file that is
-      unchanged since connect saves it, exactly like --approve, recorded as
-      approved_by=auto-check with the evidence file and score. READ, REJECT,
-      ERROR, a TIME_SENSITIVE flag (a dated fact such as a price
-      or breakeven; advisory in check --claim, blocking here), a stale file, or a secret in the file or answer saves nothing and
-      prints why. On by default; off with --no-auto or SUPERJEV_AUTO_CACHE=0.
+REPEAT QUESTIONS (the one rule for saving a file). When the same file wins the same
+question (same words after lowercasing, collapsing spaces and dropping trailing
+punctuation) for the same principal N times in a row and passes the content check, ask
+saves it automatically: it prints "Saved for next time", and the next ask of that
+question returns the FILE at once (its path, labelled "saved answer, from FILE"), with no
+Jev call and no answer text: the caller opens the file. N is a setting:
+SUPERJEV_SAVE_AFTER, default 2. Only an ordinary ask counts (not --claim, not a
+possible-tier file, and only a complete search: a partial one records no win and does not
+reset the count). The N wins are the evidence (each already passed the content check),
+so the save adds no claim check; the secret scan and unchanged-file check still run. A
+changed source is withheld as STALE and searched live (and can win its way back in).
+--miss removes a saved file and starts the count over. A person can meet the threshold at
+once with --approve. Off with --no-auto or SUPERJEV_AUTO_CACHE=0.
 
   ask.py --principal AGENT --followup [--max-tries N]
       Re-tries every pending --miss (one not yet --approve'd or already
@@ -109,19 +113,8 @@ saved DATE" (or "no source file"); a changed source says STALE and searches live
       auto-check, or a --add note) so the next ask looks it up fresh. Exits 1
       with "no saved answer" when there was nothing to remove.
 
-  ask.py --principal AGENT --used <lookup_id|last> (--rank N | --file PATH) [--answer "text"]
-      Pick trail: records "the agent used choice N" of that trace into
-      $STATE/pending_picks.jsonl (question, file, answer) and a "pick" line
-      (rank, file) in traces.jsonl. When SUPERJEV_PICK_BATCH (default 5)
-      unchecked picks queue, or on --flush-picks, each pick's answer is
-      checked against its chosen file with the same gate as --answer: CLEAN
-      saves as approved_by=agent-pick+check; REJECT/CONTRADICTED/
-      TIME_SENSITIVE/stale/secret drops it; anything else (or no answer text)
-      stays pending. --pending-picks lists them; --confirm-pick ID ["answer"]
-      records explicit approval by the caller principal, --drop-pick ID removes it.
-
-Cache hits print the caller principal for --approve and --add (principal:NAME)
-or "approved_by: auto-check" (--answer), from $STATE/approvals.jsonl.
+Cache hits print who saved the answer: the caller principal for --approve and --add
+(principal:NAME) or "approved_by: auto-save" (repeat wins), from $STATE/approvals.jsonl.
 
 LIVE DECISION TRACES: every live lookup (a real navigate/content-check pass,
 never a cache hit) appends one JSON line to $STATE/traces.jsonl -- timestamp,
@@ -135,7 +128,8 @@ are truncated). The file rotates at ~20MB, keeping one old generation
 (with the path it was actually found at); --add run right after a miss marks
 it "wrong, added". `ask.py --principal AGENT --trace-report [--days N]`
 prints read-only counts of right/wrong/unlabeled and the top wrong questions
-with their ranked lists -- the input for weekly tuning.
+with their ranked lists -- the input for weekly tuning. It also prints one line per
+principal: how many searches saved answers skipped in that window ("--days 7" = weekly).
 `ask.py --principal AGENT --trace-show <lookup_id|last>` prints one trace's
 stages (cache, routing + none-probability, word-search top 10 with each
 file's fate, read list, chunks/wording/score per content check, near-twin
@@ -155,7 +149,6 @@ $SUPERJEV_STATE_DIR or ~/.local/state/super-jev/<principal>/, never in this repo
 """
 import contextlib
 import difflib
-import fcntl
 import hashlib
 import io
 import math
@@ -223,7 +216,8 @@ def memory(req: dict) -> dict:
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
     # Not redacted/truncated: lookups.jsonl is the working index find_top
-    # read back by exact question, pointer and on-disk path (--approve, --answer).
+    # read back by exact question, pointer and on-disk path. The save check (auto-save,
+    # --approve) depends on it.
     entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
 
@@ -407,7 +401,7 @@ def trace_show(sdir: Path, which: str) -> int:
         print("  (nothing kept)")
     return 0
 
-def trace_report(sdir: Path, days=None) -> int:
+def trace_report(sdir: Path, days=None, principal: str = "") -> int:
     """Read-only: counts of right/wrong/unlabeled traces, and the top wrong
     questions with their ranked list -- the weekly-tuning input."""
     lines = []
@@ -451,6 +445,9 @@ def trace_report(sdir: Path, days=None) -> int:
             wrong += 1
             wrong_questions[tr.get("question", "")] += 1
     print(f"right: {right}  wrong: {wrong}  unlabeled: {unlabeled}")
+    skipped = sum(1 for tr in traces.values() if tr.get("tier") == "cache")
+    print(f"searches skipped by saved answers ({f'last {days} days' if days else 'all time'}"
+          f"{f', principal {principal}' if principal else ''}): {skipped}")
     if wrong_questions:
         print("\ntop wrong questions:")
         for q, n in wrong_questions.most_common(10):
@@ -505,7 +502,10 @@ def changed_saved_source(rec, record: Path):
     Checks the save's own record, and the manual note's header for older --add saves."""
     if rec and rec.get("file") and rec.get("source_sha"):
         p = Path(rec["file"])
-        if not p.is_file() or sha256_file(p) != rec["source_sha"]:
+        try:  # a file the asker cannot read is never a current answer
+            if not p.is_file() or sha256_file(p) != rec["source_sha"]:
+                return rec["file"]
+        except OSError:
             return rec["file"]
     return changed_source(record)
 
@@ -517,18 +517,23 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     stale_source = changed_saved_source(rec, manual_record_path(sdir, principal, question))
     if stale_source:
         print(f"STALE: source changed since this answer was recorded ({stale_source}); answer withheld. "
-              "Save it again (--approve, or --add --replace-entry) after checking the file.")
+              "It is saved again on its own once the file wins this question again "
+              f"{save_after()} times (or --approve it now).")
         return 1
     print("CACHE HIT")
-    print("answer:", hit.get("answer") or "")
     who = approver(sdir, question)
+    if who.get("approved_by") == "auto-save" and rec and rec.get("file"):
+        # A repeat win saved the file, not an answer: open it and answer from it.
+        print("file:", rec["file"])
+    else:
+        print("answer:", hit.get("answer") or "")
     print("approved_by:", who.get("approved_by", "human") + (
         f" (evidence {who['evidence_file']}, score {who['score']:.2f})" if who.get("evidence_file") else ""))
     origin = (f"from {rec['file']}" if rec and rec.get("file")
               else "no source file" if rec and rec.get("no_source") else "source not recorded")
     when = rec["ts"][:10] if rec and rec.get("ts") else "date not recorded"
     print(f"saved answer, {origin}, saved {when}")
-    for e in (hit.get("evidence") or [])[:3]:
+    for e in ([] if who.get("approved_by") == "auto-save" else (hit.get("evidence") or []))[:3]:
         quote = str(e.get("quote", ""))
         line = best_evidence_line(quote, hit.get("answer") or "", question)
         print("  evidence:", e.get("sourceId", ""), "|", line[:120])
@@ -2250,8 +2255,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 possible.pop(p, None)
     skills = skill_job.result() if skill_job else []
     _STAGE["skills"] = [path for _n, path in skills] if skill_job else None
+    incomplete = bool(failed or stale_ptrs)  # a set was not searched: a better file may sit in it
+    win = None if replay or _CLAIM["text"] or incomplete else win_of(top, possible, notes)
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
-        top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top])
+        top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
+        **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
     content_check = {p: {"score": scores.get(p) if type(scores.get(p)) in (int, float) and 0 <= scores[p] <= 1 else None,
@@ -2355,6 +2363,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         if skills:
             parts.append(f"{len(skills)} skill suggestion{'s' if len(skills) != 1 else ''}")
         found = "; ".join(parts)
+        autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
@@ -2707,7 +2716,7 @@ def find_top(sdir: Path, question: str):
     return None
 
 def auto_cache_on() -> bool:
-    """Fleet default ON; SUPERJEV_AUTO_CACHE=0/off/false/no turns it off."""
+    """Default ON; SUPERJEV_AUTO_CACHE=0/off/false/no turns it off."""
     return os.environ.get("SUPERJEV_AUTO_CACHE", "1").strip().lower() not in ("0", "off", "false", "no")
 
 def gate_command(claim: str, path: str) -> list:
@@ -2780,10 +2789,13 @@ def gate_why(question: str, answer: str, path: str, passage=None):
     return None, score
 
 def save_answer(principal: str, question: str, answer: str, sdir: Path,
-                top=None, approved_by: str = "auto-check", automatic: bool = True) -> int:
-    """The one way a file-backed answer is saved (--answer, --approve, --used, --confirm-pick):
-    the secret scan, then the claim check (CLEAN >= SAVE_FLOOR) on the cited file, then the
-    write. The caller's word is recorded (approved_by) but never skips a check.
+                top=None, approved_by: str = "auto-check", automatic: bool = True,
+                claim_check: bool = True, stored: str = None) -> int:
+    """The one way a file-backed answer is saved (a repeat win, --approve):
+    the secret scan, the unchanged-file check, then the claim check (CLEAN >= SAVE_FLOOR) on the
+    cited file, then the write. The caller's word is recorded (approved_by) but never skips a check.
+    claim_check=False is for a repeat win only: its N wins were the evidence. `stored` is the text
+    kept as the answer when it differs from `answer` (which still ranks the cited passage).
     top is the file row {path, pointer} the caller chose, else the last lookup's top file.
     automatic=False (a person's --approve) ignores the --no-auto switch, never the checks."""
     _LAST_WHY["why"] = None
@@ -2813,14 +2825,82 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
         return 0
     if not out:
         return not_saved(sdir, key, f"{why}; nothing to save")
+    if not claim_check:
+        return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
+                             file=evidence_file, source_sha=row["contentSHA"])
     # The claim check reads exactly the passages that will be saved as evidence.
     why, score = gate_why(key, answer, evidence_file, evidence_text(out))
     if why:
         return not_saved(sdir, key, why)
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
-    return send_approval(principal, key, answer, pointer, out, sdir, approved_by=approved_by,
+    return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
                          evidence_file=evidence_file, score=score,
                          file=evidence_file, source_sha=row["contentSHA"])
+
+SAVE_AFTER_DEFAULT = 2
+
+def save_after() -> int:
+    """N: how many times in a row one file must win a question before it is saved
+    (SUPERJEV_SAVE_AFTER, default 2)."""
+    try:
+        return max(1, int(os.environ.get("SUPERJEV_SAVE_AFTER", SAVE_AFTER_DEFAULT)))
+    except ValueError:
+        return SAVE_AFTER_DEFAULT
+
+def win_of(top: list, possible: dict, notes: dict):
+    """The win this ordinary ask records: its top file, when the content check confirmed it
+    (not a possible-tier or unfinished check), with the file's bytes as they are now."""
+    if not top or top[0][1] in possible or notes.get(top[0][1]) == INCONCLUSIVE:
+        return None
+    _s, path, pointer = top[0]
+    try:
+        return {"path": path, "pointer": pointer, "sha": live_sha(path)}
+    except OSError:
+        return None
+
+def win_count(sdir: Path, question: str, win: dict) -> int:
+    """How many asks in a row (this one included) the same unchanged file won this question.
+    Any other outcome for the question, or a --miss, starts the count over.
+    Read off lookups.jsonl; no new store."""
+    key, count = norm_q(question), 0
+    path = sdir / "lookups.jsonl"
+    for line in (path.read_text().splitlines() if path.is_file() else []):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if norm_q(rec.get("question") or "") != key:
+            continue
+        if rec.get("kind") == "lookup" and (rec.get("result") == "stale-source" or rec.get("partial")):
+            continue  # not a win and not a loss: the withheld saved answer, or a search that missed a set
+        if rec.get("kind") == "lookup":
+            w = rec.get("win") or {}
+            count = count + 1 if (w.get("path"), w.get("sha")) == (win["path"], win["sha"]) else 0
+        elif rec.get("kind") == "miss":
+            count = 0
+    return count
+
+def autosave(principal: str, question: str, sdir: Path, win) -> None:
+    """The one rule for saving a file: once it has won this question N times in a row, save the
+    FILE (path, pointer, content hash, question, principal, date), not an answer line. Each win
+    already passed the content check ("does this file state the answer"), so no claim check runs
+    here: the secret scan and the unchanged-file check still do."""
+    if not win or not auto_cache_on() or win_count(sdir, question, win) < save_after():
+        return
+    key = norm_q(question)
+    if saved_record(sdir, key):  # reached a live search, so the saved file was withheld as stale
+        for k in dict.fromkeys([key, question]):
+            memory({"action": "forget", "principal": principal, "question": k})
+        record_approver(sdir, key, None, removed_by="stale")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = save_answer(principal, key, key, sdir, top={"path": win["path"], "pointer": win["pointer"]},
+                         approved_by="auto-save", claim_check=False, stored=f"Saved file: {win['path']}")
+    if rc == 0:
+        print(f"Saved for next time: {win['path']} won this question {save_after()} times; the next ask "
+              "returns it at once, no search (--miss removes it).")
+    else:
+        print(f"not saved: {_LAST_WHY['why'] or 'the save was refused'}")
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
     """--miss: the saved answer is wrong. Removes it (and a manual note's own record) and exits 1,
@@ -2985,11 +3065,11 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
     print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
     return 0
 
-def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, file=None,
-            chosen=None) -> int:
-    """--approve / --confirm-pick: a person's choice of file, saved through save_answer
-    (same secret scan and claim check as every other save)."""
-    if chosen is None and (rank is not None or file is not None):
+def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, file=None) -> int:
+    """--approve: a person's choice of file, saved through save_answer at once (the manual way
+    to meet the repeat-win threshold; same secret scan and claim check as every other save)."""
+    chosen = None
+    if rank is not None or file is not None:
         # The lead picked a listed candidate by hand (any rank, possible tier included).
         chosen, why = find_candidate(sdir, question, rank=rank, file=file)
         if not chosen:
@@ -3129,161 +3209,6 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
             added_file = str(src) if src else str(record)
             write_outcome(sdir, lid, question, "wrong-added", file=added_file)
     return rc
-
-# --- Pick trail: an agent records which listed choice it used; every
-# PICK_BATCH picks the claim checker runs on each and saves only CLEAN ones.
-# Refused verdicts drop the pick; unsure ones stay for --pending-picks.
-PICK_BATCH_DEFAULT = 5
-PICK_REFUSED = ("REJECT", "CONTRADICTED", "TIME_SENSITIVE", "stale", "secret-held")
-
-def pick_batch() -> int:
-    try:
-        return max(1, int(os.environ.get("SUPERJEV_PICK_BATCH", PICK_BATCH_DEFAULT)))
-    except ValueError:
-        return PICK_BATCH_DEFAULT
-
-def picks_path(sdir: Path) -> Path:
-    return sdir / "pending_picks.jsonl"
-
-def load_picks(sdir: Path) -> list:
-    p = picks_path(sdir)
-    out = []
-    for line in (p.read_text().splitlines() if p.is_file() else []):
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return out
-
-PICK_MAX = 200  # queue cap: oldest picks fall off so unsure ones cannot pile up forever
-
-@contextlib.contextmanager
-def picks_lock(sdir: Path):
-    """Serialize read-modify-write of pending_picks.jsonl across agents sharing a principal."""
-    sdir.mkdir(parents=True, exist_ok=True)
-    with open(sdir / "pending_picks.lock", "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        yield
-
-def save_picks(sdir: Path, picks: list) -> None:
-    sdir.mkdir(parents=True, exist_ok=True)
-    tmp = picks_path(sdir).with_suffix(".tmp")
-    tmp.write_text("".join(json.dumps(r) + "\n" for r in picks[-PICK_MAX:]))
-    tmp.replace(picks_path(sdir))
-
-def record_pick(principal: str, sdir: Path, which: str, rank=None, file=None, answer=None) -> int:
-    """--used: queue "agent used choice N of trace <which>"; flush once the queue is full."""
-    rec = find_trace(sdir, which)
-    if not rec:
-        print(f"no trace {which!r}; run ask first")
-        return 1
-    ranked = rec.get("final_ranked") or []
-    if rank is not None:
-        if not 1 <= rank <= len(ranked):
-            print(f"--rank {rank} is out of range: that lookup listed {len(ranked)} candidate(s)")
-            return 1
-        row = ranked[rank - 1]
-    else:
-        hits = [r for r in ranked if r.get("path") == file] or \
-               [r for r in ranked if Path(r.get("path", "")).name == Path(file).name]
-        if len(hits) != 1:
-            print(f"--file {file!r} matches {len(hits)} of that lookup's candidates; pass the full path or --rank N")
-            return 1
-        row, rank = hits[0], ranked.index(hits[0]) + 1
-    pick = {"id": hashlib.sha1(f"{rec.get('lookup_id')}|{rank}|{time.time()}".encode()).hexdigest()[:8],
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "lookup_id": rec.get("lookup_id"),
-            "question": rec.get("question"), "rank": rank, "file": row.get("path"),
-            "pointer": row.get("pointer"), "answer": answer}
-    with picks_lock(sdir):
-        picks = load_picks(sdir) + [pick]
-        save_picks(sdir, picks)
-    write_trace(sdir, kind="pick", lookup_id=pick["lookup_id"], question=pick["question"],
-                rank=rank, file=pick["file"])
-    print(f"pick {pick['id']} queued: rank {rank} {pick['file']}")
-    if sum(1 for r in picks if "why" not in r and "dropped" not in r) >= pick_batch():
-        return flush_picks(principal, sdir)
-    return 0
-
-def flush_picks(principal: str, sdir: Path) -> int:
-    """Check every unchecked pick: CLEAN saves (approved_by agent-pick+check), a refused
-    verdict drops it, anything else stays listed as unsure."""
-    if not auto_cache_on():
-        print("picks kept: auto-cache is off (SUPERJEV_AUTO_CACHE=0)")
-        return 0
-    with picks_lock(sdir):
-        return _flush_picks(principal, sdir)
-
-def _flush_picks(principal: str, sdir: Path) -> int:
-    keep = []
-    for pick in load_picks(sdir):
-        if "why" in pick or "dropped" in pick:
-            keep.append(pick)
-            continue
-        print(f"pick {pick['id']}: {pick['question']}")
-        if not pick.get("answer"):
-            keep.append({**pick, "why": "no answer text to check; confirm with an answer or drop"})
-            continue
-        rc = save_answer(principal, pick["question"], pick["answer"], sdir,
-                          top={"path": pick["file"], "pointer": pick["pointer"]},
-                          approved_by="agent-pick+check")
-        why = _LAST_WHY["why"]
-        if rc == 0:
-            write_outcome(sdir, pick["lookup_id"], pick["question"], "right", file=pick["file"])
-        elif why and any(w in why for w in PICK_REFUSED):
-            # A refused pick (TIME_SENSITIVE, stale, secret-held...) used to be
-            # discarded here with only a transient print, so it vanished from
-            # --pending-picks with no trace beyond lookups.jsonl -- a real
-            # refusal ("fair" per the businessfi report) looked identical to a
-            # silent bug. It now stays listed under --pending-picks' "Dropped"
-            # section (tagged "dropped": why) until a human clears it with an
-            # explicit --confirm-pick or --drop-pick, instead of vanishing on
-            # its own the moment the checker runs.
-            print(f"pick {pick['id']} dropped: {why}")
-            keep.append({**pick, "dropped": why})
-        else:
-            keep.append({**pick, "why": why or "not saved"})
-    save_picks(sdir, keep)
-    return 0
-
-def pending_picks(sdir: Path) -> int:
-    picks = load_picks(sdir)
-    dropped = [r for r in picks if "dropped" in r]
-    unsure = [r for r in picks if "dropped" not in r]
-    if not picks:
-        print("no pending picks")
-    for r in unsure:
-        print(f"{r['id']}  rank {r['rank']}  {r['file']}\n    Q: {r['question']}\n    "
-              f"{r.get('why') or 'waiting for batch check'}")
-    if dropped:
-        print("\nDropped (not saved):")
-        for r in dropped:
-            print(f"{r['id']}  rank {r['rank']}  {r['file']}\n    Q: {r['question']}\n    "
-                  f"{r['dropped']}")
-    if any("why" in r for r in unsure) or dropped:
-        print('\nconfirm: --confirm-pick ID ["answer"]   drop/clear: --drop-pick ID')
-    return 0
-
-def settle_pick(principal: str, sdir: Path, pid: str, answer=None, drop=False) -> int:
-    with picks_lock(sdir):
-        return _settle_pick(principal, sdir, pid, answer, drop)
-
-def _settle_pick(principal: str, sdir: Path, pid: str, answer, drop) -> int:
-    picks = load_picks(sdir)
-    pick = next((r for r in picks if r["id"] == pid), None)
-    if not pick:
-        print(f"no pending pick {pid}")
-        return 1
-    if not drop:
-        answer = answer or pick.get("answer")
-        if not answer:
-            print('usage: --confirm-pick ID "answer" (this pick has no answer text)')
-            return 2
-        if approve(principal, pick["question"], answer, sdir,
-                   chosen={"path": pick["file"], "pointer": pick["pointer"]}) != 0:
-            return 1
-    save_picks(sdir, [r for r in picks if r["id"] != pid])
-    print(f"pick {pid} {'dropped' if drop else 'confirmed'}")
-    return 0
 
 def connection_status(principal: str) -> int:
     """Read scoped registration metadata, without searching or refreshing."""
@@ -3594,7 +3519,7 @@ def _main() -> int:
             except ValueError:
                 print("usage: --trace-report [--days N]")
                 return 2
-        return trace_report(sdir, days)
+        return trace_report(sdir, days, principal)
     if a[0] == "--miss":
         return miss(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--followup":
@@ -3606,11 +3531,6 @@ def _main() -> int:
                 print("usage: --followup [--max-tries N]")
                 return 2
         return followup(principal, sdir, max_tries)
-    if a[0] == "--answer":
-        if len(a) < 3:
-            print('usage: --answer "question" "answer"')
-            return 2
-        return save_answer(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--approve":
         rest, rank, file = a[1:], None, None
         try:
@@ -3624,32 +3544,6 @@ def _main() -> int:
             print('usage: --approve "question" "answer" [--rank N | --file PATH]')
             return 2
         return approve(principal, rest[0], rest[1], sdir, rank=rank, file=file)
-    if a[0] == "--used":
-        rest, rank, file, answer = a[2:], None, None, None
-        try:
-            while rest:
-                flag, val = rest[0], rest[1]
-                if flag == "--rank":
-                    rank = int(val)
-                elif flag == "--file":
-                    file = val
-                elif flag == "--answer":
-                    answer = val
-                else:
-                    raise ValueError
-                del rest[:2]
-        except (IndexError, ValueError):
-            rank = file = None
-        if len(a) < 2 or (rank is None) == (file is None):
-            print('usage: --used <trace_id|last> (--rank N | --file PATH) [--answer "text"]')
-            return 2
-        return record_pick(principal, sdir, a[1], rank=rank, file=file, answer=answer)
-    if a[0] == "--flush-picks":
-        return flush_picks(principal, sdir)
-    if a[0] == "--pending-picks":
-        return pending_picks(sdir)
-    if a[0] in ("--confirm-pick", "--drop-pick") and len(a) >= 2:
-        return settle_pick(principal, sdir, a[1], answer=" ".join(a[2:]) or None, drop=a[0] == "--drop-pick")
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
     if a[0] in ("--claim", "--claims-file"):
