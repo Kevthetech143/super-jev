@@ -469,6 +469,13 @@ def cases(env, name, tag):
     return f(env, name, "\n".join(json.dumps(r) for r in rows) + "\n")
 
 
+def results(env, name, n, passing):
+    """A result file in the try248/eval60 text format: n lines, the first `passing` of them pass."""
+    lines = [f"q{i:02d} rank 1 exit 0 5s | OUTCOME: found" if i < passing else f"q{i:02d} MISS exit 0 5s | x"
+             for i in range(n)]
+    return f(env, name, "\n".join(lines) + "\n")
+
+
 def git_wt(env):
     wt = env["tmp"] / "wt"
     subprocess.run(["git", "init", "-q", "-b", "feat", str(wt)], check=True)
@@ -482,15 +489,16 @@ def onboard_upto(env, upto):
     wt = git_wt(env)
     tl, card = f(env, "timeline.md", "row: X works\n"), f(env, "card.md", "NOW: X works\n")
     do_review = lambda: (run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok",
-                             "--file", f(env, "ans.md", "SHIP")))
-    steps = [("need", ["--who", "Kelvin", "--how-often", "weekly", "--fails", "csv files return not found"]),
+                             "--file", f(env, "ans.md", "SHIP: reviewed branch feat")))
+    steps = [("need", ["--who", "Kelvin asked twice", "--how-often", "about weekly now", "--fails", "csv files return not found"]),
              ("simplest", ["--answer", "no existing rule reads csv so widen nothing"]),
              ("promise", ["--line", "accepts csv; returns rows; failure is reported as not found",
-                          "--approved", "2026-09-29 'yes'", "--contract", contract]),
+                          "--approved", "Kelvin approved: 2026-09-29", "--contract", contract]),
              ("frozen", ["--dev", dev, "--heldout", held]),
              ("build", ["--worktree", str(wt), "--branch", "feat", "--deletes", "none: new path only"]),
-             ("prove", ["--cases10", "10/10", "--eval60-before", "50", "--eval60-after", "51",
-                        "--test-cmd", "true"]),
+             ("prove", ["--cases10-file", results(env, "c10.txt", 10, 10),
+                        "--eval60-before-file", results(env, "e0.txt", 60, 50),
+                        "--eval60-file", results(env, "e1.txt", 60, 51), "--test-cmd", f"test -f {dev}"]),
              ("record", ["--timeline-row", "X works", "--timeline-file", tl,
                          "--card-now", "NOW: X works", "--card-file", card])]
     r = None
@@ -525,7 +533,7 @@ def test_onboard_promise_needs_approval_and_all_three_parts(env):
     onboard_upto(env, "simplest")
     c = f(env, "c2.md", "x\n")
     r = ob(env, "promise", "--line", "accepts csv; returns rows; failure is reported", "--contract", c)
-    assert r.returncode == 2 and "Kelvin" in r.stderr
+    assert r.returncode == 2 and "--approved" in r.stderr
     r = ob(env, "promise", "--line", "accepts csv", "--approved", "ok", "--contract", c)
     assert r.returncode == 2 and "failure" in r.stderr
 
@@ -549,23 +557,103 @@ def test_onboard_edit_after_freeze_fails_check(env):
 def test_onboard_build_needs_ship_review_and_feature_branch(env):
     onboard_upto(env, "frozen")
     wt = git_wt(env)
-    args = ["--worktree", str(wt), "--branch", "feat", "--deletes", "none: new"]
+    args = ["--worktree", str(wt), "--branch", "feat", "--deletes", "none: new path only"]
     r = ob(env, "build", *args)
-    assert r.returncode == 2 and "SHIP" in r.stderr
-    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "a.md", "SHIP"))
-    assert ob(env, "build", "--worktree", str(wt), "--branch", "main", "--deletes", "none: new").returncode == 2
+    assert r.returncode == 2 and "review" in r.stderr
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "a.md", "SHIP on branch feat"))
+    assert ob(env, "build", "--worktree", str(wt), "--branch", "main", "--deletes", "none: new path only").returncode == 2
     assert ob(env, "build", *args).returncode == 0
 
 
-def test_onboard_prove_fails_on_lower_eval_bad_cases10_or_failing_test(env):
+def test_onboard_prove_counts_result_files_and_runs_the_frozen_test(env):
     onboard_upto(env, "build")
-    base = ["--eval60-before", "50", "--eval60-after", "50", "--test-cmd", "true"]
-    assert ob(env, "prove", "--cases10", "9/10", *base).returncode == 2
-    assert ob(env, "prove", "--cases10", "10/10", "--eval60-before", "50", "--eval60-after", "49",
-              "--test-cmd", "true").returncode == 2
-    assert ob(env, "prove", "--cases10", "10/10", "--eval60-before", "50", "--eval60-after", "50",
-              "--test-cmd", "false").returncode == 2
-    assert ob(env, "prove", "--cases10", "10/10", *base).returncode == 0
+    dev = str(env["tmp"] / "dev.jsonl")
+    c10, e0, e1 = (results(env, n, k, p) for n, k, p in (("c10.txt", 10, 10), ("e0.txt", 60, 50), ("e1.txt", 60, 50)))
+    t = ["--test-cmd", f"test -f {dev}"]
+    assert ob(env, "prove", "--cases10-file", results(env, "c9.txt", 10, 9), "--eval60-before-file", e0,
+              "--eval60-file", e1, *t).returncode == 2
+    assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0,
+              "--eval60-file", results(env, "e49.txt", 60, 49), *t).returncode == 2
+    assert ob(env, "prove", "--cases10-file", results(env, "short.txt", 9, 9), "--eval60-before-file", e0,
+              "--eval60-file", e1, *t).returncode == 2  # a file with 9 lines is not the 10 questions
+    assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0, "--eval60-file", e1,
+              "--test-cmd", "true").returncode == 2  # test does not use the frozen file
+    assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0, "--eval60-file", e1,
+              "--test-cmd", f"test -f {dev} && false").returncode == 2
+    assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0, "--eval60-file", e1, *t).returncode == 0
+    pf = (env["cycle"] / "onboard-6-prove.md").read_text()
+    assert "cases10 file sha256:" in pf and "eval60 file sha256:" in pf
+
+
+def test_onboard_typed_or_nonfinite_scores_are_no_longer_accepted(env):
+    onboard_upto(env, "build")
+    r = ob(env, "prove", "--cases10", "10/10", "--eval60-before", "nan", "--eval60-after", "inf", "--test-cmd", "true")
+    assert r.returncode == 2 and not (env["cycle"] / "onboard-6-prove.md").exists()
+
+
+def test_onboard_cannot_redo_an_earlier_step_after_a_later_one(env):
+    onboard_upto(env, "build")
+    dev, held = str(env["tmp"] / "dev.jsonl"), str(env["tmp"] / "held.jsonl")
+    sha = (env["cycle"] / "onboard-4-frozen.md").read_text()
+    r = ob(env, "frozen", "--dev", dev, "--heldout", held)
+    assert r.returncode == 2 and "cannot be redone" in r.stderr
+    assert (env["cycle"] / "onboard-4-frozen.md").read_text() == sha
+
+
+def test_onboard_approved_needs_kelvin_approved_and_a_date_or_quote(env):
+    onboard_upto(env, "simplest")
+    c = f(env, "c4.md", "x\n")
+    line = ["promise", "--line", "accepts csv; returns rows; failure is reported", "--contract", c]
+    for bad in ("yes", "2026-09-29", "Kelvin approved", "Kelvin approved: 2026-13-45", "Kelvin approved: sure"):
+        assert ob(env, *line, "--approved", bad).returncode == 2, bad
+    assert ob(env, *line, "--approved", 'Kelvin approved: "go ahead"').returncode == 0
+
+
+def test_onboard_promise_must_be_a_whole_line_in_the_contract(env):
+    onboard_upto(env, "record")
+    c = env["tmp"] / "contract.md"
+    entry = [l for l in c.read_text().splitlines() if l.startswith("- accepts")][0]
+    c.write_text("# contract\n" + entry + " and more words\n")  # the line is only a substring now
+    r = ob(env, "check")
+    assert r.returncode == 1 and "contract" in r.stdout
+
+
+def test_onboard_evidence_needs_three_real_words(env):
+    for bad in ("x", "- - -", "n/a", "two words", "x x x"):
+        r = ob(env, "need", "--who", bad, "--how-often", "about once weekly", "--fails", "csv returns not found")
+        assert r.returncode == 2, bad
+    onboard_upto(env, "promise")
+    r = ob(env, "frozen", "--dev", cases(env, "d5.jsonl", "d5"), "--heldout", cases(env, "h5.jsonl", "h5"))
+    assert r.returncode == 0
+    wt = git_wt(env)
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "a5.md", "SHIP feat"))
+    for bad in ("none", "n/a", "x x x"):
+        assert ob(env, "build", "--worktree", str(wt), "--branch", "feat", "--deletes", bad).returncode == 2, bad
+
+
+def test_onboard_review_must_be_newer_than_need_and_name_the_branch(env):
+    import time
+    onboard_upto(env, "frozen")
+    wt = git_wt(env)
+    args = ["build", "--worktree", str(wt), "--branch", "feat", "--deletes", "none: new path only"]
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "nb.md", "SHIP, looks fine"))
+    r = ob(env, *args)
+    assert r.returncode == 2 and "must name the branch" in r.stderr
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "nb2.md", "SHIP branch feat"))
+    old = time.time() - 3600
+    os.utime(env["cycle"] / "onboard-1-need.md", (old + 7200, old + 7200))
+    r = ob(env, *args)
+    assert r.returncode == 2 and "older than the need step" in r.stderr
+    os.utime(env["cycle"] / "onboard-1-need.md", (old, old))
+    assert ob(env, *args).returncode == 0
+
+
+def test_onboard_check_rereads_timeline_and_card_files(env):
+    onboard_upto(env, "record")
+    assert ob(env, "check").returncode == 0
+    (env["tmp"] / "card.md").write_text("NOW: something else\n")
+    r = ob(env, "check")
+    assert r.returncode == 1 and "no longer in the card file" in r.stdout
 
 
 def test_onboard_record_text_must_be_in_the_files(env):

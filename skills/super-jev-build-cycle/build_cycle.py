@@ -566,7 +566,10 @@ def cmd_close(ctx, a):
 # ---- Earn the Button: onboarding a new feature or file type. One artifact per step in CYCLE_DIR ----
 ONB = ["need", "simplest", "promise", "frozen", "build", "prove", "record"]
 CONTRACT = Path("/Users/admin/agents/primary-brain/superjev-source-contract.md")
-NO_EVIDENCE = {"", "none", "n/a", "na", "unknown", "tbd", "no", "nothing", "?"}
+NO_EVIDENCE = {"", "-", "--", "x", "xx", "none", "n/a", "na", "unknown", "tbd", "no", "nothing", "?", "todo", "..."}
+APPROVED_RE = re.compile(r"kelvin approved.*(\b\d{4}-\d{2}-\d{2}\b|[\"'\u201c][^\"'\u201d]{2,}[\"'\u201d])", re.I)
+PASS_RE = re.compile(r"^q\d+\b.*(\brank 1\b|not-found OK|absent-OK)")
+RESULT_RE = re.compile(r"^q\d+\b")
 CASE_KINDS = ("supported", "absent", "invalid")
 SPLITS = ("dev", "heldout")
 
@@ -598,7 +601,7 @@ def sha256(p: Path) -> str:
 
 def need_text(v, label, words=1):
     v = " ".join((v or "").split())
-    if v.lower() in NO_EVIDENCE or len(v.split()) < words:
+    if all(w.lower().strip(".:;,") in NO_EVIDENCE or len(w) < 2 for w in v.split()) or len(v.split()) < words:
         raise CycleError(f"{label} is required" + (f" (at least {words} words)" if words > 1 else "")
                          + ". No real-use evidence or answer: stop, do not onboard this")
     return v
@@ -623,9 +626,29 @@ def load_cases(path: Path) -> list:
     return rows
 
 
-def review_ship(d: Path) -> bool:
-    return step_state(d, "review") == "done" and bool(
-        re.search(r"^- verdict: SHIP\b", receipt_path(d, "review").read_text(encoding="utf-8"), re.M))
+def review_problem(d: Path, branch: str, worktree: str) -> str:
+    """Why the review does not count for this build, or "" when it does."""
+    rv = receipt_path(d, "review")
+    if step_state(d, "review") != "done":
+        return "no independent review receipt: run review first"
+    text = rv.read_text(encoding="utf-8")
+    if not re.search(r"^- verdict: SHIP\b", text, re.M):
+        return "the latest review does not say SHIP"
+    if not onb_path(d, "need").is_file() or rv.stat().st_mtime < onb_path(d, "need").stat().st_mtime:
+        return "the SHIP review is older than the need step: review the build, not an earlier change"
+    m = re.search(r"^- review file: (.+)$", text, re.M)
+    ans = Path(m.group(1)) if m else None
+    body = ans.read_text(encoding="utf-8", errors="replace") if ans and ans.is_file() else ""
+    if not re.search(r"(?<![\w/.-])" + re.escape(branch) + r"(?![\w/.-])", body) and worktree not in body:
+        return f"the reviewer's answer must name the branch {branch} or the worktree {worktree}"
+    return ""
+
+
+def count_pass(path: Path, expect: int, label: str) -> int:
+    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if RESULT_RE.match(l)]
+    if len(lines) != expect:
+        raise CycleError(f"{label} file must hold {expect} result lines (q.. rank 1 / not-found OK ...), has {len(lines)}")
+    return sum(1 for l in lines if PASS_RE.match(l))
 
 
 def onb_check(d: Path) -> list:
@@ -640,13 +663,13 @@ def onb_check(d: Path) -> list:
         try:
             if step == "need":
                 for k in ("who asked", "how often", "what fails today"):
-                    need_text(f.get(k), k)
+                    need_text(f.get(k), k, 3)
             elif step == "simplest":
                 need_text(f.get("answer"), "answer", 5)
             elif step == "promise":
                 need_text(f.get("kelvin approved"), "Kelvin approved")
                 c = Path(f.get("contract", ""))
-                if not c.is_file() or f.get("line", "\0") not in c.read_text(encoding="utf-8"):
+                if not c.is_file() or f.get("contract entry", "\0") not in c.read_text(encoding="utf-8").splitlines():
                     raise CycleError(f"promise line is not in the contract file {c}")
             elif step == "frozen":
                 for sp in SPLITS:
@@ -654,15 +677,23 @@ def onb_check(d: Path) -> list:
                     if not p.is_file() or sha256(p) != f.get(sp + " sha256"):
                         raise CycleError(f"frozen {sp} cases file changed or missing since it was frozen")
             elif step == "build":
-                need_text(f.get("deletes or replaces"), "deletes or replaces")
-                if not review_ship(d):
-                    raise CycleError("no independent review receipt with a SHIP verdict")
+                need_text(f.get("deletes or replaces"), "deletes or replaces", 3)
+                bad = review_problem(d, f.get("branch", "\0"), f.get("worktree", "\0"))
+                if bad:
+                    raise CycleError(bad)
             elif step == "prove":
                 if f.get("cases10") != "PASS" or f.get("eval60") != "PASS" or f.get("own test") != "PASS":
                     raise CycleError("prove is not all PASS (cases10, eval60, own test)")
+                for k in ("cases10 file", "eval60 file", "eval60 before file"):
+                    if not Path(f.get(k, "")).is_file() or sha256(Path(f[k])) != f.get(k + " sha256"):
+                        raise CycleError(f"{k} changed or missing since prove")
             elif step == "record":
                 need_text(f.get("timeline row"), "timeline row")
                 need_text(f.get("card now line"), "card NOW line")
+                for txt, fl in ((f["timeline row"], "timeline file"), (f["card now line"], "card file")):
+                    p = Path(f.get(fl, ""))
+                    if not p.is_file() or txt not in p.read_text(encoding="utf-8"):
+                        raise CycleError(f"the recorded text is no longer in the {fl} {p}")
         except CycleError as e:
             probs.append(f"{step}: {e}")
     return probs
@@ -681,9 +712,12 @@ def cmd_onboard(ctx, a):
         return 0
     if ONB.index(step) and not onb_path(d, ONB[ONB.index(step) - 1]).is_file():
         raise CycleError(f"do '{ONB[ONB.index(step) - 1]}' first: the steps go in order")
+    later = [s for s in ONB[ONB.index(step) + 1:] if onb_path(d, s).is_file()]
+    if later:
+        raise CycleError(f"'{step}' cannot be redone: '{later[0]}' is already recorded. Start a new cycle dir")
     if step == "need":
-        f = {"who asked": need_text(a.who, "--who"), "how often": need_text(a.how_often, "--how-often"),
-             "what fails today": need_text(a.fails, "--fails")}
+        f = {"who asked": need_text(a.who, "--who", 3), "how often": need_text(a.how_often, "--how-often", 3),
+             "what fails today": need_text(a.fails, "--fails", 3)}
     elif step == "simplest":
         f = {"answer": need_text(a.answer, "--answer", 5)}
     elif step == "promise":
@@ -691,14 +725,23 @@ def cmd_onboard(ctx, a):
         low = line.lower()
         if not all(w in low for w in ("accept", "return", "fail")):
             raise CycleError("--line must say what it accepts, what it returns, and how failure is reported")
-        ok = need_text(a.approved, "--approved (Kelvin approved: date/quote)")
+        ok = need_text(a.approved, "--approved")
+        if not APPROVED_RE.search(ok):
+            raise CycleError('--approved must say "Kelvin approved" and give a date (YYYY-MM-DD) or a quoted phrase')
+        m = re.search(r"\b\d{4}-\d{2}-\d{2}\b", ok)
+        if m:
+            try:
+                dt.date.fromisoformat(m.group(0))
+            except ValueError:
+                raise CycleError(f"--approved has an impossible date: {m.group(0)}")
         c = Path(a.contract).expanduser() if a.contract else CONTRACT
         if not c.is_file():
             raise CycleError(f"contract file not found: {c}")
-        if line not in c.read_text(encoding="utf-8"):
+        entry = f"- {line} ({ok})"
+        if entry not in c.read_text(encoding="utf-8").splitlines():
             with open(c, "a", encoding="utf-8") as fh:
-                fh.write(f"\n- {line} (Kelvin approved: {ok})\n")
-        f = {"line": line, "kelvin approved": ok, "contract": c.absolute()}
+                fh.write(f"\n{entry}\n")
+        f = {"line": line, "kelvin approved": ok, "contract": c.absolute(), "contract entry": entry}
     elif step == "frozen":
         dev, held = need_file(a.dev, "--dev"), need_file(a.heldout, "--heldout")
         dr, hr = load_cases(dev), load_cases(held)
@@ -713,18 +756,26 @@ def cmd_onboard(ctx, a):
         br = r.stdout.strip()
         if r.returncode or br in ("main", "master", "HEAD") or br != a.branch:
             raise CycleError(f"{wt} must be a git worktree with branch {a.branch!r} checked out, not main (found {br!r})")
-        f = {"worktree": wt.absolute(), "branch": br, "deletes or replaces": need_text(a.deletes, "--deletes")}
-        if not review_ship(d):
-            raise CycleError("no independent review receipt with a SHIP verdict: run review first")
+        f = {"worktree": wt.absolute(), "branch": br, "deletes or replaces": need_text(a.deletes, "--deletes", 3)}
+        bad = review_problem(d, br, str(wt.absolute()))
+        if bad:
+            raise CycleError(bad)
     elif step == "prove":
         fz = onb_read(d, "frozen")
         for sp in SPLITS:
             if sha256(Path(fz[sp + " file"])) != fz[sp + " sha256"]:
                 raise CycleError(f"frozen {sp} cases changed after freezing: the proof is void")
-        if a.cases10 != "10/10":
-            raise CycleError(f"the 10 frozen questions must all pass (got {a.cases10}, need 10/10)")
-        if a.eval60_after < a.eval60_before:
-            raise CycleError(f"eval60 went down ({a.eval60_before} -> {a.eval60_after}): not proven")
+        c10, e_after, e_before = (need_file(x, l) for x, l in ((a.cases10_file, "--cases10-file"),
+                                  (a.eval60_file, "--eval60-file"), (a.eval60_before_file, "--eval60-before-file")))
+        n10 = count_pass(c10, 10, "cases10")
+        if n10 != 10:
+            raise CycleError(f"the 10 frozen questions must all pass ({n10}/10 lines pass in {c10.name})")
+        before, after = count_pass(e_before, 60, "eval60 before"), count_pass(e_after, 60, "eval60")
+        if after < before:
+            raise CycleError(f"eval60 went down ({before} -> {after}): not proven")
+        if fz["dev file"] not in a.test_cmd and fz["heldout file"] not in a.test_cmd:
+            raise CycleError("--test-cmd must use the frozen dev or held-out cases file (its full path), "
+                             "so the test is the frozen one")
         wt = onb_read(d, "build")["worktree"]
         try:
             r = subprocess.run(a.test_cmd, shell=True, cwd=wt, capture_output=True, text=True, timeout=ctx.timeout)
@@ -733,7 +784,10 @@ def cmd_onboard(ctx, a):
         (d / "onboard-own-test.txt").write_text(r.stdout + r.stderr, encoding="utf-8")
         if r.returncode:
             raise CycleError(f"the feature's own frozen test failed (exit {r.returncode}); output: onboard-own-test.txt")
-        f = {"cases10": "PASS", "eval60": "PASS", "eval60 before": a.eval60_before, "eval60 after": a.eval60_after,
+        f = {"cases10": "PASS", "cases10 file": c10, "cases10 file sha256": sha256(c10),
+             "eval60": "PASS", "eval60 before": before, "eval60 after": after,
+             "eval60 file": e_after, "eval60 file sha256": sha256(e_after),
+             "eval60 before file": e_before, "eval60 before file sha256": sha256(e_before),
              "own test": "PASS", "own test cmd": a.test_cmd}
     else:  # record
         row, now_line = need_text(a.timeline_row, "--timeline-row"), need_text(a.card_now, "--card-now")
@@ -741,7 +795,8 @@ def cmd_onboard(ctx, a):
             p = Path(fl).expanduser()
             if not p.is_file() or txt not in p.read_text(encoding="utf-8"):
                 raise CycleError(f"the {label} text is not in {fl}: write it there first")
-        f = {"timeline row": row, "card now line": now_line}
+        f = {"timeline row": row, "card now line": now_line, "timeline file": Path(a.timeline_file).absolute(),
+             "card file": Path(a.card_file).absolute()}
     p = onb_write(d, step, ctx.principal, f)
     print(f"receipt: {p}")
     return 0
@@ -799,9 +854,10 @@ def parser() -> argparse.ArgumentParser:
     x = os_.add_parser("frozen"); x.add_argument("--dev", required=True); x.add_argument("--heldout", required=True)
     x = os_.add_parser("build"); x.add_argument("--worktree", required=True); x.add_argument("--branch", required=True)
     x.add_argument("--deletes", help="what it deletes or replaces, or 'none: why'")
-    x = os_.add_parser("prove"); x.add_argument("--cases10", required=True, help="e.g. 10/10")
-    x.add_argument("--eval60-before", type=float, required=True); x.add_argument("--eval60-after", type=float, required=True)
-    x.add_argument("--test-cmd", required=True, help="the feature's own frozen test, run in the build worktree")
+    x = os_.add_parser("prove"); x.add_argument("--cases10-file", required=True, help="result file of the 10 frozen questions")
+    x.add_argument("--eval60-file", required=True, help="result file of the 60-question run after the build")
+    x.add_argument("--eval60-before-file", required=True, help="result file of the 60-question run before the build")
+    x.add_argument("--test-cmd", required=True, help="the feature's own frozen test; must use the frozen cases file path")
     x = os_.add_parser("record"); x.add_argument("--timeline-row"); x.add_argument("--timeline-file", required=True)
     x.add_argument("--card-now"); x.add_argument("--card-file", required=True)
     s = sub.add_parser("close"); s.add_argument("--log", help="use log to append to (default CYCLE_DIR/super-jev-uses.log)")
