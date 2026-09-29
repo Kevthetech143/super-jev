@@ -142,27 +142,22 @@ export function formatMissCandidateReply(candidate: MissCandidate): string {
 
 // ---------------------------------------------------------------------------
 // Setup-missing parsing -- when a principal has no connected pointers at all,
-// ask.py's lookup() exits 1 with "nothing connected yet for principal 'X' --
-// run connect first:" plus the exact prepare_bulk.py command to run, before
-// it ever reaches the "no-candidates" miss report. Show that block instead of
+// ask.py's lookup() starts with "OUTCOME: needs-setup - ...; next: <command>"
+// (exit 4), before it ever reaches the "not-found" miss report. Show that block instead of
 // the generic MISS_LINE so the user knows this is a setup problem, not a
 // real miss.
 // ---------------------------------------------------------------------------
 export function parseSetupMissing(stdout: string): string[] | null {
   const lines = stdout.split('\n');
-  const idx = lines.findIndex((l) => l.trim().startsWith('nothing connected yet for principal'));
-  if (idx === -1) return null;
-  const block = [lines[idx]];
-  for (let i = idx + 1; i < lines.length && /^\s+\S/.test(lines[i]); i++) block.push(lines[i]);
-  return block;
+  const idx = lines.findIndex((l) => l.trim().startsWith('OUTCOME: needs-setup'));
+  return idx === -1 ? null : [lines[idx].trim()];
 }
 
 // ---------------------------------------------------------------------------
 // Pointer-error parsing -- when ask.py's providers themselves fail (auth
 // errors, network errors, etc.) every pointer can error out with no
 // candidates and no "no-candidates" miss report either; ask.py prints
-// "[pointer] error: ..." lines and an "unresolved: N of M pointers errored"
-// summary to stdout before its closing voice line. Surface that instead of
+// an "OUTCOME: error - ..." line first, then the "[pointer] error: ..." lines. Surface that instead of
 // letting the chat CLI look like a silent, unexplained miss.
 // ---------------------------------------------------------------------------
 const POINTER_ERROR_LINE = /^\[[^\]]+\]\s+error:/;
@@ -170,9 +165,9 @@ const POINTER_ERROR_LINE = /^\[[^\]]+\]\s+error:/;
 export function parseErrorReport(stdout: string): string[] | null {
   const lines = stdout.split('\n');
   const errorLines = lines.filter((l) => POINTER_ERROR_LINE.test(l.trim())).slice(0, 3);
-  const unresolved = lines.find((l) => l.trim().startsWith('unresolved:'));
-  if (!errorLines.length && !unresolved) return null;
-  return unresolved ? [...errorLines, unresolved.trim()] : errorLines;
+  const outcome = lines.find((l) => l.trim().startsWith('OUTCOME: error'));
+  if (!errorLines.length && !outcome) return null;
+  return outcome ? [outcome.trim(), ...errorLines] : errorLines;
 }
 
 // ---------------------------------------------------------------------------

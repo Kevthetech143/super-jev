@@ -97,10 +97,10 @@ def test_pointer_error_prints_status_line_and_is_not_folded_into_no_candidates(t
     monkeypatch.setattr(ask, "memory", fake_memory)
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 1
+    assert rc == 4  # needs-setup: p1 was not searched, so this is never a complete not-found
     out = capsys.readouterr().out
+    assert out.startswith("OUTCOME: needs-setup")
     assert "[p1] refresh-required" in out
-    assert "unresolved: 1 of 2 pointers errored" in out
     assert "no-candidates across" not in out
 
 
@@ -126,12 +126,11 @@ def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path
     assert "/hit.md" in out
     assert "[p2]" in out
     assert "[p1] refresh-required" in out
-    assert "unresolved: 1 of 2 pointers errored" in out
-    # the hit must appear before both the error line and the unresolved summary
+    assert out.startswith("OUTCOME: found - 1 file; partial: 1 set not searched")
+    # the hit must appear before the error line
     hit_pos = out.index("/hit.md")
     error_pos = out.index("[p1] refresh-required")
-    unresolved_pos = out.index("unresolved:")
-    assert hit_pos < error_pos < unresolved_pos
+    assert hit_pos < error_pos
 
 
 def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache(tmp_path, monkeypatch, capsys):
@@ -192,10 +191,10 @@ def test_all_pointers_empty_gives_no_candidates_hint_naming_connectors_and_add(t
     monkeypatch.setattr(ask, "memory", fake_memory)
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 0
+    assert rc == 1  # not-found
     out = capsys.readouterr().out
-    assert "no-candidates across 1 pointers" in out
-    assert "references/connectors.md" in out
+    assert out.startswith("OUTCOME: not-found - searched 1 set")
+    assert "may still exist" in out
     assert "--add" in out
 
 
@@ -210,7 +209,7 @@ def test_miss_report_says_what_was_searched_and_next_steps(tmp_path, monkeypatch
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    assert ask.lookup("q", "alice", tmp_path) == 0
+    assert ask.lookup("q", "alice", tmp_path) == 1  # not-found
     out = capsys.readouterr().out.strip().splitlines()
     assert "What was searched:" in out
     assert "  - 2 connected sets; 2 searched after the topic filter, 0 had matches" in out
@@ -766,7 +765,7 @@ def test_cache_hit_on_manual_pointer_with_changed_source_is_invalidated_not_serv
     monkeypatch.setattr(ask, "memory", fake_memory)
     rc = ask.lookup(question, "alice", tmp_path)
 
-    assert rc == 1
+    assert rc == 4  # the stale answer is withheld and the live search finds nothing connected: needs-setup
     out = capsys.readouterr().out
     assert "STALE: source changed since this answer was recorded" in out
     assert str(src) in out

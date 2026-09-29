@@ -3,8 +3,9 @@
 Ask one focused English source-finding question against explicitly connected,
 reviewed files under the intended principal. Use a meaningful title, one topic
 per note, and explicit names and dates. The bounded validation scope is UTF-8
-Markdown notes of at most 12,000 characters. Larger notes are searched by selected
-passages and have additional recall limits.
+Markdown notes. Notes over 12,000 characters are supported, up to 250 KB (250,000 bytes)
+(contract v2, 2026-09-28): they are read in sections, and a passage past character
+12,000 can be found. A note over 250 KB is outside the contract. Reading selected sections has additional recall limits.
 
 The retrieval stage returns up to five source files. Each completed content check
 uses the same rule: the text must supply a fact requested about the specified
@@ -43,6 +44,19 @@ dates and state uncertainty yourself. A returned file is a lead, not a guarantee
 that the final answer is true or complete. No match means not found in this bounded
 search, not proof of absence. Preparation requirements, secret holds, unfinished
 checks and operational errors remain distinct from an ordinary no-match result.
+
+Every ordinary ask starts with exactly one `OUTCOME:` line, computed from the whole
+search state, and its exit code matches:
+
+| Outcome | Meaning | Exit |
+|---|---|---|
+| `found` | at least one file; `partial: N sets not searched` if a set failed or is stale | 0 |
+| `not-found` | complete search, no file | 1 |
+| `not-supported` | input outside the contract (empty or over-long question) | 2 |
+| `error` | no file, and execution failed | 3 |
+| `needs-setup` | no file, and a set was stale, unprepared or skipped | 4 |
+
+A partial search is never a complete `not-found`. Every outcome except `found` names the one next command.
 
 Claim checking is a separate task: `--claim` checks support and contradiction and
 retains its claim judge. This change does not redefine claim verdicts, source

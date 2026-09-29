@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Primary live test, 2026-09-25: a stale pointer nothing could refresh printed its error
-(and a prepare_bulk command that could not work) on every answer, and "which skill ..."
+(and a prepare_bulk command that could not work) on every answer; 2026-09-28: it is now always said, in the OUTCOME line, and "which skill ..."
 questions returned a doc about skill search instead of the skill.
 
 No network, no real key, prepare_bulk.py never runs.
 
-    python3 -m pytest skills/super-jev/tests/test_stale_quiet_and_skills.py -q
+    python3 -m pytest skills/super-jev/tests/test_stale_always_shown_and_skills.py -q
 """
 import importlib.util
 import sys
@@ -41,19 +41,17 @@ def _stuck(tmp_path, monkeypatch, status="preparation-required"):
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
 
 
-def test_a_stuck_stale_pointer_warns_once_a_day_not_on_every_answer(tmp_path, monkeypatch, capsys):
+def test_a_stuck_stale_pointer_shows_on_every_answer(tmp_path, monkeypatch, capsys):
     _stuck(tmp_path, monkeypatch)
     sdir = tmp_path / "s"
-    assert ask.lookup("what is pending", "primary", sdir) == 1
-    first = capsys.readouterr().out
-    bench_line = next(ln for ln in first.splitlines() if ln.startswith("[bench]"))
-    assert "preparation-required" in bench_line and "prepare_bulk.py" not in bench_line
-    assert "What was searched:" in first  # the miss report still prints when a pointer errored
-    assert ask.lookup("what is pending", "primary", sdir) == 0
-    second = capsys.readouterr().out
-    assert not any(ln.startswith("[bench]") for ln in second.splitlines())  # not "bench" in text: a checkout path can hold it
-    assert "benched" not in second and "errored" not in second
-    assert '"stale-quiet"' in (sdir / "lookups.jsonl").read_text()
+    for _ in range(2):  # the old once-a-day "stale-quiet" drop is gone: an incomplete search is always said
+        assert ask.lookup("what is pending", "primary", sdir) == 4  # needs-setup
+        out = capsys.readouterr().out
+        assert out.startswith("OUTCOME: needs-setup")
+        bench_line = next(ln for ln in out.splitlines() if ln.startswith("[bench]"))
+        assert "preparation-required" in bench_line and "prepare_bulk.py" not in bench_line
+        assert "What was searched:" in out
+    assert "stale-quiet" not in (sdir / "lookups.jsonl").read_text()
 
 
 def test_a_stale_pointer_that_is_healing_still_shows_every_time(tmp_path, monkeypatch, capsys):
@@ -82,7 +80,8 @@ def test_a_which_skill_question_is_answered_from_the_skill_catalog(tmp_path, mon
     assert ask.lookup(q, "primary", tmp_path / "s") == 0
     out = capsys.readouterr().out
     assert asked == [q]
-    assert out.startswith("skill  /skills/ebay-return-label/SKILL.md  [skills: ebay-return-label]")
+    assert out.splitlines()[0].startswith("OUTCOME: found")
+    assert out.splitlines()[1].startswith("skill  /skills/ebay-return-label/SKILL.md  [skills: ebay-return-label]")
     assert ask.VOICE_LINE not in out
 
 
