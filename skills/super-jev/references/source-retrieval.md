@@ -5,7 +5,7 @@ reviewed files under the intended principal. Use a meaningful title, one topic
 per note, and explicit names and dates. The bounded validation scope is UTF-8
 Markdown notes. Notes over 12,000 characters are supported, up to 250 KB (250,000 bytes)
 (contract v2, 2026-09-28): they are read in sections, and a passage past character
-12,000 can be found. In code: a note up to 12,000 characters is checked whole; a longer one is split into passages and only the best-matching passages (about 14,000 characters in all) are read. A note over 250 KB is outside the contract. Reading selected sections has additional recall limits.
+12,000 can be found. In code: a note up to 12,000 characters is checked whole; notes of about 12,000-14,000 characters get every passage read; longer ones only the best-matching passages, up to about 14,000 characters. A note over 250 KB is outside the contract. Reading selected sections has additional recall limits.
 
 The retrieval stage returns up to five source files. Each completed content check
 uses the same rule: the text must supply a fact requested about the specified
