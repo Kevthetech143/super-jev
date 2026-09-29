@@ -2235,6 +2235,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             if p != listwise_winner and p not in possible and notes.get(p) != INCONCLUSIVE:
                 possible[p] = POSSIBLE_NOTE
     if _CLAIM["text"]:
+        # A file the judge read and surely says does not state the claim is rejected: never listed.
+        rejected = {p for p, f in (_STAGE.get("claim_files") or {}).items() if f.get("verdict") == "not_stated"
+                    and isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE}
+        top = [m for m in top if m[1] not in rejected]
         # A listwise "none answers" cannot erase a file that disproves a claim.
         proven = {p: f for p, f in (_STAGE.get("claim_files") or {}).items()
                   if f.get("verdict") in ("supported", "contradicted")
