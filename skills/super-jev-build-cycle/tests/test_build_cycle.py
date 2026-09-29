@@ -457,3 +457,126 @@ def test_review_brief_carries_goal_and_diff(env):
     assert r.returncode == 0, r.stderr
     brief = (env["cycle"] / "review-brief.md").read_text()
     assert "make x two" in brief and "x = 2" in brief and "pytest -q" in brief and "SHIP or FIX" in brief
+
+
+# ---- Earn the Button (onboard) ----
+def ob(env, *args):
+    return run(env, "onboard", *args)
+
+
+def cases(env, name, tag):
+    rows = [{"kind": k, "q": f"{tag}-{k}"} for k in ("supported", "absent", "invalid")]
+    return f(env, name, "\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+def git_wt(env):
+    wt = env["tmp"] / "wt"
+    subprocess.run(["git", "init", "-q", "-b", "feat", str(wt)], check=True)
+    return wt
+
+
+def onboard_upto(env, upto):
+    """Run onboarding steps in order up to and including `upto`; returns the last result."""
+    contract = f(env, "contract.md", "# contract\n")
+    dev, held = cases(env, "dev.jsonl", "dev"), cases(env, "held.jsonl", "held")
+    wt = git_wt(env)
+    tl, card = f(env, "timeline.md", "row: X works\n"), f(env, "card.md", "NOW: X works\n")
+    do_review = lambda: (run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok",
+                             "--file", f(env, "ans.md", "SHIP")))
+    steps = [("need", ["--who", "Kelvin", "--how-often", "weekly", "--fails", "csv files return not found"]),
+             ("simplest", ["--answer", "no existing rule reads csv so widen nothing"]),
+             ("promise", ["--line", "accepts csv; returns rows; failure is reported as not found",
+                          "--approved", "2026-09-29 'yes'", "--contract", contract]),
+             ("frozen", ["--dev", dev, "--heldout", held]),
+             ("build", ["--worktree", str(wt), "--branch", "feat", "--deletes", "none: new path only"]),
+             ("prove", ["--cases10", "10/10", "--eval60-before", "50", "--eval60-after", "51",
+                        "--test-cmd", "true"]),
+             ("record", ["--timeline-row", "X works", "--timeline-file", tl,
+                         "--card-now", "NOW: X works", "--card-file", card])]
+    r = None
+    for name, args in steps:
+        if name == "build":
+            do_review()
+        r = ob(env, name, *args)
+        if name == upto:
+            return r
+        assert r.returncode == 0, (name, r.stderr)
+    return r
+
+
+def test_onboard_full_path_is_earned(env):
+    assert onboard_upto(env, "record").returncode == 0
+    r = ob(env, "check")
+    assert r.returncode == 0 and "EARNED" in r.stdout
+
+
+def test_onboard_no_evidence_stops(env):
+    r = ob(env, "need", "--who", "nobody", "--how-often", "none", "--fails", "unknown")
+    assert r.returncode == 2 and "stop" in r.stderr
+    assert not (env["cycle"] / "onboard-1-need.md").exists()
+
+
+def test_onboard_steps_go_in_order(env):
+    r = ob(env, "simplest", "--answer", "widen the csv rule instead of a new path")
+    assert r.returncode == 2 and "'need' first" in r.stderr
+
+
+def test_onboard_promise_needs_approval_and_all_three_parts(env):
+    onboard_upto(env, "simplest")
+    c = f(env, "c2.md", "x\n")
+    r = ob(env, "promise", "--line", "accepts csv; returns rows; failure is reported", "--contract", c)
+    assert r.returncode == 2 and "Kelvin" in r.stderr
+    r = ob(env, "promise", "--line", "accepts csv", "--approved", "ok", "--contract", c)
+    assert r.returncode == 2 and "failure" in r.stderr
+
+
+def test_onboard_frozen_needs_all_kinds_and_separate_files(env):
+    onboard_upto(env, "promise")
+    bad = f(env, "bad.jsonl", json.dumps({"kind": "supported"}) + "\n")
+    good = cases(env, "g.jsonl", "g")
+    assert ob(env, "frozen", "--dev", bad, "--heldout", good).returncode == 2
+    assert ob(env, "frozen", "--dev", good, "--heldout", good).returncode == 2
+
+
+def test_onboard_edit_after_freeze_fails_check(env):
+    onboard_upto(env, "record")
+    dev = env["tmp"] / "dev.jsonl"
+    dev.write_text(dev.read_text() + json.dumps({"kind": "supported", "q": "sneaky"}) + "\n")
+    r = ob(env, "check")
+    assert r.returncode == 1 and "changed" in r.stdout
+
+
+def test_onboard_build_needs_ship_review_and_feature_branch(env):
+    onboard_upto(env, "frozen")
+    wt = git_wt(env)
+    args = ["--worktree", str(wt), "--branch", "feat", "--deletes", "none: new"]
+    r = ob(env, "build", *args)
+    assert r.returncode == 2 and "SHIP" in r.stderr
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "a.md", "SHIP"))
+    assert ob(env, "build", "--worktree", str(wt), "--branch", "main", "--deletes", "none: new").returncode == 2
+    assert ob(env, "build", *args).returncode == 0
+
+
+def test_onboard_prove_fails_on_lower_eval_bad_cases10_or_failing_test(env):
+    onboard_upto(env, "build")
+    base = ["--eval60-before", "50", "--eval60-after", "50", "--test-cmd", "true"]
+    assert ob(env, "prove", "--cases10", "9/10", *base).returncode == 2
+    assert ob(env, "prove", "--cases10", "10/10", "--eval60-before", "50", "--eval60-after", "49",
+              "--test-cmd", "true").returncode == 2
+    assert ob(env, "prove", "--cases10", "10/10", "--eval60-before", "50", "--eval60-after", "50",
+              "--test-cmd", "false").returncode == 2
+    assert ob(env, "prove", "--cases10", "10/10", *base).returncode == 0
+
+
+def test_onboard_record_text_must_be_in_the_files(env):
+    onboard_upto(env, "prove")
+    tl, card = f(env, "t2.md", "nothing\n"), f(env, "c3.md", "NOW: y\n")
+    r = ob(env, "record", "--timeline-row", "X works", "--timeline-file", tl, "--card-now", "NOW: y",
+           "--card-file", card)
+    assert r.returncode == 2 and "timeline" in r.stderr
+
+
+def test_close_refuses_unearned_onboarding(env):
+    onboard_upto(env, "need")
+    r = run(env, "close")
+    assert r.returncode == 1 and "onboarding not earned" in r.stdout
