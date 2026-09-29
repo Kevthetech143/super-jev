@@ -21,9 +21,9 @@ No key yet? `npm run demo` runs the loop once offline.
 
 ## The loop
 
-`ask` → read the top file yourself → answer → `--answer "question" "your answer"` so a good answer saves itself → `--miss` a bad one, `--add` a fact that has no file.
+`ask` → read the top file yourself → answer → `--miss` a bad saved one, `--add` a fact that has no file. A question you ask again saves itself.
 
-`--answer` is auto-cache: it runs the check gate on your answer against the top file `ask` returned, and saves it (through the same one save path as `--approve`, marked `approved_by: auto-check` with the evidence file and score) only when the verdict is CLEAN and the file is unchanged since connect. READ, blocked, stale or secret-held answers are not saved, and it says why. On by default; opt out with `--no-auto` or `SUPERJEV_AUTO_CACHE=0`. Human `--approve` still works (`approved_by: human`). Every cache hit prints who approved it, and `--miss` on a cached question un-saves it. Matching is the same question after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier. A saved answer lasts until its source file changes, with no clock expiry. Connectors are how data gets in: onboard a folder once, and it stays answerable.
+Auto-save: when the same file wins the same question for you N times in a row (`SUPERJEV_SAVE_AFTER`, default 2) and passes the content check, it is saved (same secret scan and claim check as `--approve`, marked `approved_by: auto-save`); the next ask returns it at once, labelled saved, with no search. Changed, secret-held or refused files are not saved (or are withheld as STALE), and it says why. Opt out with `--no-auto` or `SUPERJEV_AUTO_CACHE=0`. `--approve` meets the threshold at once (`approved_by: principal:NAME`). Every cache hit prints who approved it, and `--miss` on a cached question un-saves it. Matching is the same question after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier. A saved answer lasts until its source file changes, with no clock expiry. Connectors are how data gets in: onboard a folder once, and it stays answerable.
 
 ## Maturity
 

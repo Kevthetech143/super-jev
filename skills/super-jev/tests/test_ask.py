@@ -136,10 +136,10 @@ def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path
 
 
 def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache(tmp_path, monkeypatch, capsys):
-    """Bug report: after a pointer errors (preparation-required), `ask.py --answer` for the
+    """Bug report: after a pointer errors (preparation-required), the save of the
     same question said "not saved: no prior lookup with candidates". Confirmed here: lookup()
     already logs `top` from whichever pointers DID answer, independent of a sibling pointer's
-    error, so find_top() (what --answer reads) still finds the healthy candidate. The reported
+    error, so find_top() (what --approve reads) still finds the healthy candidate. The reported
     symptom traced back to the multi-principal refresh bug (prepare_bulk.py connect_part),
     which left every pointer perpetually preparation-required with nothing left to answer from
     -- not a gap in this recording path."""
