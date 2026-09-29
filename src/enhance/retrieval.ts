@@ -98,8 +98,6 @@ export type RetrievalSource = {
   description: string;
   /** Full original text, chunked once, up front, with exact offsets and SHA. */
   text: string;
-  /** Optional declaration chunking for reviewed code; absent preserves Markdown parity. */
-  codeExtension?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -179,8 +177,7 @@ export function assertChunkOffsets(chunks: SourceChunk[]): void {
 export function chunkSource(
   sourceId: string,
   text: string,
-  targetWords = DEFAULT_CHUNK_TARGET_WORDS,
-  codeExtension?: string
+  targetWords = DEFAULT_CHUNK_TARGET_WORDS
 ): SourceChunk[] {
   if (typeof sourceId !== 'string' || !sourceId) throw new RetrievalError('chunkSource needs a non-empty sourceId');
   if (typeof text !== 'string') throw new RetrievalError('chunkSource needs text as a string');
@@ -207,17 +204,7 @@ export function chunkSource(
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const declaration = codeExtension === '.py'
-      ? /^\s*(?:async\s+def|def|class)\s+\w+/.test(line)
-      : ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'].includes(codeExtension ?? '')
-        ? /^\s*(?:export\s+(?:default\s+)?)?(?:(?:async|abstract)\s+)?(?:function\s*\*?\s+|class\s+|interface\s+|type\s+)\w+/.test(line)
-        : ['.sh', '.bash'].includes(codeExtension ?? '')
-          ? /^\s*(?:function\s+\w+|[a-zA-Z_]\w*\s*\(\s*\))/.test(line) : false;
-    const h = codeExtension ? null : /^(#{1,6})\s+(.*)/.exec(line);
-    if (declaration) {
-      flush();
-      headings = [line.trim()];
-    }
+    const h = /^(#{1,6})\s+(.*)/.exec(line);
     if (h) {
       flush();
       headings = headings.slice(0, h[1].length - 1);
@@ -451,7 +438,7 @@ function preparationFingerprint(
   targetWords: number
 ): string | undefined {
   if (preparation === undefined) return undefined;
-  const chunks = chunkSource(source.id, source.text, targetWords, source.codeExtension);
+  const chunks = chunkSource(source.id, source.text, targetWords);
   if (!chunks.length) return undefined;
   const parts: unknown[] = [];
   for (const chunk of chunks) {
@@ -835,7 +822,7 @@ export async function retrieveSources(
   const chunksBySource = new Map<string, SourceChunk[]>();
   const allChunks: SourceChunk[] = [];
   for (const s of activeSources) {
-    const chunks = chunkSource(s.id, s.text, targetWords, s.codeExtension);
+    const chunks = chunkSource(s.id, s.text, targetWords);
     assertChunkOffsets(chunks);
     chunksBySource.set(s.id, chunks);
     allChunks.push(...chunks);

@@ -136,7 +136,7 @@ def _catalog(sources, structure):
     common = Path(os.path.commonpath([str(path.parent) for path in paths]))
     # A file name shared by several flat sources (SKILL.md, README.md, index.md) tells routing
     # nothing, so those leaves carry their parent folder too: "ebay-return-label/SKILL.md".
-    names = [path.name for path in dict.fromkeys(paths)]  # sections of one file are one name
+    names = [path.name for path in paths]
     groups = {}
     leaves = []
     for source in sources:
@@ -165,8 +165,6 @@ def _catalog(sources, structure):
         shared = not labels and names.count(path.name) > 1 and path.parent.name
         label = ('Reviewed source ' + _hash(source['id'].encode())[:12] if source.get('viewTransform') is not None
                  else (f'{path.parent.name}/{path.name}' if shared else path.name))
-        if source.get('lines') is not None:
-            label += ' (lines {}-{})'.format(*source['lines'])
         leaf = {'id': leaf_id, 'label': label,
                 'description': source['description'], 'sourceId': source['id']}
         leaves.append((parent, leaf))
@@ -221,7 +219,7 @@ def _connect(request, config):
     if structure not in ('flat-files', 'folder-tree'):
         return _problem('unsupported-structure', 'Use structure "flat-files" or "folder-tree". Directories are never crawled.')
     sources, seen_paths, seen_ids, total = [], set(), set(), 0
-    view_total, ranges = 0, {}
+    view_total = 0
     for item in items:
         if not isinstance(item, dict) or not isinstance(item.get('path'), str):
             return _problem('invalid-source', 'Each source needs a path; description and stable id are optional.')
@@ -235,13 +233,7 @@ def _connect(request, config):
             return _problem('unsupported-source', 'Directories and special files are unsupported. Supply explicit authorized text files; export PDFs or other binary formats to reviewed UTF-8 first.')
         with path.open('rb') as stream:
             raw = stream.read(MAX_BYTES + 1)
-        lines = item.get('lines')
-        if lines is not None and ('viewTransform' in item or not isinstance(lines, list) or len(lines) != 2
-                                  or any(isinstance(n, bool) or not isinstance(n, int) for n in lines)
-                                  or not 1 <= lines[0] <= lines[1]):
-            return _problem('invalid-lines', 'lines must be [first, last], 1-based line numbers of one section; a section cannot also carry a viewTransform.')
-        if lines is None or path not in ranges:
-            total += len(raw)  # a file read in sections counts once
+        total += len(raw)
         if total > MAX_BYTES:
             return _problem('byte-limit', 'The complete source set must fit within 5 MiB; split it into explicitly scoped connectors.')
         try:
@@ -251,23 +243,7 @@ def _connect(request, config):
         if not text.strip() or any(ord(c) < 32 and c not in '\n\r\t' for c in text):
             return _problem('unsupported-source', 'Empty or binary/control-character content cannot be connected. Supply nonempty reviewed UTF-8 text.')
         original_sha = _hash(raw)
-        if lines is not None:
-            # A section of the file (prepare_bulk cuts a file over its size ceiling): only lines
-            # first..last are prepared and published; sections of one file never overlap, and each
-            # is reviewed by its own viewSHA. The file itself is never changed.
-            parts = prepare_bulk.file_lines(text)
-            if lines[1] > len(parts):
-                return _problem('invalid-lines', 'The section runs past the end of the file; re-read the file and cut its sections again.')
-            if path in seen_paths or any(a <= lines[1] and lines[0] <= b for a, b in ranges.get(path, [])):
-                return _problem('duplicate-source', 'Sections of one file must not overlap, and a file cannot be connected both whole and in sections.')
-            ranges.setdefault(path, []).append(tuple(lines))
-            text = ''.join(parts[lines[0] - 1:lines[1]])
-            raw = text.encode('utf-8')
-            if not text.strip():
-                return _problem('empty-view', 'A section holds only blank lines. No connection was created.')
-        elif path in ranges:
-            return _problem('duplicate-source', 'A file cannot be connected both whole and in sections.')
-        if 'viewTransform' not in item and ('transformSHA' in item or ('viewSHA' in item and lines is None)):
+        if 'viewTransform' not in item and any(k in item for k in ('viewSHA', 'transformSHA')):
             return _problem('invalid-view-transform', 'View review hashes require the original viewTransform policy; raw fallback is refused.')
         policy = item.get('viewTransform')
         transform_sha = None
@@ -285,10 +261,7 @@ def _connect(request, config):
         if has_secret(text):
             return _problem('secret-held', 'A source contains a secret (key, token, password or card number); remove it first. No partial connection was created.')
         source_id = item.get('id', 'file:' + _hash(str(given).encode())[:24])
-        if lines is not None and 'id' not in item:
-            source_id = 'section:' + _hash(f'{given}#{lines[0]}-{lines[1]}'.encode())[:24]
-        if (not isinstance(source_id, str) or not source_id or len(source_id) > 256 or source_id in seen_ids
-                or (path in seen_paths and lines is None)):
+        if not isinstance(source_id, str) or not source_id or len(source_id) > 256 or source_id in seen_ids or path in seen_paths:
             return _problem('duplicate-source', 'Each source needs a unique path and nonempty unique id of at most 256 characters.')
         description = item.get('description', 'Reviewed local source' if policy is not None else 'Local text file: ' + path.name)
         if not isinstance(description, str) or not description.strip() or len(description) > 4000:
@@ -308,12 +281,11 @@ def _connect(request, config):
             metadata = [source_id, description, *(navigation_path or [])]
             if any(derive(value, policy)[0].decode() != value or has_secret(value) for value in metadata):
                 return _problem('view-metadata-held', 'Supply an opaque source id and descriptions/navigation labels that need no redaction under the view policy.')
-        if lines is None:
-            seen_paths.add(path)
+        seen_paths.add(path)
         seen_ids.add(source_id)
         sources.append({'id': source_id, 'path': str(given), 'realPath': str(path), 'raw': raw, 'text': text,
                         'description': description, 'navigationPath': navigation_path,
-                        'sha256': original_sha, 'viewSHA': _hash(raw), 'viewTransform': policy, 'lines': lines,
+                        'sha256': original_sha, 'viewSHA': _hash(raw), 'viewTransform': policy,
                         'transformSHA': transform_sha, 'reviewedViewSHA': item.get('viewSHA'),
                         'reviewedTransformSHA': item.get('transformSHA'), 'reviewedSHA': item.get('sha256')})
     if structure == 'folder-tree':
@@ -339,14 +311,12 @@ def _connect(request, config):
             or any(s['reviewedSHA'] != s['sha256']
                    or (s['viewTransform'] is not None and
                        (s['reviewedViewSHA'] != s['viewSHA'] or s['reviewedTransformSHA'] != s['transformSHA']))
-                   or (s['lines'] is not None and s['reviewedViewSHA'] != s['viewSHA'])
                    for s in sources)
             or not navigation_reviewed):
         return {**_problem('review-required', 'Review the local files or derived views within authorized scope. Repeat with reviewed:true, each returned sha256, and for transformed sources viewSHA and transformSHA while retaining viewTransform. Only the derived view is published. This is not automatic privacy approval.'),
                 'sources': [{**{k: s[k] for k in ('path', 'id', 'description', 'sha256')},
                              **({'viewSHA': s['viewSHA'], 'transformSHA': s['transformSHA']}
                                 if s['viewTransform'] is not None else {}),
-                             **({'lines': s['lines'], 'viewSHA': s['viewSHA']} if s['lines'] is not None else {}),
                              **({'navigationPath': s['navigationPath']}
                                 if s['navigationPath'] is not None else {})} for s in sources],
                 'structure': structure, 'catalog': catalog,
@@ -358,9 +328,7 @@ def _connect(request, config):
         return _problem('invalid-shareable', 'shareable must be true or false.')
     chunks = json.loads(subprocess.run(
         ['node', str(Path(__file__).with_name('chunk_paths.mjs'))],
-        input=json.dumps([{'id': s['id'], 'text': s['text'],
-                           'codeExtension': Path(s['path']).suffix.lower() if Path(s['path']).suffix.lower() in prepare_bulk.CODE_EXTENSIONS else None}
-                          for s in sources]),
+        input=json.dumps([{'id': s['id'], 'text': s['text']} for s in sources]),
         text=True, capture_output=True, check=True, timeout=60).stdout)
     if len(chunks) != len(sources) or any(not c for c in chunks):
         return _problem('empty-preparation', 'All files must yield readable passages; no partial connection was created.')
@@ -408,8 +376,6 @@ def _connect(request, config):
             prepared_path = folder / f'{i}.txt'
             _write(prepared_path, s['raw'])
             manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['viewSHA'], 'description': s['description'],
-                                        **({'lines': s['lines']} if s['lines'] is not None else {}),
-                                        **({'codeExtension': Path(s['path']).suffix.lower()} if Path(s['path']).suffix.lower() in prepare_bulk.CODE_EXTENSIONS else {}),
                                         **({'viewTransform': s['viewTransform'], 'transformSHA': s['transformSHA'],
                                             'originalSHA': s['sha256']} if s['viewTransform'] is not None else {})})
             for p in passages:
@@ -422,9 +388,9 @@ def _connect(request, config):
             'pathConnection': {'pointer': pointer, 'principals': sorted(principals)},
             'scope': f'Only the {len(sources)} explicitly supplied local files; no recursive discovery or automatic synchronization.',
             'manifestPath': str(manifest_path), 'manifestSHA256': _hash(manifest_raw),
-            'originals': list({s['path']: {'path': s['path'], 'sha256': s['sha256'],
-                                           **({'realPath': s['realPath']} if s['realPath'] != s['path'] else {})}
-                               for s in sources}.values()),
+            'originals': [{'path': s['path'], 'sha256': s['sha256'],
+                           **({'realPath': s['realPath']} if s['realPath'] != s['path'] else {})}
+                          for s in sources],
             'shareable': shareable, 'viewPolicies': policies,
             # The connect request itself, minus the review hashes: an ask that finds this
             # pointer stale replays it (auto_heal.reconnect_recipe) at the files' current bytes.
@@ -432,7 +398,6 @@ def _connect(request, config):
                        'structure': structure,
                        'sources': [{'path': s['path'], 'id': s['id'], 'description': s['description'],
                                     **({'viewTransform': s['viewTransform']} if s['viewTransform'] is not None else {}),
-                                    **({'lines': s['lines']} if s['lines'] is not None else {}),
                                     **({'navigationPath': s['navigationPath']}
                                        if s['navigationPath'] is not None else {})}
                                    for s in sources]}}
