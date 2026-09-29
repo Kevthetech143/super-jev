@@ -14,8 +14,10 @@ Bounds (all per principal, state kept in autoheal-state/):
   - a pointer that finds the lock held is queued; the refresh holding the lock heals the queue
     one pointer at a time, oldest first, before it releases the lock (drain), so a pointer
     that sorts after others is never skipped for good while they keep changing
-  - a cooldown per pointer (default 10 min) before it is eligible to retrigger
-  - a cap on refreshes per principal per rolling hour (default 6)
+  - a cooldown per pointer (default 10 min) that every attempt starts, whether it worked or not
+  - a cap on refreshes per principal per rolling hour (default 6), shared fairly: a pointer over
+    the cap waits in the queue, and a pointer that already healed this hour queues behind any
+    pointer that is waiting, so the busiest pointer never starves the rest
 Every attempt (started or skipped, and why) is appended to autoheal.log as one JSON line.
 
 This only ever *starts* a refresh; it does not change what a lookup reports for the pointer
@@ -317,7 +319,7 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
     "timeout" (left running in the background) or "failed". Never raises."""
     cache_dir = cache_dir or rc.CACHE_DIR
     report, owner = _report_for(pointer, cache_dir)
-    args = rc.prepare_args(report) if isinstance(report, dict) else None
+    args = rc.prepare_args(report, principal) if isinstance(report, dict) else None
     if args is None:
         return "no-report"
     cache_path = cache_dir / f"{owner}.json"
@@ -335,6 +337,7 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
     if not token:
         _queue(principal, owner, "reconnect")
         return "in-progress"
+    _mark(principal, owner, time.time())  # every attempt starts the cooldown, failed or not
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
     out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
     try:
@@ -350,10 +353,6 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
         _log(principal=principal, pointer=owner, action="reconnect", result="timeout", cmd=cmd)
         return "timeout"
     result = "reconnected" if code == 0 else "failed"
-    if code == 0:
-        # Cooldown only after a success: a failed or timed-out reconnect leaves the
-        # pointer eligible for maybe_heal's background refresh.
-        _mark(principal, owner, time.time())
     _log(principal=principal, pointer=owner, action="reconnect", result=result, cmd=cmd)
     return result
 
@@ -393,6 +392,7 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     if not token:
         return "in-progress"
     result, preview = "failed", {}
+    _mark(principal, pointer, time.time())  # every attempt starts the cooldown, failed or not
     try:
         req = {"action": "connect", "pointer": recipe["pointer"], "dataset": recipe["dataset"],
                "principals": recipe["principals"], "structure": recipe["structure"],
@@ -418,10 +418,7 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     except Exception:
         result, preview = "failed", {}
     finally:
-        # Under the state lock, not the state read before this lock was taken: a pointer
-        # another lookup queued meanwhile must survive. Then drain that queue or release.
-        if result == "reconnected":
-            _mark(principal, pointer, time.time())
+        # A pointer another lookup queued meanwhile must survive: drain that queue or release.
         _hand_off(principal, token)
     _log(principal=principal, pointer=pointer, action="reconnect-recipe", result=result,
          reason=preview.get("reason") if result == "failed" else None)
@@ -445,9 +442,9 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
     the pointer's folders hold files it has never seen, so it needs a refresh with no file changed."""
     cache_dir = cache_dir or rc.CACHE_DIR
     report, owner = _report_for(pointer, cache_dir)
-    # The asking agent stands in for a report with no recorded principal only for a new-file
-    # refresh: such a report's changed files are still skipped ("no-report"), as before scans.
-    args = rc.prepare_args(report, principal if new else None) if isinstance(report, dict) else None
+    # A report with no recorded principal is healed as the asking agent, which the refresh then
+    # records (prepare_bulk keeps the pointer's registered scope), so this happens once.
+    args = rc.prepare_args(report, principal) if isinstance(report, dict) else None
     if args is None:
         _log(principal=principal, pointer=pointer, action="skip", reason="no-report")
         return "no-report"
@@ -466,15 +463,26 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
         _log(principal=principal, pointer=pointer, action="skip", reason="cooldown",
              wait_secs=round(cooldown_secs - (now - last)))
         return "cooldown"
+    kind = "new" if new else "refresh"
+    if last and now - last < 3600 and any(p != pointer for p in state.get("pending") or {}):
+        # Fair share of the cap: this pointer already healed this hour and another one is waiting,
+        # so it queues behind it; the drain heals them oldest first.
+        _queue(principal, pointer, kind)
+        token = _acquire_lock(principal, pointer)
+        if token:
+            _hand_off(principal, token)
+        _log(principal=principal, pointer=pointer, action="skip", reason="yield", queued=True)
+        return "in-progress"
     recent = [t for t in state["attempts"] if now - t < 3600]
     if len(recent) >= max_per_hour:
+        _queue(principal, pointer, kind)  # waits its turn; never dropped
         _log(principal=principal, pointer=pointer, action="skip", reason="rate-limited",
-             attempts_last_hour=len(recent))
+             attempts_last_hour=len(recent), queued=True)
         return "rate-limited"
 
     token = _acquire_lock(principal, pointer)
     if not token:
-        _queue(principal, pointer, "new" if new else "refresh")
+        _queue(principal, pointer, kind)
         _log(principal=principal, pointer=pointer, action="skip", reason="in-progress", queued=True)
         return "in-progress"
 
@@ -552,9 +560,7 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
     # A pointer scan queued for new files is refreshed like a changed one, unless they were taken
     # in since it was queued: a refresh reconnects with replace:true, rotating approved answers.
     new = kind == "new" and bool(rc.new_files(report, rc.known_across(rc.CACHE_DIR)))
-    # The asking agent stands in for a report with no recorded principal only while a new file is
-    # still waiting: changed files alone never refresh such a report ("no-report"), as in maybe_heal.
-    args = rc.prepare_args(report) or (rc.prepare_args(report, principal) if new else None)
+    args = rc.prepare_args(report, principal)  # no recorded principal: the asker, recorded by the refresh
     if args is None:
         return "no-report"
     cache_path = rc.CACHE_DIR / f"{owner}.json"
@@ -576,6 +582,7 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
         _mark(principal, owner, now, recent + [now])
     else:
         cmd.append("--no-findability")
+        _mark(principal, owner, now)  # every attempt starts the cooldown, failed or not
     try:
         with (STATE_DIR / f"{principal}-{owner}-last-refresh.log").open("w") as out:
             code = subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(HERE),
@@ -584,8 +591,6 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
         code = 1
     if code:
         return "failed"
-    if not changed:
-        _mark(principal, owner, time.time())
     return "refreshed" if changed else "reconnected"
 
 

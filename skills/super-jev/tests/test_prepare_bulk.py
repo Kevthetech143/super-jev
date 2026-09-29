@@ -1223,23 +1223,6 @@ def test_a_note_written_during_the_first_walk_still_counts_as_new(tmp_path, monk
     assert pb.growth({str(root / "f0.md")}, [root / "mid-walk.md"], snap, set()) == [str(root / "mid-walk.md")]
 
 
-def test_a_fallback_principal_is_never_recorded(tmp_path, monkeypatch, capsys):
-    # Review of PR #239: the asking agent stands in only for a new-file refresh; recorded, it would
-    # let every later changed file auto-heal the old no-principal pointer (writer run, answers rotated).
-    root = _big_root(tmp_path, 1)
-    cache_dir = tmp_path / "cache"
-    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
-    _seed_cache(root, cache_dir, 1)
-    (cache_dir / "my-records-report.json").write_text(json.dumps(
-        {"pointer": "my-records", "roots": [str(root)], "approved": [str(root / "f0.md")]}))
-    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "amazon",
-                                      "--refresh", "--no-connect", "--no-findability", "--asker-fallback"])
-    assert pb.main() == 0
-    capsys.readouterr()
-    report = json.loads((cache_dir / "my-records-report.json").read_text())
-    assert "principal" not in report and "principals" not in report
-
-
 def test_growth_sees_a_folder_shared_through_a_symlink(tmp_path):
     # Review 2026-09-28: "team" pinned the folder through a link, "private" through its real path.
     real = tmp_path / "real"; real.mkdir()
