@@ -32,10 +32,10 @@ def test_stale_cache_hit_withholds_and_falls_through_to_live_search(tmp_path, mo
     monkeypatch.setattr(ask, "memory", fake)
     rc = ask.lookup("q", "alice", tmp_path)
     out = capsys.readouterr().out
-    assert rc == 1
+    assert rc == 4  # needs-setup: nothing is connected
     assert "panel" in calls  # live search ran
     assert "OLD-ANSWER" not in out
-    assert out.rstrip("\n").splitlines()[-1] == ask.VOICE_LINE
+    assert out.startswith("OUTCOME: needs-setup")
 
 
 def test_miss_after_cache_hit_does_not_relabel_an_older_live_lookup(tmp_path, monkeypatch):
