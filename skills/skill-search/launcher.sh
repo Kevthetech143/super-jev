@@ -35,8 +35,8 @@
 
 set -u
 
-LAUNCHER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-DEFAULT_REPO="$(cd "$LAUNCHER_DIR/../.." && pwd)"   # the release/checkout this launcher ships in
+LAUNCHER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)"   # real path, so a symlinked skill folder still finds its release
+DEFAULT_REPO="$(cd "$LAUNCHER_DIR/../.." && pwd -P)"   # the release/checkout this launcher ships in
 DEFAULT_CONFIG="$LAUNCHER_DIR/roots.json"
 RUNTIME_ENTRY="src/skill-search-cli.ts"
 RUN_TIMEOUT_SECS="${SKILL_SEARCH_RUN_TIMEOUT_SECS:-120}"
