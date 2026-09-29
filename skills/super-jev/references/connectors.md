@@ -2,7 +2,7 @@
 
 Known credential/key suffixes (`env`, `pem`, `key`, `p12`, `pfx`, `jks`, `kdbx`, `kdb`, `keystore`, `pkcs12`, `ppk`, `p8`) cannot be opted in, including compound suffixes. Inventory also holds these names and symlink targets regardless of `--allow-held`; content scanning remains necessary for other files.
 
-Bulk inventory defaults to `CONNECTABLE_EXTENSIONS = ('.md',)`. Add literal UTF-8 text/code suffixes with `--ext py,ts,js,sh,json-schema` (repeatable; leading dots accepted). This opts in to those files in addition to Markdown, without changing secret checks, size limits, exclusions or review gates. Binary/control-character and invalid UTF-8 files are held before the writer, even with `--allow-held`. Arbitrary literal suffixes are allowed for text; no binary format conversion is provided. Declaration headings for Python, JS/TS and shell are best-effort lexical boundaries, not syntax validation; comments or strings can resemble declarations. Exact original passage text and line numbers are retained, and no code executes. Other suffixes use the existing bounded text chunker. Recipes store selected `extensions`; omitted `--ext` on refresh reuses them, while explicit `--ext md` resets to Markdown-only scope. Legacy recipes remain Markdown-only. Roots are stored as given (made absolute, symlinks kept), so a release symlink refresh reads the current target. Old recipes that already stored a resolved release path cannot infer the intended link: re-run with the intended `--root` once.
+Bulk inventory defaults to `CONNECTABLE_EXTENSIONS = ('.md',)`. Add literal UTF-8 text/code suffixes with `--ext py,ts,js,sh,json-schema` (repeatable; leading dots accepted). This opts in to those files in addition to Markdown, without changing secret checks, size limits, exclusions or review gates. Binary/control-character and invalid UTF-8 files are held before the writer. Arbitrary literal suffixes are allowed for text; no binary format conversion is provided. Declaration headings for Python, JS/TS and shell are best-effort lexical boundaries, not syntax validation; comments or strings can resemble declarations. Exact original passage text and line numbers are retained, and no code executes. Other suffixes use the existing bounded text chunker. Recipes store selected `extensions`; omitted `--ext` on refresh reuses them, while explicit `--ext md` resets to Markdown-only scope. Legacy recipes remain Markdown-only. Roots are stored as given (made absolute, symlinks kept), so a release symlink refresh reads the current target. Old recipes that already stored a resolved release path cannot infer the intended link: re-run with the intended `--root` once.
 
 Onboarding a new connector or refreshing one? Start at [`super-jev-connect/SKILL.md`](../../super-jev-connect/SKILL.md) — this page is the deep reference it links back to.
 
@@ -159,9 +159,8 @@ line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. It also holds a card after an order number, phone number or date
 in the same digit run (`order 1234 4111 1111 1111 1111`, checked with a
 card-network prefix as well as Luhn) and a 15-digit Amex number (`3782 822463
-10005`). `--allow-held` admits a file the secret scan alone would hold --
-it is still listed in the held file, noting the override -- as an explicit
-operator decision for one run (never replayed); it never lifts a size hold.
+10005`). A secret hold has no override flag and is never approvable
+(`--approve-held` is for size holds only): remove or move the value.
 A file over the 250,000-byte size ceiling (and at most 2,000,000 bytes) connects
 in sections: line ranges cut at natural edges (Markdown headings outside code
 fences; top-level `def`/`class`/`function` lines with their decorators), about
@@ -170,8 +169,7 @@ file, and connected as the file's path plus its `lines` (`[first, last]`); the
 connector reads those lines from the unchanged file, secret-scans them, and
 publishes them only under their own reviewed `viewSHA`. `prepare_bulk` runs the
 same secret scan, name, folder and text checks on the whole file first (one
-secret-like line or a secret-like name still holds the whole file, even with
-`--allow-held`); the connector itself scans each section's own text. A cut falls where a heading's or
+secret-like line or a secret-like name still holds the whole file); the connector itself scans each section's own text. A cut falls where a heading's or
 declaration's own text hashes to a fixed pattern once a section holds 6 KB, so
 an edit moves only the cuts around it: a refresh re-gates only the sections
 whose text changed (cached by the section text's sha256, wherever its lines

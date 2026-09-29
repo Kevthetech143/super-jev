@@ -5,7 +5,7 @@ Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT [--principal AGENT2 ...]
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
                           [--batch 10] [--line 0.80] [--writer-model haiku]
-                          [--writer-command 'COMMAND [ARG ...]'] [--allow-held] [--approve-held PATH ...]
+                          [--writer-command 'COMMAND [ARG ...]'] [--approve-held PATH ...]
                           [--no-connect]
                           [--findability] [--refresh] [--no-shared] [--shareable]
 
@@ -38,14 +38,13 @@ Pipeline per run:
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
-     one line, must not trigger it); the password/api-key keyword check is never affected. --allow-held admits
-     a file the secret scan alone would hold -- it is still listed in the held file, noting the override -- but
-     never lifts a size hold. --approve-held PATH (repeatable) connects one file over the ceiling whole (not in
-     sections) after a person reviewed it and records its path and sha256 in the report;
+     one line, must not trigger it); the password/api-key keyword check is never affected. --approve-held PATH
+     (repeatable) connects one file over the ceiling whole (not in sections) after a person reviewed it and
+     records its path and sha256 in the report;
      --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file connects
      in sections instead. It applies only up to APPROVE_MAX_BYTES (1,000,000); a file held
-     for secret-like text or name, or with a credential suffix, can never be approved. --allow-held is never
-     replayed. A first connect
+     for secret-like text or name, or with a credential suffix, can never be approved, and there is no blanket
+     flag: the fix for a secret hold is to remove or move the value. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
      already-cached pointer instead guards on files that actually need a writer call this run (unchanged
      cached files are free and reused); raise --max-files to opt into a larger writer cost.
@@ -103,7 +102,7 @@ CONNECTABLE_EXTENSIONS = ('.md',)
 MAX_FILES = 250  # --max-files default
 UNCONNECTED_TRIES = 3  # refreshes that retry a new file whose connect failed
 CODE_EXTENSIONS = ('.py', '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.sh', '.bash')
-# Credential containers are not ordinary text inputs; --allow-held cannot opt
+# Credential containers are not ordinary text inputs; no flag can opt
 # them in. Check compound suffixes and symlink targets as well.
 CREDENTIAL_SUFFIXES = frozenset({'env', 'pem', 'key', 'p12', 'pfx', 'jks', 'kdbx',
                                  'kdb', 'keystore', 'pkcs12', 'ppk', 'p8'})
@@ -121,7 +120,7 @@ def extension_list(value: str) -> tuple:
         if not re.fullmatch(r'\.[a-z0-9]+(?:[.-][a-z0-9]+)*', suffix):
             raise argparse.ArgumentTypeError('extensions must be comma-separated literal suffixes, e.g. py,ts,js,sh,json-schema')
         if credential_suffix(suffix):
-            raise argparse.ArgumentTypeError('credential/key suffixes cannot be connected, including with --allow-held')
+            raise argparse.ArgumentTypeError('credential/key suffixes cannot be connected')
         if suffix not in result:
             result.append(suffix)
     return tuple(result)
@@ -296,15 +295,14 @@ def _record_written(path: Path, cache_dir: Path = None) -> None:
 
 # One pattern source shared with Node (src/secret-scan.ts): secret_patterns.json.
 # Token shapes are adapted from gitleaks' default rules; "1Password" (the app) is not
-# a password (digit lookbehind). GENERIC keywords start a word and their tail is capped.
+# a password (digit lookbehind); a keyword holds only a literal value, never a placeholder or a call ({PH}). GENERIC keywords start a word and their tail is capped.
 _PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").read_text())
 CARD_RE = re.compile(_PAT["card"], re.A)
 CARD_IIN_RE = re.compile(_PAT["card_iin"], re.A)
 AMEX_RE = re.compile(_PAT["amex"], re.A)
-WORD_RE = re.compile(_PAT["word"], re.I | re.A)
+WORD_RE = re.compile(_PAT["word"].replace("{PH}", _PAT["placeholder"]).replace("{STOP}", _PAT["stop"]), re.I | re.A)
 TOKEN_RE = re.compile(_PAT["token"], re.I | re.A)
 GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
-SECRET_RE = re.compile(f"{CARD_RE.pattern}|{WORD_RE.pattern}|{TOKEN_RE.pattern}", re.I | re.A)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
 # line). Both are scrubbed out before the card check only; the keyword rule below
@@ -842,13 +840,11 @@ def walk_md(root: Path, no_recurse: bool = False, extensions=CONNECTABLE_EXTENSI
     return sorted(out), linked
 
 
-def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allow_held: bool = False,
+def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
               names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS,
               approvals: dict = None, approved_out: dict = None):
     """Union of selected text suffixes under `roots`, in root order then sorted-per-root order. Each file is counted once
-    even if reachable through more than one root. --allow-held admits a file the secret scan would otherwise
-    hold (still listed in `held`, with its reason noting the override); the size-ceiling hold is unaffected,
-    since an oversized file cannot be gated regardless. `approvals` ({path: sha256}, from --approve-held)
+    even if reachable through more than one root. `approvals` ({path: sha256}, from --approve-held)
     lifts a size hold (up to APPROVE_MAX_BYTES) only while the file's bytes hash to the reviewed sha256;
     a secret-like file stays held with SECRET_NOT_APPROVABLE; each approval key used maps to the admitted path in `approved_out`.
     A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
@@ -921,19 +917,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False, allo
             if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                 held.append((str(p), "binary/control-character content, not text; skipped")); continue
             if has_secret(b.decode("utf-8", "replace")):
-                if allow_held:
-                    held.append((str(p), "card/password-like text; admitted by --allow-held"))
-                elif approved:
-                    held.append((str(p), f"card/password-like text; {SECRET_NOT_APPROVABLE}")); continue
-                else:
-                    held.append((str(p), f"card/password-like text; review before onboarding{note}")); continue
+                held.append((str(p), f"card/password-like text; {SECRET_NOT_APPROVABLE}")); continue
             if path_has_secret(p.name) or path_has_secret(rp.name):
-                if allow_held:
-                    held.append((str(p), "secret-keyword-like file name; admitted by --allow-held"))
-                elif approved:
-                    held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
-                else:
-                    held.append((str(p), f"secret-keyword-like file name; review before onboarding{note}")); continue
+                held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
             if admitted:
                 held.append((str(p), f"{'; '.join(admitted)}; admitted by --approve-held (sha256 {approved[:12]})"))
                 if approved_out is not None:
@@ -1370,15 +1356,14 @@ def replay_recipe(a) -> None:
     a.no_recurse = a.no_recurse or (not new_roots and bool(rep.get("noRecurse")))
     a.names = a.names or rep.get("names") or []
     a.allow_targets = a.allow_targets or rep.get("allowTargets") or []
-    # --allow-held is never replayed: it would admit NEW secret-looking files without review.
-    # --approve-held approvals are: each admits only the exact bytes a person reviewed (sha256).
+    # --approve-held approvals are replayed: each admits only the exact bytes a person reviewed (sha256).
     a.recorded_approvals = {e["path"]: e["sha256"] for e in rep.get("approvedHeld") or []
                             if isinstance(e, dict) and isinstance(e.get("path"), str)
                             and isinstance(e.get("sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", e["sha256"])}
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, part size {a.limit or 50}; --allow-held is never replayed, "
+          f"no-recurse {a.no_recurse}, part size {a.limit or 50}, "
           f"{len(a.recorded_approvals)} --approve-held file(s) replayed while unchanged)")
     # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
     # the whole (possibly grown) folder, so its recorded file list is the scope instead.
@@ -1560,9 +1545,6 @@ def main() -> int:
     ap.add_argument("--writer-command", metavar="COMMAND",
                     help="shell-style command for another writer; it receives the prompt on stdin and returns a JSON array on stdout. "
                          "Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted")
-    ap.add_argument("--allow-held", action="store_true",
-                    help="admit files the secret scan would hold (still listed in the held file, noting the override); "
-                         "the size-ceiling hold is unaffected")
     ap.add_argument("--approve-held", dest="approve_held", action="append", default=[], metavar="PATH",
                     help="admit this size-held file after a person reviewed it (repeatable), up to "
                          f"{APPROVE_MAX_BYTES:,} bytes; its sha256 is recorded and --refresh replays the approval only "
@@ -1664,7 +1646,7 @@ def main() -> int:
             print(f"  --approve-held {path}: no such file; nothing approved")
     used = {}
     walked_at = time.time()  # a growth snapshot counts as "since" only what the walk below could miss
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.allow_held, a.names, a.allow_targets, a.extensions,
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.names, a.allow_targets, a.extensions,
                             approvals, used)
     scope = getattr(a, "legacy_scope", None)
     if a.admit and scope is None:
@@ -1793,12 +1775,11 @@ def main() -> int:
         b = p.read_bytes()
         text = b.decode("utf-8", "replace")
         if has_secret(text) or path_has_secret(p.name) or path_has_secret(p.resolve().name):
-            # Secret-like text or name holds a file over the ceiling whole, even with --allow-held
-            # (which, as before, never lifts a size hold): no section of it is drafted or sent.
+            # Secret-like text or name holds a file over the ceiling whole: no section of it is drafted or sent.
             unsafe.add(str(p))
             held[:] = [(h, w) for h, w in held if h != str(p)] + [
                 (str(p), "card/password-like text or secret-keyword-like name in a file over the size ceiling; "
-                         "never connected in sections, even with --allow-held: review it, then remove or move the value")]
+                         "never connected in sections: remove or move the value")]
             write_held_txt(a.pointer, held)
             print(f"  HELD  {relstr(p, roots)}  (secret-like text or name; a file over the ceiling is never "
                   "connected in sections while it holds any)")
@@ -2024,13 +2005,10 @@ def main() -> int:
               f"      to include it: check the file says what it should, then run: {rerun}"
               + ("" if use_builtin else " --writer builtin"))
     for p, why in held:
-        if "admitted by --allow-held" in why or "admitted by --approve-held" in why:
+        if "admitted by --approve-held" in why:
             continue
         print(f"  HELD  {relstr(p, roots)}  ({why})")
-        if "review before onboarding" in why:
-            print(f"      to include it (and any other held secret-looking file) after checking it: "
-                  f"{rerun} --allow-held")
-        elif "binary" not in why:
+        if "binary" not in why:
             print(f"      then run: {rerun}")
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
