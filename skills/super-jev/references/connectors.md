@@ -1,8 +1,8 @@
 # Source connectors
 
-Known credential/key suffixes (`env`, `pem`, `key`, `p12`, `pfx`, `jks`, `kdbx`, `kdb`, `keystore`, `pkcs12`, `ppk`, `p8`) are never connected, including compound suffixes. Inventory also holds these names and symlink targets regardless of `--allow-held`; content scanning remains necessary for other files.
+Known credential/key suffixes (`env`, `pem`, `key`, `p12`, `pfx`, `jks`, `kdbx`, `kdb`, `keystore`, `pkcs12`, `ppk`, `p8`) are never connected, including compound suffixes. Inventory also holds these names and symlink targets; content scanning remains necessary for other files.
 
-Bulk inventory is Markdown only (`CONNECTABLE_EXTENSIONS = ('.md',)`); code and other text files are not supported. A pointer whose recipe recorded other suffixes cannot be refreshed: the refresh is refused. Binary/control-character and invalid UTF-8 files are held before the writer, even with `--allow-held`. A note up to 250,000 bytes connects whole; a bigger one is held "too big, split it". Roots are stored as given (made absolute, symlinks kept), so a release symlink refresh reads the current target. Old recipes that already stored a resolved release path cannot infer the intended link: re-run with the intended `--root` once.
+Bulk inventory is Markdown only (`CONNECTABLE_EXTENSIONS = ('.md',)`); code and other text files are not supported. A pointer whose recipe recorded other suffixes cannot be refreshed: the refresh is refused. Binary/control-character and invalid UTF-8 files are held before the writer. A note up to 250,000 bytes connects whole; a bigger one is held "too big, split it". Roots are stored as given (made absolute, symlinks kept), so a release symlink refresh reads the current target. Old recipes that already stored a resolved release path cannot infer the intended link: re-run with the intended `--root` once.
 
 Onboarding a new connector or refreshing one? Start at [`super-jev-connect/SKILL.md`](../../super-jev-connect/SKILL.md) — this page is the deep reference it links back to.
 
@@ -159,11 +159,9 @@ line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. It also holds a card after an order number, phone number or date
 in the same digit run (`order 1234 4111 1111 1111 1111`, checked with a
 card-network prefix as well as Luhn) and a 15-digit Amex number (`3782 822463
-10005`). `--allow-held` admits a file the secret scan alone would hold --
-it is still listed in the held file, noting the override -- as an explicit
-operator decision for one run (never replayed); it never lifts the size-ceiling hold.
-A file held for secret-like text or name, or with a
-credential/key suffix, is not connected: remove or move the value, then reconnect.
+10005`). A held file has no override flag: a secret hold and a size hold both stay held until the note is edited or split.
+A note over 250,000 bytes is held "too big, split it" (never connected in sections); a file held for secret-like text or name,
+or with a credential/key suffix, is not connected: remove or move the value, then reconnect.
 Every connect ends with `CONNECTED n, HELD m, FAILED k` and exits 0 only when m and k are 0 (1 if anything failed, 3 if anything was held).
 A backslash-escaped quote before a placeholder (`KEY=\"$(cat file)\"` inside a
 code string) counts as a plain quote, so it is not held; after an escaped quote

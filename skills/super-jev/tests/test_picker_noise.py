@@ -68,10 +68,12 @@ def test_word_search_fills_every_slot_after_skipping_routed_files(tmp_path, monk
     assert len(got) == ask.FALLBACK_FILES and top[0] not in got
 
 
-# 3. secret scan: a keyword followed by a pointer/placeholder word is prose; real keys still held
+# 3. secret scan: a keyword holds a file when a literal value follows: a digit or symbol in it, a quoted word, or a
+# single word of 4+ letters ending the line; a stop word, placeholder, call or identifier is prose.
 NOT_SECRET = ["PASSWORD: in other-file.md", "password: see vault", "passwd = none",
               "API_KEY: in together-ai-secret.md", "client_secret = none", "aws_secret_access_key: in vault",
-              "password: <your password>", "api_key: ${TOGETHER_KEY}", "passwd: n/a", "password: stored in keychain"]
+              "password: <your password>", "api_key: ${TOGETHER_KEY}", "passwd: n/a", "password: stored in keychain",
+              "api_key: x", "password: see below", "password: str = \"\""]
 # Built by concatenation at runtime, not as contiguous literals, so this fixture
 # file itself doesn't trip a static "no hardcoded secrets" scan while still
 # exercising has_secret() against realistic fake-key shapes.
@@ -81,8 +83,7 @@ SECRET = ["api_key" + ": " + "Zq8rTvLmWp4K", "API_KEY" + "=" + "sk-" + "a1B2" * 
           "api_key" + ': "' + "Qm9vYmFy" + "YmF6cXV4" + '"',
           "secret_key" + "=" + "abcdefghij", "client_secret" + ": " + "x#y",
           "aws_secret_access_key" + " = " + "wJalr" + "XUtnFEMIK7MDENG",
-          "passwd" + ": " + "hunter", "password" + ": " + "kelvin",
-          "api_key" + ": " + "x", "password" + ": " + "instance"]
+          "passwd" + ": " + "hunter", "password" + ": " + "kelvin", "password" + ": " + "instance"]
 
 
 @pytest.mark.parametrize("text", NOT_SECRET)

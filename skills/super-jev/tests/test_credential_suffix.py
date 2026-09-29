@@ -1,4 +1,4 @@
-"""Credential-suffix files are never connected, even with --allow-held. Offline."""
+"""Credential-suffix files are never connected. Offline."""
 import importlib.util
 from pathlib import Path
 
@@ -12,6 +12,6 @@ def test_credential_target_and_compound_name_held_even_with_override(tmp_path):
     target.write_text('an unrecognized credential encoding')
     (tmp_path / 'ordinary.md').symlink_to(target)
     (tmp_path / 'backup.key.md').write_text('another unrecognized encoding')
-    files, held = pb.inventory([tmp_path], allow_held=True)
+    files, held = pb.inventory([tmp_path])
     assert not files
     assert len(held) == 2 and all('cannot be overridden' in why for _, why in held)

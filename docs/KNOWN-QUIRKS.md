@@ -36,7 +36,7 @@ Each quirk: what you see, why it happens (if known), and the workaround.
 
 - **Symptom:** bulk prepare holds a file that contains no real secret.
 - **Cause:** the literal placeholder string trips the secret scan — a false positive.
-- **Workaround:** review the file, then admit it with `prepare_bulk.py --allow-held`.
+- **Workaround:** the rule holds only a literal value, so a placeholder, call or identifier is not held; if a real value is in the file, remove or move it. There is no override flag.
 
 ## 7. hooks.md withheld from rc.1
 

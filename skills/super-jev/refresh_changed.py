@@ -154,7 +154,7 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     roots = [Path(r) for r in report["roots"] if Path(r).is_dir()]
     walked_at = time.time()
     with contextlib.redirect_stdout(io.StringIO()):
-        files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"), False,
+        files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"),
                                 report.get("names"), report.get("allowTargets"))
     found = [str(p) for p in files + [h[0] for h in held]]
     if folders is not None:
