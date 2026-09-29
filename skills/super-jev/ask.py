@@ -213,7 +213,7 @@ def memory(req: dict) -> dict:
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
     # Not redacted/truncated: lookups.jsonl is the working index find_top
-    # read back by exact question, pointer and on-disk path (--approve, --answer).
+    # read back by exact question, pointer and on-disk path the save check (auto-save, --approve).
     entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
 
@@ -2865,14 +2865,49 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
             count = 0
     return count
 
+def answer_line(text: str, question: str) -> str:
+    """The line of the file to save as the answer: not a heading, and not a line that only
+    repeats the question's words. Needs a question word; then the most words the question
+    does not have (the answer adds new words), then most question words, then the earlier line."""
+    terms = query_terms(question)
+    asked = set(words(question))
+    best, best_key = "", None
+    for i, raw in enumerate(text.splitlines()):
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("---"):
+            continue
+        hits = term_hits(terms, line)
+        new = len(set(words(line)) - asked)
+        if hits == 0 or new == 0:
+            continue
+        key = (new, hits, -i)
+        if best_key is None or key > best_key:
+            best, best_key = line, key
+    return best
+
+def refused_before(sdir: Path, question: str, win: dict) -> bool:
+    """True when the save check already refused this file at these exact bytes for this question
+    (a changed file may try again), so the claim check is not paid for again."""
+    key, path = norm_q(question), sdir / "lookups.jsonl"
+    for line in (path.read_text().splitlines() if path.is_file() else []):
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if (rec.get("kind") == "autosave-refused" and norm_q(rec.get("question") or "") == key
+                and rec.get("path") == win["path"] and rec.get("sha") == win["sha"]):
+            return True
+    return False
+
 def autosave(principal: str, question: str, sdir: Path, win) -> None:
     """The one rule for saving a file: once it has won this question N times in a row, save it
     through save_answer (same secret scan, claim check and stale-file check as every save)."""
-    if not win or not auto_cache_on() or win_count(sdir, question, win) < save_after():
+    if (not win or not auto_cache_on() or win_count(sdir, question, win) < save_after()
+            or refused_before(sdir, question, win)):
         return
     key = norm_q(question)
     try:
-        answer = best_evidence_line(Path(win["path"]).read_text(errors="replace"), "", key)[:300]
+        answer = answer_line(Path(win["path"]).read_text(errors="replace"), key)[:300]
     except OSError:
         return
     if not answer:
@@ -2890,7 +2925,7 @@ def autosave(principal: str, question: str, sdir: Path, win) -> None:
               "returns it at once, no search (--miss removes it).")
     else:
         why = _LAST_WHY["why"] or "the save was refused"
-        log(sdir, "autosave-refused", question=key, path=win["path"], why=why)
+        log(sdir, "autosave-refused", question=key, path=win["path"], sha=win["sha"], why=why)
         print(f"not saved: {why}")
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:

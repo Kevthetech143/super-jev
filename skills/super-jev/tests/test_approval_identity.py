@@ -16,7 +16,7 @@ def test_explicit_approval_records_caller_and_replays_it(tmp_path, monkeypatch, 
 
 
 def test_existing_labels_are_preserved_and_missing_identity_is_unknown(tmp_path):
-    for who in ("human", "auto-check", "agent-pick+check"):
+    for who in ("human", "auto-check", "auto-save"):
         ask.record_approver(tmp_path, who, who)
         assert ask.approver(tmp_path, who)["approved_by"] == who
     assert ask.approver(tmp_path, "no recorded identity")["approved_by"] == "unknown (legacy)"
