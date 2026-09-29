@@ -185,7 +185,7 @@ def test_summary_names_held_file_why_and_command(env, monkeypatch, capsys):
     monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": True})
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--root", str(root), "--pointer", "x",
                                       "--principal", "me", "--writer", "builtin", "--no-findability"])
-    assert pb.main() == 0
+    assert pb.main() == 3  # connected, one file held
     summary = capsys.readouterr().out.split("approved:")[1]
     assert "HELD  keys.md  (card/password-like text" in summary
     assert f"prepare_bulk.py --root {root} --pointer x --principal me --writer builtin --no-findability" in summary

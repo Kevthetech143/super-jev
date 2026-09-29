@@ -2,8 +2,7 @@
 """The secret-scan promise: hold only real secret values. A known token shape, a Luhn card, or a
 password/key keyword followed by a literal value (a digit or symbol in it, not a placeholder or a
 call) is held; an identifier, attribute, call, '...', placeholder or 'moved to' note is not.
-One placeholder list serves every keyword rule. A held file is released only by a per-file,
-sha256-pinned --approve-held review; there is no blanket flag. Offline; no provider calls.
+One placeholder list serves every keyword rule. A held file has no override flag at all. Offline; no provider calls.
 Secret-shaped values are built by concatenation so this file never holds one.
 
     python3 -m pytest skills/super-jev/tests/test_secret_rule.py -q
@@ -97,12 +96,12 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setattr(pb, "gate", lambda *a, **k: pytest.fail("builtin writer needs no judge"))
     root = tmp_path / "r"
     root.mkdir()
-    (root / "ok.py").write_text("def add(a, b):\n    return a + b\n")
+    (root / "ok.md").write_text("# Add\n\nAdding two numbers.\n")
 
     def go(*extra, refresh=False):
         base = ["prepare_bulk.py", "--pointer", "code", "--principal", "reader", "--writer", "builtin",
                 "--no-connect"]
-        base += ["--refresh"] if refresh else ["--root", str(root), "--ext", "py"]
+        base += ["--refresh"] if refresh else ["--root", str(root)]
         monkeypatch.setattr(sys, "argv", base + list(extra))
         code = pb.main()
         rep_path = tmp_path / "cache" / "code-report.json"
@@ -111,30 +110,22 @@ def run(tmp_path, monkeypatch):
     return go
 
 
-def test_allow_held_flag_is_gone(run):
-    (run.root / "fixture.py").write_text(SECRETISH)
+@pytest.mark.parametrize("flag", ["--allow-held", "--approve-held"])
+def test_no_override_flag_exists(run, flag):
+    (run.root / "fixture.md").write_text(SECRETISH)
     with pytest.raises(SystemExit) as e:
-        run("--allow-held")
+        run(flag, str(run.root / "fixture.md")) if flag == "--approve-held" else run(flag)
     assert e.value.code == 2
-    assert "--allow-held" not in pb.__doc__ and "--allow-held" not in (SKILL / "ask.py").read_text()
-
-
-@pytest.mark.parametrize("name, text", [("fixture.py", SECRETISH), ("password-hunter2xyz.py", "x = 1\n")])
-def test_secret_hold_is_never_approvable(run, capsys, name, text):
-    f = run.root / name
-    f.write_text(text)
-    code, rep = run("--approve-held", str(f))
-    out = capsys.readouterr().out
-    assert code == 2 and rep is None and PW not in out
-    assert "Remove or move the value, then reconnect." in out
+    assert flag not in pb.__doc__ and flag not in (SKILL / "ask.py").read_text()
 
 
 def test_secret_held_file_never_drops_the_clean_files(run, capsys):
-    f = run.root / "fixture.py"
+    f = run.root / "fixture.md"
     f.write_text(SECRETISH)
     code, rep = run()
     out = capsys.readouterr().out
-    assert code == 0 and str(f) not in rep["approved"] and str(run.root / "ok.py") in rep["approved"]
+    assert code == 3 and str(f) not in rep["approved"] and str(run.root / "ok.md") in rep["approved"]
     assert "--approve-held" not in out and "--allow-held" not in out and PW not in out
+    assert out.strip().splitlines()[-1].startswith("CONNECTED 0, HELD 1, FAILED 0")
     why = dict(rep["held"])[str(f)]
     assert "Remove or move the value" in why

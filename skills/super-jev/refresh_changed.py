@@ -130,7 +130,7 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     # else marks the pointer stale; they stay new for a few refreshes, until a connect succeeds.
     retry = [p for p in report.get("unconnectedNew") or [] if os.path.isfile(p)
              and (report.get("unconnectedTries") or 1) < UNCONNECTED_TRIES]
-    extensions = tuple(report.get("extensions") or CONNECTABLE_EXTENSIONS)
+    extensions = tuple(CONNECTABLE_EXTENSIONS)
     # A vault folder (documents/, profile/ ...) never takes in new files on its own, so it is never
     # listed or walked for them: a root inside one (documents/<person>/medical, a recipe or a pinned
     # report alike) has nothing new here; a person refreshes it by hand.
@@ -155,7 +155,7 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     walked_at = time.time()
     with contextlib.redirect_stdout(io.StringIO()):
         files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"),
-                                report.get("names"), report.get("allowTargets"), extensions)
+                                report.get("names"), report.get("allowTargets"))
     found = [str(p) for p in files + [h[0] for h in held]]
     if folders is not None:
         others = _others(report, _reports(reports))
@@ -263,8 +263,8 @@ def main(argv=None) -> int:
             continue
         r = subprocess.run([sys.executable, str(HERE / "prepare_bulk.py"), *args], cwd=HERE,
                            capture_output=True, text=True)
-        lines.append(f"{'OK   ' if r.returncode == 0 else 'FAIL '} {name}: prepare_bulk exit {r.returncode}")
-        if r.returncode:
+        lines.append(f"{'OK   ' if r.returncode in (0, 3) else 'FAIL '} {name}: prepare_bulk exit {r.returncode}")
+        if r.returncode not in (0, 3):  # 3 = connected, some files held: refreshed
             failed += 1
             lines += [f"      {ln}" for ln in ((getattr(r, "stdout", "") or "") + (getattr(r, "stderr", "") or "")).splitlines()[-5:]]
 

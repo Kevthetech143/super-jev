@@ -56,6 +56,13 @@ def _setup(tmp_path, monkeypatch, names=("moving",), changed=True, principal="ag
     return calls, cache_dir, Proc
 
 
+def test_a_reconnect_that_held_some_files_is_a_success(tmp_path, monkeypatch):
+    # prepare_bulk exits 3 = connected, some files held (no override): the pointer itself was refreshed.
+    calls, cache_dir, proc = _setup(tmp_path, monkeypatch, changed=False)
+    proc.code = 3
+    assert ah.reconnect_now("moving", "agent", cache_dir=cache_dir) == "reconnected"
+
+
 # 1. cooldown on any attempt
 def test_a_failed_reconnect_now_starts_the_cooldown(tmp_path, monkeypatch):
     calls, cache_dir, _ = _setup(tmp_path, monkeypatch, changed=False)
