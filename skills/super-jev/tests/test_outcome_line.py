@@ -226,3 +226,14 @@ def test_a_200kb_note_is_found_by_a_passage_near_its_end(tmp_path, monkeypatch):
     assert err is None and score == 0.93
     assert any(needle in leaf["description"] for call in sent for leaf in call["catalog"]["nodes"][1:])
     assert needle in ask.best_passage(str(f))
+
+
+def test_outcome_file_count_is_ranked_files_only_skills_on_their_own_label(tmp_path, monkeypatch):
+    """Frozen 2026-09-29: the OUTCOME file count is the ranked files only; skill suggestions never add to it."""
+    _setup(tmp_path, monkeypatch, ["notes"], _cands, {OK: 0.95})
+    monkeypatch.setenv("SUPERJEV_SKILLS", "1")
+    monkeypatch.setattr(ask, "skill_catalog", lambda q: [("a", "/s/a/SKILL.md"), ("b", "/s/b/SKILL.md")])
+    rc, lines = _ask(tmp_path, "skill search step by step")
+    assert rc == 0
+    assert lines[0].startswith("OUTCOME: found - 1 file; 2 skill suggestions"), lines[0]
+    assert len(_outcomes(lines)) == 1
