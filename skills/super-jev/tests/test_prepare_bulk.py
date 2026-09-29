@@ -1223,23 +1223,6 @@ def test_a_note_written_during_the_first_walk_still_counts_as_new(tmp_path, monk
     assert pb.growth({str(root / "f0.md")}, [root / "mid-walk.md"], snap, set()) == [str(root / "mid-walk.md")]
 
 
-def test_a_fallback_principal_is_never_recorded(tmp_path, monkeypatch, capsys):
-    # Review of PR #239: the asking agent stands in only for a new-file refresh; recorded, it would
-    # let every later changed file auto-heal the old no-principal pointer (writer run, answers rotated).
-    root = _big_root(tmp_path, 1)
-    cache_dir = tmp_path / "cache"
-    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
-    _seed_cache(root, cache_dir, 1)
-    (cache_dir / "my-records-report.json").write_text(json.dumps(
-        {"pointer": "my-records", "roots": [str(root)], "approved": [str(root / "f0.md")]}))
-    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "amazon",
-                                      "--refresh", "--no-connect", "--no-findability", "--asker-fallback"])
-    assert pb.main() == 0
-    capsys.readouterr()
-    report = json.loads((cache_dir / "my-records-report.json").read_text())
-    assert "principal" not in report and "principals" not in report
-
-
 def test_growth_sees_a_folder_shared_through_a_symlink(tmp_path):
     # Review 2026-09-28: "team" pinned the folder through a link, "private" through its real path.
     real = tmp_path / "real"; real.mkdir()
@@ -1374,19 +1357,6 @@ def test_secret_looking_filename_is_held_even_with_clean_content(tmp_path):
     assert "secret-keyword-like file name" in held_by_name["password-hunter2xyz-notes.md"]
 
 
-def test_secret_looking_filename_admitted_by_approve_held(tmp_path):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "api_key_prod789-dump.md").write_text("# Notes\nNothing secret in here.\n")
-
-    f = root / "api_key_prod789-dump.md"
-    files, held = pb.inventory([root], approvals={str(f): hashlib.sha256(f.read_bytes()).hexdigest()})
-
-    assert {p.name for p in files} == {"api_key_prod789-dump.md"}
-    held_by_name = {Path(p).name: why for p, why in held}
-    assert "admitted by --approve-held" in held_by_name["api_key_prod789-dump.md"]
-
-
 def test_normal_filename_not_held(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -1396,43 +1366,6 @@ def test_normal_filename_not_held(tmp_path):
 
     assert {p.name for p in files} == {"tokenizer-notes.md"}
     assert held == []
-
-
-def test_approve_held_admits_only_the_named_secret_file(tmp_path):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
-
-    (root / "pw2.md").write_text("# Creds\nthe password for the router is hunter3\n")
-    f = root / "pw.md"
-    files, held = pb.inventory([root], approvals={str(f): hashlib.sha256(f.read_bytes()).hexdigest()})
-
-    assert {p.name for p in files} == {"pw.md"}
-    held_by_name = {Path(p).name: why for p, why in held}
-    assert "admitted by --approve-held" in held_by_name["pw.md"]
-    assert "review before onboarding" in held_by_name["pw2.md"]
-
-
-def test_approve_held_flag_end_to_end_admits_file_into_connect_set(tmp_path, monkeypatch, capsys):
-    root = tmp_path / "root"
-    root.mkdir()
-    f = root / "pw.md"
-    f.write_text("# Creds\nthe password for the router is hunter2\n")
-
-    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
-        str(f): {"path": str(f), "description": "Router credentials note.", "question": "What is the router password?"}
-    })
-    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
-
-    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--approve-held", str(f), "--no-connect"]))
-    rc = pb.main()
-
-    assert rc == 0
-    report = json.loads((pb.CACHE_DIR / "my-records-report.json").read_text())
-    assert report["approved"] == [str(f)]
-    held_names = {Path(p).name for p, _why in report["held"]}
-    assert held_names == {"pw.md"}
 
 
 def test_writer_banner_shows_default_and_recommends_cheap_model(tmp_path, monkeypatch, capsys):

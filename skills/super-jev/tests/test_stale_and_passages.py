@@ -168,7 +168,7 @@ def test_rel_floor_is_measured_after_routed_files_are_skipped(tmp_path, monkeypa
     assert [p for _, p, _ in found] == [str(mid)]
 
 
-def test_a_failed_reconnect_sets_no_cooldown(tmp_path, monkeypatch):
+def test_a_failed_reconnect_sets_the_cooldown(tmp_path, monkeypatch):
     cache_dir, _ = _heal_setup(tmp_path, monkeypatch)
 
     class Fail:
@@ -179,4 +179,4 @@ def test_a_failed_reconnect_sets_no_cooldown(tmp_path, monkeypatch):
             return 1
     monkeypatch.setattr(ah.subprocess, "Popen", Fail)
     assert ah.reconnect_now("brain", "hf", cache_dir=cache_dir) == "failed"
-    assert "brain" not in ah._load_state("hf")["pointers"]
+    assert "brain" in ah._load_state("hf")["pointers"]

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -eu
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The only place skill roots are chosen: Claude seats search ~/.claude/skills, others use roots.json.
 HAS_ROOTS=0
 for arg in "$@"; do
   case "$arg" in --config|--roots-file) HAS_ROOTS=1;; esac
 done
 if [ "$HAS_ROOTS" -eq 0 ]; then
-  case "${SKILL_SEARCH_AI_MODEL:-}" in claude-*) set -- "$@" --config "$DIR/roots-claude.json";; esac
+  case "${CLAW4MAC_AI_MODEL:-${SKILL_SEARCH_AI_MODEL:-}}" in claude-*) set -- "$@" --config "$DIR/roots-claude.json";; esac
 fi
 for arg in "$@"; do
   if [ "$arg" = "--local-only" ]; then exec bash "$DIR/launcher.sh" "$@"; fi

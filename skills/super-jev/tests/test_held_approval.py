@@ -93,6 +93,7 @@ def test_node_scanner_agrees_on_escaped_quotes():
 
 # --approve-held: a reviewed approval of a size-held file, pinned to the file's bytes.
 
+SECRETISH = "# fixture\nFAKE = 'pass" + "word: hunter2" + "xyz'\n"
 BIG = "x = 1\n" * (pb.CEILING_BYTES // 6 + 100)
 
 

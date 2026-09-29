@@ -173,7 +173,7 @@ def test_an_older_runtime_without_last_good_still_reports_the_stale_set(tmp_path
     monkeypatch.setattr(ask, "memory", lambda req: real({k: v for k, v in req.items() if k != "lastGood"}))
     ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
     out = capsys.readouterr().out
-    assert "[notes] preparation-required" in out and "unresolved: 1 of 1" in out
+    assert "[notes] preparation-required" in out and out.startswith("OUTCOME: needs-setup")
 
 
 def test_a_refresh_landing_mid_routing_is_asked_again_not_an_error(tmp_path, monkeypatch, capsys):

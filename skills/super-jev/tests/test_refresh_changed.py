@@ -51,16 +51,16 @@ def test_only_the_changed_pointer_is_refreshed_with_its_recorded_args(tmp_path, 
 
 def test_dry_run_and_skip_never_run_prepare(tmp_path, monkeypatch, capsys):
     calls = _setup(tmp_path, monkeypatch)
-    assert rc.main(["--dry-run"]) == 0
+    assert rc.main(["--dry-run"]) == 3  # verdict: stale
     assert calls == [] and "STALE moving" in capsys.readouterr().out
     assert rc.main(["--skip", "moving"]) == 0
     assert calls == []
 
 
-def test_report_without_principal_is_skipped_not_guessed(tmp_path, monkeypatch, capsys):
+def test_report_without_principal_needs_setup_not_guessed(tmp_path, monkeypatch, capsys):
     calls = _setup(tmp_path, monkeypatch, principal=None)
-    assert rc.main([]) == 0
-    assert calls == [] and "SKIP  moving" in capsys.readouterr().out
+    assert rc.main([]) == 2
+    assert calls == [] and "NEEDS-SETUP moving" in capsys.readouterr().out
 
 
 def test_multi_principal_pointer_repeats_every_principal_on_refresh(tmp_path, monkeypatch):
@@ -91,17 +91,17 @@ def test_cache_with_no_report_is_listed_needs_manual_prepare_not_skipped_silentl
     (cache_dir / "orphan.json").write_text(json.dumps({"/some/file.md": {"sha256": "x", "pass": True}}))
     calls = []
     monkeypatch.setattr(rc.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or type("R", (), {"returncode": 0})())
-    assert rc.main([]) == 0
+    assert rc.main([]) == 2
     assert calls == []
     out = capsys.readouterr().out
-    assert "NEEDS MANUAL PREPARE" in out and "orphan" in out
+    assert "NEEDS-SETUP orphan" in out
 
 
 def test_a_file_added_to_a_connected_folder_refreshes_its_pointer(tmp_path, monkeypatch, capsys):
     calls = _setup(tmp_path, monkeypatch)
     (tmp_path / "brain" / "moving.md").write_text("# moving\n")  # undo the change: only the new file is left
     (tmp_path / "brain" / "added.md").write_text("# added after connect\n")
-    assert rc.main(["--dry-run"]) == 0
+    assert rc.main(["--dry-run"]) == 3
     out = capsys.readouterr().out
     # Both pointers share the root, so both pick up the new in-scope file; neither re-claims the other's.
     assert "STALE moving: 0 changed, 1 new (added.md)" in out and "STALE steady: 0 changed, 1 new (added.md)" in out
@@ -138,7 +138,7 @@ def test_legacy_report_picks_up_a_file_created_after_its_growth_snapshot(tmp_pat
     assert snap["present"] == []
     time.sleep(0.02)
     (tmp_path / "brain" / "added.md").write_text("# added\n")
-    assert rc.main(["--dry-run"]) == 0
+    assert rc.main(["--dry-run"]) == 3
     assert "STALE moving: 0 changed, 1 new (added.md)" in capsys.readouterr().out and calls == []
 
 
@@ -201,14 +201,6 @@ def test_a_folder_two_pointers_pin_never_grows(tmp_path, monkeypatch, capsys):
     (tmp_path / "brain" / "added.md").write_text("# added\n")
     assert rc.main([]) == 0
     assert calls == [] and "STALE" not in capsys.readouterr().out  # their principals may differ
-
-
-def test_prepare_args_names_the_asking_agent_only_as_an_unrecorded_fallback():
-    rep = {"pointer": "p", "roots": ["/r"]}
-    assert rc.prepare_args(rep) is None
-    assert rc.prepare_args(rep, "amazon")[-4:] == ["--principal", "amazon", "--refresh", "--asker-fallback"]
-    rep["principals"] = ["owner"]
-    assert "amazon" not in rc.prepare_args(rep, "amazon") and "--asker-fallback" not in rc.prepare_args(rep, "amazon")
 
 
 def test_an_auto_rebuilt_index_never_counts_as_new(tmp_path, monkeypatch, capsys):

@@ -36,6 +36,9 @@ HELD = [
     "sk" + "_live_9fQ2xZ7pL0aB3cD8eF", "gh" + "p_" + "a1" * 18, "AK" + "IA1234567890ABCDEF",
     "8" * 9 + ":AA" + "Zx9Qp2Lm8" * 4, "-----BEGIN RSA PRIV" + "ATE KEY-----", "4111 1111 " + "1111 1111",
     "Authorization: Basic " + "dXNlcjpwYXNzd29yZA==",
+    # Letters-only values: a quoted one, or a single word of 4+ letters ending the line.
+    "password: kelvin", 'password = "hunter"', "Password: Sunshine", "api_key: abcdefgh\nnext line",
+    "passwd = 'x'", "password: Pass(w0rd", "api_key=get_key2(\"abc\"",
 ]
 # The false holds named in the audit (ordinary code, pointers, placeholders) and their kin.
 NOT_HELD = [
@@ -47,6 +50,10 @@ NOT_HELD = [
     'export TYPESAFE_API_KEY="$(cat ~/.key)"', "access_token = get_token()", "auth_token = self.token",
     "client_secret: <your secret>", "secret_key=os.environ.get('K')", "aws_secret_access_key=$(cat creds)",
     "1password: " + "abc123", "password", "the api key is yours",
+    # The short stop list, and letters-only words that do not end the line.
+    "password: see below", "password: none", "api_key = todo", 'password = "example"', "password: here",
+    "password: kelvin is set in vault", "password: (moved to logins.md)", "password: Pass(w0rd)",
+    "api_key=get_key2(\"abc\")", 'password = "true"', "password: abc",
 ]
 
 
@@ -78,13 +85,9 @@ def test_node_scanner_agrees():
     assert json.loads(out.stdout) == [True] * len(HELD) + [False] * len(NOT_HELD)
 
 
-# Per-file, sha256-pinned approval replaces the blanket flag.
+# A secret hold is never approvable and there is no blanket flag: the fix is the rule, or removing the value.
 
 SECRETISH = "# fixture\nmode = 'pass" + "word: " + PW + "'\n"
-
-
-def _sha(p):
-    return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
 @pytest.fixture
@@ -108,7 +111,7 @@ def run(tmp_path, monkeypatch):
     return go
 
 
-def test_allow_held_flag_is_gone(run, capsys):
+def test_allow_held_flag_is_gone(run):
     (run.root / "fixture.py").write_text(SECRETISH)
     with pytest.raises(SystemExit) as e:
         run("--allow-held")
@@ -116,45 +119,22 @@ def test_allow_held_flag_is_gone(run, capsys):
     assert "--allow-held" not in pb.__doc__ and "--allow-held" not in (SKILL / "ask.py").read_text()
 
 
-def test_secret_held_file_stays_held_until_approved_by_name(run, capsys):
-    f, other = run.root / "fixture.py", run.root / "other.py"
-    f.write_text(SECRETISH)
-    other.write_text(SECRETISH + "# second\n")
-    code, rep = run()
-    assert str(f) not in rep["approved"] and str(other) not in rep["approved"]
-    out = capsys.readouterr().out
-    assert "--approve-held" in out and PW not in out
+@pytest.mark.parametrize("name, text", [("fixture.py", SECRETISH), ("password-hunter2xyz.py", "x = 1\n")])
+def test_secret_hold_is_never_approvable(run, capsys, name, text):
+    f = run.root / name
+    f.write_text(text)
     code, rep = run("--approve-held", str(f))
-    assert code == 0 and str(f) in rep["approved"] and str(other) not in rep["approved"]
-    assert rep["approvedHeld"] == [{"path": str(f), "sha256": _sha(f)}]
-    assert PW not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert code == 2 and rep is None and PW not in out
+    assert "Remove or move the value, then reconnect." in out
 
 
-def test_approval_is_pinned_to_the_reviewed_bytes(run):
+def test_secret_held_file_never_drops_the_clean_files(run, capsys):
     f = run.root / "fixture.py"
     f.write_text(SECRETISH)
-    run("--approve-held", str(f))
-    code, rep = run(refresh=True)
-    assert str(f) in rep["approved"]  # same bytes: the approval replays
-    f.write_text(SECRETISH + "# edited after review\n")
-    code, rep = run(refresh=True)
-    assert str(f) not in rep["approved"]
-    assert "changed since its --approve-held review" in dict(rep["held"])[str(f)]
-
-
-def test_secret_name_can_be_approved_but_credential_suffix_never(run):
-    named = run.root / "password-notes.py"
-    named.write_text("x = 1\n")
-    code, rep = run("--approve-held", str(named))
-    assert code == 0 and str(named) in rep["approved"]
-    pem = run.root / "deploy.pem"
-    pem.write_text("plain\n")
-    code, rep = run("--approve-held", str(pem))
-    assert code == 2
-
-
-def test_approved_secret_file_over_the_hard_cap_is_never_admitted_whole(run):
-    f = run.root / "huge.py"
-    f.write_text(SECRETISH + "x = 1\n" * (pb.APPROVE_MAX_BYTES // 6 + 10))
-    code, rep = run("--approve-held", str(f))
-    assert str(f) not in rep["approved"] and not rep.get("approvedHeld")
+    code, rep = run()
+    out = capsys.readouterr().out
+    assert code == 0 and str(f) not in rep["approved"] and str(run.root / "ok.py") in rep["approved"]
+    assert "--approve-held" not in out and "--allow-held" not in out and PW not in out
+    why = dict(rep["held"])[str(f)]
+    assert "Remove or move the value" in why

@@ -68,21 +68,22 @@ def test_word_search_fills_every_slot_after_skipping_routed_files(tmp_path, monk
     assert len(got) == ask.FALLBACK_FILES and top[0] not in got
 
 
-# 3. secret scan: a keyword holds a file only when a literal value (a digit or symbol in it) follows and it is
-# not a placeholder or a call. A pointer word, placeholder, plain word or identifier is prose; real keys still held.
+# 3. secret scan: a keyword holds a file when a literal value follows: a digit or symbol in it, a quoted word, or a
+# single word of 4+ letters ending the line; a stop word, placeholder, call or identifier is prose.
 NOT_SECRET = ["PASSWORD: in other-file.md", "password: see vault", "passwd = none",
               "API_KEY: in together-ai-secret.md", "client_secret = none", "aws_secret_access_key: in vault",
               "password: <your password>", "api_key: ${TOGETHER_KEY}", "passwd: n/a", "password: stored in keychain",
-              "passwd: hunter", "password: kelvin", "api_key: x", "password: instance"]
+              "api_key: x", "password: see below", "password: str = \"\""]
 # Built by concatenation at runtime, not as contiguous literals, so this fixture
 # file itself doesn't trip a static "no hardcoded secrets" scan while still
 # exercising has_secret() against realistic fake-key shapes.
 SECRET = ["api_key" + ": " + "Zq8rTvLmWp4K", "API_KEY" + "=" + "sk-" + "a1B2" * 9,
           "password" + ": " + "hunter2",
-          "password" + " = " + "correcthorse" + "battery9", "passwd" + ": " + "x#y",
+          "password" + " = " + "correcthorse" + "battery", "passwd" + ": " + "x#y",
           "api_key" + ': "' + "Qm9vYmFy" + "YmF6cXV4" + '"',
-          "secret_key" + "=" + "abcdefghij9", "client_secret" + ": " + "x#y",
-          "aws_secret_access_key" + " = " + "wJalr" + "XUtnFEMIK7MDENG"]
+          "secret_key" + "=" + "abcdefghij", "client_secret" + ": " + "x#y",
+          "aws_secret_access_key" + " = " + "wJalr" + "XUtnFEMIK7MDENG",
+          "passwd" + ": " + "hunter", "password" + ": " + "kelvin", "password" + ": " + "instance"]
 
 
 @pytest.mark.parametrize("text", NOT_SECRET)
