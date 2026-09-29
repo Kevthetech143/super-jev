@@ -64,7 +64,7 @@ def test_ask_refuses_a_secret_anywhere_in_the_request(monkeypatch, where):
         q["instructions"] += " " + PW
     else:
         q["criteria"]["YES"] += " " + PW
-    with pytest.raises(jc.JevError, match="contains a secret; not sent"):
+    with pytest.raises(jc.SecretBlocked, match="contains a secret; not sent"):
         jc.ask(state, {"c1": q})
 
 

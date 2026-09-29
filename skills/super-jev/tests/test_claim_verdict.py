@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ask  # noqa: E402
+import judges  # noqa: E402
 
 
 def _f(tmp_path, name, text, age_days=0):
@@ -119,7 +120,7 @@ def test_a_too_big_claim_call_retries_without_line_picks(tmp_path, monkeypatch):
     def fake(state, questions):
         calls.append(set(questions))
         if any(k.startswith("line_") for k in questions):
-            raise RuntimeError("evidence exceeds the 32,768-token ceiling")
+            raise judges.TooBig("evidence exceeds the 32,768-token ceiling")
         return {"answers": {"pick": {"choice": "file_1", "probabilities": {"file_1": 0.95}},
                             "verdict_1": {"choice": "supported", "probabilities": {"supported": 0.96}}}}
     monkeypatch.setattr(ask, "jev_choice", fake)
