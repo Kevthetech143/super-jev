@@ -449,3 +449,17 @@ def test_preflight_refuses_unless_every_pointer_is_explicitly_ready(tmp_path, en
     assert e.value.code == 2 and "no ask spent" in err
     assert (f"broken: {status}" if status in ("error", "unknown") else "not understood") in err
     assert _log(tmp_path) == []
+
+
+def test_ordinary_asks_that_exit_1_or_4_are_graded_and_2_or_3_are_errors(tmp_path, env, capsys):
+    qs = ("miss", "setup", "unsupported", "failed")
+    cases = _cases(tmp_path, [{"question": q, "gold": ["/a.md"]} for q in qs])
+    old = {q: {"final": TOP} for q in qs}
+    new = {"miss": {"final": [], "rc": 1}, "setup": {"final": [], "rc": 4},
+           "unsupported": {"final": [], "rc": 2}, "failed": {"final": [], "rc": 3}}
+    _run(tmp_path, cases, old, new)
+    rows = {r["question"]: r for r in json.loads(capsys.readouterr().out)["rows"]}
+    for q in ("miss", "setup"):
+        assert "error" not in rows[q]["new"], rows[q]
+    for q in ("unsupported", "failed"):
+        assert f"exit {new[q]['rc']}" in rows[q]["new"]["error"]
