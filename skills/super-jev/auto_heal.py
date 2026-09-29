@@ -127,9 +127,21 @@ def _wait_secs(state: dict, pointer: str, now: float, cooldown_secs: int = None)
 
 
 def _live_locks(principal: str, besides: str) -> int:
-    """Refreshes or reconnects running for this principal, not counting `besides`."""
+    """Refreshes or reconnects running for this principal, not counting `besides` or a lock a
+    drain holds while it only heals the queue (it marks it `drain`; a run of its own pointer
+    drops the mark, so that run counts once)."""
     mine = _lock_path(principal, besides)
-    return sum(1 for lock in STATE_DIR.glob(f"{principal}.*.lock") if lock != mine and _lock_holder_alive(lock))
+    n = 0
+    for lock in STATE_DIR.glob(f"{principal}.*.lock"):
+        if lock == mine:
+            continue
+        try:
+            if json.loads(lock.read_text()).get("drain"):
+                continue
+        except (OSError, ValueError):
+            pass
+        n += _lock_holder_alive(lock)
+    return n
 
 
 def _admit(principal: str, pointer: str, now: float, max_per_hour: int = None,
@@ -183,7 +195,9 @@ def _settle(principal: str, pointer: str, ok: bool, now: float = None) -> None:
 
 def _fingerprint(paths: list, recipe: dict = None) -> str:
     """What the files are now (size and mtime) and what recipe replays them: a held file is
-    retried only once this changes (a hand reconnect that re-records the recipe changes it)."""
+    retried only once this changes. A hand reconnect with the same request records the same
+    recipe, so it does not change this; the HELD_EXPIRE_SECS expiry is what covers a scan-rule
+    change with no edit to the files."""
     parts = [hashlib.sha256(json.dumps(recipe, sort_keys=True, default=str).encode()).hexdigest()[:16]]
     for path in sorted(paths):
         try:
@@ -449,14 +463,13 @@ def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
         cache = {}
     if rc.changed_files(report, cache):
         return "changed"
-    if _wait_secs(_load_state(principal), owner, time.time()) > 0:
+    token, why = _admit(principal, owner, time.time(), count=False)  # no writer call: no cap slot
+    if why == "cooldown":
         _log(principal=principal, pointer=owner, action="skip-reconnect", reason="cooldown")
         return "cooldown"
-    token = _acquire_lock(principal, owner)
-    if not token:
+    if why:  # this pointer is running, or the principal is at its bound
         _queue(principal, owner, "reconnect")
         return "in-progress"
-    _mark(principal, owner, time.time())  # the cooldown runs from the start; a failure shortens it (_settle)
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args, "--no-findability"]
     out_log = STATE_DIR / f"{principal}-{owner}-last-refresh.log"
     try:
@@ -727,7 +740,7 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
     `rc` is the exit code of the refresh this drain follows: it judges that attempt (_settle).
     Touches nothing if the lock is no longer this refresh's (token)."""
     tried = set()
-    if not _hold_lock(principal, pointer, token, pid=os.getpid()):
+    if not _hold_lock(principal, pointer, token, pid=os.getpid(), drain=True):
         return 0  # the lock is no longer this refresh's: touch nothing
     if rc is not None:
         _settle(principal, pointer, rc in (0, 3))
@@ -743,6 +756,8 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
             queued = todo[0][1]
             tried.add(queued)
             kind = pending[queued].get("kind")
+            if queued == pointer:  # its own pointer runs under this lock: a run, so it counts
+                _hold_lock(principal, pointer, token, drain=False)
             try:
                 if kind == "recipe":
                     result = reconnect_recipe(queued, principal, memory=memory)
@@ -750,6 +765,8 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
                     result = _drain_prepare(queued, principal, kind)
             except Exception:
                 result = "failed"
+            if queued == pointer:
+                _hold_lock(principal, pointer, token, drain=True)
             if result not in ("cooldown", "rate-limited", "in-progress"):
                 with _state_txn(principal) as state:
                     state["pending"].pop(queued, None)
