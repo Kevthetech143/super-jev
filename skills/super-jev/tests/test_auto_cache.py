@@ -60,7 +60,7 @@ def world(tmp_path, monkeypatch):
 
 
 def test_clean_saves_marked_auto_check(world, capsys):
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 0
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 0
     assert world["cache"]["alice"] == A
     rec = ask.approver(world["sdir"], Q)
     assert rec["approved_by"] == "auto-check"
@@ -71,7 +71,7 @@ def test_clean_saves_marked_auto_check(world, capsys):
 @pytest.mark.parametrize("verdict", ["READ", "REJECT", "ERROR"])
 def test_read_or_blocked_does_not_save(world, monkeypatch, capsys, verdict):
     monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: (verdict, 0.5))
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     assert f"not saved: check gate verdict {verdict}" in capsys.readouterr().out
 
@@ -79,7 +79,7 @@ def test_read_or_blocked_does_not_save(world, monkeypatch, capsys, verdict):
 def test_stale_file_does_not_save(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "run_gate", lambda *a: pytest.fail("gate must not run on a stale file"))
     world["note"].write_text("The car is red.\n")
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     assert "not saved: stale" in capsys.readouterr().out
 
@@ -87,14 +87,14 @@ def test_stale_file_does_not_save(world, monkeypatch, capsys):
 def test_secret_held_does_not_save(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "run_gate", lambda *a: pytest.fail("gate must not run on a secret"))
     monkeypatch.setattr(ask, "has_secret", lambda text: "blue" in text)
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     assert "not saved: secret-held" in capsys.readouterr().out
 
 
 def test_no_auto_saves_nothing(world, monkeypatch, capsys):
     monkeypatch.setenv("SUPERJEV_AUTO_CACHE", "0")
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 0
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 0
     assert not world["cache"]
     assert "auto-cache is off" in capsys.readouterr().out
 
@@ -109,7 +109,7 @@ def test_uncitable_file_does_not_save(world, monkeypatch, capsys):
         return orig_memory(req)
 
     monkeypatch.setattr(ask, "memory", mismatched_memory)
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     out = capsys.readouterr().out
     assert "not saved" in out and "could be cited" in out
@@ -117,7 +117,7 @@ def test_uncitable_file_does_not_save(world, monkeypatch, capsys):
 
 def test_low_gate_score_does_not_save(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.79))
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     assert "not saved: check gate score 0.79 is below the 0.80 auto-save floor" in capsys.readouterr().out
 
@@ -132,7 +132,7 @@ def test_find_top_skips_malformed_lines(tmp_path):
 
 
 def test_miss_removes_saved_answer(world, capsys):
-    ask.auto_approve("alice", Q, A, world["sdir"])
+    ask.save_answer("alice", Q, A, world["sdir"])
     assert ask.miss("alice", Q, "it was in the garage log", world["sdir"]) == 0
     assert not world["cache"]
     assert "un-saved" in capsys.readouterr().out and "auto-check" in (world["sdir"] / "approvals.jsonl").read_text()
@@ -140,7 +140,7 @@ def test_miss_removes_saved_answer(world, capsys):
 
 
 def test_hit_shows_approver_auto_and_human(world, capsys):
-    ask.auto_approve("alice", Q, A, world["sdir"])
+    ask.save_answer("alice", Q, A, world["sdir"])
     capsys.readouterr()
     assert ask.lookup(Q, "alice", world["sdir"]) == 0
     assert "approved_by: auto-check" in capsys.readouterr().out
@@ -187,7 +187,7 @@ def test_file_ask_ranked_saves_even_when_search_would_not_match(world, monkeypat
 
     monkeypatch.setattr(ask, "memory", no_search)
     monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: gated.update(p=passage) or ("CLEAN", 0.93))
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 0
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 0
     assert world["cache"]["alice"] == A
     assert gated["p"] == "The car is blue."  # the gate saw the passage that gets saved
     assert not any(c["action"] == "search" for c in world["calls"])
@@ -196,6 +196,6 @@ def test_file_ask_ranked_saves_even_when_search_would_not_match(world, monkeypat
 def test_passage_that_does_not_support_the_answer_is_refused(world, monkeypatch, capsys):
     monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None:
                         ("REJECT", 0.1) if passage else ("CLEAN", 0.93))
-    assert ask.auto_approve("alice", Q, A, world["sdir"]) == 1
+    assert ask.save_answer("alice", Q, A, world["sdir"]) == 1
     assert not world["cache"]
     assert "not saved: check gate verdict REJECT" in capsys.readouterr().out
