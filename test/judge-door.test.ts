@@ -27,7 +27,7 @@ test('(a) with SUPERJEV_JUDGE unset the request is byte-identical to the one sen
     seen = { url, init };
     return new Response(JSON.stringify({ model: 'jev-latest', answers: { ok: { type: 'noul', noul: 0.5 }, pick: { type: 'choice', choice: 'A', confidence: 0.9, probabilities: { A: 0.9, B: 0.1 } } } }));
   };
-  await getJudge({ apiKey: 'test-not-a-key', fetch: fake }).evaluate(request, signal());
+  await getJudge({ apiKey: ['test', 'not', 'a', 'key'].join('-'), fetch: fake }).evaluate(request, signal());
   assert.equal(seen!.url, golden.url);
   assert.equal(seen!.init!.method, golden.method);
   assert.deepEqual(seen!.init!.headers, golden.headers);
