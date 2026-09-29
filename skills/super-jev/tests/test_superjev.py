@@ -4914,7 +4914,7 @@ def test_cmd_gate_direct_check_never_truncates_over_cap(tmp_path, monkeypatch, c
 
 
 def test_cap_check_names_the_files_it_drops_and_cuts(monkeypatch, capsys):
-    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "10")  # 40 chars
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "20")  # 40 bytes
     items = [("old.md", "A" * 100), ("mid.md", "M" * 30), ("new.md", "B" * 20)]
     kept, truncated, _est, _cap = sj.cap_check_and_truncate(items, "", "gate")
     err = capsys.readouterr().err
@@ -7210,7 +7210,7 @@ def test_window_cap_drops_sections_lowest_priority_first(monkeypatch):
     # a time walks the order one section further down: whatever is next to
     # go pays the overflow out of its own head (shrunk) while everything
     # cheaper than the overflow above it is already gone (dropped).
-    text = _window_with_sections([4000, 4000], 4000, 4000, 4000, 4000)
+    text = _window_with_sections([1900, 1900], 1900, 1900, 1900, 1900)
     steps = [
         (5200, [], ["previous turn -2"]),
         (4200, ["previous turn -2"], ["previous turn -1"]),
@@ -7257,7 +7257,7 @@ def _contributed_block(size, tag="ARMTAG"):
     filled with a distinctive tag so a test can assert its content never
     survives a drop — a header check alone would miss a partial-cut leak
     that left the tag behind under a DIFFERENT (or no) header."""
-    n = max(size * 4 - len(_CONTRIBUTED_HEADER) - 1, 0)
+    n = max(size * 2 - len(_CONTRIBUTED_HEADER) - 1, 0)
     line = (tag + " ") * ((n // (len(tag) + 1)) + 1)
     return _CONTRIBUTED_HEADER + "\n" + line[:n]
 
@@ -7274,10 +7274,10 @@ def test_window_cap_drops_the_contributed_block_first_and_whole(monkeypatch):
     contributed = _CONTRIBUTED_HEADER + "\n" + "\n".join(
         f"> contributed claim line {i} from a check arm" for i in range(200))
     text = "\n\n===\n\n".join([receipts, current, contributed])
-    out, meta = sj.trim_window_to_token_budget(text, budget_tok=600)
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=1200)
     assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
     assert meta["shrunk"] == ["session receipts"]
-    assert meta["tok_after"] <= 600
+    assert meta["tok_after"] <= 1200
     assert _CONTRIBUTED_HEADER not in out
     assert "contributed claim line" not in out
     assert "[session receipts]" in out
@@ -7291,14 +7291,14 @@ def test_window_cap_drops_the_contributed_block_first_and_whole(monkeypatch):
 
 
 def test_window_cap_never_shrinks_the_contributed_block(monkeypatch):
-    # A budget so tight only 1 token separates "fits" from "does not" —
+    # A budget so tight only a few tokens separate "fits" from "does not" —
     # the contributed block must still go whole, never pay the overflow
     # out of its own head the way every other section is allowed to.
     receipts = "[session receipts]\n" + "receipt line\n" * 100
     current = "[current turn]\ncurrent turn text.\n"
     contributed = _contributed_block(200)
     text = "\n\n===\n\n".join([receipts, current, contributed])
-    budget = sj._estimate_tokens(text) - 1
+    budget = sj._judge_tokens(text) - 10
     out, meta = sj.trim_window_to_token_budget(text, budget_tok=budget)
     assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
     assert sj._WINDOW_KIND_CONTRIBUTED not in meta["shrunk"]
@@ -7331,7 +7331,7 @@ def test_window_cap_contributed_block_evicted_before_any_other_section(monkeypat
     current = "[current turn]\nc" * 100
     contributed = _contributed_block(1000)
     text = "\n\n===\n\n".join([prev, receipts, current, contributed])
-    out, meta = sj.trim_window_to_token_budget(text, budget_tok=sj._estimate_tokens(text) - 10)
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=sj._judge_tokens(text) - 10)
     assert meta["dropped"][0] == sj._WINDOW_KIND_CONTRIBUTED
     assert "ARMTAG" not in out
 
@@ -7341,8 +7341,8 @@ def test_window_cap_shrinks_a_section_before_dropping_it(monkeypatch):
     # evidence the budget never asked for, and missing evidence is how a
     # true reply gets flagged NOT_SUPPORTED. The oldest previous turn pays
     # the overflow out of its own head instead, and nothing else moves.
-    text = _window_with_sections([4000, 4000], 4000, 4000, 4000, 4000)
-    before = sj._estimate_tokens(text)
+    text = _window_with_sections([1900, 1900], 1900, 1900, 1900, 1900)
+    before = sj._judge_tokens(text)
     out, m = sj.trim_window_to_token_budget(text, budget_tok=before - 50)
     assert m["dropped"] == []
     assert m["shrunk"] == ["previous turn -2"]
@@ -7374,10 +7374,10 @@ def test_window_cap_holds_over_the_cited_file_block_appended_after_the_byte_cap(
     # cited-file block appended after the builder's 24 KB cap shipped over
     # cap. In tokens, one cap, enforced once, regardless.
     text = _window_with_sections([0], 0, 60_000, 0, 200, facts=False)
-    assert sj._estimate_tokens(text) > 8000
+    assert sj._judge_tokens(text) > 8000
     out, m = sj.trim_window_to_token_budget(text, budget_tok=8000)
     assert m["tok_after"] <= 8000
-    assert sj._estimate_tokens(out) <= 8000
+    assert sj._judge_tokens(out) <= 8000
 
 
 def test_window_cap_is_a_no_op_under_budget_and_when_disabled(monkeypatch):
@@ -7423,11 +7423,11 @@ def test_fact_window_lines_label_unchanged_by_receipt_turn_fix(monkeypatch):
 
 
 def test_window_cap_default_comes_from_the_env_knob(monkeypatch):
-    assert sj._gate_window_tok() == 8000
+    assert sj._gate_window_tok() == 16000
     monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "1200")
     assert sj._gate_window_tok() == 1200
     monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "not a number")
-    assert sj._gate_window_tok() == 8000
+    assert sj._gate_window_tok() == 16000
 
 
 def test_gate_window_is_capped_before_the_call(tmp_path, monkeypatch, capsys):
@@ -7450,7 +7450,7 @@ def test_gate_window_is_capped_before_the_call(tmp_path, monkeypatch, capsys):
     _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
     assert sj.main(["hook", "gate"]) == 0
     assert "evidence" in seen
-    assert sj._estimate_tokens(seen["evidence"]) <= 600
+    assert sj._judge_tokens(seen["evidence"]) <= 600
 
 
 def test_stop_event_spends_one_live_call_by_default(tmp_path, monkeypatch, capsys):
