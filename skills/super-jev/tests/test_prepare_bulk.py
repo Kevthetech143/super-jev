@@ -85,7 +85,6 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
     (root / "big.md").write_text("x" * 100)
 
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
-    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", 50)  # too big even to connect in sections
 
     files, held = pb.inventory([root])
 
@@ -988,7 +987,7 @@ def test_refresh_replays_recorded_no_recurse_and_excludes(tmp_path, monkeypatch,
                                       "--refresh", "--no-connect", "--no-findability"])
     rc = pb.main()
     out = capsys.readouterr().out
-    assert rc == 0, out
+    assert rc == 3, out  # nothing failed; the password file stays held
     assert "inventory: 2 files to prepare, 1 held" in out  # allow-held is never replayed
     report = json.loads((cache_dir / "my-records-report.json").read_text())
     assert report["noRecurse"] is True and report["excludes"] == ["INDEX.md"] and report["limit"] == 20
@@ -1052,7 +1051,7 @@ def test_refresh_of_legacy_report_admits_new_files_in_its_folders_with_every_che
     monkeypatch.setattr(pb, "gate_many", lambda path, claims, *a, **k: [{"state": "SUPPORTED", "confidence": 0.95, "secs": 0} for _ in claims], raising=False)
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
                                       "--refresh", "--no-connect", "--no-findability"])
-    assert pb.main() == 0
+    assert pb.main() == 3  # a held file is still listed as held
     out = capsys.readouterr().out
     assert "refresh: 2 new file(s) in already-connected folders join the pinned list" in out
     assert "inventory: 3 files to prepare, 1 held" in out
@@ -1189,7 +1188,7 @@ def test_admit_only_takes_a_file_the_inventory_admits(tmp_path, monkeypatch, cap
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
                                       "--refresh", "--no-connect", "--no-findability",
                                       "--admit", str(root / "pw.md"), "--admit", str(tmp_path / "elsewhere.md")])
-    assert pb.main() == 0
+    assert pb.main() == 3
     out = capsys.readouterr().out
     assert f"--admit {tmp_path / 'elsewhere.md'}: not a WAITING file" in out
     report = json.loads((cache_dir / "my-records-report.json").read_text())
@@ -1414,7 +1413,6 @@ def test_allow_held_does_not_lift_size_ceiling_hold(tmp_path, monkeypatch):
     root.mkdir()
     (root / "big.md").write_text("x" * 100)
     monkeypatch.setattr(pb, "CEILING_BYTES", 50)
-    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", 50)  # too big even to connect in sections
 
     files, held = pb.inventory([root], allow_held=True)
 
