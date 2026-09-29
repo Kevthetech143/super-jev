@@ -323,3 +323,35 @@ def test_a_lock_naming_a_pid_that_started_after_the_lock_is_a_reused_pid(tmp_pat
     # A live pid (this test) named by a lock written an hour before it started: not the holder.
     ah._lock_path("tester", "alpha").write_text(json.dumps({"pid": os.getpid(), "ts": ah._WALL() - 3600}))
     assert ah.maybe_heal("alpha", "tester") == "started"
+
+
+# Re-review of #267 (at 73d5293) --------------------------------------------------------------
+
+def test_a_drain_and_one_other_running_refresh_still_heal_the_queue(tmp_path, monkeypatch):
+    # The drain's own lock only heals the queue; counting it as a run left every queued pointer
+    # "busy" whenever one other refresh was running.
+    cache_dir, clock = _setup(tmp_path, monkeypatch, names=("alpha", "beta", "queued"), changed=True)
+    drain_token = ah._acquire_lock("tester", "alpha")  # alpha's refresh just ended
+    assert ah._acquire_lock("tester", "beta")  # another set's refresh is running
+    ah._queue("tester", "queued", "refresh")
+    ah.drain("tester", "alpha", drain_token, rc=0)
+    assert len(Proc.launched) == 1 and "queued" in Proc.launched[0]  # the refresh's own --pointer/--name
+    assert ah._load_state("tester")["pending"] == {}
+    assert ah._load_state("tester")["pointers"].get("queued")  # it ran
+
+
+def test_a_drain_running_its_own_pointer_counts_as_a_run(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch, names=("alpha", "beta"), changed=True)
+    token = ah._acquire_lock("tester", "alpha")
+    ah._hold_lock("tester", "alpha", token, drain=True)
+    assert ah._live_locks("tester", besides="beta") == 0  # a drain only healing the queue
+    ah._hold_lock("tester", "alpha", token, drain=False)
+    assert ah._live_locks("tester", besides="beta") == 1  # its own pointer is running
+
+
+def test_a_reconnect_over_the_concurrent_bound_queues_instead_of_running(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch, names=("alpha", "b1", "b2"))
+    assert ah._acquire_lock("tester", "b1") and ah._acquire_lock("tester", "b2")  # two running
+    assert ah.reconnect_now("alpha", "tester", cache_dir=cache_dir) == "in-progress"
+    assert Proc.launched == []
+    assert ah._load_state("tester")["pending"]["alpha"]["kind"] == "reconnect"
