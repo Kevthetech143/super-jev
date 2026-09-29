@@ -42,7 +42,7 @@ def _run(tmp_path, question, files, candidates, scores, caches=None):
     sdir.mkdir(parents=True, exist_ok=True)
     ask.lookup(question, "me", sdir)
     mp.undo()
-    rec = [json.loads(l) for l in (sdir / "lookups.jsonl").read_text().splitlines()][-1]
+    rec = [r for r in map(json.loads, (sdir / "lookups.jsonl").read_text().splitlines()) if r["kind"] == "lookup"][-1]
     return rec["top"], checked, navigated
 
 

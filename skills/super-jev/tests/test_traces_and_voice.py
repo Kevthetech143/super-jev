@@ -215,7 +215,7 @@ def test_trace_leaves_prose_secret_words_in_paths_untouched(tmp_path):
 
 
 def test_lookups_jsonl_stays_raw_so_find_top_still_matches(tmp_path):
-    """lookups.jsonl is the working index --answer/--approve read back by exact
+    """lookups.jsonl is the working index --approve read back by exact
     question and on-disk path; redacting or truncating it breaks auto-cache."""
     q = "where is my token-2fa setup? " + "x" * 600
     path = "/notes/password_2024_notes.md"

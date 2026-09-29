@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for ask.py auto-cache (--answer), --miss un-save and approver on hits.
+"""Offline tests for ask.py the save path behind auto-saved answers, --miss un-save and approver on hits.
 
 `ask.memory` and `ask.run_gate` are monkeypatched: no network, no live harness.
 
@@ -163,7 +163,7 @@ def test_run_gate_blocks_a_time_sensitive_answer(monkeypatch, side, want):
 
 
 def test_run_gate_ignores_a_low_confidence_time_sensitive_label(monkeypatch):
-    """Regression for the health-fitness test #7 bug (2026-09-25): jev's reply
+    """Regression (2026-09-25): jev's reply
     table prints whichever label won the choice even at low confidence, so a
     near coin-flip TIME_SENSITIVE call (0.05-0.10) must not block a correct,
     fully-supported answer the way a confident one (>=0.80) does."""
@@ -176,7 +176,7 @@ def test_run_gate_ignores_a_low_confidence_time_sensitive_label(monkeypatch):
 
 
 def test_file_ask_ranked_saves_even_when_search_would_not_match(world, monkeypatch, capsys):
-    """businessfi geico 2026-09-25: ask() ranked the file #1 but memory's description-only
+    """Regression (2026-09-25): ask() ranked the file #1 but memory's description-only
     search said no-match. The save cites the file itself and never asks search."""
     orig, gated = ask.memory, {}
 

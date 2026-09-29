@@ -73,7 +73,6 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(ask, "state_dir", lambda principal: sdir)
     monkeypatch.setattr(ask, "confirm", lambda question, paths: ({p: .9 for p in paths}, set(), None, {}))
     monkeypatch.delenv("SUPERJEV_AUTO_CACHE", raising=False)
-    monkeypatch.setenv("SUPERJEV_PICK_BATCH", "1")
     ask.log(sdir, "lookup", question=Q, top=[{"score": 0.95, "path": str(note), "pointer": "p1"}])
     ask.write_trace(sdir, kind="trace", lookup_id="L1", question=Q,
                     final_ranked=[{"path": str(note), "pointer": "p1"}])
@@ -85,8 +84,8 @@ def run(monkeypatch, *argv):
     return ask._main()
 
 
-def save_via_answer(monkeypatch, question=Q):
-    assert run(monkeypatch, "--answer", question, A) == 0
+def save_via_approve(monkeypatch, question=Q):
+    assert run(monkeypatch, "--approve", question, A) == 0
 
 
 # 1 -- ONE WAY IN ----------------------------------------------------------
@@ -94,8 +93,6 @@ def save_via_answer(monkeypatch, question=Q):
 SAVE_PATHS = {
     "approve": lambda note: ["--approve", Q, A],
     "approve-rank": lambda note: ["--approve", Q, A, "--rank", "1"],
-    "answer": lambda note: ["--answer", Q, A],
-    "used": lambda note: ["--used", "last", "--rank", "1", "--answer", A],
     "add-with-source": lambda note: ["--add", Q, A, "--source", str(note)],
 }
 
@@ -120,7 +117,7 @@ def test_every_save_path_saves_a_clean_answer(world, monkeypatch, path):
     assert len(world["cache"]) == 1
 
 
-@pytest.mark.parametrize("path", ["approve", "answer", "add-with-source"])
+@pytest.mark.parametrize("path", ["approve", "add-with-source"])
 def test_every_save_path_runs_the_secret_scan(world, monkeypatch, path):
     monkeypatch.setattr(ask, "has_secret", lambda text: "blue" in text)
     monkeypatch.setattr(ask, "payload_has_secret", lambda req: False)
@@ -155,7 +152,7 @@ def age_records(sdir, days):
 
 
 def test_saved_answer_has_no_24_hour_clock(world, monkeypatch, capsys):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     age_records(world["sdir"], 400)
     capsys.readouterr()
     assert ask.lookup(Q, "alice", world["sdir"]) == 0
@@ -167,7 +164,7 @@ def test_no_86400_second_setting_is_left_in_ask(world):
 
 
 def test_saved_answer_ends_when_its_source_file_changes(world, monkeypatch, capsys):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     world["note"].write_text("The car is red now.\n")
     capsys.readouterr()
     ask.lookup(Q, "alice", world["sdir"])
@@ -185,7 +182,7 @@ def test_missing_source_path_is_refused_loudly(world, monkeypatch, capsys):
 # 3 -- ONE WAY OUT ------------------------------------------------------------
 
 def test_miss_removes_the_saved_answer(world, monkeypatch, capsys):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     assert run(monkeypatch, "--miss", Q, "somewhere else") == 0
     assert not world["cache"]
     assert "un-saved" in capsys.readouterr().out
@@ -205,7 +202,7 @@ def test_miss_is_labelled_wrong_in_the_help_text():
 
 @pytest.mark.parametrize("asked", ["what color is the car", "  WHAT   color is\tthe car?? ", "what color is the car ?!"])
 def test_same_question_after_case_space_and_trailing_punctuation_hits(world, monkeypatch, capsys, asked):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     capsys.readouterr()
     assert ask.lookup(asked, "alice", world["sdir"]) == 0
     assert "CACHE HIT" in capsys.readouterr().out
@@ -213,14 +210,14 @@ def test_same_question_after_case_space_and_trailing_punctuation_hits(world, mon
 
 @pytest.mark.parametrize("asked", ["what colour is the car", "what is the color of the car", "what color is the car and truck"])
 def test_nothing_fuzzier_than_that_matches(world, monkeypatch, capsys, asked):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     capsys.readouterr()
     ask.lookup(asked, "alice", world["sdir"])
     assert "CACHE HIT" not in capsys.readouterr().out
 
 
 def test_miss_removes_the_answer_under_any_spelling_of_the_question(world, monkeypatch):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     assert run(monkeypatch, "--miss", "  what COLOR is the car", "x") == 0
     assert not world["cache"]
 
@@ -228,7 +225,7 @@ def test_miss_removes_the_answer_under_any_spelling_of_the_question(world, monke
 # 5 -- HONEST REPLY ---------------------------------------------------------------
 
 def test_hit_says_saved_answer_from_file_and_date(world, monkeypatch, capsys):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     capsys.readouterr()
     assert ask.lookup(Q, "alice", world["sdir"]) == 0
     out = capsys.readouterr().out
@@ -236,7 +233,7 @@ def test_hit_says_saved_answer_from_file_and_date(world, monkeypatch, capsys):
 
 
 def test_changed_source_says_so_and_falls_through_to_live_search(world, monkeypatch, capsys):
-    save_via_answer(monkeypatch)
+    save_via_approve(monkeypatch)
     world["note"].write_text("The car is red now.\n")
     capsys.readouterr()
     ask.lookup(Q, "alice", world["sdir"])
