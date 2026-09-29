@@ -70,11 +70,6 @@ JEV_LIB = SKILL_DIR / "lib" / "jev_client.py"
 # authored on; absent on a fresh clone, where SUPERJEV_VERIFY_CMD takes over.
 FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 
-# The pure derive-facts/pre-rules pair (src/experimental/derive-facts.ts), reached
-# through its own tiny CLI so a Python process can call it without an FFI.
-# Only used by `verify`'s door-absent fallback — see _derived_facts_fallback.
-DERIVE_FACTS_CLI = REPO_ROOT / "src" / "experimental" / "derive-facts-cli.ts"
-
 # ================================================ EVIDENCE GUARD (blocklist + redactor)
 # The ONE place this file asks "may I open this path?" and "is this text safe
 # to ship?" before it opens a path or lets text into an evidence pack that
@@ -3873,9 +3868,9 @@ def run_door(cmd, cwd=None, capture=False, door=None, json_mode=False, hook_mode
     return returncode
 
 
-def refuse(line):
+def refuse(line, code=REFUSED):
     print(f"super-jev: {line}", file=sys.stderr)
-    return REFUSED
+    return code
 
 
 def emit_json(door, verdict, exit_code, summary, details, would_run):
@@ -4965,15 +4960,45 @@ def cmd_gate(a):
 
 # ---------------------------------------------------------------- verify
 
+WORKTREE_REFUSED = 7  # verify: the door refused the --worktree, so nothing was checked against it
+
 VERIFY_VERDICT = {
     0: "CLEAN — every claim in the report is carried by the evidence.",
     3: "READ — a human must read the flagged claims before accepting this report.",
     4: "REJECT — the evidence DISPROVES a claim in the report.",
     2: "NO CHECKABLE CLAIMS — the report carries nothing the evidence can test.",
     5: "BAD USAGE — worker-verify refused the arguments.",
+    NOT_BUILT: "NEEDS SETUP — the worker-verify door is not installed; nothing was checked.",
 }
 VERIFY_VERDICT_WORD = {0: "CLEAN", 3: "READ", 4: "REJECT", 2: "NO_CHECKABLE_CLAIMS",
-                       5: "BAD_USAGE"}
+                       5: "BAD_USAGE", NOT_BUILT: "NEEDS_SETUP",
+                       WORKTREE_REFUSED: "WORKTREE_REFUSED"}
+
+_VERIFY_FACT_ROW = re.compile(r"^\s*c\d+\s+CONTRADICTED_BY_FACT\b", re.MULTILINE)
+_VERIFY_WORKTREE_REFUSED = re.compile(r"^worktree refused: (.+)$", re.MULTILINE)
+_VERIFY_EVIDENCE_REFUSED = re.compile(r"NOT GATHERED \([^)\n]*\brefused\b", re.IGNORECASE)
+
+
+def verify_outcome(code, out, dry_run=False):
+    """(exit code, verdict word, one-line summary) for a finished verify run.
+
+    One rule: the verdict is never kinder than the door's own output. CLEAN
+    needs no CONTRADICTED_BY_FACT row and no refused evidence; a refused
+    worktree is an error outcome of its own (exit 7); a dry run has no judge,
+    so it gets no verdict unless a fact already settled a contradiction."""
+    m = _VERIFY_WORKTREE_REFUSED.search(out or "")
+    if m and code in (0, 2, 3, 4):
+        return (WORKTREE_REFUSED, "WORKTREE_REFUSED",
+                f"WORKTREE REFUSED — {m.group(1).strip()}; nothing was checked against it.")
+    if code in (0, 3) and _VERIFY_FACT_ROW.search(out or ""):
+        code = 4
+    elif code == 0 and dry_run:
+        return 0, "DRY_RUN", "DRY RUN - NO VERDICT — evidence was gathered, no judge was called."
+    elif code == 0 and _VERIFY_EVIDENCE_REFUSED.search(out or ""):
+        return (3, "READ", "READ — some evidence was refused, so the report is not fully checked. "
+                           + VERIFY_VERDICT[3].split(" — ", 1)[1])
+    return code, VERIFY_VERDICT_WORD.get(code, "ERROR"), VERIFY_VERDICT.get(
+        code, f"ERROR — worker-verify exited {code}")
 
 
 def _verify_timeout():
@@ -4981,50 +5006,6 @@ def _verify_timeout():
         return float(os.environ.get(VERIFY_TIMEOUT_ENV, DEFAULT_VERIFY_TIMEOUT_S))
     except ValueError:
         return DEFAULT_VERIFY_TIMEOUT_S
-
-
-# ------------------------------------------------- derived-facts fallback
-#
-# worker-verify (FLEET_VERIFY_PY) is a fleet-local install; on a fresh clone
-# with no SUPERJEV_VERIFY_CMD it is simply absent, and `verify` used to just
-# refuse. That is honest but throws away the one part of the pattern that
-# needs no external tool at all: reading git/test/gh output in CODE instead
-# of by eye. This fallback runs ONLY when the real door is unreachable. It
-# gathers a small, best-effort evidence set itself (never as thorough as
-# worker-verify's own atom extraction), hands it to the pure
-# src/experimental/derive-facts.ts pair over its CLI, and prints the DERIVED FACTS
-# block plus the pre-rule verdicts it settles for free. It never calls a
-# judge — there is no evidence gathered here worth paying for a model call
-# over — so it can say CONTRADICTED_BY_FACT with confidence 1.00, but it can
-# never say CLEAN. A report with no settled contradiction is READ: unverified,
-# not vouched for.
-_PATH_RE = re.compile(r'(?<![\w@:])((?:~/|\./|/)?(?:[\w.\-]+/){1,8}[\w.\-]+)')
-_HASH_RE = re.compile(r'\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)([0-9a-f]{7,40})\b')
-_BRANCH_RE = re.compile(r'\b((?:feat|feature|fix|proto|chore|docs|bench|test|refactor|perf|'
-                        r'release|hotfix|wip|exp)/[\w.\-/]+)')
-
-
-def _light_atoms(text):
-    """A cut-down version of worker-verify's atom extraction: just enough to
-    find candidate paths, commit hashes and branch names in a report, for a
-    fallback that has no jev.py to lean on. Not a replacement for the real
-    thing — see worker-verify's extract_atoms for the thorough version."""
-    paths, hashes, branches = [], [], []
-    for m in _PATH_RE.finditer(text):
-        p = m.group(1).rstrip('.,;:!?)')
-        if p and p not in paths:
-            paths.append(p)
-    for m in _HASH_RE.finditer(text):
-        h = m.group(1)
-        if h not in hashes:
-            hashes.append(h)
-    for m in _BRANCH_RE.finditer(text):
-        b = m.group(1).rstrip('.,;:!?)')
-        if b not in branches:
-            branches.append(b)
-    # A branch is not also a path.
-    paths = [p for p in paths if p not in branches]
-    return paths[:20], hashes[:20], branches[:20]
 
 
 # TRUST BOUNDARY — git's own config is executable input. A repository carries
@@ -5105,384 +5086,19 @@ def _git_stdout(args, cwd, timeout=20):
         return False, ""
 
 
-# A PR number named in the report, the fallback's only cue that there is any
-# PR evidence worth gathering at all — "PR #N" or a `/pull/N` URL segment
-# (see _PR_NUM_RE further down for the sibling used by the hook's --pr /
-# --from-file path; this one is deliberately self-contained so this early
-# section of the file has no forward dependency on it).
-_PR_NUM_FALLBACK_RE = re.compile(r'PR\s*#(\d+)|\bpull/(\d+)\b', re.IGNORECASE)
-_GH_PR_TIMEOUT = 10
-
-
-def _run_gh(args, cwd, commands_log):
-    """One `gh` call for the verify fallback's PR evidence: never
-    interactive (GH_PROMPT_DISABLED=1, stdin closed), a 10s timeout, and
-    never raises. Logged into `commands_log` regardless of outcome, so
-    `--explain` can print exactly what ran even when a call failed or timed
-    out. Returns (ok, stdout)."""
-    cmd = ["gh", *args]
-    commands_log.append(" ".join(cmd))
-    # safe_git_env, not a bare copy: `gh` shells out to git, and `cwd` here
-    # is a report-derived worktree.
-    env = safe_git_env()
-    env["GH_PROMPT_DISABLED"] = "1"
-    try:
-        p = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True,
-                           text=True, timeout=_GH_PR_TIMEOUT, env=env,
-                           stdin=subprocess.DEVNULL)
-        return p.returncode == 0, (p.stdout or "")
-    except (OSError, subprocess.TimeoutExpired):
-        return False, ""
-
-
-def _gh_pr_evidence(report_text, worktree, commands_log):
-    """Best-effort PR state + checks off `gh`, for the verify fallback's
-    derived-facts pass — the fallback's only source of PR truth, since it
-    has no worker-verify door to run `gh pr view` for it. Returns one
-    `evidence.prs[]` entry (the shape src/experimental/derive-facts.ts's
-    `Evidence.prs` already expects) or None. Runs both `gh pr view N --json
-    state,mergedAt,headRefName,baseRefName,statusCheckRollup` and `gh pr
-    checks N` — the checks command is the primary source for the checks
-    list (it is the command the report's claim is actually judged against),
-    `statusCheckRollup` from the view call is only a fallback for when the
-    checks command itself returns nothing parseable. Every call is appended
-    to `commands_log` whether or not it succeeded. Never raises and never
-    guesses: no `gh` on PATH, no PR number named in the report, a timeout,
-    or unparseable JSON all fall through to None (no fact, no rule) rather
-    than fabricating a state."""
-    if not shutil.which("gh"):
-        return None
-    m = _PR_NUM_FALLBACK_RE.search(report_text or "")
-    if not m:
-        return None
-    pr_num = int(m.group(1) or m.group(2))
-    cwd = Path(worktree).expanduser() if worktree else None
-
-    state = None
-    rollup_checks = []
-    ok, out = _run_gh(
-        ["pr", "view", str(pr_num), "--json",
-         "state,mergedAt,headRefName,baseRefName,statusCheckRollup"],
-        cwd, commands_log)
-    if ok and out.strip():
-        try:
-            data = json.loads(out)
-        except ValueError:
-            data = None
-        if isinstance(data, dict):
-            state = {
-                "state": data.get("state") or "UNKNOWN",
-                "isDraft": bool(data.get("isDraft", False)),
-                "headRefName": data.get("headRefName"),
-                "mergedAt": data.get("mergedAt"),
-            }
-            for c in (data.get("statusCheckRollup") or []):
-                if not isinstance(c, dict):
-                    continue
-                name = c.get("name") or c.get("context") or "check"
-                st = c.get("conclusion") or c.get("state") or "UNKNOWN"
-                rollup_checks.append({"name": name, "state": st})
-
-    checks = []
-    ok2, out2 = _run_gh(["pr", "checks", str(pr_num)], cwd, commands_log)
-    if ok2 and out2.strip():
-        # Plain `gh pr checks` output is one check per line, tab-separated
-        # (name, state, elapsed, url).
-        for line in out2.splitlines():
-            parts = [p for p in line.split("\t") if p != ""]
-            if len(parts) >= 2:
-                checks.append({"name": parts[0].strip(), "state": parts[1].strip()})
-    if not checks:
-        checks = rollup_checks
-
-    if state is None and not checks:
-        return None
-    entry = {"number": pr_num}
-    if state is not None:
-        entry["state"] = state
-    if checks:
-        entry["checks"] = checks
-    return entry
-
-
-def _gather_local_evidence(report_text, worktree, test_cmd, commands_log=None, guard=None):
-    """Best-effort git/test/PR evidence, gathered read-only, in the shape
-    src/experimental/derive-facts.ts's `Evidence` type expects. Never raises;
-    a block this cannot gather is simply left out, same contract as
-    worker-verify's own "not gathered" blocks. `commands_log`, if passed,
-    collects every `gh` command this run attempted (see _gh_pr_evidence),
-    for `--explain`. `guard`, if passed, is a GuardTally: every path this
-    gatherer would open is checked against is_blocked_path first (a
-    blocked path is never opened; it gets blocked_path_fact instead, so
-    it reads UNPROVABLE, never FALSE), and the test command's captured
-    output is redacted before it enters the evidence pack — this is the
-    evidence-guard.ts / atoms.py blocklist+redactor's Python mirror, wired
-    into the one gatherer worker-verify's door-absent fallback uses."""
-    evidence = {}
-    guard = guard if guard is not None else GuardTally()
-    paths, hashes, branches = _light_atoms(report_text)
-
-    if worktree:
-        wt = Path(worktree).expanduser()
-        ok, branch_out = _git_out(["rev-parse", "--abbrev-ref", "HEAD"], wt)
-        if ok:
-            branch = branch_out.strip()
-            ok2, _up = _git_out(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], wt)
-            ahead = behind = 0
-            if ok2:
-                ok3, counts = _git_out(["rev-list", "--left-right", "--count", "HEAD...@{u}"], wt)
-                if ok3:
-                    parts = counts.split()
-                    if len(parts) == 2:
-                        try:
-                            ahead, behind = int(parts[0]), int(parts[1])
-                        except ValueError:
-                            pass
-            evidence["pushState"] = {"branch": branch, "hasUpstream": ok2,
-                                     "ahead": ahead, "behind": behind}
-
-        if paths:
-            tracked = []
-            lengths = []
-            for p in paths:
-                full = p if os.path.isabs(p) else (wt / p)
-                full = Path(full)
-                if guard.check_path(str(full)) or guard.check_path(p):
-                    lengths.append(blocked_path_fact(p))
-                    continue
-                exists = full.exists() and full.is_file()
-                ok_tr, _ = _git_out(["ls-files", "--error-unmatch", p], wt)
-                tracked.append({"path": p, "existsOnDisk": full.exists(), "tracked": ok_tr})
-                if exists:
-                    try:
-                        with open(full, "r", encoding="utf-8", errors="replace") as fh:
-                            n = sum(1 for _ in fh)
-                    except OSError:
-                        n = None
-                    lengths.append({"path": p, "exists": True, "lines": n})
-                else:
-                    lengths.append({"path": p, "exists": False})
-            evidence["tracked"] = tracked
-            evidence["lengths"] = lengths
-
-        ok_d, diff_out = _git_out(
-            ["diff", *GIT_DIFF_SAFE_FLAGS, "--shortstat", "origin/main...HEAD"], wt)
-        if ok_d and diff_out.strip():
-            m = re.search(r'(\d+) files? changed(?:, (\d+) insertions?\(\+\))?'
-                          r'(?:, (\d+) deletions?\(-\))?', diff_out)
-            if m:
-                evidence["diffstat"] = {
-                    "base": "origin/main", "head": "HEAD",
-                    "filesChanged": int(m.group(1) or 0),
-                    "insertions": int(m.group(2) or 0),
-                    "deletions": int(m.group(3) or 0),
-                }
-
-        if hashes:
-            commits = []
-            for h in hashes:
-                ok_c, _ = _git_out(["cat-file", "-e", h], wt)
-                commits.append({"hash": h, "branch": "HEAD", "inLog": ok_c})
-            evidence["commits"] = commits
-
-        if branches:
-            branch_facts = []
-            for b in branches:
-                ok_b, listing = _git_out(["branch", "-a", "--list", b], wt)
-                branch_facts.append({"name": b, "exists": bool(ok_b and listing.strip())})
-            evidence["branches"] = branch_facts
-
-    if test_cmd:
-        bad = check_test_cmd_for_fallback(test_cmd, worktree)
-        if bad is None:
-            try:
-                # The one command this fallback EXECUTES, in a
-                # report-derived worktree. It runs under the git config
-                # pins like every other child — an `npm test` script is
-                # free to call git, and the pins are what keep the
-                # repo's own fsmonitor/hooksPath/pager out of it.
-                p = subprocess.run(shlex.split(test_cmd), cwd=worktree or None,
-                                   capture_output=True, text=True, timeout=300,
-                                   env=safe_git_env())
-                out = (p.stdout or "") + (p.stderr or "")
-            except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-                out = f"TEST COMMAND FAILED TO RUN: {exc}"
-            evidence["tests"] = {"command": test_cmd, "output": guard.redact(out)}
-        else:
-            evidence["tests"] = {"command": test_cmd, "output": f"REFUSED: {bad}"}
-
-    # PR state/checks off `gh` — gated on a PR number actually being named
-    # in the report AND `gh` being on PATH; neither present means no fact,
-    # no rule, same "silence over a guess" contract as every block above.
-    pr_entry = _gh_pr_evidence(report_text, worktree, commands_log if commands_log is not None else [])
-    if pr_entry is not None:
-        evidence["prs"] = [pr_entry]
-
-    return evidence
-
-
-def check_test_cmd_for_fallback(cmd, worktree, protected_repo=None):
-    """The guardrail on the one command this fallback EXECUTES. Returns a
-    refusal string, or None if the command may run.
-
-    Two refusals:
-
-    1. A directory-level pytest, the same refusal worker-verify enforces
-       (see verify.py's check_test_cmd) — kept small here because this
-       fallback has no import of verify.py to reuse, the whole point of
-       this path being that verify.py is ABSENT.
-
-    2. An `npm`-family command whose package.json the protected repo does
-       not vouch for. `npm test` names no program; package.json's
-       "scripts" does, and on this path the command can be DERIVED FROM A
-       WORKER'S OWN REPORT TEXT. A worker that writes both its package.json
-       and its report could otherwise have this door run its script and
-       accept the pass count that script printed as independent evidence of
-       its own claim. So npm runs only when the worktree's package.json
-       has the same raw bytes as the PROTECTED checkout's own, and that
-       checkout matches the pin committed in the repo — see
-       _npm_runner_is_trusted, which explains why "unmodified against the
-       worker's own HEAD" and "equal to origin/main:package.json" were both
-       the attacker's own answer. This is the last line; the derive paths refuse the same
-       command earlier (recording "untrusted-test-cmd:<why>"), and this
-       catches every other caller.
-    """
-    try:
-        toks = shlex.split(cmd)
-    except ValueError:
-        return f"not parseable as a shell command: {cmd}"
-    if not toks:
-        return "empty test command"
-    if _test_cmd_is_npm(cmd):
-        ok, why = _npm_runner_is_trusted(worktree, protected_repo)
-        if not ok:
-            return (f"untrusted-test-cmd:{why} — `npm` runs whatever "
-                    "package.json's scripts name, and this worktree's "
-                    "package.json is not the one the PROTECTED checkout "
-                    "holds, so this command's own output cannot stand as "
-                    "evidence for the report that named it. Name the "
-                    "underlying test command directly.")
-        return None
-    is_pytest = toks[0] == "pytest" or ("pytest" in toks and toks[0] in ("python", "python3"))
-    if not is_pytest:
-        return None
-    named = [t for t in toks[1:] if t.endswith(".py") or "::" in t]
-    if named:
-        return None
-    return ("a directory-level pytest can launch an app or hit a live system; "
-            "name the test file instead")
-
-
-def _resolve_node():
-    return shutil.which("node")
-
-
-def _derived_facts_fallback(report_text, worktree, test_cmd, explain=False):
-    """Run the derive-facts/pre-rules pair through its CLI over locally
-    gathered evidence, and return (block_text, verdicts, code) — or None if
-    this fallback itself cannot run (no node, no CLI file, or nothing at all
-    to gather). `code` is 4 (REJECT) when a pre-rule settles at least one
-    claim as CONTRADICTED_BY_FACT, else 3 (READ) — this path never returns 0
-    (CLEAN); it has no judge, so an unsettled claim stays unverified, never
-    vouched for. `explain=True` appends the list of `gh` commands this run
-    attempted (see _gh_pr_evidence) to the block, empty when none ran
-    (no PR named in the report, or no `gh` on PATH)."""
-    node = _resolve_node()
-    if not node or not DERIVE_FACTS_CLI.exists():
-        return None
-    if not worktree and not test_cmd:
-        return None
-    gh_commands = []
-    guard = GuardTally()
-    evidence = _gather_local_evidence(report_text, worktree, test_cmd, commands_log=gh_commands, guard=guard)
-    if not evidence:
-        return None
-    claims = presplit_claims(report_text) or [report_text.strip()]
-    payload = json.dumps({"evidence": evidence, "claims": claims})
-    try:
-        p = subprocess.run([node, str(DERIVE_FACTS_CLI)], input=payload,
-                           capture_output=True, text=True, timeout=30,
-                           env=safe_git_env())
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if p.returncode != 0 or not p.stdout.strip():
-        return None
-    try:
-        result = json.loads(p.stdout)
-    except ValueError:
-        return None
-    formatted = result.get("formatted", "")
-    verdicts = result.get("verdicts", [])
-    lines = ["DERIVED FACTS (this evidence was gathered by super-jev's own "
-            "fallback path, not worker-verify — see docs/playbook.md):", formatted, ""]
-    if verdicts:
-        lines.append("PRE-RULE VERDICTS (settled in code, before any judge call):")
-        for v in verdicts:
-            lines.append(f"  CONTRADICTED_BY_FACT 1.00 — {v['claim']!r}: {v['reason']}")
-    else:
-        lines.append("PRE-RULE VERDICTS: none of the facts above contradict a claim in "
-                     "this report.")
-    if explain:
-        lines.append("")
-        if gh_commands:
-            lines.append("--explain: gh commands run —")
-            for c in gh_commands:
-                lines.append(f"  {c}")
-        else:
-            lines.append("--explain: no gh commands run (no PR named in the report, "
-                         "or gh is not on PATH).")
-        lines.append(f"--explain: {guard.summary()} (evidence-guard blocklist+redactor).")
-    lines.append("")
-    lines.append("No judge is reachable in this fallback (worker-verify is not installed "
-                "and SUPERJEV_VERIFY_CMD is not set), so nothing here can be called CLEAN. "
-                "Any claim not listed above as CONTRADICTED_BY_FACT is UNVERIFIED — read it "
-                "yourself.")
-    code = 4 if verdicts else 3
-    return "\n".join(lines), verdicts, code, guard
-
-
 def cmd_verify(a):
     json_mode = getattr(a, "json", False)
     hook_mode = getattr(a, "hook_mode", False)
     bad = door_missing(VERIFY_CMD_ENV, FLEET_VERIFY_PY)
     if bad is not None:
-        # No door installed and no override. Before refusing outright, try
-        # the offline derived-facts/pre-rules fallback (src/enhance/
-        # derive-facts.ts via its CLI) — it needs no external door and no
-        # TypeSafe key, only git/test output this process gathers itself.
-        # See _derived_facts_fallback's docstring for exactly what it can
-        # and cannot settle.
-        report_text = ""
-        try:
-            report_text = Path(a.report).read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            pass
-        explain = bool(getattr(a, "explain", False))
-        fallback = _derived_facts_fallback(report_text, a.worktree, a.test_cmd,
-                                           explain=explain) if report_text else None
-        if fallback is None:
-            return door_refuse(json_mode, "verify", bad)
-        block, verdicts, code, guard = fallback
-        dropped = [f for f in ("pr", "base", "claim") if getattr(a, f, None)]
-        if dropped:  # the offline fallback cannot use them; say so rather than judge other claims
-            block = (f"door absent: {', '.join('--' + f for f in dropped)} ignored by the offline "
-                     "fallback; its verdict covers the report's own claims only\n") + block
-        summary = VERIFY_VERDICT.get(code, f"exit {code}")
-        ledger_append({
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "door": "verify", "argv": ["<fallback:derive-facts>"],
-            "exit_code": code, "ms": 0, "json_mode": json_mode, "hook_mode": hook_mode,
-            "fallback": "derive-facts", "guard": guard.to_dict(),
-        })
+        # One evidence gatherer: the worker-verify door. Without it there is no
+        # check to run, so say so plainly (needs setup, exit 6), never a partial answer.
+        if hook_mode:  # callers unpack (code, out, err); a hook's stdout is not ours to write to
+            return NOT_BUILT, "", bad
         if json_mode:
-            emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code, summary,
-                      {"stdout": block, "stderr": "", "fallback": "derive-facts"}, [])
-            return code
-        if hook_mode:
-            return code, block, ""
-        print(block)
-        print(f"\nVERDICT: {summary}")
-        return code
+            return door_refuse(True, "verify", bad, exit_code=NOT_BUILT)
+        print(f"VERDICT: {VERIFY_VERDICT[NOT_BUILT]}")
+        return refuse(bad, NOT_BUILT)
     # Cap estimate + truncation, same rule as gate: a.report (the worker's
     # report — verify's equivalent of the draft) is never touched; --paths
     # (extra evidence files a caller named) is the only thing trimmed,
@@ -5565,25 +5181,24 @@ def cmd_verify(a):
     timeout = getattr(a, "timeout", None)
     timeout = _verify_timeout() if timeout is None else min(timeout, _verify_timeout())
     try:
-        if json_mode:
-            code, out, err = run_door(cmd, capture=True, door="verify", json_mode=True,
-                                      hook_mode=hook_mode, timeout=timeout,
-                                      extra_ledger=extra_ledger)
-            emit_json("verify", VERIFY_VERDICT_WORD.get(code, "ERROR"), code,
-                      VERIFY_VERDICT.get(code, f"ERROR — worker-verify exited {code}"),
-                      {"stdout": out, "stderr": err}, cmd)
-            return code
         if hook_mode:
             # Same rationale as cmd_gate's hook_mode branch: captured, never
             # printed, and returned as (code, out, err) so cmd_hook can run
             # the same strong-flag scan over worker-verify's table.
-            code, out, err = run_door(cmd, capture=True, door="verify", json_mode=False,
-                                      hook_mode=True, timeout=timeout,
-                                      extra_ledger=extra_ledger)
-            return code, out, err
-        code = run_door(cmd, door="verify", hook_mode=hook_mode, timeout=timeout,
-                        extra_ledger=extra_ledger)
-        print(f"\nVERDICT: {VERIFY_VERDICT.get(code, f'ERROR — worker-verify exited {code}')}")
+            return run_door(cmd, capture=True, door="verify", json_mode=False,
+                            hook_mode=True, timeout=timeout, extra_ledger=extra_ledger)
+        code, out, err = run_door(cmd, capture=True, door="verify", json_mode=json_mode,
+                                  timeout=timeout, extra_ledger=extra_ledger)
+        code, word, summary = verify_outcome(code, out, a.dry_run)
+        if json_mode:
+            emit_json("verify", word, code, summary, {"stdout": out, "stderr": err}, cmd)
+            return code
+        # The outcome is the FIRST line; the door's own reply follows unchanged.
+        print(f"VERDICT: {summary}")
+        print("$ " + shlex.join(str(c) for c in cmd))
+        print(out, end="" if out.endswith("\n") or not out else "\n")
+        if err:
+            print(err, end="", file=sys.stderr)
         return code
     finally:
         for p in extra_tmp_paths:
@@ -5722,8 +5337,8 @@ def cmd_guard(a):
     --paths (checked and, if readable, redacted) and/or --text (redacted),
     entirely locally, no model call, no ledger call other than its own
     counts. Exit 0 always: this door only reports, it never blocks by
-    itself — the callers wired into it (verify's fallback gatherer, the
-    Stop-hook gate window builder) are what actually skip a path or refuse
+    itself — the caller wired into it (the Stop-hook gate window
+    builder) is what actually skips a path or refuses
     to send text."""
     json_mode = getattr(a, "json", False)
     guard = GuardTally()
@@ -13655,9 +13270,6 @@ def build_parser():
     v.add_argument("--claim", action="append", default=[],
                    help="name a claim yourself (repeatable); beats the automatic split")
     v.add_argument("--dry-run", action="store_true", help="collect evidence, no judging")
-    v.add_argument("--explain", action="store_true",
-                   help="door-absent fallback only: list the gh commands run "
-                        "gathering PR state/checks")
     _add_json_flag(v)
     v.set_defaults(func=cmd_verify)
 
