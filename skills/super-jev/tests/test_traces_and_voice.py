@@ -465,14 +465,14 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
     assert st["routing"]["p1"]["none"] == 0.2
     assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, True]
     fates = [f["fate"] for f in st["word_search"]["top"]]
-    assert fates == []  # lexical discovery is claim-only
-    assert st["read_list"] == ["/a.md", "/b.md"]
+    assert fates and fates[0] == "already routed"
+    assert st["read_list"] == ["/a.md", "/b.md", "/w.md", "/x.md", "/y.md"]
     assert st["content_check"]["/a.md"]["read"] == [0, 1, 2, 9]
     assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"] == "evidence-selected"
 
     assert ask.trace_show(tmp_path, "last") == 0
     out = capsys.readouterr().out
-    assert "/z.md" not in out
+    assert "/z.md  -> not read: past top 5" in out
     assert "b.md 0.02" in out and "under floor" not in out
     assert "chunks [0, 1, 2, 9] of 11" in out
     assert ask.trace_show(tmp_path, "nope") == 1

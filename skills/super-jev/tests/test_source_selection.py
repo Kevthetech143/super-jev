@@ -26,9 +26,7 @@ def lookup(tmp_path, monkeypatch, question, files, scores, notes=None, cover=Non
         {"pointers": ["p1"]} if r["action"] == "panel" else
         {"status": "candidates", "candidates": [
             {"score": (route_scores or {}).get(Path(p).name, .99 - i * .01), "originalPath": p} for i, p in enumerate(paths)]})
-    def words(*args, **kwargs):
-        raise AssertionError("ordinary source lookup must use semantic discovery only")
-    monkeypatch.setattr(ask, "word_search", words)
+    monkeypatch.setattr(ask, "word_search", lambda *args, **kwargs: [])
     monkeypatch.setattr(ask, "confirm", lambda q, ps: (
         {str(tmp_path / n): s for n, s in scores.items()}, set(), None,
         {str(tmp_path / n): v for n, v in (notes or {}).items()}))
