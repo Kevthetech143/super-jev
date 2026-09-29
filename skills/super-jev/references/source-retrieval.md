@@ -19,10 +19,13 @@ one relative-choice question per branch and retains the existing none-win rule.
 Default catalog and claim navigation keep their original routing prompt.
 Source discovery ranks candidates within a five-candidate beam and result bound
 per pointer. Ordinary lookup does not reject a candidate merely because its
-relative routing probability is small, and does not add lexical matches.
+relative routing probability is small. Routing scores compare only inside one pointer and
+see names and descriptions, not text, so unrelated files can fill every routed slot; word
+search therefore adds up to five files whose text matches the question, and the content
+check decides what is kept.
 A routing no-match or error retains its distinct meaning. At most five routed files
-are content-checked across pointers, so dense collections can hide a useful note
-behind that bound. Meaningful titles and focused notes matter for discovery.
+plus up to five word-matched files are content-checked across pointers, so dense
+collections can still hide a useful note behind that bound. Meaningful titles and focused notes matter for discovery.
 The content stage judges each passage against one predicate: it states a requested
 fact or supplies a necessary input to determining that fact. An arithmetic
 operand or list member can qualify while other required inputs are missing.
