@@ -56,8 +56,8 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    or calculation. Topic overlap alone is insufficient. See
    [source retrieval](skills/super-jev/references/source-retrieval.md) for scope and limits.
 
-6. **Ask for a fact that is not in the files.** Success: `no-candidates across
-   1 pointers: Super Jev couldn't find it in the connected files.` Tell your
+6. **Ask for a fact that is not in the files.** Success: the output starts with
+   `OUTCOME: not-found - searched 1 set, no matching file (it may still exist)` (exit 1). Tell your
    human it may still exist, and offer to search by hand. Do not guess.
 
 7. **Check a claim before you send it.** Give it a claim you know is false:
