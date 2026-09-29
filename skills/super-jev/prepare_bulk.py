@@ -1328,6 +1328,14 @@ def manual_label_rows(principal: str, status: str = None, kind: str = None,
     return rows, excluded
 
 
+def keep_unrecorded(report: dict, a) -> None:
+    """A report that recorded no principal records the stand-in one only after every part connected.
+    A part that failed (e.g. one only another agent may see) must not leave the stand-in as the
+    pointer's principal: the next refresh would register that part for it."""
+    if getattr(a, "standin", False) and not report.get("connected"):
+        report.pop("principal", None); report.pop("principals", None)
+
+
 def replay_recipe(a) -> None:
     """--refresh replays the pointer's recorded recipe for anything not given on the command line,
     so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
@@ -1337,6 +1345,8 @@ def replay_recipe(a) -> None:
         return
     if not isinstance(rep, dict):
         return
+    # Whoever named the principal here (auto_heal's asking agent) is only a stand-in: see keep_unrecorded.
+    a.standin = not (rep.get("principals") or rep.get("principal"))
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
@@ -2036,6 +2046,7 @@ def main() -> int:
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
     if a.no_connect or not connect_set:
+        keep_unrecorded(report, a)
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
         _record_written(CACHE_DIR / f"{a.pointer}-report.json")
         print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s")
@@ -2106,6 +2117,7 @@ def main() -> int:
         for p, why in misses:
             print(f"  MISS  {relstr(p, roots)}  ({why})")
 
+    keep_unrecorded(report, a)
     (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
     _record_written(CACHE_DIR / f"{a.pointer}-report.json")
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")

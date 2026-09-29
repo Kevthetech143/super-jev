@@ -48,12 +48,12 @@ def test_miss_lookup_prints_voice_line_as_the_last_line(tmp_path, monkeypatch, c
     monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
     rc = ask.lookup("where is the deed?", "alice", tmp_path)
 
-    assert rc == 0
+    assert rc == 1  # not-found
     out = capsys.readouterr().out.rstrip("\n").splitlines()
     assert out[-1] == ask.VOICE_LINE
 
 
-def test_only_errors_lookup_prints_voice_line(tmp_path, monkeypatch, capsys):
+def test_only_stale_lookup_prints_no_voice_line(tmp_path, monkeypatch, capsys):
     def fake_memory(req):
         if req["action"] == "cached":
             return {"status": "cache-miss", "checked": []}
@@ -67,12 +67,13 @@ def test_only_errors_lookup_prints_voice_line(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 1
+    assert rc == 4  # needs-setup: the voice line ("I didn't have this") is for a complete not-found only
     out = capsys.readouterr().out.rstrip("\n").splitlines()
-    assert out[-1] == ask.VOICE_LINE
+    assert out[0].startswith("OUTCOME: needs-setup")
+    assert ask.VOICE_LINE not in out
 
 
-def test_nothing_connected_prints_voice_line(tmp_path, monkeypatch, capsys):
+def test_nothing_connected_prints_no_voice_line(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: (
         {"status": "cache-miss", "checked": []} if req["action"] == "cached" else
         {"pointers": []} if req["action"] == "panel" else
@@ -80,9 +81,9 @@ def test_nothing_connected_prints_voice_line(tmp_path, monkeypatch, capsys):
     ))
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 1
+    assert rc == 4
     out = capsys.readouterr().out.rstrip("\n").splitlines()
-    assert out[-1] == ask.VOICE_LINE
+    assert out[0].startswith("OUTCOME: needs-setup") and ask.VOICE_LINE not in out
 
 
 def test_hit_lookup_prints_no_voice_line(tmp_path, monkeypatch, capsys):

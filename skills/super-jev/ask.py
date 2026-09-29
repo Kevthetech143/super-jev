@@ -18,10 +18,12 @@
       merged candidates from healthy pointers print first, always -- a pointer
       error never buries a real hit. A non-candidate pointer prints its own
       status line (e.g. "[pointer] refresh-required") after the candidates --
-      errors never hide as "no-candidates". All-empty (no candidates, no
-      errors) -> a no-candidates hint naming references/connectors.md and
-      --add. Any error -> "unresolved: N of M pointers errored" last, exit 1
-      (even when candidates printed above); exit 0 otherwise.
+      errors never hide as "no-candidates". Output starts with one line,
+      "OUTCOME: found | not-found | not-supported | needs-setup | error", with a
+      reason and (unless found) the one next command; exit 0 / 1 / 2 / 4 / 3 in
+      that order (found 0, not-found 1, not-supported 2, error 3, needs-setup 4).
+      found with a failed content check says "(unconfirmed: content check
+      failed)" and exits 0: the files are unconfirmed candidates, read them.
 
   ask.py --principal AGENT --claim "statement" [--claim "statement2" ...] [--claims-file FILE]
       Is a statement true by our own files? One lookup per statement; the same
@@ -145,6 +147,7 @@ import contextlib
 import difflib
 import fcntl
 import hashlib
+import io
 import math
 import json
 import os
@@ -1643,30 +1646,6 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
             f"--root DIR --pointer {ptr} --principal {principal} --refresh "
             "(one --root per connected folder, one --principal per agent it serves)")
 
-# A stale pointer that cannot refresh itself (no prepare_bulk report, no connect recipe,
-# or a replay that failed) waits on a human. Warn about it once per day per principal,
-# not on every answer; the other sightings go to lookups.jsonl only.
-STALE_WARNED_FILE = "stale-warned.json"
-
-def warn_stale_today(sdir: Path, ptr: str) -> bool:
-    """True the first time today this pointer is seen stuck stale (and records it)."""
-    path, today = sdir / STALE_WARNED_FILE, time.strftime("%Y-%m-%d")
-    try:
-        seen = json.loads(path.read_text())
-    except (OSError, ValueError):
-        seen = {}
-    if not isinstance(seen, dict):
-        seen = {}
-    if seen.get(ptr) == today:
-        return False
-    seen[ptr] = today
-    try:
-        sdir.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(seen))
-    except OSError:
-        pass
-    return True
-
 # "Which skill/tool/command ..." asks a skill catalog question: the answer is a SKILL.md
 # in the trusted skill roots, which are not connected files. The skills connector
 # (dispatch.py skills) searches them for every principal; its picks print first.
@@ -1785,12 +1764,48 @@ def question_people(question: str, folks: dict) -> set:
         return self_ if words & FIRST_PERSON else set()
     return who | self_ if words & {"i", "me", "myself"} else who
 
+# The one promise of an ordinary ask: its output starts with exactly one OUTCOME line, computed from
+# the whole search state, and the exit code is the outcome's. Claim checks keep their own verdict lines.
+OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
+_OUTCOME = {}
+
+
+def _done(kind: str, why: str, nxt: str = "", claim_rc: int = 0) -> int:
+    """Record an ordinary ask's outcome. A claim check has no OUTCOME line and keeps its own exit code."""
+    _OUTCOME.update(kind=kind, why=why, next=nxt)
+    return claim_rc if _CLAIM["text"] else OUTCOME_EXIT[kind]
+
+
 def lookup(question: str, principal: str, sdir: Path) -> int:
+    if _CLAIM["text"]:
+        return _lookup(question, principal, sdir)
+    _OUTCOME.clear()
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            _lookup(question, principal, sdir)
+    except Exception as e:  # SecretHeld and the like keep main()'s handling
+        if isinstance(e, SecretHeld):
+            sys.stdout.write(buf.getvalue())
+            raise
+        _done("error", f"the lookup failed ({type(e).__name__}: {e})", f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status")
+        traceback.print_exc()
+    o = _OUTCOME or dict(kind="error", why="the lookup ended without a result", next="")
+    print(f"OUTCOME: {o['kind']} - {o['why']}" + (f"; next: {o['next']}" if o["next"] else ""))
+    sys.stdout.write(buf.getvalue())
+    return OUTCOME_EXIT[o["kind"]]
+
+
+def _lookup(question: str, principal: str, sdir: Path) -> int:
     # Relative route mass ranks candidates; it is not ordinary evidence confidence.
     route_floor = ROUTE_FLOOR if _CLAIM["text"] else 0
+    status_cmd = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status"
+    if not question.strip():
+        return _done("not-supported", "empty question", "ask one focused question, e.g. "
+                     f'ask.py --principal {principal} "find the note about X"', claim_rc=2)
     if len(question) > MAX_QUESTION:
-        print(f"question too long ({len(question):,} chars, max {MAX_QUESTION:,}); ask a shorter question")
-        return 2
+        return _done("not-supported", f"question too long ({len(question):,} chars, max {MAX_QUESTION:,})",
+                     "ask one shorter, focused question", claim_rc=2)
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
@@ -1823,6 +1838,8 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
+        if rc == 0:
+            _done("found", "saved answer, its source unchanged")
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
                     content_check={}, final_ranked=[], tier="cache" if rc == 0 else "stale",
                     timings={"total_secs": round(time.time() - t0, 2)},
@@ -1838,17 +1855,13 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                      if isinstance(row, dict) and row.get("viewOriginals")}
     _STAGE["view_pointers"] = sorted(view_pointers)
     if panel.get("reason") == "not-set-up":
-        print(f"Super Jev is not set up yet. Run: python3 {skill_dir_for_display() / 'setup.py'}")
-        return 1
+        return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}", claim_rc=1)
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
                             for p in panel.get("pointers", [])) if n and n != withheld]
     if not pointers:
         # Runnable from any folder (the skill folder as invoked), and a new agent in a fleet
         # learns the shared sets it can join at once, with no connect.
         here = skill_dir_for_display()
-        print(f"nothing connected yet for principal '{principal}' -- run connect first:\n"
-              f"  python3 {here / 'prepare_bulk.py'} --root /path/to/folder "
-              f"--pointer my-notes --principal {principal}")
         try:
             import share_pointers
             shared = share_pointers.load_shared()
@@ -1863,8 +1876,9 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
                     content_check={}, final_ranked=[], tier="none",
                     timings={"total_secs": round(time.time() - t0, 2)}, errors=["nothing-connected"],
                     stages={"cache": cache_stage})
-        print(VOICE_LINE)
-        return 1
+        return _done("needs-setup", f"nothing is connected yet for principal '{principal}'",
+                     f"python3 {here / 'prepare_bulk.py'} --root /path/to/folder --pointer my-notes "
+                     f"--principal {principal}", claim_rc=1)
 
     # Sick-pointer circuit breaker: skip pointers already benched from repeated
     # recent failures instead of waiting on them (and re-erroring) again this call.
@@ -1873,10 +1887,11 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # Runs beside routing; its picks print first (see SKILL_Q_RE).
     skill_job = (ThreadPoolExecutor(max_workers=1).submit(skill_catalog, question)
                  if skill_question(question) else None)
-    active_pointers, error_lines = [], []
+    active_pointers, error_lines, failed, stale_ptrs, hints = [], [], [], [], {}
     for ptr in original_pointers:
         benched, remaining, fails = pointer_benched(health, ptr, principal)
         if benched:
+            failed.append(ptr)
             error_lines.append(f"[{ptr}] benched ({fails} consecutive failures, cooling off {int(remaining)}s more)")
         else:
             active_pointers.append(ptr)
@@ -2009,7 +2024,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     # and refresh their pointers, so a later lookup finds them without a hand reconnect.
     if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
         _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
-    merged, errored, statuses, stale_held = [], 0, {}, []
+    merged, statuses, stale_held = [], {}, []
     _STAGE["stale_changed"], _STAGE["section_routes"] = [], {}
     for ptr, kind, rows, elapsed, ok in results:
         served = stale_served.get(ptr)
@@ -2044,13 +2059,14 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         elif kind in ("candidates", "no-candidates"):
             statuses[ptr] = "no-candidates"
         else:
-            errored += 1
             statuses[ptr] = kind
+            (stale_ptrs if auto_heal.is_stale_kind(kind) else failed).append(ptr)
         if served:
+            stale_ptrs.append(ptr)
             statuses[ptr] += " (stale: last refresh)"
         if served or kind not in ("candidates", "no-candidates"):
             stale_kind = served.get("status", "preparation-required") if served else kind
-            hint = ("; refresh through the recorded view recipe; raw bulk refresh is disabled"
+            hint = hints[ptr] = ("; refresh through the recorded view recipe; raw bulk refresh is disabled"
                     if ptr in view_pointers else refresh_hint(ptr, principal, stale_kind))
             # A stale pointer never has to wait on a human to run the refresh hint above by
             # hand: this starts the exact same prepare_bulk.py --refresh in the background,
@@ -2078,12 +2094,6 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             # a live error, never benched) so it reads differently at a glance from
             # a real provider error -- appended after the existing kind/hint/heal
             # text so it never changes what those already say.
-            if stale and result == "no-report" and reconnected.get(ptr) != "reconnected" \
-                    and not warn_stale_today(sdir, ptr):
-                if not served:
-                    errored -= 1
-                log(sdir, "stale-quiet", pointer=ptr, status=stale_kind)
-                continue
             if served:
                 # Not an error: this set answered from its last refresh. Say so, and how much is newer.
                 gone = len(served.get("missing") or [])
@@ -2123,7 +2133,6 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
         if check_error:
-            errored += 1
             error_lines.append(f"[content-check] error: {check_error}")
         # One source-evidence floor for all questions. Routing discovers candidates;
         # it cannot rescue a file the content check rejected. Unfinished checks
@@ -2305,31 +2314,41 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             print(f"HELD  {p}  ({HELD_SECRET})")
     for line in error_lines:
         print(line)
-    if errored:
-        print(f"unresolved: {errored} of {len(original_pointers)} pointers errored")
-        if not top and not skills:
-            # A miss with some pointers errored is still a miss on the healthy ones:
-            # say what was searched and what was skipped, not just the voice line.
-            for line in miss_report(principal, len(original_pointers), routing, content_check,
-                                    question, original_pointers):
-                print(line)
-            print(VOICE_LINE)
-            return 1
-        # Partial failure: some pointers errored or are benched, but healthy
-        # pointers still answered -- the failure stays visible above, it just
-        # does not fail a lookup that actually has a real result.
-        return 0
-    if not top and not skills:
-        if dropped:
-            print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
-        print(f"no-candidates across {len(original_pointers)} pointers: Super Jev couldn't find it in the connected "
-              "files. It may still exist (see references/connectors.md to fill the gap).")
-        for line in miss_report(principal, len(original_pointers), routing, content_check,
-                                question, original_pointers):
-            print(line)
+    # One outcome from the whole search state. A set that failed, is stale or is unprepared was not
+    # fully searched, so it never reads as a complete not-found.
+    unsearched = list(dict.fromkeys(failed + stale_ptrs))
+    n = len(unsearched)
+    sets = f"{n} set{'s' if n != 1 else ''}"
+    if top or skills:
+        found = f"{len(top) + len(skills)} file{'s' if len(top) + len(skills) != 1 else ''}"
+        if check_error and any(m[1] in possible for m in top):
+            found += " (unconfirmed: content check failed)"
+        return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
+    if dropped:
+        print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
+    skipped = skipped_for_question(question, original_pointers, principal)
+    held = [p for p, note in notes.items() if note == HELD_SECRET]
+    ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
+    if failed or check_error:
+        why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
+               else "no match, and the content check failed")
+        rc = _done("error", why, f"{ask_py} --status", claim_rc=1)
+    elif stale_ptrs or skipped or held:
+        first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
+        why = "no match, but the search was incomplete: " + "; ".join(
+            x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
+                        f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
+                        f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
+        rc = _done("needs-setup", why, first or f"{ask_py} --status", claim_rc=1)
+    else:
+        rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
+                   "no matching file (it may still exist)", f"{ask_py} --trace-show last")
+    for line in miss_report(principal, len(original_pointers), routing, content_check,
+                            question, original_pointers):
+        print(line)
+    if _OUTCOME["kind"] == "not-found" or _CLAIM["text"]:
         print(VOICE_LINE)
-        return 0
-    return 0
+    return rc
 
 MISS_CLOSEST = 3
 

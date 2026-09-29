@@ -201,3 +201,51 @@ def test_no_freshness_module_imports_shadow_repair():
         mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         mods |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
         assert not {"shadow_repair", "paid_replay", "scorecard"} & mods, name
+
+
+# 6. privacy: a stand-in asker is recorded only when every part connected
+def test_a_stand_in_asker_never_gains_a_part_it_cannot_see(tmp_path, monkeypatch, capsys):
+    import sys as _sys
+    _sys.path.insert(0, str(SKILL))
+    import prepare_bulk as pb
+    root = tmp_path / "root"; root.mkdir()
+    cache_dir = tmp_path / "cache"; cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    entries = {}
+    for i in range(2):
+        f = root / f"f{i}.md"; f.write_text(f"# F{i}\n")
+        entries[str(f)] = {"sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "description": f"d{i}.",
+                           "question": f"What is f{i}?", "verdict": "SUPPORTED", "confidence": 0.95,
+                           "pass": True, "checkedAt": "2026-01-01T00:00:00"}
+    (cache_dir / "x.json").write_text(json.dumps(entries))
+    report = {"pointer": "x", "roots": [str(root)], "approved": list(entries), "excludes": [], "noRecurse": True,
+              "limit": 1}  # split in two parts, no principal recorded
+    (cache_dir / "x-report.json").write_text(json.dumps(report))
+    registry = {"x": ["alice"], "x-2": ["alice", "bob"]}  # bob sees only part 2 (the one his lookup hit)
+
+    def memory(req):
+        act, ptr = req.get("action"), req.get("pointer")
+        if act == "panel":
+            return {"pointers": [p for p, who in registry.items() if req["principal"] in who]}
+        if act == "register":
+            registry[ptr] = list(req["principals"]); return {"status": "registered"}
+        if act == "connect":
+            if ptr in registry and not req.get("replace"):
+                return {"status": "error", "reason": "already-connected"}
+            if ptr in registry and not set(registry[ptr]) <= set(req["principals"]):
+                return {"status": "error", "reason": "scope-change", "registeredPrincipals": registry[ptr]}
+            if "reviewed" not in req:
+                return {"status": "preparation-required", "sources": [
+                    {"path": s["path"], "sha256": hashlib.sha256(Path(s["path"]).read_bytes()).hexdigest()}
+                    for s in req["sources"]]}
+            registry[ptr] = list(req["principals"]); return {"status": "registered", "pointer": ptr, "sources": req["sources"]}
+        return {"pointers": []}
+    monkeypatch.setattr(pb, "memory", memory)
+    monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no writer")))
+    argv = ["prepare_bulk.py", "--pointer", "x", "--principal", "bob", "--refresh", "--no-findability"]
+    for _ in range(2):  # bob's heal runs twice: the second must not widen part 1 either
+        monkeypatch.setattr(_sys, "argv", argv)
+        assert pb.main() == 1  # part 1 could not connect for bob
+        rep = json.loads((cache_dir / "x-report.json").read_text())
+        assert "principal" not in rep and "principals" not in rep
+        assert registry["x"] == ["alice"]
