@@ -141,16 +141,17 @@ def test_a_refresh_that_worked_keeps_its_cooldown_and_its_cap_slot(tmp_path, mon
     assert ah.maybe_heal("alpha", "tester") == "cooldown"
 
 
-def test_repeated_failures_back_off_up_to_the_cooldown_so_a_broken_set_is_not_hammered(tmp_path, monkeypatch):
+def test_repeated_failures_back_off_up_to_an_hour_so_a_broken_set_is_not_hammered(tmp_path, monkeypatch):
     cache_dir, clock = _setup(tmp_path, monkeypatch, changed=True)
     waits = []
-    for _ in range(6):
-        assert ah.maybe_heal("alpha", "tester") == "started"
+    for _ in range(9):
+        assert ah.maybe_heal("alpha", "tester", max_per_hour=100) == "started"
         ah.drain("tester", "alpha", _token("alpha"), rc=1)
         waits.append(ah._load_state("tester")["retry"]["alpha"] - clock[0])
         clock[0] += waits[-1] + 1
     assert waits[:3] == [ah.RETRY_SECS, ah.RETRY_SECS * 2, ah.RETRY_SECS * 4]
-    assert max(waits) == ah.COOLDOWN_SECS
+    assert max(waits) == ah.MAX_RETRY_SECS and waits[-1] == ah.MAX_RETRY_SECS
+    assert ah.MAX_RETRY_SECS > ah.COOLDOWN_SECS  # a failing set is tried less often than a working one
 
 
 # (d) ---------------------------------------------------------------------------------------
@@ -213,3 +214,112 @@ def test_no_path_starts_a_second_run_of_a_pointer_that_already_has_one(tmp_path,
     assert ah.reconnect_recipe("alpha", "tester", memory=_recipe_memory(src, [])) == "in-progress"
     assert Proc.launched == []
     assert ah._lock_path("tester", "alpha").is_file()  # still the first run's lock
+
+
+# Review of #267 ------------------------------------------------------------------------------
+
+def _parallel_lookups(names):
+    import threading
+    out = []
+    threads = [threading.Thread(target=lambda n=n: out.append(ah.maybe_heal(n, "tester"))) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return out
+
+
+def test_parallel_lookups_never_start_more_refreshes_than_the_concurrent_bound(tmp_path, monkeypatch):
+    names = [f"set{i}" for i in range(12)]
+    _setup(tmp_path, monkeypatch, names=names, changed=True)
+    results = _parallel_lookups(names)
+    assert results.count("started") == ah.MAX_CONCURRENT == len(Proc.launched)
+    state = ah._load_state("tester")
+    assert len(state["attempts"]) == ah.MAX_CONCURRENT  # every start is recorded
+    assert len(state["pending"]) == 12 - ah.MAX_CONCURRENT  # the rest wait, none dropped
+
+
+def test_parallel_lookups_never_overshoot_the_hourly_cap_and_record_every_attempt(tmp_path, monkeypatch):
+    names = [f"set{i}" for i in range(12)]
+    _setup(tmp_path, monkeypatch, names=names, changed=True)
+    monkeypatch.setattr(ah, "MAX_CONCURRENT", 20)
+    results = _parallel_lookups(names)
+    assert results.count("started") == ah.MAX_PER_HOUR == 6
+    assert len(ah._load_state("tester")["attempts"]) == 6
+    assert results.count("rate-limited") == 6
+
+
+def test_a_pointer_queued_behind_its_own_running_refresh_runs_when_it_ends(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch, changed=True)
+    assert ah.maybe_heal("alpha", "tester") == "started"
+    token = _token("alpha")
+    clock[0] += ah.COOLDOWN_SECS + 60  # still running, files changed again, cooldown over
+    assert ah.maybe_heal("alpha", "tester") == "in-progress"
+    assert "alpha" in ah._load_state("tester")["pending"]
+    Proc.launched.clear()
+    ah.drain("tester", "alpha", token, rc=0)  # the first refresh ended
+    assert len(Proc.launched) == 1 and "prepare_bulk.py" in " ".join(Proc.launched[0])  # ran, under its own lock
+    assert ah._load_state("tester")["pending"] == {}
+    assert not ah._lock_path("tester", "alpha").exists()
+
+
+def test_a_reconnect_that_finishes_inside_the_wait_is_judged_once(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch)
+    Proc.outcome = 1
+    assert ah.reconnect_now("alpha", "tester", cache_dir=cache_dir) == "failed"
+    ah.drain("tester", "alpha", _token("alpha"), rc=1)  # the child's own drain reports it too
+    state = ah._load_state("tester")
+    assert state["fails"]["alpha"] == 1
+    assert state["retry"]["alpha"] - clock[0] == ah.RETRY_SECS
+
+
+def test_a_new_attempt_is_judged_again(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch, changed=True)
+    for expected in (1, 2):
+        assert ah.maybe_heal("alpha", "tester", max_per_hour=100) == "started"
+        ah.drain("tester", "alpha", _token("alpha"), rc=1)
+        assert ah._load_state("tester")["fails"]["alpha"] == expected
+        clock[0] += ah.MAX_RETRY_SECS + 1
+
+
+def test_a_held_mark_expires_after_a_day_and_a_changed_recipe_clears_it(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch)
+    src = tmp_path / "held.md"; src.write_text("made-up note\n")
+    calls = []
+    memory = _recipe_memory(src, calls)
+    ah.reconnect_recipe("gamma", "tester", memory=memory)
+    clock[0] += ah.HELD_EXPIRE_SECS - 60
+    assert ah.reconnect_recipe("gamma", "tester", memory=memory) == "held"
+    clock[0] += 120
+    assert ah.reconnect_recipe("gamma", "tester", memory=memory) == "failed"  # a day passed: tried again
+    n = calls.count("connect")
+    clock[0] += 3600  # past the short retry wait
+    inner = memory  # a hand reconnect re-records the recipe: it now names a described note differently
+    def renamed(req):
+        got = inner(req)
+        if req["action"] == "recipe":
+            got["recipe"] = {**got["recipe"], "sources": [{**got["recipe"]["sources"][0], "description": "new"}]}
+        return got
+    assert ah.reconnect_recipe("gamma", "tester", memory=renamed) == "failed"
+    assert calls.count("connect") == n + 1
+
+
+def test_a_refresh_that_cannot_start_is_a_failure_not_an_exception(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch, changed=True)
+
+    def broken(cmd, **kw):
+        raise OSError("no processes")
+    monkeypatch.setattr(ah.subprocess, "Popen", broken)
+    assert ah.maybe_heal("alpha", "tester") == "failed"
+    state = ah._load_state("tester")
+    assert state["fails"]["alpha"] == 1 and state["attempts"] == []
+    assert not ah._lock_path("tester", "alpha").exists()
+
+
+def test_a_lock_naming_a_pid_that_started_after_the_lock_is_a_reused_pid(tmp_path, monkeypatch):
+    cache_dir, clock = _setup(tmp_path, monkeypatch, changed=True)
+    monkeypatch.setattr(ah.time, "time", ah._WALL)  # this one needs the real clock: ps reports real times
+    ah.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # A live pid (this test) named by a lock written an hour before it started: not the holder.
+    ah._lock_path("tester", "alpha").write_text(json.dumps({"pid": os.getpid(), "ts": ah._WALL() - 3600}))
+    assert ah.maybe_heal("alpha", "tester") == "started"

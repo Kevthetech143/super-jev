@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Bounded background auto-heal: one refresh in flight per principal, a per-pointer cooldown,
-an hourly cap, no blocking, no change to unchanged pointers. subprocess.Popen is faked, so
+"""Bounded background auto-heal: one refresh in flight per pointer (a few at once per principal),
+a per-pointer cooldown, an hourly cap, no blocking, no change to unchanged pointers. subprocess.Popen is faked, so
 prepare_bulk.py never actually runs.
 
     python3 -m pytest skills/super-jev/tests/test_auto_heal.py -q
