@@ -229,6 +229,7 @@ def section_text(text: str, lines) -> str:
 
 sys.path.insert(0, str(HERE))
 from connect_checked import gate, gate_many, memory  # noqa: E402
+from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
 
 # Gate packing: TypeSafe's docs batch independent questions into one call (parallel
 # questions, speculative fan-out). Small files are gated several to a call: each file's
@@ -352,7 +353,7 @@ SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 # excerpt, so a big file needs no hand split. The old 90,000-byte hold left every notes log, dead-ends
 # list and knowledge file over it unsearchable. 250,000 bytes keeps one file's gate to about 5 Jev
 # calls; a bigger file is still held with a split hint.
-CEILING_BYTES = 250_000
+CEILING_BYTES = JUDGE_PROFILE.file_ceiling_bytes
 # A reviewed --approve-held file may go over CEILING_BYTES up to this hard cap (about 20 gate calls).
 # Only a size hold can be approved: secret-like text is never sent, so approving it could not connect it.
 APPROVE_MAX_BYTES = 1_000_000
