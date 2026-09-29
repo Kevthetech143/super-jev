@@ -1535,8 +1535,6 @@ def main() -> int:
     ap.add_argument("--admit", action="append", default=[],
                     help="repeatable; on --refresh of a legacy pinned pointer, add this WAITING file (only those) "
                          "after checking it, through the usual holds, review and gate")
-    ap.add_argument("--asker-fallback", action="store_true",
-                    help="internal (auto_heal): --principal is the asking agent, not a recorded one; it is not saved")
     ap.add_argument("--name", dest="names", action="append", default=[])
     ap.add_argument("--allow-target", dest="allow_targets", action="append", default=[],
                     help="folder a symlinked file may point into besides the roots (repeatable)")
@@ -2037,10 +2035,6 @@ def main() -> int:
               "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
-    if a.asker_fallback:
-        # A legacy report records no principal; auto_heal named the asking agent only to run this
-        # new-file refresh. Keep none recorded, so changed files still do not auto-heal it.
-        report.pop("principal"); report.pop("principals")
     if a.no_connect or not connect_set:
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
         _record_written(CACHE_DIR / f"{a.pointer}-report.json")
