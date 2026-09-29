@@ -2869,8 +2869,8 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
 def answer_line(text: str, question: str) -> str:
     """The line of the file to save as the answer: not a heading, and not a line that only
     repeats the question's words (it needs a question word and at least one word the question
-    lacks). Then a line with a number or date first (an answer states one; an intro does not),
-    then the most question words, then the shorter line, then the earlier one."""
+    lacks). Then most question words, then a line with a number or date (an answer often states one),
+    then the shorter line, then the earlier one."""
     terms = query_terms(question)
     asked = set(words(question))
     best, best_key = "", None
@@ -2881,7 +2881,7 @@ def answer_line(text: str, question: str) -> str:
         hits = term_hits(terms, line)
         if hits == 0 or not set(words(line)) - asked:
             continue
-        key = (bool(re.search(r"\d", line)), hits, -len(line), -i)
+        key = (hits, bool(re.search(r"\d", line)), -len(line), -i)
         if best_key is None or key > best_key:
             best, best_key = line, key
     return best
