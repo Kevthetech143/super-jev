@@ -18,10 +18,12 @@
       merged candidates from healthy pointers print first, always -- a pointer
       error never buries a real hit. A non-candidate pointer prints its own
       status line (e.g. "[pointer] refresh-required") after the candidates --
-      errors never hide as "no-candidates". All-empty (no candidates, no
-      errors) -> a no-candidates hint naming references/connectors.md and
-      --add. Any error -> "unresolved: N of M pointers errored" last, exit 1
-      (even when candidates printed above); exit 0 otherwise.
+      errors never hide as "no-candidates". Output starts with one line,
+      "OUTCOME: found | not-found | not-supported | needs-setup | error", with a
+      reason and (unless found) the one next command; exit 0 / 1 / 2 / 4 / 3 in
+      that order (found 0, not-found 1, not-supported 2, error 3, needs-setup 4).
+      found with a failed content check says "(unconfirmed: content check
+      failed)" and exits 0: the files are unconfirmed candidates, read them.
 
   ask.py --principal AGENT --claim "statement" [--claim "statement2" ...] [--claims-file FILE]
       Is a statement true by our own files? One lookup per statement; the same
@@ -2319,6 +2321,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     sets = f"{n} set{'s' if n != 1 else ''}"
     if top or skills:
         found = f"{len(top) + len(skills)} file{'s' if len(top) + len(skills) != 1 else ''}"
+        if check_error and any(m[1] in possible for m in top):
+            found += " (unconfirmed: content check failed)"
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
