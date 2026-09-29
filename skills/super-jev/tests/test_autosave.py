@@ -259,3 +259,31 @@ def test_a_refused_file_is_not_re_checked_until_it_changes(world, monkeypatch):
     world["state"]["sha"] = world["sha"](world["note"])
     ask_once(world)
     assert len(world["gates"]) == 2 and world["cache"]
+
+
+def test_a_gate_error_is_not_remembered_and_the_next_ask_saves(world, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_SAVE_AFTER", "1")
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("ERROR", None))
+    ask_once(world)
+    assert not world["cache"] and not ask.refused_before(world["sdir"], Q, {"path": str(world["note"]), "sha": world["state"]["sha"]})
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
+    ask_once(world)
+    assert world["cache"]
+
+
+def test_a_miss_clears_a_remembered_refusal(world, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_SAVE_AFTER", "1")
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("REJECT", 0.2))
+    ask_once(world)
+    win = {"path": str(world["note"]), "sha": world["state"]["sha"]}
+    assert ask.refused_before(world["sdir"], Q, win)
+    monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "ann", "--miss", Q, "elsewhere"])
+    ask._main()
+    assert not ask.refused_before(world["sdir"], Q, win)
+
+
+def test_answer_line_prefers_the_short_answer_over_a_long_intro():
+    q = "What is the Acme refund window?"
+    note = ("# Refunds\n\nThis long introduction explains how the Acme refund window works for every "
+            "customer, and why the refund window matters to Acme.\n\nRefund window: 30 days from delivery.\n")
+    assert ask.answer_line(note, q) == "Refund window: 30 days from delivery."

@@ -213,7 +213,8 @@ def memory(req: dict) -> dict:
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
     # Not redacted/truncated: lookups.jsonl is the working index find_top
-    # read back by exact question, pointer and on-disk path the save check (auto-save, --approve).
+    # read back by exact question, pointer and on-disk path. The save check (auto-save,
+    # --approve) depends on it.
     entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
 
@@ -2867,8 +2868,9 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
 
 def answer_line(text: str, question: str) -> str:
     """The line of the file to save as the answer: not a heading, and not a line that only
-    repeats the question's words. Needs a question word; then the most words the question
-    does not have (the answer adds new words), then most question words, then the earlier line."""
+    repeats the question's words (it needs a question word and at least one word the question
+    lacks). Then a line with a number or date first (an answer states one; an intro does not),
+    then the most question words, then the shorter line, then the earlier one."""
     terms = query_terms(question)
     asked = set(words(question))
     best, best_key = "", None
@@ -2877,27 +2879,38 @@ def answer_line(text: str, question: str) -> str:
         if not line or line.startswith("#") or line.startswith("---"):
             continue
         hits = term_hits(terms, line)
-        new = len(set(words(line)) - asked)
-        if hits == 0 or new == 0:
+        if hits == 0 or not set(words(line)) - asked:
             continue
-        key = (new, hits, -i)
+        key = (bool(re.search(r"\d", line)), hits, -len(line), -i)
         if best_key is None or key > best_key:
             best, best_key = line, key
     return best
 
+def verdict_refusal(why: str) -> bool:
+    """True for a real verdict on the file (REJECT, READ, CONTRADICTED, TIME_SENSITIVE, a score
+    under the floor, a secret) and false for a failure that says nothing about the file (a gate
+    ERROR, a stale pointer, cannot open, assist off, changed since connect)."""
+    if why.startswith(("secret-held", "check gate score")):
+        return True
+    return why.startswith("check gate verdict") and not why.startswith("check gate verdict ERROR")
+
 def refused_before(sdir: Path, question: str, win: dict) -> bool:
-    """True when the save check already refused this file at these exact bytes for this question
-    (a changed file may try again), so the claim check is not paid for again."""
-    key, path = norm_q(question), sdir / "lookups.jsonl"
+    """True when the save check gave a real refusal for this file at these exact bytes for this
+    question since the last --miss or save, so the claim check is not paid for again (a changed
+    file may try again)."""
+    key, path, refused = norm_q(question), sdir / "lookups.jsonl", False
     for line in (path.read_text().splitlines() if path.is_file() else []):
         try:
             rec = json.loads(line)
         except ValueError:
             continue
-        if (rec.get("kind") == "autosave-refused" and norm_q(rec.get("question") or "") == key
-                and rec.get("path") == win["path"] and rec.get("sha") == win["sha"]):
-            return True
-    return False
+        if norm_q(rec.get("question") or "") != key:
+            continue
+        if rec.get("kind") == "autosave-refused":
+            refused = refused or (rec.get("path") == win["path"] and rec.get("sha") == win["sha"])
+        elif rec.get("kind") in ("miss", "approve"):
+            refused = False
+    return refused
 
 def autosave(principal: str, question: str, sdir: Path, win) -> None:
     """The one rule for saving a file: once it has won this question N times in a row, save it
@@ -2925,7 +2938,8 @@ def autosave(principal: str, question: str, sdir: Path, win) -> None:
               "returns it at once, no search (--miss removes it).")
     else:
         why = _LAST_WHY["why"] or "the save was refused"
-        log(sdir, "autosave-refused", question=key, path=win["path"], sha=win["sha"], why=why)
+        if verdict_refusal(why):  # a failure that says nothing about the file is simply retried
+            log(sdir, "autosave-refused", question=key, path=win["path"], sha=win["sha"], why=why)
         print(f"not saved: {why}")
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
