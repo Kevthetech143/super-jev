@@ -22,7 +22,7 @@ A connector is one named set of reviewed files, registered as one pointer, for o
 | Skills | Skill roots discovered by name/description; no pointer to register |
 | Brain | An agent's own notes |
 | Project queue | A pending-work folder |
-| Manual entries | One small pointer per approved fact, added with `ask.py --add` |
+| Manual entries | One small pointer per approved fact, added with `ask.py --add` (no expiry; stale only if its `--source` file changes) |
 | Documents / Repo / Tools docs | Reviewed local text: documents, a repo checkout snapshot, or tool documentation |
 | Fleet datasets | A shared reviewed set used by more than one agent (shared knowledge folder, skills catalog); see section 10 |
 | Database, Website | Proposed only — not built |

@@ -55,4 +55,4 @@ def test_approve_ignores_possible_only_lookup(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {str(f): ask.INCONCLUSIVE}))
     sdir = tmp_path / "s"; sdir.mkdir(parents=True, exist_ok=True)
     ask.lookup("how is the plan going", "me", sdir)
-    assert ask.find_pointer(sdir, "how is the plan going") is None
+    assert ask.approve("me", "how is the plan going", "on track", sdir) == 1  # never approve from a possible-only hit

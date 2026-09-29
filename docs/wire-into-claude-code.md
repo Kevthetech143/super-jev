@@ -4,7 +4,7 @@
 
 1. To find a SKILL, use skill-search — never grep the skills directory.
 2. To find a FILE answer, use `ask` — never browse the folders yourself.
-3. After EVERY ask: `--approve` a good hit, `--miss` a bad one, `--add` a fact with no file.
+3. After EVERY ask: `--approve` a good hit, `--miss` a wrong saved answer, `--add` a fact with no file.
 4. Read the top evidence file yourself before answering from it.
 5. A "preparation required" or "refresh-required" reply means SETUP is pending, not that there is no match — run the connect flow, then ask again.
 6. The cache only replays YOUR OWN approved wording — paraphrases go through the search lane.

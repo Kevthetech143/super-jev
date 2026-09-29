@@ -89,7 +89,7 @@ requires absolute paths inside the registry/manifest. Source URLs are unsupporte
 
 | Setting | Default | Meaning |
 |---|---:|---|
-| `cacheTtlSeconds` | 86400 | Maximum answer lifetime; choose shorter for time-sensitive information |
+| `cacheTtlSeconds` | none | Optional maximum answer lifetime. Unset, a saved answer lasts until its source file changes; set a limit only for time-sensitive information |
 | `reviewTtlSeconds` | 600 | Time allowed to approve a fresh retrieval ticket |
 | `providerTimeoutSeconds` | 120 | Whole retrieval subprocess timeout |
 | `retrievalCommand` | Bundled Node bridge | Optional trusted executable argument array; receives JSON on stdin and returns JSON |
