@@ -155,7 +155,8 @@ test('source evidence asks whether the passage states the answer to the question
   assert.match(q.instructions!, /^Does this passage state the answer to the question\?/);
   assert.match(q.criteria.o_0!, /^States the answer/);
   assert.match(q.criteria.o_none!, /same subject or topic/);
-  assert.match(q.criteria.o_none!, /never states the requested/);
+  assert.match(q.criteria.o_none!, /neither the requested property nor a necessary input/);
+  assert.match(q.criteria.o_none!, /necessary input/);
   assert.equal(Object.keys(q.criteria).length, 2);
 });
 
