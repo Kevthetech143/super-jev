@@ -1650,7 +1650,11 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
 # in the trusted skill roots, which are not connected files. The skills connector
 # (dispatch.py skills) searches them for every principal; its picks print first.
 SKILL_Q_RE = re.compile(r"\b(skills?|slash commands?)\b|\b(which|what|any)\b.{0,30}\b(tools?|commands?)\b", re.I)
-SKILL_NOTE = "  (skill catalog match: read the SKILL.md before using it)"
+GUESS = "(unverified guess)"
+
+def skill_note(name: str) -> str:
+    return ("  (unverified local guess: read the SKILL.md before using it)" if name.endswith(GUESS)
+            else "  (skill catalog match: read the SKILL.md before using it)")
 
 def skill_question(question: str) -> bool:
     return os.environ.get("SUPERJEV_SKILLS", "1") != "0" and bool(SKILL_Q_RE.search(question))
@@ -1663,8 +1667,15 @@ def skill_catalog(question: str) -> list:
         out = json.loads(r.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return []
-    return [(c.get("name") or c.get("id") or "", c["path"]) for c in out.get("candidates") or []
-            if isinstance(c, dict) and isinstance(c.get("path"), str)] if isinstance(out, dict) else []
+    if not isinstance(out, dict):
+        return []
+    if out.get("status") == "error":
+        print(f"skill search failed: {str(out.get('error') or 'unknown cause')[:200]}", file=sys.stderr)
+        return []
+    # Only a live judge pick or an exact name is a match; local ranking and doubt are guesses.
+    guess = GUESS if not (out.get("status") == "exact" or (out.get("status") == "suggestions" and out.get("source") == "jev")) else ""
+    return [((c.get("name") or c.get("id") or "") + (" " + guess if guess else ""), c["path"]) for c in out.get("candidates") or []
+            if isinstance(c, dict) and isinstance(c.get("path"), str)]
 
 def path_rank(question: str, path: str) -> tuple:
     """Tie-break for equal scores: more question words in the file's name or folder
@@ -2301,7 +2312,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
     for name, path in skills:
-        print(f"skill  {path}  [skills: {name}]{SKILL_NOTE}")
+        print(f"skill  {path}  [skills: {name}]{skill_note(name)}")
     for s, p, ptr in top:
         note = ("  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE
                 else possible.get(p, ""))
