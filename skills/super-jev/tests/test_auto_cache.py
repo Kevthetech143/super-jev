@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline tests for ask.py the save path behind auto-saved answers, --miss un-save and approver on hits.
+"""Offline tests for the save path behind auto-saved answers and --approve, --miss un-save and the approver on hits.
 
 `ask.memory` and `ask.run_gate` are monkeypatched: no network, no live harness.
 

@@ -73,12 +73,17 @@ def world(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "confirm", confirm)
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None:
-                        ("REJECT", 0.1) if path in state["rejected"] else ("CLEAN", 0.93))
+    gates = []
+
+    def gate(claim, path, passage=None):
+        gates.append(claim)
+        return ("REJECT", 0.1) if path in state["rejected"] else ("CLEAN", 0.93)
+
+    monkeypatch.setattr(ask, "run_gate", gate)
     monkeypatch.setattr(ask, "state_dir", lambda principal: tmp_path / "state" / principal)
     monkeypatch.delenv("SUPERJEV_AUTO_CACHE", raising=False)
     monkeypatch.delenv("SUPERJEV_SAVE_AFTER", raising=False)
-    return {"note": note, "other": other, "cache": cache, "calls": calls, "state": state,
+    return {"gates": gates, "note": note, "other": other, "cache": cache, "calls": calls, "state": state,
             "sdir": tmp_path / "state" / "ann", "sha": sha}
 
 
@@ -98,8 +103,9 @@ def test_repeat_question_won_twice_is_returned_saved_with_no_search(world):
     assert n1 == 1 and "Saved for next time" not in out1
     out2, n2 = ask_once(world)
     assert n2 == 1 and "Saved for next time" in out2 and world["cache"]
+    assert len(world["gates"]) == 1  # the claim check ran once, on the saving ask
     out3, n3 = ask_once(world)
-    assert n3 == 0
+    assert n3 == 0 and len(world["gates"]) == 1  # a saved answer costs no check
     assert out3.startswith("OUTCOME: found - saved answer, its source unchanged")
     assert f"saved answer, from {world['note']}, saved " in out3 and "CACHE HIT" in out3
     assert "30 days" in out3
@@ -221,3 +227,35 @@ def test_trace_report_counts_searches_skipped_by_saved_answers(world, capsys):
     capsys.readouterr()
     assert ask.trace_report(world["sdir"], 7, "ann") == 0
     assert "searches skipped by saved answers (last 7 days, principal ann): 2" in capsys.readouterr().out
+
+
+# The saved text is the answer line, not the note's heading
+NOTE = "# Acme refund policy\n\nThis note covers the Acme refund window.\n\nRefunds: 30 days from delivery.\n"
+
+
+def test_saved_text_is_the_answer_line_not_the_heading(world):
+    world["note"].write_text(NOTE)
+    world["state"]["sha"] = world["sha"](world["note"])
+    ask_once(world); ask_once(world)
+    assert list(world["cache"].values()) == ["Refunds: 30 days from delivery."]
+
+
+def test_answer_line_skips_headings_and_lines_that_only_repeat_the_question():
+    q = "what is the acme refund window"
+    assert ask.answer_line(NOTE, q) == "Refunds: 30 days from delivery."
+    assert ask.answer_line("# Acme refund window\n", q) == ""
+
+
+def test_a_refused_file_is_not_re_checked_until_it_changes(world, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_SAVE_AFTER", "1")
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None:
+                        world["gates"].append(claim) or ("REJECT", 0.2))
+    for _ in range(5):
+        ask_once(world)
+    assert len(world["gates"]) == 1 and not world["cache"]
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None:
+                        world["gates"].append(claim) or ("CLEAN", 0.93))
+    world["note"].write_text(ACME + "Late returns: 7 days.\n")
+    world["state"]["sha"] = world["sha"](world["note"])
+    ask_once(world)
+    assert len(world["gates"]) == 2 and world["cache"]
