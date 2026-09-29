@@ -53,7 +53,7 @@ search state, and its exit code matches:
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `found` | at least one file; `partial: N sets not searched` if a set failed or is stale; `(unconfirmed: content check failed)` if the check failed and the files are routed but unread (still 0: read them) | 0 |
+| `found` | at least one file or skill suggestion; the file count is ranked files only (skill suggestions have their own label, e.g. `5 files; 2 skill suggestions`); `partial: N sets not searched` if a set failed or is stale; `(unconfirmed: content check failed)` if the check failed and the files are routed but unread (still 0: read them) | 0 |
 | `not-found` | complete search, no file | 1 |
 | `not-supported` | input outside the contract (empty or over-long question) | 2 |
 | `error` | no file, and execution failed | 3 |
