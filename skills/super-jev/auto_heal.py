@@ -17,13 +17,17 @@ Bounds (state kept in autoheal-state/):
     heals the queue one pointer at a time, oldest first, before it releases its lock (drain)
   - a cooldown per pointer (default 10 min) after a refresh that worked. An attempt that did
     not work (failed, or was still running when the lookup gave up waiting) is judged when it
-    ends: it waits RETRY_SECS (doubling per consecutive failure, at most the cooldown) instead
-    of the full cooldown and does not count toward the hourly cap
-  - a cap on successful-or-running refreshes per principal per rolling hour (default 6), shared
+    ends: it waits RETRY_SECS (doubling per consecutive failure, at most MAX_RETRY_SECS)
+    instead of the full cooldown and does not count toward the hourly cap; each attempt is
+    judged exactly once
+  - at most MAX_CONCURRENT refreshes running at once per principal; the cap, that bound and
+    the attempt record are checked and written in one locked step (_admit), so parallel
+    lookups can neither overshoot them nor lose an attempt
+  - a cap on started refreshes per principal per rolling hour (default 6), shared
     fairly: a pointer over the cap waits in the queue, and a pointer that already healed this
     hour queues behind any pointer that is waiting, so the busiest pointer never starves the rest
   - a refusal that repeats until the file changes (a held, secret-bearing file) is not retried
-    until that file changes
+    until that file (or its recorded recipe) changes, or a day passes
 Every attempt (started or skipped, and why) is appended to autoheal.log as one JSON line.
 
 This only ever *starts* a refresh; it does not change what a lookup reports for the pointer
@@ -31,6 +35,7 @@ that triggered it (that pointer's current lookup still reports its real status).
 the *next* lookup, after the background refresh finishes, no longer hits the stale pointer.
 """
 import fcntl
+import hashlib
 import json
 import os
 import shlex
@@ -50,7 +55,10 @@ STATE_DIR = HERE / "autoheal-state"
 LOG_PATH = STATE_DIR / "autoheal.log"
 
 COOLDOWN_SECS = 600       # 10 minutes per pointer, after a refresh that worked
-RETRY_SECS = 120          # wait after a failed/timed-out attempt (doubles per repeat, up to COOLDOWN_SECS)
+RETRY_SECS = 120          # wait after a failed/timed-out attempt (doubles per repeat, up to MAX_RETRY_SECS)
+MAX_RETRY_SECS = 3600     # a set that keeps failing is tried at most once an hour
+MAX_CONCURRENT = 2        # refreshes running at once per principal (each may be a paid writer run)
+HELD_EXPIRE_SECS = 86400  # a "held, unchanged" mark is forgotten after a day (a scan rule may have changed)
 MAX_PER_HOUR = 6          # per principal
 LOCK_STALE_SECS = 4 * 3600  # a live pid older than this is a reused pid, not a refresh (none runs this long)
 DETERMINISTIC_REFUSALS = ("secret-held",)  # same files, same refusal: not retried until they change
@@ -92,7 +100,7 @@ def _state_txn(principal: str):
     with open(STATE_DIR / f".{principal}.state-lock", "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         state = _load_state(principal)
-        for key in ("pending", "retry", "fails", "held"):
+        for key in ("pending", "retry", "fails", "held", "judged"):
             state.setdefault(key, {})
         yield state
         _save_state(principal, state)
@@ -103,6 +111,7 @@ def _mark(principal: str, pointer: str, when: float, attempts: list = None) -> N
     with _state_txn(principal) as state:
         state["pointers"][pointer] = when
         state["retry"].pop(pointer, None)
+        state["judged"].pop(pointer, None)
         if attempts is not None:
             state["attempts"] = attempts
         state["pending"].pop(pointer, None)
@@ -117,27 +126,65 @@ def _wait_secs(state: dict, pointer: str, now: float, cooldown_secs: int = None)
     return state["pointers"].get(pointer, 0) + (COOLDOWN_SECS if cooldown_secs is None else cooldown_secs) - now
 
 
+def _live_locks(principal: str, besides: str) -> int:
+    """Refreshes or reconnects running for this principal, not counting `besides`."""
+    mine = _lock_path(principal, besides)
+    return sum(1 for lock in STATE_DIR.glob(f"{principal}.*.lock") if lock != mine and _lock_holder_alive(lock))
+
+
+def _admit(principal: str, pointer: str, now: float, max_per_hour: int = None,
+           max_concurrent: int = None, cooldown_secs: int = None, count: bool = True) -> tuple:
+    """Start an attempt: (token, "") or ("", why). The cooldown, the hourly cap, the concurrent
+    bound, the pointer's lock and the attempt record are one step under the state lock, so
+    parallel lookups cannot all pass a check that only the first one's record would fail.
+    `count` False: an attempt that spends no writer call (a --no-findability reconnect)."""
+    max_per_hour = MAX_PER_HOUR if max_per_hour is None else max_per_hour
+    max_concurrent = MAX_CONCURRENT if max_concurrent is None else max_concurrent
+    with _state_txn(principal) as state:
+        if _wait_secs(state, pointer, now, cooldown_secs) > 0:
+            return "", "cooldown"
+        recent = [t for t in state["attempts"] if now - t < 3600]
+        if count and len(recent) >= max_per_hour:
+            return "", "rate-limited"
+        if _live_locks(principal, pointer) >= max_concurrent:
+            return "", "busy"
+        token = _acquire_lock(principal, pointer)
+        if not token:
+            return "", "in-progress"
+        state["pointers"][pointer] = now
+        state["retry"].pop(pointer, None)
+        state["judged"].pop(pointer, None)
+        state["pending"].pop(pointer, None)
+        state["attempts"] = recent + [now] if count else state["attempts"]
+        return token, ""
+
+
 def _settle(principal: str, pointer: str, ok: bool, now: float = None) -> None:
-    """Judge an attempt when it ends. A worked attempt keeps its cooldown and clears the
-    failure count. One that did not work (failed, or timed out and later failed) waits RETRY_SECS
-    (doubling per consecutive failure, up to the cooldown) and gives its hourly-cap slot back."""
+    """Judge an attempt when it ends, once (the inline wait and the child's drain may both report
+    it; the first one counts). A worked attempt keeps its cooldown and clears the failure count.
+    One that did not work (failed, or timed out and later failed) waits RETRY_SECS (doubling per
+    consecutive failure, up to MAX_RETRY_SECS) and gives its hourly-cap slot back."""
     now = time.time() if now is None else now
     with _state_txn(principal) as state:
+        if state["judged"].get(pointer):
+            return
+        state["judged"][pointer] = True
         if ok:
             state["fails"].pop(pointer, None)
             state["retry"].pop(pointer, None)
             return
         n = state["fails"].get(pointer, 0) + 1
         state["fails"][pointer] = n
-        state["retry"][pointer] = now + min(COOLDOWN_SECS, RETRY_SECS * 2 ** (n - 1))
+        state["retry"][pointer] = now + min(MAX_RETRY_SECS, RETRY_SECS * 2 ** min(n - 1, 20))
         started = state["pointers"].get(pointer)
         if started in state["attempts"]:
             state["attempts"].remove(started)  # _mark stored the same time in both
 
 
-def _fingerprint(paths: list) -> str:
-    """What the files are now (size and mtime): a held file is retried only once this changes."""
-    parts = []
+def _fingerprint(paths: list, recipe: dict = None) -> str:
+    """What the files are now (size and mtime) and what recipe replays them: a held file is
+    retried only once this changes (a hand reconnect that re-records the recipe changes it)."""
+    parts = [hashlib.sha256(json.dumps(recipe, sort_keys=True, default=str).encode()).hexdigest()[:16]]
     for path in sorted(paths):
         try:
             st = os.stat(os.path.expanduser(path))
@@ -175,7 +222,26 @@ def _lock_holder_alive(lock: Path) -> bool:
         os.kill(pid, 0)
     except (OSError, ProcessLookupError):
         return False
-    return True
+    return not _pid_reused(pid, info.get("ts", 0))
+
+
+_WALL = time.time  # the real clock and process listing, kept apart from anything that fakes them
+_POPEN = subprocess.Popen
+
+
+def _pid_reused(pid: int, lock_ts: float) -> bool:
+    """True if the process now at `pid` started after the lock was written, so it is a different
+    process that got the dead holder's pid. Every holder started before it wrote (or refreshed)
+    the lock. If `ps` cannot say, assume it is the holder."""
+    try:
+        out = _POPEN(["ps", "-o", "etime=", "-p", str(pid)], stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL, text=True).communicate(timeout=2)[0].strip()
+        days, _, rest = out.rpartition("-")
+        parts = [int(x) for x in rest.split(":")]
+        secs = sum(v * 60 ** i for i, v in enumerate(reversed(parts))) + (int(days) * 86400 if days else 0)
+    except Exception:
+        return False
+    return _WALL() - secs > lock_ts + 5  # 5 s: ps reports whole seconds
 
 
 def _publish_lock(lock: Path, payload: bytes) -> bool:
@@ -207,6 +273,7 @@ def _publish_lock(lock: Path, payload: bytes) -> bool:
 
 
 _DRAINING = set()  # principals this process is draining (it holds one pointer's lock for it)
+_OWNED = {}  # (principal, pointer) -> token of the lock this process's drain holds
 
 
 @contextmanager
@@ -222,6 +289,8 @@ def _control(principal: str):
 
 def _acquire_lock(principal: str, pointer: str) -> str:
     """The new lock's token (truthy) if this pointer's lock was free, else ""."""
+    if (principal, pointer) in _OWNED:  # the drain's own pointer: it runs under the lock it holds
+        return _OWNED[(principal, pointer)]
     lock = _lock_path(principal, pointer)
     token = uuid.uuid4().hex
     payload = json.dumps({"pid": os.getpid(), "ts": time.time(), "pointer": pointer,
@@ -303,7 +372,10 @@ def _hand_off(principal: str, pointer: str, token: str) -> None:
 
 
 def _release_lock(principal: str, pointer: str, token: str = None) -> None:
-    """Remove the pointer's lock; given a token, only if the lock is still that one."""
+    """Remove the pointer's lock; given a token, only if the lock is still that one. A lock this
+    process's drain holds is released only by the drain itself."""
+    if token is not None and _OWNED.get((principal, pointer)) == token:
+        return
     lock = _lock_path(principal, pointer)
     with _control(principal):
         try:
@@ -416,7 +488,7 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     bytes, with the same paths, descriptions, structure and principals. Local only: no
     writer or Jev call, and the connector's own secret scan still runs. Returns
     "reconnected", or why not: "no-recipe", "manual" (a --add record re-adds itself),
-    "held" (refused for a held file that has not changed since), "cooldown", "in-progress" or
+    "held" (refused for a held file that has not changed since, within a day), "cooldown", "in-progress" or
     "failed". Never raises."""
     if "-manual-" in pointer:
         return "manual"
@@ -431,17 +503,17 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
         return "no-recipe"
     state = _load_state(principal)
     paths = [str(s.get("path")) for s in recipe.get("sources") or [] if isinstance(s, dict)]
-    if state.get("held", {}).get(pointer) == _fingerprint(paths):
+    fingerprint = _fingerprint(paths, recipe)
+    mark = state.get("held", {}).get(pointer) or {}
+    if mark.get("fp") == fingerprint and time.time() - mark.get("ts", 0) < HELD_EXPIRE_SECS:
         _log(principal=principal, pointer=pointer, action="skip-recipe", reason="held-unchanged")
         return "held"
-    if _wait_secs(state, pointer, time.time()) > 0:
-        _log(principal=principal, pointer=pointer, action="skip-recipe", reason="cooldown")
-        return "cooldown"
-    token = _acquire_lock(principal, pointer)
-    if not token:
-        return "in-progress"
+    token, why = _admit(principal, pointer, time.time(), count=False)  # local only: no cap slot
+    if why:
+        if why == "cooldown":
+            _log(principal=principal, pointer=pointer, action="skip-recipe", reason="cooldown")
+        return why if why == "cooldown" else "in-progress"
     result, preview = "failed", {}
-    _mark(principal, pointer, time.time())  # the cooldown runs from the start; a failure shortens it (_settle)
     try:
         req = {"action": "connect", "pointer": recipe["pointer"], "dataset": recipe["dataset"],
                "principals": recipe["principals"], "structure": recipe["structure"],
@@ -470,7 +542,7 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     _settle(principal, pointer, result == "reconnected")
     if reason in DETERMINISTIC_REFUSALS:
         with _state_txn(principal) as st:  # same files, same refusal: wait for them to change
-            st["held"][pointer] = _fingerprint(paths)
+            st["held"][pointer] = {"fp": fingerprint, "ts": time.time()}
     elif result == "reconnected":
         with _state_txn(principal) as st:
             st["held"].pop(pointer, None)
@@ -490,12 +562,14 @@ def reconnect_recipe_or_queue(pointer: str, principal: str, memory=None) -> str:
 
 def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
                cooldown_secs: int = COOLDOWN_SECS, max_per_hour: int = MAX_PER_HOUR,
-               new: bool = False) -> str:
+               new: bool = False, max_concurrent: int = None) -> str:
     """Start a bounded background refresh of `pointer` for `principal` if eligible. Returns a
     short reason string: "started", or why it was skipped ("no-report", "no-change",
-    "in-progress", "cooldown", "rate-limited"). Never raises, never blocks. `new` (from scan):
+    "in-progress" (this pointer is running, or MAX_CONCURRENT are: queued), "cooldown",
+    "rate-limited", "failed" (the process could not start)). Never raises, never blocks. `new` (from scan):
     the pointer's folders hold files it has never seen, so it needs a refresh with no file changed."""
     cache_dir = cache_dir or rc.CACHE_DIR
+    max_concurrent = MAX_CONCURRENT if max_concurrent is None else max_concurrent
     report, owner = _report_for(pointer, cache_dir)
     # A report with no recorded principal is healed as the asking agent, which the refresh then
     # records (prepare_bulk keeps the pointer's registered scope), so this happens once.
@@ -529,26 +603,26 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
             _hand_off(principal, pointer, token)
         _log(principal=principal, pointer=pointer, action="skip", reason="yield", queued=True)
         return "in-progress"
-    recent = [t for t in state["attempts"] if now - t < 3600]
-    if len(recent) >= max_per_hour:
+    token, why = _admit(principal, pointer, now, max_per_hour, max_concurrent, cooldown_secs)
+    if why in ("rate-limited", "busy", "in-progress"):
         _queue(principal, pointer, kind)  # waits its turn; never dropped
-        _log(principal=principal, pointer=pointer, action="skip", reason="rate-limited",
-             attempts_last_hour=len(recent), queued=True)
-        return "rate-limited"
-
-    token = _acquire_lock(principal, pointer)
-    if not token:
-        _queue(principal, pointer, kind)
-        _log(principal=principal, pointer=pointer, action="skip", reason="in-progress", queued=True)
-        return "in-progress"
-
-    _mark(principal, pointer, now, recent + [now])
+        _log(principal=principal, pointer=pointer, action="skip", reason=why, queued=True)
+        return "in-progress" if why != "rate-limited" else "rate-limited"
+    if why:  # cooldown, judged again under the lock
+        _log(principal=principal, pointer=pointer, action="skip", reason=why)
+        return why
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     out_log = STATE_DIR / f"{principal}-{pointer}-last-refresh.log"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args]
     # Detached background run; its drain heals the queue and releases the lock (see _child_line).
-    proc = _spawn_detached(["/bin/sh", "-c", _child_line(cmd, out_log, principal, pointer, token)])
+    try:
+        proc = _spawn_detached(["/bin/sh", "-c", _child_line(cmd, out_log, principal, pointer, token)])
+    except OSError:
+        _settle(principal, pointer, False)
+        _release_lock(principal, pointer, token)
+        _log(principal=principal, pointer=pointer, action="skip", reason="spawn-failed")
+        return "failed"
     _name_child(principal, pointer, token, proc)
     _log(principal=principal, pointer=pointer, action="started", cmd=cmd)
     return "started"
@@ -624,22 +698,15 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
     changed = bool(rc.changed_files(report, cache)) or new
     if not changed and kind != "reconnect":
         return "no-change"  # refreshed since it was queued
-    state, now = _load_state(principal), time.time()
-    if _wait_secs(state, owner, now) > 0:
-        return "cooldown"
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), *args]
-    recent = [t for t in state["attempts"] if now - t < 3600]
-    if changed and len(recent) >= MAX_PER_HOUR:
-        return "rate-limited"
-    token = _acquire_lock(principal, owner)  # the same one-run-per-pointer rule as every launch
-    if not token:
-        return "in-progress"
+    if not changed:
+        cmd.append("--no-findability")
+    # The same admission as every launch: cooldown, cap, bound, and the pointer's one lock (the
+    # drain's own pointer runs under the lock the drain already holds).
+    token, why = _admit(principal, owner, time.time(), count=changed)
+    if why:
+        return why if why != "busy" else "in-progress"
     try:
-        if changed:
-            _mark(principal, owner, now, recent + [now])
-        else:
-            cmd.append("--no-findability")
-            _mark(principal, owner, now)
         try:
             with (STATE_DIR / f"{principal}-{owner}-last-refresh.log").open("w") as out:
                 code = subprocess.run(cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(HERE)).returncode
@@ -665,6 +732,7 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
     if rc is not None:
         _settle(principal, pointer, rc in (0, 3))
     _DRAINING.add(principal)
+    _OWNED[(principal, pointer)] = token
     try:
         while True:
             pending = _load_state(principal).get("pending") or {}
@@ -687,6 +755,7 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
                     state["pending"].pop(queued, None)
             _log(principal=principal, pointer=queued, action="drain", kind=kind, result=result)
     finally:
+        _OWNED.pop((principal, pointer), None)
         _release_lock(principal, pointer, token)
         _DRAINING.discard(principal)
 
