@@ -471,9 +471,13 @@ def cases(env, name, tag):
 
 def results(env, name, n, passing):
     """A result file in the try248/eval60 text format: n lines, the first `passing` of them pass."""
-    lines = [f"q{i:02d} rank 1 exit 0 5s | OUTCOME: found" if i < passing else f"q{i:02d} MISS exit 0 5s | x"
-             for i in range(n)]
+    lines = [f"q{i:02d} tuned health rank 1 exit 0 5s | OUTCOME: found" if i < passing
+             else f"q{i:02d} tuned health MISS exit 0 5s | x rank 1 not-found OK" for i in range(n)]
     return f(env, name, "\n".join(lines) + "\n")
+
+
+def ids10(env):
+    return f(env, "cases10-ids.jsonl", "".join(json.dumps({"id": f"q{i:02d}"}) + "\n" for i in range(10)))
 
 
 def git_wt(env):
@@ -496,16 +500,16 @@ def onboard_upto(env, upto):
                           "--approved", "Kelvin approved: 2026-09-29", "--contract", contract]),
              ("frozen", ["--dev", dev, "--heldout", held]),
              ("build", ["--worktree", str(wt), "--branch", "feat", "--deletes", "none: new path only"]),
-             ("prove", ["--cases10-file", results(env, "c10.txt", 10, 10),
-                        "--eval60-before-file", results(env, "e0.txt", 60, 50),
-                        "--eval60-file", results(env, "e1.txt", 60, 51), "--test-cmd", f"test -f {dev}"]),
+             ("prove", lambda: ["--cases10-file", results(env, "c10.txt", 10, 10), "--cases10-ids", ids10(env),
+                                "--eval60-before-file", results(env, "e0.txt", 60, 50),
+                                "--eval60-file", results(env, "e1.txt", 60, 51), "--test-cmd", f"test -f {dev}"]),
              ("record", ["--timeline-row", "X works", "--timeline-file", tl,
                          "--card-now", "NOW: X works", "--card-file", card])]
     r = None
     for name, args in steps:
         if name == "build":
             do_review()
-        r = ob(env, name, *args)
+        r = ob(env, name, *(args() if callable(args) else args))
         if name == upto:
             return r
         assert r.returncode == 0, (name, r.stderr)
@@ -569,7 +573,8 @@ def test_onboard_prove_counts_result_files_and_runs_the_frozen_test(env):
     onboard_upto(env, "build")
     dev = str(env["tmp"] / "dev.jsonl")
     c10, e0, e1 = (results(env, n, k, p) for n, k, p in (("c10.txt", 10, 10), ("e0.txt", 60, 50), ("e1.txt", 60, 50)))
-    t = ["--test-cmd", f"test -f {dev}"]
+    ids = ids10(env)
+    t = ["--cases10-ids", ids, "--test-cmd", f"test -f {dev}"]
     assert ob(env, "prove", "--cases10-file", results(env, "c9.txt", 10, 9), "--eval60-before-file", e0,
               "--eval60-file", e1, *t).returncode == 2
     assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0,
@@ -577,12 +582,97 @@ def test_onboard_prove_counts_result_files_and_runs_the_frozen_test(env):
     assert ob(env, "prove", "--cases10-file", results(env, "short.txt", 9, 9), "--eval60-before-file", e0,
               "--eval60-file", e1, *t).returncode == 2  # a file with 9 lines is not the 10 questions
     assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0, "--eval60-file", e1,
-              "--test-cmd", "true").returncode == 2  # test does not use the frozen file
+              "--cases10-ids", ids, "--test-cmd", "true").returncode == 2  # test does not use the frozen file
     assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0, "--eval60-file", e1,
-              "--test-cmd", f"test -f {dev} && false").returncode == 2
+              "--cases10-ids", ids, "--test-cmd", f"test -f {dev} && false").returncode == 2
     assert ob(env, "prove", "--cases10-file", c10, "--eval60-before-file", e0, "--eval60-file", e1, *t).returncode == 0
     pf = (env["cycle"] / "onboard-6-prove.md").read_text()
     assert "cases10 file sha256:" in pf and "eval60 file sha256:" in pf
+
+
+def test_pass_rule_is_anchored_to_the_status_field_not_text_after_the_bar(env):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("bc", TOOL)
+    bc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bc)
+    ok = ["q01 rank 1 exit 0 5s | x", "q01 tuned health rank 3 exit 0 | x", "q20 not-found OK exit 4 | y",
+          "q21 absent-OK exit 0 | y"]
+    bad = ["q01 MISS exit 0 5s | rank 1", "q02 tuned health MISS exit 0 | not-found OK", "q03 exit 0 | rank 1",
+           "q04 rank 6 exit 0", "q05 MISS exit rank 1", "q06 a b c rank 1"]
+    assert all(bc.PASS_RE.match(l) for l in ok) and not any(bc.PASS_RE.match(l) for l in bad)
+
+
+def test_onboard_result_ids_must_be_distinct_and_the_frozen_ten(env):
+    onboard_upto(env, "build")
+    dev = str(env["tmp"] / "dev.jsonl")
+    e0, e1, ids = results(env, "e0.txt", 60, 50), results(env, "e1.txt", 60, 50), ids10(env)
+    dup = f(env, "dup.txt", "\n".join("q00 rank 1 exit 0 | x" for _ in range(10)) + "\n")
+    other = f(env, "other.txt", "\n".join(f"q{i + 50:02d} rank 1 exit 0 | x" for i in range(10)) + "\n")
+    for bad in (dup, other):
+        r = ob(env, "prove", "--cases10-file", bad, "--eval60-before-file", e0, "--eval60-file", e1,
+               "--cases10-ids", ids, "--test-cmd", f"test -f {dev}")
+        assert r.returncode == 2 and "ids" in r.stderr, bad
+
+
+def test_onboard_eval60_files_must_differ_and_after_must_be_newer_than_build(env):
+    import time
+    onboard_upto(env, "build")
+    dev = str(env["tmp"] / "dev.jsonl")
+    c10, ids, e = results(env, "c10.txt", 10, 10), ids10(env), results(env, "e0.txt", 60, 50)
+    args = ["--cases10-file", c10, "--cases10-ids", ids, "--test-cmd", f"test -f {dev}"]
+    r = ob(env, "prove", *args, "--eval60-before-file", e, "--eval60-file", e)
+    assert r.returncode == 2 and "different files" in r.stderr
+    e1 = results(env, "e1.txt", 60, 50)
+    old = time.time() - 3600
+    os.utime(e1, (old, old))
+    r = ob(env, "prove", *args, "--eval60-before-file", e, "--eval60-file", e1)
+    assert r.returncode == 2 and "older than the build" in r.stderr
+
+
+def test_onboard_review_verdict_comes_from_the_answer_file_and_must_follow_frozen(env):
+    import time
+    onboard_upto(env, "frozen")
+    wt = git_wt(env)
+    args = ["build", "--worktree", str(wt), "--branch", "feat", "--deletes", "none: new path only"]
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP typed", "--file", f(env, "fx.md", "FIX branch feat: broken"))
+    r = ob(env, *args)
+    assert r.returncode == 2 and "must start with SHIP" in r.stderr
+    run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "sh.md", "SHIP branch feat"))
+    old = time.time() - 3600
+    os.utime(env["cycle"] / "onboard-4-frozen.md", (old + 7200, old + 7200))
+    r = ob(env, *args)
+    assert r.returncode == 2 and "older than the frozen step" in r.stderr
+    os.utime(env["cycle"] / "onboard-4-frozen.md", (old, old))
+    assert ob(env, *args).returncode == 0
+
+
+def test_onboard_check_recounts_prove_files_and_reapplies_approval_and_branch_rules(env):
+    import hashlib
+    onboard_upto(env, "record")
+    cyc = env["cycle"]
+    orig = {n: (cyc / n).read_text() for n in ("onboard-6-prove.md", "onboard-3-promise.md", "onboard-5-build.md")}
+    e1 = env["tmp"] / "e1.txt"
+    e1.write_text("\n".join(f"q{i:02d} rank 1 | x" for i in range(30)) + "\n"
+                  + "\n".join(f"q{i + 30:02d} MISS | x" for i in range(30)) + "\n")  # lower than before, 60 lines
+    sha = hashlib.sha256(e1.read_bytes()).hexdigest()
+    old_line = [l for l in orig["onboard-6-prove.md"].splitlines() if l.startswith("- eval60 file sha256:")][0]
+    (cyc / "onboard-6-prove.md").write_text(orig["onboard-6-prove.md"].replace(old_line, f"- eval60 file sha256: {sha}"))
+    r = ob(env, "check")
+    assert r.returncode == 1 and "eval60 went down" in r.stdout
+    (cyc / "onboard-6-prove.md").write_text(orig["onboard-6-prove.md"])
+    (cyc / "onboard-3-promise.md").write_text(orig["onboard-3-promise.md"].replace("Kelvin approved: 2026-09-29", "sure"))
+    assert "Kelvin approved" in ob(env, "check").stdout
+    (cyc / "onboard-3-promise.md").write_text(orig["onboard-3-promise.md"])
+    (cyc / "onboard-5-build.md").write_text(orig["onboard-5-build.md"].replace("- branch: feat", "- branch: main"))
+    assert "build branch is main" in ob(env, "check").stdout
+
+
+def test_onboard_approved_date_cannot_be_in_the_future(env):
+    onboard_upto(env, "simplest")
+    c = f(env, "c9.md", "x\n")
+    r = ob(env, "promise", "--line", "accepts csv; returns rows; failure is reported", "--contract", c,
+           "--approved", "Kelvin approved: 2999-01-01")
+    assert r.returncode == 2 and "future" in r.stderr
 
 
 def test_onboard_typed_or_nonfinite_scores_are_no_longer_accepted(env):
@@ -641,10 +731,6 @@ def test_onboard_review_must_be_newer_than_need_and_name_the_branch(env):
     assert r.returncode == 2 and "must name the branch" in r.stderr
     run(env, "review", "--reviewer", "rev", "--verdict", "SHIP ok", "--file", f(env, "nb2.md", "SHIP branch feat"))
     old = time.time() - 3600
-    os.utime(env["cycle"] / "onboard-1-need.md", (old + 7200, old + 7200))
-    r = ob(env, *args)
-    assert r.returncode == 2 and "older than the need step" in r.stderr
-    os.utime(env["cycle"] / "onboard-1-need.md", (old, old))
     assert ob(env, *args).returncode == 0
 
 
