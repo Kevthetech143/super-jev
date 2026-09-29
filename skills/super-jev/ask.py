@@ -88,8 +88,9 @@ REPEAT QUESTIONS (the one rule for saving a file). When the same file wins the s
 question (same words after lowercasing, collapsing spaces and dropping trailing
 punctuation) for the same principal N times in a row and passes the content check, ask
 saves it automatically: it prints "Saved for next time", and the next ask of that
-question returns the FILE at once (its path, labelled "saved answer, from FILE"), with no
-Jev call and no answer text: the caller opens the file. N is a setting:
+question returns the whole ranked list of the winning search (up to 5 files, in rank order,
+labelled "saved answer, from FILE"), with no Jev call and no answer text: the caller opens the
+files. If any listed file changed or cannot be read, the saved answer is withheld as STALE. N is a setting:
 SUPERJEV_SAVE_AFTER, default 2. Only an ordinary ask counts (not --claim, not a
 possible-tier file, and only a complete search: a partial one records no win and does not
 reset the count). The N wins are the evidence (each already passed the content check),
@@ -507,6 +508,12 @@ def changed_saved_source(rec, record: Path):
                 return rec["file"]
         except OSError:
             return rec["file"]
+    for f in (rec or {}).get("files") or []:  # a repeat win saved the whole ranked list
+        try:
+            if sha256_file(Path(f["path"])) != f["sha"]:
+                return f["path"]
+        except OSError:
+            return f["path"]
     return changed_source(record)
 
 def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
@@ -523,8 +530,9 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     print("CACHE HIT")
     who = approver(sdir, question)
     if who.get("approved_by") == "auto-save" and rec and rec.get("file"):
-        # A repeat win saved the file, not an answer: open it and answer from it.
-        print("file:", rec["file"])
+        # A repeat win saved the ranked files, not an answer: print them like a found result.
+        for f in rec.get("files") or [{"score": 0, "path": rec["file"], "pointer": rec.get("pointer", "")}]:
+            print(f"{f['score']:5.2f}  {f['path']}  [{f['pointer']}]")
     else:
         print("answer:", hit.get("answer") or "")
     print("approved_by:", who.get("approved_by", "human") + (
@@ -1868,7 +1876,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
         if rc == 0:
-            _done("found", "saved answer, its source unchanged")
+            n = len((saved_record(sdir, question) or {}).get("files") or []) or 1
+            _done("found", f"{n} file{'s' if n != 1 else ''}; saved answer, sources unchanged")
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
                     content_check={}, final_ranked=[], tier="cache" if rc == 0 else "stale",
                     timings={"total_secs": round(time.time() - t0, 2)},
@@ -2790,12 +2799,13 @@ def gate_why(question: str, answer: str, path: str, passage=None):
 
 def save_answer(principal: str, question: str, answer: str, sdir: Path,
                 top=None, approved_by: str = "auto-check", automatic: bool = True,
-                claim_check: bool = True, stored: str = None) -> int:
+                claim_check: bool = True, stored: str = None, files: list = None) -> int:
     """The one way a file-backed answer is saved (a repeat win, --approve):
     the secret scan, the unchanged-file check, then the claim check (CLEAN >= SAVE_FLOOR) on the
     cited file, then the write. The caller's word is recorded (approved_by) but never skips a check.
     claim_check=False is for a repeat win only: its N wins were the evidence. `stored` is the text
     kept as the answer when it differs from `answer` (which still ranks the cited passage).
+    `files` is a repeat win's whole ranked list, kept in the saved record.
     top is the file row {path, pointer} the caller chose, else the last lookup's top file.
     automatic=False (a person's --approve) ignores the --no-auto switch, never the checks."""
     _LAST_WHY["why"] = None
@@ -2827,7 +2837,7 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
         return not_saved(sdir, key, f"{why}; nothing to save")
     if not claim_check:
         return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
-                             file=evidence_file, source_sha=row["contentSHA"])
+                             file=evidence_file, source_sha=row["contentSHA"], **({"files": files} if files else {}))
     # The claim check reads exactly the passages that will be saved as evidence.
     why, score = gate_why(key, answer, evidence_file, evidence_text(out))
     if why:
@@ -2853,10 +2863,15 @@ def win_of(top: list, possible: dict, notes: dict):
     if not top or top[0][1] in possible or notes.get(top[0][1]) == INCONCLUSIVE:
         return None
     _s, path, pointer = top[0]
-    try:
-        return {"path": path, "pointer": pointer, "sha": live_sha(path)}
-    except OSError:
+    files = []  # the whole ranked list (up to 5), in rank order, each with its bytes' hash
+    for s, p, ptr in top[:5]:
+        try:
+            files.append({"score": s, "path": p, "pointer": ptr, "sha": live_sha(p)})
+        except OSError:
+            continue
+    if not files or files[0]["path"] != path:
         return None
+    return {"path": path, "pointer": pointer, "sha": files[0]["sha"], "files": files}
 
 def win_count(sdir: Path, question: str, win: dict) -> int:
     """How many asks in a row (this one included) the same unchanged file won this question.
@@ -2895,7 +2910,8 @@ def autosave(principal: str, question: str, sdir: Path, win) -> None:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         rc = save_answer(principal, key, key, sdir, top={"path": win["path"], "pointer": win["pointer"]},
-                         approved_by="auto-save", claim_check=False, stored=f"Saved file: {win['path']}")
+                         approved_by="auto-save", claim_check=False, stored=f"Saved file: {win['path']}",
+                         files=win.get("files"))
     if rc == 0:
         print(f"Saved for next time: {win['path']} won this question {save_after()} times; the next ask "
               "returns it at once, no search (--miss removes it).")

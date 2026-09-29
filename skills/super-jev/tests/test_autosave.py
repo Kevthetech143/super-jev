@@ -34,7 +34,7 @@ def world(tmp_path, monkeypatch):
     other.write_text("Acme ships in 2 days.\n")
     cache, calls = {}, []
     pointers = {"ann": ["acme"], "bo": []}
-    state = {"routed": str(note), "rejected": set()}
+    state = {"routed": str(note), "rejected": set(), "also": []}
 
     def sha(p):
         return hashlib.sha256(Path(p).read_bytes()).hexdigest()
@@ -49,7 +49,8 @@ def world(tmp_path, monkeypatch):
             return ({"status": "verified-cache-hit", "answer": hit, "evidence": []} if hit
                     else {"status": "cache-miss", "checked": []})
         if act == "navigate":
-            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": state["routed"]}]}
+            paths = [state["routed"]] + state["also"]
+            return {"status": "candidates", "candidates": [{"score": 0.9 - 0.05 * i, "originalPath": p} for i, p in enumerate(paths)]}
         if act == "sources":
             return {"status": "ok", "sources": [{"sourceId": "s1", "originalPath": state["routed"],
                                                   "contentSHA": state["sha"]}]}
@@ -69,7 +70,7 @@ def world(tmp_path, monkeypatch):
     state["sha"] = sha(note)
 
     def confirm(question, paths):
-        return {p: (0.1 if p in state["rejected"] else 0.9) for p in paths}, set(), None, {}
+        return {p: (0.1 if p in state["rejected"] else 0.9 - 0.05 * i) for i, p in enumerate(paths)}, set(), None, {}
 
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "confirm", confirm)
@@ -106,9 +107,9 @@ def test_repeat_question_won_twice_is_returned_saved_with_no_search(world):
     assert world["gates"] == []  # no claim check on the saving ask
     out3, n3 = ask_once(world)
     assert n3 == 0 and world["gates"] == []  # nor on a hit
-    assert out3.startswith("OUTCOME: found - saved answer, its source unchanged")
+    assert out3.startswith("OUTCOME: found - 1 file; saved answer, sources unchanged")
     assert f"saved answer, from {world['note']}, saved " in out3 and "CACHE HIT" in out3
-    assert f"file: {world['note']}" in out3
+    assert f"  {world['note']}  [acme]" in out3
 
 
 # 2 -- ONE WIN ONLY: still a full search
@@ -230,7 +231,7 @@ def test_a_repeat_win_saves_the_file_with_no_answer_text_and_no_claim_check(worl
     assert saved == [f"Saved file: {world['note']}"] and "30 days" not in saved[0]
     out3, n3 = ask_once(world)
     assert n3 == 0 and world["gates"] == []
-    assert f"file: {world['note']}" in out3 and "answer:" not in out3 and "evidence:" not in out3
+    assert str(world["note"]) in out3 and "answer:" not in out3 and "evidence:" not in out3
 
 
 def test_a_file_holding_a_secret_is_never_saved(world):
@@ -273,3 +274,44 @@ def test_a_partial_search_neither_counts_nor_resets_the_count(world, monkeypatch
     world["down"] = False
     out, _n = ask_once(world)  # win 2, complete
     assert "Saved for next time" in out and world["cache"]
+
+
+# The saved answer keeps the whole ranked list, so a right file that ranked 2-5 is never lost
+def _three_files(world, tmp_path):
+    extra = []
+    for name in ("acme-returns.md", "acme-policy.md"):
+        f = tmp_path / name
+        f.write_text(f"Acme {name} refund window notes.\n")
+        extra.append(str(f))
+    world["state"]["also"] = extra
+    return extra
+
+
+def _rank_lines(out):
+    return [l.split()[1] for l in out.splitlines() if l[:5].strip().replace(".", "").isdigit()]
+
+
+def test_a_hit_returns_all_ranked_files_from_the_saving_search_in_order(world, tmp_path):
+    extra = _three_files(world, tmp_path)
+    live, _ = ask_once(world)
+    ranked = _rank_lines(live)
+    assert ranked == [str(world["note"])] + extra
+    ask_once(world)
+    hit, n = ask_once(world)
+    assert n == 0 and "CACHE HIT" in hit and _rank_lines(hit) == ranked
+
+
+def test_a_change_to_the_third_file_makes_the_saved_answer_stale_and_searches_live(world, tmp_path):
+    extra = _three_files(world, tmp_path)
+    ask_once(world); ask_once(world)
+    Path(extra[1]).write_text("Acme policy: changed.\n")
+    out, n = ask_once(world)
+    assert "STALE" in out and "CACHE HIT" not in out and n == 1
+    assert _rank_lines(out) == [str(world["note"])] + extra  # the live search shows every file again
+
+
+def test_outcome_count_on_a_hit_is_the_number_of_saved_files(world, tmp_path):
+    _three_files(world, tmp_path)
+    ask_once(world); ask_once(world)
+    hit, _ = ask_once(world)
+    assert hit.startswith("OUTCOME: found - 3 files; saved answer, sources unchanged")
