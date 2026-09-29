@@ -230,7 +230,7 @@ def test_trace_report_counts_searches_skipped_by_saved_answers(world, capsys):
 
 
 # The saved text is the answer line, not the note's heading
-NOTE = "# Acme refund policy\n\nThis note covers the Acme refund window.\n\nRefunds: 30 days from delivery.\n"
+NOTE = "# Acme refund policy\n\nThis note covers Acme policies.\n\nRefunds: 30 days from delivery.\n"
 
 
 def test_saved_text_is_the_answer_line_not_the_heading(world):
@@ -285,5 +285,15 @@ def test_a_miss_clears_a_remembered_refusal(world, monkeypatch):
 def test_answer_line_prefers_the_short_answer_over_a_long_intro():
     q = "What is the Acme refund window?"
     note = ("# Refunds\n\nThis long introduction explains how the Acme refund window works for every "
-            "customer, and why the refund window matters to Acme.\n\nRefund window: 30 days from delivery.\n")
-    assert ask.answer_line(note, q) == "Refund window: 30 days from delivery."
+            "customer, and why the refund window matters to Acme.\n\nAcme refund window: 30 days from delivery.\n")
+    assert ask.answer_line(note, q) == "Acme refund window: 30 days from delivery."
+
+
+@pytest.mark.parametrize("question,decoy,answer", [
+    ("When is trash pickup?", "Trash notes last updated 2026-09-01.", "Trash pickup is every Monday morning."),
+    ("What is the Acme refund window?", "Acme refund page reviewed 2025-11-02.", "Acme refund window: thirty days from delivery."),
+    ("What color is the car?", "Car bought in 2019.", "The car color is blue."),
+])
+def test_answer_line_prefers_more_question_words_over_a_dated_line(question, decoy, answer):
+    assert ask.answer_line(f"# Notes\n\n{decoy}\n\n{answer}\n", question) == answer
+    assert ask.answer_line(f"# Notes\n\n{answer}\n\n{decoy}\n", question) == answer
