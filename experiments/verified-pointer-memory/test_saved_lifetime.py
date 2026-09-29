@@ -1,6 +1,6 @@
 """Saved answers have no clock expiry: they last until their source changes.
 
-Promise item 2 of the saved-answer contract (docs/saved-answers.md).
+Promise item 2 of the saved-answer contract (docs/GETTING-STARTED.md, step 7).
 """
 import time
 import unittest

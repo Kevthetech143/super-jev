@@ -131,15 +131,19 @@ class Service:
         *,
         navigate_provider: Callable[[str, dict[str, Any], Any], dict[str, Any]] | None = None,
         navigate_many_provider: Callable[[str, list, Any], Any] | None = None,
-        cache_ttl_seconds: float = 86400,
+        cache_ttl_seconds: float | None = None,
         review_ttl_seconds: float = 600,
         allow_agent_assist: bool = False,
     ) -> None:
+        # cache_ttl_seconds None (the default): a saved answer has no clock expiry and lasts
+        # until its source changes. An operator may still set a positive finite limit.
         ttl_values = (
             ("cache_ttl_seconds", cache_ttl_seconds),
             ("review_ttl_seconds", review_ttl_seconds),
         )
         for label, value in ttl_values:
+            if value is None and label == "cache_ttl_seconds":
+                continue
             invalid_type = isinstance(value, bool) or not isinstance(value, (int, float))
             if invalid_type or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{label} must be a positive finite number")
@@ -148,7 +152,7 @@ class Service:
         self.retrieve = retrieve
         self.navigate_provider = navigate_provider
         self.navigate_many_provider = navigate_many_provider
-        self.cache_ttl_seconds = float(cache_ttl_seconds)
+        self.cache_ttl_seconds = None if cache_ttl_seconds is None else float(cache_ttl_seconds)
         self.review_ttl_seconds = float(review_ttl_seconds)
         if not isinstance(allow_agent_assist, bool):
             raise ValueError('allow_agent_assist must be a boolean')
@@ -417,13 +421,23 @@ class Service:
             return False
         return True
 
+    def _expiry(self, now: float, freshness_metadata: dict[str, Any]) -> dict[str, Any]:
+        """A saved answer's expiry: the operator's optional TTL and the source-currentness
+        deadline, whichever comes first; with neither, no `expires` (it lasts until its
+        source changes)."""
+        limits = [freshness_metadata['deadline']] if 'deadline' in freshness_metadata else []
+        if self.cache_ttl_seconds is not None:
+            limits.append(now + self.cache_ttl_seconds)
+        return {'expires': min(limits)} if limits else {}
+
     def _valid_hit(self, hit: Any) -> bool:
         """Accept only the compact, reviewed answer shape stored by approve()."""
         if not isinstance(hit, dict) or not isinstance(hit.get('answer'), str) or not hit['answer']:
             return False
         try:
-            require_time('cache.expires', hit['expires'])
-        except (KeyError, ValueError):
+            if 'expires' in hit:
+                require_time('cache.expires', hit['expires'])
+        except ValueError:
             return False
         evidence = hit.get('evidence')
         if not isinstance(evidence, list) or not evidence:
@@ -897,7 +911,7 @@ class Service:
                     if error:
                         return None, error
                     if (hitrow[1:] == binding
-                            and self._valid_hit(hit) and hit['expires'] > hit_now):
+                            and self._valid_hit(hit) and hit.get('expires', float('inf')) > hit_now):
                         return {
                             'status': 'verified-cache-hit',
                             'answer': hit['answer'],
@@ -1153,8 +1167,7 @@ class Service:
             'originatingAttemptId': pending.get('originatingAttemptId'),
             **({'assistanceReason': pending['assistanceReason']}
                if pending.get('assistanceReason') else {}),
-            'expires': min(approval_now + self.cache_ttl_seconds,
-                           freshness_metadata.get('deadline', float('inf')))
+            **self._expiry(approval_now, freshness_metadata)
         }
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
@@ -1169,8 +1182,8 @@ class Service:
             freshness_metadata, freshness_error = self.freshness(pointer, policy, commit_now)
             if freshness_error:
                 raise ValueError('refresh required before approval')
-            hit['expires'] = min(commit_now + self.cache_ttl_seconds,
-                                 freshness_metadata.get('deadline', float('inf')))
+            hit.pop('expires', None)
+            hit.update(self._expiry(commit_now, freshness_metadata))
             if c.execute(
                     'DELETE FROM pending WHERE ticket=? AND generation=? AND fingerprint=?',
                 (ticket, generation, fingerprint)).rowcount != 1:

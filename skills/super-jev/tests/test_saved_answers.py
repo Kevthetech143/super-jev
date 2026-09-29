@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Frozen tests for the saved-answer promise (docs/saved-answers.md), one per promise item.
+"""Frozen tests for the saved-answer promise (docs/GETTING-STARTED.md, step 7), one per promise item.
 
 `ask.memory` is a fake harness and `ask.run_gate` a stub: no network, no live state.
 Every test drives the public CLI entry (`ask._main`) or `ask.lookup`.

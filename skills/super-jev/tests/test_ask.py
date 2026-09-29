@@ -30,6 +30,8 @@ spec.loader.exec_module(ask)
 def no_content_check(monkeypatch):
     """Stub completed evidence so these tests isolate routing and queue behavior."""
     monkeypatch.setattr(ask, "confirm", lambda question, paths: ({p: .9 for p in paths}, set(), None, {}))
+    # Every save runs the claim check; these tests fake it CLEAN (test_saved_answers.py covers refusals).
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
 
 
 def test_cache_hit_prints_answer_and_never_navigates(tmp_path, monkeypatch, capsys):
@@ -174,7 +176,7 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
         {"status": "saved"} if req["action"] == "approve" else
         (_ for _ in ()).throw(AssertionError(req))
     ))
-    assert ask.auto_approve("alice", "what color is the car?", "The car is blue.", sdir) == 0
+    assert ask.save_answer("alice", "what color is the car?", "The car is blue.", sdir) == 0
     assert "not saved" not in capsys.readouterr().out
 
 
@@ -261,46 +263,6 @@ def test_miss_report_next_steps_use_invoked_skill_dir(monkeypatch, tmp_path):
     joined = "\n".join(lines)
     assert str(stable_dir / "prepare_bulk.py") in joined
     assert str(stable_dir / "ask.py") in joined
-
-
-def test_approve_ready_search_sends_ticket_approved_answer_and_reviewedtext_quotes(tmp_path, monkeypatch):
-    ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": "/a.md", "pointer": "p1"}])
-    calls = []
-
-    def fake_memory(req):
-        calls.append(req)
-        if req["action"] == "search":
-            return {"status": "ready", "approvalTicket": "tix-1",
-                     "passages": [{"sourceId": "s1", "reviewedText": "The answer text."}]}
-        if req["action"] == "approve":
-            return {"status": "saved"}
-        raise AssertionError(req)
-
-    monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.approve("alice", "q", "The answer.", tmp_path, pointer="p1")  # no file known: search fallback
-
-    assert rc == 0
-    approve_req = next(c for c in calls if c["action"] == "approve")
-    assert approve_req["ticket"] == "tix-1"
-    assert approve_req["approved"] is True
-    assert approve_req["answer"] == "The answer."
-    assert approve_req["evidence"] == [{"sourceId": "s1", "quote": "The answer text."}]
-
-
-def test_approve_on_no_match_hints_add_and_exits_1(tmp_path, monkeypatch, capsys):
-    ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": "/a.md", "pointer": "p1"}])
-
-    def fake_memory(req):
-        if req["action"] == "search":
-            return {"status": "no-match"}
-        raise AssertionError(req)
-
-    monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.approve("alice", "q", "answer", tmp_path, pointer="p1")
-
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "--add" in out
 
 
 def test_add_writes_manual_record_connects_new_pointer_never_replace_then_approves(tmp_path, monkeypatch):
@@ -822,12 +784,13 @@ def test_missing_question_prints_usage_and_exits_2(monkeypatch, capsys):
 def test_main_routes_miss_through_state_dir_and_logs(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "state_dir", lambda principal: tmp_path)
     monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "alice", "--miss", "q", "it was in the wiki"])
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "not-cached"})
 
     rc = ask.main()
 
-    assert rc == 0
+    assert rc == 1  # nothing was saved for "q", so nothing was removed
     out = capsys.readouterr().out
-    assert "miss recorded" in out
+    assert "no saved answer" in out
     rec = json.loads((tmp_path / "lookups.jsonl").read_text().splitlines()[-1])
     assert rec["kind"] == "miss"
     assert rec["question"] == "q"
@@ -918,7 +881,8 @@ def _ready_memory(calls, sdir):
             return {"status": "saved"}
         if req["action"] == "sources":
             path = {"p1": "r1/a.md", "p2": "r2/b.md", "p3": "r3/c.md"}[req["pointer"]]
-            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": str(sdir / path)}]}
+            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": str(sdir / path),
+                                                  "contentSHA": ask.sha256_file(sdir / path)}]}
         raise AssertionError(req)
     return fake_memory
 
@@ -982,8 +946,8 @@ def _same_name_memory(calls, main, analysis):
                     "passages": [{"sourceId": ref["sourceId"], "reviewedText": text[ref["sourceId"]]}]}
         if req["action"] == "sources":
             return {"status": "ok", "sources": [
-                {"sourceId": "s-analysis", "originalPath": str(analysis)},
-                {"sourceId": "s-main", "originalPath": str(main)}]}
+                {"sourceId": "s-analysis", "originalPath": str(analysis), "contentSHA": ask.sha256_file(analysis)},
+                {"sourceId": "s-main", "originalPath": str(main), "contentSHA": ask.sha256_file(main)}]}
         if req["action"] == "approve":
             return {"status": "saved"}
         raise AssertionError(req)
