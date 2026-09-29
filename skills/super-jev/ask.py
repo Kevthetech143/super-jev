@@ -2349,9 +2349,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
     if top or skills:
-        found = f"{len(top) + len(skills)} file{'s' if len(top) + len(skills) != 1 else ''}"
-        if check_error and any(m[1] in possible for m in top):
-            found += " (unconfirmed: content check failed)"
+        # Files are the ranked files only; skill suggestions get their own label, never the file count.
+        unconfirmed = " (unconfirmed: content check failed)" if check_error and any(m[1] in possible for m in top) else ""
+        parts = ([f"{len(top)} file{'s' if len(top) != 1 else ''}{unconfirmed}"] if top else [])
+        if skills:
+            parts.append(f"{len(skills)} skill suggestion{'s' if len(skills) != 1 else ''}")
+        found = "; ".join(parts)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
