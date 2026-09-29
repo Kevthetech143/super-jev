@@ -101,9 +101,9 @@ def test_client_without_a_key_exits_1_with_the_export_line(env, monkeypatch, cap
 
 def test_default_gate_door_is_the_shipped_client():
     sj = load("superjev_for_door", SKILL / "superjev.py")
-    assert sj.JEV_LIB == SKILL / "lib" / "jev_client.py"
-    assert sj.JEV_LIB.is_file()
-    assert ".claude" not in str(sj.JEV_LIB)
+    assert sj.GATE_DOOR == SKILL / "lib" / "jev_client.py"
+    assert sj.GATE_DOOR.is_file()
+    assert ".claude" not in str(sj.GATE_DOOR)
 
 
 class _FakeJev(BaseHTTPRequestHandler):

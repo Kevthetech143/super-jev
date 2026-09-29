@@ -4,7 +4,7 @@
 Usage:
   python3 connect_checked.py CONNECT.json            # check, then preview + confirm connect on all-pass
   python3 connect_checked.py CONNECT.json --check-only
-  python3 connect_checked.py CONNECT.json --line 0.80 # confidence line (default: the gate's own 0.80)
+  python3 connect_checked.py CONNECT.json --line 0.80 # confidence line (default: the judge profile's line)
 
 CONNECT.json is the normal memory connect request: {"action":"connect","pointer":...,"principals":[...],
 "sources":[{"path":..., "description":...}, ...]}. Every source must carry a description.
@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from reviewed_view import derive
 from judge_profile import PROFILE
-CEILING_MSG = f"exceeds {PROFILE.ceiling_text}"  # the gate's refusal text (lib/jev_client.ask)
+CEILING_MSG = f"exceeds {PROFILE.ceiling_text}"  # the gate's refusal text (the judge's ask)
 
 
 # The gate's c1 line can carry any verdict token the reply kit's claim question
@@ -93,7 +93,7 @@ def main() -> int:
         print(__doc__); return 2
     req_path = Path(args[0]).resolve()
     check_only = "--check-only" in args
-    line = float(args[args.index("--line") + 1]) if "--line" in args else 0.80
+    line = float(args[args.index("--line") + 1]) if "--line" in args else PROFILE.confidence_line
     req = json.loads(req_path.read_text())
     sources = req.get("sources", [])
     if not sources or any(not s.get("description", "").strip() for s in sources):

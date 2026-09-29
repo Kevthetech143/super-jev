@@ -172,6 +172,7 @@ import prepare_bulk  # noqa: E402
 from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret,  # noqa: E402
                           payload_has_secret, path_has_secret, redact_path_secrets)
 import auto_heal  # noqa: E402
+import judges  # noqa: E402
 import refresh_changed  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
@@ -580,14 +581,6 @@ def _bench_cooldown_secs() -> float:
         return 120.0
 BENCH_FAIL_THRESHOLD = _bench_threshold()
 BENCH_COOLDOWN_SECS = _bench_cooldown_secs()
-# A 529/"overloaded" navigate gets exactly one retry after a short backoff,
-# rather than being counted as a failure on the first try.
-OVERLOAD_BACKOFF_SECS = 1.0
-
-def _is_overloaded(text: str) -> bool:
-    t = (text or "").lower()
-    return "529" in t or "overload" in t
-
 # preparation-required / refresh-required is a STALE pointer (needs a refresh run),
 # not a live failure of the provider -- benching it hides its real, current facts
 # behind a generic "benched" message instead of the honest "still preparing" one
@@ -669,9 +662,10 @@ READ_CHARS = CONFIRM_CHUNK * CONFIRM_CHUNKS_PER_FILE  # most text one file's che
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
-ROUTE_FLOOR, CONFIRM_FLOOR = 0.05, 0.85
-SOURCE_FLOOR = 0.7
-CLAIM_CONTENT_FLOOR = 0.6
+# Judge calibration (measured per judge): read from the profile, judge_profiles.json.
+ROUTE_FLOOR, CONFIRM_FLOOR = judges.profile().route_floor, judges.profile().confirm_floor
+SOURCE_FLOOR = judges.profile().source_floor
+CLAIM_CONTENT_FLOOR = judges.profile().claim_content_floor
 POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file before answering)"
 # Word search: on every lookup the
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
@@ -925,7 +919,7 @@ def judge_near_twin(question: str, candidates: list):
 # on-topic lookalike; a weaker "none" keeps the files and prints LEANS_NONE_NOTE. A failed call changes nothing.
 # Claim mode always runs its verdict judge when evidence is available.
 LISTWISE_MAX_FILES = 4
-LISTWISE_PROMOTE_FLOOR = 0.9
+LISTWISE_PROMOTE_FLOOR = judges.profile().sure_line
 LISTWISE_NONE = "none"
 LEANS_NONE_NOTE = "(Jev leans none of these: read the files before answering; the answer may not be here)"
 LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, pick none."
@@ -936,7 +930,7 @@ LISTWISE_INSTRUCTIONS = "Question: %s\nWhich file states the answer? When torn, 
 # line of it says so (picked from the file's own lines, never written). No extra
 # call. Plain code then combines the per-file answers (claim_verdict): only answers
 # at >= CLAIM_SURE count; files that disagree are a CONFLICT, newest first.
-CLAIM_SURE = 0.9
+CLAIM_SURE = judges.profile().sure_line
 MAX_CLAIMS = 25
 CLAIM_LINES = 2000  # lines ranked per passage; the line budget picks which are shown
 CLAIM_LINE_CHARS = 160
@@ -1168,10 +1162,8 @@ def best_passage(path: str):
     return with_subject(chunks, min(i, len(chunks) - 1))
 
 def jev_choice(state: dict, questions: dict) -> dict:
-    """One Jev call through the built-in client (lib/jev_client.py)."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-    import jev_client
-    return jev_client.ask(state, questions, timeout=60)
+    """One judge call through the doorway (judges.ask)."""
+    return judges.ask(state, questions, timeout=60)
 
 def judge_listwise(question: str, paths: list):
     """Which of the first LISTWISE_MAX_FILES paths states the answer: (path, its
@@ -1200,7 +1192,7 @@ def judge_listwise(question: str, paths: list):
         try:
             r = jev_choice(state, questions)
         except Exception as e:
-            if not _CLAIM["text"] or not re.search(r"ceiling|max_tokens_exceeded", str(e)):
+            if not _CLAIM["text"] or not isinstance(e, judges.TooBig):
                 raise  # only a size refusal is retried; a timeout or auth error is not waited on twice
             # A claim call can only be bigger than a normal one: retry once without the line picks.
             questions = {k: v for k, v in questions.items() if not k.startswith("line_")}
@@ -1993,10 +1985,6 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         kind = status or "error"
         return ptr, f"{kind}: {reason}" if reason else kind, [], elapsed, False
 
-    def failed_overloaded(out):
-        return (out.get("status") not in ("candidates", "no-candidates")
-                and _is_overloaded(f"{out.get('status')} {out.get('reason', '')}"))
-
     # Match the five-source result bound on every routing path. Claim checks
     # retain their existing navigation defaults.
     routing_limits = {} if _CLAIM["text"] else {"mode": "source-discovery", "limits": {"beamWidth": 5, "maxResults": 5}}
@@ -2005,12 +1993,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         t_start = time.time()
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
                       "lastGood": True, **routing_limits})
-        # One backoff retry for an overloaded provider (HTTP 529) -- not counted
-        # as a failure unless the retry also fails.
-        if failed_overloaded(out):
-            time.sleep(OVERLOAD_BACKOFF_SECS)
-            out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
-                          "lastGood": True, **routing_limits})
+        # No retry here: the judge's one retry rule already ran inside the call (an
+        # overloaded judge is retried there), so a failure that reaches us is final.
         return classify(ptr, out, time.time() - t_start)
 
     def nav_many(ptrs):
@@ -2030,11 +2014,6 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if outs is None:  # one navigate call per pointer, as before batching
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     else:
-        retry = [ptr for ptr in pointers if failed_overloaded(outs[ptr])]
-        if retry:  # one backoff retry for the pointers an overloaded provider (HTTP 529) failed
-            time.sleep(OVERLOAD_BACKOFF_SECS)
-            outs.update(nav_many(retry) or {ptr: memory({"action": "navigate", "pointer": ptr, "principal": principal,
-                                                         "question": question, "lastGood": True, **routing_limits}) for ptr in retry})
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
@@ -2759,7 +2738,7 @@ def run_gate(claim: str, path: str, passage=None):
     # (bug: a NOT_TIME_SENSITIVE-leaning 0.05 call was blocking real
     # answers because only the label, never the score, was checked).
     ts_match = re.search(r"^\s*time_sensitive\s+TIME_SENSITIVE\s+(\d+\.\d+)", out, re.M)
-    if verdict == "CLEAN" and ts_match and float(ts_match.group(1)) >= 0.80:
+    if verdict == "CLEAN" and ts_match and float(ts_match.group(1)) >= judges.profile().confidence_line:
         verdict = "TIME_SENSITIVE"
     return verdict, (min(float(x) for x in rows) if rows else None)
 
@@ -2771,7 +2750,7 @@ def not_saved(sdir: Path, question: str, why: str) -> int:
     log(sdir, "auto-approve", question=question, result="not-saved", why=why)
     return 1
 
-SAVE_FLOOR = 0.80  # the claim check must call the answer CLEAN at or above this
+SAVE_FLOOR = judges.profile().confidence_line  # the claim check must call the answer CLEAN at or above this
 
 def secret_why(*texts):
     """Why the secret scan holds this save, or None. Every save runs it."""
@@ -3256,7 +3235,7 @@ PREFLIGHT_QUESTIONS = (
     "which code files and tests handle {about}",
 )
 PREFLIGHT_SKIP_DIRS = {"__pycache__", "node_modules", "prepare-cache", "autoheal-state"}  # generated, never notes
-PREFLIGHT_STRONG = 0.85  # a confirmed hit at or above this means the topic is known
+PREFLIGHT_STRONG = judges.profile().preflight_strong  # a confirmed hit at or above this means the topic is known
 _HIT_LINE = re.compile(r"^\s*([0-9]+\.[0-9]{2})\s+\S")
 _QUALIFIED = re.compile(r"\]\s+\(")  # "(possible: ...)", "(inconclusive: ...)": an unconfirmed hit
 

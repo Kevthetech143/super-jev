@@ -265,7 +265,7 @@ def reachable_doors(monkeypatch):
     test_verify_refuses_when_the_door_is_not_installed) override this
     afterwards in their own body, which takes precedence.
     """
-    monkeypatch.setattr(sj, "JEV_LIB", FAKE_DOOR)
+    monkeypatch.setattr(sj, "GATE_DOOR", FAKE_DOOR)
     monkeypatch.setattr(sj, "FLEET_VERIFY_PY", FAKE_DOOR)
 
 
@@ -347,7 +347,7 @@ def test_ask_runs_gate_when_two_real_paths_are_in_the_sentence(tmp_path, door, c
     code = sj.main(["ask", f"does my draft {evidence} {draft} hold up"])
     out = capsys.readouterr().out
     assert code == 0
-    assert door.argv[1] == str(sj.JEV_LIB)
+    assert door.argv[1] == str(sj.GATE_DOOR)
     assert door.argv[2] == str(evidence)
     assert "--kit" in door.argv and "reply" in door.argv
     # gate v2: a non-empty --draft is pre-split into a --claims-file rather
@@ -478,7 +478,7 @@ def test_gate_passes_evidence_claims_and_kit_through(tmp_path, door):
     code = sj.main(["gate", str(a), str(b), "--claim", "one", "--claim", "two"])
     assert code == 0
     argv = door.argv
-    assert argv[1:4] == [str(sj.JEV_LIB), str(a), str(b)]
+    assert argv[1:4] == [str(sj.GATE_DOOR), str(a), str(b)]
     assert argv[4:6] == ["--kit", "reply"]
     assert argv.count("--claim") == 2
     assert "one" in argv and "two" in argv
@@ -506,7 +506,7 @@ def test_gate_refuses_with_no_draft_and_no_claim(tmp_path, door, capsys):
 
 
 def test_gate_refuses_when_the_door_is_not_installed(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(sj, "JEV_LIB", tmp_path / "nope.py")
+    monkeypatch.setattr(sj, "GATE_DOOR", tmp_path / "nope.py")
     monkeypatch.delenv(sj.GATE_CMD_ENV, raising=False)
     f = tmp_path / "a.md"
     f.write_text("x", encoding="utf-8")
@@ -519,7 +519,7 @@ def test_gate_refuses_when_the_door_is_not_installed(tmp_path, monkeypatch, caps
 
 def test_gate_uses_the_env_command_when_set(tmp_path, door, monkeypatch):
     door.stdout = CLEAN_GATE_TABLE  # a clean gate must print a readable table
-    monkeypatch.setattr(sj, "JEV_LIB", tmp_path / "nope.py")
+    monkeypatch.setattr(sj, "GATE_DOOR", tmp_path / "nope.py")
     monkeypatch.setenv(sj.GATE_CMD_ENV, "python3 /elsewhere/jev.py")
     f = tmp_path / "a.md"
     f.write_text("x", encoding="utf-8")
@@ -2086,7 +2086,7 @@ def test_stop_hook_derives_evidence_from_transcript_tool_results(tmp_path, monke
         # The evidence file is the first positional arg after the fleet
         # door's own argv prefix; read it while it still exists (the shim
         # deletes it after this call returns).
-        idx = cmd.index(str(sj.JEV_LIB)) if str(sj.JEV_LIB) in cmd else 1
+        idx = cmd.index(str(sj.GATE_DOOR)) if str(sj.GATE_DOOR) in cmd else 1
         evidence_path = cmd[idx + 1]
         captured["evidence_text"] = Path(evidence_path).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -2394,7 +2394,7 @@ def test_hook_gate_receipt_turn_names_the_existing_header_in_derived_facts(
 
     def fake_run(cmd, cwd=None, env=None, **kw):
         cmd = [str(c) for c in cmd]
-        idx = cmd.index(str(sj.JEV_LIB)) if str(sj.JEV_LIB) in cmd else 1
+        idx = cmd.index(str(sj.GATE_DOOR)) if str(sj.GATE_DOOR) in cmd else 1
         captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
                                            stderr="")
@@ -2430,7 +2430,7 @@ def test_hook_gate_no_receipt_turn_when_no_previous_turn_ran_tools(
 
     def fake_run(cmd, cwd=None, env=None, **kw):
         cmd = [str(c) for c in cmd]
-        idx = cmd.index(str(sj.JEV_LIB)) if str(sj.JEV_LIB) in cmd else 1
+        idx = cmd.index(str(sj.GATE_DOOR)) if str(sj.GATE_DOOR) in cmd else 1
         captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="  c1   SUPPORTED   0.80  x\n",
                                            stderr="")
@@ -6460,7 +6460,7 @@ def test_stop_hook_gate_hands_the_door_a_window_with_derived_facts_at_its_head(
 
     def fake_run(cmd, cwd=None, env=None, **kw):
         cmd = [str(c) for c in cmd]
-        idx = cmd.index(str(sj.JEV_LIB)) if str(sj.JEV_LIB) in cmd else 1
+        idx = cmd.index(str(sj.GATE_DOOR)) if str(sj.GATE_DOOR) in cmd else 1
         captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -6494,7 +6494,7 @@ def test_stop_hook_gate_leaves_an_ordinary_window_untouched(tmp_path, monkeypatc
 
     def fake_run(cmd, cwd=None, env=None, **kw):
         cmd = [str(c) for c in cmd]
-        idx = cmd.index(str(sj.JEV_LIB)) if str(sj.JEV_LIB) in cmd else 1
+        idx = cmd.index(str(sj.GATE_DOOR)) if str(sj.GATE_DOOR) in cmd else 1
         captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -6837,7 +6837,7 @@ def test_stop_hook_gate_folds_a_cited_files_tail_into_the_window(tmp_path, monke
 
     def fake_run(cmd, cwd=None, env=None, **kw):
         cmd = [str(c) for c in cmd]
-        idx = cmd.index(str(sj.JEV_LIB)) if str(sj.JEV_LIB) in cmd else 1
+        idx = cmd.index(str(sj.GATE_DOOR)) if str(sj.GATE_DOOR) in cmd else 1
         captured["evidence_text"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -9021,7 +9021,7 @@ def test_replay_catch_cases_replays_a_case_with_a_saved_payload(tmp_path, monkey
 
     monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", tmp_path / "real-catches.jsonl")
     monkeypatch.setattr(replay.sj.subprocess, "run", FakeDoor(0))
-    monkeypatch.setattr(replay.sj, "JEV_LIB", FAKE_DOOR)
+    monkeypatch.setattr(replay.sj, "GATE_DOOR", FAKE_DOOR)
     # B1: a case whose door needs a live call now refuses unless the door
     # env var is set (or --live is passed) — a fake door here proves the
     # normal replay path still runs.
@@ -9108,7 +9108,7 @@ def test_replay_catch_cases_live_flag_allows_the_fallback_door(tmp_path, monkeyp
     monkeypatch.delenv(replay.sj.GATE_CMD_ENV, raising=False)
     monkeypatch.setattr(replay.sj, "CATCH_LEDGER_PATH", tmp_path / "real-catches.jsonl")
     monkeypatch.setattr(replay.sj.subprocess, "run", FakeDoor(0))
-    monkeypatch.setattr(replay.sj, "JEV_LIB", FAKE_DOOR)
+    monkeypatch.setattr(replay.sj, "GATE_DOOR", FAKE_DOOR)
 
     payload_path = tmp_path / "n4-payload.json"
     evidence = tmp_path / "notes.md"
