@@ -126,5 +126,5 @@ def test_readme_uses_same_content_order(tmp_path):
 def test_no_candidates_message_does_not_claim_absence(tmp_path, capsys):
     assert _run(tmp_path, "what is my shoe size", {}, [], {}) == []
     out = capsys.readouterr().out
-    assert "couldn't find it in the connected files" in out and "may still exist" in out
+    assert "OUTCOME: not-found" in out and "may still exist" in out
     assert "not in their files" not in out
