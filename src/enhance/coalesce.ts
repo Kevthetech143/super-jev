@@ -1,10 +1,10 @@
 import type { Evaluation, Evaluator, Request } from '../types.ts';
-import { JUDGE_PROFILE } from '../judge-profile.ts';
+import { JUDGE_PROFILE, judgeTokens } from '../judge-profile.ts';
 
 /**
  * Estimated input budget for one batched judge call: the judge profile's
- * callTokens (Jev: 30,000 under its 32k ceiling for the state plus the longest
- * question). Tokens are estimated on the
+ * callTokens (for the state plus the longest question, under its ceiling).
+ * Tokens are counted by judgeTokens, on the
  * high side so number-dense text is never under-counted, and a batch is kept under
  * this many estimated tokens.
  */
@@ -14,9 +14,7 @@ const RETRY_ATTEMPTS = 4;
 const RETRY_FIRST_DELAY_MS = 1_000;
 const QUESTION_OVERHEAD = 20;
 
-export function estimateTokens(value: unknown): number {
-  return Math.ceil(Buffer.byteLength(JSON.stringify(value) ?? '', 'utf8') / 2);
-}
+export const estimateTokens = judgeTokens;
 
 type Pending = { request: Request; resolve: (e: Evaluation) => void; reject: (e: unknown) => void; tokens: number; done: boolean; onDone?: () => void };
 

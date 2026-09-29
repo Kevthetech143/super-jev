@@ -59,9 +59,10 @@ SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent  # skills/super-jev/superjev.py -> repo root
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
-# The judge's limits (window, questions per call, price): judge_profiles.json via
-# SUPERJEV_JUDGE_PROFILE. Every judge-sized default below is derived from it.
-from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
+# The judge's limits (window, questions per call, price, parts, gate window): judge_profiles.json.
+# Every judge-sized default below comes from it, and every size is counted by judge_tokens.
+from judge_profile import PROFILE as JUDGE_PROFILE, judge_tail  # noqa: E402
+from judge_profile import judge_tokens as _judge_tokens  # noqa: E402
 
 # The default claim-gate door: the judge client shipped in this repo. It needs
 # only TYPESAFE_API_KEY. SUPERJEV_GATE_CMD, when set, replaces it.
@@ -481,7 +482,7 @@ DEFAULT_GATE_BUDGET_S = 15.0
 GATE_MAX_CALLS_ENV = "SUPERJEV_GATE_MAX_CALLS"
 DEFAULT_GATE_MAX_CALLS = 1
 GATE_WINDOW_TOK_ENV = "SUPERJEV_GATE_WINDOW_TOK"
-DEFAULT_GATE_WINDOW_TOK = 8_000
+DEFAULT_GATE_WINDOW_TOK = JUDGE_PROFILE.gate_window_tokens
 STOP_SCAN_MIN_BUDGET_S_ENV = "SUPERJEV_STOP_SCAN_MIN_S"
 DEFAULT_STOP_SCAN_MIN_BUDGET_S = 20.0
 STOP_SCAN_MAX_BYTES_ENV = "SUPERJEV_STOP_SCAN_MAX_BYTES"
@@ -534,7 +535,7 @@ HOOK_WORKTREE_ENV = "SUPERJEV_HOOK_WORKTREE"
 INPUT_USD_PER_MTOK_ENV = "SUPERJEV_INPUT_USD_PER_MTOK"
 DEFAULT_INPUT_USD_PER_MTOK = JUDGE_PROFILE.input_usd_per_mtok
 
-# The judge's input ceiling (Jev: 32,768 tokens, CAPABILITIES.md "HARD INPUT
+# The judge's input ceiling (the profile's window, CAPABILITIES.md "HARD INPUT
 # CEILING"); this cap sits a hair under it so a door call still has room for
 # the question battery's own overhead. SUPERJEV_INPUT_CAP_TOK overrides it.
 INPUT_CAP_TOK_ENV = "SUPERJEV_INPUT_CAP_TOK"
@@ -557,14 +558,6 @@ def _input_cap_tok():
         return n if n > 0 else DEFAULT_INPUT_CAP_TOK
     except ValueError:
         return DEFAULT_INPUT_CAP_TOK
-
-
-def _estimate_tokens(text):
-    """The same cheap chars/4 estimate used everywhere a real token count
-    is not available yet — good enough to decide whether to warn/truncate
-    BEFORE paying for a call; the real count comes back in the door's own
-    header line afterwards and is what the ledger records."""
-    return len(text or "") // 4
 
 
 def parse_jev_headers(text):
@@ -609,7 +602,7 @@ def cap_check_and_truncate(evidence_items, draft_text, door):
     `evidence_items` (a list of (path, text) pairs, given OLDEST FIRST —
     receipts/previous-turn ahead of current-turn, matching the order
     _derive_evidence_text_from_transcript already builds) plus
-    `draft_text`, using the chars/4 estimate. If the total is at or under
+    `draft_text`, counted in judge tokens (bytes/2). If the total is at or under
     SUPERJEV_INPUT_CAP_TOK, nothing changes.
 
     If it is over, print ONE warning line to stderr and truncate the
@@ -624,29 +617,30 @@ def cap_check_and_truncate(evidence_items, draft_text, door):
     kept_items preserves the original oldest-first order.
     """
     cap = _input_cap_tok()
-    draft_tok = _estimate_tokens(draft_text)
-    ev_tok = sum(_estimate_tokens(t) for _, t in evidence_items)
+    draft_tok = _judge_tokens(draft_text)
+    ev_tok = sum(_judge_tokens(t) for _, t in evidence_items)
     total = draft_tok + ev_tok
     if total <= cap:
         return list(evidence_items), False, total, cap
 
-    budget_chars = max(0, (cap - draft_tok) * 4)
+    budget = max(0, cap - draft_tok)
     kept_rev, dropped, cut = [], [], []
     running = 0
     for path, text in reversed(evidence_items):     # newest first while trimming
-        remaining = budget_chars - running
+        remaining = budget - running
         if remaining <= 0:
             dropped.append(path)                     # drop this older item entirely
             continue
-        if len(text) <= remaining:
+        if _judge_tokens(text) <= remaining:
             kept_rev.append((path, text))
-            running += len(text)
+            running += _judge_tokens(text)
         else:
             # keep the TAIL (its most recent content) of this, the oldest
             # item that still fits at all
-            kept_rev.append((path, text[-remaining:]))
+            tail = judge_tail(text, remaining)
+            kept_rev.append((path, tail))
             cut.append(path)
-            running += remaining
+            running += _judge_tokens(tail)
     kept_rev.reverse()                               # back to oldest-first
     # Name what was lost: a claim about a dropped or cut file is judged without it.
     named = "; ".join(s for s in (
@@ -661,17 +655,13 @@ def cap_check_and_truncate(evidence_items, draft_text, door):
 
 # A direct check needing more judge calls than this is refused (nothing sent), not cut.
 MAX_PARTS_ENV = "SUPERJEV_MAX_PARTS"
-DEFAULT_MAX_PARTS = 40
+DEFAULT_MAX_PARTS = JUDGE_PROFILE.max_parts
 
-# One judge call's input, as lib/jev_client.py counts it: bytes/2, deliberately high,
-# under the judge's ceiling (the profile's call_tokens; Jev: 30,000 under 32,768). A direct check whose evidence is bigger is split
+# One judge call's input, counted as everywhere else: judge_tokens (bytes/2, deliberately high),
+# under the judge's ceiling (the profile's call_tokens). A direct check whose evidence is bigger is split
 # into parts of this size, one call each, and nothing is cut. Cutting it instead let a
 # big file push the others out, and true claims about them came back NOT_SUPPORTED.
 JUDGE_CALL_TOKENS = JUDGE_PROFILE.call_tokens
-
-
-def _judge_tokens(text):
-    return (len((text or "").encode("utf-8")) + 1) // 2
 
 
 def _judge_room(claims, draft_text=""):
@@ -4652,7 +4642,7 @@ def cmd_gate(a):
     else:
         kept_ev = list(sent_ev if sent_ev is not None else ev_items)
         truncated, cap_tok = False, None
-        est_tok = _estimate_tokens(draft_text_for_cap) + sum(_estimate_tokens(t) for _, t in kept_ev)
+        est_tok = _judge_tokens(draft_text_for_cap) + sum(_judge_tokens(t) for _, t in kept_ev)
     evidence_tmp_paths = []
     if sent_ev is not None and (truncated or sent_ev != ev_items):
         evidence_paths = []
@@ -8787,10 +8777,10 @@ def _shrink_window_part(text, target_tok):
     lines = text.split("\n")
     header = lines[0] if lines else ""
     body = "\n".join(lines[1:])
-    room = max(target_tok * 4 - len(header) - len(_WINDOW_SHRINK_MARKER) - 2, 0)
+    room = target_tok - _judge_tokens(header) - _judge_tokens(_WINDOW_SHRINK_MARKER) - 1
     if room <= 0:
         return header
-    return header + "\n" + _WINDOW_SHRINK_MARKER + "\n" + body[-room:]
+    return header + "\n" + _WINDOW_SHRINK_MARKER + "\n" + judge_tail(body, room)
 
 
 def _gate_window_tok():
@@ -8817,7 +8807,7 @@ def trim_window_to_token_budget(text, budget_tok=None):
     untouched."""
     budget = _gate_window_tok() if budget_tok is None else budget_tok
     text = text or ""
-    meta = {"tok_before": _estimate_tokens(text), "tok_after": _estimate_tokens(text),
+    meta = {"tok_before": _judge_tokens(text), "tok_after": _judge_tokens(text),
             "budget_tok": budget, "dropped": [], "shrunk": [],
             "current_trimmed_chars": 0}
     if budget <= 0 or meta["tok_before"] <= budget:
@@ -8843,7 +8833,7 @@ def trim_window_to_token_budget(text, budget_tok=None):
         victims = sorted([p for p in kept if p["kind"] == kind],
                          key=lambda p: -p["age"])
         for victim in victims:
-            over = _estimate_tokens(assemble(kept)) - budget
+            over = _judge_tokens(assemble(kept)) - budget
             if over <= 0:
                 break
             label = (f"previous turn -{victim['age']}" if victim["kind"] == "previous turn"
@@ -8863,29 +8853,30 @@ def trim_window_to_token_budget(text, budget_tok=None):
             # overflow out of its own head does exactly that and the
             # trimming stops there; only a section too small to cover it
             # is dropped whole.
-            size = _estimate_tokens(victim["text"])
+            size = _judge_tokens(victim["text"])
             if victim["kind"] != _WINDOW_KIND_CONTRIBUTED and size > over:
                 victim["text"] = _shrink_window_part(victim["text"], size - over)
                 meta["shrunk"].append(label)
                 break
             kept.remove(victim)
             meta["dropped"].append(label)
-        if _estimate_tokens(assemble(kept)) <= budget:
+        if _judge_tokens(assemble(kept)) <= budget:
             break
 
     out = assemble(kept)
-    if _estimate_tokens(out) > budget:
+    if _judge_tokens(out) > budget:
         # Facts + the current turn alone are over. Keep the facts whole and
         # the current turn's TAIL, same guarantee the byte cap carried.
-        room_chars = max(budget * 4 - len(head), 0)
+        room = max(budget - _judge_tokens(head), 0)
         rest = "\n\n===\n\n".join(p["text"] for p in kept)
-        if room_chars <= 0:
+        if room <= 0:
             meta["current_trimmed_chars"] = len(rest)
             out = head
         else:
-            meta["current_trimmed_chars"] = max(len(rest) - room_chars, 0)
-            out = head + rest[-room_chars:]
-    meta["tok_after"] = _estimate_tokens(out)
+            tail = judge_tail(rest, room)
+            meta["current_trimmed_chars"] = len(rest) - len(tail)
+            out = head + tail
+    meta["tok_after"] = _judge_tokens(out)
     return out, meta
 
 
