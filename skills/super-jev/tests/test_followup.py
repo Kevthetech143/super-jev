@@ -137,7 +137,7 @@ def test_followup_drops_after_max_tries_with_no_confident_file(tmp_path, monkeyp
 
 
 def test_followup_only_proposes_a_confirmed_not_a_possible_only_hit(tmp_path, monkeypatch, capsys):
-    """A possible-only hit (find_pointer refuses it) must never be proposed --
+    """A possible-only hit (the save path refuses it) must never be proposed --
     the same bar --approve already enforces."""
     ask.log(tmp_path, "miss", question="q", actual="the wiki")
 
