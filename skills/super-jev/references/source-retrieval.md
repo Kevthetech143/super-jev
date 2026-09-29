@@ -26,8 +26,10 @@ check decides what is kept.
 A routing no-match or error retains its distinct meaning. At most five routed files
 plus up to five word-matched files are content-checked across pointers, so dense
 collections can still hide a useful note behind that bound. Meaningful titles and focused notes matter for discovery.
-The content stage judges each passage against one predicate: it states a requested
-fact or supplies a necessary input to determining that fact. An arithmetic
+The content stage asks of each passage one question, "does this passage state the answer
+to the question?": it states a requested fact or supplies a necessary input to
+determining that fact. Being about the same subject or topic, without the requested
+property, does not qualify. An arithmetic
 operand or list member can qualify while other required inputs are missing.
 Subject, property, event and modality must match; a related measurement or a
 pointer alone does not qualify. The same source floor applies to every query.

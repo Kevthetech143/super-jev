@@ -141,6 +141,24 @@ test('source evidence checks requested facts and permits partial premises', asyn
   assert.equal(seen[0]!.state.purpose, 'check source text for requested facts');
 });
 
+test('source evidence asks whether the passage states the answer to the question', async () => {
+  const flat = { version: 1 as const, structure: 'flat-files' as const, rootId: 'root' as const,
+    nodes: [{ id: 'root', label: 'Sources', description: '', children: ['p'] },
+      { id: 'p', label: 'Passage 1', description: 'Timeline of events for the subject.', sourceId: '0' }] };
+  const seen: Request[] = [];
+  const transport: Evaluator = { evaluate: async request => {
+    seen.push(request);
+    return { model: 'fake', answers: { branch_0: distribution(request.questions.branch_0!, 'o_none', .9) } };
+  } };
+  await navigate(flat, 'What is the requested property?', { transport, mode: 'source-evidence' });
+  const q = seen[0]!.questions.branch_0!;
+  assert.match(q.instructions!, /^Does this passage state the answer to the question\?/);
+  assert.match(q.criteria.o_0!, /^States the answer/);
+  assert.match(q.criteria.o_none!, /same subject or topic/);
+  assert.match(q.criteria.o_none!, /never states the requested/);
+  assert.equal(Object.keys(q.criteria).length, 2);
+});
+
 test('source evidence rejects folder hierarchies and unknown modes before provider call', async () => {
   let calls = 0;
   const transport: Evaluator = { evaluate: async () => { calls++; throw new Error('not called'); } };
