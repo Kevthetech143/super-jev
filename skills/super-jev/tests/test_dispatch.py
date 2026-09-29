@@ -28,15 +28,12 @@ def run(skill, *args):
 
 
 @pytest.mark.parametrize('family', ['.codex', '.claude'])
-def test_skills_preserves_arguments_and_seat_roots(tmp_path, family):
+def test_skills_preserves_arguments_and_adds_no_roots(tmp_path, family):
     root, skill = installed(tmp_path, family)
     stub(root / 'skill-search/search.sh')
     result = run(skill, 'skills', '--request-file', 'literal $(do-not-run).json')
     assert result.returncode == 7
-    expected = ['--request-file', 'literal $(do-not-run).json']
-    if family == '.claude':
-        expected += ['--config', str(root / 'skill-search/roots-claude.json')]
-    assert result.stdout.splitlines() == expected
+    assert result.stdout.splitlines() == ['--request-file', 'literal $(do-not-run).json']
 
 
 def test_skills_inline_request_becomes_request_file(tmp_path):
