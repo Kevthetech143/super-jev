@@ -24,7 +24,7 @@ def test_default_and_explicit_extensions(tmp_path):
 
 def test_code_holds_before_writer(tmp_path, monkeypatch):
     for name, data in {'null.py': b'x\x00y', 'control.py': b'x\x01y', 'bad.py': b'\xff',
-                       'secret.py': b'password: syntheticTestOnlyValue9', 'big.py': b'x' * 101,
+                       'secret.py': b'password: syntheticTestOnlyValue', 'big.py': b'x' * 101,
                        'ok.py': b'def add(a, b):\n    return a + b\n'}.items():
         (tmp_path / name).write_bytes(data)
     monkeypatch.setattr(pb, 'CEILING_BYTES', 100)
@@ -33,9 +33,9 @@ def test_code_holds_before_writer(tmp_path, monkeypatch):
     assert [p.name for p in files] == ['ok.py']
     assert len(held) == 5
     secret = tmp_path / 'secret.py'
-    approvals = {str(secret): hashlib.sha256(secret.read_bytes()).hexdigest()}  # one file, pinned to its bytes
+    approvals = {str(secret): hashlib.sha256(secret.read_bytes()).hexdigest()}
     files, held = pb.inventory([tmp_path], extensions=('.py',), approvals=approvals)
-    assert {p.name for p in files} == {'ok.py', 'secret.py'}
+    assert [p.name for p in files] == ['ok.py']  # a secret hold is never approvable
 
 
 def test_code_excerpt_has_definition_headings(tmp_path):

@@ -150,7 +150,7 @@ test('parseMissCandidate picks the top-ranked candidate line', () => {
 });
 
 test('parseMissCandidate returns null on true no-candidates output', () => {
-  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n';
+  const stdout = 'OUTCOME: not-found - searched 3 sets, no matching file\n';
   assert.equal(parseMissCandidate(stdout), null);
 });
 
@@ -163,7 +163,7 @@ test('formatMissCandidateReply names the top file and gives a one-line why, not 
 
 test('parseMissReport extracts the searched/next-step block from a true-miss ask.py run', () => {
   const stdout = [
-    'no-candidates across 3 pointers: Super Jev could not find it in the connected files.',
+    'OUTCOME: not-found - searched 3 sets, no matching file',
     'What was searched:',
     '  - 3 connected sets; 2 searched after the topic filter, 1 had matches: kelvin-notes',
     '  - 2 file(s) read; none contained the answer. Closest: notes/pricing.md, notes/other.md',
@@ -186,7 +186,7 @@ test('parseMissReport extracts the searched/next-step block from a true-miss ask
 });
 
 test('parseMissReport returns null when ask.py predates the miss-report block', () => {
-  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  const stdout = 'OUTCOME: not-found - searched 3 sets, no matching file\n' + MISS_LINE + '\n';
   assert.equal(parseMissReport(stdout), null);
 });
 
@@ -194,37 +194,35 @@ test('parseMissReport returns null on a cache hit', () => {
   assert.equal(parseMissReport('CACHE HIT\nanswer: foo\n'), null);
 });
 
-test('parseSetupMissing extracts the message and connect command for a principal with no pointers', () => {
-  const stdout = "nothing connected yet for principal 'primary' -- run connect first:\n"
-    + "  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal primary\n"
-    + MISS_LINE + '\n';
+test('parseSetupMissing returns the needs-setup outcome line with its next command', () => {
+  const stdout = "OUTCOME: needs-setup - nothing is connected yet for principal 'primary'; next: "
+    + 'python3 skills/super-jev/prepare_bulk.py --root /path/to/folder --pointer my-notes --principal primary\n';
   const block = parseSetupMissing(stdout);
   assert.ok(block);
-  assert.match(block[0], /nothing connected yet for principal 'primary'/);
-  assert.match(block[1], /prepare_bulk\.py/);
-  assert.equal(block.length, 2);
+  assert.equal(block.length, 1);
+  assert.match(block[0], /needs-setup/);
+  assert.match(block[0], /prepare_bulk\.py/);
 });
 
-test('parseSetupMissing returns null when pointers exist (a real miss, not a setup problem)', () => {
-  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+test('parseSetupMissing returns null for a real miss (not a setup problem)', () => {
+  const stdout = 'OUTCOME: not-found - searched 3 sets, no matching file\n' + MISS_LINE + '\n';
   assert.equal(parseSetupMissing(stdout), null);
 });
 
-test('parseErrorReport surfaces pointer errors and the unresolved summary', () => {
+test('parseErrorReport surfaces the error outcome and the pointer errors', () => {
   const stdout = [
+    'OUTCOME: error - no match, and 2 sets failed; next: python3 ask.py --principal p --status',
     '[brain-reviewed] error: Navigation provider failed: Jev HTTP 401 (TypeSafe rejected the API key)',
     '[health-reviewed] error: Navigation provider failed: Jev HTTP 401 (TypeSafe rejected the API key)',
-    'unresolved: 2 of 2 pointers errored',
-    MISS_LINE,
   ].join('\n');
   const report = parseErrorReport(stdout);
   assert.ok(report);
   assert.match(report.join('\n'), /HTTP 401/);
-  assert.match(report.join('\n'), /unresolved: 2 of 2/);
+  assert.match(report[0], /^OUTCOME: error/);
 });
 
 test('parseErrorReport returns null when there are no pointer errors', () => {
-  const stdout = 'no-candidates across 3 pointers: no connected file answers this.\n' + MISS_LINE + '\n';
+  const stdout = 'OUTCOME: not-found - searched 3 sets, no matching file\n' + MISS_LINE + '\n';
   assert.equal(parseErrorReport(stdout), null);
 });
 

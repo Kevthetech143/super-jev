@@ -13,10 +13,10 @@ so their approved answers survive (a reconnect rotates them).
 Usage:
   python3 refresh_changed.py [--dry-run] [--pointer NAME ...] [--skip NAME ...] [--writer builtin]
 
-Reports written before prepare_bulk recorded its principal are skipped with a note; re-run
-prepare_bulk once by hand for those. A pointer with a prepare-cache/<pointer>.json but no
-matching <pointer>-report.json is listed as NEEDS MANUAL PREPARE, not skipped silently.
-Exit 1 if any refresh failed.
+Output opens with one outcome line: fresh | refreshed | stale (--dry-run) | needs-setup | error.
+Exit code: 0 fresh/refreshed, 1 error, 2 needs-setup, 3 stale. A report that records no principal
+(an agent's lookup heals it and records the asker; this command has no asker) is NEEDS-SETUP with the
+one command to run, and so is a pointer with a prepare-cache/<pointer>.json but no report.
 """
 import argparse, contextlib, fnmatch, hashlib, io, json, os, subprocess, sys, time
 from pathlib import Path
@@ -183,12 +183,10 @@ def prepare_args(report: dict, asker: str = None) -> list[str] | None:
     # "principals" is the current field (every principal the pointer is registered for, so a
     # --refresh repeats them all and never narrows the pointer's scope); "principal" is the
     # older single-value field, still read for reports written before this field existed.
-    # `asker` is the agent whose lookup sees this pointer, given by auto_heal only for a new-file
-    # refresh and used only when the report records no principal; it is passed with
-    # --asker-fallback, so prepare_bulk does not record it (changed files still skip such a report).
-    # connect_part keeps every principal the pointer is registered for.
+    # `asker` is the agent whose lookup sees this pointer (auto_heal gives it); it stands in only
+    # when the report records no principal, and the refresh then records it. connect_part keeps
+    # every principal the pointer is registered for.
     principals = report.get("principals") or ([report["principal"]] if report.get("principal") else [])
-    fallback = not principals and bool(asker)
     principals = principals or ([asker] if asker else [])
     if not principals or not report.get("roots"):
         return None
@@ -206,7 +204,7 @@ def prepare_args(report: dict, asker: str = None) -> list[str] | None:
     args += ["--pointer", report["pointer"]]
     for p in principals:
         args += ["--principal", p]
-    return args + ["--refresh"] + (["--asker-fallback"] if fallback else [])
+    return args + ["--refresh"]
 
 
 def main(argv=None) -> int:
@@ -216,7 +214,7 @@ def main(argv=None) -> int:
     ap.add_argument("--skip", action="append", default=[])
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"])
     a = ap.parse_args(argv)
-    failures = 0
+    lines, stale, failed, setup = [], 0, 0, 0
     reported = set()
     reports = []
     for rp in sorted(CACHE_DIR.glob("*-report.json")):
@@ -236,42 +234,65 @@ def main(argv=None) -> int:
         try:
             added = new_files(report, known, [r for r, _ in reports], snapshot=not a.dry_run)
         except OSError as e:  # one unreadable folder must not stop the other pointers' refreshes
-            print(f"NOTE  {name}: could not look for new files ({e.__class__.__name__}); changed files still count")
+            lines.append(f"NOTE  {name}: could not look for new files ({e.__class__.__name__}); changed files still count")
             added = []
         for w in waiting(report)[:1]:
             n = len(waiting(report))
-            print(f"WAITING {name}: {n} file(s) were in its folders before new-file pickup started and are "
-                  f"not in it ({Path(w).name}{', ...' if n > 1 else ''}); check each, then run prepare_bulk.py "
-                  f"--pointer {name} --principal AGENT --refresh --admit PATH (their folders take in new notes after)")
+            lines.append(f"WAITING {name}: {n} file(s) were in its folders before new-file pickup started and are "
+                         f"not in it ({Path(w).name}{', ...' if n > 1 else ''}); check each, then run prepare_bulk.py "
+                         f"--pointer {name} --principal AGENT --refresh --admit PATH (their folders take in new notes after)")
         if not changed and not added:
             continue
         args = prepare_args(report)
         if args is None:
-            print(f"SKIP  {name}: {len(changed)} changed, {len(added)} new, but its report has no recorded principal; re-run prepare_bulk once by hand")
+            # No recorded principal and no asker to stand in: a person names one once, and the
+            # refresh records it, so this pointer heals on its own after that.
+            roots = " ".join(f"--root {r}" for r in report.get("roots") or [])
+            lines.append(f"NEEDS-SETUP {name}: {len(changed)} changed, {len(added)} new, but its report records no "
+                         f"principal. Run once: python3 {HERE / 'prepare_bulk.py'} {roots} --pointer {name} "
+                         f"--principal AGENT --refresh (one --principal per agent it serves); after that it heals itself")
+            setup += 1
             continue
         if a.writer:
             args += ["--writer", a.writer]
         what = changed or added
-        print(f"STALE {name}: {len(changed)} changed, {len(added)} new "
-              f"({Path(what[0]).name}{', ...' if len(what) > 1 else ''})")
+        lines.append(f"STALE {name}: {len(changed)} changed, {len(added)} new "
+                     f"({Path(what[0]).name}{', ...' if len(what) > 1 else ''})")
+        stale += 1
         if a.dry_run:
             continue
-        r = subprocess.run([sys.executable, str(HERE / "prepare_bulk.py"), *args], cwd=HERE)
-        print(f"{'OK   ' if r.returncode == 0 else 'FAIL '} {name}: prepare_bulk exit {r.returncode}")
-        failures += r.returncode != 0
+        r = subprocess.run([sys.executable, str(HERE / "prepare_bulk.py"), *args], cwd=HERE,
+                           capture_output=True, text=True)
+        lines.append(f"{'OK   ' if r.returncode == 0 else 'FAIL '} {name}: prepare_bulk exit {r.returncode}")
+        if r.returncode:
+            failed += 1
+            lines += [f"      {ln}" for ln in ((getattr(r, "stdout", "") or "") + (getattr(r, "stderr", "") or "")).splitlines()[-5:]]
 
     # A pointer whose cache (prepare-cache/<pointer>.json) exists with no matching
     # <pointer>-report.json (a run that crashed after caching but before the report, or a
-    # cache dropped in by hand) has no recorded roots/principal to refresh from -- it was
-    # previously skipped in total silence. List it instead, so it is not mistaken for "up
-    # to date".
+    # cache dropped in by hand) has no recorded roots/principal to refresh from. List it,
+    # so it is not mistaken for "up to date".
     for cp in sorted(CACHE_DIR.glob("*.json")):
         name = cp.stem
         if name.endswith("-report") or name in reported:
             continue
-        print(f"NEEDS MANUAL PREPARE  {name}: prepare-cache/{name}.json exists with no {name}-report.json "
-              f"(no recorded roots/principal to refresh from); run prepare_bulk.py for it by hand")
-    return 1 if failures else 0
+        lines.append(f"NEEDS-SETUP {name}: prepare-cache/{name}.json exists with no {name}-report.json "
+                     f"(no recorded roots/principal to refresh from); run prepare_bulk.py for it by hand")
+        setup += 1
+    # One outcome line first, and the exit code matches it: error 1, needs-setup 2, stale 3
+    # (--dry-run only), else 0. A problem is never listed below a success line.
+    if failed:
+        code, head = 1, f"error: {failed} refresh(es) failed"
+    elif setup:
+        code, head = 2, f"needs-setup: {setup} pointer(s) cannot refresh themselves"
+    elif a.dry_run and stale:
+        code, head = 3, f"stale: {stale} pointer(s) would refresh"
+    elif stale:
+        code, head = 0, f"refreshed: {stale} pointer(s)"
+    else:
+        code, head = 0, "fresh: nothing changed"
+    print("\n".join([head, *lines]))
+    return code
 
 
 if __name__ == "__main__":

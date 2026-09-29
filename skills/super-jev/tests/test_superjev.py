@@ -536,7 +536,7 @@ def test_verify_refuses_when_the_door_is_not_installed(tmp_path, monkeypatch, ca
     report = tmp_path / "r.md"
     report.write_text("done", encoding="utf-8")
     code = sj.main(["verify", str(report)])
-    assert code == sj.REFUSED
+    assert code == sj.NOT_BUILT
     err = capsys.readouterr().err
     assert "no door at" in err
     assert sj.VERIFY_CMD_ENV in err
@@ -569,213 +569,6 @@ def test_verify_passes_pr_base_and_claims_to_the_door(tmp_path, door, monkeypatc
     assert [x for x in argv if x.startswith("--claim=")] == ["--claim=tests pass", "--claim=PR merged"]
     sj.main(["verify", str(report), "--claim=-q flag works"])  # a dash-led value stays one argument
     assert "--claim=-q flag works" in door.argv
-
-# --------------------------------------------- verify: derived-facts fallback
-#
-# These run against a REAL tiny git repo and REAL node — no subprocess.run
-# mock — because the whole point of the fallback is what it reads off actual
-# git/test output. Skipped when node is missing, since the fallback silently
-# declines in that case too (see _derived_facts_fallback).
-import shutil as _shutil  # local alias; the module-level `subprocess` import above stays untouched
-
-requires_node = pytest.mark.skipif(_shutil.which("node") is None, reason="node not on PATH")
-
-
-@pytest.fixture
-def bare_git_repo(tmp_path):
-    """A tiny real repo with one commit on a named branch, no upstream."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    run = lambda *args: subprocess.run(["git", *args], cwd=repo, check=True,
-                                       capture_output=True, text=True)
-    run("init", "-q", "-b", "work")
-    run("config", "user.email", "test@example.com")
-    run("config", "user.name", "Test")
-    (repo / "README.md").write_text("hello\n", encoding="utf-8")
-    run("add", "README.md")
-    run("commit", "-q", "-m", "init")
-    return repo
-
-
-@requires_node
-def test_verify_fallback_settles_a_fake_branch_as_a_rejection(tmp_path, bare_git_repo, monkeypatch, capsys):
-    """No door installed, but a worktree is given: the fallback runs, derives
-    a BRANCH fact, and settles the claim's own fake branch name as
-    CONTRADICTED_BY_FACT before any judge would have been asked."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    report = tmp_path / "r.md"
-    report.write_text("Pushed to fix/totally-made-up-branch and opened the PR.", encoding="utf-8")
-    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
-    assert code == 4  # REJECT
-    out = capsys.readouterr().out
-    assert "DERIVED FACTS" in out
-    assert "there is NO branch named fix/totally-made-up-branch" in out
-    assert "CONTRADICTED_BY_FACT 1.00" in out
-    assert "PRE-RULE VERDICTS" in out
-
-
-@requires_node
-def test_verify_fallback_never_claims_clean(tmp_path, bare_git_repo, monkeypatch, capsys):
-    """A report with nothing to contradict still comes back READ, never
-    CLEAN — this path has no judge, so nothing here is ever vouched for."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    report = tmp_path / "r.md"
-    report.write_text("The change is committed on branch work.", encoding="utf-8")
-    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
-    assert code == 3  # READ, never 0/CLEAN
-    out = capsys.readouterr().out
-    assert "DERIVED FACTS" in out
-    assert "No judge is reachable in this fallback" in out
-
-
-def test_verify_fallback_declines_with_no_worktree_and_no_test_cmd(tmp_path, monkeypatch, capsys):
-    """No door, no worktree, no test command: nothing to gather, so this
-    falls all the way back to the plain refusal — unchanged behaviour."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    report = tmp_path / "r.md"
-    report.write_text("done", encoding="utf-8")
-    code = sj.main(["verify", str(report)])
-    assert code == sj.REFUSED
-    assert "no door at" in capsys.readouterr().err
-
-
-# ------------------------------------------- verify fallback: PR state via gh
-#
-# A fake `gh` script on PATH, never the real CLI and never live — it just
-# prints a fixed JSON/text fixture keyed off $GH_FAKE_MODE so each test can
-# pick a scenario (open, merged, a failing check) without touching a real
-# GitHub repo.
-
-_FAKE_GH_SCRIPT = """#!/usr/bin/env bash
-mode="${GH_FAKE_MODE:-open}"
-if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
-  case "$mode" in
-    open)
-      echo '{"state":"OPEN","isDraft":false,"headRefName":"feat/x","baseRefName":"main","mergedAt":null,"statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"}]}'
-      ;;
-    merged)
-      echo '{"state":"MERGED","isDraft":false,"headRefName":"feat/x","baseRefName":"main","mergedAt":"2026-09-17T00:00:00Z","statusCheckRollup":[{"name":"build","conclusion":"SUCCESS"}]}'
-      ;;
-    failed)
-      echo '{"state":"OPEN","isDraft":false,"headRefName":"feat/x","baseRefName":"main","mergedAt":null,"statusCheckRollup":[{"name":"build","conclusion":"FAILURE"}]}'
-      ;;
-  esac
-  exit 0
-fi
-if [ "$1" = "pr" ] && [ "$2" = "checks" ]; then
-  case "$mode" in
-    open) printf "build\\tpass\\t5s\\thttps://x\\n" ;;
-    merged) printf "build\\tpass\\t5s\\thttps://x\\n" ;;
-    failed) printf "build\\tfail\\t5s\\thttps://x\\n" ;;
-  esac
-  exit 0
-fi
-exit 1
-"""
-
-
-@pytest.fixture
-def fake_gh(tmp_path, monkeypatch):
-    """Puts a fake `gh` on PATH (ahead of any real one) and returns a
-    setter for GH_FAKE_MODE. Never interactive, never live."""
-    bin_dir = tmp_path / "fakebin"
-    bin_dir.mkdir()
-    gh_path = bin_dir / "gh"
-    gh_path.write_text(_FAKE_GH_SCRIPT, encoding="utf-8")
-    gh_path.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
-
-    def _set_mode(mode):
-        monkeypatch.setenv("GH_FAKE_MODE", mode)
-    return _set_mode
-
-
-@requires_node
-def test_verify_fallback_pr_open_contradicts_merged_claim(tmp_path, bare_git_repo,
-                                                           monkeypatch, capsys, fake_gh):
-    """The report claims PR #12 is merged; the fake `gh pr view` says OPEN —
-    settled as CONTRADICTED_BY_FACT before any judge call."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    fake_gh("open")
-    report = tmp_path / "r.md"
-    report.write_text("PR #12 open, checks green, merged.", encoding="utf-8")
-    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo), "--explain"])
-    assert code == 4  # REJECT
-    out = capsys.readouterr().out
-    assert "pull request #12: state OPEN" in out
-    assert "claims PR #12 is merged, but its state is OPEN" in out
-    assert "CONTRADICTED_BY_FACT 1.00" in out
-    assert "--explain: gh commands run" in out
-    assert "gh pr view 12" in out
-    assert "gh pr checks 12" in out
-
-
-@requires_node
-def test_verify_fallback_pr_merged_and_green_is_not_contradicted(tmp_path, bare_git_repo,
-                                                                  monkeypatch, capsys, fake_gh):
-    """An honest "PR #12 is merged" claim against a real MERGED state, all
-    checks passing: no pre-rule fires, still READ (no judge), never REJECT."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    fake_gh("merged")
-    report = tmp_path / "r.md"
-    report.write_text("PR #12 is merged, checks green.", encoding="utf-8")
-    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
-    assert code == 3  # READ, never 0/CLEAN, and not 4 — nothing contradicts here
-    out = capsys.readouterr().out
-    assert "pull request #12: state MERGED" in out
-    assert "none of the facts above contradict a claim" in out
-
-
-@requires_node
-def test_verify_fallback_pr_failed_check_contradicts_green_claim(tmp_path, bare_git_repo,
-                                                                  monkeypatch, capsys, fake_gh):
-    """The report claims PR #12's checks are green; the fake `gh pr checks`
-    reports one failing — settled as CONTRADICTED_BY_FACT."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    fake_gh("failed")
-    report = tmp_path / "r.md"
-    report.write_text("PR #12 checks are green, ready to merge.", encoding="utf-8")
-    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
-    assert code == 4  # REJECT
-    out = capsys.readouterr().out
-    assert "NOT all pass — failing: build" in out
-    assert "claims PR #12 checks are green, but failing: build" in out
-
-
-@requires_node
-def test_verify_fallback_no_gh_on_path_is_graceful(tmp_path, bare_git_repo, monkeypatch, capsys):
-    """No `gh` on PATH at all: no PR fact, no pre-rule, no crash — same
-    "no fact, no rule" contract as every other missing block."""
-    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
-    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
-    # git and node are still needed for the rest of the fallback's evidence
-    # gather; only `gh` needs to be unreachable. A CI runner can have git
-    # and gh in the SAME directory (e.g. /usr/bin on the GitHub-hosted
-    # ubuntu image), so shrinking PATH by directory is unsafe here — patch
-    # shutil.which itself, scoped to this module, so only a "gh" lookup
-    # comes back empty.
-    real_which = sj.shutil.which
-
-    def _which_no_gh(name, *a, **k):
-        if name == "gh":
-            return None
-        return real_which(name, *a, **k)
-    monkeypatch.setattr(sj.shutil, "which", _which_no_gh)
-    report = tmp_path / "r.md"
-    report.write_text("PR #12 is merged, checks green.", encoding="utf-8")
-    code = sj.main(["verify", str(report), "--worktree", str(bare_git_repo)])
-    assert code == 3  # READ — no gh, so no PR fact and no pre-rule fired
-    out = capsys.readouterr().out
-    assert "pull request #12" not in out
-    assert "CONTRADICTED_BY_FACT 1.00" not in out
-    assert "none of the facts above contradict a claim" in out
-
 
 # ------------------------------------------------------------ verify
 
@@ -3148,26 +2941,6 @@ def test_derived_evidence_refuses_npm_when_package_json_is_untracked(trusted):
     assert "untrusted-test-cmd" in derived["refused"]
 
 
-def test_check_test_cmd_for_fallback_refuses_npm_from_an_untrusted_package_json(trusted):
-    # The execution chokepoint, independent of how the command was derived.
-    wt = trusted.worktree()
-    assert sj.check_test_cmd_for_fallback("npm test", str(wt)) is None
-    (wt / "package.json").write_text('{"scripts":{"test":"echo pwned"}}\n',
-                                     encoding="utf-8")
-    bad = sj.check_test_cmd_for_fallback("npm test", str(wt))
-    assert bad is not None
-    assert "untrusted-test-cmd" in bad
-    assert sj.check_test_cmd_for_fallback("npm run test:skill", str(wt)) is not None
-    # a non-npm command is unaffected by the package.json state
-    assert sj.check_test_cmd_for_fallback(
-        "python3 -m pytest tests/test_x.py", str(wt)) is None
-
-
-def test_check_test_cmd_for_fallback_refuses_npm_with_no_worktree():
-    assert sj.check_test_cmd_for_fallback("npm test", None) is not None
-    assert sj.check_test_cmd_for_fallback("npm test", "") is not None
-
-
 # ------------------------------ verify hook: worktree precedence + ledger
 
 def test_posttooluse_verify_worktree_from_report_when_no_payload_or_env(
@@ -5141,7 +4914,7 @@ def test_cmd_gate_direct_check_never_truncates_over_cap(tmp_path, monkeypatch, c
 
 
 def test_cap_check_names_the_files_it_drops_and_cuts(monkeypatch, capsys):
-    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "10")  # 40 chars
+    monkeypatch.setenv("SUPERJEV_INPUT_CAP_TOK", "20")  # 40 bytes
     items = [("old.md", "A" * 100), ("mid.md", "M" * 30), ("new.md", "B" * 20)]
     kept, truncated, _est, _cap = sj.cap_check_and_truncate(items, "", "gate")
     err = capsys.readouterr().err
@@ -7437,7 +7210,7 @@ def test_window_cap_drops_sections_lowest_priority_first(monkeypatch):
     # a time walks the order one section further down: whatever is next to
     # go pays the overflow out of its own head (shrunk) while everything
     # cheaper than the overflow above it is already gone (dropped).
-    text = _window_with_sections([4000, 4000], 4000, 4000, 4000, 4000)
+    text = _window_with_sections([1900, 1900], 1900, 1900, 1900, 1900)
     steps = [
         (5200, [], ["previous turn -2"]),
         (4200, ["previous turn -2"], ["previous turn -1"]),
@@ -7484,7 +7257,7 @@ def _contributed_block(size, tag="ARMTAG"):
     filled with a distinctive tag so a test can assert its content never
     survives a drop — a header check alone would miss a partial-cut leak
     that left the tag behind under a DIFFERENT (or no) header."""
-    n = max(size * 4 - len(_CONTRIBUTED_HEADER) - 1, 0)
+    n = max(size * 2 - len(_CONTRIBUTED_HEADER) - 1, 0)
     line = (tag + " ") * ((n // (len(tag) + 1)) + 1)
     return _CONTRIBUTED_HEADER + "\n" + line[:n]
 
@@ -7501,10 +7274,10 @@ def test_window_cap_drops_the_contributed_block_first_and_whole(monkeypatch):
     contributed = _CONTRIBUTED_HEADER + "\n" + "\n".join(
         f"> contributed claim line {i} from a check arm" for i in range(200))
     text = "\n\n===\n\n".join([receipts, current, contributed])
-    out, meta = sj.trim_window_to_token_budget(text, budget_tok=600)
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=1200)
     assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
     assert meta["shrunk"] == ["session receipts"]
-    assert meta["tok_after"] <= 600
+    assert meta["tok_after"] <= 1200
     assert _CONTRIBUTED_HEADER not in out
     assert "contributed claim line" not in out
     assert "[session receipts]" in out
@@ -7518,14 +7291,14 @@ def test_window_cap_drops_the_contributed_block_first_and_whole(monkeypatch):
 
 
 def test_window_cap_never_shrinks_the_contributed_block(monkeypatch):
-    # A budget so tight only 1 token separates "fits" from "does not" —
+    # A budget so tight only a few tokens separate "fits" from "does not" —
     # the contributed block must still go whole, never pay the overflow
     # out of its own head the way every other section is allowed to.
     receipts = "[session receipts]\n" + "receipt line\n" * 100
     current = "[current turn]\ncurrent turn text.\n"
     contributed = _contributed_block(200)
     text = "\n\n===\n\n".join([receipts, current, contributed])
-    budget = sj._estimate_tokens(text) - 1
+    budget = sj._judge_tokens(text) - 10
     out, meta = sj.trim_window_to_token_budget(text, budget_tok=budget)
     assert meta["dropped"] == [sj._WINDOW_KIND_CONTRIBUTED]
     assert sj._WINDOW_KIND_CONTRIBUTED not in meta["shrunk"]
@@ -7558,7 +7331,7 @@ def test_window_cap_contributed_block_evicted_before_any_other_section(monkeypat
     current = "[current turn]\nc" * 100
     contributed = _contributed_block(1000)
     text = "\n\n===\n\n".join([prev, receipts, current, contributed])
-    out, meta = sj.trim_window_to_token_budget(text, budget_tok=sj._estimate_tokens(text) - 10)
+    out, meta = sj.trim_window_to_token_budget(text, budget_tok=sj._judge_tokens(text) - 10)
     assert meta["dropped"][0] == sj._WINDOW_KIND_CONTRIBUTED
     assert "ARMTAG" not in out
 
@@ -7568,8 +7341,8 @@ def test_window_cap_shrinks_a_section_before_dropping_it(monkeypatch):
     # evidence the budget never asked for, and missing evidence is how a
     # true reply gets flagged NOT_SUPPORTED. The oldest previous turn pays
     # the overflow out of its own head instead, and nothing else moves.
-    text = _window_with_sections([4000, 4000], 4000, 4000, 4000, 4000)
-    before = sj._estimate_tokens(text)
+    text = _window_with_sections([1900, 1900], 1900, 1900, 1900, 1900)
+    before = sj._judge_tokens(text)
     out, m = sj.trim_window_to_token_budget(text, budget_tok=before - 50)
     assert m["dropped"] == []
     assert m["shrunk"] == ["previous turn -2"]
@@ -7601,10 +7374,10 @@ def test_window_cap_holds_over_the_cited_file_block_appended_after_the_byte_cap(
     # cited-file block appended after the builder's 24 KB cap shipped over
     # cap. In tokens, one cap, enforced once, regardless.
     text = _window_with_sections([0], 0, 60_000, 0, 200, facts=False)
-    assert sj._estimate_tokens(text) > 8000
+    assert sj._judge_tokens(text) > 8000
     out, m = sj.trim_window_to_token_budget(text, budget_tok=8000)
     assert m["tok_after"] <= 8000
-    assert sj._estimate_tokens(out) <= 8000
+    assert sj._judge_tokens(out) <= 8000
 
 
 def test_window_cap_is_a_no_op_under_budget_and_when_disabled(monkeypatch):
@@ -7650,11 +7423,11 @@ def test_fact_window_lines_label_unchanged_by_receipt_turn_fix(monkeypatch):
 
 
 def test_window_cap_default_comes_from_the_env_knob(monkeypatch):
-    assert sj._gate_window_tok() == 8000
+    assert sj._gate_window_tok() == 16000
     monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "1200")
     assert sj._gate_window_tok() == 1200
     monkeypatch.setenv(sj.GATE_WINDOW_TOK_ENV, "not a number")
-    assert sj._gate_window_tok() == 8000
+    assert sj._gate_window_tok() == 16000
 
 
 def test_gate_window_is_capped_before_the_call(tmp_path, monkeypatch, capsys):
@@ -7677,7 +7450,7 @@ def test_gate_window_is_capped_before_the_call(tmp_path, monkeypatch, capsys):
     _hook_stdin(monkeypatch, json.dumps(_stop_gate_payload(path)))
     assert sj.main(["hook", "gate"]) == 0
     assert "evidence" in seen
-    assert sj._estimate_tokens(seen["evidence"]) <= 600
+    assert sj._judge_tokens(seen["evidence"]) <= 600
 
 
 def test_stop_event_spends_one_live_call_by_default(tmp_path, monkeypatch, capsys):
@@ -10705,20 +10478,6 @@ def test_derived_evidence_refuses_a_committed_hostile_package_json(trusted):
     assert "untrusted-test-cmd:package.json-differs" in derived["refused"]
 
 
-def test_check_test_cmd_for_fallback_refuses_a_committed_hostile_package_json(trusted):
-    # The execution chokepoint, independent of how the command was derived.
-    wt = trusted.worktree()
-    assert sj.check_test_cmd_for_fallback("npm test", str(wt)) is None
-    _commit_package_json(wt, {"scripts": {"test": "echo pwned"}})
-    bad = sj.check_test_cmd_for_fallback("npm test", str(wt))
-    assert bad is not None
-    assert "untrusted-test-cmd:package.json-differs" in bad
-    assert sj.check_test_cmd_for_fallback("npm run test:skill", str(wt)) is not None
-    # a non-npm command is unaffected by the package.json state
-    assert sj.check_test_cmd_for_fallback(
-        "python3 -m pytest tests/test_x.py", str(wt)) is None
-
-
 # =====================================================================# FINDING 6 — the shared .git/config is arbitrary code execution
 #
 # `git worktree add` gives every worktree the SAME `.git/config` as the
@@ -11118,7 +10877,7 @@ def test_moving_origin_main_does_not_vouch_for_a_hostile_package_json(trusted):
     When the vouched-for blob was read through that ref, this made a hostile
     committed package.json pass."""
     wt = trusted.worktree()
-    assert sj.check_test_cmd_for_fallback("npm test", str(wt)) is None
+    assert sj._npm_runner_is_trusted(str(wt), str(trusted.repo))[0]
     _commit_package_json(wt, {"scripts": {"test": "echo pwned"}})
     head = _git("rev-parse", "HEAD", cwd=wt).strip()
     # the move a worker can really make, from its own worktree
@@ -11130,8 +10889,6 @@ def test_moving_origin_main_does_not_vouch_for_a_hostile_package_json(trusted):
     ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
     assert not ok
     assert why == "package.json-differs", why
-    assert "untrusted-test-cmd" in (
-        sj.check_test_cmd_for_fallback("npm test", str(wt)) or "")
 
 
 def test_protected_checkout_that_does_not_match_its_pin_vouches_for_nothing(trusted):
@@ -11326,8 +11083,6 @@ def test_npm_gate_catches_a_hostile_package_json_hidden_by_a_clean_filter(truste
     # The gate is not fooled, because it hashes the bytes instead.
     ok, why = sj._npm_runner_is_trusted(str(wt), str(trusted.repo))
     assert (ok, why) == (False, "package.json-differs"), (ok, why)
-    assert "untrusted-test-cmd:package.json-differs" in (
-        sj.check_test_cmd_for_fallback("npm test", str(wt)) or "")
     # and the worktree that carries the clean filter is refused outright
     assert sj._worktree_trust(str(wt), str(trusted.repo))[1] == (
         "worktree-config-execution:filter.f.clean")

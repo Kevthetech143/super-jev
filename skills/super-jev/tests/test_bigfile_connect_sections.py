@@ -284,7 +284,7 @@ def test_big_secret_file_never_sends_a_section(run, capsys):
     code, rep, cache = run()
     assert str(big) not in rep["approved"] and str(big) not in cache
     why = dict(rep["held"])[str(big)]
-    assert "review before onboarding" in why and "admitted" not in why
+    assert "Remove or move the value" in why and "admitted" not in why
     out = capsys.readouterr().out
     assert "changed while this run read it" not in out
     assert not any(str(big) in json.dumps(r) for r in run.sent)
@@ -329,5 +329,5 @@ def test_big_file_with_a_secret_like_name_is_never_sectioned(run):
     big.write_text(code_file())
     code, rep, cache = run()
     assert str(big) not in rep["approved"] and str(big) not in cache
-    assert "review before onboarding" in dict(rep["held"])[str(big)]
+    assert "Remove or move the value" in dict(rep["held"])[str(big)]
     assert not any("password-hunter2xyz" in n for n in run.drafted)

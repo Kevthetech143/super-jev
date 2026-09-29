@@ -39,11 +39,12 @@ Pipeline per run:
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
      The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
      one line, must not trigger it); the password/api-key keyword check is never affected. --approve-held PATH
-     (repeatable) admits one held file (over the ceiling: connected whole, not in sections; or secret-like text or
-     name) after a person read it, and records its path and sha256 in the report;
+     (repeatable) connects one file over the ceiling whole (not in sections) after a person reviewed it and
+     records its path and sha256 in the report;
      --refresh (and so auto-heal) replays it only while the file's bytes still match, and a changed file connects
-     in sections instead. It applies only up to APPROVE_MAX_BYTES (1,000,000); a file with a
-     credential suffix can never be approved. There is no blanket flag. A first connect
+     in sections instead. It applies only up to APPROVE_MAX_BYTES (1,000,000); a file held
+     for secret-like text or name, or with a credential suffix, can never be approved, and there is no blanket
+     flag: the fix for a secret hold is to remove or move the value. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
      already-cached pointer instead guards on files that actually need a writer call this run (unchanged
      cached files are free and reused); raise --max-files to opt into a larger writer cost.
@@ -227,6 +228,7 @@ def section_text(text: str, lines) -> str:
 
 sys.path.insert(0, str(HERE))
 from connect_checked import gate, gate_many, memory  # noqa: E402
+from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
 
 # Gate packing: TypeSafe's docs batch independent questions into one call (parallel
 # questions, speculative fan-out). Small files are gated several to a call: each file's
@@ -298,7 +300,7 @@ _PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").rea
 CARD_RE = re.compile(_PAT["card"], re.A)
 CARD_IIN_RE = re.compile(_PAT["card_iin"], re.A)
 AMEX_RE = re.compile(_PAT["amex"], re.A)
-WORD_RE = re.compile(_PAT["word"].replace("{PH}", _PAT["placeholder"]), re.I | re.A)
+WORD_RE = re.compile(_PAT["word"].replace("{PH}", _PAT["placeholder"]).replace("{STOP}", _PAT["stop"]), re.I | re.A)
 TOKEN_RE = re.compile(_PAT["token"], re.I | re.A)
 GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
@@ -349,10 +351,12 @@ SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
 # excerpt, so a big file needs no hand split. The old 90,000-byte hold left every notes log, dead-ends
 # list and knowledge file over it unsearchable. 250,000 bytes keeps one file's gate to about 5 Jev
 # calls; a bigger file is still held with a split hint.
-CEILING_BYTES = 250_000
-# A reviewed --approve-held file (a size hold or a secret-text/name hold) is admitted whole up to this hard cap
-# (about 20 gate calls); the approval is pinned to the file's sha256.
+CEILING_BYTES = JUDGE_PROFILE.file_ceiling_bytes
+# A reviewed --approve-held file may go over CEILING_BYTES up to this hard cap (about 20 gate calls).
+# Only a size hold can be approved: secret-like text is never sent, so approving it could not connect it.
 APPROVE_MAX_BYTES = 1_000_000
+SECRET_NOT_APPROVABLE = ("held for secret-like text; Super Jev never sends that text. "
+                         "Remove or move the value, then reconnect.")
 # One connect (a part pointer) may hold at most 5 MiB (path_connect.MAX_BYTES); parts close early
 # before that. Under the old 90,000-byte file limit 50 files never reached it, so parts are unchanged.
 PART_BYTES = 4_500_000
@@ -840,9 +844,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
               names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS,
               approvals: dict = None, approved_out: dict = None):
     """Union of selected text suffixes under `roots`, in root order then sorted-per-root order. Each file is counted once
-    even if reachable through more than one root. `approvals` ({path: sha256}, from --approve-held) lifts a size
-    hold or a secret-text/name hold (up to APPROVE_MAX_BYTES) only while the file's bytes hash to the reviewed
-    sha256; each approval key used maps to the admitted path in `approved_out`.
+    even if reachable through more than one root. `approvals` ({path: sha256}, from --approve-held)
+    lifts a size hold (up to APPROVE_MAX_BYTES) only while the file's bytes hash to the reviewed sha256;
+    a secret-like file stays held with SECRET_NOT_APPROVABLE; each approval key used maps to the admitted path in `approved_out`.
     A symlinked file is judged on its target too: the target must sit under a root or an `allow_targets`
     folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
     logins.md or any other file the roots would never have admitted."""
@@ -912,23 +916,15 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
                 held.append((str(p), "not UTF-8 text; re-save it as UTF-8 to connect it")); continue
             if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                 held.append((str(p), "binary/control-character content, not text; skipped")); continue
-            for hit, why in ((has_secret(b.decode("utf-8", "replace")), "card/password-like text"),
-                             (path_has_secret(p.name) or path_has_secret(rp.name), "secret-keyword-like file name")):
-                if not hit:
-                    continue
-                if approved and len(b) <= APPROVE_MAX_BYTES:
-                    admitted.append(why)  # a reviewed, sha256-pinned approval, this file only
-                else:
-                    held.append((str(p), f"{why}; " + (f"over {APPROVE_MAX_BYTES:,} bytes, too big to approve; "
-                                                       "remove or move the value" if approved
-                                                       else f"review before onboarding{note}")))
-                    break
-            else:
-                if admitted:
-                    held.append((str(p), f"{'; '.join(admitted)}; admitted by --approve-held (sha256 {approved[:12]})"))
-                    if approved_out is not None:
-                        approved_out[key] = str(p)
-                files.append(p)
+            if has_secret(b.decode("utf-8", "replace")):
+                held.append((str(p), f"card/password-like text; {SECRET_NOT_APPROVABLE}")); continue
+            if path_has_secret(p.name) or path_has_secret(rp.name):
+                held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
+            if admitted:
+                held.append((str(p), f"{'; '.join(admitted)}; admitted by --approve-held (sha256 {approved[:12]})"))
+                if approved_out is not None:
+                    approved_out[key] = str(p)
+            files.append(p)
     if test_skips:
         print(f"  SKIP  {test_skips} test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); name one exactly with --name to connect it")
     if worktree_skips:
@@ -1319,6 +1315,14 @@ def manual_label_rows(principal: str, status: str = None, kind: str = None,
     return rows, excluded
 
 
+def keep_unrecorded(report: dict, a) -> None:
+    """A report that recorded no principal records the stand-in one only after every part connected.
+    A part that failed (e.g. one only another agent may see) must not leave the stand-in as the
+    pointer's principal: the next refresh would register that part for it."""
+    if getattr(a, "standin", False) and not report.get("connected"):
+        report.pop("principal", None); report.pop("principals", None)
+
+
 def replay_recipe(a) -> None:
     """--refresh replays the pointer's recorded recipe for anything not given on the command line,
     so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
@@ -1328,6 +1332,8 @@ def replay_recipe(a) -> None:
         return
     if not isinstance(rep, dict):
         return
+    # Whoever named the principal here (auto_heal's asking agent) is only a stand-in: see keep_unrecorded.
+    a.standin = not (rep.get("principals") or rep.get("principal"))
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
@@ -1525,8 +1531,6 @@ def main() -> int:
     ap.add_argument("--admit", action="append", default=[],
                     help="repeatable; on --refresh of a legacy pinned pointer, add this WAITING file (only those) "
                          "after checking it, through the usual holds, review and gate")
-    ap.add_argument("--asker-fallback", action="store_true",
-                    help="internal (auto_heal): --principal is the asking agent, not a recorded one; it is not saved")
     ap.add_argument("--name", dest="names", action="append", default=[])
     ap.add_argument("--allow-target", dest="allow_targets", action="append", default=[],
                     help="folder a symlinked file may point into besides the roots (repeatable)")
@@ -1542,9 +1546,9 @@ def main() -> int:
                     help="shell-style command for another writer; it receives the prompt on stdin and returns a JSON array on stdout. "
                          "Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted")
     ap.add_argument("--approve-held", dest="approve_held", action="append", default=[], metavar="PATH",
-                    help="admit this held file (size, or secret-like text or name) after a person read it (repeatable), up to "
+                    help="admit this size-held file after a person reviewed it (repeatable), up to "
                          f"{APPROVE_MAX_BYTES:,} bytes; its sha256 is recorded and --refresh replays the approval only "
-                         "while the file is unchanged. Never a credential/key file")
+                         "while the file is unchanged. Never a secret-like or credential/key file")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--findability", action="store_true",
@@ -1567,6 +1571,9 @@ def main() -> int:
     for path in a.approve_held:
         if credential_suffix(given_path(path).name) or credential_suffix(given_path(path).resolve().name):
             print(f"REFUSED: --approve-held {path}: credential/key file suffixes can never be approved"); return 2
+        gp = given_path(path)
+        if path_has_secret(gp.name) or (gp.is_file() and has_secret(gp.read_bytes().decode("utf-8", "replace"))):
+            print(f"REFUSED: --approve-held {path}: {SECRET_NOT_APPROVABLE}"); return 2
 
     if a.list:
         if not a.pointer and not a.principals:
@@ -1768,12 +1775,11 @@ def main() -> int:
         b = p.read_bytes()
         text = b.decode("utf-8", "replace")
         if has_secret(text) or path_has_secret(p.name) or path_has_secret(p.resolve().name):
-            # Secret-like text or name holds a file over the ceiling whole unless a matching --approve-held
-            # review admits it whole: no section of it is drafted or sent.
+            # Secret-like text or name holds a file over the ceiling whole: no section of it is drafted or sent.
             unsafe.add(str(p))
             held[:] = [(h, w) for h, w in held if h != str(p)] + [
                 (str(p), "card/password-like text or secret-keyword-like name in a file over the size ceiling; "
-                         "never connected in sections; read it, then --approve-held it or remove or move the value")]
+                         "never connected in sections: remove or move the value")]
             write_held_txt(a.pointer, held)
             print(f"  HELD  {relstr(p, roots)}  (secret-like text or name; a file over the ceiling is never "
                   "connected in sections while it holds any)")
@@ -2002,10 +2008,7 @@ def main() -> int:
         if "admitted by --approve-held" in why:
             continue
         print(f"  HELD  {relstr(p, roots)}  ({why})")
-        if "review before onboarding" in why:
-            print(f"      to include this file after reading it (this file only, pinned to its bytes): "
-                  f"{rerun} --approve-held {shlex.quote(str(p))}")
-        elif "binary" not in why:
+        if "binary" not in why:
             print(f"      then run: {rerun}")
 
     # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
@@ -2021,11 +2024,8 @@ def main() -> int:
               "approvedHeld": [{"path": k, "sha256": v} for k, v in sorted(approved_held.items())],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
-    if a.asker_fallback:
-        # A legacy report records no principal; auto_heal named the asking agent only to run this
-        # new-file refresh. Keep none recorded, so changed files still do not auto-heal it.
-        report.pop("principal"); report.pop("principals")
     if a.no_connect or not connect_set:
+        keep_unrecorded(report, a)
         (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
         _record_written(CACHE_DIR / f"{a.pointer}-report.json")
         print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s")
@@ -2096,6 +2096,7 @@ def main() -> int:
         for p, why in misses:
             print(f"  MISS  {relstr(p, roots)}  ({why})")
 
+    keep_unrecorded(report, a)
     (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
     _record_written(CACHE_DIR / f"{a.pointer}-report.json")
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")

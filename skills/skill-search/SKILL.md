@@ -20,25 +20,25 @@ How to call it:
 2. Run the launcher:
    bash ~/.claude/skills/skill-search/search.sh --request-file REQUEST.json [--local-only]
    The launcher expands the roots config, forwards everything to the shared runtime, and prints one JSON object on stdout.
-3. Read the result. status is one of: exact, suggestions, no_match, fallback, clarify, local-unavailable. candidates holds up to three entries, each {id, name, path, description} with a short description only.
+3. Read the result. status is one of: exact, suggestions, no_match, fallback, clarify, error. `fallback` and any `source: local` suggestions are unverified local guesses, never a match; `error` (exit 2) carries the real cause in `error`, with no candidates. candidates holds up to three entries, each {id, name, path, description} with a short description only.
 
 Rules:
 - A named skill wins. If the request names a skill directly (/name, or an unambiguous exact name), load it. Do not search.
 - The result is advisory. You still decide USE, CHAIN, or BUILD. A suggestion is not permission to run.
 - You load the chosen skill file. Read the candidate's path and load it with the Skill tool or a file read. The search never runs it for you.
-- If the chosen candidate's file is missing when you go to load it, fall back to the existing catalog (the skills map card, ~/agents/global/skills/INDEX.md) — the same fallback as a fallback/local-unavailable result.
-- A search is only complete over validated roots. ANY invalid root entry (not a string, empty, or not absolute after ~ expansion) makes the launcher fail explicitly with a fallback diagnostic — it never warns-and-continues, never claims complete over a filtered set. Unreadable-but-valid absolute roots are still forwarded so the runtime can report the search incomplete.
+- If the chosen candidate's file is missing when you go to load it, fall back to the existing catalog (the skills map card, ~/agents/global/skills/INDEX.md) — the same fallback as a fallback result.
+- A search is only complete over validated roots. ANY invalid root entry (not a string, empty, or not absolute after ~ expansion) makes the launcher fail explicitly with an error status — it never warns-and-continues, never claims complete over a filtered set. Unreadable-but-valid absolute roots are still forwarded so the runtime can report the search incomplete.
 - On clarify: this is an advisory boundary, not a forced question. Ask the user to disambiguate and re-invoke only when intent is actually unclear. If one returned candidate clearly fits the request (read the short descriptors first), the caller may choose it. Do not force a question for near-equivalent duplicates (for example web versus playwright results) — pick or ask based on actual ambiguity. Clarify is never no_match and never a build signal. no_match means no skill fit; it never authorizes building and never grants execution permission.
-- On fallback or local-unavailable, use the existing catalog (the skills map card, ~/agents/global/skills/INDEX.md). Never read a service failure as no_match.
+- On fallback, the candidates are unverified guesses: check them, or use the existing catalog (the skills map card, ~/agents/global/skills/INDEX.md). On error, read the `error` text and fix that cause (for example, shorten an over-long request); the catalog is not the answer to an input error. Never read a service failure as no_match.
 - Pronoun-only requests with no usable referent get a clarifying question. Do not invent the task.
 - Same technique, different purpose (for example rent versus generic browser work) stays advisory. Do not auto-run.
-- Node missing, or the runtime entry not installed, is a clear local-unavailable diagnostic, not a silent pass and not a no_match.
+- Node missing, or the runtime entry not installed, is a clear error status, not a silent pass and not a no_match.
 
 ## Model calls and credentials
 
 - The shared runtime makes the model call only in live mode. It reads the API key from the environment only (never argv, never logs). The launcher inherits its environment into the runtime child, so a deployment-provided key reaches it without any key in the repo.
-- The deployment wrapper that supplies the key is a LOCAL deployment artifact only (see deploy/hook-wrapper.sh, reference implementation of deploy/ENV-CONTRACT.md); the skill ships secret-free. Without a key in the environment the runtime reports fallback/local-unavailable honestly — a fallback is never claimed as a live search.
+- The deployment wrapper that supplies the key is a LOCAL deployment artifact only (see deploy/hook-wrapper.sh, reference implementation of deploy/ENV-CONTRACT.md); the skill ships secret-free. Without a key in the environment the runtime reports fallback honestly — a fallback is never claimed as a live search.
 - --local-only never needs a provider or a key; the launcher never invokes any provider command itself.
 - No CA environment is required by this wiring. If a deployments provider endpoint needs a private CA, add the sites usual CA variables inside the deployment wrapper only.
 
-Skill roots follow the caller: Claude/Fable/Opus seats append `--config ~/.claude/skills/skill-search/roots-claude.json`; Codex seats use the default roots. A file being readable does not guarantee its tools exist on this seat: check the selected skill before use.
+Skill roots follow the caller and are chosen in one place, `search.sh`: Claude/Fable/Opus seats (model name starting `claude-`) use `roots-claude.json`; Codex seats use `roots.json`. The launcher runs the runtime from the release it ships in, never a separate checkout. A file being readable does not guarantee its tools exist on this seat: check the selected skill before use.
