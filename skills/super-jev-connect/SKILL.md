@@ -67,7 +67,7 @@ The secret scan holds a file that looks like it carries card/password text, and 
 
 ## 9. Safeguards
 
-`preparation-required` and an unknown pointer are setup errors, never "nothing found" — follow the setup step, don't repeat the search or ask another agent to prepare unrelated records. `connect`, `connect_checked.py` and `prepare_bulk.py` always preview before publishing; nothing is registered until the confirm step runs. Originals are never edited — only reviewed copies are prepared and sent to the provider.
+`preparation-required` and an unknown pointer are setup errors, never "nothing found" — follow the setup step, don't repeat the search or ask another agent to prepare unrelated records. An ask reports them as `OUTCOME: needs-setup` (exit 4, with the one command to run) when nothing was found, or as `partial: N sets not searched` on a `found`; act on the `next:` command, then ask again. (The kinds are `found`, `not-found`, `not-supported`, `needs-setup`, `error`; details in the super-jev skill.) `connect`, `connect_checked.py` and `prepare_bulk.py` always preview before publishing; nothing is registered until the confirm step runs. Originals are never edited — only reviewed copies are prepared and sent to the provider.
 
 ## 10. Shared sets and onboarding defaults
 
