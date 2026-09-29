@@ -30,17 +30,21 @@ Then: `mark USE_ID helped|neutral|missed [--note ...]` for each Super Jev use, `
 
 ## Earn the Button (any new feature or new file type)
 
-Nothing new gets a button until it earns one. Seven steps, in order, each leaves a file in the cycle dir (`onboard-N-name.md`). No command runs before the one above it. `build_cycle.py ... onboard check` re-checks all seven, and `close` refuses while an onboarding is started but not earned.
+Nothing new gets a button until it earns one. Seven steps, in order, each leaves a file in the cycle dir (`onboard-N-name.md`). A step cannot run before the one above it, and an earlier step cannot be redone once a later one exists (start a new cycle dir). `onboard check` re-checks all seven against the real files, and `close` refuses while an onboarding is started but not earned.
 
 | # | Command | Must show |
 |---|---|---|
-| 1 | `onboard need --who --how-often --fails` | Real use: who asked, how often, what fails today. No evidence = stop. |
-| 2 | `onboard simplest --answer "..."` | Could an existing rule be widened instead of a new path? Written answer. |
-| 3 | `onboard promise --line "accepts ...; returns ...; failure is reported as ..." --approved "Kelvin approved: date/quote"` | One line added to `/Users/admin/agents/primary-brain/superjev-source-contract.md`. No approval, no pass. |
+| 1 | `onboard need --who --how-often --fails` | Real use, at least 3 real words each (no "-", "x", "n/a"). No evidence = stop. |
+| 2 | `onboard simplest --answer "..."` | Could an existing rule be widened instead of a new path? Written answer, 5+ words. |
+| 3 | `onboard promise --line "accepts ...; returns ...; failure is reported as ..." --approved 'Kelvin approved: 2026-09-29'` | `--approved` must say "Kelvin approved" plus a date (YYYY-MM-DD) or a quoted phrase. The line goes into `/Users/admin/agents/primary-brain/superjev-source-contract.md` and must stay there as a whole line. |
 | 4 | `onboard frozen --dev FILE --heldout FILE` | Separate JSONL files, each with `supported`, `absent` (not found) and `invalid` (failure) cases. sha256 recorded before build; a later edit fails `check`. |
-| 5 | `onboard build --worktree DIR --branch NAME --deletes "list, or none: why"` | Own worktree on a feature branch (not main), what it removes is listed, and a `review` receipt from a fresh reviewer says SHIP. |
-| 6 | `onboard prove --cases10 10/10 --eval60-before N --eval60-after N --test-cmd CMD` | The 10 frozen questions (`superjev-tests/try248/cases10.jsonl`) all pass, eval60 is not lower, the feature's own frozen test passes (run in the worktree). |
-| 7 | `onboard record --timeline-row T --timeline-file F --card-now L --card-file F` | The test-timeline row and the card NOW line are already written in those files. |
+| 5 | `onboard build --worktree DIR --branch NAME --deletes "what it removes, or none: why"` | Own worktree on a feature branch (not main). A `review` receipt says SHIP, is newer than the need step, and the reviewer's answer file names the branch or worktree. |
+| 6 | `onboard prove --cases10-file F --eval60-before-file F --eval60-file F --test-cmd CMD` | 10 of 10 frozen questions pass, eval60 not lower, the feature's own frozen test passes. |
+| 7 | `onboard record --timeline-row T --timeline-file F --card-now L --card-file F` | The timeline row and card NOW line are present in those files, and `check` looks again each time. |
+
+What is checked and what is self-reported:
+- Checked by the tool: step order, file contents and sha256 (frozen cases, result files, contract line), the branch is not main, the review receipt, the pass counts (it counts lines in the result files: a line starting `qNN` with "rank 1", "not-found OK" or "absent-OK" passes; cases10 must have 10 lines, eval60 60), the test command runs and exits 0, and it must use the frozen dev or held-out file path.
+- Self-reported: who asked and how often, the simplest-rule answer, what the build deletes, and the "Kelvin approved" wording (the tool checks its shape, not that Kelvin said it). The result files themselves are only as honest as whoever produced them: run the tests and score them yourself, do not type numbers into a file.
 
 ## Checking claims: shelves or direct
 
