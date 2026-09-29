@@ -135,13 +135,7 @@ judge at all. `verify`'s own worker-verify door does this internally (see
 `~/.claude/skills/worker-verify/SKILL.md`, "HOW EVIDENCE IS FRAMED"); this
 repository carries the same pair of pure functions, `deriveFacts` and
 `preRules`, in `src/experimental/derive-facts.ts`, so any harness — not just
-worker-verify — can read evidence the same way. `verify`'s door-absent
-fallback (no `worker-verify` installed and `SUPERJEV_VERIFY_CMD` unset) uses
-exactly this: it gathers a small git/test evidence set itself and runs it
-through `src/experimental/derive-facts-cli.ts` before it will settle anything, printing
-the DERIVED FACTS block first, then the pre-rule verdicts. It never calls a
-judge, so it can say `CONTRADICTED_BY_FACT`, but it can never say CLEAN — an
-unsettled claim there stays READ, unverified, not vouched for.
+worker-verify — can read evidence the same way.
 
 ### permit
 
@@ -504,7 +498,7 @@ the measurement is how you find out whether it's good enough for your use.
   never printed, never logged. `status` reports whether a key is present as
   `yes`/`no` and nothing more.
 - **What never reaches the judge.** Before any evidence — a gate window, a
-  verify fallback's gathered files and test output, or a raw request/record
+  verify's gathered files and test output, or a raw request/record
   handed to `superjev.py guard` directly — is packed for the judge, it goes
   through one guard, in plain words: a path is never opened at all if it
   names the fleet login vault, a `*-secret.md` file, an `.env` file, anything

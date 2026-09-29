@@ -65,7 +65,7 @@ def test_long_file_failing_the_check_is_not_kept(tmp_path, monkeypatch, capsys):
         cmd, 0, json.dumps({"status": "no-candidates", "candidates": []}), ""))
     ask.lookup("whens the CLOV annual shareholder meeting", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert "no-candidates" in out
+    assert "OUTCOME: not-found" in out
     assert not any(l.strip().endswith("[p1]") or "CLOV.md  [" in l for l in out.splitlines())
     assert "no answer confirmed. Closest:" in out and "CLOV.md" in out
 
@@ -77,7 +77,7 @@ def test_only_file_meeting_evidence_threshold_is_returned(tmp_path, monkeypatch,
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.99, "originalPath": str(a)}, {"score": 0.5, "originalPath": str(b)}]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(b): 0.9}, set(), None, {}))
     ask.lookup("q?", "me", tmp_path / "s")
-    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip() and not l.startswith("OUTCOME:")]
     assert lines[0].startswith(" 0.90") and "possible" not in lines[0]
     assert not any(str(a) in line for line in lines)
 
@@ -117,10 +117,10 @@ def test_unrouted_lexical_match_does_not_enter_ordinary_content_check(tmp_path, 
     monkeypatch.setattr(ask, "memory", _memory([]))
     checked = []
     monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.9}, set(), None, {}))
-    assert ask.lookup("what about the vehicle account toll", "me", tmp_path / "s") == 0
+    assert ask.lookup("what about the vehicle account toll", "me", tmp_path / "s") == 1  # not-found
     out = capsys.readouterr().out
     assert checked == []
-    assert "no-candidates" in out and str(toll) not in out
+    assert "OUTCOME: not-found" in out and str(toll) not in out
 
 
 def test_fallback_that_reads_nothing_still_says_not_in_files(tmp_path, monkeypatch, capsys):
@@ -131,7 +131,7 @@ def test_fallback_that_reads_nothing_still_says_not_in_files(tmp_path, monkeypat
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("vehicle account balance owed", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert "no-candidates" in out and str(toll) not in out
+    assert "OUTCOME: not-found" in out and str(toll) not in out
 
 
 def test_fallback_skips_files_the_content_check_already_rejected(tmp_path, monkeypatch):
@@ -159,7 +159,7 @@ def test_value_question_has_no_possible_tier(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("how much is in my roth ira right now", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert str(a) not in out and "no-candidates" in out
+    assert str(a) not in out and "OUTCOME: not-found" in out
 
 
 def test_ordinary_lookup_checks_only_semantically_routed_candidates(tmp_path, monkeypatch, capsys):
@@ -173,7 +173,7 @@ def test_ordinary_lookup_checks_only_semantically_routed_candidates(tmp_path, mo
     ask.lookup("how should I verify information before using it", "me", tmp_path / "s")
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
     assert checked == [str(routed)]
-    assert any("no-candidates" in line for line in lines)
+    assert lines[0].startswith("OUTCOME: not-found")
     assert not any(str(fb) in line for line in lines)
 
 
@@ -187,7 +187,7 @@ def test_exact_ties_have_stable_path_order(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(p)} for p in (other, reuse, local)]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(p): 0.9 for p in ps}, set(), None, {}))
     ask.lookup("does sendmessage revive a stopped teammate?", "me", tmp_path / "s")
-    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
+    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip() and not l.startswith("OUTCOME:")]
     assert rows == sorted([str(local), str(reuse), str(other)], reverse=True)
 
 
@@ -197,7 +197,7 @@ def test_content_score_wins_over_routing_when_not_a_true_tie(tmp_path, monkeypat
                                                  {"score": 0.5, "originalPath": str(higher_content)}]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(lower_content): 0.88, str(higher_content): 0.9}, set(), None, {}))
     ask.lookup("q?", "me", tmp_path / "s")
-    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
+    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip() and not l.startswith("OUTCOME:")]
     assert rows == [str(higher_content), str(lower_content)]
 
 
@@ -207,7 +207,7 @@ def test_routing_score_breaks_true_content_tie(tmp_path, monkeypatch, capsys):
                                                  {"score": 0.5, "originalPath": str(sibling)}]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(right): 0.9, str(sibling): 0.9}, set(), None, {}))
     ask.lookup("q?", "me", tmp_path / "s")
-    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip()]
+    rows = [l.split()[1] for l in capsys.readouterr().out.splitlines() if l.strip() and not l.startswith("OUTCOME:")]
     assert rows == [str(right), str(sibling)]
 
 
@@ -222,7 +222,7 @@ def test_strong_route_does_not_rescue_opinion_misses(tmp_path, monkeypatch, caps
     ask.lookup(q, "me", tmp_path / "s")
     out = capsys.readouterr().out
     assert (f"{ask.SOURCE_FLOOR:5.2f}  {a}  [p1]  (possible:" in out) is kept
-    assert ("no-candidates" in out) is not kept
+    assert ("OUTCOME: not-found" in out) is not kept
 
 
 def test_strong_route_not_kept_when_the_check_did_not_read_it(tmp_path, monkeypatch, capsys):
@@ -247,8 +247,8 @@ def test_value_question_owed_gets_no_possible_tier(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([toll]))
     monkeypatch.setattr(ask, "memory", _memory([]))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
-    assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 0
-    assert "no-candidates" in capsys.readouterr().out
+    assert ask.lookup("what is owed on the vehicle account", "me", tmp_path / "s") == 1  # not-found
+    assert "OUTCOME: not-found" in capsys.readouterr().out
 
 
 def _big_pending(tmp_path):

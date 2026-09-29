@@ -142,7 +142,7 @@ def _panel_nav(nav_out):
 def test_ask_error_line_names_the_reason(env, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", _panel_nav(
         {"status": "error", "reason": "Navigation provider failed: could not reach TypeSafe (network)"}))
-    assert ask.lookup("q?", "me", env / "state" / "me") == 1
+    assert ask.lookup("q?", "me", env / "state" / "me") == 3  # error
     assert "[p1] error: Navigation provider failed: could not reach TypeSafe (network)" in capsys.readouterr().out
 
 
@@ -158,9 +158,9 @@ def _nav_with(tmp_path, monkeypatch):
 def test_content_check_drops_a_topic_only_match(env, monkeypatch, capsys):
     _nav_with(env, monkeypatch)
     monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None, {}))
-    assert ask.lookup("collar color?", "me", env / "state" / "me") == 0
+    assert ask.lookup("collar color?", "me", env / "state" / "me") == 1  # not-found
     out = capsys.readouterr().out
-    assert "no-candidates" in out and "no answer was confirmed" in out
+    assert "OUTCOME: not-found" in out and "no answer was confirmed" in out
 
 
 def test_content_check_keeps_a_file_with_the_fact(env, monkeypatch, capsys):
@@ -173,7 +173,7 @@ def test_content_check_keeps_a_file_with_the_fact(env, monkeypatch, capsys):
 def test_content_check_failure_is_an_error_with_reason(env, monkeypatch, capsys):
     _nav_with(env, monkeypatch)
     monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), "Jev HTTP 401", {}))
-    assert ask.lookup("vet?", "me", env / "state" / "me") == 1
+    assert ask.lookup("vet?", "me", env / "state" / "me") == 3  # error
     assert "[content-check] error: Jev HTTP 401" in capsys.readouterr().out
 
 

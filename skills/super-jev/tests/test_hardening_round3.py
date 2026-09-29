@@ -108,7 +108,7 @@ def test_held_file_is_named_in_ask_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["p1"]} if req["action"] == "panel" else
                         {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": str(f)}]})
     monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None, {str(f): ask.HELD_SECRET}))
-    assert ask.lookup("vet?", "me", tmp_path / "s") == 0
+    assert ask.lookup("vet?", "me", tmp_path / "s") == 4  # needs-setup: a held file was not searched
     out = capsys.readouterr().out
     assert f"HELD  {f}  (contains a secret; not sent)" in out and "did not contain" not in out
 
@@ -141,7 +141,7 @@ def test_files_past_the_checked_few_are_not_kept_unread(tmp_path, monkeypatch, c
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("absent?", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert "no-candidates" in out and "f5.md" not in out
+    assert "OUTCOME: not-found" in out and "f5.md" not in out
 
 
 def test_odd_candidate_does_not_crash(tmp_path, monkeypatch):
@@ -198,7 +198,7 @@ def test_stale_pointer_line_names_the_refresh_command(tmp_path, monkeypatch, cap
     monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", tmp_path)
     (tmp_path / "x-report.json").write_text(json.dumps(
         {"pointer": "x", "roots": ["/r"], "principals": ["me", "helper"]}))
-    assert ask.lookup("q", "me", tmp_path / "s") == 1
+    assert ask.lookup("q", "me", tmp_path / "s") == 4  # needs-setup
     out = capsys.readouterr().out
     script = Path(ask.__file__).resolve().parent / "prepare_bulk.py"
     assert (f"[x] preparation-required; its files changed since connect. Run: python3 {script} "

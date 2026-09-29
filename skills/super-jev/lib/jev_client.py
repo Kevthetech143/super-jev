@@ -27,16 +27,16 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from judge_profile import PROFILE  # noqa: E402
+from judge_profile import PROFILE, judge_tokens as estimate_tokens  # noqa: E402
 
-API_URL = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
-# The judge's input ceiling (the profile's window; Jev: 32,768 tokens) covers the
+API_URL = PROFILE.api_url
+MODEL = PROFILE.model
+# The judge's input ceiling (the profile's window) covers the
 # state plus the longest question. A character cap sized for prose let number-dense
 # text (IDs, dates, amounts) through over the ceiling, so tokens are estimated on the
 # high side instead.
 MAX_INPUT_TOKENS = PROFILE.call_tokens
-LINE = 0.80                 # under this confidence a human reads the source
+LINE = PROFILE.confidence_line   # under this confidence a human reads the source
 MAX_QUESTIONS = PROFILE.max_questions_per_call
 MIN_CLAIM_WORDS = 4
 
@@ -81,12 +81,6 @@ FAVORABLE = {k for q in DRAFT_QUESTIONS.values() for k in q["criteria"] if k not
     "HAS_LEAKS", "TIME_SENSITIVE", "SELF_CONTRADICTORY", "OVERCLAIMS"}}
 RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
        "SELF_CONTRADICTORY", "OVERCLAIMS"}
-
-
-def estimate_tokens(value) -> int:
-    """A deliberately high token count, so dense text is never under-counted."""
-    text = value if isinstance(value, str) else json.dumps(value)
-    return (len(text.encode("utf-8")) + 1) // 2
 
 
 class JevError(RuntimeError):
