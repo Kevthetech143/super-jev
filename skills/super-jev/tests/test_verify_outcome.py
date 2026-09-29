@@ -129,6 +129,15 @@ def test_missing_door_is_needs_setup_exit_6(monkeypatch, capsys, tmp_path, repor
     assert "no door at" in cap.err
 
 
+def test_missing_door_in_hook_mode_returns_the_three_tuple(monkeypatch, tmp_path, report):
+    monkeypatch.setattr(sj, "FLEET_VERIFY_PY", tmp_path / "nope.py")
+    monkeypatch.delenv(sj.VERIFY_CMD_ENV, raising=False)
+    ns = sj.argparse.Namespace(report=report, worktree=None, test_cmd="", paths=[],
+                               dry_run=False, json=False, hook_mode=True)
+    code, out, err = sj.cmd_verify(ns)
+    assert code == sj.NOT_BUILT and out == "" and "no door at" in err
+
+
 def test_the_duplicate_fallback_gatherer_is_gone():
     for name in ("_derived_facts_fallback", "_gather_local_evidence", "_light_atoms",
                  "_gh_pr_evidence", "check_test_cmd_for_fallback", "DERIVE_FACTS_CLI"):

@@ -5093,10 +5093,11 @@ def cmd_verify(a):
     if bad is not None:
         # One evidence gatherer: the worker-verify door. Without it there is no
         # check to run, so say so plainly (needs setup, exit 6), never a partial answer.
+        if hook_mode:  # callers unpack (code, out, err); a hook's stdout is not ours to write to
+            return NOT_BUILT, "", bad
         if json_mode:
             return door_refuse(True, "verify", bad, exit_code=NOT_BUILT)
-        if not hook_mode:  # a hook's stdout is not ours to write to
-            print(f"VERDICT: {VERIFY_VERDICT[NOT_BUILT]}")
+        print(f"VERDICT: {VERIFY_VERDICT[NOT_BUILT]}")
         return refuse(bad, NOT_BUILT)
     # Cap estimate + truncation, same rule as gate: a.report (the worker's
     # report — verify's equivalent of the draft) is never touched; --paths
