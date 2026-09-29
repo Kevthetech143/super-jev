@@ -138,7 +138,7 @@ def test_overloaded_navigate_still_counts_as_a_failure_if_retry_also_fails(tmp_p
     monkeypatch.setattr(ask, "OVERLOAD_BACKOFF_SECS", 0)
     rc = ask.lookup("q", "alice", sdir)
 
-    assert rc == 1
+    assert rc == 3  # error
     health = ask.load_pointer_health(sdir)
     assert health["p1"]["fails"] == 1
 
@@ -164,7 +164,7 @@ def test_partial_pointer_failure_still_returns_healthy_results_rc0(tmp_path, mon
     out = capsys.readouterr().out
     assert "/ok.md" in out
     assert "[broken]" in out
-    assert "unresolved: 1 of 2 pointers errored" in out
+    assert out.startswith("OUTCOME: found - 1 file; partial: 1 set not searched")
 
 
 def test_preparation_required_never_counts_toward_the_fail_streak():
@@ -229,7 +229,7 @@ def test_lookup_never_benches_or_skips_the_principals_own_brain_root(tmp_path, m
     rc = ask.lookup("q", "testbot", sdir)
 
     assert ("navigate", "testbot-brain-root") in calls
-    assert rc == 1
+    assert rc == 4  # needs-setup
     out = capsys.readouterr().out
     assert "[testbot-brain-root]" in out
     assert "[STALE]" in out
@@ -249,7 +249,7 @@ def test_stale_error_line_is_marked_stale(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", fake_memory)
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 1
+    assert rc == 4  # needs-setup
     out = capsys.readouterr().out
     assert "[p1] preparation-required" in out
     assert "[STALE]" in out
@@ -270,6 +270,6 @@ def test_all_pointers_failing_still_exits_1_with_no_healthy_result(tmp_path, mon
     monkeypatch.setattr(ask, "memory", fake_memory)
     rc = ask.lookup("q", "alice", sdir)
 
-    assert rc == 1
+    assert rc == 3  # error
     out = capsys.readouterr().out
-    assert "unresolved: 1 of 1 pointers errored" in out
+    assert out.startswith("OUTCOME: error - no match, and 1 set failed")
