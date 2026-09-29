@@ -54,8 +54,7 @@ import scorecard as sc  # noqa: E402
 CLAIM_SURE = 0.9  # ask.py CLAIM_SURE: a TRUE/FALSE verdict needs this probability
 POSSIBLE_FLOOR = 0.6  # ask.py POSSIBLE_FLOOR: the line when the top 5 is not full
 # Left out of the state snapshot: logs, and every saved answer or verdict.
-NOT_COPIED = ("traces.jsonl*", "lookups.jsonl*", "approvals.jsonl", "claim-verdicts.json",
-              "pending_picks*")
+NOT_COPIED = ("traces.jsonl*", "lookups.jsonl*", "approvals.jsonl", "claim-verdicts.json")
 VERDICT_RE = re.compile(r"^(TRUE|FALSE|CONFLICT|PARTIAL|UNSURE|NOT FOUND)\b"
                         r"(?: \((?:(supported|contradicted) )?(\d+(?:\.\d+)?)(, saved)?)?", re.M)
 LEAN = {"supported": "TRUE", "contradicted": "FALSE"}
