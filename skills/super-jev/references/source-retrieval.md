@@ -29,7 +29,7 @@ collections can still hide a useful note behind that bound. Meaningful titles an
 The content stage asks of each passage one question, "does this passage state the answer
 to the question?": it states a requested fact or supplies a necessary input to
 determining that fact. Being about the same subject or topic, without the requested
-property, does not qualify. An arithmetic
+property or a necessary input to it, does not qualify. An arithmetic
 operand or list member can qualify while other required inputs are missing.
 Subject, property, event and modality must match; a related measurement or a
 pointer alone does not qualify. The same source floor applies to every query.
@@ -55,7 +55,7 @@ search state, and its exit code matches:
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `found` | at least one file; `partial: N sets not searched` if a set failed or is stale; `(unconfirmed: content check failed)` if the check failed and the files are routed but unread (still 0: read them) | 0 |
+| `found` | at least one file or skill suggestion; the file count is ranked files only (skill suggestions have their own label, e.g. `5 files; 2 skill suggestions`); `partial: N sets not searched` if a set failed or is stale; `(unconfirmed: content check failed)` if the check failed and the files are routed but unread (still 0: read them) | 0 |
 | `not-found` | complete search, no file | 1 |
 | `not-supported` | input outside the contract (empty or over-long question) | 2 |
 | `error` | no file, and execution failed | 3 |
