@@ -1669,6 +1669,9 @@ def skill_catalog(question: str) -> list:
         return []
     if not isinstance(out, dict):
         return []
+    if out.get("status") == "error":
+        print(f"skill search failed: {str(out.get('error') or 'unknown cause')[:200]}", file=sys.stderr)
+        return []
     # Only a live judge pick or an exact name is a match; local ranking and doubt are guesses.
     guess = GUESS if not (out.get("status") == "exact" or (out.get("status") == "suggestions" and out.get("source") == "jev")) else ""
     return [((c.get("name") or c.get("id") or "") + (" " + guess if guess else ""), c["path"]) for c in out.get("candidates") or []

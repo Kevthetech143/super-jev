@@ -165,3 +165,21 @@ def test_only_confirmed_results_are_called_a_match(monkeypatch, body, guess):
 
 def test_an_error_reply_gives_no_skills(monkeypatch):
     assert cat_reply(monkeypatch, {"status": "error", "candidates": [], "error": "boom"}) == []
+
+
+def test_symlinked_skill_folder_still_runs_its_own_release(release, tmp_path):
+    """sync.sh layout: ~/.claude/skills/skill-search -> <release>/skills/skill-search."""
+    rel, env, log = release
+    skills = tmp_path / "home/.claude/skills"
+    skills.mkdir(parents=True)
+    (skills / "skill-search").symlink_to(rel / "skills/skill-search")
+    (rel / "req.json").write_text('{"request":"x"}')
+    r = subprocess.run(["bash", str(skills / "skill-search/search.sh"), "--local-only", "--request-file",
+                        str(rel / "req.json")], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stdout
+    assert (log / "entries").read_text().split() == [str(rel.resolve() / "src/skill-search-cli.ts")]
+
+
+def test_an_error_reply_prints_one_cause_line(monkeypatch, capsys):
+    cat_reply(monkeypatch, {"status": "error", "candidates": [], "error": "boom cause"})
+    assert "boom cause" in capsys.readouterr().err
