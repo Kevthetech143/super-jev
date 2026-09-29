@@ -2147,12 +2147,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     for s, p, _ in merged:
         route.setdefault(p, s)
     dropped, check_error, notes, possible = 0, None, {}, {}
-    # Ordinary source lookup checks only routed candidates. Lexical topic overlap
-    # must not reintroduce files that semantic routing rejected. Claim checking
-    # retains its broader evidence discovery for support and contradiction.
-    found = (word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
+    # Routing scores are only comparable inside one pointer, and it sees names and
+    # descriptions, not text: unrelated files can fill every routed read slot and hide the
+    # note that states the answer. Word search adds the files whose text matches the
+    # question; the content check still decides what is kept.
+    found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
                         | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
-             if _CLAIM["text"] else [])
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)

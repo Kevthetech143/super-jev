@@ -109,7 +109,7 @@ def test_word_search_needs_the_question_words(tmp_path, monkeypatch):
     assert ask.word_search("what is it", ["p1"]) == []
 
 
-def test_unrouted_lexical_match_does_not_enter_ordinary_content_check(tmp_path, monkeypatch, capsys):
+def test_unrouted_lexical_match_enters_ordinary_content_check(tmp_path, monkeypatch, capsys):
     toll, other = tmp_path / "toll.md", tmp_path / "other.md"
     toll.write_text("E-ZPass vehicle account balance owed: $42.")
     other.write_text("vehicle notes")
@@ -117,10 +117,10 @@ def test_unrouted_lexical_match_does_not_enter_ordinary_content_check(tmp_path, 
     monkeypatch.setattr(ask, "memory", _memory([]))
     checked = []
     monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(toll): 0.9}, set(), None, {}))
-    assert ask.lookup("what about the vehicle account toll", "me", tmp_path / "s") == 1  # not-found
+    assert ask.lookup("what about the vehicle account toll", "me", tmp_path / "s") == 0
     out = capsys.readouterr().out
-    assert checked == []
-    assert "OUTCOME: not-found" in out and str(toll) not in out
+    assert checked == [str(toll)]
+    assert "OUTCOME: found" in out and str(toll) in out
 
 
 def test_fallback_that_reads_nothing_still_says_not_in_files(tmp_path, monkeypatch, capsys):
@@ -162,7 +162,7 @@ def test_value_question_has_no_possible_tier(tmp_path, monkeypatch, capsys):
     assert str(a) not in out and "OUTCOME: not-found" in out
 
 
-def test_ordinary_lookup_checks_only_semantically_routed_candidates(tmp_path, monkeypatch, capsys):
+def test_ordinary_lookup_checks_routed_and_word_matched_candidates(tmp_path, monkeypatch, capsys):
     routed, fb = tmp_path / "routed.md", tmp_path / "feedback.md"
     routed.write_text("unrelated")
     fb.write_text("verify information before using it: read the source")
@@ -172,9 +172,9 @@ def test_ordinary_lookup_checks_only_semantically_routed_candidates(tmp_path, mo
     monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(fb): 0.9}, set(), None, {}))
     ask.lookup("how should I verify information before using it", "me", tmp_path / "s")
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
-    assert checked == [str(routed)]
-    assert lines[0].startswith("OUTCOME: not-found")
-    assert not any(str(fb) in line for line in lines)
+    assert checked == [str(routed), str(fb)]
+    assert lines[0].startswith("OUTCOME: found")
+    assert any(str(fb) in line for line in lines) and not any(str(routed) in line for line in lines)
 
 
 def test_exact_ties_have_stable_path_order(tmp_path, monkeypatch, capsys):
