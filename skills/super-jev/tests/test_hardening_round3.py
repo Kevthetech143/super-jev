@@ -188,7 +188,7 @@ def test_summary_names_held_file_why_and_command(env, monkeypatch, capsys):
     assert pb.main() == 0
     summary = capsys.readouterr().out.split("approved:")[1]
     assert "HELD  keys.md  (card/password-like text" in summary
-    assert f"prepare_bulk.py --root {root} --pointer x --principal me --writer builtin --no-findability --allow-held" in summary
+    assert f"prepare_bulk.py --root {root} --pointer x --principal me --writer builtin --no-findability --approve-held {root / 'keys.md'}" in summary
 
 
 # 5. a stale pointer says how to refresh it -- a command that runs as printed

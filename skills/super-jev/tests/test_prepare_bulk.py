@@ -982,14 +982,14 @@ def test_refresh_replays_recorded_no_recurse_and_excludes(tmp_path, monkeypatch,
     _seed_cache(root, cache_dir, 2)
     (cache_dir / "my-records-report.json").write_text(json.dumps(
         {"pointer": "my-records", "roots": [str(root)], "principals": ["alice"],
-         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20, "allowHeld": True}))
+         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20}))
     monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
                                       "--refresh", "--no-connect", "--no-findability"])
     rc = pb.main()
     out = capsys.readouterr().out
     assert rc == 0, out
-    assert "inventory: 2 files to prepare, 1 held" in out  # allow-held is never replayed
+    assert "inventory: 2 files to prepare, 1 held" in out  # no approval recorded: still held
     report = json.loads((cache_dir / "my-records-report.json").read_text())
     assert report["noRecurse"] is True and report["excludes"] == ["INDEX.md"] and report["limit"] == 20
 
@@ -1374,16 +1374,17 @@ def test_secret_looking_filename_is_held_even_with_clean_content(tmp_path):
     assert "secret-keyword-like file name" in held_by_name["password-hunter2xyz-notes.md"]
 
 
-def test_secret_looking_filename_admitted_by_allow_held(tmp_path):
+def test_secret_looking_filename_admitted_by_approve_held(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     (root / "api_key_prod789-dump.md").write_text("# Notes\nNothing secret in here.\n")
 
-    files, held = pb.inventory([root], allow_held=True)
+    f = root / "api_key_prod789-dump.md"
+    files, held = pb.inventory([root], approvals={str(f): hashlib.sha256(f.read_bytes()).hexdigest()})
 
     assert {p.name for p in files} == {"api_key_prod789-dump.md"}
     held_by_name = {Path(p).name: why for p, why in held}
-    assert "admitted by --allow-held" in held_by_name["api_key_prod789-dump.md"]
+    assert "admitted by --approve-held" in held_by_name["api_key_prod789-dump.md"]
 
 
 def test_normal_filename_not_held(tmp_path):
@@ -1397,33 +1398,22 @@ def test_normal_filename_not_held(tmp_path):
     assert held == []
 
 
-def test_allow_held_admits_secret_file_with_override_reason(tmp_path):
+def test_approve_held_admits_only_the_named_secret_file(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
     (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
 
-    files, held = pb.inventory([root], allow_held=True)
+    (root / "pw2.md").write_text("# Creds\nthe password for the router is hunter3\n")
+    f = root / "pw.md"
+    files, held = pb.inventory([root], approvals={str(f): hashlib.sha256(f.read_bytes()).hexdigest()})
 
     assert {p.name for p in files} == {"pw.md"}
     held_by_name = {Path(p).name: why for p, why in held}
-    assert "admitted by --allow-held" in held_by_name["pw.md"]
+    assert "admitted by --approve-held" in held_by_name["pw.md"]
+    assert "review before onboarding" in held_by_name["pw2.md"]
 
 
-def test_allow_held_does_not_lift_size_ceiling_hold(tmp_path, monkeypatch):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "big.md").write_text("x" * 100)
-    monkeypatch.setattr(pb, "CEILING_BYTES", 50)
-    monkeypatch.setattr(pb, "SECTION_MAX_BYTES", 50)  # too big even to connect in sections
-
-    files, held = pb.inventory([root], allow_held=True)
-
-    assert files == []
-    held_by_name = {Path(p).name: why for p, why in held}
-    assert "size ceiling" in held_by_name["big.md"]
-
-
-def test_allow_held_flag_end_to_end_admits_file_into_connect_set(tmp_path, monkeypatch, capsys):
+def test_approve_held_flag_end_to_end_admits_file_into_connect_set(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()
     f = root / "pw.md"
@@ -1435,7 +1425,7 @@ def test_allow_held_flag_end_to_end_admits_file_into_connect_set(tmp_path, monke
     })
     monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
 
-    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--allow-held", "--no-connect"]))
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--approve-held", str(f), "--no-connect"]))
     rc = pb.main()
 
     assert rc == 0

@@ -1,4 +1,5 @@
 """Opt-in text inventory and stable symlink recipes, with no provider calls."""
+import hashlib
 import importlib.util
 import json
 import sys
@@ -23,7 +24,7 @@ def test_default_and_explicit_extensions(tmp_path):
 
 def test_code_holds_before_writer(tmp_path, monkeypatch):
     for name, data in {'null.py': b'x\x00y', 'control.py': b'x\x01y', 'bad.py': b'\xff',
-                       'secret.py': b'password: syntheticTestOnlyValue', 'big.py': b'x' * 101,
+                       'secret.py': b'password: syntheticTestOnlyValue9', 'big.py': b'x' * 101,
                        'ok.py': b'def add(a, b):\n    return a + b\n'}.items():
         (tmp_path / name).write_bytes(data)
     monkeypatch.setattr(pb, 'CEILING_BYTES', 100)
@@ -31,7 +32,9 @@ def test_code_holds_before_writer(tmp_path, monkeypatch):
     files, held = pb.inventory([tmp_path], extensions=('.py',))
     assert [p.name for p in files] == ['ok.py']
     assert len(held) == 5
-    files, held = pb.inventory([tmp_path], extensions=('.py',), allow_held=True)
+    secret = tmp_path / 'secret.py'
+    approvals = {str(secret): hashlib.sha256(secret.read_bytes()).hexdigest()}  # one file, pinned to its bytes
+    files, held = pb.inventory([tmp_path], extensions=('.py',), approvals=approvals)
     assert {p.name for p in files} == {'ok.py', 'secret.py'}
 
 
@@ -78,7 +81,7 @@ def test_bad_extension_refused_before_inventory(tmp_path, monkeypatch, ext):
 @pytest.mark.parametrize('ext', ['env', '.PEM', 'key', 'p12', 'pfx', 'jks', 'kdbx', 'keystore', 'pem.txt'])
 def test_credential_extensions_cannot_be_opted_in(tmp_path, monkeypatch, ext):
     monkeypatch.setattr(sys, 'argv', ['prepare_bulk.py', '--root', str(tmp_path), '--pointer', 'code',
-                                    '--principal', 'reader', '--ext', ext, '--allow-held'])
+                                    '--principal', 'reader', '--ext', ext])
     with pytest.raises(SystemExit) as exc:
         pb.main()
     assert exc.value.code == 2
@@ -103,6 +106,6 @@ def test_credential_target_and_compound_name_held_even_with_override(tmp_path):
     target.write_text('an unrecognized credential encoding')
     (tmp_path / 'ordinary.txt').symlink_to(target)
     (tmp_path / 'backup.key.txt').write_text('another unrecognized encoding')
-    files, held = pb.inventory([tmp_path], extensions=('.txt',), allow_held=True)
+    files, held = pb.inventory([tmp_path], extensions=('.txt',))
     assert not files
     assert len(held) == 2 and all('cannot be overridden' in why for _, why in held)

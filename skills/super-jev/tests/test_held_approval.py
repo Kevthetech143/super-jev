@@ -93,7 +93,6 @@ def test_node_scanner_agrees_on_escaped_quotes():
 
 # --approve-held: a reviewed approval of a size-held file, pinned to the file's bytes.
 
-SECRETISH = "# fixture\nFAKE = 'pass" + "word: hunter2" + "xyz'\n"
 BIG = "x = 1\n" * (pb.CEILING_BYTES // 6 + 100)
 
 
@@ -142,40 +141,6 @@ def test_approved_file_survives_refresh_until_its_bytes_change(run, capsys):
     code, rep = run(refresh=True)
     assert code == 0 and str(f) in rep["approved"] and str(f) in rep["sections"]
     assert str(f) not in dict(rep["held"])
-
-
-def test_allow_held_is_still_never_replayed(run):
-    f = run.root / "fixture.py"
-    f.write_text(SECRETISH)
-    code, rep = run("--allow-held")
-    assert str(f) in rep["approved"] and not rep.get("approvedHeld")
-    code, rep = run(refresh=True)
-    assert str(f) not in rep["approved"]
-
-
-@pytest.mark.parametrize("name, text", [("fixture.py", SECRETISH), ("big.py", BIG + SECRETISH),
-                                        ("password-hunter2xyz.py", BIG)])
-def test_secret_held_file_can_never_be_approved(run, capsys, name, text):
-    f = run.root / name
-    f.write_text(text)
-    code, rep = run("--approve-held", str(f))
-    assert code == 2 and rep is None
-    assert "held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect." \
-        in capsys.readouterr().out
-
-
-def test_replayed_approval_never_admits_a_file_that_now_holds_secret_text(run, monkeypatch):
-    f = run.root / "big.py"
-    f.write_text(BIG)
-    run("--approve-held", str(f))
-    rep_path = run.root.parent / "cache" / "code-report.json"
-    rep = json.loads(rep_path.read_text())
-    f.write_text(BIG + SECRETISH)  # recorded hash matches the new bytes: the secret check still wins
-    rep["approvedHeld"] = [{"path": str(f), "sha256": _sha(f)}]
-    rep_path.write_text(json.dumps(rep))
-    code, rep = run(refresh=True)
-    assert str(f) not in rep["approved"]
-    assert "held for secret-like text" in dict(rep["held"])[str(f)]
 
 
 @pytest.mark.parametrize("name", ["deploy.pem", "prod.env", "a.key.py"])
