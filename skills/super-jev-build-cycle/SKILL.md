@@ -28,6 +28,20 @@ python3 build_cycle.py --dir CYCLE_DIR --principal YOUR_AGENT STEP ...
 
 Then: `mark USE_ID helped|neutral|missed [--note ...]` for each Super Jev use, `status`, and `close [--log FILE]` (exit 1 naming missing steps, unmarked uses or a FIX review; else writes `summary.md` and one log line per use).
 
+## Earn the Button (any new feature or new file type)
+
+Nothing new gets a button until it earns one. Seven steps, in order, each leaves a file in the cycle dir (`onboard-N-name.md`). No command runs before the one above it. `build_cycle.py ... onboard check` re-checks all seven, and `close` refuses while an onboarding is started but not earned.
+
+| # | Command | Must show |
+|---|---|---|
+| 1 | `onboard need --who --how-often --fails` | Real use: who asked, how often, what fails today. No evidence = stop. |
+| 2 | `onboard simplest --answer "..."` | Could an existing rule be widened instead of a new path? Written answer. |
+| 3 | `onboard promise --line "accepts ...; returns ...; failure is reported as ..." --approved "Kelvin approved: date/quote"` | One line added to `/Users/admin/agents/primary-brain/superjev-source-contract.md`. No approval, no pass. |
+| 4 | `onboard frozen --dev FILE --heldout FILE` | Separate JSONL files, each with `supported`, `absent` (not found) and `invalid` (failure) cases. sha256 recorded before build; a later edit fails `check`. |
+| 5 | `onboard build --worktree DIR --branch NAME --deletes "list, or none: why"` | Own worktree on a feature branch (not main), what it removes is listed, and a `review` receipt from a fresh reviewer says SHIP. |
+| 6 | `onboard prove --cases10 10/10 --eval60-before N --eval60-after N --test-cmd CMD` | The 10 frozen questions (`superjev-tests/try248/cases10.jsonl`) all pass, eval60 is not lower, the feature's own frozen test passes (run in the worktree). |
+| 7 | `onboard record --timeline-row T --timeline-file F --card-now L --card-file F` | The test-timeline row and the card NOW line are already written in those files. |
+
 ## Checking claims: shelves or direct
 
 New code, a worker's report or a one-off file is not on Super Jev's shelves. Claims about it looked up on the shelves come back NOT FOUND. Pass `--worktree DIR` (its diff against origin/main, committed and uncommitted) or `--evidence FILE` and Super Jev judges those files directly (`dispatch.py check`, no connecting; a diff is judged as code). With neither, claims are looked up on the connected shelves.

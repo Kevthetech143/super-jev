@@ -14,6 +14,7 @@ Required steps (receipts are CYCLE_DIR/NN-step.md; Super Jev uses go to CYCLE_DI
 Optional notes: target, cause, brief, prove.
   skip STEP --reason TEXT              recorded and shown at close (start, review, reply-check cannot be skipped)
   mark USE_ID helped|neutral|missed [--note TEXT]
+  onboard need|simplest|promise|frozen|build|prove|record|check|status   Earn the Button (see SKILL.md)
   status                               which steps are done, skipped or missing
   close [--log FILE]                   exit 1 naming missing steps / unmarked uses / a FIX review
 
@@ -517,6 +518,11 @@ def cmd_close(ctx, a):
     if rv.exists() and not verdict.lstrip().startswith("SHIP"):
         print("close refused: the latest review says " + (verdict or "nothing") + "; fix, get a new review, record it")
         return 1
+    if any(onb_path(ctx.dir, s).is_file() for s in ONB):  # an onboarding was started: it must be earned
+        probs = onb_check(ctx.dir)
+        if probs:
+            print("close refused: onboarding not earned:\n- " + "\n- ".join(probs))
+            return 1
     uses, marks = load_uses(ctx.dir), load_marks(ctx.dir)
     unmarked = [u["id"] for u in uses if u["id"] not in marks]
     if missing or unmarked:
@@ -554,6 +560,190 @@ def cmd_close(ctx, a):
                                m["note"].replace("\t", " ").replace("\n", " ")]) + "\n")
     print("\n".join(lines))
     print(f"\nsummary: {ctx.dir / 'summary.md'}\nuse log: {log}")
+    return 0
+
+
+# ---- Earn the Button: onboarding a new feature or file type. One artifact per step in CYCLE_DIR ----
+ONB = ["need", "simplest", "promise", "frozen", "build", "prove", "record"]
+CONTRACT = Path("/Users/admin/agents/primary-brain/superjev-source-contract.md")
+NO_EVIDENCE = {"", "none", "n/a", "na", "unknown", "tbd", "no", "nothing", "?"}
+CASE_KINDS = ("supported", "absent", "invalid")
+SPLITS = ("dev", "heldout")
+
+
+def onb_path(d: Path, step: str) -> Path:
+    return d / f"onboard-{ONB.index(step) + 1}-{step}.md"
+
+
+def onb_read(d: Path, step: str) -> dict:
+    p = onb_path(d, step)
+    if not p.is_file():
+        raise CycleError(f"onboarding step '{step}' has no artifact yet ({p.name}); run: onboard {step}")
+    return {m.group(1): m.group(2) for m in map(re.compile(r"^- ([^:]+): (.*)$").match,
+                                                p.read_text(encoding="utf-8").splitlines()) if m}
+
+
+def onb_write(d: Path, step: str, principal: str, fields: dict) -> Path:
+    lines = [f"# onboard {step}", f"- time: {now()}", f"- principal: {principal}"]
+    lines += [f"- {k}: {' '.join(str(v).split())}" for k, v in fields.items()]
+    p = onb_path(d, step)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def sha256(p: Path) -> str:
+    import hashlib
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def need_text(v, label, words=1):
+    v = " ".join((v or "").split())
+    if v.lower() in NO_EVIDENCE or len(v.split()) < words:
+        raise CycleError(f"{label} is required" + (f" (at least {words} words)" if words > 1 else "")
+                         + ". No real-use evidence or answer: stop, do not onboard this")
+    return v
+
+
+def load_cases(path: Path) -> list:
+    rows = []
+    for i, l in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not l.strip():
+            continue
+        try:
+            row = json.loads(l)
+        except ValueError:
+            raise CycleError(f"{path.name} line {i} is not JSON")
+        if not isinstance(row, dict) or row.get("kind") not in CASE_KINDS:
+            raise CycleError(f"{path.name} line {i} needs a \"kind\" of {', '.join(CASE_KINDS)}")
+        rows.append(row)
+    missing = [k for k in CASE_KINDS if not any(r["kind"] == k for r in rows)]
+    if missing:
+        raise CycleError(f"{path.name} has no case of kind: {', '.join(missing)} (needs supported, absent "
+                         "'not found', invalid/failure)")
+    return rows
+
+
+def review_ship(d: Path) -> bool:
+    return step_state(d, "review") == "done" and bool(
+        re.search(r"^- verdict: SHIP\b", receipt_path(d, "review").read_text(encoding="utf-8"), re.M))
+
+
+def onb_check(d: Path) -> list:
+    """Every onboarding problem, re-checked against the real files. Empty list = earned."""
+    probs = []
+    for step in ONB:
+        try:
+            f = onb_read(d, step)
+        except CycleError as e:
+            probs.append(str(e))
+            continue
+        try:
+            if step == "need":
+                for k in ("who asked", "how often", "what fails today"):
+                    need_text(f.get(k), k)
+            elif step == "simplest":
+                need_text(f.get("answer"), "answer", 5)
+            elif step == "promise":
+                need_text(f.get("kelvin approved"), "Kelvin approved")
+                c = Path(f.get("contract", ""))
+                if not c.is_file() or f.get("line", "\0") not in c.read_text(encoding="utf-8"):
+                    raise CycleError(f"promise line is not in the contract file {c}")
+            elif step == "frozen":
+                for sp in SPLITS:
+                    p = Path(f.get(sp + " file", ""))
+                    if not p.is_file() or sha256(p) != f.get(sp + " sha256"):
+                        raise CycleError(f"frozen {sp} cases file changed or missing since it was frozen")
+            elif step == "build":
+                need_text(f.get("deletes or replaces"), "deletes or replaces")
+                if not review_ship(d):
+                    raise CycleError("no independent review receipt with a SHIP verdict")
+            elif step == "prove":
+                if f.get("cases10") != "PASS" or f.get("eval60") != "PASS" or f.get("own test") != "PASS":
+                    raise CycleError("prove is not all PASS (cases10, eval60, own test)")
+            elif step == "record":
+                need_text(f.get("timeline row"), "timeline row")
+                need_text(f.get("card now line"), "card NOW line")
+        except CycleError as e:
+            probs.append(f"{step}: {e}")
+    return probs
+
+
+def cmd_onboard(ctx, a):
+    step, d = a.ostep, ctx.dir
+    if step == "check":
+        probs = onb_check(d)
+        print("onboarding EARNED: all 7 steps have artifacts and still check out" if not probs
+              else "onboarding NOT earned:\n- " + "\n- ".join(probs))
+        return 1 if probs else 0
+    if step == "status":
+        for s in ONB:
+            print(f"{ONB.index(s) + 1}. {s}: {'done' if onb_path(d, s).is_file() else 'missing'}")
+        return 0
+    if ONB.index(step) and not onb_path(d, ONB[ONB.index(step) - 1]).is_file():
+        raise CycleError(f"do '{ONB[ONB.index(step) - 1]}' first: the steps go in order")
+    if step == "need":
+        f = {"who asked": need_text(a.who, "--who"), "how often": need_text(a.how_often, "--how-often"),
+             "what fails today": need_text(a.fails, "--fails")}
+    elif step == "simplest":
+        f = {"answer": need_text(a.answer, "--answer", 5)}
+    elif step == "promise":
+        line = need_text(a.line, "--line")
+        low = line.lower()
+        if not all(w in low for w in ("accept", "return", "fail")):
+            raise CycleError("--line must say what it accepts, what it returns, and how failure is reported")
+        ok = need_text(a.approved, "--approved (Kelvin approved: date/quote)")
+        c = Path(a.contract).expanduser() if a.contract else CONTRACT
+        if not c.is_file():
+            raise CycleError(f"contract file not found: {c}")
+        if line not in c.read_text(encoding="utf-8"):
+            with open(c, "a", encoding="utf-8") as fh:
+                fh.write(f"\n- {line} (Kelvin approved: {ok})\n")
+        f = {"line": line, "kelvin approved": ok, "contract": c.absolute()}
+    elif step == "frozen":
+        dev, held = need_file(a.dev, "--dev"), need_file(a.heldout, "--heldout")
+        dr, hr = load_cases(dev), load_cases(held)
+        if dev.resolve() == held.resolve() or {json.dumps(r, sort_keys=True) for r in dr} & \
+                {json.dumps(r, sort_keys=True) for r in hr}:
+            raise CycleError("dev and held-out cases must be separate files with no case in both")
+        f = {"dev file": dev, "dev sha256": sha256(dev), "heldout file": held, "heldout sha256": sha256(held),
+             "frozen before build": "yes: recorded before the build step can run"}
+    elif step == "build":
+        wt = Path(a.worktree).expanduser()
+        r = subprocess.run(["git", "-C", str(wt), "symbolic-ref", "--short", "HEAD"], capture_output=True, text=True)
+        br = r.stdout.strip()
+        if r.returncode or br in ("main", "master", "HEAD") or br != a.branch:
+            raise CycleError(f"{wt} must be a git worktree with branch {a.branch!r} checked out, not main (found {br!r})")
+        f = {"worktree": wt.absolute(), "branch": br, "deletes or replaces": need_text(a.deletes, "--deletes")}
+        if not review_ship(d):
+            raise CycleError("no independent review receipt with a SHIP verdict: run review first")
+    elif step == "prove":
+        fz = onb_read(d, "frozen")
+        for sp in SPLITS:
+            if sha256(Path(fz[sp + " file"])) != fz[sp + " sha256"]:
+                raise CycleError(f"frozen {sp} cases changed after freezing: the proof is void")
+        if a.cases10 != "10/10":
+            raise CycleError(f"the 10 frozen questions must all pass (got {a.cases10}, need 10/10)")
+        if a.eval60_after < a.eval60_before:
+            raise CycleError(f"eval60 went down ({a.eval60_before} -> {a.eval60_after}): not proven")
+        wt = onb_read(d, "build")["worktree"]
+        try:
+            r = subprocess.run(a.test_cmd, shell=True, cwd=wt, capture_output=True, text=True, timeout=ctx.timeout)
+        except subprocess.TimeoutExpired:
+            raise CycleError("the feature's own frozen test timed out")
+        (d / "onboard-own-test.txt").write_text(r.stdout + r.stderr, encoding="utf-8")
+        if r.returncode:
+            raise CycleError(f"the feature's own frozen test failed (exit {r.returncode}); output: onboard-own-test.txt")
+        f = {"cases10": "PASS", "eval60": "PASS", "eval60 before": a.eval60_before, "eval60 after": a.eval60_after,
+             "own test": "PASS", "own test cmd": a.test_cmd}
+    else:  # record
+        row, now_line = need_text(a.timeline_row, "--timeline-row"), need_text(a.card_now, "--card-now")
+        for txt, fl, label in ((row, a.timeline_file, "timeline"), (now_line, a.card_file, "card")):
+            p = Path(fl).expanduser()
+            if not p.is_file() or txt not in p.read_text(encoding="utf-8"):
+                raise CycleError(f"the {label} text is not in {fl}: write it there first")
+        f = {"timeline row": row, "card now line": now_line}
+    p = onb_write(d, step, ctx.principal, f)
+    print(f"receipt: {p}")
     return 0
 
 
@@ -598,6 +788,22 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("mark"); s.add_argument("use_id"); s.add_argument("verdict", choices=VERDICTS)
     s.add_argument("--note")
     sub.add_parser("status")
+    o = sub.add_parser("onboard", help="Earn the Button: onboard a new feature or file type, 7 steps")
+    os_ = o.add_subparsers(dest="ostep", required=True)
+    for n in ("check", "status"):
+        os_.add_parser(n)
+    x = os_.add_parser("need"); x.add_argument("--who"); x.add_argument("--how-often"); x.add_argument("--fails")
+    x = os_.add_parser("simplest"); x.add_argument("--answer")
+    x = os_.add_parser("promise"); x.add_argument("--line"); x.add_argument("--approved")
+    x.add_argument("--contract", help=f"default {CONTRACT}")
+    x = os_.add_parser("frozen"); x.add_argument("--dev", required=True); x.add_argument("--heldout", required=True)
+    x = os_.add_parser("build"); x.add_argument("--worktree", required=True); x.add_argument("--branch", required=True)
+    x.add_argument("--deletes", help="what it deletes or replaces, or 'none: why'")
+    x = os_.add_parser("prove"); x.add_argument("--cases10", required=True, help="e.g. 10/10")
+    x.add_argument("--eval60-before", type=float, required=True); x.add_argument("--eval60-after", type=float, required=True)
+    x.add_argument("--test-cmd", required=True, help="the feature's own frozen test, run in the build worktree")
+    x = os_.add_parser("record"); x.add_argument("--timeline-row"); x.add_argument("--timeline-file", required=True)
+    x.add_argument("--card-now"); x.add_argument("--card-file", required=True)
     s = sub.add_parser("close"); s.add_argument("--log", help="use log to append to (default CYCLE_DIR/super-jev-uses.log)")
     return p
 
@@ -615,6 +821,8 @@ def main(argv=None) -> int:
         ctx.dir.mkdir(parents=True, exist_ok=True)
         if a.step in NEEDS_SJ:
             ctx.sj = find_super_jev(a.super_jev)
+        if a.step == "onboard":
+            return cmd_onboard(ctx, a)
         if a.step == "skip":
             return cmd_skip(ctx, argparse.Namespace(step=a.skip_step, reason=a.reason))
         if a.step in ("mark", "status", "close", "review-brief"):
