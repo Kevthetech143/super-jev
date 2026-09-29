@@ -378,10 +378,6 @@ def reconnect_recipe(pointer: str, principal: str, memory=None) -> str:
     except Exception:
         got = {}
     recipe = got.get("recipe") if got.get("status") == "ok" else None
-    if isinstance(recipe, dict) and any(isinstance(x, dict) and "lines" in x for x in recipe.get("sources") or []):
-        # Sections are cut from the file's current text by prepare_bulk; replaying old line
-        # ranges on edited bytes would publish them under descriptions gated for other text.
-        recipe = None
     if not isinstance(recipe, dict):
         _log(principal=principal, pointer=pointer, action="skip-recipe", reason="no-recipe")
         return "no-recipe"
@@ -582,7 +578,7 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
                                   timeout=LOCK_STALE_SECS // 2).returncode
     except (OSError, subprocess.TimeoutExpired):
         code = 1
-    if code:
+    if code not in (0, 3):  # 3 = connected, with some files held: the pointer itself was refreshed
         return "failed"
     if not changed:
         _mark(principal, owner, time.time())
