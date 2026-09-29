@@ -8,7 +8,7 @@
  */
 import { mkdir, open, readFile, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { Jev } from './jev.ts';
+import { getJudge, keyEnv, requireKey } from './judge.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
 import {
   formatSweepPlan, formatSweepReport, planSweep, runSweep,
@@ -49,7 +49,7 @@ Asks every question of every record, across as many calls as the budget needs.
   --stub             Run against the offline stub. Synthetic answers, zero
                      network, no API key. Never evidence about anything.
 
-Live mode is the default and needs TYPESAFE_API_KEY. It sends record text to
+Live mode is the default and needs ${keyEnv()}. It sends record text to
 TypeSafe. Writes results.jsonl, manifest.json, cost.json, report.md, plan.json.
 Each record in results.jsonl carries a "reask" block with its pass-1 and
 pass-2 scores when it was re-asked. cost.json's call count includes any
@@ -196,7 +196,7 @@ try {
   if (batch === undefined && process.env.SWEEP_BATCH) batch = number(process.env.SWEEP_BATCH, 'SWEEP_BATCH');
   // The key check happens before any file is read, so a run that cannot
   // possibly reach the provider fails immediately and cheaply.
-  if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live sweep, or use --dry-run or --stub');
+  if (!dryRun && !stub) requireKey('run a live sweep, or use --dry-run or --stub', m => new CliError(m));
 
   const guard = new GuardTally();
   const records = parseRecords(await readSmallFile(recordsPath, MAX_RECORDS_BYTES, 'records'), guard);
@@ -240,7 +240,7 @@ try {
     process.exit(0);
   }
 
-  const evaluator: Evaluator = stub ? stubEvaluator() : new Jev();
+  const evaluator: Evaluator = stub ? stubEvaluator() : getJudge();
   const run = await runSweep(config, evaluator);
 
   await writeNew(outDir, 'plan.json', JSON.stringify(planJson, null, 2) + '\n');

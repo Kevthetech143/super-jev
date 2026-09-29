@@ -13,7 +13,7 @@
  */
 import { stat, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { Jev } from '../jev.ts';
+import { getJudge, keyEnv, requireKey } from '../judge.ts';
 import { StubEvaluator, choiceAnswer } from '../enhance/stub.ts';
 import { planInvestigation, runInvestigation, type InvestigateConfig, type InvestigationCase } from './investigate.ts';
 import type { EvidenceRole, EvidenceSpec, SourceDoc } from '../enhance/evidence.ts';
@@ -57,7 +57,7 @@ Spec shape:
       // over the same docs/roles/options.
   }
 
-Live mode is the default and needs TYPESAFE_API_KEY.
+Live mode is the default and needs ${keyEnv()}.
 Exit codes: 0 every case resolved, 2 at least one case is blocked on
 insufficient evidence, 1 usage/failure.`;
 
@@ -233,7 +233,7 @@ try {
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
   if (!specPath) throw new CliError(usage);
-  if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run live, or use --dry-run or --stub');
+  if (!dryRun && !stub) requireKey('run live, or use --dry-run or --stub', m => new CliError(m));
 
   const config = parseChainSpec(await readSmallFile(specPath, MAX_SPEC_BYTES, 'spec'));
 
@@ -256,7 +256,7 @@ try {
     process.exit(blocked.length ? 2 : 0);
   }
 
-  const evaluator: Evaluator = stub ? fixedStub() : new Jev();
+  const evaluator: Evaluator = stub ? fixedStub() : getJudge();
   const run = await runInvestigation(config, evaluator);
 
   const outcomesById = new Map(run.manifest.outcomes.map(o => [o.id, o]));
