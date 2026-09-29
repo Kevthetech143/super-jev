@@ -224,9 +224,9 @@ def test_memory_before_setup_names_the_setup_command(env):
 def test_ask_with_nothing_connected_says_run_connect(env, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: {"status": "ok", "pointers": []}
                         if req["action"] == "panel" else {"status": "miss"})
-    assert ask.lookup("where is it?", "me", env / "state" / "me") == 1
+    assert ask.lookup("where is it?", "me", env / "state" / "me") == 4
     out = capsys.readouterr().out
-    assert "nothing connected yet" in out and "prepare_bulk.py" in out and "--principal me" in out
+    assert out.startswith("OUTCOME: needs-setup - nothing is connected yet") and "prepare_bulk.py" in out and "--principal me" in out
 
 
 
@@ -238,7 +238,7 @@ def test_a_new_agent_gets_a_runnable_command_and_the_fleets_shared_sets(env, mon
     shared = tmp_path / "shared.json"
     shared.write_text(json.dumps({"pointers": ["fleet-knowledge", "main-skills-catalog"]}))
     monkeypatch.setenv("SUPERJEV_SHARED_POINTERS", str(shared))
-    assert ask.lookup("where is it?", "newbot", env / "state" / "newbot") == 1
+    assert ask.lookup("where is it?", "newbot", env / "state" / "newbot") == 4
     out = capsys.readouterr().out
     assert f"python3 {ask.skill_dir_for_display() / 'prepare_bulk.py'} --root" in out
     assert "2 shared set(s) now (fleet-knowledge, main-skills-catalog)" in out
@@ -250,7 +250,7 @@ def test_a_new_agent_gets_a_runnable_command_and_the_fleets_shared_sets(env, mon
 
 def test_ask_before_setup_says_run_setup(env, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: {"status": "error", "reason": "not-set-up"})
-    assert ask.lookup("where is it?", "me", env / "state" / "me") == 1
+    assert ask.lookup("where is it?", "me", env / "state" / "me") == 4
     assert "setup.py" in capsys.readouterr().out
 
 

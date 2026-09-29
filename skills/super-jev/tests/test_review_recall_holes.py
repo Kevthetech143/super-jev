@@ -42,7 +42,7 @@ def test_value_question_near_miss_not_shown(tmp_path, monkeypatch, capsys):
                         {"status": "candidates", "candidates": [{"score": 0.5, "originalPath": str(f)}]})
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("what price did we pay for the Dell after the refund", "me", tmp_path / "s")
-    assert "no-candidates" in capsys.readouterr().out
+    assert "OUTCOME: not-found" in capsys.readouterr().out
 
 
 # H3: --approve picks top[0] pointer from the log even when that hit was only "possible".
