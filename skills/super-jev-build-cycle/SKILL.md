@@ -28,6 +28,24 @@ python3 build_cycle.py --dir CYCLE_DIR --principal YOUR_AGENT STEP ...
 
 Then: `mark USE_ID helped|neutral|missed [--note ...]` for each Super Jev use, `status`, and `close [--log FILE]` (exit 1 naming missing steps, unmarked uses or a FIX review; else writes `summary.md` and one log line per use).
 
+## Earn the Button (any new feature or new file type)
+
+Nothing new gets a button until it earns one. Seven steps, in order, each leaves a file in the cycle dir (`onboard-N-name.md`). A step cannot run before the one above it, and an earlier step cannot be redone once a later one exists (start a new cycle dir). `onboard check` re-checks all seven against the real files, and `close` refuses while an onboarding is started but not earned.
+
+| # | Command | Must show |
+|---|---|---|
+| 1 | `onboard need --who --how-often --fails` | Real use, at least 3 real words each (no "-", "x", "n/a"). No evidence = stop. |
+| 2 | `onboard simplest --answer "..."` | Could an existing rule be widened instead of a new path? Written answer, 5+ words. |
+| 3 | `onboard promise --line "accepts ...; returns ...; failure is reported as ..." --approved 'Kelvin approved: 2026-09-29'` | `--approved` must say "Kelvin approved" plus a date (YYYY-MM-DD, not in the future) or a quoted phrase. The line goes into `/Users/admin/agents/primary-brain/superjev-source-contract.md` and must stay there as a whole line. |
+| 4 | `onboard frozen --dev FILE --heldout FILE` | Separate JSONL files, each with `supported`, `absent` (not found) and `invalid` (failure) cases. sha256 recorded before build; a later edit fails `check`. |
+| 5 | `onboard build --worktree DIR --branch NAME --deletes "what it removes, or none: why"` | Own worktree on a feature branch (not main). The reviewer's own answer file starts with SHIP (the typed `--verdict` is not used), is newer than the frozen step, and names the branch or worktree. |
+| 6 | `onboard prove --cases10-file F --eval60-before-file F --eval60-file F --test-cmd CMD [--cases10-ids F]` | 10 of 10 frozen questions pass, eval60 not lower (before and after are different files; after is newer than the build step), the feature's own frozen test passes. |
+| 7 | `onboard record --timeline-row T --timeline-file F --card-now L --card-file F` | The timeline row and card NOW line are present in those files, and `check` looks again each time. |
+
+What is checked and what is self-reported:
+- Checked by the tool: step order, file contents and sha256 (frozen cases, result files, contract line), the branch is not main, the review receipt, the pass counts (it counts lines in the result files: a line passes when the field right after `qNN` (and up to two label columns) is `rank 1` to `rank 5`, "not-found OK" or "absent-OK"; text after "|" never counts; ids must be distinct; cases10 must be exactly the ids in `superjev-tests/try248/cases10.jsonl`; eval60 has 60 lines), the test command runs and exits 0, and it must use the frozen dev or held-out file path.
+- Self-reported: who asked and how often, the simplest-rule answer, what the build deletes, and the "Kelvin approved" wording (the tool checks its shape, not that Kelvin said it). The result files themselves are only as honest as whoever produced them: run the tests and score them yourself, do not type numbers into a file.
+
 ## Checking claims: shelves or direct
 
 New code, a worker's report or a one-off file is not on Super Jev's shelves. Claims about it looked up on the shelves come back NOT FOUND. Pass `--worktree DIR` (its diff against origin/main, committed and uncommitted) or `--evidence FILE` and Super Jev judges those files directly (`dispatch.py check`, no connecting; a diff is judged as code). With neither, claims are looked up on the connected shelves.
