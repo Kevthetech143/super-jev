@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Docs: `cacheTtlSeconds` marked removed (v1.0.101) in the pointer-memory README; source-retrieval says how a note over 12,000 characters is read today; SKILL.md notes an ask never waits on a refresh (v1.0.102); the build-cycle skill names the helper and reviewer models.
+- Docs: source-retrieval says how a note over 12,000 characters is read today; SKILL.md notes an ask never waits on a refresh (v1.0.102); the build-cycle skill names the helper and reviewer models.
 - The content check asks the plain question: "does this file state the answer to the question?" It used to ask whether the passage "supplies the requested fact or a necessary input", so a file about the right subject but without the requested property or a necessary input to it (for example a timeline for a question about a fact it never records) could pass on topic alone and be listed as found. Same single check, same number of Jev calls, no extra claim check; components and list items still qualify, and a file the check rejects is not reported as found (`ask.py` keeps only files that clear the source floor). Tests: `test/enhance/navigation.test.ts` ("source evidence asks whether the passage states the answer to the question").
 - OUTCOME `found` counts ranked files only (at most five); skill suggestions get their own `N skill suggestions` label instead of being added to the file count. Tests: `skills/super-jev/tests/test_outcome_line.py`.
 - Ordinary `ask` reads the files most likely to answer: word search runs again beside routing (routing scores only compare inside one pointer and see descriptions, so unrelated files could fill all five read slots and the note holding the answer was never read); the content check still decides what is kept
