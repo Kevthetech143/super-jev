@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Jev } from './jev.ts';
+import { getJudge } from './judge.ts';
 import { navigate, NavigationError, providerFailureReason } from './enhance/navigation.ts';
 import { BatchingEvaluator } from './enhance/coalesce.ts';
 
@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   const batch = (input as { batch?: unknown }).batch;
   if (batch !== undefined && (Object.keys(input).length !== 1 || !Array.isArray(batch) || !batch.length || batch.length > MAX_BATCH)) throw new NavigationError('Navigation input is invalid');
   const single = batch === undefined ? checkedInput(input) : undefined;
-  const transport = new BatchingEvaluator(new Jev());
+  const transport = new BatchingEvaluator(getJudge());
   if (Array.isArray(batch)) {
     // {"batch": [navigate input, ...]}: every navigation runs at once and their Jev
     // questions share calls; one navigation's failure is its own error row.

@@ -9,7 +9,7 @@
  *
  * What it will not do:
  * - It never reads a `.env` file, a credential file or any secret. The only
- *   credential it touches is `TYPESAFE_API_KEY` from the environment, it is
+ *   credential it touches is the judge's key (its name comes from judge_profiles.json) from the environment, it is
  *   read by the Jev adapter, and it is never logged, printed or written to a
  *   trace. Request headers are not recorded.
  * - It refuses to start a live run when that variable is unset, rather than
@@ -21,12 +21,12 @@
  * Usage:
  *   npm run bench:live -- --dry-run
  *   npm run bench:live -- --stub
- *   TYPESAFE_API_KEY=... npm run bench:live
+ *   <the judge's key variable>=... npm run bench:live
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { Jev } from '../src/jev.ts';
+import { getJudge, keyEnv, keyPresent } from '../src/judge.ts';
 import { organizer } from '../src/organizer.ts';
 import { estimateTokens } from '../src/enhance/budget.ts';
 import { instructionFor, planEnhancedRun, runEnhancedClassification } from '../src/enhance/classify.ts';
@@ -113,7 +113,7 @@ class TracingEvaluator implements Evaluator {
 /** A live Jev adapter plus a peek at the untouched provider body. */
 export function liveEvaluator(): { evaluator: Evaluator; peekRaw: () => any; resetRaw: () => void } {
   let raw: any;
-  const jev = new Jev({
+  const jev = getJudge({
     fetch: async (url, init) => {
       const response = await fetch(url as any, init);
       raw = await response.clone().json().catch(() => null);
@@ -413,7 +413,7 @@ export async function main(argv: string[]): Promise<number> {
       '',
       '  --dry-run   print the plan, the call count and the token estimate. No network, no key.',
       '  --stub      run end to end against the offline stub provider. No network, no key.',
-      '  (no flag)   live run. Requires TYPESAFE_API_KEY in the environment.'
+      `  (no flag)   live run. Requires ${keyEnv()} in the environment.`
     ].join('\n'));
     return 0;
   }
@@ -423,8 +423,8 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
 
-  if (!stub && !process.env.TYPESAFE_API_KEY) {
-    console.error('Refusing to start: set TYPESAFE_API_KEY in the environment for a live run, or pass --dry-run or --stub.');
+  if (!stub && !keyPresent()) {
+    console.error(`Refusing to start: set ${keyEnv()} in the environment for a live run, or pass --dry-run or --stub.`);
     return 2;
   }
 

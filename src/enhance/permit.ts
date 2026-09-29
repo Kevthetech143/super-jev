@@ -1,3 +1,4 @@
+import { JUDGE_PROFILE } from '../judge-profile.ts';
 /**
  * Action permit: "safe to do automatically?" before the harness clicks, pays,
  * sends or deletes. Wraps `decideOutcome` (outcome.ts) with the one choice
@@ -63,12 +64,12 @@ export const PERMIT_OPTIONS: Record<string, string> = {
  * under 0.80 lands in `review`, which a permit result always maps to
  * `needs_approval` (see decidePermit below), never to `safe_to_auto`.
  */
-export const PERMIT_CONFIDENCE_THRESHOLD = 0.80;
+export const PERMIT_CONFIDENCE_THRESHOLD = JUDGE_PROFILE.confidenceLine;
 
 export const DEFAULT_PERMIT_GATE: GateConfig = {
   minConfidence: PERMIT_CONFIDENCE_THRESHOLD,
   requireAgreement: true,
-  maxConfidenceAbovePeak: 0.05
+  maxConfidenceAbovePeak: JUDGE_PROFILE.maxConfidenceAbovePeak
 };
 
 // ---------------------------------------------------------------------------

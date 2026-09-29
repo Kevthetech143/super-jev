@@ -39,6 +39,10 @@ Super Jev: I didn't have this. Want me to find it by hand and save it for next t
 
 **A harness relaying `ask.py` output to a human must pass that line on verbatim.** Just above it, a miss prints `What was searched:` (connected sets, which had matches, files read with the closest named), then any `Skipped at setup` files that may hold the answer (reason and fix; apply the fix, do not reconnect the folder), and `Next step (pick one):` with exact commands, even when some pointer errored. Act on it instead of guessing: if the answer lives in a file you have, connect its folder with the printed `prepare_bulk.py` command; if you know the answer, save it with the printed `--add` command; otherwise tell your human it was not found and offer a by-hand search. A miss after reading files points to the filtering trace, not reconnecting those files. Abstract worth questions are not treated as monetary values. A hit marked `possible` is a lead, not an answer: open and check the file before using it.
 
+## Choosing the judge
+
+One setting picks the judge: `SUPERJEV_JUDGE` (default: the Jev profile, `typesafe-jev`; `fake` is the test judge; an unknown name stops the run with one line). Its endpoint, model, key variable, limits and thresholds live in `judge_profiles.json`, shared by Python and Node. Any judge error (no key, key rejected, unreachable, overloaded, bad reply, too big, secret found) means no verdict, never a pass; only "overloaded" is retried (4 tries, 1 s first wait, doubling). Jev users see no change.
+
 ## Maturity
 
 Proven in current use: skill search, file-level `navigate`, checked connect, bulk prepare, `check` as a description gate, dataset and pointer listing, and the not-connected path. Experimental: passage-level `search`, saved-answer reuse (automatic on repeat questions, or `approve`), and `verify` — treat their results as leads and read the evidence twice.

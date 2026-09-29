@@ -1,3 +1,4 @@
+import { JUDGE_PROFILE } from '../judge-profile.ts';
 import type { Answer, OutcomeKind, RecordOutcome } from './types.ts';
 
 export type GateConfig = {
@@ -29,7 +30,7 @@ export type GateConfig = {
   maxConfidenceAbovePeak: number;
 };
 
-export const DEFAULT_GATE: GateConfig = { minConfidence: 0.75, requireAgreement: true, maxConfidenceAbovePeak: 0.05 };
+export const DEFAULT_GATE: GateConfig = { minConfidence: JUDGE_PROFILE.outcomeLine, requireAgreement: true, maxConfidenceAbovePeak: JUDGE_PROFILE.maxConfidenceAbovePeak };
 
 /**
  * Float slack for the peak comparison. The observed worst case, 0.71 - 0.66,
