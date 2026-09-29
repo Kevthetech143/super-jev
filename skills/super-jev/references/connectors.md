@@ -159,9 +159,9 @@ line cannot trigger a false hold; the password/api-key keyword check is
 unaffected. It also holds a card after an order number, phone number or date
 in the same digit run (`order 1234 4111 1111 1111 1111`, checked with a
 card-network prefix as well as Luhn) and a 15-digit Amex number (`3782 822463
-10005`). `--allow-held` admits a file the secret scan alone would hold --
-it is still listed in the held file, noting the override -- as an explicit
-operator decision for one run (never replayed); it never lifts a size hold.
+10005`). `--approve-held PATH` admits one file the secret scan
+holds, after a person read it -- pinned to the file's sha256, listed in the held file, replayed
+by `--refresh` only while the bytes are unchanged; there is no blanket flag.
 A file over the 250,000-byte size ceiling (and at most 2,000,000 bytes) connects
 in sections: line ranges cut at natural edges (Markdown headings outside code
 fences; top-level `def`/`class`/`function` lines with their decorators), about
@@ -170,8 +170,8 @@ file, and connected as the file's path plus its `lines` (`[first, last]`); the
 connector reads those lines from the unchanged file, secret-scans them, and
 publishes them only under their own reviewed `viewSHA`. `prepare_bulk` runs the
 same secret scan, name, folder and text checks on the whole file first (one
-secret-like line or a secret-like name still holds the whole file, even with
-`--allow-held`); the connector itself scans each section's own text. A cut falls where a heading's or
+secret-like line or a secret-like name still holds the whole file unless that file
+is approved with `--approve-held`); the connector itself scans each section's own text. A cut falls where a heading's or
 declaration's own text hashes to a fixed pattern once a section holds 6 KB, so
 an edit moves only the cuts around it: a refresh re-gates only the sections
 whose text changed (cached by the section text's sha256, wherever its lines

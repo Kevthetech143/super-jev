@@ -2399,7 +2399,7 @@ def skipped_files(pointers, principal: str = "") -> dict:
         failed += [(path, str(c.get("verdict"))) for path, c in cache.items()
                    if isinstance(c, dict) and c.get("pass") is False]
         for path, why in held + failed:
-            if (path in out or "admitted by --allow-held" in why or "admitted by --approve-held" in why
+            if (path in out or "admitted by --approve-held" in why
                     or (cache.get(path) or {}).get("pass") or not os.path.exists(path)):
                 continue
             if "over size ceiling" in why:
@@ -2415,7 +2415,7 @@ def skipped_files(pointers, principal: str = "") -> dict:
                     out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
             elif any(k in why for k in SECRET_HELD):
                 out[path] = ("held back: it looks like it holds a password, key or card number",
-                             "review the flagged line, then re-run setup with --allow-held", True)
+                             f"read the flagged line; if it is safe, re-run setup with --approve-held {shlex.quote(path)} (this file only)", True)
             elif "UTF-8" in why:
                 out[path] = ("not saved as UTF-8 text", "re-save it as UTF-8, then re-run setup", False)
             elif (path, why) in failed and "no draft" in why:
