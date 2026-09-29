@@ -79,9 +79,10 @@ against the file before it is connected. Pick the description writer:
   and prints a JSON array.
 
 - **Held files:** the secret scan may hold files it does not trust. Read the
-  held file list the command printed, review the files, then re-run with
-  `--allow-held` if they are safe. The size-ceiling hold is not overridden
-  by `--allow-held`.
+  held file list the command printed, read each file, then re-run with
+  `--approve-held PATH` for every one that is safe (one file, pinned to its bytes;
+  there is no blanket flag). A password or key keyword holds a file only when a
+  literal value follows it (a digit or symbol in it, not a placeholder or a call).
 - **Where state lives:** under `$SUPERJEV_STATE_DIR` or
   `~/.local/state/super-jev/<principal>/` — never in this repo.
 

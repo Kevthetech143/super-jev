@@ -100,7 +100,7 @@ def test_secret_held_matched_on_name_only_and_never_read(cache, monkeypatch):
     monkeypatch.setattr("builtins.open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
     lines = ask.miss_report("alice", 1, {}, {}, "what is the wifi router login", ["alice-notes"])
     assert not any("wifi-router" in f for f in opened)
-    assert any(line.startswith("    notes/wifi-router.md: held back") and "--allow-held" in line for line in lines)
+    assert any(line.startswith("    notes/wifi-router.md: held back") and "remove or move the flagged value" in line for line in lines)
     assert "SECRET-CONTENT" not in "\n".join(lines) and "hunter2" not in "\n".join(lines)
     # Its words are only in the text, which is never read: no match.
     assert not any("wifi-router" in line for line in ask.miss_report("alice", 1, {}, {}, "hunter2 value", ["alice-notes"]))

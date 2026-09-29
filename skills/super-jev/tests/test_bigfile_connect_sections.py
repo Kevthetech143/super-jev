@@ -278,13 +278,13 @@ def test_max_files_counts_sections_before_any_paid_call(run, monkeypatch, capsys
     assert not [r for r in run.sent if r["action"] == "connect"]
 
 
-def test_allow_held_never_sends_a_section_of_a_big_secret_file(run, capsys):
+def test_big_secret_file_never_sends_a_section(run, capsys):
     big = run.root / "big.py"
     big.write_text(code_file() + "TOKEN = 'pass" + "word: hunter2" + "xyz'\n")
-    code, rep, cache = run("--allow-held")
+    code, rep, cache = run()
     assert str(big) not in rep["approved"] and str(big) not in cache
     why = dict(rep["held"])[str(big)]
-    assert "never connected in sections" in why and "admitted" not in why
+    assert "Remove or move the value" in why and "admitted" not in why
     out = capsys.readouterr().out
     assert "changed while this run read it" not in out
     assert not any(str(big) in json.dumps(r) for r in run.sent)
@@ -324,10 +324,10 @@ def test_a_refused_preview_fails_its_part_without_crashing(run, monkeypatch):
     assert code == 1 and not rep["connected"] and not any(p["connected"] for p in rep["parts"])
 
 
-def test_allow_held_never_sections_a_big_file_with_a_secret_like_name(run):
+def test_big_file_with_a_secret_like_name_is_never_sectioned(run):
     big = run.root / "password-hunter2xyz-notes.py"
     big.write_text(code_file())
-    code, rep, cache = run("--allow-held")
+    code, rep, cache = run()
     assert str(big) not in rep["approved"] and str(big) not in cache
-    assert "never connected in sections" in dict(rep["held"])[str(big)]
+    assert "Remove or move the value" in dict(rep["held"])[str(big)]
     assert not any("password-hunter2xyz" in n for n in run.drafted)
