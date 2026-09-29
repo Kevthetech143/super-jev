@@ -63,10 +63,13 @@ for name,mutate,expected in [
  def run(m=mutate,e=expected):
   f=Fixture();f.approve();before=f.calls;m(f);eq(f.ask()['status'],e);eq(f.calls,before)
  check(name,run)
-for name,args in [('paraphrase',{'q':'What color?'}),('negation',{'q':'Is the color NOT blue?'}),('new_context',{'context':'different project'}),('expired',{'now':time.time()+90000})]:
+for name,args in [('paraphrase',{'q':'What color?'}),('negation',{'q':'Is the color NOT blue?'}),('new_context',{'context':'different project'})]:
  def run(a=args):
   f=Fixture();f.approve();eq(f.ask(**a)['status'],'ready');eq(f.calls,2)
  check(name+'_does_not_reuse',run)
+def no_clock_expiry():
+ f=Fixture();f.approve();before=f.calls;eq(f.ask(now=time.time()+90000)['status'],'verified-cache-hit');eq(f.calls,before)
+check('saved_answer_has_no_clock_expiry',no_clock_expiry)
 def wrong_person():
  f=Fixture();f.approve();eq(f.ask(principal='bob')['status'],'access-denied');eq(f.calls,1)
 check('wrong_person_blocked',wrong_person)

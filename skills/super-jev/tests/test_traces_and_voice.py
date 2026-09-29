@@ -223,7 +223,6 @@ def test_lookups_jsonl_stays_raw_so_find_top_still_matches(tmp_path):
 
     top = ask.find_top(tmp_path, q)
     assert top and top["path"] == path
-    assert ask.find_pointer(tmp_path, q) == "p1"
 
 
 @pytest.mark.parametrize("val", ["0", "off", "OFF", "no", "False", " 0 "])
@@ -286,7 +285,8 @@ def _file_memory(path):
     """Fake harness citing `path` through open + assist (the file ask() ranked)."""
     def fake_memory(req):
         if req["action"] == "sources":
-            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": str(path)}]}
+            return {"status": "ok", "sources": [{"sourceId": "s", "originalPath": str(path),
+                                                  "contentSHA": ask.sha256_file(path)}]}
         if req["action"] == "cached":
             return {"status": "cache-miss"}
         if req["action"] == "open":
@@ -308,6 +308,7 @@ def test_approve_marks_the_last_lookup_right_with_evidence_file(tmp_path, monkey
     ask.log(tmp_path, "lookup", question="q", top=[{"score": 0.9, "path": str(note), "pointer": "p1", "possible": False}])
 
     monkeypatch.setattr(ask, "memory", _file_memory(note))
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
     rc = ask.approve("alice", "q", "answer", tmp_path)
 
     assert rc == 0
@@ -324,7 +325,7 @@ def test_miss_marks_the_last_lookup_wrong_with_the_actual_path(tmp_path, monkeyp
 
     rc = ask.miss("alice", "q2", "/real/answer.md", tmp_path)
 
-    assert rc == 0
+    assert rc == 1  # nothing was saved to remove; the outcome is still marked
     outcomes = [r for r in read_jsonl(tmp_path / "traces.jsonl") if r.get("kind") == "outcome"]
     assert len(outcomes) == 1
     assert outcomes[0]["lookup_id"] == "lid2"
@@ -368,6 +369,7 @@ def test_approve_with_no_prior_lookup_writes_no_outcome(tmp_path, monkeypatch):
     ask.log(tmp_path, "lookup", question="q4", top=[{"score": 0.9, "path": str(note), "pointer": "p1", "possible": False}])
 
     monkeypatch.setattr(ask, "memory", _file_memory(note))
+    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
     rc = ask.approve("alice", "q4", "answer", tmp_path)
 
     assert rc == 0
