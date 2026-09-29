@@ -21,11 +21,11 @@ secret-free launcher never references it.
    wrapper runs, the wrapper MUST NOT call the provider and MUST NOT
    overwrite the value.
 3. Provider failure is honest failure: if the provider command exits nonzero
-   or prints an empty key, the wrapper prints a sanitized JSON fallback on
+   or prints an empty key, the wrapper prints a sanitized JSON error (`"status":"error"`) on
    stdout and exits nonzero WITHOUT running the launcher. It must never
    run the launcher keyless and let a later step claim a live search.
 4. No keyless live claim: without a key in the environment, the runtime
-   reports `fallback`/`local-unavailable` honestly. A fallback is never a
+   reports `fallback` honestly. A fallback is never a
    successful live search.
 5. `--local-only` never needs a provider or a key. The launcher never
    invokes any provider command itself, on any flag combination.

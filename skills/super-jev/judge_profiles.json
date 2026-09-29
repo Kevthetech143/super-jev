@@ -1,15 +1,18 @@
 {
- "_comment": "One judge profile per judge model; every size limit tied to the judge is derived from the selected one (judge_profile.py for Python, src/judge-profile.ts for Node, which apply the same rules). Pick one with SUPERJEV_JUDGE_PROFILE (default below). window_tokens is the judge's hard input ceiling for the state plus the longest question; max_questions_per_call is how many questions one call may carry; question_kinds are the answer shapes the judge supports; input_usd_per_mtok and output_usd_per_mtok are its published prices per million tokens.",
+ "_comment": "The judge model's limits, stated once; every size and endpoint tied to the judge is read from here (judge_profile.py for Python, src/judge-profile.ts for Node, which apply the same rules). There is one judge, so nothing selects among profiles. window_tokens is the judge's hard input ceiling for the state plus the longest question; max_questions_per_call is how many questions one call may carry; input_usd_per_mtok is its published input price per million tokens; max_parts is how many judge calls one direct check may need before it is refused; confidence_line is the confidence under which a human reads the source; file_ceiling_bytes is the largest file that connects whole (a larger file is held, never cut into sections); gate_window_tokens is the evidence window the Stop gate sends. All sizes are counted in judge tokens, bytes/2.",
  "default": "typesafe-jev",
  "profiles": {
   "typesafe-jev": {
-   "label": "TypeSafe Jev",
    "_source": "window: the measured hard input ceiling; questions: the per-call cap every batcher plans under; price: docs.typesafe.ai, checked 2026-09-16",
+   "api_url": "https://api.typesafe.ai/v1/systemone",
+   "model": "jev-latest",
    "window_tokens": 32768,
    "max_questions_per_call": 255,
-   "question_kinds": ["noul", "choice", "score"],
    "input_usd_per_mtok": 0.042,
-   "output_usd_per_mtok": 0
+   "max_parts": 40,
+   "confidence_line": 0.8,
+   "file_ceiling_bytes": 250000,
+   "gate_window_tokens": 16000
   }
  }
 }

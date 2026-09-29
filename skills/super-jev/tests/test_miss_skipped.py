@@ -92,7 +92,7 @@ def test_secret_held_matched_on_name_only_and_never_read(cache, monkeypatch):
     monkeypatch.setattr("builtins.open", lambda f, *a, **k: (opened.append(str(f)), real_open(f, *a, **k))[1])
     lines = ask.miss_report("alice", 1, {}, {}, "what is the wifi router login", ["alice-notes"])
     assert not any("wifi-router" in f for f in opened)
-    assert any(line.startswith("    notes/wifi-router.md: held back") and "--allow-held" in line for line in lines)
+    assert any(line.startswith("    notes/wifi-router.md: held back") and "remove or move the flagged value" in line for line in lines)
     assert "SECRET-CONTENT" not in "\n".join(lines) and "hunter2" not in "\n".join(lines)
     # Its words are only in the text, which is never read: no match.
     assert not any("wifi-router" in line for line in ask.miss_report("alice", 1, {}, {}, "hunter2 value", ["alice-notes"]))
@@ -136,12 +136,12 @@ def test_errored_pointer_still_prints_miss_report(cache, tmp_path, monkeypatch, 
     monkeypatch.setattr(ask, "memory", fake_memory(["alice-notes", "broken"], errored=("broken",)))
     rc = ask.lookup("How much was the villa roof repair quote?", "alice", tmp_path / "state")
     out = capsys.readouterr().out.strip().splitlines()
-    assert rc == 1
-    assert "unresolved: 1 of 2 pointers errored" in out
+    assert rc == 3  # error: a set failed and nothing was found
+    assert out[0].startswith("OUTCOME: error - no match, and 1 set failed")
     assert "What was searched:" in out and "Next step (pick one):" in out
     assert any("notes/roof-quote.md: too big to connect" in line for line in out)
-    assert out.index("unresolved: 1 of 2 pointers errored") < out.index("What was searched:")
-    assert out[-1] == ask.VOICE_LINE
+    assert out.index("[broken] error: Navigation provider failed") < out.index("What was searched:")
+    assert ask.VOICE_LINE not in out  # "I didn't have this" would misreport a search that failed
 
 
 def test_write_held_txt_clears_old_list_when_nothing_held(tmp_path, monkeypatch):

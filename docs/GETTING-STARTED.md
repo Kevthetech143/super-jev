@@ -95,12 +95,17 @@ Success: ranked lines `score  /path/to/file.md  [MYPOINTER]`, best first.
 These tell you where the answer is; they are not the answer. A cache hit (a
 question you approved before) prints `CACHE HIT` and the saved answer.
 
-- **Nothing connected yet:** prints `nothing connected yet for principal
-  'ME' -- run connect first` and the command. Go back to step 4.
-- **Fact not in the files:** prints `no-candidates across N pointers`, then
-  `What was searched:` (sets searched, files read, closest named) and
-  `Next step (pick one):` with the exact connect and `--add` commands. Say so;
-  do not guess, and take one of the listed next steps.
+Every answer starts with one `OUTCOME:` line (`found`, `not-found`,
+`not-supported`, `needs-setup` or `error`, with the one `next:` command when it
+is not `found`). Exit codes: found 0, not-found 1, not-supported 2, error 3,
+needs-setup 4.
+
+- **`needs-setup`** (nothing connected, or a set is stale or unprepared): run the
+  `next:` command (for nothing connected, go back to step 4), then ask again.
+- **`not-found`** (a complete search): `What was searched:` (sets searched,
+  files read, closest named) and `Next step (pick one):` list the exact connect
+  and `--add` commands. Say so; do not guess, and take one of the listed next
+  steps.
 
 ## 6. Open the top file yourself
 
