@@ -1,4 +1,4 @@
-"""An explicit --claim check (check, the auto-save check) is decided by its claim rows.
+"""An explicit --claim check (check, the --approve check) is decided by its claim rows.
 
 Fleet hand tests 2026-09-24: a SUPPORTED 1.00 claim against a plain internal
 note exited 3 (READ) because the draft-level rows (HAS_LEAKS,

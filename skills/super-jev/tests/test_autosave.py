@@ -103,12 +103,12 @@ def test_repeat_question_won_twice_is_returned_saved_with_no_search(world):
     assert n1 == 1 and "Saved for next time" not in out1
     out2, n2 = ask_once(world)
     assert n2 == 1 and "Saved for next time" in out2 and world["cache"]
-    assert len(world["gates"]) == 1  # the claim check ran once, on the saving ask
+    assert world["gates"] == []  # no claim check on the saving ask
     out3, n3 = ask_once(world)
-    assert n3 == 0 and len(world["gates"]) == 1  # a saved answer costs no check
+    assert n3 == 0 and world["gates"] == []  # nor on a hit
     assert out3.startswith("OUTCOME: found - saved answer, its source unchanged")
     assert f"saved answer, from {world['note']}, saved " in out3 and "CACHE HIT" in out3
-    assert "30 days" in out3
+    assert f"file: {world['note']}" in out3
 
 
 # 2 -- ONE WIN ONLY: still a full search
@@ -168,7 +168,7 @@ def test_changed_file_is_withheld_stale_and_searched_fresh(world):
     assert n == 1 and str(world["note"]) in out
     ask_once(world)  # it wins its way back in on the new bytes (the stale answer is replaced)
     out, n = ask_once(world)
-    assert n == 0 and "14 days" in out
+    assert n == 0 and "CACHE HIT" in out and str(world["note"]) in out
 
 
 # 5 -- ACCESS: an asker who cannot read the file never gets it
@@ -212,14 +212,6 @@ def test_a_file_the_content_check_rejects_is_never_saved(world):
     assert not world["cache"]
 
 
-def test_a_file_the_save_check_refuses_is_not_saved_and_the_count_starts_over(world, monkeypatch):
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("REJECT", 0.2))
-    ask_once(world)
-    out, _ = ask_once(world)
-    assert "not saved: check gate verdict REJECT" in out and not world["cache"]
-    assert any(json.loads(l)["kind"] == "autosave-refused" for l in (world["sdir"] / "lookups.jsonl").read_text().splitlines())
-
-
 # The weekly line
 def test_trace_report_counts_searches_skipped_by_saved_answers(world, capsys):
     for _ in range(4):
@@ -229,71 +221,22 @@ def test_trace_report_counts_searches_skipped_by_saved_answers(world, capsys):
     assert "searches skipped by saved answers (last 7 days, principal ann): 2" in capsys.readouterr().out
 
 
-# The saved text is the answer line, not the note's heading
-NOTE = "# Acme refund policy\n\nThis note covers Acme policies.\n\nRefunds: 30 days from delivery.\n"
+# The saved thing is the file: no claim check, no answer text, a secret is still held
+def test_a_repeat_win_saves_the_file_with_no_answer_text_and_no_claim_check(world):
+    ask_once(world)
+    out2, _ = ask_once(world)
+    assert "Saved for next time" in out2 and world["gates"] == []
+    saved = list(world["cache"].values())
+    assert saved == [f"Saved file: {world['note']}"] and "30 days" not in saved[0]
+    out3, n3 = ask_once(world)
+    assert n3 == 0 and world["gates"] == []
+    assert f"file: {world['note']}" in out3 and "answer:" not in out3 and "evidence:" not in out3
 
 
-def test_saved_text_is_the_answer_line_not_the_heading(world):
-    world["note"].write_text(NOTE)
-    world["state"]["sha"] = world["sha"](world["note"])
-    ask_once(world); ask_once(world)
-    assert list(world["cache"].values()) == ["Refunds: 30 days from delivery."]
-
-
-def test_answer_line_skips_headings_and_lines_that_only_repeat_the_question():
-    q = "what is the acme refund window"
-    assert ask.answer_line(NOTE, q) == "Refunds: 30 days from delivery."
-    assert ask.answer_line("# Acme refund window\n", q) == ""
-
-
-def test_a_refused_file_is_not_re_checked_until_it_changes(world, monkeypatch):
-    monkeypatch.setenv("SUPERJEV_SAVE_AFTER", "1")
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None:
-                        world["gates"].append(claim) or ("REJECT", 0.2))
-    for _ in range(5):
-        ask_once(world)
-    assert len(world["gates"]) == 1 and not world["cache"]
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None:
-                        world["gates"].append(claim) or ("CLEAN", 0.93))
-    world["note"].write_text(ACME + "Late returns: 7 days.\n")
+def test_a_file_holding_a_secret_is_never_saved(world):
+    world["note"].write_text(ACME + "password: hunter2hunter2\n")
     world["state"]["sha"] = world["sha"](world["note"])
     ask_once(world)
-    assert len(world["gates"]) == 2 and world["cache"]
-
-
-def test_a_gate_error_is_not_remembered_and_the_next_ask_saves(world, monkeypatch):
-    monkeypatch.setenv("SUPERJEV_SAVE_AFTER", "1")
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("ERROR", None))
-    ask_once(world)
-    assert not world["cache"] and not ask.refused_before(world["sdir"], Q, {"path": str(world["note"]), "sha": world["state"]["sha"]})
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
-    ask_once(world)
-    assert world["cache"]
-
-
-def test_a_miss_clears_a_remembered_refusal(world, monkeypatch):
-    monkeypatch.setenv("SUPERJEV_SAVE_AFTER", "1")
-    monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("REJECT", 0.2))
-    ask_once(world)
-    win = {"path": str(world["note"]), "sha": world["state"]["sha"]}
-    assert ask.refused_before(world["sdir"], Q, win)
-    monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "ann", "--miss", Q, "elsewhere"])
-    ask._main()
-    assert not ask.refused_before(world["sdir"], Q, win)
-
-
-def test_answer_line_prefers_the_short_answer_over_a_long_intro():
-    q = "What is the Acme refund window?"
-    note = ("# Refunds\n\nThis long introduction explains how the Acme refund window works for every "
-            "customer, and why the refund window matters to Acme.\n\nAcme refund window: 30 days from delivery.\n")
-    assert ask.answer_line(note, q) == "Acme refund window: 30 days from delivery."
-
-
-@pytest.mark.parametrize("question,decoy,answer", [
-    ("When is trash pickup?", "Trash notes last updated 2026-09-01.", "Trash pickup is every Monday morning."),
-    ("What is the Acme refund window?", "Acme refund page reviewed 2025-11-02.", "Acme refund window: thirty days from delivery."),
-    ("What color is the car?", "Car bought in 2019.", "The car color is blue."),
-])
-def test_answer_line_prefers_more_question_words_over_a_dated_line(question, decoy, answer):
-    assert ask.answer_line(f"# Notes\n\n{decoy}\n\n{answer}\n", question) == answer
-    assert ask.answer_line(f"# Notes\n\n{answer}\n\n{decoy}\n", question) == answer
+    out, _n = ask_once(world)
+    assert "not saved: secret-held" in out and "Saved for next time" not in out
+    assert not world["cache"]
