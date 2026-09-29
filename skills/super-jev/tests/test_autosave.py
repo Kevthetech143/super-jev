@@ -240,3 +240,36 @@ def test_a_file_holding_a_secret_is_never_saved(world):
     out, _n = ask_once(world)
     assert "not saved: secret-held" in out and "Saved for next time" not in out
     assert not world["cache"]
+
+
+# A win counts only on a COMPLETE search: a partial one records no win and does not reset the count
+def _second_set_down(world, monkeypatch, down):
+    real = ask.memory
+    world["down"] = down
+
+    def memory(req):
+        if req["action"] == "panel" and req.get("principal") == "ann":
+            return {"pointers": [{"pointer": "acme"}, {"pointer": "acme2"}]}
+        if req["action"] == "navigate" and req.get("pointer") == "acme2":
+            return {"status": "error", "reason": "provider failed"} if world["down"] else {"status": "no-candidates"}
+        return real(req)
+
+    monkeypatch.setattr(ask, "memory", memory)
+
+
+def test_two_partial_search_wins_do_not_save(world, monkeypatch):
+    _second_set_down(world, monkeypatch, True)
+    for _ in range(3):
+        out, _n = ask_once(world)
+        assert "partial: 1 set not searched" in out and "Saved for next time" not in out
+    assert not world["cache"]
+
+
+def test_a_partial_search_neither_counts_nor_resets_the_count(world, monkeypatch):
+    _second_set_down(world, monkeypatch, False)
+    ask_once(world)  # win 1, complete
+    world["down"] = True
+    ask_once(world)  # partial: no win, no reset
+    world["down"] = False
+    out, _n = ask_once(world)  # win 2, complete
+    assert "Saved for next time" in out and world["cache"]

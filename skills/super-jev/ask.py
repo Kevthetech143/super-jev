@@ -38,8 +38,9 @@
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
 
 SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
-save by hand. All save through one function: the same secret scan and claim check
-(CLEAN, score 0.80 or higher) run first; --add with no file gets the secret scan only and is
+save by hand. All save through one function and run the secret scan. A repeat-question
+save stores the file, and its N wins stand in for the claim check; only --approve and
+--add run the claim check (CLEAN, score 0.80 or higher). --add with no file gets the secret scan only and is
 marked "no source file"; a --source that does not exist is refused (exit 2). A saved
 answer lasts until its source file changes (no clock expiry); a fact with no file lasts
 until --miss (wrong) removes it. "The same question" = lowercased, spaces collapsed,
@@ -90,7 +91,8 @@ saves it automatically: it prints "Saved for next time", and the next ask of tha
 question returns the FILE at once (its path, labelled "saved answer, from FILE"), with no
 Jev call and no answer text: the caller opens the file. N is a setting:
 SUPERJEV_SAVE_AFTER, default 2. Only an ordinary ask counts (not --claim, not a
-possible-tier file). The N wins are the evidence (each already passed the content check),
+possible-tier file, and only a complete search: a partial one records no win and does not
+reset the count). The N wins are the evidence (each already passed the content check),
 so the save adds no claim check; the secret scan and unchanged-file check still run. A
 changed source is withheld as STALE and searched live (and can win its way back in).
 --miss removes a saved file and starts the count over. A person can meet the threshold at
@@ -2253,10 +2255,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 possible.pop(p, None)
     skills = skill_job.result() if skill_job else []
     _STAGE["skills"] = [path for _n, path in skills] if skill_job else None
-    win = None if replay or _CLAIM["text"] else win_of(top, possible, notes)
+    incomplete = bool(failed or stale_ptrs)  # a set was not searched: a better file may sit in it
+    win = None if replay or _CLAIM["text"] or incomplete else win_of(top, possible, notes)
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
-        **({"win": win} if win else {}))
+        **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
     content_check = {p: {"score": scores.get(p) if type(scores.get(p)) in (int, float) and 0 <= scores[p] <= 1 else None,
@@ -2868,8 +2871,8 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
             continue
         if norm_q(rec.get("question") or "") != key:
             continue
-        if rec.get("kind") == "lookup" and rec.get("result") == "stale-source":
-            continue  # the withheld saved answer, logged just before this ask's own live search
+        if rec.get("kind") == "lookup" and (rec.get("result") == "stale-source" or rec.get("partial")):
+            continue  # not a win and not a loss: the withheld saved answer, or a search that missed a set
         if rec.get("kind") == "lookup":
             w = rec.get("win") or {}
             count = count + 1 if (w.get("path"), w.get("sha")) == (win["path"], win["sha"]) else 0
