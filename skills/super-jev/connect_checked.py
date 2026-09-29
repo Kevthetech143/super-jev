@@ -13,7 +13,7 @@ Rules (deliberately strict):
   PASS      = gate says SUPPORTED at or above the line.
   FAIL      = NOT_SUPPORTED or CONTRADICTED at any confidence, or SUPPORTED under the line (the gate's own
               "read it" zone).
-  UNCHECKED = file over the gate's 32k-token ceiling; the gate refuses to truncate, so we refuse to connect it.
+  UNCHECKED = file over the gate's judge-token ceiling; the gate refuses to truncate, so we refuse to connect it.
 Any FAIL or UNCHECKED refuses the whole connect. Fix the description, split the file, or drop it, then rerun.
 Verdicts are written next to CONNECT.json as <name>.verdicts.json with each file's sha256, so a later run
 can tell which files changed since they were last checked.
