@@ -87,12 +87,13 @@ REPEAT QUESTIONS (the one rule for saving a file). When the same file wins the s
 question (same words after lowercasing, collapsing spaces and dropping trailing
 punctuation) for the same principal N times in a row and passes the content check, ask
 saves it automatically: it prints "Saved for next time", and the next ask of that
-question returns it at once, labelled "saved answer, from FILE", with no Jev call. N
-is a setting: SUPERJEV_SAVE_AFTER, default 2. Only an ordinary ask counts (not
---claim, not a possible-tier file). The save runs the same secret scan and claim check as
-every save; a file they refuse is never saved and its win count starts over. A changed
-source is withheld as STALE and searched live (and can win its way back in). --miss
-removes a saved answer and starts the count over. A person can meet the threshold at
+question returns the FILE at once (its path, labelled "saved answer, from FILE"), with no
+Jev call and no answer text: the caller opens the file. N is a setting:
+SUPERJEV_SAVE_AFTER, default 2. Only an ordinary ask counts (not --claim, not a
+possible-tier file). The N wins are the evidence (each already passed the content check),
+so the save adds no claim check; the secret scan and unchanged-file check still run. A
+changed source is withheld as STALE and searched live (and can win its way back in).
+--miss removes a saved file and starts the count over. A person can meet the threshold at
 once with --approve. Off with --no-auto or SUPERJEV_AUTO_CACHE=0.
 
   ask.py --principal AGENT --followup [--max-tries N]
@@ -518,15 +519,19 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
               f"{save_after()} times (or --approve it now).")
         return 1
     print("CACHE HIT")
-    print("answer:", hit.get("answer") or "")
     who = approver(sdir, question)
+    if who.get("approved_by") == "auto-save" and rec and rec.get("file"):
+        # A repeat win saved the file, not an answer: open it and answer from it.
+        print("file:", rec["file"])
+    else:
+        print("answer:", hit.get("answer") or "")
     print("approved_by:", who.get("approved_by", "human") + (
         f" (evidence {who['evidence_file']}, score {who['score']:.2f})" if who.get("evidence_file") else ""))
     origin = (f"from {rec['file']}" if rec and rec.get("file")
               else "no source file" if rec and rec.get("no_source") else "source not recorded")
     when = rec["ts"][:10] if rec and rec.get("ts") else "date not recorded"
     print(f"saved answer, {origin}, saved {when}")
-    for e in (hit.get("evidence") or [])[:3]:
+    for e in ([] if who.get("approved_by") == "auto-save" else (hit.get("evidence") or []))[:3]:
         quote = str(e.get("quote", ""))
         line = best_evidence_line(quote, hit.get("answer") or "", question)
         print("  evidence:", e.get("sourceId", ""), "|", line[:120])
@@ -2781,10 +2786,13 @@ def gate_why(question: str, answer: str, path: str, passage=None):
     return None, score
 
 def save_answer(principal: str, question: str, answer: str, sdir: Path,
-                top=None, approved_by: str = "auto-check", automatic: bool = True) -> int:
+                top=None, approved_by: str = "auto-check", automatic: bool = True,
+                claim_check: bool = True, stored: str = None) -> int:
     """The one way a file-backed answer is saved (a repeat win, --approve):
-    the secret scan, then the claim check (CLEAN >= SAVE_FLOOR) on the cited file, then the
-    write. The caller's word is recorded (approved_by) but never skips a check.
+    the secret scan, the unchanged-file check, then the claim check (CLEAN >= SAVE_FLOOR) on the
+    cited file, then the write. The caller's word is recorded (approved_by) but never skips a check.
+    claim_check=False is for a repeat win only: its N wins were the evidence. `stored` is the text
+    kept as the answer when it differs from `answer` (which still ranks the cited passage).
     top is the file row {path, pointer} the caller chose, else the last lookup's top file.
     automatic=False (a person's --approve) ignores the --no-auto switch, never the checks."""
     _LAST_WHY["why"] = None
@@ -2814,12 +2822,15 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
         return 0
     if not out:
         return not_saved(sdir, key, f"{why}; nothing to save")
+    if not claim_check:
+        return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
+                             file=evidence_file, source_sha=row["contentSHA"])
     # The claim check reads exactly the passages that will be saved as evidence.
     why, score = gate_why(key, answer, evidence_file, evidence_text(out))
     if why:
         return not_saved(sdir, key, why)
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
-    return send_approval(principal, key, answer, pointer, out, sdir, approved_by=approved_by,
+    return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
                          evidence_file=evidence_file, score=score,
                          file=evidence_file, source_sha=row["contentSHA"])
 
@@ -2846,7 +2857,7 @@ def win_of(top: list, possible: dict, notes: dict):
 
 def win_count(sdir: Path, question: str, win: dict) -> int:
     """How many asks in a row (this one included) the same unchanged file won this question.
-    Any other outcome for the question, a --miss or a refused save starts the count over.
+    Any other outcome for the question, or a --miss, starts the count over.
     Read off lookups.jsonl; no new store."""
     key, count = norm_q(question), 0
     path = sdir / "lookups.jsonl"
@@ -2862,85 +2873,31 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
         if rec.get("kind") == "lookup":
             w = rec.get("win") or {}
             count = count + 1 if (w.get("path"), w.get("sha")) == (win["path"], win["sha"]) else 0
-        elif rec.get("kind") in ("miss", "autosave-refused"):
+        elif rec.get("kind") == "miss":
             count = 0
     return count
 
-def answer_line(text: str, question: str) -> str:
-    """The line of the file to save as the answer: not a heading, and not a line that only
-    repeats the question's words (it needs a question word and at least one word the question
-    lacks). Then most question words, then a line with a number or date (an answer often states one),
-    then the shorter line, then the earlier one."""
-    terms = query_terms(question)
-    asked = set(words(question))
-    best, best_key = "", None
-    for i, raw in enumerate(text.splitlines()):
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("---"):
-            continue
-        hits = term_hits(terms, line)
-        if hits == 0 or not set(words(line)) - asked:
-            continue
-        key = (hits, bool(re.search(r"\d", line)), -len(line), -i)
-        if best_key is None or key > best_key:
-            best, best_key = line, key
-    return best
-
-def verdict_refusal(why: str) -> bool:
-    """True for a real verdict on the file (REJECT, READ, CONTRADICTED, TIME_SENSITIVE, a score
-    under the floor, a secret) and false for a failure that says nothing about the file (a gate
-    ERROR, a stale pointer, cannot open, assist off, changed since connect)."""
-    if why.startswith(("secret-held", "check gate score")):
-        return True
-    return why.startswith("check gate verdict") and not why.startswith("check gate verdict ERROR")
-
-def refused_before(sdir: Path, question: str, win: dict) -> bool:
-    """True when the save check gave a real refusal for this file at these exact bytes for this
-    question since the last --miss or save, so the claim check is not paid for again (a changed
-    file may try again)."""
-    key, path, refused = norm_q(question), sdir / "lookups.jsonl", False
-    for line in (path.read_text().splitlines() if path.is_file() else []):
-        try:
-            rec = json.loads(line)
-        except ValueError:
-            continue
-        if norm_q(rec.get("question") or "") != key:
-            continue
-        if rec.get("kind") == "autosave-refused":
-            refused = refused or (rec.get("path") == win["path"] and rec.get("sha") == win["sha"])
-        elif rec.get("kind") in ("miss", "approve"):
-            refused = False
-    return refused
-
 def autosave(principal: str, question: str, sdir: Path, win) -> None:
-    """The one rule for saving a file: once it has won this question N times in a row, save it
-    through save_answer (same secret scan, claim check and stale-file check as every save)."""
-    if (not win or not auto_cache_on() or win_count(sdir, question, win) < save_after()
-            or refused_before(sdir, question, win)):
+    """The one rule for saving a file: once it has won this question N times in a row, save the
+    FILE (path, pointer, content hash, question, principal, date), not an answer line. Each win
+    already passed the content check ("does this file state the answer"), so no claim check runs
+    here: the secret scan and the unchanged-file check still do."""
+    if not win or not auto_cache_on() or win_count(sdir, question, win) < save_after():
         return
     key = norm_q(question)
-    try:
-        answer = answer_line(Path(win["path"]).read_text(errors="replace"), key)[:300]
-    except OSError:
-        return
-    if not answer:
-        return
-    if saved_record(sdir, key):  # reached a live search, so the saved answer was withheld as stale
+    if saved_record(sdir, key):  # reached a live search, so the saved file was withheld as stale
         for k in dict.fromkeys([key, question]):
             memory({"action": "forget", "principal": principal, "question": k})
         record_approver(sdir, key, None, removed_by="stale")
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        rc = save_answer(principal, key, answer, sdir, top={"path": win["path"], "pointer": win["pointer"]},
-                         approved_by="auto-save")
+        rc = save_answer(principal, key, key, sdir, top={"path": win["path"], "pointer": win["pointer"]},
+                         approved_by="auto-save", claim_check=False, stored=f"Saved file: {win['path']}")
     if rc == 0:
         print(f"Saved for next time: {win['path']} won this question {save_after()} times; the next ask "
               "returns it at once, no search (--miss removes it).")
     else:
-        why = _LAST_WHY["why"] or "the save was refused"
-        if verdict_refusal(why):  # a failure that says nothing about the file is simply retried
-            log(sdir, "autosave-refused", question=key, path=win["path"], sha=win["sha"], why=why)
-        print(f"not saved: {why}")
+        print(f"not saved: {_LAST_WHY['why'] or 'the save was refused'}")
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
     """--miss: the saved answer is wrong. Removes it (and a manual note's own record) and exits 1,
