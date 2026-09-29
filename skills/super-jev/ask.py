@@ -37,6 +37,15 @@
       (blank lines and # comments skipped): a draft's facts, or a worker
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
 
+SAVED ANSWERS (one promise). --approve, --answer, --used, --confirm-pick and --add
+all save through one function: the same secret scan and claim check (CLEAN, score
+0.80 or higher) run first; --add with no file gets the secret scan only and is
+marked "no source file"; a --source that does not exist is refused (exit 2). A saved
+answer lasts until its source file changes (no clock expiry); a fact with no file lasts
+until --miss (wrong) removes it. "The same question" = lowercased, spaces collapsed,
+trailing punctuation dropped; nothing fuzzier. A hit prints "saved answer, from FILE,
+saved DATE" (or "no source file"); a changed source says STALE and searches live.
+
   ask.py --principal AGENT --approve "question" "answer" [--rank N | --file PATH]
       Re-searches the last lookup's top pointer and approves it, quotes taken
       verbatim from reviewedText. Next ask of the same question is a cache
@@ -96,8 +105,9 @@
       log lines (followup-try/followup-drop).
 
   ask.py --principal AGENT --miss "question" "where it actually was"
-      Logs the miss. If that exact question is a cache hit, the saved answer
-      (human or auto-check) is un-saved so the next ask looks it up fresh.
+      The saved answer is wrong: logs it and removes the saved answer (human or
+      auto-check, or a --add note) so the next ask looks it up fresh. Exits 1
+      with "no saved answer" when there was nothing to remove.
 
   ask.py --principal AGENT --used <lookup_id|last> (--rank N | --file PATH) [--answer "text"]
       Pick trail: records "the agent used choice N" of that trace into
@@ -283,7 +293,7 @@ def last_lookup_id(sdir: Path, question: str):
             rec = json.loads(line)
         except ValueError:
             continue
-        if rec.get("kind") == "trace" and rec.get("question") == question:
+        if rec.get("kind") == "trace" and norm_q(rec.get("question") or "") == norm_q(question):
             return rec.get("lookup_id")
     return None
 
@@ -456,6 +466,11 @@ def my_pointers(principal: str) -> list:
     names = [(p.get("pointer") if isinstance(p, dict) else p) for p in panel.get("pointers", [])]
     return [n for n in names if n]
 
+def norm_q(question: str) -> str:
+    """The saved-answer matching key: lowercase, whitespace collapsed, trailing punctuation
+    dropped. Nothing fuzzier -- a reworded question is a different question."""
+    return " ".join(question.lower().split()).rstrip(" .,;:!?")
+
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -477,23 +492,42 @@ def manual_pointer_name(principal: str, question: str) -> str:
     return f"{principal}-manual-{hashlib.sha1(question.encode()).hexdigest()[:10]}"
 
 def manual_record_path(sdir: Path, principal: str, question: str) -> Path:
-    return sdir / "manual" / f"{manual_pointer_name(principal, question)}.md"
+    """This question's manual record: named from the matching key, else (a note saved before
+    matching was normalised) from the exact wording."""
+    for q in (norm_q(question), question):
+        path = sdir / "manual" / f"{manual_pointer_name(principal, q)}.md"
+        if path.is_file():
+            return path
+    return sdir / "manual" / f"{manual_pointer_name(principal, norm_q(question))}.md"
+
+def changed_saved_source(rec, record: Path):
+    """The source file of a saved answer that changed (or vanished) since it was saved, else None.
+    Checks the save's own record, and the manual note's header for older --add saves."""
+    if rec and rec.get("file") and rec.get("source_sha"):
+        p = Path(rec["file"])
+        if not p.is_file() or sha256_file(p) != rec["source_sha"]:
+            return rec["file"]
+    return changed_source(record)
 
 def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     # The harness's evidence "path" is always its own internal prepared-copy path,
-    # never the caller's file -- so staleness is checked against the manual record
-    # this exact principal+question would have written, not against evidence.path.
-    record = manual_record_path(sdir, principal, question)
-    if record.is_file():
-        stale_source = changed_source(record)
-        if stale_source:
-            print(f"STALE: source changed since this answer was recorded ({stale_source}); answer withheld. Re-add with --add --replace-entry after verifying.")
-            return 1
+    # never the caller's file -- so staleness is checked against the file recorded when
+    # the answer was saved (approvals.jsonl), and a manual note's own header.
+    rec = saved_record(sdir, question)
+    stale_source = changed_saved_source(rec, manual_record_path(sdir, principal, question))
+    if stale_source:
+        print(f"STALE: source changed since this answer was recorded ({stale_source}); answer withheld. "
+              "Save it again (--approve, or --add --replace-entry) after checking the file.")
+        return 1
     print("CACHE HIT")
     print("answer:", hit.get("answer") or "")
     who = approver(sdir, question)
     print("approved_by:", who.get("approved_by", "human") + (
         f" (evidence {who['evidence_file']}, score {who['score']:.2f})" if who.get("evidence_file") else ""))
+    origin = (f"from {rec['file']}" if rec and rec.get("file")
+              else "no source file" if rec and rec.get("no_source") else "source not recorded")
+    when = rec["ts"][:10] if rec and rec.get("ts") else "date not recorded"
+    print(f"saved answer, {origin}, saved {when}")
     for e in (hit.get("evidence") or [])[:3]:
         quote = str(e.get("quote", ""))
         line = best_evidence_line(quote, hit.get("answer") or "", question)
@@ -1819,9 +1853,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     elif replay:
         cache = {"status": "skipped (replay)"}
     else:
-        cache = memory({"action": "cached", "principal": principal, "question": question})
+        cache = memory({"action": "cached", "principal": principal, "question": norm_q(question)})
+        if cache.get("status") != "verified-cache-hit" and norm_q(question) != question:
+            # An answer saved before matching was normalised sits under the caller's exact wording.
+            cache = memory({"action": "cached", "principal": principal, "question": question})
     cache_stage = {"result": cache.get("status"), "checked": len(cache.get("checked") or [])}
-    withheld = None
+    withheld = set()
     if cache.get("status") == "verified-cache-hit":
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
@@ -1835,7 +1872,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             return rc
         # The stale answer stays withheld, but the question still gets a fresh live search.
         # Its manual pointer's record text IS the stale answer, so keep it out of the live search.
-        withheld = manual_pointer_name(principal, question)
+        withheld = {manual_pointer_name(principal, norm_q(question)), manual_pointer_name(principal, question)}
         print("Searching live instead...")
     panel = panel if panel is not None else memory({"action": "panel", "principal": principal})
     view_pointers = {row["pointer"] for row in panel.get("pointers", [])
@@ -1844,7 +1881,15 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if panel.get("reason") == "not-set-up":
         return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}", claim_rc=1)
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
-                            for p in panel.get("pointers", [])) if n and n != withheld]
+                            for p in panel.get("pointers", [])) if n and n not in withheld]
+    # A saved note whose source file changed after it was recorded is not a current answer.
+    stale_notes = {n: changed_source(sdir / "manual" / f"{n}.md") for n in pointers
+                   if n.startswith(f"{principal}-manual-")}
+    stale_notes = {n: src for n, src in stale_notes.items() if src}
+    if stale_notes:
+        print("STALE: saved note(s) skipped, source changed since they were recorded: "
+              + ", ".join(sorted(set(stale_notes.values()))))
+        pointers = [n for n in pointers if n not in stale_notes]
     if not pointers:
         # Runnable from any folder (the skill folder as invoked), and a new agent in a fleet
         # learns the shared sets it can join at once, with no connect.
@@ -2485,17 +2530,6 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict,
     return lines
 
 
-def find_pointer(sdir: Path, question: str):
-    path = sdir / "lookups.jsonl"
-    if not path.is_file():
-        return None
-    for line in reversed(path.read_text().splitlines()):
-        rec = json.loads(line)
-        if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
-            # A possible-only hit is not a confirmed source: never approve from it.
-            return None if rec["top"][0].get("possible") else rec["top"][0]["pointer"]
-    return None
-
 def find_candidate(sdir: Path, question: str, rank=None, file=None):
     """The row {score, path, pointer, possible} the lead picked from the last lookup's
     printed list: by 1-based rank, or by path (full path or unique file name).
@@ -2508,7 +2542,7 @@ def find_candidate(sdir: Path, question: str, rank=None, file=None):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
+            if rec.get("kind") == "lookup" and norm_q(rec.get("question") or "") == norm_q(question) and rec.get("top"):
                 top = rec["top"]
                 break
     if not top:
@@ -2528,12 +2562,12 @@ def record_approver(sdir: Path, question: str, approved_by, **fields) -> None:
     """Who approved the saved answer for this exact question; the last line wins.
     approved_by None means un-saved."""
     sdir.mkdir(parents=True, exist_ok=True)
-    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "question": question, "approved_by": approved_by, **fields}
+    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "question": norm_q(question), "approved_by": approved_by, **fields}
     (sdir / "approvals.jsonl").open("a").write(json.dumps(entry) + "\n")
 
-def approver(sdir: Path, question: str) -> dict:
-    """The last approvals.jsonl entry for this question. No entry means a save from
-    before auto-cache existed, when only humans could approve."""
+def saved_record(sdir: Path, question: str):
+    """The last approvals.jsonl entry for this question while it is saved, else None
+    (never saved, or un-saved since)."""
     path = sdir / "approvals.jsonl"
     if path.is_file():
         for line in reversed(path.read_text().splitlines()):
@@ -2541,11 +2575,14 @@ def approver(sdir: Path, question: str) -> dict:
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get("question") == question and rec.get("approved_by"):
-                return rec
-            if rec.get("question") == question:
-                break
-    return {"approved_by": "unknown (legacy)"}
+            if norm_q(rec.get("question") or "") == norm_q(question):
+                return rec if rec.get("approved_by") else None
+    return None
+
+def approver(sdir: Path, question: str) -> dict:
+    """The saved answer's approvals entry. No entry means a save from before auto-cache
+    existed, when only humans could approve."""
+    return saved_record(sdir, question) or {"approved_by": "unknown (legacy)"}
 
 def evidence_line_rank(text: str, answer: str, question: str = "") -> tuple:
     """Preserve exact dates and numeric identifiers that retrieval stopwords omit.
@@ -2658,7 +2695,7 @@ def find_top(sdir: Path, question: str):
             rec = json.loads(line)
         except ValueError:
             continue
-        if rec.get("kind") == "lookup" and rec.get("question") == question and rec.get("top"):
+        if rec.get("kind") == "lookup" and norm_q(rec.get("question") or "") == norm_q(question) and rec.get("top"):
             return rec["top"][0]
     return None
 
@@ -2718,55 +2755,91 @@ def not_saved(sdir: Path, question: str, why: str) -> int:
     log(sdir, "auto-approve", question=question, result="not-saved", why=why)
     return 1
 
-def auto_approve(principal: str, question: str, answer: str, sdir: Path,
-                 top=None, approved_by: str = "auto-check") -> int:
-    """--answer: save the answer only if the check gate calls it CLEAN against a fresh top file.
-    top overrides the last lookup's top row (an agent's pick of a listed file)."""
+SAVE_FLOOR = 0.80  # the claim check must call the answer CLEAN at or above this
+
+def secret_why(*texts):
+    """Why the secret scan holds this save, or None. Every save runs it."""
+    if any(has_secret(t) for t in texts if t):
+        return f"secret-held: {HELD_SECRET}"
+    return None
+
+def gate_why(question: str, answer: str, path: str, passage=None):
+    """(why the claim check refuses this save or None, its score). Every file-backed save runs it."""
+    verdict, score = run_gate(f"Question: {question} Answer: {answer}", path, passage)
+    if verdict != "CLEAN" or score is None:
+        return f"check gate verdict {verdict} (only CLEAN saves)", None
+    if score < SAVE_FLOOR:
+        return f"check gate score {score:.2f} is below the {SAVE_FLOOR:.2f} auto-save floor", None
+    return None, score
+
+def save_answer(principal: str, question: str, answer: str, sdir: Path,
+                top=None, approved_by: str = "auto-check", automatic: bool = True) -> int:
+    """The one way a file-backed answer is saved (--answer, --approve, --used, --confirm-pick):
+    the secret scan, then the claim check (CLEAN >= SAVE_FLOOR) on the cited file, then the
+    write. The caller's word is recorded (approved_by) but never skips a check.
+    top is the file row {path, pointer} the caller chose, else the last lookup's top file.
+    automatic=False (a person's --approve) ignores the --no-auto switch, never the checks."""
     _LAST_WHY["why"] = None
-    if not auto_cache_on():
+    if automatic and not auto_cache_on():
         print("not saved: auto-cache is off (--no-auto or SUPERJEV_AUTO_CACHE=0); a human can still --approve")
         return 0
-    top = top or find_top(sdir, question)
+    key = norm_q(question)
+    top = top or find_top(sdir, key)
     if not top or not top.get("path"):
-        return not_saved(sdir, question, "no prior lookup with candidates for that exact question; run ask first")
+        return not_saved(sdir, key, "no prior lookup with candidates for that exact question; run ask first")
     pointer, evidence_file = top["pointer"], top["path"]
     try:
         text = Path(evidence_file).read_text(errors="replace")
     except OSError as e:
-        return not_saved(sdir, question, f"cannot read {evidence_file}: {e.strerror or e}")
-    if has_secret(text) or has_secret(question) or has_secret(answer):
-        return not_saved(sdir, question, f"secret-held: {HELD_SECRET}")
+        return not_saved(sdir, key, f"cannot read {evidence_file}: {e.strerror or e}")
+    why = secret_why(text, key, answer)
+    if why:
+        return not_saved(sdir, key, why)
     row, status = source_row(principal, pointer, evidence_file)
     if status != "ok":
-        return not_saved(sdir, question, f"stale: pointer {pointer} is {status}")
+        return not_saved(sdir, key, f"stale: pointer {pointer} is {status}")
     if not row or row.get("contentSHA") != live_sha(evidence_file):
-        return not_saved(sdir, question, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
-    out, why = ask_evidence(principal, pointer, question, answer, evidence_file, row.get("sourceId"))
+        return not_saved(sdir, key, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
+    out, why = ask_evidence(principal, pointer, key, answer, evidence_file, row.get("sourceId"))
     if out and out.get("status") == "verified-cache-hit":
         print("already cached")
         return 0
     if not out:
-        return not_saved(sdir, question, f"{why}; nothing to save")
-    # The gate checks exactly the passages that will be saved as evidence.
-    verdict, score = run_gate(f"Question: {question} Answer: {answer}",
-                              evidence_file, evidence_text(out))
-    if verdict != "CLEAN" or score is None:
-        return not_saved(sdir, question, f"check gate verdict {verdict} (only CLEAN saves)")
-    if score < 0.80:
-        return not_saved(sdir, question, f"check gate score {score:.2f} is below the 0.80 auto-save floor")
+        return not_saved(sdir, key, f"{why}; nothing to save")
+    # The claim check reads exactly the passages that will be saved as evidence.
+    why, score = gate_why(key, answer, evidence_file, evidence_text(out))
+    if why:
+        return not_saved(sdir, key, why)
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
-    return send_approval(principal, question, answer, pointer, out, sdir,
-                         approved_by=approved_by, evidence_file=evidence_file, score=score)
+    return send_approval(principal, key, answer, pointer, out, sdir, approved_by=approved_by,
+                         evidence_file=evidence_file, score=score,
+                         file=evidence_file, source_sha=row["contentSHA"])
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
+    """--miss: the saved answer is wrong. Removes it (and a manual note's own record) and exits 1,
+    saying so, when there was nothing saved to remove."""
+    key = norm_q(question)
     log(sdir, "miss", question=question, actual=actual)
+    lookup_id = last_lookup_id(sdir, question)
+    write_outcome(sdir, lookup_id, question, "wrong", file=actual)
+    who = approver(sdir, question).get("approved_by", "human")
+    removed = []
+    for k in dict.fromkeys([key, question]):  # an older save sits under the exact wording
+        res = memory({"action": "forget", "principal": principal, "question": k})
+        if res.get("status") == "forgotten":
+            removed += res.get("pointers") or []
+        record = sdir / "manual" / f"{manual_pointer_name(principal, k)}.md"
+        if record.is_file():  # a wrong --add fact must not stay searchable as a note
+            memory({"action": "remove", "pointer": manual_pointer_name(principal, k), "principal": principal})
+            record.unlink()
+            removed.append(record.stem)
+    if not removed:
+        print("miss logged, but there is no saved answer for that question, so nothing was removed"
+              + ("" if lookup_id else " (and no earlier lookup of it to mark wrong)"))
+        return 1
+    record_approver(sdir, key, None, removed_by="miss", was=who)
     print("miss recorded")
-    write_outcome(sdir, last_lookup_id(sdir, question), question, "wrong", file=actual)
-    res = memory({"action": "forget", "principal": principal, "question": question})
-    if res.get("status") == "forgotten":
-        who = approver(sdir, question).get("approved_by", "human")
-        record_approver(sdir, question, None, removed_by="miss", was=who)
-        print(f"un-saved: the cached answer (approved_by: {who}) was removed from {', '.join(res.get('pointers') or [])}")
+    print(f"un-saved: the saved answer (approved_by: {who}) was removed from {', '.join(dict.fromkeys(removed))}")
     return 0
 
 FOLLOWUP_MAX_TRIES = 5
@@ -2905,56 +2978,27 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
     print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
     return 0
 
-def approve(principal: str, question: str, answer: str, sdir: Path, pointer=None, rank=None, file=None,
+def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, file=None,
             chosen=None) -> int:
+    """--approve / --confirm-pick: a person's choice of file, saved through save_answer
+    (same secret scan and claim check as every other save)."""
     if chosen is None and (rank is not None or file is not None):
-        # The lead picked a listed candidate by hand (any rank, possible tier
-        # included): that pick IS the review, so approve from its own pointer.
+        # The lead picked a listed candidate by hand (any rank, possible tier included).
         chosen, why = find_candidate(sdir, question, rank=rank, file=file)
         if not chosen:
             print(why)
             return 1
-    if chosen is None and pointer is None:
+    if chosen is None:
         top = find_top(sdir, question)  # the file ask() ranked first, unless possible-only
         chosen = top if top and not top.get("possible") else None
-    pointer = chosen["pointer"] if chosen else pointer
-    if not pointer:
+    if not chosen:
         print("no confirmed top candidate for that question; run ask first, pick a listed "
               "file with --rank N or --file PATH, or use --add")
         return 1
-    extra = {"file": chosen["path"]} if chosen else {}
-    if chosen:
-        # Evidence comes from the file ask() ranked (or the lead picked) itself, matched by
-        # full path so a same-name file in the same tree never stands in (businessfi
-        # retest 2026-09-24); memory's own search ranking plays no part.
-        row, _ = source_row(principal, pointer, chosen["path"])
-        try:
-            now_sha = live_sha(chosen["path"])
-        except OSError:
-            now_sha = None
-        if row and row.get("contentSHA") and row["contentSHA"] != now_sha:
-            print(f"cannot approve: stale: {chosen['path']} changed since connect; refresh the pointer first.")
-            log(sdir, "approve", question=question, pointer=pointer, result="stale")
-            return 1
-        out, why = ask_evidence(principal, pointer, question, answer, chosen["path"],
-                                (row or {}).get("sourceId"))
-    else:
-        # No file known (--approve with an explicit pointer only): search is the fallback.
-        out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
-        why = f"search returned {out.get('status')} on {pointer}"
-        if out.get("status") not in ("ready", "verified-cache-hit"):
-            out = None
-    if out and out.get("status") == "verified-cache-hit":
-        print("already cached")
-        return 0
-    if not out:
-        print(f"cannot approve: {why}; use --add with --source to record it manually.")
-        log(sdir, "approve", question=question, pointer=pointer, result="evidence-mismatch")
-        return 1
-    rc = send_approval(principal, question, answer, pointer, out, sdir, **extra)
+    rc = save_answer(principal, question, answer, sdir, top=chosen,
+                     approved_by=f"principal:{principal}", automatic=False)
     if rc == 0:
-        top = chosen or find_top(sdir, question)
-        write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=(top or {}).get("path"))
+        write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=chosen.get("path"))
     return rc
 
 ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
@@ -2962,14 +3006,15 @@ ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssis
                         "config.json, or the file passed with --config) before --add can approve a "
                         "manual entry that retrieval does not match on its own.")
 
-def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path) -> int:
+def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path,
+                   **fields) -> int:
     """Approve a just-registered manual pointer, falling back to assisted review on a retrieval miss."""
     out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
     if out.get("status") == "verified-cache-hit":
         print("already cached")
         return 0
     if out.get("status") == "ready":
-        return send_approval(principal, question, answer, pointer, out, sdir)
+        return send_approval(principal, question, answer, pointer, out, sdir, **fields)
     attempt_id = out.get("attemptId")
     if not attempt_id:
         print(f"cannot approve: search returned {out.get('status')} on {pointer} with no attempt to assist from.")
@@ -2987,7 +3032,7 @@ def approve_manual(principal: str, question: str, answer: str, pointer: str, sou
         print(f"cannot approve: assist returned {assisted.get('status')} on {pointer}.")
         log(sdir, "approve", question=question, pointer=pointer, result=assisted.get("status"))
         return 1
-    return send_approval(principal, question, answer, pointer, assisted, sdir)
+    return send_approval(principal, question, answer, pointer, assisted, sdir, **fields)
 
 def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
                 kind: str = DEFAULT_KIND, status: str = DEFAULT_STATUS,
@@ -2997,11 +3042,30 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
         "as_of": as_of or time.strftime("%Y-%m-%d"),
         "subject": subject or derive_subject(question),
     })
-    pointer = manual_pointer_name(principal, question)
-    exists = pointer in my_pointers(principal)
+    key = norm_q(question)
+    src = None
+    if source:
+        if not Path(source).is_file():
+            print(f"refused: --source {source} does not exist; give the file this fact comes from, "
+                  "or leave --source out to save it as a fact with no source file.")
+            return 2
+        src = Path(source).resolve()
+    mine = my_pointers(principal)
+    # A note saved before matching was normalised is named from the exact wording.
+    pointer = next((n for n in (manual_pointer_name(principal, key), manual_pointer_name(principal, question))
+                    if n in mine), manual_pointer_name(principal, key))
+    exists = pointer in mine
     if exists and not replace:
         print(f"refused: {pointer} already exists for this question wording; use different wording, --replace-entry, or remove the pointer explicitly.")
         return 1
+    # The same secret scan and claim check as every other save (a fact with no source file: the
+    # secret scan only), before anything is registered or replaced.
+    why = secret_why(question, answer, src.read_text(errors="replace") if src else None)
+    score = None
+    if not why and src:
+        why, score = gate_why(key, answer, str(src))
+    if why:
+        return not_saved(sdir, key, why)
     manual_dir = sdir / "manual"
     manual_dir.mkdir(parents=True, exist_ok=True)
     record = manual_dir / f"{pointer}.md"
@@ -3012,8 +3076,7 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
             record.unlink()
     lines = [f"# {question}", "", f"kind: {labels['kind']}", f"status: {labels['status']}",
              f"as_of: {labels['as_of']}", f"subject: {labels['subject']}", f"project: {principal}", ""]
-    if source and Path(source).is_file():
-        src = Path(source).resolve()
+    if src:
         lines += [f"source_path: {src}", f"source_sha256: {sha256_file(src)}", ""]
     lines += [answer, "", f"recorded: {time.strftime('%Y-%m-%d %H:%M %Z')}"]
     record.write_text("\n".join(lines) + "\n")
@@ -3049,12 +3112,14 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
         return 1
     print(f"manual entry written: {record.name}; pointer {pointer} registered")
     source_id = reg["sources"][0]["id"]
-    rc = approve_manual(principal, question, answer, pointer, source_id, record, sdir)
+    fields = ({"file": str(src), "source_sha": sha256_file(src), "score": score} if src
+              else {"no_source": True})
+    rc = approve_manual(principal, key, answer, pointer, source_id, record, sdir, **fields)
     if rc == 0:
         lid = last_lookup_id(sdir, question)
         prior = last_outcome(sdir, lid) if lid else None
         if prior and prior.get("result") == "wrong":
-            added_file = str(Path(source).resolve()) if source and Path(source).is_file() else str(record)
+            added_file = str(src) if src else str(record)
             write_outcome(sdir, lid, question, "wrong-added", file=added_file)
     return rc
 
@@ -3151,7 +3216,7 @@ def _flush_picks(principal: str, sdir: Path) -> int:
         if not pick.get("answer"):
             keep.append({**pick, "why": "no answer text to check; confirm with an answer or drop"})
             continue
-        rc = auto_approve(principal, pick["question"], pick["answer"], sdir,
+        rc = save_answer(principal, pick["question"], pick["answer"], sdir,
                           top={"path": pick["file"], "pointer": pick["pointer"]},
                           approved_by="agent-pick+check")
         why = _LAST_WHY["why"]
@@ -3538,7 +3603,7 @@ def _main() -> int:
         if len(a) < 3:
             print('usage: --answer "question" "answer"')
             return 2
-        return auto_approve(principal, a[1], " ".join(a[2:]), sdir)
+        return save_answer(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--approve":
         rest, rank, file = a[1:], None, None
         try:

@@ -151,6 +151,9 @@ def test_unsure_stays_listed_then_confirm_or_drop(world, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "check gate verdict READ" in out and "--confirm-pick" in out
     assert ask.settle_pick("alice", world["sdir"], picks[1]["id"], drop=True) == 0
+    # a person's --confirm-pick runs the same claim check: still READ, so still refused
+    assert ask.settle_pick("alice", world["sdir"], picks[0]["id"]) == 1 and not world["cache"]
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: ("CLEAN", 0.93))
     assert ask.settle_pick("alice", world["sdir"], picks[0]["id"]) == 0
     assert world["cache"][Q] == "The car is blue." and ask.load_picks(world["sdir"]) == []
 
@@ -182,7 +185,8 @@ def _approve_world(tmp_path, monkeypatch, search_passages, answer="The car is bl
     def fake_memory(req):
         act = req["action"]
         if act == "sources":
-            return {"status": "ok", "sources": [{"sourceId": "car", "originalPath": str(car)}]}
+            return {"status": "ok", "sources": [{"sourceId": "car", "originalPath": str(car),
+                                                  "contentSHA": ask.live_sha(str(car))}]}
         if act == "search":  # memory's own ranking: must never decide the save
             return {"status": "ready", "approvalTicket": "t", "attemptId": "a1", "passages": search_passages}
         if act == "cached":
@@ -199,6 +203,7 @@ def _approve_world(tmp_path, monkeypatch, search_passages, answer="The car is bl
         raise AssertionError(act)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "run_gate", lambda c, p, passage=None: ("CLEAN", 0.93))
     rc = ask.approve("alice", Q, answer, sdir, file=str(car))
     return rc, sent.get("evidence")
 
