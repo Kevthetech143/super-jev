@@ -37,7 +37,7 @@ def go(tmp_path, monkeypatch, capsys):
 
     def run(root, *extra):
         monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--root", str(root), "--pointer", "p", "--principal", "alice",
-                                          "--no-findability", "--no-shared", *extra])
+                                          "--no-findability", "--no-shared", "--writer", "claude", *extra])
         code = pb.main()
         return code, capsys.readouterr().out
     return run
