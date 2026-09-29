@@ -222,7 +222,7 @@ def memory(req: dict) -> dict:
 
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
-    # Not redacted/truncated: lookups.jsonl is the working index find_pointer/find_top
+    # Not redacted/truncated: lookups.jsonl is the working index find_top
     # read back by exact question, pointer and on-disk path (--approve, --answer).
     entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **fields}
     (sdir / "lookups.jsonl").open("a").write(json.dumps(entry) + "\n")
@@ -2888,7 +2888,7 @@ def pending_misses(sdir: Path) -> dict:
 def fresh_top(sdir: Path, question: str):
     """The top row from the MOST RECENT lookups.jsonl line, only if it is a
     'lookup' record for this exact question with a non-empty, non-possible
-    top. Unlike find_top/find_pointer (which scan backward through history
+    top. Unlike find_top (which scan backward through history
     and can surface an OLD lookup's result), this never falls back past the
     single fresh lookup just run: a failed or empty fresh search (top=[], or
     an early-return path that logs nothing at all) yields None here instead
