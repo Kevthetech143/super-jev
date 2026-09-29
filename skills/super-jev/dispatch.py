@@ -37,11 +37,8 @@ class NotSetUp(FileNotFoundError):
 def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
     root = skill_dir.parent
     if tool == "skills":
-        entry = root / "skill-search/search.sh"
-        extra = []
-        if root.parent.name == ".claude" and "--config" not in args:
-            extra = ["--config", str(root / "skill-search/roots-claude.json")]
-        cmd = ["bash", str(entry), *args, *extra]
+        entry = root / "skill-search/search.sh"  # search.sh alone chooses the skill roots
+        cmd = ["bash", str(entry), *args]
     elif tool == "find":
         entry = root / "fleet-retrieval-experiment/run.sh"
         cmd = ["sh", str(entry), *args]
@@ -137,8 +134,8 @@ def main(args: list[str]) -> int:
         if tool == "skills" and "--request" in cmd:
             # The launcher only reads --request-file; turn an inline --request into one.
             i = cmd.index("--request")
-            if i + 1 >= len(cmd):
-                print(json.dumps({"status": "error", "reason": "--request needs a value"}))
+            if i + 1 >= len(cmd) or not cmd[i + 1].strip():
+                print(json.dumps({"status": "error", "candidates": [], "error": "--request needs the request text; it was missing or empty"}))
                 return 2
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
                 json.dump({"request": cmd[i + 1]}, f)
