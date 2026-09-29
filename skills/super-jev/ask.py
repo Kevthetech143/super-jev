@@ -516,6 +516,11 @@ def changed_saved_source(rec, record: Path):
             return f["path"]
     return changed_source(record)
 
+def _lost_pointers(principal: str, rec: dict) -> list:
+    """Pointers of a saved list's files that the principal no longer has (a local panel call)."""
+    have = {(p.get("pointer") if isinstance(p, dict) else p) for p in memory({"action": "panel", "principal": principal}).get("pointers", [])}
+    return sorted({f["pointer"] for f in rec.get("files") or []} - have)
+
 def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     # The harness's evidence "path" is always its own internal prepared-copy path,
     # never the caller's file -- so staleness is checked against the file recorded when
@@ -527,12 +532,23 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
               "It is saved again on its own once the file wins this question again "
               f"{save_after()} times (or --approve it now).")
         return 1
+    gone = _lost_pointers(principal, rec) if (rec or {}).get("files") else []
+    if gone:
+        print(f"STALE: this principal no longer has {', '.join(gone)} connected; answer withheld. "
+              "It is saved again on its own once the files win this question again "
+              f"{save_after()} times (or --approve it now).")
+        return 1
     print("CACHE HIT")
     who = approver(sdir, question)
     if who.get("approved_by") == "auto-save" and rec and rec.get("file"):
         # A repeat win saved the ranked files, not an answer: print them like a found result.
-        for f in rec.get("files") or [{"score": 0, "path": rec["file"], "pointer": rec.get("pointer", "")}]:
-            print(f"{f['score']:5.2f}  {f['path']}  [{f['pointer']}]")
+        for s in rec.get("skills") or []:
+            print(f"skill  {s['path']}  [skills: {s['name']}]{skill_note(s['name'])}")
+        for f in rec.get("files") or [{"score": None, "path": rec["file"], "pointer": rec.get("pointer", "")}]:
+            score = f"{f['score']:5.2f}" if isinstance(f["score"], (int, float)) else "saved"
+            print(f"{score}  {f['path']}  [{f['pointer']}]")
+        if rec.get("leans_none"):
+            print(LEANS_NONE_NOTE)
     else:
         print("answer:", hit.get("answer") or "")
     print("approved_by:", who.get("approved_by", "human") + (
@@ -1876,8 +1892,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         rc = print_hit(cache, sdir, principal, question)
         log(sdir, "lookup", question=question, result="cache-hit" if rc == 0 else "stale-source", secs=round(time.time() - t0, 1))
         if rc == 0:
-            n = len((saved_record(sdir, question) or {}).get("files") or []) or 1
-            _done("found", f"{n} file{'s' if n != 1 else ''}; saved answer, sources unchanged")
+            r = saved_record(sdir, question) or {}
+            n, k = len(r.get("files") or []) or 1, len(r.get("skills") or [])
+            _done("found", f"{n} file{'s' if n != 1 else ''}"
+                  + (f"; {k} skill suggestion{'s' if k != 1 else ''}" if k else "") + "; saved answer, sources unchanged")
         write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing={},
                     content_check={}, final_ranked=[], tier="cache" if rc == 0 else "stale",
                     timings={"total_secs": round(time.time() - t0, 2)},
@@ -2265,7 +2283,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     skills = skill_job.result() if skill_job else []
     _STAGE["skills"] = [path for _n, path in skills] if skill_job else None
     incomplete = bool(failed or stale_ptrs)  # a set was not searched: a better file may sit in it
-    win = None if replay or _CLAIM["text"] or incomplete else win_of(top, possible, notes)
+    win = None if replay or _CLAIM["text"] or incomplete else win_of(
+        top, possible, notes, skills, (_STAGE.get("listwise") or {}).get("leans_none"))
     log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
         **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
@@ -2799,13 +2818,13 @@ def gate_why(question: str, answer: str, path: str, passage=None):
 
 def save_answer(principal: str, question: str, answer: str, sdir: Path,
                 top=None, approved_by: str = "auto-check", automatic: bool = True,
-                claim_check: bool = True, stored: str = None, files: list = None) -> int:
+                claim_check: bool = True, stored: str = None, extra: dict = None) -> int:
     """The one way a file-backed answer is saved (a repeat win, --approve):
     the secret scan, the unchanged-file check, then the claim check (CLEAN >= SAVE_FLOOR) on the
     cited file, then the write. The caller's word is recorded (approved_by) but never skips a check.
     claim_check=False is for a repeat win only: its N wins were the evidence. `stored` is the text
     kept as the answer when it differs from `answer` (which still ranks the cited passage).
-    `files` is a repeat win's whole ranked list, kept in the saved record.
+    `extra` is a repeat win's ranked list, skill suggestions and leans-none flag, kept in the saved record.
     top is the file row {path, pointer} the caller chose, else the last lookup's top file.
     automatic=False (a person's --approve) ignores the --no-auto switch, never the checks."""
     _LAST_WHY["why"] = None
@@ -2837,7 +2856,7 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
         return not_saved(sdir, key, f"{why}; nothing to save")
     if not claim_check:
         return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
-                             file=evidence_file, source_sha=row["contentSHA"], **({"files": files} if files else {}))
+                             file=evidence_file, source_sha=row["contentSHA"], **(extra or {}))
     # The claim check reads exactly the passages that will be saved as evidence.
     why, score = gate_why(key, answer, evidence_file, evidence_text(out))
     if why:
@@ -2857,21 +2876,20 @@ def save_after() -> int:
     except ValueError:
         return SAVE_AFTER_DEFAULT
 
-def win_of(top: list, possible: dict, notes: dict):
-    """The win this ordinary ask records: its top file, when the content check confirmed it
-    (not a possible-tier or unfinished check), with the file's bytes as they are now."""
-    if not top or top[0][1] in possible or notes.get(top[0][1]) == INCONCLUSIVE:
+def win_of(top: list, possible: dict, notes: dict, skills=(), leans_none=False):
+    """The win this ordinary ask records: its ranked files (up to 5), each with its bytes' hash,
+    plus the skill suggestions and the leans-none note, so a saved hit equals the live result.
+    No win when any of those files is possible-tier, unfinished or unreadable (a hit could
+    then lose a warning or shorten the list)."""
+    top = top[:5]
+    if not top or any(p in possible or notes.get(p) == INCONCLUSIVE for _s, p, _ptr in top):
         return None
-    _s, path, pointer = top[0]
-    files = []  # the whole ranked list (up to 5), in rank order, each with its bytes' hash
-    for s, p, ptr in top[:5]:
-        try:
-            files.append({"score": s, "path": p, "pointer": ptr, "sha": live_sha(p)})
-        except OSError:
-            continue
-    if not files or files[0]["path"] != path:
+    try:
+        files = [{"score": s, "path": p, "pointer": ptr, "sha": live_sha(p)} for s, p, ptr in top]
+    except OSError:
         return None
-    return {"path": path, "pointer": pointer, "sha": files[0]["sha"], "files": files}
+    return {"path": files[0]["path"], "pointer": files[0]["pointer"], "sha": files[0]["sha"], "files": files,
+            "skills": [{"name": n, "path": p} for n, p in skills], "leans_none": bool(leans_none)}
 
 def win_count(sdir: Path, question: str, win: dict) -> int:
     """How many asks in a row (this one included) the same unchanged file won this question.
@@ -2911,10 +2929,11 @@ def autosave(principal: str, question: str, sdir: Path, win) -> None:
     with contextlib.redirect_stdout(buf):
         rc = save_answer(principal, key, key, sdir, top={"path": win["path"], "pointer": win["pointer"]},
                          approved_by="auto-save", claim_check=False, stored=f"Saved file: {win['path']}",
-                         files=win.get("files"))
+                         extra={k: win[k] for k in ("files", "skills", "leans_none") if win.get(k)})
     if rc == 0:
-        print(f"Saved for next time: {win['path']} won this question {save_after()} times; the next ask "
-              "returns it at once, no search (--miss removes it).")
+        n = len(win.get("files") or [])
+        print(f"Saved for next time: {n} file{'s' if n != 1 else ''}, top: {win['path']}; it won this question "
+              f"{save_after()} times; the next ask returns them at once, no search (--miss removes it).")
     else:
         print(f"not saved: {_LAST_WHY['why'] or 'the save was refused'}")
 
