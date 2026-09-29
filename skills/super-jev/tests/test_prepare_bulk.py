@@ -981,14 +981,14 @@ def test_refresh_replays_recorded_no_recurse_and_excludes(tmp_path, monkeypatch,
     _seed_cache(root, cache_dir, 2)
     (cache_dir / "my-records-report.json").write_text(json.dumps(
         {"pointer": "my-records", "roots": [str(root)], "principals": ["alice"],
-         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20, "allowHeld": True}))
+         "excludes": ["INDEX.md"], "noRecurse": True, "limit": 20}))
     monkeypatch.setattr(pb, "writer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("writer must not run")))
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "my-records", "--principal", "alice",
                                       "--refresh", "--no-connect", "--no-findability"])
     rc = pb.main()
     out = capsys.readouterr().out
     assert rc == 3, out  # nothing failed; the password file stays held
-    assert "inventory: 2 files to prepare, 1 held" in out  # allow-held is never replayed
+    assert "inventory: 2 files to prepare, 1 held" in out  # the held file has no override
     report = json.loads((cache_dir / "my-records-report.json").read_text())
     assert report["noRecurse"] is True and report["excludes"] == ["INDEX.md"] and report["limit"] == 20
 
@@ -1356,18 +1356,6 @@ def test_secret_looking_filename_is_held_even_with_clean_content(tmp_path):
     assert "secret-keyword-like file name" in held_by_name["password-hunter2xyz-notes.md"]
 
 
-def test_secret_looking_filename_admitted_by_allow_held(tmp_path):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "api_key_prod789-dump.md").write_text("# Notes\nNothing secret in here.\n")
-
-    files, held = pb.inventory([root], allow_held=True)
-
-    assert {p.name for p in files} == {"api_key_prod789-dump.md"}
-    held_by_name = {Path(p).name: why for p, why in held}
-    assert "admitted by --allow-held" in held_by_name["api_key_prod789-dump.md"]
-
-
 def test_normal_filename_not_held(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
@@ -1377,53 +1365,6 @@ def test_normal_filename_not_held(tmp_path):
 
     assert {p.name for p in files} == {"tokenizer-notes.md"}
     assert held == []
-
-
-def test_allow_held_admits_secret_file_with_override_reason(tmp_path):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "pw.md").write_text("# Creds\nthe password for the router is hunter2\n")
-
-    files, held = pb.inventory([root], allow_held=True)
-
-    assert {p.name for p in files} == {"pw.md"}
-    held_by_name = {Path(p).name: why for p, why in held}
-    assert "admitted by --allow-held" in held_by_name["pw.md"]
-
-
-def test_allow_held_does_not_lift_size_ceiling_hold(tmp_path, monkeypatch):
-    root = tmp_path / "root"
-    root.mkdir()
-    (root / "big.md").write_text("x" * 100)
-    monkeypatch.setattr(pb, "CEILING_BYTES", 50)
-
-    files, held = pb.inventory([root], allow_held=True)
-
-    assert files == []
-    held_by_name = {Path(p).name: why for p, why in held}
-    assert "size ceiling" in held_by_name["big.md"]
-
-
-def test_allow_held_flag_end_to_end_admits_file_into_connect_set(tmp_path, monkeypatch, capsys):
-    root = tmp_path / "root"
-    root.mkdir()
-    f = root / "pw.md"
-    f.write_text("# Creds\nthe password for the router is hunter2\n")
-
-    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
-    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: {
-        str(f): {"path": str(f), "description": "Router credentials note.", "question": "What is the router password?"}
-    })
-    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
-
-    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--allow-held", "--no-connect"]))
-    rc = pb.main()
-
-    assert rc == 0
-    report = json.loads((pb.CACHE_DIR / "my-records-report.json").read_text())
-    assert report["approved"] == [str(f)]
-    held_names = {Path(p).name for p, _why in report["held"]}
-    assert held_names == {"pw.md"}
 
 
 def test_writer_banner_shows_default_and_recommends_cheap_model(tmp_path, monkeypatch, capsys):
