@@ -36,6 +36,9 @@ from judges.errors import (JudgeError, AuthRejected, BadReply, Overloaded, Secre
                            TooBig, Unreachable)
 
 API_URL = PROFILE.api_url
+URL_ENV = PROFILE.api_url_env
+VENDOR = PROFILE.vendor   # the judge named in error text
+CONFIDENCE_FIELD = PROFILE.confidence_field
 MODEL = PROFILE.model
 # The judge's input ceiling (the profile's window) covers the
 # state plus the longest question. A character cap sized for prose let number-dense
@@ -89,6 +92,17 @@ RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
        "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
 
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def _key_may_go_to(url):
+    """The key goes only to the profile's own host (same scheme and host as its api_url) or to
+    this machine, so a URL override can never carry it to a third party."""
+    from urllib.parse import urlsplit
+    mine, want = urlsplit(API_URL), urlsplit(url)
+    return (want.hostname or "") in _LOOPBACK or (want.scheme, want.hostname) == (mine.scheme, mine.hostname)
+
+
 def _tls_context():
     """certifi's CA bundle when installed and SSL_CERT_FILE is unset (some Macs ship none)."""
     if os.environ.get("SSL_CERT_FILE"):
@@ -100,9 +114,17 @@ def _tls_context():
     return ssl.create_default_context(cafile=certifi.where())
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A judge never redirects a request: following one would carry the Authorization header along."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise BadReply(f"the judge answered with a redirect (HTTP {code}); not followed, the API key is never re-sent")
+
+
 def _http_post(url, body, headers, timeout):
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout, context=_tls_context()) as r:
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=_tls_context()))
+    with opener.open(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -140,9 +162,14 @@ def ask(state, questions, timeout=120):
                      "it is never truncated")
     body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
     # The TypeSafe edge rejects the default "Python-urllib" user agent with 403.
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+    headers = {"Content-Type": "application/json",
                "User-Agent": "super-jev (+https://github.com/Kevthetech143/super-jev)"}
-    url = os.environ.get("SUPERJEV_JEV_URL", API_URL)
+    if key:   # a keyless judge (key_required false in its profile) is sent no Authorization
+        headers = {"Authorization": f"Bearer {key}", **headers}
+    url = (os.environ.get(URL_ENV) if URL_ENV else None) or API_URL
+    if key and not _key_may_go_to(url):
+        raise AuthRejected(f"{URL_ENV} points at a host other than this judge's own; the API key is "
+                           "never sent there, so nothing was sent")
     t0 = time.monotonic()
 
     def send():
@@ -150,20 +177,23 @@ def ask(state, questions, timeout=120):
             return transport(url, body, headers, timeout)
         except urllib.error.HTTPError as e:
             if e.code in PROFILE.overloaded_statuses:
-                raise Overloaded(f"TypeSafe returned HTTP {e.code}") from None
+                raise Overloaded(f"{VENDOR} returned HTTP {e.code}") from None
             if e.code == 401:
-                raise AuthRejected("401 -- TypeSafe rejected the API key") from None
+                raise AuthRejected(f"401 -- {VENDOR} rejected the API key") from None
             if e.code == PROFILE.too_big_status and _says_too_big(e):
-                raise TooBig(f"TypeSafe returned HTTP {e.code}") from None
-            raise BadReply(f"TypeSafe returned HTTP {e.code}") from None
+                raise TooBig(f"{VENDOR} returned HTTP {e.code}") from None
+            raise BadReply(f"{VENDOR} returned HTTP {e.code}") from None
         except ValueError as e:
-            raise BadReply(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+            raise BadReply(f"could not reach {VENDOR}: {e.__class__.__name__}") from None
         except (urllib.error.URLError, OSError) as e:
-            raise Unreachable(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+            raise Unreachable(f"could not reach {VENDOR}: {e.__class__.__name__}") from None
 
     data = judges.with_retry(send)
     if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
-        raise BadReply("TypeSafe reply had no answers")
+        raise BadReply(f"{VENDOR} reply had no answers")
+    if (data.get("usage") or {}).get("truncated"):
+        # A judge that cut the input to fit its window (Laya does) has not read it all: no verdict.
+        raise TooBig("the judge cut the input to fit its window -- split the file; it is never truncated")
     return {"answers": data["answers"], "model": data.get("model"), "chunks": 1,
             "input_tokens": (data.get("usage") or {}).get("input_tokens", 0),
             "latency_ms": round((time.monotonic() - t0) * 1000)}
@@ -202,7 +232,7 @@ def row(key, answer, subject="", side=False):
     answer = answer if isinstance(answer, dict) else {}
     verdict = answer.get("choice") if isinstance(answer.get("choice"), str) else "NO_ANSWER"
     try:
-        conf = float(answer.get("confidence", 0.0))
+        conf = float(answer.get(CONFIDENCE_FIELD, 0.0))
     except (TypeError, ValueError):
         conf = 0.0
     return {"key": key, "subject": subject, "verdict": verdict, "confidence": conf,
@@ -261,11 +291,12 @@ def check(evidence, claims, draft=""):
     questions = questions_for(claims)
     tail = f"\n\nDRAFT:\n{draft.strip()}"
     room = MAX_INPUT_TOKENS - max(estimate_tokens(q) for q in questions.values()) - estimate_tokens(tail) - 10
-    if room < 1000:
+    if room < min(1000, MAX_INPUT_TOKENS // 4):   # 1000 for Jev; a small-window judge gets a proportional floor
         raise TooBig("the draft or a claim alone is too long for one call -- shorten it")
     parts, meta = [], {"model": None, "chunks": 0, "input_tokens": 0, "latency_ms": 0}
     for group in evidence_parts(evidence, room):
-        res = ask("EVIDENCE:\n" + "\n\n".join(group) + tail, questions)
+        # through the door, so its secret scan covers this path for every judge
+        res = judges.ask("EVIDENCE:\n" + "\n\n".join(group) + tail, questions)
         meta.update(model=meta["model"] or res.get("model"), chunks=meta["chunks"] + 1,
                     input_tokens=meta["input_tokens"] + (res.get("input_tokens") or 0),
                     latency_ms=meta["latency_ms"] + (res.get("latency_ms") or 0))

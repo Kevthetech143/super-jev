@@ -37,6 +37,7 @@ def _rec(*a, **k):
     open(os.environ["R7_SENT"], "a").write("sent\\n")
     raise OSError("blocked in test")
 urllib.request.urlopen = _rec
+urllib.request.OpenerDirector.open = _rec  # the client posts through its own no-redirect opener
 """
 
 
