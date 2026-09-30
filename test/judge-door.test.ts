@@ -163,3 +163,11 @@ test('a reply that says the judge cut the input is TooBig, no verdict', async ()
   const fake = (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
   await assert.rejects(new Jev({ apiKey: 'k', fetch: fake }).evaluate({ state: 's', questions: q } as never, signal()), TooBig);
 });
+
+test('error text names the active judge; Jev keeps its own wording', async () => {
+  const q = { state: 's', questions: {} } as never;
+  const fail = (status: number) => (async () => new Response('', { status })) as unknown as typeof fetch;
+  await assert.rejects(new Jev({ fetch: fail(503), profile: loadJudgeProfile('laya'), apiKey: '' }).evaluate(q, signal()), /Laya HTTP 503/);
+  await assert.rejects(new Jev({ apiKey: 'k', fetch: fail(500) }).evaluate(q, signal()), /Jev HTTP 500/);
+  await assert.rejects(new Jev({ apiKey: 'k', fetch: fail(401) }).evaluate(q, signal()), /Jev HTTP 401/);
+});

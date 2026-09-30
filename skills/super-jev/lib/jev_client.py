@@ -37,6 +37,7 @@ from judges.errors import (JudgeError, AuthRejected, BadReply, Overloaded, Secre
 
 API_URL = PROFILE.api_url
 URL_ENV = PROFILE.api_url_env
+VENDOR = PROFILE.vendor   # the judge named in error text
 CONFIDENCE_FIELD = PROFILE.confidence_field
 MODEL = PROFILE.model
 # The judge's input ceiling (the profile's window) covers the
@@ -176,20 +177,20 @@ def ask(state, questions, timeout=120):
             return transport(url, body, headers, timeout)
         except urllib.error.HTTPError as e:
             if e.code in PROFILE.overloaded_statuses:
-                raise Overloaded(f"TypeSafe returned HTTP {e.code}") from None
+                raise Overloaded(f"{VENDOR} returned HTTP {e.code}") from None
             if e.code == 401:
-                raise AuthRejected("401 -- TypeSafe rejected the API key") from None
+                raise AuthRejected(f"401 -- {VENDOR} rejected the API key") from None
             if e.code == PROFILE.too_big_status and _says_too_big(e):
-                raise TooBig(f"TypeSafe returned HTTP {e.code}") from None
-            raise BadReply(f"TypeSafe returned HTTP {e.code}") from None
+                raise TooBig(f"{VENDOR} returned HTTP {e.code}") from None
+            raise BadReply(f"{VENDOR} returned HTTP {e.code}") from None
         except ValueError as e:
-            raise BadReply(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+            raise BadReply(f"could not reach {VENDOR}: {e.__class__.__name__}") from None
         except (urllib.error.URLError, OSError) as e:
-            raise Unreachable(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+            raise Unreachable(f"could not reach {VENDOR}: {e.__class__.__name__}") from None
 
     data = judges.with_retry(send)
     if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
-        raise BadReply("TypeSafe reply had no answers")
+        raise BadReply(f"{VENDOR} reply had no answers")
     if (data.get("usage") or {}).get("truncated"):
         # A judge that cut the input to fit its window (Laya does) has not read it all: no verdict.
         raise TooBig("the judge cut the input to fit its window -- split the file; it is never truncated")
