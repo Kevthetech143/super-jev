@@ -31,6 +31,12 @@ ask = load("ask_r4", SKILL / "ask.py")
 pb = load("prepare_bulk_r4", SKILL / "prepare_bulk.py")
 jc = load("jev_client_r4", SKILL / "lib" / "jev_client.py")
 
+
+@pytest.fixture(autouse=True)
+def _door_reaches_this_copy(monkeypatch):
+    """check() goes through judges.ask, which reaches the shared jev_client; point it at this test's copy."""
+    monkeypatch.setitem(sys.modules, "jev_client", jc)
+
 RAND = "q8Zr2LmX7vKp4TnB9wYc3HdJ6sFa1Ge5"  # 32 mixed chars, high entropy
 
 
@@ -106,7 +112,7 @@ def _check(monkeypatch, claim_ans, side_ans):
                                                 ("time_sensitive", "NOT_TIME_SENSITIVE"),
                                                 ("self_contradictory", "CONSISTENT"),
                                                 ("overclaim", "HONEST"))}}
-    monkeypatch.setattr(jc, "ask", lambda state, qs: {"answers": answers})
+    monkeypatch.setattr(jc, "ask", lambda state, qs, timeout=120: {"answers": answers})
     return jc.check([("rent.md", "Late rent after the 5th: $75 penalty.")],
                     ["If rent is paid after the fifth, there's a seventy-five dollar penalty."])[2]
 

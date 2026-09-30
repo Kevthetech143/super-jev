@@ -197,6 +197,16 @@ export type JudgeRuns = {
  * outcome instead of retrying again. */
 type PinState = { pin: JudgePin; rejected: boolean };
 
+const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]', '::1'];
+/** The key goes only to the profile's own host (same scheme and host as its apiUrl) or this machine,
+ * so a URL override can never carry it to a third party. */
+export function keyMayGoTo(url: string, apiUrl: string): boolean {
+  try {
+    const want = new URL(url), mine = new URL(apiUrl);
+    return LOOPBACK.includes(want.hostname) || (want.protocol === mine.protocol && want.hostname === mine.hostname);
+  } catch { return false; }
+}
+
 export class Jev implements Evaluator {
   private key: string;
   private model: string;
@@ -204,16 +214,16 @@ export class Jev implements Evaluator {
   private profile: JudgeProfile;
   constructor(options: { apiKey?: string; model?: string; fetch?: typeof fetch; profile?: JudgeProfile } = {}) {
     this.profile = options.profile ?? JUDGE_PROFILE;
-    this.key = options.apiKey ?? process.env[this.profile.keyEnv] ?? '';
-    if (!this.key) throw new NoKey(`Set ${this.profile.keyEnv} to use live Jev`, `${this.profile.keyEnv} is not set`);
+    this.key = options.apiKey ?? (this.profile.keyRequired ? process.env[this.profile.keyEnv] : undefined) ?? '';
+    if (!this.key && this.profile.keyRequired) throw new NoKey(`Set ${this.profile.keyEnv} to use live ${this.profile.judgeName}`, `${this.profile.keyEnv} is not set`);
     this.model = options.model ?? this.profile.model;
     this.transport = options.fetch ?? fetch;
   }
-  /** The typed error for a non-2xx answer. The message stays `Jev HTTP <status>`. */
+  /** The typed error for a non-2xx answer. The message is `<judge name> HTTP <status>` (`Jev HTTP <status>` for Jev). */
   private httpError(status: number, body = ''): Error {
-    const message = `Jev HTTP ${status}`;
+    const message = `${this.profile.judgeName} HTTP ${status}`;
     if (this.profile.overloadedStatuses.includes(status)) return new Overloaded(message);
-    if (status === 401) return new AuthRejected(message, `${message} (TypeSafe rejected the API key)`);
+    if (status === 401) return new AuthRejected(message, `${message} (${this.profile.vendor} rejected the API key)`);
     // Only a body that clearly says "too large" is TooBig; a bare 400 is a bad request, not split-retried.
     if (status === this.profile.tooBigStatus && /too (large|long|big)|context (length|window)|token limit|maximum context|exceeds the|payload too/i.test(body)) return new TooBig(message);
     return new BadReply(message);
@@ -221,18 +231,32 @@ export class Jev implements Evaluator {
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
     const payload = { model: this.model, ...pin, ...request };
     // The one choke point for every TypeSafe send: scan the whole body first.
-    if (payloadHasSecret(payload)) throw new SecretBlocked('Jev request contains a secret; not sent', 'request contains a secret; not sent');
+    if (payloadHasSecret(payload)) throw new SecretBlocked(`${this.profile.judgeName} request contains a secret; not sent`, 'request contains a secret; not sent');
     try {
-      return await this.transport(this.profile.apiUrl, {
+      const url = (this.profile.apiUrlEnv ? process.env[this.profile.apiUrlEnv] : undefined) || this.profile.apiUrl;
+      if (this.key && !keyMayGoTo(url, this.profile.apiUrl)) {
+        throw new AuthRejected(`${this.profile.judgeName} URL override points at another host`, `${this.profile.apiUrlEnv} points at a host other than this judge's own; the API key is never sent there, so nothing was sent`);
+      }
+      return await this.transport(url, {
         method: 'POST', signal,
-        headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+        headers: { ...(this.key ? { Authorization: `Bearer ${this.key}` } : {}), 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
     } catch (error) {
       // fetch reports a network failure as a TypeError; an abort is passed through untouched.
-      if (error instanceof TypeError) throw new Unreachable(error.message, 'could not reach TypeSafe (network)');
+      if (error instanceof TypeError) throw new Unreachable(error.message, `could not reach ${this.profile.vendor} (network)`);
       throw error;
     }
+  }
+  /** A judge whose confidence lives in another reply field (profile.confidenceField) is read through it. */
+  private readConfidenceField(result: Evaluation): Evaluation {
+    const field = this.profile.confidenceField;
+    if (field === 'confidence' || !result || typeof result.answers !== 'object' || !result.answers) return result;
+    const answers = Object.fromEntries(Object.entries(result.answers).map(([id, a]) => {
+      const v = (a as unknown as Record<string, unknown>)?.[field];
+      return [id, typeof v === 'number' ? { ...a, confidence: v } : a];
+    }));
+    return { ...result, answers } as Evaluation;
   }
   private async _peekBody(response: Response): Promise<string> {
     try { return await response.text(); } catch { return ''; }
@@ -252,7 +276,7 @@ export class Jev implements Evaluator {
       // so the remaining runs share the outcome (one retry, not N).
       const bodyText = await this._peekBody(response);
       state.rejected = true;
-      pinRejection = `Jev HTTP ${response.status}${bodyText ? `: ${bodyText}` : ''}`;
+      pinRejection = `${this.profile.judgeName} HTTP ${response.status}${bodyText ? `: ${bodyText}` : ''}`;
       response = await this._post(request, signal, {});
       if (response.ok) {
         // The ledger note fires only on the success path: a failed retry
@@ -267,7 +291,9 @@ export class Jev implements Evaluator {
       }
       throw failure;
     }
-    const result = await response.json() as Evaluation;
+    const result = this.readConfidenceField(await response.json() as Evaluation);
+    // A judge that cut the input to fit its window has not read it all: no verdict (Python twin: jev_client.ask).
+    if ((result as { usage?: { truncated?: unknown } } | undefined)?.usage?.truncated) throw new TooBig('the judge cut the input to fit its window', 'the judge cut the input to fit its window -- split the file; it is never truncated');
     // The validated copy is what the caller gets; the parsed reply is not touched.
     return validateEvaluation(request, result);
   }
