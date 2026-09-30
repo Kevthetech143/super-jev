@@ -4,8 +4,9 @@
  * (see judge-profile.ts). Errors are typed (judge-errors.ts); any error means no verdict. */
 import type { Evaluator, Request, Evaluation } from './types.ts';
 import { JUDGE_PROFILE, type JudgeProfile } from './judge-profile.ts';
-import { JudgeError, NoKey, Overloaded } from './judge-errors.ts';
+import { JudgeError, NoKey, Overloaded, SecretBlocked } from './judge-errors.ts';
 import { Jev } from './jev.ts';
+import { payloadHasSecret } from './secret-scan.ts';
 
 export { JudgeError, NoKey, AuthRejected, Unreachable, Overloaded, BadReply, TooBig, SecretBlocked } from './judge-errors.ts';
 
@@ -33,7 +34,17 @@ const IMPLEMENTATIONS: Record<string, (options: { apiKey?: string; model?: strin
 export function getJudge(options: { apiKey?: string; model?: string; fetch?: typeof fetch } = {}): Evaluator {
   const make = IMPLEMENTATIONS[JUDGE_PROFILE.kind];
   if (!make) throw new JudgeError('bad-reply', `no implementation for judge kind ${JSON.stringify(JUDGE_PROFILE.kind)}`);
-  return make(options);
+  return guarded(make(options));
+}
+
+/** The door's own secret scan: no adapter is handed a request that holds a secret. */
+export function guarded(inner: Evaluator): Evaluator {
+  return {
+    evaluate(request, signal) {
+      if (payloadHasSecret(request)) throw new SecretBlocked('the request contains a secret; not sent', 'request contains a secret; not sent');
+      return inner.evaluate(request, signal);
+    }
+  };
 }
 
 /** The one retry rule: an Overloaded answer is retried, profile.retryAttempts in all, the first wait

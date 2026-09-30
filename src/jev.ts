@@ -210,11 +210,12 @@ export class Jev implements Evaluator {
     this.transport = options.fetch ?? fetch;
   }
   /** The typed error for a non-2xx answer. The message stays `Jev HTTP <status>`. */
-  private httpError(status: number): Error {
+  private httpError(status: number, body = ''): Error {
     const message = `Jev HTTP ${status}`;
     if (this.profile.overloadedStatuses.includes(status)) return new Overloaded(message);
     if (status === 401) return new AuthRejected(message, `${message} (TypeSafe rejected the API key)`);
-    if (status === this.profile.tooBigStatus) return new TooBig(message);
+    // Only a body that clearly says "too large" is TooBig; a bare 400 is a bad request, not split-retried.
+    if (status === this.profile.tooBigStatus && /too (large|long|big)|context (length|window)|token limit|maximum context|exceeds the|payload too/i.test(body)) return new TooBig(message);
     return new BadReply(message);
   }
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
@@ -260,7 +261,7 @@ export class Jev implements Evaluator {
       }
     }
     if (!response.ok) {
-      const failure = this.httpError(response.status);
+      const failure = this.httpError(response.status, await this._peekBody(response));
       if (pinRejection !== null) {
         throw new (failure.constructor as new (m: string, r?: string) => Error)(`pin rejected: ${pinRejection}; unpinned retry: ${failure.message}`, (failure as { reason: string }).reason);
       }

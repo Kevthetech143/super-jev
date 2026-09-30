@@ -220,3 +220,49 @@ def test_e_only_the_jev_implementation_names_the_vendors_key_or_endpoint():
             if needle in text:
                 bad.append(f"{f.relative_to(REPO)}: {needle}")
     assert not bad, bad
+
+
+# ------------------------------------------------------------------ door hardening
+def test_door_scans_secrets_before_any_adapter(monkeypatch):
+    calls = []
+
+    class Fake:
+        @staticmethod
+        def ask(state, questions, timeout=120):
+            calls.append((state, questions))
+            return {"answers": {}}
+    monkeypatch.setattr(judges, "_impl", lambda: Fake)
+    q = {"c1": {"type": "choice", "instructions": "Is it?", "criteria": {"YES": "y", "NO": "n"}}}
+    with pytest.raises(errors.SecretBlocked):
+        judges.ask("def f(): pass " + PW, q)
+    q2 = {"c1": {"type": "choice", "instructions": "Is it? " + PW, "criteria": {"YES": "y"}}}
+    with pytest.raises(errors.SecretBlocked):
+        judges.ask("def f(): pass", q2)
+    assert calls == []
+    judges.ask("def f(): pass", q)
+    assert len(calls) == 1
+
+
+def test_judge_names_are_case_sensitive(monkeypatch):
+    monkeypatch.delenv("SUPERJEV_JUDGE", raising=False)
+    with pytest.raises(SystemExit):
+        judges.get_judge("Typesafe-JEV")
+    assert judges.get_judge("typesafe-jev").name == "typesafe-jev"
+
+
+def _http400(body):
+    return lambda *a: (_ for _ in ()).throw(
+        urllib.error.HTTPError("http://x", 400, "err", {}, io.BytesIO(body)))
+
+
+@pytest.mark.parametrize("body,kind", [(b'{"error":"input exceeds the context length"}', errors.TooBig),
+                                       (b'{"error":"questions must be a list"}', errors.BadReply),
+                                       (b"", errors.BadReply)])
+def test_http_400_is_toobig_only_when_the_body_says_so(body, kind, monkeypatch):
+    jc = importlib.import_module("jev_client")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
+    monkeypatch.setattr(jc, "transport", _http400(body))
+    q = {"c1": {"type": "choice", "instructions": "Is it?", "criteria": {"YES": "y", "NO": "n"}}}
+    with pytest.raises(kind) as e:
+        judges.ask("def f(): pass", q)
+    assert type(e.value) is kind

@@ -107,6 +107,12 @@ def _impl():
 def ask(state, questions, timeout=120):
     """One judge call for every question: {answers, model, chunks, input_tokens, latency_ms}.
     Raises a typed JudgeError on anything short of a usable answer; that is no verdict."""
+    # The door scans for every judge, so no adapter can be handed a secret. An adapter may scan again.
+    if str(_SKILL_DIR) not in sys.path:
+        sys.path.insert(0, str(_SKILL_DIR))
+    from prepare_bulk import payload_has_secret            # noqa: PLC0415
+    if payload_has_secret(state) or payload_has_secret(questions):
+        raise SecretBlocked("the request contains a secret; not sent")
     return _impl().ask(state, questions, timeout=timeout)
 
 
@@ -290,7 +296,7 @@ def get_judge(backend=None, **kwargs):
     An unrecognised name stops the run with one line: a typo must not quietly leave
     a draft unjudged, or judged by a different judge than the one asked for.
     """
-    want = (backend or os.environ.get(JUDGE_ENV) or "").strip().lower()
+    want = (backend or os.environ.get(JUDGE_ENV) or "").strip()
     try:
         prof = judge_profile.load(want or None)        # raises on an unknown name
     except ValueError as e:

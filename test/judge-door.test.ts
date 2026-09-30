@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { Jev } from '../src/jev.ts';
-import { getJudge, keyEnv, keyPresent, requireKey, retryOverloaded } from '../src/judge.ts';
+import { getJudge, guarded, keyEnv, keyPresent, requireKey, retryOverloaded } from '../src/judge.ts';
 import { JUDGE_PROFILE, loadJudgeProfile } from '../src/judge-profile.ts';
 import { BatchingEvaluator } from '../src/enhance/coalesce.ts';
 import { providerFailureReason } from '../src/enhance/navigation.ts';
@@ -117,4 +117,22 @@ test('(d) the key check comes from the judge, with a NoKey when none is set', ()
   assert.throws(() => requireKey('go', m => new RangeError(m), {}), /^RangeError: Set TYPESAFE_API_KEY to go$/);
   assert.doesNotThrow(() => requireKey('go', undefined, { TYPESAFE_API_KEY: 'k' }));
   assert.throws(() => new Jev({ fetch: async () => new Response('') , apiKey: '' }), NoKey);
+});
+
+test('(door) the door scans for every judge: a fake adapter never receives a secret', async () => {
+  const seen: unknown[] = [];
+  const door = guarded({ async evaluate(r) { seen.push(r); return { model: 'm', answers: {} } as any; } });
+  const secret = 'password=' + 'hunter2' + 'hunter2';
+  await assert.rejects(async () => door.evaluate({ state: 'code ' + secret, questions: { q: { type: 'noul', instructions: 'i' } } }, signal()), SecretBlocked);
+  await assert.rejects(async () => door.evaluate({ state: 's', questions: { q: { type: 'noul', instructions: 'i ' + secret } } }, signal()), SecretBlocked);
+  assert.equal(seen.length, 0);
+  await door.evaluate({ state: 's', questions: { q: { type: 'noul', instructions: 'i' } } }, signal());
+  assert.equal(seen.length, 1);
+});
+
+test('(door) HTTP 400 is TooBig only when the body says the input is too large', async () => {
+  const req = { state: 's', questions: { q: { type: 'noul', instructions: 'i' } } } as any;
+  const reply = (body: string): typeof fetch => async () => new Response(body, { status: 400 });
+  await assert.rejects(new Jev({ apiKey: 'k', fetch: reply('input exceeds the context length') }).evaluate(req, signal()), TooBig);
+  await assert.rejects(new Jev({ apiKey: 'k', fetch: reply('questions must be a list') }).evaluate(req, signal()), BadReply);
 });
