@@ -93,7 +93,7 @@ def test_a_failed_recipe_replay_starts_the_cooldown(tmp_path, monkeypatch):
         return {"status": "error", "reason": "secret-held"}
     assert ah.reconnect_recipe("p", "agent", memory=memory) == "failed"
     n = len(seen)
-    assert ah.reconnect_recipe("p", "agent", memory=memory) == "cooldown"
+    assert ah.reconnect_recipe("p", "agent", memory=memory) == "held"  # a held file: not retried
     assert seen[n:] == ["recipe"]  # the second look read the recipe and went no further
 
 
