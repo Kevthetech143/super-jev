@@ -110,6 +110,20 @@ def _http_post(url, body, headers, timeout):
 transport = _http_post
 
 
+_TOO_BIG_WORDS = ("too large", "too long", "too big", "context length", "context window",
+                  "token limit", "maximum context", "exceeds the", "payload too")
+
+
+def _says_too_big(err):
+    """True only when the error body clearly says the input was over the limit. The local
+    size check already raised TooBig before sending, so a bare 400 is a bad request."""
+    try:
+        body = err.read().decode("utf-8", "replace").lower()
+    except Exception:
+        return False
+    return any(w in body for w in _TOO_BIG_WORDS)
+
+
 def ask(state, questions, timeout=120):
     """One Jev call for every question. Returns answers plus model/usage metadata.
     Every failure is a typed judges.errors error: no verdict, never a pass."""
@@ -139,7 +153,7 @@ def ask(state, questions, timeout=120):
                 raise Overloaded(f"TypeSafe returned HTTP {e.code}") from None
             if e.code == 401:
                 raise AuthRejected("401 -- TypeSafe rejected the API key") from None
-            if e.code == PROFILE.too_big_status:
+            if e.code == PROFILE.too_big_status and _says_too_big(e):
                 raise TooBig(f"TypeSafe returned HTTP {e.code}") from None
             raise BadReply(f"TypeSafe returned HTTP {e.code}") from None
         except ValueError as e:
