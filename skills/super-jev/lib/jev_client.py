@@ -36,6 +36,8 @@ from judges.errors import (JudgeError, AuthRejected, BadReply, Overloaded, Secre
                            TooBig, Unreachable)
 
 API_URL = PROFILE.api_url
+URL_ENV = PROFILE.api_url_env
+CONFIDENCE_FIELD = PROFILE.confidence_field
 MODEL = PROFILE.model
 # The judge's input ceiling (the profile's window) covers the
 # state plus the longest question. A character cap sized for prose let number-dense
@@ -140,9 +142,11 @@ def ask(state, questions, timeout=120):
                      "it is never truncated")
     body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
     # The TypeSafe edge rejects the default "Python-urllib" user agent with 403.
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+    headers = {"Content-Type": "application/json",
                "User-Agent": "super-jev (+https://github.com/Kevthetech143/super-jev)"}
-    url = os.environ.get("SUPERJEV_JEV_URL", API_URL)
+    if key:   # a keyless judge (key_required false in its profile) is sent no Authorization
+        headers = {"Authorization": f"Bearer {key}", **headers}
+    url = (os.environ.get(URL_ENV) if URL_ENV else None) or API_URL
     t0 = time.monotonic()
 
     def send():
@@ -164,6 +168,9 @@ def ask(state, questions, timeout=120):
     data = judges.with_retry(send)
     if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
         raise BadReply("TypeSafe reply had no answers")
+    if (data.get("usage") or {}).get("truncated"):
+        # A judge that cut the input to fit its window (Laya does) has not read it all: no verdict.
+        raise TooBig("the judge cut the input to fit its window -- split the file; it is never truncated")
     return {"answers": data["answers"], "model": data.get("model"), "chunks": 1,
             "input_tokens": (data.get("usage") or {}).get("input_tokens", 0),
             "latency_ms": round((time.monotonic() - t0) * 1000)}
@@ -202,7 +209,7 @@ def row(key, answer, subject="", side=False):
     answer = answer if isinstance(answer, dict) else {}
     verdict = answer.get("choice") if isinstance(answer.get("choice"), str) else "NO_ANSWER"
     try:
-        conf = float(answer.get("confidence", 0.0))
+        conf = float(answer.get(CONFIDENCE_FIELD, 0.0))
     except (TypeError, ValueError):
         conf = 0.0
     return {"key": key, "subject": subject, "verdict": verdict, "confidence": conf,
@@ -261,11 +268,12 @@ def check(evidence, claims, draft=""):
     questions = questions_for(claims)
     tail = f"\n\nDRAFT:\n{draft.strip()}"
     room = MAX_INPUT_TOKENS - max(estimate_tokens(q) for q in questions.values()) - estimate_tokens(tail) - 10
-    if room < 1000:
+    if room < min(1000, MAX_INPUT_TOKENS // 4):   # 1000 for Jev; a small-window judge gets a proportional floor
         raise TooBig("the draft or a claim alone is too long for one call -- shorten it")
     parts, meta = [], {"model": None, "chunks": 0, "input_tokens": 0, "latency_ms": 0}
     for group in evidence_parts(evidence, room):
-        res = ask("EVIDENCE:\n" + "\n\n".join(group) + tail, questions)
+        # through the door, so its secret scan covers this path for every judge
+        res = judges.ask("EVIDENCE:\n" + "\n\n".join(group) + tail, questions)
         meta.update(model=meta["model"] or res.get("model"), chunks=meta["chunks"] + 1,
                     input_tokens=meta["input_tokens"] + (res.get("input_tokens") or 0),
                     latency_ms=meta["latency_ms"] + (res.get("latency_ms") or 0))
