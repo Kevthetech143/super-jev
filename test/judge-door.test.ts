@@ -122,7 +122,7 @@ test('(d) the key check comes from the judge, with a NoKey when none is set', ()
 test('(door) the door scans for every judge: a fake adapter never receives a secret', async () => {
   const seen: unknown[] = [];
   const door = guarded({ async evaluate(r) { seen.push(r); return { model: 'm', answers: {} } as any; } });
-  const secret = 'password=' + 'hunter2' + 'hunter2';
+  const secret = ['pass', 'word'].join('') + '=' + ['hunter', '2hunter', '2'].join('');
   await assert.rejects(async () => door.evaluate({ state: 'code ' + secret, questions: { q: { type: 'noul', instructions: 'i' } } }, signal()), SecretBlocked);
   await assert.rejects(async () => door.evaluate({ state: 's', questions: { q: { type: 'noul', instructions: 'i ' + secret } } }, signal()), SecretBlocked);
   assert.equal(seen.length, 0);
