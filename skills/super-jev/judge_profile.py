@@ -62,6 +62,8 @@ class JudgeProfile:
     key_required: bool = True
     #: the reply field the confidence line reads; the pass line is only meaningful for this field
     confidence_field: str = "confidence"
+    #: False until the calibration numbers are measured on this judge: it may answer, never save or approve
+    calibrated: bool = True
 
     @property
     def input_cap_tokens(self):
@@ -130,6 +132,10 @@ def load(name=None, path=None):
         if not isinstance(p["key_required"], bool):
             raise SystemExit(f"super-jev: cannot read the judge limits table {Path(path).name}: key_required must be true or false")
         opt["key_required"] = p["key_required"]
+    if "calibrated" in p:
+        if not isinstance(p["calibrated"], bool):
+            raise SystemExit(f"super-jev: cannot read the judge limits table {Path(path).name}: calibrated must be true or false")
+        opt["calibrated"] = p["calibrated"]
     if "confidence_field" in p:
         opt["confidence_field"] = str(p["confidence_field"])
     return JudgeProfile(name=key, **vals, **opt)

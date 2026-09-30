@@ -21,6 +21,8 @@ export type JudgeProfile = {
   apiUrlEnv: string;
   /** The reply field the confidence numbers read; the lines are only meaningful for it. */
   confidenceField: string;
+  /** False until the calibration is measured on this judge: it may answer, never save or approve. */
+  calibrated: boolean;
   apiUrl: string;
   model: string;
   windowTokens: number;
@@ -56,7 +58,7 @@ export type JudgeProfile = {
 };
 
 type Raw = {
-  kind: string; key_env: string; key_required?: boolean; api_url_env?: string; confidence_field?: string; aliases?: string[]; api_url: string; model: string;
+  kind: string; key_env: string; key_required?: boolean; api_url_env?: string; confidence_field?: string; calibrated?: boolean; aliases?: string[]; api_url: string; model: string;
   window_tokens: number; max_questions_per_call: number; input_usd_per_mtok: number; max_parts: number;
   file_ceiling_bytes: number; gate_window_tokens: number; bytes_per_token: number;
   input_cap_headroom: number; call_headroom: number; overloaded_statuses: number[]; retry_attempts: number;
@@ -79,7 +81,7 @@ export function loadJudgeProfile(name?: string, file: URL | string = PROFILES_UR
   const inputCapTokens = p.window_tokens - p.input_cap_headroom;
   return {
     name: key, kind: p.kind, keyEnv: p.key_env, keyRequired: p.key_required ?? true,
-    apiUrlEnv: p.api_url_env ?? '', confidenceField: p.confidence_field ?? 'confidence', apiUrl: p.api_url, model: p.model, windowTokens: p.window_tokens,
+    apiUrlEnv: p.api_url_env ?? '', confidenceField: p.confidence_field ?? 'confidence', calibrated: p.calibrated ?? true, apiUrl: p.api_url, model: p.model, windowTokens: p.window_tokens,
     maxQuestionsPerCall: p.max_questions_per_call, inputUsdPerMtok: p.input_usd_per_mtok, maxParts: p.max_parts,
     fileCeilingBytes: p.file_ceiling_bytes, gateWindowTokens: p.gate_window_tokens, bytesPerToken: p.bytes_per_token,
     inputCapHeadroom: p.input_cap_headroom, callHeadroom: p.call_headroom, overloadedStatuses: [...p.overloaded_statuses],

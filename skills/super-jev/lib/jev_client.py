@@ -91,6 +91,17 @@ RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
        "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
 
+_LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def _key_may_go_to(url):
+    """The key goes only to the profile's own host (same scheme and host as its api_url) or to
+    this machine, so a URL override can never carry it to a third party."""
+    from urllib.parse import urlsplit
+    mine, want = urlsplit(API_URL), urlsplit(url)
+    return (want.hostname or "") in _LOOPBACK or (want.scheme, want.hostname) == (mine.scheme, mine.hostname)
+
+
 def _tls_context():
     """certifi's CA bundle when installed and SSL_CERT_FILE is unset (some Macs ship none)."""
     if os.environ.get("SSL_CERT_FILE"):
@@ -147,6 +158,9 @@ def ask(state, questions, timeout=120):
     if key:   # a keyless judge (key_required false in its profile) is sent no Authorization
         headers = {"Authorization": f"Bearer {key}", **headers}
     url = (os.environ.get(URL_ENV) if URL_ENV else None) or API_URL
+    if key and not _key_may_go_to(url):
+        raise AuthRejected(f"{URL_ENV} points at a host other than this judge's own; the API key is "
+                           "never sent there, so nothing was sent")
     t0 = time.monotonic()
 
     def send():

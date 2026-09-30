@@ -112,3 +112,53 @@ def test_a_server_side_cut_is_no_verdict(laya):
     laya.transport = lambda *a: _reply(truncated=True)
     with pytest.raises(errors.TooBig):
         judges.ask("s", Q)
+
+
+# -- the key goes only to the judge's own host (or this machine), never to a URL override elsewhere
+@pytest.fixture
+def keyed(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "-".join(["test", "not", "a", "key"]))
+    monkeypatch.delenv("SUPERJEV_JUDGE", raising=False)
+    monkeypatch.setattr(judge_profile, "PROFILE", judge_profile.load("typesafe-jev"))
+    spec = importlib.util.spec_from_file_location("jev_client_keyed", SKILL / "lib" / "jev_client.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setitem(sys.modules, "jev_client", mod)
+    return mod
+
+
+def _ok(url, body, headers, timeout):
+    return {"model": "m", "answers": {"c1": {"choice": "SUPPORTED", "confidence": 0.9}}}
+
+
+def test_key_is_never_sent_to_another_host(keyed, monkeypatch):
+    sent = []
+    keyed.transport = lambda *a: sent.append(a) or _ok(*a)
+    for bad in ("https://evil.example.test/v1/systemone", "http://api.typesafe.ai/v1/systemone",
+                "https://api.typesafe.ai.evil.example.test/x"):
+        monkeypatch.setenv("SUPERJEV_JEV_URL", bad)
+        with pytest.raises(errors.AuthRejected):
+            judges.ask("s", Q)
+    assert sent == []
+
+
+def test_key_still_goes_to_its_own_host_and_to_loopback(keyed, monkeypatch):
+    sent = []
+    keyed.transport = lambda url, *a: sent.append((url, a[1])) or _ok(url, *a)
+    for ok in ("https://api.typesafe.ai/other/path", "http://127.0.0.1:9/x", "http://localhost:9/x"):
+        monkeypatch.setenv("SUPERJEV_JEV_URL", ok)
+        judges.ask("s", Q)
+    assert len(sent) == 3 and all("Authorization" in h for _, h in sent)
+
+
+def test_a_keyless_judge_may_be_pointed_anywhere(laya, monkeypatch):
+    sent = []
+    laya.transport = lambda url, *a: sent.append(url) or _reply()
+    monkeypatch.setenv("SUPERJEV_LAYA_URL", "http://laya.example.test/x")
+    judges.ask("s", Q)
+    assert sent == ["http://laya.example.test/x"]
+
+
+def test_calibrated_flag_in_the_table():
+    assert judge_profile.load("typesafe-jev").calibrated is True
+    assert judge_profile.load("laya").calibrated is False
