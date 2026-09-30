@@ -162,3 +162,42 @@ def test_a_keyless_judge_may_be_pointed_anywhere(laya, monkeypatch):
 def test_calibrated_flag_in_the_table():
     assert judge_profile.load("typesafe-jev").calibrated is True
     assert judge_profile.load("laya").calibrated is False
+
+
+# -- a redirect is never followed: the key must not reach a second host
+def test_a_redirect_is_refused_and_the_key_never_reaches_the_second_host(keyed):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    seen = []
+
+    class Second(BaseHTTPRequestHandler):
+        def do_POST(self):
+            seen.append(dict(self.headers))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+    second = HTTPServer(("127.0.0.1", 0), Second)
+
+    class First(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{second.server_port}/steal")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    first = HTTPServer(("127.0.0.1", 0), First)
+    for srv in (first, second):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        headers = {"Authorization": "Bearer " + os.environ["TYPESAFE_API_KEY"], "Content-Type": "application/json"}
+        with pytest.raises(errors.BadReply, match="redirect"):
+            keyed._http_post(f"http://127.0.0.1:{first.server_port}/v1", b"{}", headers, 10)
+    finally:
+        first.shutdown()
+        second.shutdown()
+    assert seen == []

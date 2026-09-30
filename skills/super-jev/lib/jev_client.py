@@ -113,9 +113,17 @@ def _tls_context():
     return ssl.create_default_context(cafile=certifi.where())
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A judge never redirects a request: following one would carry the Authorization header along."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise BadReply(f"the judge answered with a redirect (HTTP {code}); not followed, the API key is never re-sent")
+
+
 def _http_post(url, body, headers, timeout):
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout, context=_tls_context()) as r:
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=_tls_context()))
+    with opener.open(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 
