@@ -2709,6 +2709,11 @@ def ask_evidence(principal: str, pointer: str, question: str, answer: str, path:
 
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
                   approved_by: str = None, **fields) -> int:
+    why = uncalibrated_why()  # the one place every save and approval passes through (--add included)
+    if why:
+        print(f"not saved: {why}")
+        log(sdir, "approve", question=question, pointer=pointer, result="refused-uncalibrated", approved_by=approved_by)
+        return 1
     approved_by = approved_by if approved_by is not None else f"principal:{principal}"
     evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
     res = memory({"action": "approve", "ticket": ticket_result["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
