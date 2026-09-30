@@ -197,6 +197,16 @@ export type JudgeRuns = {
  * outcome instead of retrying again. */
 type PinState = { pin: JudgePin; rejected: boolean };
 
+const LOOPBACK = ['127.0.0.1', 'localhost', '[::1]', '::1'];
+/** The key goes only to the profile's own host (same scheme and host as its apiUrl) or this machine,
+ * so a URL override can never carry it to a third party. */
+export function keyMayGoTo(url: string, apiUrl: string): boolean {
+  try {
+    const want = new URL(url), mine = new URL(apiUrl);
+    return LOOPBACK.includes(want.hostname) || (want.protocol === mine.protocol && want.hostname === mine.hostname);
+  } catch { return false; }
+}
+
 export class Jev implements Evaluator {
   private key: string;
   private model: string;
@@ -224,6 +234,9 @@ export class Jev implements Evaluator {
     if (payloadHasSecret(payload)) throw new SecretBlocked('Jev request contains a secret; not sent', 'request contains a secret; not sent');
     try {
       const url = (this.profile.apiUrlEnv ? process.env[this.profile.apiUrlEnv] : undefined) || this.profile.apiUrl;
+      if (this.key && !keyMayGoTo(url, this.profile.apiUrl)) {
+        throw new AuthRejected('Jev URL override points at another host', `${this.profile.apiUrlEnv} points at a host other than this judge's own; the API key is never sent there, so nothing was sent`);
+      }
       return await this.transport(url, {
         method: 'POST', signal,
         headers: { ...(this.key ? { Authorization: `Bearer ${this.key}` } : {}), 'Content-Type': 'application/json' },
@@ -279,6 +292,8 @@ export class Jev implements Evaluator {
       throw failure;
     }
     const result = this.readConfidenceField(await response.json() as Evaluation);
+    // A judge that cut the input to fit its window has not read it all: no verdict (Python twin: jev_client.ask).
+    if ((result as { usage?: { truncated?: unknown } } | undefined)?.usage?.truncated) throw new TooBig('the judge cut the input to fit its window', 'the judge cut the input to fit its window -- split the file; it is never truncated');
     // The validated copy is what the caller gets; the parsed reply is not touched.
     return validateEvaluation(request, result);
   }

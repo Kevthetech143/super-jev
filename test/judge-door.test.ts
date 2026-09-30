@@ -136,3 +136,30 @@ test('(door) HTTP 400 is TooBig only when the body says the input is too large',
   await assert.rejects(new Jev({ apiKey: 'k', fetch: reply('input exceeds the context length') }).evaluate(req, signal()), TooBig);
   await assert.rejects(new Jev({ apiKey: 'k', fetch: reply('questions must be a list') }).evaluate(req, signal()), BadReply);
 });
+
+test('the key is never sent to a URL override on another host; own host and loopback still work', async () => {
+  const sent: string[] = [];
+  const fake = (async (url: string) => { sent.push(String(url)); return new Response(JSON.stringify({ model: 'm', answers: {} }), { status: 200 }); }) as unknown as typeof fetch;
+  const req = { state: 's', questions: {} } as never;
+  const apiUrl = JUDGE_PROFILE.apiUrl;
+  const before = process.env[JUDGE_PROFILE.apiUrlEnv];
+  try {
+    for (const bad of ['https://evil.example.test/v1/systemone', 'https://' + new URL(apiUrl).hostname + '.evil.example.test/x']) {
+      process.env[JUDGE_PROFILE.apiUrlEnv] = bad;
+      await assert.rejects(new Jev({ apiKey: 'k', fetch: fake }).evaluate(req, signal()), AuthRejected);
+    }
+    assert.deepEqual(sent, []);
+    for (const ok of [apiUrl + '/x', 'http://127.0.0.1:9/x', 'http://localhost:9/x']) {
+      process.env[JUDGE_PROFILE.apiUrlEnv] = ok;
+      await new Jev({ apiKey: 'k', fetch: fake }).evaluate(req, signal());
+    }
+    assert.equal(sent.length, 3);
+  } finally { if (before === undefined) delete process.env[JUDGE_PROFILE.apiUrlEnv]; else process.env[JUDGE_PROFILE.apiUrlEnv] = before; }
+});
+
+test('a reply that says the judge cut the input is TooBig, no verdict', async () => {
+  const q = { c1: { type: 'choice', instructions: 'i', criteria: { A: 'a', B: 'b' } } };
+  const body = { model: 'm', answers: { c1: { type: 'choice', choice: 'A', confidence: 0.9, probabilities: { A: 0.9, B: 0.1 } } }, usage: { truncated: true } };
+  const fake = (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
+  await assert.rejects(new Jev({ apiKey: 'k', fetch: fake }).evaluate({ state: 's', questions: q } as never, signal()), TooBig);
+});
