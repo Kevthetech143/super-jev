@@ -201,3 +201,20 @@ def test_a_redirect_is_refused_and_the_key_never_reaches_the_second_host(keyed):
         first.shutdown()
         second.shutdown()
     assert seen == []
+
+
+def test_error_text_names_the_active_judge(laya):
+    import urllib.error
+    import io
+
+    def boom(*a):
+        raise urllib.error.HTTPError("http://x", 503, "err", {}, io.BytesIO(b""))
+    laya.transport = boom
+    laya.time.sleep = lambda s: None
+    with pytest.raises(errors.BadReply) as e:
+        judges.ask("s", Q)
+    assert "Laya" in str(e.value) and "TypeSafe" not in str(e.value)
+    laya.transport = lambda *a: {"answers": "nope"}
+    with pytest.raises(errors.BadReply, match="Laya reply"):
+        judges.ask("s", Q)
+    assert judge_profile.load("typesafe-jev").vendor == "TypeSafe"

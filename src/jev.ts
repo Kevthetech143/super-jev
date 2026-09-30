@@ -215,15 +215,15 @@ export class Jev implements Evaluator {
   constructor(options: { apiKey?: string; model?: string; fetch?: typeof fetch; profile?: JudgeProfile } = {}) {
     this.profile = options.profile ?? JUDGE_PROFILE;
     this.key = options.apiKey ?? (this.profile.keyRequired ? process.env[this.profile.keyEnv] : undefined) ?? '';
-    if (!this.key && this.profile.keyRequired) throw new NoKey(`Set ${this.profile.keyEnv} to use live Jev`, `${this.profile.keyEnv} is not set`);
+    if (!this.key && this.profile.keyRequired) throw new NoKey(`Set ${this.profile.keyEnv} to use live ${this.profile.judgeName}`, `${this.profile.keyEnv} is not set`);
     this.model = options.model ?? this.profile.model;
     this.transport = options.fetch ?? fetch;
   }
-  /** The typed error for a non-2xx answer. The message stays `Jev HTTP <status>`. */
+  /** The typed error for a non-2xx answer. The message is `<judge name> HTTP <status>` (`Jev HTTP <status>` for Jev). */
   private httpError(status: number, body = ''): Error {
-    const message = `Jev HTTP ${status}`;
+    const message = `${this.profile.judgeName} HTTP ${status}`;
     if (this.profile.overloadedStatuses.includes(status)) return new Overloaded(message);
-    if (status === 401) return new AuthRejected(message, `${message} (TypeSafe rejected the API key)`);
+    if (status === 401) return new AuthRejected(message, `${message} (${this.profile.vendor} rejected the API key)`);
     // Only a body that clearly says "too large" is TooBig; a bare 400 is a bad request, not split-retried.
     if (status === this.profile.tooBigStatus && /too (large|long|big)|context (length|window)|token limit|maximum context|exceeds the|payload too/i.test(body)) return new TooBig(message);
     return new BadReply(message);
@@ -231,11 +231,11 @@ export class Jev implements Evaluator {
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
     const payload = { model: this.model, ...pin, ...request };
     // The one choke point for every TypeSafe send: scan the whole body first.
-    if (payloadHasSecret(payload)) throw new SecretBlocked('Jev request contains a secret; not sent', 'request contains a secret; not sent');
+    if (payloadHasSecret(payload)) throw new SecretBlocked(`${this.profile.judgeName} request contains a secret; not sent`, 'request contains a secret; not sent');
     try {
       const url = (this.profile.apiUrlEnv ? process.env[this.profile.apiUrlEnv] : undefined) || this.profile.apiUrl;
       if (this.key && !keyMayGoTo(url, this.profile.apiUrl)) {
-        throw new AuthRejected('Jev URL override points at another host', `${this.profile.apiUrlEnv} points at a host other than this judge's own; the API key is never sent there, so nothing was sent`);
+        throw new AuthRejected(`${this.profile.judgeName} URL override points at another host`, `${this.profile.apiUrlEnv} points at a host other than this judge's own; the API key is never sent there, so nothing was sent`);
       }
       return await this.transport(url, {
         method: 'POST', signal,
@@ -244,7 +244,7 @@ export class Jev implements Evaluator {
       });
     } catch (error) {
       // fetch reports a network failure as a TypeError; an abort is passed through untouched.
-      if (error instanceof TypeError) throw new Unreachable(error.message, 'could not reach TypeSafe (network)');
+      if (error instanceof TypeError) throw new Unreachable(error.message, `could not reach ${this.profile.vendor} (network)`);
       throw error;
     }
   }
@@ -276,7 +276,7 @@ export class Jev implements Evaluator {
       // so the remaining runs share the outcome (one retry, not N).
       const bodyText = await this._peekBody(response);
       state.rejected = true;
-      pinRejection = `Jev HTTP ${response.status}${bodyText ? `: ${bodyText}` : ''}`;
+      pinRejection = `${this.profile.judgeName} HTTP ${response.status}${bodyText ? `: ${bodyText}` : ''}`;
       response = await this._post(request, signal, {});
       if (response.ok) {
         // The ledger note fires only on the success path: a failed retry
