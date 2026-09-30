@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from service import Service, valid_principal
+from service import Service, invalidate_registry, valid_principal
 from cli import has_secret
 from reviewed_view import derive
 import prepare_bulk
@@ -42,6 +42,7 @@ def _atomic(path, data):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
+        invalidate_registry(path)
     finally:
         if os.path.exists(name):
             os.unlink(name)
