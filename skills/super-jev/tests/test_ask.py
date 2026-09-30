@@ -1032,3 +1032,31 @@ def test_a_malformed_principal_is_refused_before_any_state_is_touched(monkeypatc
         assert ask.main() == 2
         assert "invalid --principal" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == []
+
+
+def test_add_under_an_uncalibrated_judge_saves_nothing(tmp_path, monkeypatch, capsys):
+    """--add reaches send_approval, the one place every save passes through; it refuses there."""
+    import judge_profile
+    monkeypatch.setattr(judge_profile, "PROFILE", judge_profile.load("laya"))
+    src_file = tmp_path / "src.txt"
+    src_file.write_text("hello source\n")
+    approvals = []
+
+    def fake_memory(req):
+        if req["action"] == "approve":
+            approvals.append(req)
+            return {"status": "saved"}
+        if req["action"] == "panel":
+            return {"pointers": []}
+        if req["action"] == "connect" and not req.get("reviewed"):
+            return {"status": "preparation-required", "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
+        if req["action"] == "connect":
+            return {"status": "registered", "sources": [{"id": "file:abc123", "originalPath": req["sources"][0]["path"]}]}
+        if req["action"] == "search":
+            return {"status": "ready", "approvalTicket": "tix", "passages": [{"sourceId": "s", "reviewedText": "answer text"}]}
+        return {"status": "ok"}
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    ask.add_manual("alice", "which pointers hold the example agent brain", "The answer body.", str(src_file), tmp_path)
+    assert approvals == [] and "uncalibrated" in capsys.readouterr().out
+    assert not (tmp_path / "approvals.jsonl").exists()

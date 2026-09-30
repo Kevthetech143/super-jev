@@ -367,3 +367,54 @@ def test_an_older_single_file_save_prints_saved_not_a_score(world):
     path.write_text(json.dumps(rec) + "\n")
     out, _ = ask_once(world)
     assert f"saved  {world['note']}  [acme]" in out and "0.00" not in out
+
+
+# -- a judge whose lines are not measured never saves or approves; wins are counted per judge
+def _use_judge(monkeypatch, name):
+    import judge_profile
+    monkeypatch.setattr(judge_profile, "PROFILE", judge_profile.load(name))
+
+
+def _lines(path):
+    return [json.loads(l) for l in path.read_text().splitlines()]
+
+
+def test_each_lookup_records_which_judge_answered(world):
+    ask_once(world)
+    look = [r for r in _lines(world["sdir"] / "lookups.jsonl") if r["kind"] == "lookup"]
+    assert look and all(r["judge"] == "typesafe-jev" for r in look)
+
+
+def test_uncalibrated_judge_never_autosaves_and_says_why(world, monkeypatch):
+    _use_judge(monkeypatch, "laya")
+    ask_once(world)
+    out, _ = ask_once(world)
+    ask_once(world)
+    assert not world["cache"] and "Saved for next time" not in out
+    assert "uncalibrated" in out and "laya" in out
+
+
+def test_uncalibrated_judge_never_approves(world, monkeypatch, capsys):
+    ask_once(world)
+    _use_judge(monkeypatch, "laya")
+    assert ask.approve("ann", Q, "30 days", world["sdir"]) == 1
+    assert "uncalibrated" in capsys.readouterr().out and not world["cache"]
+
+
+def test_save_answer_itself_refuses_when_uncalibrated(world, monkeypatch, capsys):
+    ask_once(world)
+    _use_judge(monkeypatch, "laya")
+    assert ask.save_answer("ann", Q, "30 days", world["sdir"], approved_by="x") == 1
+    assert "uncalibrated" in capsys.readouterr().out and not world["cache"]
+
+
+def test_wins_by_another_judge_do_not_count_and_the_saved_record_names_the_judge(world, monkeypatch):
+    _use_judge(monkeypatch, "laya")
+    ask_once(world); ask_once(world)            # two wins, by the uncalibrated judge
+    _use_judge(monkeypatch, "typesafe-jev")
+    ask_once(world)                             # its first win: not enough
+    assert not world["cache"]
+    ask_once(world)                             # its second: saved
+    assert world["cache"]
+    rec = _lines(world["sdir"] / "approvals.jsonl")[-1]
+    assert rec["judge"] == "typesafe-jev"

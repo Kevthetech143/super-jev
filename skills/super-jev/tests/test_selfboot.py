@@ -32,6 +32,12 @@ def load(name, path):
 
 
 jev = load("jev_client_under_test", SKILL / "lib" / "jev_client.py")
+
+
+@pytest.fixture(autouse=True)
+def _door_reaches_this_copy(monkeypatch):
+    """check() goes through judges.ask, which reaches the shared jev_client; point it at this test's copy."""
+    monkeypatch.setitem(sys.modules, "jev_client", jev)
 setup = load("setup_under_test", SKILL / "setup.py")
 sys.path.insert(0, str(SKILL))
 ask = load("ask_under_test", SKILL / "ask.py")

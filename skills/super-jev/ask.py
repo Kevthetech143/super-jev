@@ -174,6 +174,7 @@ from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, 
                           payload_has_secret, path_has_secret, redact_path_secrets)
 import auto_heal  # noqa: E402
 import judges  # noqa: E402
+import judge_profile  # noqa: E402
 import refresh_changed  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
@@ -214,6 +215,15 @@ def memory(req: dict) -> dict:
         return json.loads(r.stdout)
     except Exception:
         return {"status": "error", "raw": (r.stdout + r.stderr)[-300:]}
+
+def uncalibrated_why():
+    """Why nothing may be saved or approved under the active judge, or None. A judge whose lines
+    were not measured may answer, but its answers never become saved ones."""
+    prof = judges.profile()
+    if prof.calibrated:
+        return None
+    return (f"the {prof.name} judge is uncalibrated (its pass line is not measured), so it never saves "
+            "or approves; use the calibrated judge to save")
 
 def log(sdir: Path, kind: str, **fields) -> None:
     sdir.mkdir(parents=True, exist_ok=True)
@@ -2264,7 +2274,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     incomplete = bool(failed or stale_ptrs)  # a set was not searched: a better file may sit in it
     win = None if replay or _CLAIM["text"] or incomplete else win_of(
         top, possible, notes, skills, (_STAGE.get("listwise") or {}).get("leans_none"))
-    log(sdir, "lookup", question=question, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
+    log(sdir, "lookup", question=question, judge=judges.profile().name, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
         **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
@@ -2585,7 +2595,8 @@ def record_approver(sdir: Path, question: str, approved_by, **fields) -> None:
     """Who approved the saved answer for this exact question; the last line wins.
     approved_by None means un-saved."""
     sdir.mkdir(parents=True, exist_ok=True)
-    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "question": norm_q(question), "approved_by": approved_by, **fields}
+    entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "question": norm_q(question), "approved_by": approved_by,
+             "judge": judges.profile().name, **fields}
     (sdir / "approvals.jsonl").open("a").write(json.dumps(entry) + "\n")
 
 def saved_record(sdir: Path, question: str):
@@ -2698,6 +2709,11 @@ def ask_evidence(principal: str, pointer: str, question: str, answer: str, path:
 
 def send_approval(principal: str, question: str, answer: str, pointer: str, ticket_result: dict, sdir: Path,
                   approved_by: str = None, **fields) -> int:
+    why = uncalibrated_why()  # the one place every save and approval passes through (--add included)
+    if why:
+        print(f"not saved: {why}")
+        log(sdir, "approve", question=question, pointer=pointer, result="refused-uncalibrated", approved_by=approved_by)
+        return 1
     approved_by = approved_by if approved_by is not None else f"principal:{principal}"
     evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
     res = memory({"action": "approve", "ticket": ticket_result["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
@@ -2807,6 +2823,9 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
     top is the file row {path, pointer} the caller chose, else the last lookup's top file.
     automatic=False (a person's --approve) ignores the --no-auto switch, never the checks."""
     _LAST_WHY["why"] = None
+    why = uncalibrated_why()
+    if why:
+        return not_saved(sdir, norm_q(question), why)
     if automatic and not auto_cache_on():
         print("not saved: auto-cache is off (--no-auto or SUPERJEV_AUTO_CACHE=0); a human can still --approve")
         return 0
@@ -2875,6 +2894,7 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
     Any other outcome for the question, or a --miss, starts the count over.
     Read off lookups.jsonl; no new store."""
     key, count = norm_q(question), 0
+    me, first = judges.profile().name, judge_profile._read(judge_profile.PROFILES_PATH)[0]
     path = sdir / "lookups.jsonl"
     for line in (path.read_text().splitlines() if path.is_file() else []):
         try:
@@ -2885,6 +2905,8 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
             continue
         if rec.get("kind") == "lookup" and (rec.get("result") == "stale-source" or rec.get("partial")):
             continue  # not a win and not a loss: the withheld saved answer, or a search that missed a set
+        if rec.get("kind") == "lookup" and (rec.get("judge") or first) != me:
+            continue  # another judge's ask: it neither adds to this judge's wins nor breaks them
         if rec.get("kind") == "lookup":
             w = rec.get("win") or {}
             count = count + 1 if (w.get("path"), w.get("sha")) == (win["path"], win["sha"]) else 0
@@ -2898,6 +2920,10 @@ def autosave(principal: str, question: str, sdir: Path, win) -> None:
     already passed the content check ("does this file state the answer"), so no claim check runs
     here: the secret scan and the unchanged-file check still do."""
     if not win or not auto_cache_on() or win_count(sdir, question, win) < save_after():
+        return
+    why = uncalibrated_why()
+    if why:
+        print(f"not saved: {why}")
         return
     key = norm_q(question)
     if saved_record(sdir, key):  # reached a live search, so the saved file was withheld as stale
@@ -3082,6 +3108,10 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
 def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, file=None) -> int:
     """--approve: a person's choice of file, saved through save_answer at once (the manual way
     to meet the repeat-win threshold; same secret scan and claim check as every other save)."""
+    why = uncalibrated_why()
+    if why:
+        print(f"not saved: {why}")
+        return 1
     chosen = None
     if rank is not None or file is not None:
         # The lead picked a listed candidate by hand (any rank, possible tier included).
