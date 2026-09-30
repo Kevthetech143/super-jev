@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -15,6 +16,31 @@ from typing import Any, Callable
 SCHEMA_VERSION = "3"
 STATUSES = {"ready", "no-match", "preparation-required", "refused", "error"}
 SNAPSHOT_FRESHNESS = {'mode': 'snapshot'}
+
+
+_REGISTRY_CACHE: dict[str, tuple[tuple[int, int, int], Any]] = {}
+
+
+def invalidate_registry(path: str | Path) -> None:
+    """Drop the parsed copy of a registry file (call after writing it in-process)."""
+    _REGISTRY_CACHE.pop(str(path), None)
+
+
+def load_registry(path: str | Path) -> Any:
+    """Parsed registry JSON, re-parsed only when (size, mtime_ns, inode) changes.
+
+    The returned object is shared: callers must deepcopy anything they keep or change."""
+    key_path = str(path)
+    st = Path(path).stat()
+    key = (st.st_size, st.st_mtime_ns, st.st_ino)
+    hit = _REGISTRY_CACHE.get(key_path)
+    if hit and hit[0] == key:
+        return hit[1]
+    # Stat happens before the read: if the file changes in between, the stored key is
+    # older than the data, so the next call re-parses.
+    parsed = json.loads(Path(path).read_bytes())
+    _REGISTRY_CACHE[key_path] = (key, parsed)
+    return parsed
 
 
 def pack(value: Any) -> str:
@@ -221,7 +247,7 @@ class Service:
 
     def snapshot(self, dataset: str) -> dict[str, Any]:
         """Validate and describe the current reviewed dataset state."""
-        entry = json.loads(self.registry.read_bytes())['datasets'][dataset]
+        entry = copy.deepcopy(load_registry(self.registry)['datasets'][dataset])
         manifest = self._manifest(entry)
         for original in entry['originals']:
             if sha(original['path']) != original['sha256']:
@@ -248,7 +274,7 @@ class Service:
         pointer = json.loads(row[0])
         if principal not in pointer['principals']:
             return {'status': 'access-denied'}
-        entry = json.loads(self.registry.read_bytes())['datasets'].get(pointer['dataset']) or {}
+        entry = copy.deepcopy(load_registry(self.registry)['datasets'].get(pointer['dataset']) or {})
         recipe = entry.get('recipe')
         if not recipe and entry.get('pathConnection'):
             try:

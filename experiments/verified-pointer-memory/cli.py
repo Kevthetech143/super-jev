@@ -8,7 +8,7 @@ import shlex
 import sys
 import subprocess
 from pathlib import Path
-from service import Service
+from service import Service, load_registry
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'super-jev'))
 from prepare_bulk import has_secret, payload_has_secret  # noqa: E402
@@ -295,7 +295,7 @@ def run(request, config):
         if field not in request:
             raise ValueError(f'Missing required field: {field}')
     if action == 'panel':
-        registry = json.loads(Path(config['registry']).read_text())
+        registry = load_registry(config['registry'])  # shared, read-only here
         with service.connect() as connection:
             rows = connection.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
         pointers = []
