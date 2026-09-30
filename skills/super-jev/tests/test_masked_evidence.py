@@ -422,7 +422,7 @@ def test_pattern_only_claims_never_need_the_mask(monkeypatch):
 def test_ask_still_refuses_raw_secret_text(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
     monkeypatch.setattr(jc, "transport", lambda *a: pytest.fail("secret was sent"))
-    with pytest.raises(jc.JevError, match="contains a secret; not sent"):
+    with pytest.raises(jc.SecretBlocked, match="contains a secret; not sent"):
         jc.ask("CODE:\n" + DIFF, {"c1": {"instructions": "Is it?", "criteria": {"YES": "y"}}})
 
 

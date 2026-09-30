@@ -10,7 +10,7 @@
  */
 import { mkdir, open, readFile, stat, writeFile } from 'node:fs/promises';
 import { join, resolve, dirname } from 'node:path';
-import { Jev } from './jev.ts';
+import { getJudge, keyEnv, requireKey } from './judge.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
 import {
   DEFAULT_FETCH_MAX_INPUT_TOKENS, DEFAULT_K, DEFAULT_PREFILTER, DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN,
@@ -96,7 +96,7 @@ default; \`--no-prerules\` disables them.
                    network, no API key. Never evidence about ranking quality.
   --json           Print one JSON object to stdout and nothing else.
 
-Live mode is the default and needs TYPESAFE_API_KEY. It sends catalog text
+Live mode is the default and needs ${keyEnv()}. It sends catalog text
 to TypeSafe. Exit codes: 0 ok, 1 usage, 2 transport failure.`;
 
 const MAX_CATALOG_BYTES = 32 * 1024 * 1024;
@@ -210,7 +210,7 @@ async function main(): Promise<number> {
   if (ledgerPath && !recordId) throw new CliError('--ledger only applies with --record');
   // The key check happens before any file is read, so a run that cannot
   // possibly reach the provider fails immediately and cheaply.
-  if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run a live fetch, or use --dry-run or --stub');
+  if (!dryRun && !stub) requireKey('run a live fetch, or use --dry-run or --stub', m => new CliError(m));
 
   // Precedence: the CLI flag wins, then the env var, then the built-in
   // default. Env values are validated the same as the flag so a bad env
@@ -275,7 +275,7 @@ async function main(): Promise<number> {
 
   if (!json) console.log(formatFetchPlan(plan));
 
-  const transport: Evaluator = stub ? stubEvaluator() : new Jev();
+  const transport: Evaluator = stub ? stubEvaluator() : getJudge();
 
   // Free checks first, judge for the rest: R1 (unique multi-word trigger,
   // no negatives) can settle a request with zero judge calls; when it

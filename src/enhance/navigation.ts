@@ -1,4 +1,5 @@
 import type { Evaluator, Request } from '../types.ts';
+import { JudgeError } from '../judge-errors.ts';
 
 /** A deliberately small, data-only hierarchy for bounded source navigation. */
 export type NavigationNode = {
@@ -59,11 +60,7 @@ type Candidate = { nodeId: string; path: string[]; logTotal: number; decisions: 
 
 /** A short, content-free cause for a provider failure: HTTP status, missing key or no network. */
 export function providerFailureReason(error: unknown): string {
-  const message = error instanceof Error ? error.message : '';
-  const http = /Jev HTTP (\d{3})/.exec(message);
-  if (http) return `Jev HTTP ${http[1]}${http[1] === '401' ? ' (TypeSafe rejected the API key)' : ''}`;
-  if (message.endsWith('contains a secret; not sent')) return 'request contains a secret; not sent';
-  if (message.startsWith('Set TYPESAFE_API_KEY')) return 'TYPESAFE_API_KEY is not set';
+  if (error instanceof JudgeError) return error.reason;
   if (error instanceof TypeError) return 'could not reach TypeSafe (network)';
   return 'unknown cause';
 }

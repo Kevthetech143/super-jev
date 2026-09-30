@@ -46,7 +46,7 @@
  */
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
-import { Jev } from './jev.ts';
+import { getJudge, keyEnv, keyPresent } from './judge.ts';
 import { extractDescription } from './catalog-build-cli.ts';
 import {
   DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN,
@@ -109,7 +109,7 @@ export type SkillSearchOptions = {
   localOnly?: boolean;
   /** Injected fake transport for unit tests; the lead runs live. */
   transport?: Evaluator;
-  /** Defaults to TYPESAFE_API_KEY. Tests pass a dummy value with a fake transport. */
+  /** Defaults to the judge's key from the environment. Tests pass a dummy value with a fake transport. */
   apiKey?: string;
   /** Test-only override of the fixed CLI timeout. The CLI never sets this. */
   timeoutMs?: number;
@@ -359,12 +359,12 @@ export async function runSkillSearch(options: SkillSearchOptions): Promise<{ res
   }
   // 5. Judge path. A missing key is a clearly-marked local fallback, never
   //    a no_match and never a thrown error.
-  const apiKey = options.apiKey ?? process.env.TYPESAFE_API_KEY ?? '';
-  if (!apiKey) {
+  const apiKey = options.apiKey ?? '';
+  if (!apiKey && !keyPresent()) {
     return {
       result: {
         status: 'fallback', candidates: localTop, source: 'local', metadataSkipped: skipped, duplicateCount: duplicates,
-        usage: zeroUsage(), error: 'No TYPESAFE_API_KEY in the environment; local-only results'
+        usage: zeroUsage(), error: `No ${keyEnv()} in the environment; local-only results`
       },
       diagnostics
     };
@@ -378,7 +378,7 @@ export async function runSkillSearch(options: SkillSearchOptions): Promise<{ res
   // Hoisted so the catch path can report whatever the judge already cost.
   let usage: SkillSearchUsage = zeroUsage();
   try {
-    const transport: Evaluator = options.transport ?? new Jev({ apiKey });
+    const transport: Evaluator = options.transport ?? getJudge(apiKey ? { apiKey } : {});
     const run = await runFetch(toFetchEntries(skills), request, {
       context,
       k: JUDGE_TOP_K,
@@ -489,7 +489,7 @@ timeout, a transport error, or unusable judge answers is a "fallback" with
 local-only candidates — a service failure is never reported as no_match.
 Retrieval returns suggestions, never permission to execute.
 
-Live mode needs TYPESAFE_API_KEY. Exit codes: 0 ok (including advisory
+Live mode needs ${keyEnv()}. Exit codes: 0 ok (including advisory
 fallback/no_match/clarify), 1 usage or input error.`;
 
 async function main(): Promise<number> {

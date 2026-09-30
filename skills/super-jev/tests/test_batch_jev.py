@@ -27,7 +27,7 @@ def batched(monkeypatch):
     monkeypatch.setattr(ask.time, "sleep", lambda s: None)
 
 
-def test_routing_asks_every_pointer_in_one_request_and_retries_only_the_overloaded(tmp_path, monkeypatch, capsys):
+def test_routing_asks_every_pointer_in_one_request_and_does_not_retry_the_overloaded(tmp_path, monkeypatch, capsys):
     calls = []
 
     def fake_memory(req):
@@ -41,17 +41,15 @@ def test_routing_asks_every_pointer_in_one_request_and_retries_only_the_overload
                 "p1": {"status": "candidates", "candidates": [{"score": 0.4, "originalPath": "/low.md"}]},
                 "p2": {"status": "error", "reason": "Navigation provider failed: Jev HTTP 529"},
                 "p3": {"status": "no-candidates", "candidates": []}}}
-        if req["action"] == "navigate-many" and req["pointers"] == ["p2"]:
-            return {"status": "ok", "results": {
-                "p2": {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": "/high.md"}]}}}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "confirm", lambda q, paths: ({p: .9 for p in paths}, set(), None, {}))
     assert ask.lookup("where is it?", "alice", tmp_path) == 0
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()[:1].isdigit()]
-    assert "/high.md" in lines[0] and "/low.md" in lines[1]
-    assert [c["action"] for c in calls].count("navigate-many") == 2
+    assert "/low.md" in lines[0] and not any("/high.md" in l for l in lines)
+    # the judge's one retry rule already ran inside the call: no second layer here
+    assert [c["action"] for c in calls].count("navigate-many") == 1
     assert not any(c["action"] == "navigate" for c in calls)
     assert all(c["mode"] == "source-discovery" and c["limits"] == {"beamWidth": 5, "maxResults": 5}
                for c in calls if c["action"] == "navigate-many")

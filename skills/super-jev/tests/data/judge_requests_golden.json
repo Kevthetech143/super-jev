@@ -1,0 +1,20 @@
+[
+ {
+  "url": "https://api.typesafe.ai/v1/systemone",
+  "body": "{\"model\": \"jev-latest\", \"state\": \"EVIDENCE:\\n=== /e/a.md ===\\nThe build passes on Tuesday.\\nRow 000042 is in the ledger.\\n\\nDRAFT:\\nThe build passes on Tuesday. Row 000042 is in the ledger file.\", \"questions\": {\"c1\": {\"type\": \"choice\", \"criteria\": {\"SUPPORTED\": \"The evidence confirms it.\", \"NOT_SUPPORTED\": \"The evidence does not address it.\", \"CONTRADICTED\": \"The evidence disproves it.\"}, \"instructions\": \"Given ONLY the evidence, is this claim supported, not supported, or contradicted?\\n\\nCLAIM: The build passes on Tuesday.\"}, \"c2\": {\"type\": \"choice\", \"criteria\": {\"SUPPORTED\": \"The evidence confirms it.\", \"NOT_SUPPORTED\": \"The evidence does not address it.\", \"CONTRADICTED\": \"The evidence disproves it.\"}, \"instructions\": \"Given ONLY the evidence, is this claim supported, not supported, or contradicted?\\n\\nCLAIM: Row 000042 is in the ledger file.\"}, \"leaked_internal\": {\"type\": \"choice\", \"instructions\": \"Does the DRAFT contain internal working material that should not go to the reader, such as assistant notes, agent chatter, or paths to secrets?\", \"criteria\": {\"CLEAN\": \"nothing internal appears in the draft\", \"HAS_LEAKS\": \"internal notes, agent chatter, or a path to a secret appears\"}}, \"time_sensitive\": {\"type\": \"choice\", \"instructions\": \"Does the DRAFT assert a fact whose truth depends on a date after 2024, such as a current price, version or schedule? Answer only whether one is present.\", \"criteria\": {\"NOT_TIME_SENSITIVE\": \"no claim depends on anything after 2024\", \"TIME_SENSITIVE\": \"at least one claim depends on a post-2024 fact\"}}, \"self_contradictory\": {\"type\": \"choice\", \"instructions\": \"Does the EVIDENCE contradict itself anywhere?\", \"criteria\": {\"CONSISTENT\": \"the evidence is internally consistent\", \"SELF_CONTRADICTORY\": \"the evidence contradicts itself\"}}, \"overclaim\": {\"type\": \"choice\", \"instructions\": \"Does the DRAFT state something as tested, verified or done when the EVIDENCE shows it only inferred, planned or partial?\", \"criteria\": {\"HONEST\": \"the draft's certainty matches the evidence\", \"OVERCLAIMS\": \"the draft claims more certainty than the evidence carries\"}}}}",
+  "headers": {
+   "Authorization": "Bearer test-not-a-key",
+   "Content-Type": "application/json",
+   "User-Agent": "super-jev (+https://github.com/Kevthetech143/super-jev)"
+  }
+ },
+ {
+  "url": "https://api.typesafe.ai/v1/systemone",
+  "body": "{\"model\": \"jev-latest\", \"state\": \"EVIDENCE:\\nplain state\", \"questions\": {\"q1\": {\"type\": \"choice\", \"instructions\": \"Pick.\", \"criteria\": {\"A\": \"a\", \"B\": \"b\"}}}}",
+  "headers": {
+   "Authorization": "Bearer test-not-a-key",
+   "Content-Type": "application/json",
+   "User-Agent": "super-jev (+https://github.com/Kevthetech143/super-jev)"
+  }
+ }
+]

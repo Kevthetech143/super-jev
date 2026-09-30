@@ -1,3 +1,4 @@
+import { JUDGE_PROFILE } from './judge-profile.ts';
 import type { Domain, Evaluation, Question } from './types.ts';
 
 export type OrganizerInput = {
@@ -34,7 +35,7 @@ export function organizer(input: OrganizerInput): Domain<OrganizerState> {
     minConfidence: input.minConfidence
   };
   const validRows = (value: unknown): value is OrganizedRow[] => Array.isArray(value) && value.length === config.records.length && Array.from(value).every((r, i) =>
-    r?.id === config.records[i].id && Object.hasOwn(config.categories, r.category) && Number.isFinite(r.confidence) && r.confidence >= 0 && r.confidence <= 1 && r.needsReview === (r.confidence < (config.minConfidence ?? 0.75) || r.category === 'other'));
+    r?.id === config.records[i].id && Object.hasOwn(config.categories, r.category) && Number.isFinite(r.confidence) && r.confidence >= 0 && r.confidence <= 1 && r.needsReview === (r.confidence < (config.minConfidence ?? JUDGE_PROFILE.outcomeLine) || r.category === 'other'));
   return {
     name: 'data-organizer',
     observe: async () => ({ records: config.records }),
@@ -45,7 +46,7 @@ export function organizer(input: OrganizerInput): Domain<OrganizerState> {
       const rows = config.records.map((r, i) => {
         const a = evaluation.answers[`record_${i}`];
         if (a.type !== 'choice') throw new Error('Expected category choices');
-        return { id: r.id, category: a.choice, confidence: a.confidence, needsReview: a.confidence < (config.minConfidence ?? 0.75) || a.choice === 'other' };
+        return { id: r.id, category: a.choice, confidence: a.confidence, needsReview: a.confidence < (config.minConfidence ?? JUDGE_PROFILE.outcomeLine) || a.choice === 'other' };
       });
       return { kind: 'act', action: { tool: 'group_records', args: rows } };
     },

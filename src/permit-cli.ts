@@ -9,7 +9,7 @@
  */
 import { stat, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { Jev } from './jev.ts';
+import { getJudge, keyEnv, requireKey } from './judge.ts';
 import { StubEvaluator, choiceAnswer } from './enhance/stub.ts';
 import { decidePermit, permitRequest, PERMIT_CONFIDENCE_THRESHOLD, type PermitSnapshot } from './enhance/permit.ts';
 import { decide as decidePreRules, formatPermitPreRuleFacts, DEFAULT_MONEY_THRESHOLD, type PermitPreRuleResult } from './enhance/permit-prerules.ts';
@@ -67,7 +67,7 @@ print before the judge's own verdict for whatever pre-rules leaves unsettled.
                      before it existed.
   --explain          Print which pre-rule fired (or that none did).
 
-Live mode is the default and needs TYPESAFE_API_KEY.
+Live mode is the default and needs ${keyEnv()}.
 Exit codes: 0 safe_to_auto, 2 needs_approval, 3 refuse, 1 usage/failure.`;
 
 const MAX_SNAPSHOT_BYTES = 64 * 1024;
@@ -162,7 +162,7 @@ try {
   if (!snapshotPath) throw new CliError(usage);
   if (minConfidence !== undefined && (minConfidence <= 0 || minConfidence > 1)) throw new CliError('--min-confidence must be greater than 0 and at most 1');
   if (moneyThreshold !== undefined && !(moneyThreshold >= 0)) throw new CliError('--money-threshold must be a non-negative number');
-  if (!dryRun && !stub && !process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to run live, or use --dry-run or --stub');
+  if (!dryRun && !stub) requireKey('run live, or use --dry-run or --stub', m => new CliError(m));
 
   const guard = new GuardTally();
   const snapshot = parseSnapshot(await readSmallFile(snapshotPath, MAX_SNAPSHOT_BYTES, 'snapshot'), guard);
@@ -218,7 +218,7 @@ try {
     process.exit(EXIT_BY_VERDICT[verdict]);
   }
 
-  const evaluator: Evaluator = stub ? fixedStub() : new Jev();
+  const evaluator: Evaluator = stub ? fixedStub() : getJudge();
   const gate = minConfidence !== undefined ? { minConfidence } : {};
   const result = await decidePermit(id, fullSnapshot, evaluator, { gate });
   // decidePermit has its own hard rule that also skips the model call when

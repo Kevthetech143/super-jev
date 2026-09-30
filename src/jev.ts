@@ -1,5 +1,7 @@
 import type { Evaluator, Request, Evaluation, Answer } from './types.ts';
 import { payloadHasSecret } from './secret-scan.ts';
+import { JUDGE_PROFILE, type JudgeProfile } from './judge-profile.ts';
+import { AuthRejected, BadReply, NoKey, Overloaded, SecretBlocked, TooBig, Unreachable } from './judge-errors.ts';
 
 // Every rule below is sourced in docs/provider-contract.md, which labels each
 // claim DOCUMENTED (stated by TypeSafe), OBSERVED (measured from recorded
@@ -22,7 +24,7 @@ const FLOAT_SLACK = 1e-9;
 // never written to: a normalized answer is returned on a fresh object, so the
 // provider's reply stays exactly as it arrived and a frozen response validates.
 export function validateEvaluation(request: Request, response: Evaluation): Evaluation {
-  if (!response || typeof response.model !== 'string' || !response.answers) throw new Error('Invalid model response');
+  if (!response || typeof response.model !== 'string' || !response.answers) throw new BadReply('Invalid model response');
   const probability = (n: unknown) => typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 1;
   // True when `raw` is a distribution over the same levels that renormalizes to
   // `target`, which is what this validator's own output looks like on a second
@@ -36,12 +38,12 @@ export function validateEvaluation(request: Request, response: Evaluation): Eval
   const answers: Record<string, Answer> = { ...response.answers };
   for (const [id, q] of Object.entries(request.questions)) {
     const a = response.answers[id];
-    if (!a || a.type !== q.type) throw new Error(`Missing or mismatched answer: ${id}`);
+    if (!a || a.type !== q.type) throw new BadReply(`Missing or mismatched answer: ${id}`);
     if (a.type === 'noul') {
       // DOCUMENTED, and confirmed by the live probe of 2026-09-17: a noul
       // answer carries the single value and nothing else, no confidence and no
       // probabilities, so only that value is checked.
-      if (!probability(a.noul)) throw new Error(`Invalid probability: ${id}`);
+      if (!probability(a.noul)) throw new BadReply(`Invalid probability: ${id}`);
       continue;
     }
     const keys = q.type === 'choice' ? Object.keys(q.criteria) : q.type === 'score' ? q.criteria.map((_, i) => String(i)) : [];
@@ -51,12 +53,12 @@ export function validateEvaluation(request: Request, response: Evaluation): Eval
     // Confidence is checked for one thing only, the documented one: a finite
     // number in [0, 1]. See section 4 of the contract doc.
     if (!probability(a.confidence) || !provided || Object.keys(provided).length !== keys.length ||
-        keys.some(k => !Object.hasOwn(provided, k) || !probability(provided[k]))) throw new Error(`Invalid distribution: ${id}`);
+        keys.some(k => !Object.hasOwn(provided, k) || !probability(provided[k]))) throw new BadReply(`Invalid distribution: ${id}`);
     // Then the total. Only a rounding-sized error is tolerated; a total of 0,
     // a total above 1.01 or any other gross malformation is rejected outright.
     // Nothing is ever substituted or retried in its place.
     const total = keys.reduce((sum, k) => sum + provided[k], 0);
-    if (!Number.isFinite(total) || Math.abs(total - 1) > ROUNDING_STEP + FLOAT_SLACK) throw new Error(`Invalid distribution total ${total}: ${id}`);
+    if (!Number.isFinite(total) || Math.abs(total - 1) > ROUNDING_STEP + FLOAT_SLACK) throw new BadReply(`Invalid distribution total ${total}: ${id}`);
     // Inside the band, renormalize so downstream arithmetic sees a true
     // distribution, and keep exactly what the provider sent for the audit
     // trail. rawProbabilities is this harness's field, never the provider's: on
@@ -67,7 +69,7 @@ export function validateEvaluation(request: Request, response: Evaluation): Eval
     // because a trusted rawProbabilities would forge the audit trail.
     const shifted = Math.abs(total - 1) > FLOAT_SLACK;
     if (!shifted && a.rawProbabilities && !renormalizesTo(a.rawProbabilities, provided, keys)) {
-      throw new Error(`Untrusted rawProbabilities: ${id}`);
+      throw new BadReply(`Untrusted rawProbabilities: ${id}`);
     }
     const p = shifted ? Object.fromEntries(keys.map(k => [k, provided[k] / total])) : { ...provided };
     const raw = shifted ? { ...provided } : a.rawProbabilities;
@@ -75,9 +77,9 @@ export function validateEvaluation(request: Request, response: Evaluation): Eval
     if (raw) validated.rawProbabilities = { ...raw }; else delete validated.rawProbabilities;
     const peak = Math.max(...keys.map(k => p[k]));
     // DOCUMENTED: choice is "the highest-probability option".
-    if (a.type === 'choice' && (!keys.includes(a.choice) || p[a.choice] + ROUNDING_STEP + FLOAT_SLACK < peak)) throw new Error(`Invalid choice: ${id}`);
+    if (a.type === 'choice' && (!keys.includes(a.choice) || p[a.choice] + ROUNDING_STEP + FLOAT_SLACK < peak)) throw new BadReply(`Invalid choice: ${id}`);
     if (a.type === 'score') {
-      if (!Number.isFinite(a.score) || a.score < 0 || a.score > keys.length - 1) throw new Error(`Invalid score: ${id}`);
+      if (!Number.isFinite(a.score) || a.score < 0 || a.score > keys.length - 1) throw new BadReply(`Invalid score: ${id}`);
       // DOCUMENTED: score is "the probability-weighted answer across the
       // levels; can land between levels", that is the expectation of the level
       // index. So it is checked against that expectation and NOT against the
@@ -90,7 +92,7 @@ export function validateEvaluation(request: Request, response: Evaluation): Eval
       // INFERRED tolerance: one rounding step per unit of level span for the
       // probabilities that feed the sum, plus one for the score's own rounding.
       const tolerance = ROUNDING_STEP * (keys.length - 1) + ROUNDING_STEP;
-      if (Math.abs(a.score - expected) > tolerance + FLOAT_SLACK) throw new Error(`Score ${a.score} inconsistent with its distribution (expected about ${expected.toFixed(2)}): ${id}`);
+      if (Math.abs(a.score - expected) > tolerance + FLOAT_SLACK) throw new BadReply(`Score ${a.score} inconsistent with its distribution (expected about ${expected.toFixed(2)}): ${id}`);
     }
     answers[id] = validated as Answer;
   }
@@ -199,21 +201,38 @@ export class Jev implements Evaluator {
   private key: string;
   private model: string;
   private transport: typeof fetch;
-  constructor(options: { apiKey?: string; model?: string; fetch?: typeof fetch } = {}) {
-    this.key = options.apiKey ?? process.env.TYPESAFE_API_KEY ?? '';
-    if (!this.key) throw new Error('Set TYPESAFE_API_KEY to use live Jev');
-    this.model = options.model ?? 'jev-latest';
+  private profile: JudgeProfile;
+  constructor(options: { apiKey?: string; model?: string; fetch?: typeof fetch; profile?: JudgeProfile } = {}) {
+    this.profile = options.profile ?? JUDGE_PROFILE;
+    this.key = options.apiKey ?? process.env[this.profile.keyEnv] ?? '';
+    if (!this.key) throw new NoKey(`Set ${this.profile.keyEnv} to use live Jev`, `${this.profile.keyEnv} is not set`);
+    this.model = options.model ?? this.profile.model;
     this.transport = options.fetch ?? fetch;
+  }
+  /** The typed error for a non-2xx answer. The message stays `Jev HTTP <status>`. */
+  private httpError(status: number, body = ''): Error {
+    const message = `Jev HTTP ${status}`;
+    if (this.profile.overloadedStatuses.includes(status)) return new Overloaded(message);
+    if (status === 401) return new AuthRejected(message, `${message} (TypeSafe rejected the API key)`);
+    // Only a body that clearly says "too large" is TooBig; a bare 400 is a bad request, not split-retried.
+    if (status === this.profile.tooBigStatus && /too (large|long|big)|context (length|window)|token limit|maximum context|exceeds the|payload too/i.test(body)) return new TooBig(message);
+    return new BadReply(message);
   }
   private async _post(request: Request, signal: AbortSignal, pin: JudgePin) {
     const payload = { model: this.model, ...pin, ...request };
     // The one choke point for every TypeSafe send: scan the whole body first.
-    if (payloadHasSecret(payload)) throw new Error('Jev request contains a secret; not sent');
-    return this.transport('https://api.typesafe.ai/v1/systemone', {
-      method: 'POST', signal,
-      headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    if (payloadHasSecret(payload)) throw new SecretBlocked('Jev request contains a secret; not sent', 'request contains a secret; not sent');
+    try {
+      return await this.transport(this.profile.apiUrl, {
+        method: 'POST', signal,
+        headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      // fetch reports a network failure as a TypeError; an abort is passed through untouched.
+      if (error instanceof TypeError) throw new Unreachable(error.message, 'could not reach TypeSafe (network)');
+      throw error;
+    }
   }
   private async _peekBody(response: Response): Promise<string> {
     try { return await response.text(); } catch { return ''; }
@@ -242,9 +261,11 @@ export class Jev implements Evaluator {
       }
     }
     if (!response.ok) {
-      const retryError = `Jev HTTP ${response.status}`;
-      if (pinRejection !== null) throw new Error(`pin rejected: ${pinRejection}; unpinned retry: ${retryError}`);
-      throw new Error(retryError);
+      const failure = this.httpError(response.status, await this._peekBody(response));
+      if (pinRejection !== null) {
+        throw new (failure.constructor as new (m: string, r?: string) => Error)(`pin rejected: ${pinRejection}; unpinned retry: ${failure.message}`, (failure as { reason: string }).reason);
+      }
+      throw failure;
     }
     const result = await response.json() as Evaluation;
     // The validated copy is what the caller gets; the parsed reply is not touched.

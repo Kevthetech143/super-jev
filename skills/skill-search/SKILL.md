@@ -36,6 +36,9 @@ Rules:
 
 ## Model calls and credentials
 
+The judge is chosen by `SUPERJEV_JUDGE` (default: Jev); its key variable name comes from `skills/super-jev/judge_profiles.json` (for Jev, `TYPESAFE_API_KEY`).
+
+
 - The shared runtime makes the model call only in live mode. It reads the API key from the environment only (never argv, never logs). The launcher inherits its environment into the runtime child, so a deployment-provided key reaches it without any key in the repo.
 - The deployment wrapper that supplies the key is a LOCAL deployment artifact only (see deploy/hook-wrapper.sh, reference implementation of deploy/ENV-CONTRACT.md); the skill ships secret-free. Without a key in the environment the runtime reports fallback honestly — a fallback is never claimed as a live search.
 - --local-only never needs a provider or a key; the launcher never invokes any provider command itself.

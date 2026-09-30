@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""jev_client.py -- the built-in judge client Super Jev uses by default.
+"""jev_client.py -- the Jev implementation behind the judge doorway (skills/super-jev/judges).
 
-Checks claims against evidence files with TypeSafe Jev. Needs only
-TYPESAFE_API_KEY in the environment; the key is never printed or logged.
+Nothing else in the skill talks to TypeSafe: callers use `judges.ask` and the door
+script. The endpoint, model, key variable name and limits come from the profile
+(judge_profiles.json); the key is never printed or logged.
+
+Checks claims against evidence files with TypeSafe Jev.
 
     python3 jev_client.py EVIDENCE [EVIDENCE ...] --kit reply --claim "..." [--claim ...]
     python3 jev_client.py EVIDENCE [EVIDENCE ...] --kit reply --claims-file FILE
@@ -28,6 +31,9 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from judge_profile import PROFILE, judge_tokens as estimate_tokens  # noqa: E402
+import judges  # noqa: E402
+from judges.errors import (JudgeError, AuthRejected, BadReply, Overloaded, SecretBlocked,  # noqa: E402
+                           TooBig, Unreachable)
 
 API_URL = PROFILE.api_url
 MODEL = PROFILE.model
@@ -83,10 +89,6 @@ RED = {"NOT_SUPPORTED", "CONTRADICTED", "HAS_LEAKS", "TIME_SENSITIVE",
        "SELF_CONTRADICTORY", "OVERCLAIMS"}
 
 
-class JevError(RuntimeError):
-    """A call that produced no verdict. Always exit 1, never a pass."""
-
-
 def _tls_context():
     """certifi's CA bundle when installed and SSL_CERT_FILE is unset (some Macs ship none)."""
     if os.environ.get("SSL_CERT_FILE"):
@@ -108,43 +110,60 @@ def _http_post(url, body, headers, timeout):
 transport = _http_post
 
 
-def ask(state, questions, timeout=120, attempts=4):
-    """One Jev call for every question. Returns answers plus model/usage metadata."""
+_TOO_BIG_WORDS = ("too large", "too long", "too big", "context length", "context window",
+                  "token limit", "maximum context", "exceeds the", "payload too")
+
+
+def _says_too_big(err):
+    """True only when the error body clearly says the input was over the limit. The local
+    size check already raised TooBig before sending, so a bare 400 is a bad request."""
+    try:
+        body = err.read().decode("utf-8", "replace").lower()
+    except Exception:
+        return False
+    return any(w in body for w in _TOO_BIG_WORDS)
+
+
+def ask(state, questions, timeout=120):
+    """One Jev call for every question. Returns answers plus model/usage metadata.
+    Every failure is a typed judges.errors error: no verdict, never a pass."""
     # The one place a request leaves for TypeSafe: scan the state and every question's
     # instructions and criteria here, so no caller can skip it.
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from prepare_bulk import payload_has_secret
     if payload_has_secret(state) or payload_has_secret(questions):
-        raise JevError("the request contains a secret; not sent")
-    key = os.environ.get("TYPESAFE_API_KEY", "").strip()
-    if not key:
-        raise JevError("TYPESAFE_API_KEY is not set -- export it first "
-                       "(export TYPESAFE_API_KEY=\"$(cat /path/to/your/key-file)\")")
+        raise SecretBlocked("the request contains a secret; not sent")
+    key = judges.require_key()
     longest = max((estimate_tokens(q) for q in questions.values()), default=0)
     if estimate_tokens(state) + longest > MAX_INPUT_TOKENS:
-        raise JevError(f"evidence exceeds {PROFILE.ceiling_text} -- split the file; "
-                       "it is never truncated")
+        raise TooBig(f"evidence exceeds {PROFILE.ceiling_text} -- split the file; "
+                     "it is never truncated")
     body = json.dumps({"model": MODEL, "state": state, "questions": questions}).encode()
     # The TypeSafe edge rejects the default "Python-urllib" user agent with 403.
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                "User-Agent": "super-jev (+https://github.com/Kevthetech143/super-jev)"}
-    delay, t0 = 1.0, time.monotonic()
-    for attempt in range(attempts):
+    url = os.environ.get("SUPERJEV_JEV_URL", API_URL)
+    t0 = time.monotonic()
+
+    def send():
         try:
-            data = transport(os.environ.get("SUPERJEV_JEV_URL", API_URL), body, headers, timeout)
-            break
+            return transport(url, body, headers, timeout)
         except urllib.error.HTTPError as e:
-            if e.code in (429, 529) and attempt < attempts - 1:
-                time.sleep(delay)
-                delay *= 2
-                continue
+            if e.code in PROFILE.overloaded_statuses:
+                raise Overloaded(f"TypeSafe returned HTTP {e.code}") from None
             if e.code == 401:
-                raise JevError("401 -- TypeSafe rejected the API key") from None
-            raise JevError(f"TypeSafe returned HTTP {e.code}") from None
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            raise JevError(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+                raise AuthRejected("401 -- TypeSafe rejected the API key") from None
+            if e.code == PROFILE.too_big_status and _says_too_big(e):
+                raise TooBig(f"TypeSafe returned HTTP {e.code}") from None
+            raise BadReply(f"TypeSafe returned HTTP {e.code}") from None
+        except ValueError as e:
+            raise BadReply(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+        except (urllib.error.URLError, OSError) as e:
+            raise Unreachable(f"could not reach TypeSafe: {e.__class__.__name__}") from None
+
+    data = judges.with_retry(send)
     if not isinstance(data, dict) or not isinstance(data.get("answers"), dict):
-        raise JevError("TypeSafe reply had no answers")
+        raise BadReply("TypeSafe reply had no answers")
     return {"answers": data["answers"], "model": data.get("model"), "chunks": 1,
             "input_tokens": (data.get("usage") or {}).get("input_tokens", 0),
             "latency_ms": round((time.monotonic() - t0) * 1000)}
@@ -164,10 +183,10 @@ def split_claims(draft):
 
 def questions_for(claims):
     if not claims:
-        raise JevError("no checkable claims -- pass --claim, --claims-file, or a --draft "
+        raise JudgeError("no checkable claims -- pass --claim, --claims-file, or a --draft "
                        "with a sentence of four words or more")
     if len(claims) + len(DRAFT_QUESTIONS) > MAX_QUESTIONS:
-        raise JevError(f"{len(claims)} claims is too many for one call -- split the draft")
+        raise TooBig(f"{len(claims)} claims is too many for one call -- split the draft")
     qs = {f"c{i}": {"type": "choice", "criteria": CLAIM_CRITERIA,
                     "instructions": "Given ONLY the evidence, is this claim supported, not "
                                     f"supported, or contradicted?\n\nCLAIM: {c}"}
@@ -243,7 +262,7 @@ def check(evidence, claims, draft=""):
     tail = f"\n\nDRAFT:\n{draft.strip()}"
     room = MAX_INPUT_TOKENS - max(estimate_tokens(q) for q in questions.values()) - estimate_tokens(tail) - 10
     if room < 1000:
-        raise JevError("the draft or a claim alone is too long for one call -- shorten it")
+        raise TooBig("the draft or a claim alone is too long for one call -- shorten it")
     parts, meta = [], {"model": None, "chunks": 0, "input_tokens": 0, "latency_ms": 0}
     for group in evidence_parts(evidence, room):
         res = ask("EVIDENCE:\n" + "\n\n".join(group) + tail, questions)
@@ -281,7 +300,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         if not a.evidence:
-            raise JevError("needs at least one evidence file")
+            raise JudgeError("needs at least one evidence file")
         # newline="": a lone CR stays inside its line (see prepare_bulk.mask_evidence)
         evidence = [(f, open(os.path.expanduser(f), encoding="utf-8", errors="replace", newline="").read())
                     for f in a.evidence]
@@ -293,7 +312,7 @@ def main(argv=None):
         masked, withheld = mask_evidence(evidence)
         kept = [(f, text) for f, text in masked if text is not None]
         if not kept:
-            raise JevError(f"evidence file {masked[0][0]} contains a secret; not sent")
+            raise SecretBlocked(f"evidence file {masked[0][0]} contains a secret; not sent")
         if withheld:
             print(f"jev: withheld {len(withheld)} file(s) holding secret-shaped text, not sent: "
                   f"{', '.join(withheld)}; a claim about them cannot be checked", file=sys.stderr)
@@ -306,14 +325,14 @@ def main(argv=None):
             claims = split_claims(draft)
         # The draft and every claim go into the request too, so they get the same scan.
         if has_secret(draft):
-            raise JevError("the draft contains a secret; not sent")
+            raise SecretBlocked("the draft contains a secret; not sent")
         if any(has_secret(c) for c in claims):
-            raise JevError("a claim contains a secret; not sent")
+            raise SecretBlocked("a claim contains a secret; not sent")
         rows, meta, code = check(evidence, claims, draft)
         side_advisory = bool(a.claim) and not a.claims_file and not a.draft
         if side_advisory and code == 3:
             code = 3 if any(r["flag"] for r in rows if r["key"] not in CLAIM_ADVISORY) else 0
-    except (JevError, OSError) as e:
+    except (JudgeError, OSError) as e:
         print(f"jev: {e}", file=sys.stderr)
         return 1
     print_table(rows, meta, len(claims), side_advisory)

@@ -26,6 +26,8 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO = SKILL_DIR.parent.parent
+sys.path.insert(0, str(SKILL_DIR))
+import judges  # noqa: E402
 # prepare_bulk.py lists every file it writes into prepare-cache/ here.
 WRITTEN_MANIFEST = ".superjev-written"
 # In-repo folders Super Jev writes to. Uninstall deletes only files it can prove it
@@ -81,11 +83,12 @@ def setup() -> int:
         print(f"made  memory config: {cfg}")
     print(f"ok    state folder: {state_root()}")
 
-    if os.environ.get("TYPESAFE_API_KEY", "").strip():
-        print("ok    TYPESAFE_API_KEY is set")
+    key_env = judges.key_env()
+    if judges.key_present():
+        print(f"ok    {key_env} is set")
     else:
-        problems.append("TYPESAFE_API_KEY is not set. Every check and connect needs it. Run:\n"
-                        "        export TYPESAFE_API_KEY=\"$(cat /path/to/your/typesafe-key-file)\"")
+        problems.append(f"{key_env} is not set. Every check and connect needs it. Run:\n"
+                        f"        export {key_env}=\"$(cat /path/to/your/key-file)\"")
 
     if shutil.which("claude"):
         print("ok    description writer: claude CLI found (connect uses it only if it is logged in; "

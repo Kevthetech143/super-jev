@@ -1,5 +1,7 @@
 export { run } from './loop.ts';
 export { Jev } from './jev.ts';
+export { getJudge, keyEnv, keyPresent, requireKey, retryOverloaded } from './judge.ts';
+export { JudgeError, NoKey, AuthRejected, Unreachable, Overloaded, BadReply, TooBig, SecretBlocked } from './judge-errors.ts';
 export { JsonlJournal, readJournal } from './journal.ts';
 export { organizer, organizerReport, validateOrganizerInput } from './organizer.ts';
 export type { OrganizerInput, OrganizerState, OrganizedRow } from './organizer.ts';

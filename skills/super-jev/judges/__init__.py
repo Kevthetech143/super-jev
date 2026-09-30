@@ -13,8 +13,19 @@ later. This package is that seam.
 `classify` returns a `JudgeResult`. Every backend returns the same shape,
 so nothing downstream needs to know which backend answered.
 
-BACKENDS
-  * `typesafe` (default) — wraps today's call exactly: it hands the
+THE DOORWAY
+Every model call goes through this package, and only the judge's own
+implementation (lib/jev_client.py for the Jev profile) knows the vendor:
+
+    judges.ask(state, questions, timeout)   one call, answers + usage
+    judges.key_present() / key_env()         the key check, by the profile's env name
+    judges.door_script()                     the implementation's own claim-check CLI
+    judges.with_retry(send)                  the one retry rule (Overloaded only)
+
+Failures are typed (judges.errors) and always mean "no verdict".
+
+BACKENDS (the gate)
+  * the profile's judge (default `typesafe-jev`) — wraps today's call exactly: it hands the
     window and the draft to `superjev.cmd_gate`, which is the same code
     path, the same ledger row and the same exit codes as before. No
     behaviour changes by adding this file.
@@ -23,8 +34,9 @@ BACKENDS
     jev.py. A test can therefore assert "no live call happened" rather
     than hoping.
 
-Pick one with `SUPERJEV_JUDGE=typesafe|fake`. An unrecognised value falls
-back to `typesafe` and prints one stderr line.
+Pick one with `SUPERJEV_JUDGE` (a profile name from judge_profiles.json, or
+`fake`). An unrecognised value stops the run with one stderr line; it never
+falls back to another judge.
 
 See docs/plugins.md.
 """
@@ -33,17 +45,96 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["JudgeResult", "Judge", "TypeSafeJudge", "FakeJudge",
-           "get_judge", "JUDGE_ENV", "BACKENDS", "DEFAULT_BACKEND"]
-
-#: Which backend to use.
-JUDGE_ENV = "SUPERJEV_JUDGE"
-DEFAULT_BACKEND = "typesafe"
-
 _SKILL_DIR = Path(__file__).resolve().parent.parent
+if str(_SKILL_DIR) not in sys.path:
+    sys.path.append(str(_SKILL_DIR))
+import judge_profile                                       # noqa: E402
+from judges.errors import (JudgeError, NoKey, AuthRejected, Unreachable,   # noqa: E402,F401
+                           Overloaded, BadReply, TooBig, SecretBlocked, ERROR_KINDS)
+
+__all__ = ["JudgeResult", "Judge", "ProfileJudge", "FakeJudge", "get_judge", "JUDGE_ENV",
+           "ask", "profile", "key_env", "key_present", "require_key", "door_script", "with_retry",
+           "JudgeError", "NoKey", "AuthRejected", "Unreachable", "Overloaded", "BadReply", "TooBig",
+           "SecretBlocked", "ERROR_KINDS"]
+
+#: The one setting that picks the judge.
+JUDGE_ENV = judge_profile.JUDGE_ENV
+
+#: profile kind -> (module in skills/super-jev/lib that speaks to that judge).
+IMPLEMENTATIONS = {"jev": "jev_client"}
+_LIB_DIR = _SKILL_DIR / "lib"
+
+
+def profile():
+    """The active judge's profile (SUPERJEV_JUDGE, read once at start)."""
+    return judge_profile.PROFILE
+
+
+def key_env():
+    """Name of the environment variable holding the active judge's key."""
+    return profile().key_env
+
+
+def key_present():
+    return bool(os.environ.get(key_env(), "").strip())
+
+
+def require_key():
+    """The key, or NoKey. The one place a key is read."""
+    env = key_env()
+    key = os.environ.get(env, "").strip()
+    if not key:
+        raise NoKey(f"{env} is not set -- export it first "
+                    f"(export {env}=\"$(cat /path/to/your/key-file)\")")
+    return key
+
+
+def _impl():
+    name = IMPLEMENTATIONS.get(profile().kind)
+    if name is None:
+        raise SystemExit(f"super-jev: judge profile {profile().name!r} has kind {profile().kind!r}, "
+                         f"which has no implementation (known: {', '.join(sorted(IMPLEMENTATIONS))})")
+    if str(_LIB_DIR) not in sys.path:
+        sys.path.append(str(_LIB_DIR))
+    import importlib                                       # noqa: PLC0415
+    return importlib.import_module(name)
+
+
+def ask(state, questions, timeout=120):
+    """One judge call for every question: {answers, model, chunks, input_tokens, latency_ms}.
+    Raises a typed JudgeError on anything short of a usable answer; that is no verdict."""
+    # The door scans for every judge, so no adapter can be handed a secret. An adapter may scan again.
+    if str(_SKILL_DIR) not in sys.path:
+        sys.path.insert(0, str(_SKILL_DIR))
+    from prepare_bulk import payload_has_secret            # noqa: PLC0415
+    if payload_has_secret(state) or payload_has_secret(questions):
+        raise SecretBlocked("the request contains a secret; not sent")
+    return _impl().ask(state, questions, timeout=timeout)
+
+
+def door_script():
+    """Path of the implementation's own claim-check CLI (the default gate door)."""
+    name = IMPLEMENTATIONS.get(profile().kind)
+    return (_LIB_DIR / f"{name}.py").resolve()
+
+
+def with_retry(send):
+    """The one retry rule: call `send()`; on Overloaded wait and try again, as the profile says
+    (attempts, first delay, doubling). Every other error passes straight through."""
+    p = profile()
+    delay = p.retry_first_delay_ms / 1000
+    for attempt in range(p.retry_attempts):
+        try:
+            return send()
+        except Overloaded:
+            if attempt >= p.retry_attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 @dataclass(frozen=True)
@@ -102,8 +193,8 @@ def _window_text(window):
     return str(window)
 
 
-class TypeSafeJudge(Judge):
-    """Today's call, wrapped. Nothing more.
+class ProfileJudge(Judge):
+    """The profile's judge (Jev by default), today's call wrapped. Nothing more.
 
     It writes the window and the draft to temp files (which is what the
     Stop hook already does) and calls `superjev.cmd_gate` in hook mode,
@@ -111,7 +202,9 @@ class TypeSafeJudge(Judge):
     the exit codes are the existing ones.
     """
 
-    name = "typesafe"
+    @property
+    def name(self):
+        return profile().name
 
     def __init__(self, timeout=None):
         self.timeout = timeout
@@ -126,7 +219,7 @@ class TypeSafeJudge(Judge):
 
     def available(self):
         sj = self._sj()
-        return sj.door_missing(sj.GATE_CMD_ENV, sj.JEV_LIB) is None
+        return sj.door_missing(sj.GATE_CMD_ENV, sj.GATE_DOOR) is None
 
     def classify(self, draft, window):
         import argparse                                   # noqa: PLC0415
@@ -197,24 +290,18 @@ class FakeJudge(Judge):
                         pass
 
 
-BACKENDS = {"typesafe": TypeSafeJudge, "fake": FakeJudge}
-
-
 def get_judge(backend=None, **kwargs):
-    """The judge to use: the argument, else `SUPERJEV_JUDGE`, else TypeSafe.
+    """The judge to use: the argument, else `SUPERJEV_JUDGE`, else the default profile.
 
-    An unrecognised name is one stderr line and the default backend — a
-    typo must not quietly leave a draft unjudged.
+    An unrecognised name stops the run with one line: a typo must not quietly leave
+    a draft unjudged, or judged by a different judge than the one asked for.
     """
-    want = backend or os.environ.get(JUDGE_ENV) or DEFAULT_BACKEND
-    key = str(want).strip().lower()
-    cls = BACKENDS.get(key)
-    if cls is None:
-        print(f"judges: {JUDGE_ENV}={want!r} is not one of "
-              f"{'/'.join(sorted(BACKENDS))} — using {DEFAULT_BACKEND!r}",
-              file=sys.stderr)
-        cls = BACKENDS[DEFAULT_BACKEND]
-    return cls(**kwargs)
+    want = (backend or os.environ.get(JUDGE_ENV) or "").strip()
+    try:
+        prof = judge_profile.load(want or None)        # raises on an unknown name
+    except ValueError as e:
+        raise SystemExit(f"super-jev: {JUDGE_ENV}: {e}")
+    return (FakeJudge if want == judge_profile.FAKE_JUDGE else ProfileJudge)(**kwargs) if prof else None
 
 
 def _write_tmp(text, suffix):

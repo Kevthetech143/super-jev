@@ -95,7 +95,8 @@ def test_lookup_benches_a_pointer_with_a_prior_failure_streak_and_reports_it(tmp
     assert "/ok.md" in out
 
 
-def test_overloaded_navigate_gets_one_backoff_retry_then_succeeds(tmp_path, monkeypatch, capsys):
+def test_overloaded_navigate_is_not_retried_here_and_counts_as_a_failure(tmp_path, monkeypatch):
+    """The judge's one retry rule runs inside the call; a failure that reaches ask.py is final."""
     sdir = tmp_path / "state"
     attempts = {"n": 0}
 
@@ -106,38 +107,13 @@ def test_overloaded_navigate_gets_one_backoff_retry_then_succeeds(tmp_path, monk
             return {"pointers": ["p1"]}
         if req["action"] == "navigate":
             attempts["n"] += 1
-            if attempts["n"] == 1:
-                return {"status": "error", "reason": "Jev HTTP 529 overloaded"}
-            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": "/hit.md"}]}
-        raise AssertionError(req)
-
-    monkeypatch.setattr(ask, "memory", fake_memory)
-    monkeypatch.setattr(ask, "OVERLOAD_BACKOFF_SECS", 0)
-    rc = ask.lookup("q", "alice", sdir)
-
-    assert attempts["n"] == 2
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "/hit.md" in out
-    assert "unresolved" not in out
-
-
-def test_overloaded_navigate_still_counts_as_a_failure_if_retry_also_fails(tmp_path, monkeypatch):
-    sdir = tmp_path / "state"
-
-    def fake_memory(req):
-        if req["action"] == "cached":
-            return {"status": "cache-miss", "checked": []}
-        if req["action"] == "panel":
-            return {"pointers": ["p1"]}
-        if req["action"] == "navigate":
             return {"status": "error", "reason": "Jev HTTP 529 overloaded"}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    monkeypatch.setattr(ask, "OVERLOAD_BACKOFF_SECS", 0)
     rc = ask.lookup("q", "alice", sdir)
 
+    assert attempts["n"] == 1
     assert rc == 3  # error
     health = ask.load_pointer_health(sdir)
     assert health["p1"]["fails"] == 1
