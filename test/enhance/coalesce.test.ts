@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { BatchingEvaluator, estimateTokens } from '../../src/enhance/coalesce.ts';
 import { navigate } from '../../src/enhance/navigation.ts';
 import type { Evaluator, Request } from '../../src/types.ts';
+import { Overloaded, TooBig } from '../../src/judge-errors.ts';
 
 function flat(words: string[]) {
   return {
@@ -19,7 +20,7 @@ function fake(fail400Over = Infinity): Evaluator & { sent: Request[] } {
     sent,
     async evaluate(request: Request) {
       sent.push(request);
-      if (Object.keys(request.questions).length > fail400Over) throw new Error('Jev HTTP 400');
+      if (Object.keys(request.questions).length > fail400Over) throw new TooBig('Jev HTTP 400');
       const word = (request.state as { question: string }).question;
       const answers = Object.fromEntries(Object.entries(request.questions).map(([key, q]) => {
         const criteria = (q as { criteria: Record<string, string> }).criteria;
@@ -64,7 +65,7 @@ test('an HTTP 400 on a multi-question batch splits it and retries the halves', a
 test('a 529 or 429 is retried with backoff, then answers', async () => {
   const inner = fake();
   let failures = 1;
-  const flaky = { async evaluate(r: Request, s: AbortSignal) { if (failures-- > 0) throw new Error('Jev HTTP 529'); return inner.evaluate(r, s); } };
+  const flaky = { async evaluate(r: Request, s: AbortSignal) { if (failures-- > 0) throw new Overloaded('Jev HTTP 529'); return inner.evaluate(r, s); } };
   const out = await navigate(flat(['alpha', 'beta']), 'alpha', { transport: new BatchingEvaluator(flaky), timeoutMs: 10_000 });
   assert.equal(out.candidates[0]?.sourceId, 'alpha');
 });
@@ -98,7 +99,7 @@ test('a shared call is not stopped while one caller still waits for it', async (
 
 test('a 429/529 backoff ends when every caller has given up, with no further call', async () => {
   let sent = 0;
-  const busy = { async evaluate() { sent++; throw new Error('Jev HTTP 529'); } };
+  const busy = { async evaluate() { sent++; throw new Overloaded('Jev HTTP 529'); } };
   const batched = new BatchingEvaluator(busy);
   const out = await Promise.allSettled([flat(['alpha', 'beta']), flat(['alpha', 'gamma'])].map(c => navigate(c, 'alpha', { transport: batched, timeoutMs: 50 })));
   assert.ok(out.every(r => r.status === 'rejected'));

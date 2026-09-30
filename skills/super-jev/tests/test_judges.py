@@ -51,9 +51,9 @@ def _clean_env(monkeypatch):
 
 # ------------------------------------------------------------ selection
 
-def test_default_backend_is_typesafe():
-    assert isinstance(judges.get_judge(), judges.TypeSafeJudge)
-    assert judges.get_judge().name == "typesafe"
+def test_default_backend_is_the_default_profile():
+    assert isinstance(judges.get_judge(), judges.ProfileJudge)
+    assert judges.get_judge().name == "typesafe-jev"
 
 
 def test_env_selects_the_fake_backend(monkeypatch):
@@ -63,22 +63,21 @@ def test_env_selects_the_fake_backend(monkeypatch):
 
 def test_argument_wins_over_env(monkeypatch):
     monkeypatch.setenv(judges.JUDGE_ENV, "fake")
-    assert isinstance(judges.get_judge("typesafe"), judges.TypeSafeJudge)
+    assert isinstance(judges.get_judge("typesafe-jev"), judges.ProfileJudge)
 
 
-def test_unknown_backend_falls_back_with_one_stderr_line(monkeypatch, capsys):
+def test_unknown_backend_stops_with_one_line(monkeypatch):
     monkeypatch.setenv(judges.JUDGE_ENV, "oracle")
-    j = judges.get_judge()
-    assert isinstance(j, judges.TypeSafeJudge)
-    err = capsys.readouterr().err
-    assert "SUPERJEV_JUDGE='oracle'" in err
-    assert err.count("\n") == 1
+    with pytest.raises(SystemExit) as e:
+        judges.get_judge()
+    msg = str(e.value)
+    assert "SUPERJEV_JUDGE" in msg and "'oracle'" in msg and "\n" not in msg
 
 
 def test_every_backend_implements_the_interface():
-    for name, cls in judges.BACKENDS.items():
-        assert issubclass(cls, judges.Judge), name
-        assert cls.classify is not judges.Judge.classify, name
+    for cls in (judges.ProfileJudge, judges.FakeJudge):
+        assert issubclass(cls, judges.Judge), cls
+        assert cls.classify is not judges.Judge.classify, cls
 
 
 # ---------------------------------------------------------- fake judge
@@ -145,8 +144,8 @@ def test_typesafe_judge_hands_the_window_and_draft_to_cmd_gate(monkeypatch):
 
     monkeypatch.setattr(sj, "cmd_gate", fake_cmd_gate)
     window = wm.from_text(WINDOW_TEXT)
-    r = judges.TypeSafeJudge(timeout=7).classify("Done. 12 tests pass.", window)
-    assert r == judges.JudgeResult(code=3, backend="typesafe", stdout="READ",
+    r = judges.ProfileJudge(timeout=7).classify("Done. 12 tests pass.", window)
+    assert r == judges.JudgeResult(code=3, backend="typesafe-jev", stdout="READ",
                                    stderr="")
     assert seen["draft"] == "Done. 12 tests pass."
     assert seen["evidence"] == [window.render()]
@@ -163,7 +162,7 @@ def test_typesafe_judge_accepts_plain_window_text(monkeypatch):
         return 0, "", ""
 
     monkeypatch.setattr(sj, "cmd_gate", fake_cmd_gate)
-    judges.TypeSafeJudge().classify("Done.", WINDOW_TEXT)
+    judges.ProfileJudge().classify("Done.", WINDOW_TEXT)
     assert captured["evidence"] == WINDOW_TEXT
 
 
@@ -171,17 +170,17 @@ def test_typesafe_judge_cleans_up_its_temp_files(monkeypatch, tmp_path):
     sj = _sj()
     monkeypatch.setattr(sj, "cmd_gate", lambda ns: (0, "", ""))
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    judges.TypeSafeJudge().classify("Done.", wm.from_text(WINDOW_TEXT))
+    judges.ProfileJudge().classify("Done.", wm.from_text(WINDOW_TEXT))
     assert list(tmp_path.iterdir()) == []
 
 
 def test_typesafe_availability_tracks_the_door(monkeypatch):
     sj = _sj()
     monkeypatch.setenv("SUPERJEV_GATE_CMD", f"{sys.executable} {FAKE_DOOR}")
-    assert judges.TypeSafeJudge().available() is True
+    assert judges.ProfileJudge().available() is True
     monkeypatch.delenv("SUPERJEV_GATE_CMD", raising=False)
-    monkeypatch.setattr(sj, "JEV_LIB", Path("/nonexistent/jev.py"))
-    assert judges.TypeSafeJudge().available() is False
+    monkeypatch.setattr(sj, "GATE_DOOR", Path("/nonexistent/jev.py"))
+    assert judges.ProfileJudge().available() is False
 
 
 def test_judge_result_is_the_same_shape_from_both_backends(monkeypatch):
@@ -189,11 +188,11 @@ def test_judge_result_is_the_same_shape_from_both_backends(monkeypatch):
     monkeypatch.setattr(sj, "cmd_gate", lambda ns: (0, "ok", ""))
     monkeypatch.setenv("SUPERJEV_GATE_CMD", f"{sys.executable} {FAKE_DOOR}")
     window = wm.from_text(WINDOW_TEXT)
-    a = judges.TypeSafeJudge().classify("Done.", window)
+    a = judges.ProfileJudge().classify("Done.", window)
     b = judges.FakeJudge().classify("Done.", window)
     assert type(a) is type(b) is judges.JudgeResult
     assert (a.code, b.code) == (0, 0)
-    assert {a.backend, b.backend} == {"typesafe", "fake"}
+    assert {a.backend, b.backend} == {"typesafe-jev", "fake"}
 
 
 def test_base_interface_raises_rather_than_answering_silently():

@@ -31,9 +31,9 @@ if sj is None:
 _REAL_RUN = subprocess.run
 
 # The real fleet lib path, captured before the hermetic_ci fixture below
-# stubs sj.JEV_LIB. Only the wire-shape test reads this, and only to
+# stubs sj.GATE_DOOR. Only the wire-shape test reads this, and only to
 # skip when the lib is absent (the CI condition).
-_REAL_LIB = Path(str(sj.JEV_LIB))
+_REAL_LIB = Path(str(sj.GATE_DOOR))
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +46,7 @@ def no_key(monkeypatch):
 def hermetic_ci(monkeypatch, tmp_path, request):
     """CI hermeticity: no test may depend on the fleet skill on disk.
 
-    Points JEV_LIB at a tmp stub file, points the gate door env var at
+    Points GATE_DOOR at a tmp stub file, points the gate door env var at
     a fake door script, and injects a fake code-mode judge - unless the test
     is marked real_code_ask (the wire-shape test, which skips when the real
     lib is absent instead of running).
@@ -54,7 +54,7 @@ def hermetic_ci(monkeypatch, tmp_path, request):
     stub = tmp_path / "jev_stub.py"
     stub.write_text("# hermetic stub: the live fleet lib is never imported here",
                     encoding="utf-8")
-    monkeypatch.setattr(sj, "JEV_LIB", stub)
+    monkeypatch.setattr(sj, "GATE_DOOR", stub)
     fake_door = tmp_path / "fake-door.sh"
     fake_door.write_text("#!/bin/sh", encoding="utf-8")
     fake_door.chmod(0o755)
@@ -606,7 +606,7 @@ def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
 
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setattr(sj, "_load_jev_lib", lambda: jev)
+    monkeypatch.setattr(sj.judges, "_impl", lambda: jev)
     claim = "when x, f returns y"
     rows, code = sj.run_code_gate([("ev.py", "some code")], [claim])
     assert len(seen) == 1
@@ -758,7 +758,7 @@ def test_rerouted_code_claim_holding_a_secret_is_refused(monkeypatch, evfile):
 
 
 def test_rerouted_big_code_with_no_judge_client_is_advisory(monkeypatch, evfile, tmp_path):
-    monkeypatch.setattr(sj, "JEV_LIB", tmp_path / "missing.py")
+    monkeypatch.setattr(sj, "GATE_DOOR", tmp_path / "missing.py")
     monkeypatch.delenv(sj.GATE_CMD_ENV)
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
     code, out = _run_text(["gate", evfile(BIG_DIFF, "big.diff"), "--claim", "x.py now says new"])

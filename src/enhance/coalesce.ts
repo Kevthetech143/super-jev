@@ -1,5 +1,7 @@
 import type { Evaluation, Evaluator, Request } from '../types.ts';
 import { JUDGE_PROFILE, judgeTokens } from '../judge-profile.ts';
+import { retryOverloaded } from '../judge.ts';
+import { TooBig } from '../judge-errors.ts';
 
 /**
  * Estimated input budget for one batched judge call: the judge profile's
@@ -9,9 +11,6 @@ import { JUDGE_PROFILE, judgeTokens } from '../judge-profile.ts';
  * this many estimated tokens.
  */
 export const BATCH_TOKEN_BUDGET = JUDGE_PROFILE.callTokens;
-/** Overloaded (529) and rate-limited (429) calls are retried with backoff. */
-const RETRY_ATTEMPTS = 4;
-const RETRY_FIRST_DELAY_MS = 1_000;
 const QUESTION_OVERHEAD = 20;
 
 export const estimateTokens = judgeTokens;
@@ -82,7 +81,7 @@ export class BatchingEvaluator implements Evaluator {
       });
     } catch (error) {
       // An estimate that still ran over the ceiling (HTTP 400): split and retry each half.
-      if (live.length > 1 && error instanceof Error && /Jev HTTP 400\b/.test(error.message)) {
+      if (live.length > 1 && error instanceof TooBig) {
         const half = Math.ceil(live.length / 2);
         await Promise.all([this.send(live.slice(0, half)), this.send(live.slice(half))]);
         return;
@@ -91,18 +90,8 @@ export class BatchingEvaluator implements Evaluator {
     }
   }
 
-  private async withRetry(request: Request, signal: AbortSignal): Promise<Evaluation> {
-    for (let attempt = 1, delay = RETRY_FIRST_DELAY_MS; ; attempt++, delay *= 2) {
-      try { return await this.inner.evaluate(request, signal); }
-      catch (error) {
-        if (attempt >= RETRY_ATTEMPTS || signal.aborted || !(error instanceof Error && /Jev HTTP (429|529)\b/.test(error.message))) throw error;
-        await new Promise(resolve => {
-          const timer = setTimeout(resolve, delay);
-          signal.addEventListener('abort', () => { clearTimeout(timer); resolve(undefined); }, { once: true });
-        });
-        if (signal.aborted) throw error;
-      }
-    }
+  private withRetry(request: Request, signal: AbortSignal): Promise<Evaluation> {
+    return retryOverloaded(() => this.inner.evaluate(request, signal), signal);
   }
 }
 

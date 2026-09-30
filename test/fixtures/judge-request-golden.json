@@ -1,0 +1,11 @@
+[
+ {
+  "url": "https://api.typesafe.ai/v1/systemone",
+  "method": "POST",
+  "headers": {
+   "Authorization": "Bearer test-not-a-key",
+   "Content-Type": "application/json"
+  },
+  "body": "{\"model\":\"jev-latest\",\"state\":\"EVIDENCE:\\nplain state\",\"questions\":{\"ok\":{\"type\":\"noul\",\"instructions\":\"Is it true?\"},\"pick\":{\"type\":\"choice\",\"instructions\":\"Pick.\",\"criteria\":{\"A\":\"a\",\"B\":\"b\"}}}}"
+ }
+]

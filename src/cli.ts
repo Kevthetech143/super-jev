@@ -3,7 +3,7 @@ import { readFile, open, unlink } from 'node:fs/promises';
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { run } from './loop.ts';
-import { Jev } from './jev.ts';
+import { getJudge, keyEnv, requireKey } from './judge.ts';
 import { organizer, organizerReport, validateOrganizerInput } from './organizer.ts';
 import type { Evaluation, Evaluator } from './types.ts';
 
@@ -14,7 +14,7 @@ class CliError extends Error {}
 const usage = `super-jev organize INPUT.json --live [--out OUTPUT.json]
 super-jev organize examples/organizer.json --demo [--out OUTPUT.json]
 
-Node 24+. Live mode requires TYPESAFE_API_KEY and sends records to TypeSafe.
+Node 24+. Live mode requires ${keyEnv()} and sends records to TypeSafe.
 Demo mode accepts only the bundled fixture and uses scripted answers.
 JSON output goes to stdout by default. --out creates a NEW file, never overwrites.
 Exit codes: 0 complete (may contain review items), 1 failure.
@@ -68,8 +68,8 @@ try {
     if (JSON.stringify(input) !== JSON.stringify(fixture)) throw new CliError('Demo mode only supports the unchanged bundled fixture; use --live for your records');
     evaluator = { evaluate: async () => ({ model: 'scripted-organizer-demo', answers: Object.fromEntries(['invoice', 'receipt', 'support', 'other'].map((choice, i) => [`record_${i}`, { type: 'choice' as const, choice, confidence: 1, probabilities: Object.fromEntries(Object.keys(input.categories).map(k => [k, k === choice ? 1 : 0])) }])) }) };
   } else {
-    if (!process.env.TYPESAFE_API_KEY) throw new CliError('Set TYPESAFE_API_KEY to use live Jev');
-    evaluator = new Jev();
+    requireKey('use live Jev', m => new CliError(m));
+    evaluator = getJudge();
   }
   // Reserve output before inference to avoid paid calls when output already exists.
   if (output) {

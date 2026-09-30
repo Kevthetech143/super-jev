@@ -463,12 +463,16 @@ SUPERJEV_JUDGE=fake
 SUPERJEV_GATE_CMD="python3 skills/super-jev/tests/fake_door.py"
 ```
 
-An unrecognised `SUPERJEV_JUDGE` value falls back to `typesafe` with one
-stderr line — a typo must not quietly leave a draft unjudged.
+An unrecognised `SUPERJEV_JUDGE` value stops the run with one line
+(`super-jev: SUPERJEV_JUDGE: unknown judge 'x' (known: fake, typesafe-jev)`)
+— a typo must never quietly leave a draft unjudged, or hand it to another judge.
 
-To add a third backend, subclass `judges.Judge`, implement `classify`
-(and `available` if it can be missing on a given machine), and add it to
-`judges.BACKENDS`. Every backend returns the same `JudgeResult`, so
+The judge is one doorway in both languages (`skills/super-jev/judges/`,
+`src/judge.ts`); `judge_profiles.json` holds the endpoint, model, key
+variable name, window, price, token rule and calibration for each judge.
+To add another judge, add a profile whose `kind` names an implementation
+in `judges.IMPLEMENTATIONS` (and `src/judge.ts`); raise the typed errors in
+`judges/errors.py` / `src/judge-errors.ts`. Every backend returns the same `JudgeResult`, so
 nothing downstream needs to know which one answered.
 
 ## Tests

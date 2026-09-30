@@ -1355,7 +1355,7 @@ def main() -> int:
     ap.add_argument("--allow-target", dest="allow_targets", action="append", default=[],
                     help="folder a symlinked file may point into besides the roots (repeatable)")
     ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=MAX_FILES)
-    ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=0.80)
+    ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=JUDGE_PROFILE.confidence_line)
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
                     help="builtin: no model call, descriptions quoted from each file's headings (needs only the "
                          "TypeSafe key). auto (default): --writer-command if given, else the claude CLI if it is "
@@ -1558,7 +1558,7 @@ def main() -> int:
             print(f"ERROR: description writer failed: {e}")
             if not writer_command:
                 print("  The claude CLI must be installed and logged in for this writer. Or re-run with "
-                      "--writer builtin (no model call; needs only TYPESAFE_API_KEY).")
+                      "--writer builtin (no model call; needs only the judge's API key).")
             return 1
         drafts.update(got)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")

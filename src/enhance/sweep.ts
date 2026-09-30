@@ -38,7 +38,7 @@ import { JUDGE_PROFILE } from '../judge-profile.ts';
 export const MAX_QUESTIONS_PER_CALL = JUDGE_PROFILE.maxQuestionsPerCall;
 
 /** Default accept gate for a sweep. Stricter than the 0.75 organizer gate. */
-export const DEFAULT_SWEEP_GATE = 0.80;
+export const DEFAULT_SWEEP_GATE = JUDGE_PROFILE.confidenceLine;
 
 /**
  * Default records per call for a sweep. Chosen from a hand ground-truth

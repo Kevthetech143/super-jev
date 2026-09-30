@@ -17,7 +17,7 @@ Exit codes: whatever the wrapped door returned. Plus 5 for a refusal by this
 wrapper (missing input, missing door, unroutable ask) and 6 for NOT BUILT.
 `hook` uses a different, narrower contract of its own — see its section below.
 
-It never prints TYPESAFE_API_KEY, and it never reads a secret file.
+It never prints the judge's API key, and it never reads a secret file.
 
 Portable by default: the `gate` and `verify` doors run a command taken from
 SUPERJEV_GATE_CMD / SUPERJEV_VERIFY_CMD when set, and otherwise fall back to
@@ -63,10 +63,11 @@ if str(SKILL_DIR) not in sys.path:
 # Every judge-sized default below comes from it, and every size is counted by judge_tokens.
 from judge_profile import PROFILE as JUDGE_PROFILE, judge_tail  # noqa: E402
 from judge_profile import judge_tokens as _judge_tokens  # noqa: E402
+import judges  # noqa: E402
 
-# The default claim-gate door: the judge client shipped in this repo. It needs
-# only TYPESAFE_API_KEY. SUPERJEV_GATE_CMD, when set, replaces it.
-JEV_LIB = SKILL_DIR / "lib" / "jev_client.py"
+# The default claim-gate door: the active judge's own client (judges.door_script), shipped
+# in this repo. It needs only the judge's key. SUPERJEV_GATE_CMD, when set, replaces it.
+GATE_DOOR = judges.door_script()
 # Fleet-local fallback for `verify`. Real on the machine this skill was
 # authored on; absent on a fresh clone, where SUPERJEV_VERIFY_CMD takes over.
 FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
@@ -1504,7 +1505,7 @@ _REPORT_MARKER_RE = re.compile(
 # A fabricated quote is already exit 2 from jev.py itself and already maps
 # to "block" via GATE_HOOK_ACTION — nothing here changes that path.
 BLOCK_CONF_ENV = "SUPERJEV_BLOCK_CONF"
-DEFAULT_BLOCK_CONF = 0.80
+DEFAULT_BLOCK_CONF = JUDGE_PROFILE.confidence_line
 # The companion floor for OVERCLAIMS. Deliberately lower than the block
 # line itself and NOT env-configurable — it exists only to tell "this
 # OVERCLAIMS sits beside a real unsupported/contradicted claim" from "this
@@ -2443,7 +2444,7 @@ def git_env_pins_missing(env):
 def child_env():
     """The environment a wrapped door runs in.
 
-    A copy of ours, so SSL_CERT_FILE and TYPESAFE_API_KEY pass through
+    A copy of ours, so SSL_CERT_FILE and the judge's API key pass through
     untouched. Neither is ever printed. Plus the git config pins from
     safe_git_env, so the trust boundary reaches the door and everything the
     door itself spawns — see SAFE_GIT_CONFIG_PINS for why argv flags alone
@@ -3945,8 +3946,8 @@ def not_built(sub, json_mode=False):
 # ---------------------------------------------------------------- gate
 
 GATE_VERDICT = {
-    0: "CLEAN — every claim is carried by the evidence at or above 0.80. Send it.",
-    3: "READ (blocked) — a claim is red or under 0.80. Do not send it; a human reads the source first.",
+    0: "CLEAN — every claim is carried by the evidence at or above %.2f. Send it." % JUDGE_PROFILE.confidence_line,
+    3: "READ (blocked) — a claim is red or under %.2f. Do not send it; a human reads the source first." % JUDGE_PROFILE.confidence_line,
     2: "REJECT — a quoted span is not in the evidence. The citation is fabricated.",
 }
 GATE_VERDICT_WORD = {0: "CLEAN", 3: "READ", 2: "REJECT"}
@@ -3994,7 +3995,7 @@ def gate_fail_closed(code, out, n_claims=0):
         if m.group("verdict") in NOTABLE_VERDICTS:
             return 3
     for m in claim_rows:
-        if m.group("verdict") != "SUPPORTED" or float(m.group("score")) < 0.80:
+        if m.group("verdict") != "SUPPORTED" or float(m.group("score")) < JUDGE_PROFILE.confidence_line:
             return 3
     return 0
 
@@ -4248,15 +4249,6 @@ def pattern_claim_answer(claim, evidence_text):
             "name": name, "token": token, "negated": negated}
 
 
-def _load_jev_lib():
-    """Import the judge client (JEV_LIB, built in by default) for its ask()."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("fleet_jev", str(JEV_LIB))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _has_secret(text):
     """prepare_bulk.has_secret, loaded from this skill directory."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -4281,14 +4273,14 @@ def _mask_evidence(evidence_items):
 
 def _code_ask(state, questions):
     """The live call code mode makes. Monkeypatched in tests — no network."""
-    return _load_jev_lib().ask(state, questions)
+    return judges.ask(state, questions)
 
 
 _code_ask_live = _code_ask  # identity of the real judge; tests replace sj._code_ask
 
 
 class _CodeLibMissing(Exception):
-    """JEV_LIB is absent while the live code-mode judge needs it."""
+    """GATE_DOOR is absent while the live code-mode judge needs it."""
 
 
 class _JudgeFailed(Exception):
@@ -4339,21 +4331,21 @@ def run_code_gate(evidence_items, claims, ask_fn=None, mask_info=None, state_ite
         judged = evidence_judge(state_items, [c for _, c in pending])
         for n, (i, claim) in enumerate(pending, 1):
             verdict, conf = judged.get(n, ("NO_ANSWER", 0.0))
-            ok = verdict == "SUPPORTED" and conf >= 0.80
+            ok = verdict == "SUPPORTED" and conf >= JUDGE_PROFILE.confidence_line
             rows.append({
                 "key": "c%d" % i, "claim": claim, "verdict": verdict, "confidence": conf,
                 "p_yes": None, "arm": "reply:judge",
                 "action": "ok" if ok else "needs a human — " + (
-                    "under the 0.80 line" if verdict == "SUPPORTED"
+                    "under the %.2f line" % JUDGE_PROFILE.confidence_line if verdict == "SUPPORTED"
                     else verdict.lower().replace("_", " "))})
         pending = []
     if pending:
         questions = {"c%d" % i: noul_code_question(c) for i, c in pending}
         ask = ask_fn if ask_fn is not None else _code_ask
-        if ask is _code_ask_live and not JEV_LIB.exists():
+        if ask is _code_ask_live and not GATE_DOOR.exists():
             raise _CodeLibMissing(
-                "no judge client at %s — restore lib/jev_client.py "
-                "or inject a judge" % JEV_LIB)
+                "no judge client at %s — restore it "
+                "or inject a judge" % GATE_DOOR)
         state_items, withheld = _mask_evidence(
             evidence_items if state_items is None else state_items)
         if mask_info is not None:
@@ -4432,8 +4424,8 @@ def _door_table(out, code=0):
     rows = {}
     for m in _DOOR_ROW_RE.finditer(out or ""):
         verdict, score = m.group("verdict"), float(m.group("score"))
-        if code and verdict == "SUPPORTED" and score <= 0.80:
-            score = 0.79
+        if code and verdict == "SUPPORTED" and score <= JUDGE_PROFILE.confidence_line:
+            score = round(JUDGE_PROFILE.confidence_line - 0.01, 2)
         if m.group("key") in rows:
             return None
         rows[m.group("key")] = (verdict, score, (m.group("subject") or "").strip())
@@ -4443,7 +4435,7 @@ def _door_table(out, code=0):
 def _row_flagged(key, verdict, score, advisory=()):
     """Whether the gate reads this row as needing a human."""
     if key.startswith("c"):
-        return verdict != "SUPPORTED" or score < 0.80
+        return verdict != "SUPPORTED" or score < JUDGE_PROFILE.confidence_line
     return verdict not in _FAVORABLE_SIDE and key not in advisory
 
 
@@ -4532,7 +4524,7 @@ def _gate_door_parts(parts, claim_args, timeout, extra_ledger, tmp_paths, json_m
         tmp.write("\n\n".join("=== %s ===\n%s" % (label, text.strip("\n")) for label, text in part))
         tmp.close()
         tmp_paths.append(tmp.name)
-        cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), tmp.name, "--kit", "reply", *claim_args]
+        cmd = [*door_cmd(GATE_CMD_ENV, GATE_DOOR), tmp.name, "--kit", "reply", *claim_args]
         code, out, err = run_door(cmd, capture=True, door="gate", json_mode=json_mode,
                                   timeout=timeout, extra_ledger=extra_ledger)
         if code == 2 and not _DOOR_ROW_RE.search(out or ""):
@@ -4672,9 +4664,9 @@ def cmd_gate(a):
     if mode == "code" and not claims_for_check:
         mode = "evidence"
     # Code mode's own judge runs the built-in client in-process, which reads the
-    # TYPESAFE_API_KEY environment variable and nothing else; a shell whose key
+    # judge's key environment variable and nothing else; a shell whose key
     # comes through a configured judge (SUPERJEV_GATE_CMD, as prose checks use)
-    # has none, and every diff check died "TYPESAFE_API_KEY is not set". And its
+    # has none, and every diff check died "the key is not set". And its
     # question's "false" means false OR not shown, so over evidence split into
     # parts it cannot tell a part that lacks the code from one that disproves
     # the claim. In both cases the claims the pattern arm does not settle go to
@@ -4682,9 +4674,9 @@ def cmd_gate(a):
     # refusal and the pattern arm apply as before.
     code_judge_note = None
     if mode == "code" and _code_ask is _code_ask_live and os.environ.get(GATE_CMD_ENV) \
-            and not os.environ.get("TYPESAFE_API_KEY", "").strip():
-        code_judge_note = ("gate: TYPESAFE_API_KEY is not in the environment, so the code "
-                           "claims go to the configured judge (%s) as evidence claims\n" % GATE_CMD_ENV)
+            and not judges.key_present():
+        code_judge_note = ("gate: %s is not in the environment, so the code "
+                           "claims go to the configured judge (%s) as evidence claims\n" % (judges.key_env(), GATE_CMD_ENV))
     elif mode == "code" and not hook_mode \
             and len(split_evidence(kept_ev, _judge_room(claims_for_check))) > 1:
         code_judge_note = ("gate: the code is bigger than one judge call, so its claims are "
@@ -4693,7 +4685,7 @@ def cmd_gate(a):
     # The door subprocess is an evidence-mode requirement only: code mode
     # must not refuse (exit 5) for a lib file the CI runner does not have.
     if mode != "code":
-        bad = door_missing(GATE_CMD_ENV, JEV_LIB)
+        bad = door_missing(GATE_CMD_ENV, GATE_DOOR)
         if bad is not None:
             return door_refuse(json_mode, "gate", bad)
     if not a.draft and not a.claim:
@@ -4726,9 +4718,9 @@ def cmd_gate(a):
 
         def door_judge(items, claims):
             """The evidence judge (the gate's door), over parts that each fit one call."""
-            if not os.environ.get(GATE_CMD_ENV) and not JEV_LIB.exists():
-                raise _CodeLibMissing("no judge client at %s — restore lib/jev_client.py "
-                                      "or set %s" % (JEV_LIB, GATE_CMD_ENV))
+            if not os.environ.get(GATE_CMD_ENV) and not GATE_DOOR.exists():
+                raise _CodeLibMissing("no judge client at %s — restore it "
+                                      "or set %s" % (GATE_DOOR, GATE_CMD_ENV))
             if any(_has_secret(c) for c in claims):
                 raise ValueError("a claim contains a secret; not sent")
             parts = split_evidence(items, _judge_room(claims))
@@ -4864,7 +4856,7 @@ def cmd_gate(a):
             claim_args += ["--draft", a.draft]
     elif a.draft:
         claim_args += ["--draft", a.draft]
-    cmd = [*door_cmd(GATE_CMD_ENV, JEV_LIB), *evidence_paths, "--kit", "reply", *claim_args]
+    cmd = [*door_cmd(GATE_CMD_ENV, GATE_DOOR), *evidence_paths, "--kit", "reply", *claim_args]
     # A direct check whose evidence is bigger than one judge call goes in parts, one
     # call each, merged below; the door is never left to cut or chunk it on its own.
     # Evidence that masking left nothing of (every file scans as a secret) is never
@@ -5222,8 +5214,8 @@ def cmd_sweep(a):
     if a.stub:
         cmd += ["--stub"]
     key_warning = None
-    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
-        key_warning = ("a live sweep needs TYPESAFE_API_KEY. Re-run with --dry-run "
+    if not a.dry_run and not a.stub and not judges.key_present():
+        key_warning = (f"a live sweep needs {judges.key_env()}. Re-run with --dry-run "
                        "or --stub to stay offline.")
         if not json_mode:
             print(f"super-jev: {key_warning}", file=sys.stderr)
@@ -5265,8 +5257,8 @@ def cmd_fetch(a):
     if a.stub:
         cmd += ["--stub"]
     key_warning = None
-    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
-        key_warning = ("a live fetch needs TYPESAFE_API_KEY. Re-run with --dry-run "
+    if not a.dry_run and not a.stub and not judges.key_present():
+        key_warning = (f"a live fetch needs {judges.key_env()}. Re-run with --dry-run "
                        "or --stub to stay offline.")
         if not json_mode:
             print(f"super-jev: {key_warning}", file=sys.stderr)
@@ -5304,8 +5296,8 @@ def cmd_permit(a):
     if a.stub:
         cmd += ["--stub"]
     key_warning = None
-    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
-        key_warning = ("a live permit needs TYPESAFE_API_KEY. Re-run with --dry-run "
+    if not a.dry_run and not a.stub and not judges.key_present():
+        key_warning = (f"a live permit needs {judges.key_env()}. Re-run with --dry-run "
                        "or --stub to stay offline.")
         if not json_mode:
             print(f"super-jev: {key_warning}", file=sys.stderr)
@@ -5390,8 +5382,8 @@ def cmd_chain(a):
     if a.stub:
         cmd += ["--stub"]
     key_warning = None
-    if not a.dry_run and not a.stub and not os.environ.get("TYPESAFE_API_KEY"):
-        key_warning = ("a live chain needs TYPESAFE_API_KEY. Re-run with --dry-run "
+    if not a.dry_run and not a.stub and not judges.key_present():
+        key_warning = (f"a live chain needs {judges.key_env()}. Re-run with --dry-run "
                        "or --stub to stay offline.")
         if not json_mode:
             print(f"super-jev: {key_warning}", file=sys.stderr)
@@ -5418,8 +5410,8 @@ def cmd_bench(a):
     if bad is not None:
         return bad
     live = not (a.dry_run or a.stub)
-    if live and not os.environ.get("TYPESAFE_API_KEY"):
-        msg = ("refusing a live bench — TYPESAFE_API_KEY is not set in the "
+    if live and not judges.key_present():
+        msg = (f"refusing a live bench — {judges.key_env()} is not set in the "
                "environment. Printing the dry-run plan instead; no network, no cost.")
         plan_cmd = ["npm", "run", "bench:live", "--", "--dry-run"]
         if json_mode:
@@ -13149,11 +13141,11 @@ def cmd_status(a):
     json_mode = getattr(a, "json", False)
     repo = repo_path()
     scripts = npm_scripts(repo) or {}
-    live_gate = door_missing(GATE_CMD_ENV, JEV_LIB) is None
+    live_gate = door_missing(GATE_CMD_ENV, GATE_DOOR) is None
     live_verify = door_missing(VERIFY_CMD_ENV, FLEET_VERIFY_PY) is None
     npm_ok = resolve_npm() is not None
     gate_what = (f"${GATE_CMD_ENV}" if os.environ.get(GATE_CMD_ENV)
-                else f"claim-gate ({JEV_LIB})")
+                else f"claim-gate ({GATE_DOOR})")
     verify_what = (f"${VERIFY_CMD_ENV}" if os.environ.get(VERIFY_CMD_ENV)
                   else f"report-verify ({FLEET_VERIFY_PY})")
 
@@ -13188,7 +13180,7 @@ def cmd_status(a):
             "doors": [{"door": n, "state": s, "wraps": w} for n, s, w in rows],
             "harness_repo": str(repo),
             "harness_commit": harness_commit(repo),
-            "typesafe_key_present": bool(os.environ.get("TYPESAFE_API_KEY")),
+            "judge_key_present": judges.key_present(),
             "ledger_path": str(LEDGER_PATH),
             "ledger_calls_today": ledger_today,
             "token_totals_today": today_totals,
@@ -13204,7 +13196,7 @@ def cmd_status(a):
         print(f"{name:<8} {state:<28} {what}")
     print(f"\nharness repo: {repo}")
     print(f"harness commit: {harness_commit(repo)}")
-    print(f"TYPESAFE_API_KEY in env: {'yes' if os.environ.get('TYPESAFE_API_KEY') else 'no'}"
+    print(f"{judges.key_env()} in env: {'yes' if judges.key_present() else 'no'}"
           " (never printed)")
     print(f"ledger: {LEDGER_PATH} ({ledger_today} call(s) today)")
     _print_token_totals("token totals, today", today_totals)
