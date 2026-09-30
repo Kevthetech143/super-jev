@@ -43,3 +43,13 @@ test('judgeTokens is the one estimator and matches the Python table', () => {
   assert.equal(estimateTokens('abc'), 2);
   assert.equal(estimateTokens({ a: 'bc' }), judgeTokens({ a: 'bc' }));
 });
+
+test('the laya profile is keyless, reads answer_confidence and takes its URL from its own variable', () => {
+  const p = loadJudgeProfile('laya');
+  assert.equal(p.keyRequired, false);
+  assert.equal(p.confidenceField, 'answer_confidence');
+  assert.equal(p.apiUrlEnv, 'SUPERJEV_LAYA_URL');
+  assert.equal(p.windowTokens, 1024);
+  assert.ok(p.callTokens > 0);
+  assert.equal(loadJudgeProfile('typesafe-jev').keyRequired, true);
+});

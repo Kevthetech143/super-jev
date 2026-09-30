@@ -204,8 +204,8 @@ export class Jev implements Evaluator {
   private profile: JudgeProfile;
   constructor(options: { apiKey?: string; model?: string; fetch?: typeof fetch; profile?: JudgeProfile } = {}) {
     this.profile = options.profile ?? JUDGE_PROFILE;
-    this.key = options.apiKey ?? process.env[this.profile.keyEnv] ?? '';
-    if (!this.key) throw new NoKey(`Set ${this.profile.keyEnv} to use live Jev`, `${this.profile.keyEnv} is not set`);
+    this.key = options.apiKey ?? (this.profile.keyRequired ? process.env[this.profile.keyEnv] : undefined) ?? '';
+    if (!this.key && this.profile.keyRequired) throw new NoKey(`Set ${this.profile.keyEnv} to use live Jev`, `${this.profile.keyEnv} is not set`);
     this.model = options.model ?? this.profile.model;
     this.transport = options.fetch ?? fetch;
   }
@@ -223,9 +223,10 @@ export class Jev implements Evaluator {
     // The one choke point for every TypeSafe send: scan the whole body first.
     if (payloadHasSecret(payload)) throw new SecretBlocked('Jev request contains a secret; not sent', 'request contains a secret; not sent');
     try {
-      return await this.transport(this.profile.apiUrl, {
+      const url = (this.profile.apiUrlEnv ? process.env[this.profile.apiUrlEnv] : undefined) || this.profile.apiUrl;
+      return await this.transport(url, {
         method: 'POST', signal,
-        headers: { Authorization: `Bearer ${this.key}`, 'Content-Type': 'application/json' },
+        headers: { ...(this.key ? { Authorization: `Bearer ${this.key}` } : {}), 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
     } catch (error) {
@@ -233,6 +234,16 @@ export class Jev implements Evaluator {
       if (error instanceof TypeError) throw new Unreachable(error.message, 'could not reach TypeSafe (network)');
       throw error;
     }
+  }
+  /** A judge whose confidence lives in another reply field (profile.confidenceField) is read through it. */
+  private readConfidenceField(result: Evaluation): Evaluation {
+    const field = this.profile.confidenceField;
+    if (field === 'confidence' || !result || typeof result.answers !== 'object' || !result.answers) return result;
+    const answers = Object.fromEntries(Object.entries(result.answers).map(([id, a]) => {
+      const v = (a as unknown as Record<string, unknown>)?.[field];
+      return [id, typeof v === 'number' ? { ...a, confidence: v } : a];
+    }));
+    return { ...result, answers } as Evaluation;
   }
   private async _peekBody(response: Response): Promise<string> {
     try { return await response.text(); } catch { return ''; }
@@ -267,7 +278,7 @@ export class Jev implements Evaluator {
       }
       throw failure;
     }
-    const result = await response.json() as Evaluation;
+    const result = this.readConfidenceField(await response.json() as Evaluation);
     // The validated copy is what the caller gets; the parsed reply is not touched.
     return validateEvaluation(request, result);
   }

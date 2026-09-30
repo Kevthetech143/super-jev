@@ -42,7 +42,7 @@ test('(b) an unknown judge name fails with one clear line', () => {
     assert.equal(r.status, 1, bad);
     const lines = r.stderr.trim().split('\n');
     assert.equal(lines.length, 1, r.stderr);
-    assert.match(lines[0]!, /^super-jev: SUPERJEV_JUDGE: unknown judge .* \(known: fake, typesafe-jev\)$/);
+    assert.match(lines[0]!, /^super-jev: SUPERJEV_JUDGE: unknown judge .* \(known: fake, laya, typesafe-jev\)$/);
   }
   assert.throws(() => loadJudgeProfile('nope'), /unknown judge "nope"/);
 });

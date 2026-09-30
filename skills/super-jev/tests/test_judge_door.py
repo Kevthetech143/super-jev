@@ -107,6 +107,7 @@ def test_c_a_second_profile_changes_behaviour_only_through_the_profile(tmp_path,
 
     def run(client):
         sent = []
+        monkeypatch.setitem(sys.modules, "jev_client", client)   # the door's ask reaches this copy
 
         def fake(url, body, headers, timeout):
             sent.append((url, json.loads(body)["model"], headers["Authorization"]))
