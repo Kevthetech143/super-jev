@@ -444,7 +444,10 @@ SITE = """import urllib.request, os
 def _rec(req, *a, **k):
     open(os.environ["MASK_SENT"], "ab").write(req.data + b"\\n")
     raise OSError("blocked in test")
+def _rec_open(self, req, *a, **k):  # the client posts through its own no-redirect opener
+    return _rec(req)
 urllib.request.urlopen = _rec
+urllib.request.OpenerDirector.open = _rec_open
 """
 
 

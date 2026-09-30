@@ -13,8 +13,9 @@ export { JudgeError, NoKey, AuthRejected, Unreachable, Overloaded, BadReply, Too
 /** Name of the environment variable that holds the selected judge's key. */
 export function keyEnv(profile: JudgeProfile = JUDGE_PROFILE): string { return profile.keyEnv; }
 
-/** True when the selected judge's key is set (whitespace-only counts as unset). */
+/** True when the selected judge's key is set (whitespace-only counts as unset); a keyless judge always is. */
 export function keyPresent(env: NodeJS.ProcessEnv = process.env, profile: JudgeProfile = JUDGE_PROFILE): boolean {
+  if (!profile.keyRequired) return true;
   return Boolean(env[profile.keyEnv]?.trim());
 }
 

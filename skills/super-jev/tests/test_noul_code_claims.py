@@ -599,13 +599,13 @@ def test_code_ask_posts_exact_noul_question_on_the_wire(tmp_path, monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
     seen = []
 
-    def fake_urlopen(req, timeout=None, context=None):
+    def fake_urlopen(self, req, data=None, timeout=None):
         seen.append(req)
         return _CannedHTTPResponse(
             {"answers": {"c1": {"type": "noul", "noul": 0.93}}})
 
     import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(urllib.request.OpenerDirector, "open", fake_urlopen)
     monkeypatch.setattr(sj.judges, "_impl", lambda: jev)
     claim = "when x, f returns y"
     rows, code = sj.run_code_gate([("ev.py", "some code")], [claim])

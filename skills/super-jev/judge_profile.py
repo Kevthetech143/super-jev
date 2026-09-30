@@ -55,6 +55,18 @@ class JudgeProfile:
     route_floor: float
     preflight_strong: float
     outcome_line: float
+    # optional wire fields (defaults keep the Jev behaviour)
+    #: environment variable that, when set, replaces api_url ("" = none)
+    api_url_env: str = ""
+    #: False for a judge that takes no key (a local model): no key check, no Authorization header
+    key_required: bool = True
+    #: the reply field the confidence line reads; the pass line is only meaningful for this field
+    confidence_field: str = "confidence"
+    #: False until the calibration numbers are measured on this judge: it may answer, never save or approve
+    calibrated: bool = True
+    #: the judge's short name in error text ("" = the profile name) and its vendor name ("" = that name)
+    judge_name: str = ""
+    vendor: str = ""
 
     @property
     def input_cap_tokens(self):
@@ -116,7 +128,25 @@ def load(name=None, path=None):
                 "overloaded_statuses": tuple(int(c) for c in p["overloaded_statuses"])}
     except (KeyError, ValueError, TypeError) as e:
         raise SystemExit(f"super-jev: cannot read the judge limits table {Path(path).name}: {e!r}")
-    return JudgeProfile(name=key, **vals)
+    opt = {}
+    if "api_url_env" in p:
+        opt["api_url_env"] = str(p["api_url_env"])
+    if "key_required" in p:
+        if not isinstance(p["key_required"], bool):
+            raise SystemExit(f"super-jev: cannot read the judge limits table {Path(path).name}: key_required must be true or false")
+        opt["key_required"] = p["key_required"]
+    for f in ("judge_name", "vendor"):
+        if f in p:
+            opt[f] = str(p[f])
+    if "calibrated" in p:
+        if not isinstance(p["calibrated"], bool):
+            raise SystemExit(f"super-jev: cannot read the judge limits table {Path(path).name}: calibrated must be true or false")
+        opt["calibrated"] = p["calibrated"]
+    if "confidence_field" in p:
+        opt["confidence_field"] = str(p["confidence_field"])
+    opt["judge_name"] = opt.get("judge_name") or key
+    opt["vendor"] = opt.get("vendor") or opt["judge_name"]
+    return JudgeProfile(name=key, **vals, **opt)
 
 
 def _from_env():

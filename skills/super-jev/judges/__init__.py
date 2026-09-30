@@ -80,11 +80,16 @@ def key_env():
 
 
 def key_present():
+    """True when the judge can be called as far as its key goes: a keyless judge always can."""
+    if not profile().key_required:
+        return True
     return bool(os.environ.get(key_env(), "").strip())
 
 
 def require_key():
-    """The key, or NoKey. The one place a key is read."""
+    """The key, or NoKey ("" for a judge that takes none). The one place a key is read."""
+    if not profile().key_required:
+        return ""
     env = key_env()
     key = os.environ.get(env, "").strip()
     if not key:
