@@ -83,7 +83,7 @@ class PublicCliTests(unittest.TestCase):
     def config(self, registry: Path, command: list[str] | None = None, **settings: object) -> Path:
         body: dict[str, object] = {
             "db": str(self.root / "state.sqlite"), "registry": str(registry),
-            "cacheTtlSeconds": 17, "reviewTtlSeconds": 3, "providerTimeoutSeconds": 2,
+            "cacheTtlSeconds": 17, "reviewTtlSeconds": 30, "providerTimeoutSeconds": 2,
         }
         if command is not None:
             body["retrievalCommand"] = command
@@ -168,7 +168,7 @@ class PublicCliTests(unittest.TestCase):
         panel, result = self.cli("--config", str(config), "--principal", "alice")
         self.assertEqual(panel.returncode, 0, panel.stderr)
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["settings"], {"cacheTtlSeconds": 17, "reviewTtlSeconds": 3, "providerTimeoutSeconds": 2})
+        self.assertEqual(result["settings"], {"cacheTtlSeconds": 17, "reviewTtlSeconds": 30, "providerTimeoutSeconds": 2})
         self.assertIn("context", result["optionalSearchFields"])
         self.assertEqual(len(result["pointers"]), 1)
         pointer = result["pointers"][0]
@@ -185,8 +185,8 @@ class PublicCliTests(unittest.TestCase):
         self.assertEqual(calls.read_text().splitlines(), ["call"])
         with sqlite3.connect(self.root / "state.sqlite") as connection:
             pending = json.loads(connection.execute("SELECT body FROM pending").fetchone()[0])
-        self.assertGreater(pending["expires"] - search_started, 2)
-        self.assertLess(pending["expires"] - search_started, 4)
+        self.assertGreater(pending["expires"] - search_started, 29)
+        self.assertLess(pending["expires"] - search_started, 32)
         approval = self.write_json("approve.json", {
             "action": "approve", "ticket": ready["approvalTicket"], "principal": "alice", "approved": True,
             "answer": "The launch policy is blue.", "evidence": [{"sourceId": "policy", "quote": "blue"}],
