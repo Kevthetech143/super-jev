@@ -357,6 +357,15 @@ def trace_show(sdir: Path, which: str) -> int:
     print(f"trace {rec.get('lookup_id')}  {rec.get('ts')}  tier={rec.get('tier')}  "
           f"{(rec.get('timings') or {}).get('total_secs')}s")
     print(f"question: {rec.get('question')}")
+    tm = rec.get("timings") or {}
+    if "routing" in tm:
+        rc = st.get("routing_calls") or {}
+        print("stage seconds: " + ", ".join(f"{k} {tm[k]}" for k in
+              ("routing", "reconnect", "word_search", "word_search_wait", "content_check", "listwise", "total_secs") if k in tm)
+              + f"; routing runs={rc.get('runs')} provider calls={rc.get('provider_calls')}"
+              + f"; timeout re-checks={st.get('timeout_rechecks') or 0}"
+              + ("; word search re-run after reconnect" if tm.get("word_search_rerun") else "")
+              + " (word search ran beside routing)")
     c = st.get("cache") or {}
     if c:
         print(f"1 cache: {c.get('result')} ({c.get('checked')} pointer(s) checked)")
@@ -1494,7 +1503,16 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
             and not has_secret(text) and refresh_would_admit(path, ptr))
 
 
-def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
+def word_pick(ranked: list, skip=(), limit: int = FALLBACK_FILES) -> list:
+    """The part of word search that needs routing: drop `skip` (already routed) paths, then apply
+    the relative floor against the best file still eligible, then the limit."""
+    # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
+    # Measured against the best file still eligible, i.e. after routed files are skipped.
+    rest = [r for r in ranked if r[1] not in skip]
+    floor = rest[0][0] * FALLBACK_REL_FLOOR if rest else 0
+    return [r for r in rest if r[0] >= floor][:limit]
+
+def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), full=False) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
@@ -1503,7 +1521,9 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     output is never searched; `skip` paths (already routed) are dropped before the top `limit`.
     A reviewed file edited since connect stays searchable at its current text while its
     pointer waits on the refresh (routing cannot see a stale pointer), if that text passes
-    the same secret scan and size ceiling connect applies; it is listed in the trace."""
+    the same secret scan and size ceiling connect applies; it is listed in the trace.
+    `full=True` returns the whole ranked list (no skip, floor or limit), so the ask can search
+    while routing runs and apply word_pick once routing has returned."""
     terms = query_terms(question)
     if not terms:
         return []
@@ -1581,11 +1601,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
                       "ranked": ranked[:STAGE_LIST_CAP],
                       "cover": {p: sum(idf[t] for t in terms if f[t]) / total for p, f in tf.items()}}
-    # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
-    # Measured against the best file still eligible, i.e. after routed files are skipped.
-    rest = [r for r in ranked if r[1] not in skip]
-    floor = rest[0][0] * FALLBACK_REL_FLOOR if rest else 0
-    return [r for r in rest if r[0] >= floor][:limit]
+    return ranked if full else word_pick(ranked, skip, limit)
 
 def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
@@ -2030,18 +2046,34 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         out = memory({"action": "navigate-many", "pointers": ptrs, "principal": principal, "question": question,
                       "lastGood": True, **routing_limits})
         rows = out.get("results") if out.get("status") == "ok" else None
+        _STAGE["nav_many_calls"] = out.get("calls")  # shared provider calls; None if the runtime does not say
         if not isinstance(rows, dict):  # an older runtime, or the batch itself failed
             return None
         return {ptr: rows.get(ptr) if isinstance(rows.get(ptr), dict) else {"status": "error"} for ptr in ptrs}
 
     # Routing asks Jev about every pointer at once: their questions ride in shared
     # calls (split under the input ceiling) instead of one navigate call per pointer.
+    # Word search is local and needs nothing from routing except the skip list, so it runs
+    # beside routing and returns its FULL ranked list; skip, floor and limit are applied after.
+    timers = _STAGE["timers"] = {}
+    def timed_word_search():
+        t = time.time()
+        ranked = word_search(question, search_pointers, full=True)
+        timers["word_search"] = round(time.time() - t, 2)
+        return ranked
+    word_pool = ThreadPoolExecutor(max_workers=1)
+    word_job = word_pool.submit(timed_word_search)
     t_start = time.time()
     outs = nav_many(pointers) if pointers and batch_jev() else None
+    _STAGE["routing_calls"] = {"runs": 1 if outs is not None else len(pointers), "navigate_many": outs is not None,
+                               "provider_calls": _STAGE.pop("nav_many_calls", None)}
     if outs is None:  # one navigate call per pointer, as before batching
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     else:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
+    timers["routing"] = round(time.time() - t_start, 2)
+    t_reconnect = time.time()
+    renav = [False]
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
     # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup. A replay
@@ -2056,12 +2088,15 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
                 reconnected[ptr] = auto_heal.reconnect_recipe_or_queue(ptr, principal, memory=memory)
             if reconnected[ptr] == "reconnected":
+                renav[0] = True
                 results[i] = nav(ptr)
         elif kind == "pointer-changed":
             # A refresh re-registered the set while Jev routed it (a stale set is routed now,
             # so a background refresh can land mid-call): ask it once more at its new generation.
+            renav[0] = True
             results[i] = nav(ptr)
     _STAGE["reconnect"] = reconnected
+    timers["reconnect"] = round(time.time() - t_reconnect, 2)
     # A note written into a connected folder after its connect is not in the pointer's file list,
     # so nothing marks the pointer stale: look for such files now and then (background, bounded)
     # and refresh their pointers, so a later lookup finds them without a hand reconnect.
@@ -2162,13 +2197,24 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # descriptions, not text: unrelated files can fill every routed read slot and hide the
     # note that states the answer. Word search adds the files whose text matches the
     # question; the content check still decides what is kept.
-    found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES])
-                        | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
+    t_wait = time.time()
+    ranked_words = word_job.result()
+    word_pool.shutdown(wait=False)
+    if any(v == "reconnected" for v in reconnected.values()) or renav[0]:
+        # A pointer was reconnected (or re-registered) mid-ask: its file list changed after the
+        # search above read it, so search again, exactly as the serial path would have.
+        ranked_words = word_search(question, search_pointers, full=True)
+        timers["word_search_rerun"] = True
+    timers["word_search_wait"] = round(time.time() - t_wait, 2)
+    found = word_pick(ranked_words, skip=set(routed[:CONFIRM_FILES])
+                      | {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     checked = set(to_check)
     if to_check:
+        t_check = time.time()
         scores, partial, check_error, notes = confirm(question, to_check)
+        timers["content_check"] = round(time.time() - t_check, 2)
         if check_error:
             error_lines.append(f"[content-check] error: {check_error}")
         # One source-evidence floor for all questions. Routing discovers candidates;
@@ -2206,7 +2252,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if top and _CLAIM["text"]:
         pool = [p for _s, p, _ptr in top if notes.get(p) != HELD_SECRET]
         _STAGE["listwise"] = {"pool": pool[:LISTWISE_MAX_FILES], "ran": bool(pool), "reordered": False}
+        t_list = time.time()
         listwise_winner, listwise_prob = judge_listwise(question, pool) if pool else (None, None)
+        timers["listwise"] = round(time.time() - t_list, 2)
         _STAGE["listwise"].update(winner=listwise_winner, winner_prob=listwise_prob, promoted=False)
     if listwise_winner == LISTWISE_NONE and not (isinstance(listwise_prob, (int, float))
                                                  and listwise_prob >= LISTWISE_PROMOTE_FLOOR):
@@ -2303,6 +2351,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
             "cover_gate": _STAGE.get("cover_gate"),
             "timeout_rechecks": _STAGE.get("timeout_rechecks"),
+            "routing_calls": _STAGE.get("routing_calls"),
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
                               for p, v in content_check.items()},
             "tiebreak": _STAGE.get("tiebreak") or {},
@@ -2323,7 +2372,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     write_trace(sdir, kind="trace", lookup_id=lookup_id, question=question, routing=routing,
                 content_check=content_check,
                 final_ranked=[{"score": s, "path": p, "pointer": ptr} for s, p, ptr in top],
-                tier=tier, timings={"total_secs": round(time.time() - t0, 2)}, errors=error_lines,
+                tier=tier, timings={"total_secs": round(time.time() - t0, 2), **timers}, errors=error_lines,
                 stages=stages)
     if _CLAIM["text"]:
         files = _STAGE.get("claim_files")
