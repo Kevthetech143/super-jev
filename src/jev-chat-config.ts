@@ -250,7 +250,7 @@ export function render(shown: Shown, look: Look): string {
     else if (d.refused) {
       head('Not connected', 'red');
       body(REFUSED[d.refused.kind]?.(d.refused) ?? d.refused.why ?? '');
-      if (d.refused.kind === 'too_many') next('drag in a smaller folder inside it.');
+      if (d.refused.kind === 'too_many') drag('drag in a smaller folder inside it.');
     } else {
       head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : 'Not connected', d.connected ? 'green' : 'red');
       said(d.held, (n) => `Held back ${plural(n, 'note')}:`);

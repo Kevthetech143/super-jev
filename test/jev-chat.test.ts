@@ -1534,15 +1534,15 @@ test('K8 a line typed while a search runs is ignored: no second paid ask, and th
 });
 
 // ---------------------------------------------------------------- round 6: a reason is said once; the door drops typed-ahead lines too
-const WHY_SECRET = 'card/password-like text; held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect.';
+const WHY_HELD = 'card/password-like text; held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect.';
 const nine = (why: string) => Array.from({ length: 9 }, (_, i) => ({ path: `/Users/sam/Ops Notes/creds-${i}.md`, why }));
 
 test('G1 nine held notes with one reason say it once: every path whole on its own line, at most held+3 body lines, widths 60 and 80', () => {
   for (const width of [60, 80]) for (const color of [false, true]) {
-    const s = stripVTControlCharacters(R('connect', { connected: 1, held: nine(WHY_SECRET) }, { label: 'Ops Notes' }, { width, color }));
+    const s = stripVTControlCharacters(R('connect', { connected: 1, held: nine(WHY_HELD) }, { label: 'Ops Notes' }, { width, color }));
     const at = `width ${width}, colour ${color}:\n${s}`;
-    assert.equal(flat(s).split(WHY_SECRET).length - 1, 1, `the reason is not said exactly once at ${at}`);
-    assert.ok(flat(s).includes('Held back 9 notes: ' + WHY_SECRET), at);
+    assert.equal(flat(s).split(WHY_HELD).length - 1, 1, `the reason is not said exactly once at ${at}`);
+    assert.ok(flat(s).includes('Held back 9 notes: ' + WHY_HELD), at);
     for (let i = 0; i < 9; i++) assert.ok(lines(s).includes(`    ~/Ops Notes/creds-${i}.md`), `path ${i} is not whole on its own line at ${at}`);
     assert.ok(lines(s).slice(1).length <= 9 + 3, `${lines(s).slice(1).length} body lines at ${at}`);
     assert.ok(lines(s).every((l) => l.length <= width), at);
@@ -1591,6 +1591,18 @@ test('W5 at the one-shot door, a Next that points at dragging says how to open t
     assert.ok(!new RegExp(way).test(flat(R('ask', d))), 'the window never points at itself');
   }
   assert.match(flat(R('status', { next: 'connect', principal: 'me', sets: [] }, {}, { door: true })), new RegExp(`Next: ${way} drag a folder`));
+  const big = { connected: 0, refused: { kind: 'too_many', why: 'x', count: 1230, max: 250 } };
+  assert.match(flat(R('connect', big, { label: 'Everything' }, { door: true })), new RegExp(`Next: ${way} drag in a smaller folder inside it\\.`));
+  assert.match(flat(R('connect', big, { label: 'Everything' })), /Next: drag in a smaller folder inside it\./, 'the window says it as before');
+});
+
+test('W6 the one-shot door on an install that was never set up shows the status reply and its Next, and asks nothing', async () => {
+  const r = rig([{ when: '--status', out: { v: 1, next: 'setup', principal: 'me', sets: [] } }, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+  const w = win(r, { argv: [FOLDER] });
+  await w.exit();
+  assert.match(flat(w.text()), /Not set up yet\s+Next: open the window \(npm run jev, or superjev with no words\); setup runs there\./, w.text());
+  assert.ok(!/Connect Team Notes\?/.test(w.text()), w.text());
+  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'), 'a connect ran on a never-set-up install');
 });
 
 test('W5 whole app: the one-shot door with nothing connected tells a shell user to open the window, not to drag', async () => {

@@ -233,8 +233,9 @@ export async function run(io: IO): Promise<number> {
       if (stdin.isTTY) {
         const term = terminal(); // first, so a line typed while the status runs is dropped like any other, never taken as the yes
         try {
-          await helper({ kind: 'status' });
+          const s = await helper({ kind: 'status' });
           if (interrupted) return 130;
+          if (!s.data || s.data.outcome || s.data.next === 'setup') return finish(s); // never set up: the status says what to do next, and no question is asked
           r = await connectFlow(t, term.confirm);
         } finally { term.close(); }
       } else {
