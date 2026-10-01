@@ -112,10 +112,11 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
   `--claims-file FILE` checks one statement per line. Use `dispatch.py check FILE --claim "..."`
   when you already have the file, diff or report and want a send/no-send gate; it gives no proof
   line. Both doors: only exit 0 passes. `ask --claim` exits TRUE 0, FALSE 5; every other result is
-  not a pass, and its code says how the search went: 1 searched fully and nothing settles it
-  (NOT FOUND, UNSURE, PARTIAL, CONFLICT), 3 a set or the check failed (a NOT FOUND after a failed set,
-  or `UNSURE: the true/false check did not run`), 4 setup needed (a NOT FOUND where a set is stale or
-  files were skipped or held), 2 refused input; several statements exit with the highest code.
+  not a pass, and its code says how the search went, whatever the verdict word and whether or not
+  files are listed: 1 searched fully and nothing settles it (NOT FOUND, UNSURE, PARTIAL, CONFLICT),
+  3 a set or the content check failed (or `UNSURE: the true/false check did not run`), 4 setup needed
+  (a set is stale or unprepared, or files were skipped or held), 2 refused input; several statements
+  exit with the highest code.
   `check` exits CLEAN 0, READ 3, REJECT 2; any other code (1 error, 5 refused) means the check
   failed (step 7). The two doors use different numbers: ask's 5 is FALSE, check's 5 is a refusal.
 - **Building something bigger than one answer:** use the `super-jev-build-cycle` skill. Six steps —
