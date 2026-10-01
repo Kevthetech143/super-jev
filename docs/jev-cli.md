@@ -13,6 +13,9 @@ npm run jev            # the window
 superjev "How long does the canary hold?"   # one question, then exit
 ```
 
+`install.sh` makes its own copy in `~/.local/share/super-jev`. Folders you
+connect are kept per copy, so connect and ask from the same door.
+
 The first launch asks once for your TypeSafe key (hidden, saved only on
 this Mac in `~/.typesafe-api-key`, owner-only) and runs setup. Later
 launches print one line: the version, how many folders, and whether they
@@ -23,7 +26,7 @@ are up to date. A key in `TYPESAFE_API_KEY` wins over the saved one.
 | You type | What happens |
 |---|---|
 | a question | finds the notes that answer it |
-| `/check <statement>` | TRUE, FALSE or NOT FOUND, with the proof line |
+| `/check <statement>` | TRUE, FALSE or NOT FOUND, with the proof line (the separate claim judge, not the notes-retrieval contract) |
 | a folder or `.md` note (drag it in) | asks, then connects it or refreshes it |
 | `/status` | what is connected and whether it is current |
 | `/help` or `?` | this list |

@@ -75,7 +75,7 @@ export async function run(io: IO): Promise<number> {
     let data: any = null;
     try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
     const secs = t.kind === 'status' ? undefined : (Date.now() - t0) / 1000;
-    if (!data) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: lastLine(res.err) }, secs }, look()) };
+    if (!data) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
     for (const s of data.sets ?? []) session.connected.add(s.name);
     return { data, code: res.code, text: render({ kind: t.kind as any, data, secs, ...extra }, look()) };
   }
@@ -87,7 +87,7 @@ export async function run(io: IO): Promise<number> {
   async function connectFlow(t: Extract<Turn, { kind: 'connect' }>, askYes: (text: string) => Promise<boolean>) {
     const name = pointerName(t.path), label = basename(t.path).replace(/\.md$/i, '');
     const refresh = session.connected.has(name);
-    if (!(await askYes(confirmText(label, refresh, vendor, look().width)))) return { text: render({ kind: 'connect', data: {}, label }, look()), code: 1 };
+    if (!(await askYes(confirmText(label, refresh, vendor, look().width)))) return { text: render({ kind: 'connect', data: {}, declined: true }, look()), code: 1 };
     const r = await helper(t, { label, refreshed: refresh });
     if (r.data?.connected && !r.data.refused) session.connected.add(name);
     return r;
@@ -133,21 +133,17 @@ export async function run(io: IO): Promise<number> {
     };
     rl.on('line', (l) => push(l));
     rl.on('close', () => { closed = true; wake?.(); });
+    const act = (a: string) => { if (a === 'clear') clear(); else if (a === 'quit') rl.close(); else if (a === 'no') { clear(); push(ESC); } };
     rl.on('SIGINT', () => {
       if (mode === 'busy') { interrupted = true; child?.kill('SIGTERM'); rl.close(); return; }
       const a = keyAction({ mode, line: rl.line, armed }, 'ctrl-c');
-      if (a === 'clear') clear();
-      else if (a === 'quit') rl.close();
-      else if (a === 'no') { clear(); push(ESC); }
-      else if (a === 'hint') { armed = true; setTimeout(() => (armed = false), 2000).unref(); stdout.write('\nPress Ctrl+C again to quit\n'); rl.prompt(); }
+      if (a === 'hint') { armed = true; setTimeout(() => (armed = false), 2000).unref(); stdout.write('\nPress Ctrl+C again to quit\n'); rl.prompt(); }
+      else act(a);
     });
     stdin.on('keypress', (_s: string, key: any) => {
       if (!key || mode === 'busy') return;
       const name = key.name === 'escape' ? 'escape' : key.ctrl && key.name === 'd' ? 'ctrl-d' : '';
-      const a = name && keyAction({ mode, line: rl.line, armed }, name);
-      if (a === 'clear') clear();
-      else if (a === 'quit') rl.close();
-      else if (a === 'no') { clear(); push(ESC); }
+      if (name) act(keyAction({ mode, line: rl.line, armed }, name));
     });
     return {
       /** The next line, or null once the window is closed. */
@@ -155,6 +151,7 @@ export async function run(io: IO): Promise<number> {
         for (;;) {
           mode = 'prompt';
           if (closed) return null;
+          rl.setPrompt('› ');
           rl.prompt();
           const x = await pull();
           if (typeof x === 'string' || x === null) { mode = 'busy'; return x; }
@@ -162,6 +159,7 @@ export async function run(io: IO): Promise<number> {
       },
       async confirm(text: string): Promise<boolean> {
         out(text);
+        rl.setPrompt(''); // so clearing the line on Esc does not redraw a prompt
         mode = 'confirm';
         const x = await pull();
         mode = 'busy';
@@ -173,9 +171,12 @@ export async function run(io: IO): Promise<number> {
 
   // ------------------------------------------------------------ the window
   async function window(): Promise<number> {
+    const stop = (r: { text: string; code: number }) => { stdin.setRawMode?.(false); out(r.text); return r.code || 1; };
+    if (needsKey()) stdin.setRawMode?.(true); // from the start, so a key pasted before the prompt shows is never echoed
     let r = await helper({ kind: 'status' });
-    if (!r.data) { out(r.text); return r.code; }
-    if (!(r.data.sets ?? []).length) out(`Super Jev ${VERSION}\nPoints you to the notes that answer your question.\n`);
+    if (r.data?.outcome) return stop(r); // the helper could not read the status: show why, never an empty window
+    const fresh = !r.data || r.data.next === 'setup'; // no JSON at all (an old Python) goes to setup.py, which says what is missing
+    if (!(r.data?.sets ?? []).length) out(`Super Jev ${VERSION}\nPoints you to the notes that answer your question.\n`);
     if (needsKey()) {
       out(wrap(`Paste your ${vendor} API key. It stays hidden and is saved only on this Mac.`, look().width).join('\n'));
       stdout.write('key › ');
@@ -185,11 +186,11 @@ export async function run(io: IO): Promise<number> {
       chmodSync(keyFile, 0o600);
       fileKey = key;
     }
-    if (r.data.next === 'setup') {
+    if (fresh) {
       const s = await exec([join(SKILL, 'setup.py')]);
-      if (s.code !== 0) { out([s.out, s.err].map((x) => x.trim()).filter(Boolean).join('\n')); return s.code || 1; }
+      if (s.code !== 0) return stop({ text: [s.out, s.err].map((x) => x.trim()).filter(Boolean).join('\n'), code: s.code });
       r = await helper({ kind: 'status' });
-      if (!r.data) { out(r.text); return r.code; }
+      if (!r.data || r.data.outcome) return stop(r);
     }
     const sets: { state: string }[] = r.data.sets ?? [];
     out(sets.length ? launchLine(VERSION, sets) : '• Ready. Nothing connected yet.\n  Drag a folder of Markdown notes in here.');

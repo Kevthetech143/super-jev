@@ -6,14 +6,14 @@
 //               python3 first on PATH. The fake records each call's argv and whether a key was set
 //               (a short digest of it, never the key) and prints canned JSON with a canned exit code.
 //   real engine setup.py, prepare_bulk --writer builtin and ask.py in a temp state folder. These need
-//               ask.py --json, so they skip with a stated reason on a tree that does not have it yet.
+//               ask.py --json (PR 278), and FAIL, never skip, when a tree does not have it.
 // Data is made up: company Quillbrook, user sam, principal me.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,7 +63,8 @@ setTimeout(() => {
 `;
 
 const made: string[] = [];
-process.on('exit', () => { for (const d of made) rmSync(d, { recursive: true, force: true }); });
+const cleanups: (() => void)[] = [];
+process.on('exit', () => { for (const f of cleanups) f(); for (const d of made) rmSync(d, { recursive: true, force: true }); });
 
 type Rule = { when: string; out?: unknown; code?: number; err?: string; sleep?: number; replies?: Rule[] };
 function rig(rules: Rule[] = []) {
@@ -112,13 +113,15 @@ const tty = () => Object.assign(new PassThrough(), { isTTY: true, columns: 60, s
 
 /** The window: run() with fake terminal streams. */
 function win(r: Rig, o: { key?: boolean; env?: Record<string, string> } = {}) {
-  const stdin = tty(), stdout = tty(), stderr = tty();
   let out = '', err = '';
+  const rawLog: { on: boolean; screen: string }[] = []; // each raw-mode switch, with what was on screen at that moment
+  const stdin = Object.assign(tty(), { setRawMode(on: boolean) { rawLog.push({ on, screen: out }); return this; } });
+  const stdout = tty(), stderr = tty();
   stdout.on('data', (d) => (out += d)); stderr.on('data', (d) => (err += d));
   const env = { ...r.env, ...(o.key === false ? {} : { TYPESAFE_API_KEY: KEY }), ...o.env };
   const done: Promise<number> = cli.run({ argv: [], env, stdin, stdout, stderr });
   const w = {
-    done, raw: () => out, text: () => strip(out), err: () => strip(err),
+    done, rawLog, raw: () => out, text: () => strip(out), err: () => strip(err),
     send: (s: string) => stdin.write(s),
     say: (line: string) => stdin.write(line + '\r'),
     async waitFor(what: string | RegExp | (() => boolean), ms = 8000) {
@@ -359,6 +362,81 @@ test('E8 connect failed: Not connected plus the reasons', () => {
   assert.ok(s.includes('no .md file left to connect'));
 });
 
+// ---------------------------------------------------------------- review round 1: the helper's outcome decides the screen
+const SET_LOST = { errors: [{ set: 'team-notes-3fa9c1', kind: 'unknown' }],
+  unsearched: [{ set: 'team-notes-3fa9c1', root: '/Users/sam/Team Notes', state: 'failed', healing: false }] };
+const NOT_FOUND_CLAIM = { verdict: 'NOT FOUND', proof: null, read: 1, files: [] };
+
+test('H1 a claim whose search failed is never NOT FOUND: it names the folder that was not searched', () => {
+  const s = R('check', { outcome: 'error', why: 'no match, and 1 set failed', next: 'none', claim: NOT_FOUND_CLAIM, ...SET_LOST });
+  assert.ok(!/NOT FOUND/.test(s), s);
+  assert.ok(s.includes('Team Notes not searched (failed)'), s);
+});
+
+test('H1b a claim on a folder that is refreshing says so, and is never NOT FOUND', () => {
+  const s = R('check', { outcome: 'needs-setup', why: 'no match, but the search was incomplete', next: 'refresh', claim: NOT_FOUND_CLAIM,
+    unsearched: [{ set: 'team-notes-3fa9c1', root: '/Users/sam/Team Notes', state: 'stale', healing: true }] });
+  assert.ok(!/NOT FOUND/.test(s), s);
+  assert.match(s, /Team Notes changed; it is refreshing now/);
+  assert.match(s, /Ask again/);
+});
+
+test('H1c a claim the judge rejected or could not reach says that, and is never NOT FOUND', () => {
+  const key = R('check', { outcome: 'error', why: 'x', next: 'key', claim: NOT_FOUND_CLAIM, errors: [{ set: 'a', kind: 'auth-rejected' }] });
+  assert.match(key, /rejected the key/);
+  assert.match(key, /fix .*TYPESAFE_API_KEY.* in your shell/i);
+  const down = R('check', { outcome: 'error', why: 'x', next: 'none', claim: NOT_FOUND_CLAIM, errors: [{ set: 'a', kind: 'unreachable' }] });
+  assert.match(down, /can't be reached/);
+  for (const s of [key, down]) assert.ok(!/NOT FOUND/.test(s), s);
+});
+
+test('H1d a TRUE claim still names a folder that was not searched, on the same line as the verdict', () => {
+  const s = R('check', { outcome: 'found', why: 'ok', next: 'none', ...SET_LOST,
+    claim: { verdict: 'TRUE', read: 3, proof: { path: HB, line: 39, text: HANDBOOK_QUOTE }, files: [] } });
+  assert.match(s, /^• TRUE · Team Notes not searched \(failed\)/m);
+});
+
+test('H1e a status the helper could not read says why: never "Nothing connected" or "Ready", and no Next', () => {
+  const why = 'Connection status unavailable. Next: check the memory connector configuration.';
+  const s = R('status', { outcome: 'error', why, next: 'none' }, { secs: undefined });
+  assert.ok(s.includes(why), s);
+  assert.ok(!/Nothing connected|Ready|ask again/.test(s), s);
+  assert.equal((s.match(/Next:/g) || []).length, 1, 'only the engine\'s own words, no second Next line');
+});
+
+test('H1f a status the helper refused shows its reason and no "ask one focused question"', () => {
+  const s = R('status', { outcome: 'not-supported', why: 'that principal name is not valid: use letters and digits', next: 'rephrase' });
+  assert.ok(s.includes('that principal name is not valid'), s);
+  assert.ok(!/Nothing connected|focused question|Next:/.test(s), s);
+});
+
+test('H1g a crash after a status turn has no Next that points back at the status', () => {
+  const s = R('crash', { line: 'ValueError: bad registry' }, { noNext: true });
+  assert.ok(s.includes('ValueError: bad registry'));
+  assert.ok(!/Next:/.test(s), s);
+});
+
+test('M2 skills_off: one line says no skill catalog was searched, before the Next line', () => {
+  const off = 'no skill catalog was searched: skill search is off (SUPERJEV_SKILLS=0)';
+  const found = R('ask', FOUND({ skills_off: off }));
+  const none = R('ask', { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 3 }, skills_off: off });
+  for (const s of [found, none]) {
+    assert.equal((s.match(/skill catalog/g) || []).length, 1, s);
+    assert.ok(s.includes('SUPERJEV_SKILLS=0'), s);
+  }
+  assert.ok(none.indexOf('skill catalog') < none.indexOf('Next:'), 'Next stays last');
+  assert.ok(!R('ask', FOUND()).includes('skill catalog'));
+});
+
+test('L2 counts read as numbers: 1 note, 0 notes; and a not-found names folders, not sets', () => {
+  const nf = (read: number) => R('check', { outcome: 'not-found', why: 'none', next: 'none', claim: { ...NOT_FOUND_CLAIM, read } });
+  assert.match(nf(1), /NOT FOUND in the 1 note read/);
+  assert.match(nf(0), /NOT FOUND in the 0 notes read/);
+  const s = R('ask', { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 28 } });
+  assert.match(s, /Searched 1 folder \(28 notes\)/);
+  assert.ok(!/\bsets?\b/.test(s), s);
+});
+
 test('colour: off gives no escape bytes; on gives green TRUE and red FALSE', () => {
   const claim = (verdict: string) => ({ outcome: 'found', why: 'ok', next: 'none', claim: { verdict, read: 1, files: [],
     proof: { path: HB, line: 1, text: 'x', date: '2026-09-12' } } });
@@ -449,6 +527,14 @@ test('I10 two paths on one line: One at a time', () => {
   const t: any = cfg.readLine(`${FOLDER.replace(/ /g, '\\ ')} ${dirname(FOLDER)}`);
   assert.equal(t.kind, 'say');
   assert.match(t.text, /One at a time/);
+});
+
+test('L3 a path with an unescaped apostrophe, or a one-segment folder, still reads as a folder', () => {
+  const sams = rig().folder("Sam's Notes");
+  assert.deepEqual(cfg.readLine(sams), { kind: 'connect', path: sams, dir: true });
+  assert.deepEqual(cfg.readLine('/usr'), { kind: 'connect', path: '/usr', dir: true }, 'not "Unknown command /usr"');
+  assert.equal((cfg.readLine('/nosuchdir') as any).kind, 'say');
+  assert.match((cfg.readLine('/nosuchdir') as any).text, /Unknown command \/nosuchdir/);
 });
 
 test('grammar order: bare words, then a path, then /command, then a question', () => {
@@ -627,6 +713,33 @@ test('S14 door: /status shows what the helper reported and passes its exit code'
   assert.ok(d.out.includes('team-notes-3fa9c1') && d.out.includes('28 notes') && d.out.includes('stale'));
 });
 
+const STATUS_ERR = { v: 1, outcome: 'error', why: 'Connection status unavailable. Next: check the memory connector configuration.', next: 'none' };
+
+test('H1 door: a /status the helper could not read prints why and its exit code, never "Nothing connected"', async () => {
+  const r = rig([{ when: '--status', out: STATUS_ERR, code: 1 }]);
+  const d = await door(r, ['/status']);
+  assert.equal(d.code, 1);
+  assert.ok(d.out.includes(STATUS_ERR.why), d.out);
+  assert.ok(!/Nothing connected|ask again/.test(d.out), d.out);
+});
+
+test('H1 door: a /check whose judge could not be reached says so, never NOT FOUND, and exits 1', async () => {
+  const r = rig([{ when: '--claim', code: 1, out: { v: 1, outcome: 'error', why: 'no match, and 1 set failed', next: 'none',
+    claim: NOT_FOUND_CLAIM, errors: [{ set: 'team-notes-3fa9c1', kind: 'unreachable' }],
+    unsearched: [{ set: 'team-notes-3fa9c1', root: '/Users/sam/Team Notes', state: 'failed', healing: false }] } }]);
+  const d = await door(r, ['/check', 'The canary holds 40 minutes.']);
+  assert.equal(d.code, 1);
+  assert.match(d.out, /can't be reached/);
+  assert.ok(!/NOT FOUND/.test(d.out), d.out);
+});
+
+test('L3 door: a folder whose name holds an apostrophe is a folder, not "Can\'t find"', async () => {
+  const r = rig();
+  const d = await door(r, [r.folder("Sam's Notes")]);
+  assert.ok(!/Can't find/.test(d.out + d.err), d.out + d.err);
+  assert.match(d.out, /Not connected/, 'no keyboard, so a no');
+});
+
 test('door: a folder path with no keyboard counts as no, and connects nothing', async () => {
   const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
   const d = await door(r, [FOLDER]);
@@ -741,6 +854,72 @@ test('E7 setup.py exits 1: its text verbatim and exit 1', async () => {
   assert.ok(w.text().includes(text.trim()), w.text());
 });
 
+test('H1 launch: a status the helper could not read is shown with its reason and exit code, never an empty window', async () => {
+  const r = rig([{ when: '--status', out: STATUS_ERR, code: 1 }]);
+  const w = win(r);
+  assert.equal(await w.exit(), 1);
+  assert.ok(w.text().includes(STATUS_ERR.why), w.text());
+  assert.ok(!/Ready|Nothing connected|for help/.test(w.text()), w.text());
+  assert.equal(r.calls().length, 1, 'no setup and no second status');
+  w.all();
+});
+
+test('H1 launch: a status the helper refused (a bad principal) shows its reason, exit 2, and no Next', async () => {
+  const r = rig([{ when: '--status', out: { v: 1, outcome: 'not-supported', why: 'that principal name is not valid: use letters and digits', next: 'rephrase' }, code: 2 }]);
+  const w = win(r, { env: { SUPERJEV_PRINCIPAL: 'sam smith' } });
+  assert.equal(await w.exit(), 2);
+  assert.ok(w.text().includes('that principal name is not valid'), w.text());
+  assert.ok(!/Ready|Nothing connected|Next:/.test(w.text()), w.text());
+  assert.equal(r.calls()[0].args[r.calls()[0].args.indexOf('--principal') + 1], 'sam smith', 'the app passes the name as set');
+});
+
+test('H1 /status in the window: a status the helper could not read says why, and the window stays open', async () => {
+  const r = rig([{ when: '--status', replies: [{ when: '', out: { v: 1, next: 'connect', principal: 'me', sets: [] } }, { when: '', out: STATUS_ERR, code: 1 }] }]);
+  const w = win(r);
+  await w.ready();
+  w.say('/status');
+  await w.waitFor('Connection status unavailable');
+  assert.ok(!/ask again/.test(w.text()), 'no Next that points back at /status');
+  assert.equal(w.text().match(/Nothing connected yet/g)?.length, 1, 'only the launch screen says it');
+  assert.equal(await w.quit(), 0);
+});
+
+test('M1 launch with an old Python: the status gives no JSON, so setup.py runs and says what is missing, with no Next', async () => {
+  const text = 'NOT READY:\n  - Python 3.10 or newer is required (found: 3.9.6). Install it, then run setup again.\n';
+  const r = rig([
+    { when: '--status', out: 'Traceback (most recent call last):\n', err: "TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'\n", code: 1 },
+    { when: 'setup.py', out: text, code: 1 }]);
+  const w = win(r);
+  assert.equal(await w.exit(), 1);
+  assert.ok(w.text().includes(text.trim()), w.text());
+  assert.ok(!/hit an error|Next:|Ready/.test(w.text()), w.text());
+  assert.deepEqual(r.calls().map((c: any) => c.script), ['ask.py', 'setup.py']);
+});
+
+test('M1b launch: no JSON before or after setup shows the error line with no Next, and exits with the helper\'s code', async () => {
+  const r = rig([
+    { when: '--status', out: 'oops\n', err: 'ValueError: bad registry\n', code: 3 },
+    { when: 'setup.py', out: 'READY.\n', code: 0 }]);
+  const w = win(r);
+  assert.equal(await w.exit(), 3);
+  assert.match(w.text(), /Super Jev hit an error/);
+  assert.ok(w.text().includes('ValueError: bad registry'));
+  assert.ok(!/Next:|Ready/.test(w.text()), w.text());
+  assert.deepEqual(r.calls().map((c: any) => c.script), ['ask.py', 'setup.py', 'ask.py']);
+});
+
+test('L1 the key prompt: raw mode is on before it is written, so a key pasted early is never echoed', async () => {
+  const r = rig([STATUS_EMPTY]);
+  const w = win(r, { key: false });
+  await w.waitFor('key ›');
+  const first = w.rawLog[0];
+  assert.ok(first?.on, 'raw mode was turned on');
+  assert.ok(!first.screen.includes('key ›'), `raw mode came after the prompt was written:\n${first.screen}`);
+  w.send(KEY + '\r');
+  await w.ready();
+  await w.quit();
+});
+
 test('E6 window: no python3 on PATH gives the Python 3.10 message and exit 1', async () => {
   const empty = join(rig().dir, 'empty'); mkdirSync(empty);
   const r = rig();
@@ -775,6 +954,24 @@ test('S8 whole app: Esc at the confirm says Not connected and calls nothing', as
   w.send('\x1b');
   await w.waitFor('Not connected');
   assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'));
+  await w.quit();
+});
+
+test('L4 Esc at the connect confirm: a plain "Not connected", no stray prompt before it, not red', async () => {
+  const r = rig([STATUS_EMPTY]);
+  const w = win(r);
+  await w.ready();
+  w.say(FOLDER);
+  await w.waitFor(/Connect Team Notes\?/);
+  w.send('\x1b');
+  await w.waitFor('Not connected');
+  const raw = w.raw();
+  assert.ok(!strip(raw.slice(raw.indexOf('esc no'), raw.indexOf('Not connected'))).includes('›'), `a prompt was redrawn before the answer:\n${w.text()}`);
+  assert.ok(!/\x1b\[31m[^\n]*Not connected/.test(w.raw()), 'your own no is not drawn as a failure');
+  w.send('?');
+  w.send('\r');
+  await w.waitFor('/exit');
+  assert.match(w.text(), /› \?/, 'the normal prompt is back for the next line');
   await w.quit();
 });
 
@@ -961,7 +1158,19 @@ function engineHasAskJson(): boolean {
   try { return JSON.parse((p.stdout || '').trim()).v === 1; } catch { return false; }
 }
 const HAS_JSON = engineHasAskJson();
-const SKIP = HAS_JSON ? false : 'this tree has no ask.py --json yet (PR 278); proven on an overlay, see the build report';
+
+/** A real connect writes its cache into the skill folder (gitignored): take this test's files out again. */
+const CACHE = join(SKILL, 'prepare-cache');
+function sweepCache(pointer: string) {
+  if (!existsSync(CACHE)) return;
+  for (const f of readdirSync(CACHE)) if (f.startsWith(pointer)) rmSync(join(CACHE, f), { force: true });
+  const manifest = join(CACHE, '.superjev-written');
+  if (existsSync(manifest)) {
+    const keep = readFileSync(manifest, 'utf8').split('\n').filter((l) => l && !l.startsWith(pointer));
+    if (keep.length) writeFileSync(manifest, keep.join('\n') + '\n'); else rmSync(manifest);
+  }
+  if (!readdirSync(CACHE).length) rmSync(CACHE, { recursive: true });
+}
 
 function realRig() {
   const dir = mkdtempSync(join(tmpdir(), 'jev-real-')); made.push(dir);
@@ -973,7 +1182,11 @@ function realRig() {
   writeFileSync(join(folder, 'runbook.md'), '# Runbook\n\nRoll back with the release tool.\n');
   writeFileSync(join(folder, 'tool.py'), 'print("hi")\n');
   const setup = () => spawnSync('python3', [join(SKILL, 'setup.py')], { env, encoding: 'utf8' });
-  return { dir, home, state, env, folder, setup };
+  const pointer = cfg.pointerName(folder);
+  cleanups.push(() => sweepCache(pointer));
+  const connect = () => spawnSync('python3', [join(SKILL, 'prepare_bulk.py'), '--root', folder, '--pointer', pointer, '--principal', 'me',
+    '--writer', 'builtin', '--json'], { env, encoding: 'utf8' });
+  return { dir, home, state, env, folder, setup, connect };
 }
 function realWin(rr: ReturnType<typeof realRig>, withKey = true) {
   const stdin = tty(), stdout = tty(), stderr = tty();
@@ -996,7 +1209,11 @@ function realWin(rr: ReturnType<typeof realRig>, withKey = true) {
   return w;
 }
 
-test('R1 real setup.py: status says next: setup, the app runs setup, then it is ready', { skip: SKIP, timeout: 120000 }, async () => {
+test('R0 the engine under the app has ask.py --json (PR 278): without it the app cannot run, so this fails and never skips', () => {
+  assert.ok(HAS_JSON, 'ask.py --json is missing from this tree: merge PR 278 first');
+});
+
+test('R1 real setup.py: status says next: setup, the app runs setup, then it is ready', { timeout: 120000 }, async () => {
   const rr = realRig();
   const w = realWin(rr, false);
   await w.waitFor('key ›');
@@ -1007,7 +1224,7 @@ test('R1 real setup.py: status says next: setup, the app runs setup, then it is 
   await w.quit();
 });
 
-test('R2 real engine, set up, nothing connected: next: connect is the drag hint', { skip: SKIP, timeout: 120000 }, async () => {
+test('R2 real engine, set up, nothing connected: next: connect is the drag hint', { timeout: 120000 }, async () => {
   const rr = realRig();
   assert.equal(rr.setup().status, 0);
   const w = realWin(rr);
@@ -1018,7 +1235,7 @@ test('R2 real engine, set up, nothing connected: next: connect is the drag hint'
   await w.quit();
 });
 
-test('R3 real connect with the builtin writer and no key: 2 notes, one left-out line, /status shows ready', { skip: SKIP, timeout: 120000 }, async () => {
+test('R3 real connect with the builtin writer and no key: 2 notes, one left-out line, /status shows ready', { timeout: 120000 }, async () => {
   const rr = realRig();
   assert.equal(rr.setup().status, 0);
   const w = realWin(rr);
@@ -1034,10 +1251,25 @@ test('R3 real connect with the builtin writer and no key: 2 notes, one left-out 
   await w.quit();
 });
 
-test('R3 real connect, one-shot door: a folder with no keyboard connects nothing', { skip: SKIP, timeout: 120000 }, async () => {
+test('R3 real connect, one-shot door: a folder with no keyboard connects nothing', { timeout: 120000 }, async () => {
   const rr = realRig();
   assert.equal(rr.setup().status, 0);
   const p = spawnSync(process.execPath, [CLI, rr.folder], { env: rr.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(p.status, 1);
   assert.match(p.stdout, /Not connected/);
+});
+
+test('R4 real engine, registry unreadable: /status and the launch say why, never "Nothing connected" or "Ready"', { timeout: 120000 }, async () => {
+  const rr = realRig();
+  assert.equal(rr.setup().status, 0);
+  assert.equal(JSON.parse(rr.connect().stdout).connected, 2);
+  writeFileSync(join(rr.state, '_memory', 'registry.json'), '{{{\n');
+  const p = spawnSync(process.execPath, [CLI, '/status'], { env: rr.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(p.status, 1);
+  assert.match(p.stdout, /Connection status unavailable/);
+  assert.ok(!/Nothing connected|ask again/.test(p.stdout), p.stdout);
+  const w = realWin(rr);
+  assert.equal(await w.done, 1);
+  assert.match(w.text(), /Connection status unavailable/);
+  assert.ok(!/Ready|Nothing connected/.test(w.text()), w.text());
 });

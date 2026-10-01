@@ -13,7 +13,9 @@ export type Turn =
   | { kind: 'connect'; path: string; dir: boolean };
 export type Session = { principal: string; skillDir: string; connected: Set<string> };
 export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string };
-export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string; refreshed?: boolean };
+// noNext: the turn was a status, so a next step would only point back at it.
+export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
+  refreshed?: boolean; declined?: boolean; noNext?: boolean };
 
 // ---------------------------------------------------------------- reading a line
 /** Shell-style words: single quotes literal, double quotes allow \" \\ \$ \`, a backslash escapes one character. */
@@ -59,10 +61,13 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (t === '?') return { kind: 'help' };
   if (t === 'exit' || t === 'quit') return { kind: 'exit' };
   const ws = /^\/[a-z]+(\s|$)/i.test(t) ? [] : words(t);
-  if (ws.length && pathy(ws[0])) {
-    if (ws.length > 1 && ws.every(pathy)) return { kind: 'say', text: 'One at a time: drag in one folder or note, then the next.' };
-    const p = absolute(ws.length === 1 ? ws[0] : t, home);
-    const st = statSync(p, { throwIfNoEntry: false });
+  const typed = ws.length > 0 && pathy(ws[0]);
+  if (typed && ws.length > 1 && ws.every(pathy)) return { kind: 'say', text: 'One at a time: drag in one folder or note, then the next.' };
+  // The words as parsed first, then the line as typed: a path can hold an apostrophe, or be a one-segment folder like /notes.
+  const tries = [...(typed ? [ws.length === 1 ? ws[0] : t] : []), ...(pathy(t) ? [t] : [])].map((w) => absolute(w, home));
+  const hit = tries.map((p) => [p, statSync(p, { throwIfNoEntry: false })] as const).find(([, st]) => st);
+  if (hit || typed) {
+    const [p, st] = hit ?? [tries[0], undefined];
     if (!st) return { kind: 'say', text: `Can't find ${tilde(p, home)}. Drag the folder in, or check the path.` };
     if (st.isDirectory() || /\.md$/i.test(p)) return { kind: 'connect', path: p, dir: st.isDirectory() };
     return { kind: 'say', text: `${tilde(p, home)} is not a folder or a Markdown note, so it can't be connected.` };
@@ -152,68 +157,86 @@ export function launchLine(version: string, sets: { state: string }[]): string {
   return `Super Jev ${version} · ${plural(sets.length, 'folder')} · ${state} · ? for help`;
 }
 
-const NEXT: Record<string, string> = {
-  connect: 'drag a folder of Markdown notes in here', rephrase: 'ask one focused question',
-  include: 'use the way in above, then ask again', setup: 'run superjev again; setup runs at launch',
-  refresh: 'drag the folder in again to refresh it',
-};
-
+/** The outcome decides the screen; a connect has none. Whatever the helper reports is drawn, never a calmer screen. */
 export function render(shown: Shown, look: Look): string {
-  const d = shown.data ?? {};
+  const d = shown.data ?? {}, o: string = d.outcome ?? '';
   const paint = (fmt: string, s: string) => (look.color ? styleText(fmt as any, s, { validateStream: false }) : s);
   const vendor = look.vendor ?? 'TypeSafe';
   const path = (p: string) => tilde(p, look.home);
   const tag = (s: string) => '  ' + paint('dim', s);
   const out: string[] = [];
-  let title = '', tone = '';
+  let title = '', tone = '', nextLine = '';
   const head = (text: string, color = '') => { title = text; tone = color; };
-  const time = shown.secs === undefined ? '' : ` · ${shown.secs.toFixed(1)}s`;
   const body = (s: string) => out.push('  ' + s);
-  const next = (s: string) => out.push('  ' + paint('dim', 'Next: ' + s));
-  const quote = (text: string, indent = 4) => { for (const l of wrap(`"${text}"`, look.width - indent)) out.push(' '.repeat(indent) + paint('dim', l)); };
+  const next = (s: string) => { nextLine = s; };
+  const quote = (text: string) => { for (const l of wrap(`"${text}"`, look.width - 4)) out.push('    ' + paint('dim', l)); };
   const place = (f: { path: string; line?: number; date?: string; says?: string }) =>
     path(f.path) + (f.line ? ':' + f.line : '') + (f.date ? ` · ${f.date}` : '') + (f.says ? ` · says ${f.says}` : '');
   const keyNext = () => next(look.keySource === 'env' ? `fix ${look.keyEnv ?? 'the key variable'} in your shell, then restart.`
     : look.keySource === 'file' ? 'delete ~/.typesafe-api-key, then run superjev again to paste a new key.' : 'run superjev again to paste your key.');
-  const leftOut = (rows: any[], ask: boolean) => uniq((rows ?? []).map((r) => ask
-    ? `Left out ${r.count}: ${r.what}${r.where ? ` (${basename(r.where)})` : ''}.${r.way_in ? ' ' + sentence(r.way_in) : ''}`
-    : `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach(body);
-  const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); next('/status, or ask again.'); };
+  const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach(body);
+  const empty = (setup: boolean) => { head(setup ? 'Not set up yet' : 'Nothing connected yet'); next(setup ? 'run superjev again; setup runs at launch.' : 'drag a folder of Markdown notes in here.'); };
+  const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); if (!shown.noNext && shown.kind !== 'status') next('/status, or ask again.'); };
+  // Folders the helper did not search, said once and added to every headline, so a partial search never reads as complete.
+  const rows: any[] = d.unsearched ?? [];
+  const lost = uniq([...rows.map((u) => `${u.root ? basename(u.root) : u.set} not searched (${u.healing ? 'refreshing' : u.state})`),
+    ...(d.errors ?? []).filter((e: any) => !rows.some((u) => u.set === e.set)).map((e: any) => `${e.set} not searched (failed)`)]);
+  const headline = (text: string) => [text, ...lost].join(' · ');
 
   if (shown.kind === 'help') return HELP;
   if (shown.kind === 'crash') crash(d.line ?? '');
   else if (shown.kind === 'connect') {
     const word = shown.refreshed ? 'Refreshed' : 'Connected';
-    if (d.refused) { head(`Not connected: ${d.refused.why}`, 'red'); next('drag in a smaller folder inside it.'); }
+    if (shown.declined) head('Not connected');
+    else if (d.refused) { head(`Not connected: ${d.refused.why}`, 'red'); next('drag in a smaller folder inside it.'); }
     else {
       head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : 'Not connected', d.connected ? 'green' : 'red');
       for (const h of d.held ?? []) body(`Held back ${h.path}: ${h.why}`);
       for (const f of d.failed ?? []) body(`${d.connected ? 'Failed ' : ''}${f.path}: ${f.why}`);
-      leftOut(d.skipped, false);
+      leftOut(d.skipped);
     }
+  } else if (o === 'error') {
+    const why: Record<string, string> = { 'auth-rejected': `${vendor} rejected the key`, 'no-key': `no ${vendor} key was found`,
+      unreachable: `${vendor} can't be reached`, overloaded: `${vendor} is busy` };
+    const kind = Object.keys(why).find((k) => (d.errors ?? []).some((e: any) => e.kind === k)) ?? (d.next === 'key' ? 'auth-rejected' : '');
+    if (kind) head(`Couldn't search: ${why[kind]}`, 'red');
+    if (kind === 'auth-rejected' || kind === 'no-key') keyNext();
+    else if (kind) body('Saved answers still work. Try again, or /status.');
+    else if (lost.length) { head("Couldn't search", 'red'); lost.forEach((l) => body(sentence(l))); }
+    else crash(d.why ?? '');
+  } else if (o === 'needs-setup') {
+    if (d.next === 'connect' || d.next === 'setup') empty(d.next === 'setup');
+    else {
+      head('Not sure yet');
+      for (const u of rows) body(`${u.root ? basename(u.root) : u.set} ${u.healing ? 'changed; it is refreshing now. Ask again in a moment.' : 'was not refreshed, so it was not searched.'}`);
+      leftOut(d.left_out);
+      if (!rows.length && !(d.left_out ?? []).length && d.why) body(d.why);
+      if (d.next === 'include') next('use the way in above, then ask again.');
+      else if (rows.some((u) => !u.healing)) next('drag the folder in again to refresh it.');
+    }
+  } else if (o === 'not-supported') {
+    head('Not answered'); body(d.why ?? '');
+    if (shown.kind !== 'status') next('ask one focused question.');
   } else if (shown.kind === 'status') {
     const sets: any[] = d.sets ?? [];
-    if (d.next === 'setup') { head('Not set up yet'); next(NEXT.setup + '.'); }
-    else if (!sets.length) { head('Nothing connected yet'); next(NEXT.connect + '.'); }
+    if (d.next === 'setup' || !sets.length) empty(d.next === 'setup');
     else {
       head(`${plural(sets.length, 'folder')} connected`);
       for (const s of sets) body(`${s.name}  ${(s.roots ?? []).map(path).join(', ')}  ${plural(s.notes ?? 0, 'note')}  ${s.state}`);
     }
   } else if (d.claim) {
     const c = d.claim, saved = d.saved ? ' · saved, proof file unchanged' : '';
-    if (c.verdict === 'NOT FOUND') { head(`NOT FOUND in the ${c.read} notes read`); body('It may be in a note not read or not connected.'); }
+    if (c.verdict === 'NOT FOUND') { head(headline(`NOT FOUND in the ${plural(c.read ?? 0, 'note')} read`)); body('It may be in a note not read or not connected.'); }
     else {
-      head(c.verdict + saved, c.verdict === 'TRUE' ? 'green' : c.verdict === 'FALSE' ? 'red' : '');
+      head(headline(c.verdict + saved), c.verdict === 'TRUE' ? 'green' : c.verdict === 'FALSE' ? 'red' : '');
       if (c.proof) { body(place(c.proof)); if (c.proof.text) quote(c.proof.text); }
       for (const f of c.files ?? []) body(place(f));
       if (c.verdict === 'CONFLICT') body('Read both before relying on either.');
     }
-  } else if (d.outcome === 'found') {
+  } else if (o === 'found') {
     const files: any[] = d.files ?? [], skills: any[] = d.skills ?? [];
-    const lost = uniq([...(d.unsearched ?? []).map((u: any) => `${u.root ? basename(u.root) : u.set} not searched (${u.healing ? 'refreshing' : u.state})`),
-      ...(d.errors ?? []).filter((e: any) => !(d.unsearched ?? []).some((u: any) => u.set === e.set)).map((e: any) => `${e.set} not searched (failed)`)]);
-    const found = skills.length && files.length ? `${plural(skills.length, 'skill')} and ${plural(files.length, 'note')}` : skills.length ? plural(skills.length, 'skill') : plural(files.length, 'note');
-    head(d.saved ? 'Saved answer · notes unchanged' : [`Found ${found}`, ...lost].join(' · '), d.saved ? 'green' : '');
+    const found = [skills.length && plural(skills.length, 'skill'), files.length && plural(files.length, 'note')].filter(Boolean).join(' and ') || '0 notes';
+    head(d.saved ? 'Saved answer · notes unchanged' : headline(`Found ${found}`), d.saved ? 'green' : '');
     if (d.saved?.by === 'you' && d.saved.answer) for (const l of wrap(d.saved.answer, look.width - 2)) body(l);
     for (const s of skills) body(`${s.name}  ${path(s.path)}` + (s.guess ? tag('guess') : ''));
     files.forEach((f, i) => {
@@ -222,32 +245,14 @@ export function render(shown: Shown, look: Look): string {
     });
     if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
     if (d.saved_now) body('Saved for next time.');
-    leftOut(d.left_out, true);
-  } else if (d.outcome === 'not-found') {
+    leftOut(d.left_out);
+  } else if (o === 'not-found') {
     head('Not in your notes');
-    if (d.searched) body(`Searched ${plural(d.searched.sets, 'set')} (${plural(d.searched.notes, 'note')}); nothing matched.`);
+    if (d.searched) body(`Searched ${plural(d.searched.sets, 'folder')} (${plural(d.searched.notes, 'note')}); nothing matched.`);
     body("That doesn't prove it's nowhere: it may be in a folder you haven't connected.");
     next('drag in the folder that has it.');
-  } else if (d.outcome === 'needs-setup') {
-    if (d.next === 'connect') { head('Nothing connected yet'); next(NEXT.connect + '.'); }
-    else if (d.next === 'setup') { head('Not set up yet'); next(NEXT.setup + '.'); }
-    else {
-      head('Not sure yet');
-      const lost: any[] = d.unsearched ?? [];
-      for (const u of lost) body(`${u.root ? basename(u.root) : u.set} ${u.healing ? 'changed; it is refreshing now. Ask again in a moment.' : 'was not refreshed, so it was not searched.'}`);
-      leftOut(d.left_out, true);
-      if (!lost.length && !(d.left_out ?? []).length && d.why) body(d.why);
-      if (d.next === 'include') next(NEXT.include + '.');
-      else if (lost.some((u) => !u.healing)) next(NEXT.refresh + '.');
-    }
-  } else if (d.outcome === 'not-supported') {
-    head('Not answered'); body(d.why ?? ''); next(NEXT.rephrase + '.');
-  } else {
-    const kinds: string[] = (d.errors ?? []).map((e: any) => e.kind);
-    const kind = ['auth-rejected', 'no-key', 'unreachable', 'overloaded'].find((k) => kinds.includes(k)) ?? (d.next === 'key' ? 'auth-rejected' : '');
-    if (kind === 'auth-rejected' || kind === 'no-key') { head(`Couldn't search: ${kind === 'no-key' ? `no ${vendor} key was found` : `${vendor} rejected the key`}`, 'red'); keyNext(); }
-    else if (kind) { head(`Couldn't search: ${vendor} ${kind === 'unreachable' ? "can't be reached" : 'is busy'}`, 'red'); body('Saved answers still work. Try again, or /status.'); }
-    else crash(d.why ?? '');
-  }
-  return [(tone ? paint(tone, `• ${title}`) : `• ${title}`) + paint('dim', time), ...out].join('\n');
+  } else crash(d.why ?? '');
+  if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off));
+  const time = shown.secs === undefined ? '' : paint('dim', ` · ${shown.secs.toFixed(1)}s`);
+  return [(tone ? paint(tone, `• ${title}`) : `• ${title}`) + time, ...out, ...(nextLine ? ['  ' + paint('dim', 'Next: ' + nextLine)] : [])].join('\n');
 }
