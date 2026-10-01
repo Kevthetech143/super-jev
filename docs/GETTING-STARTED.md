@@ -6,23 +6,64 @@ step has the exact command and what success looks like. Run from the repo root.
 
 ## 1. Prerequisites
 
-- **Node 24** — check: `node --version` → prints `v24.x.y`.
-- **Python 3.10+** — check: `python3 --version` → prints `3.10` or newer.
+- **Node 24 or newer** — check: `node --version` → prints `v24` or newer.
+- **Python 3.10 or newer** — check: `python3 --version` → prints `3.10` or newer.
 - **A TypeSafe API key** — ask and check call TypeSafe with it (a `--writer builtin` connect does not,
   unless you add `--findability`).
-  Do not commit it; keep it in a file only you can read.
+  Do not commit it; keep it in a file only you can read (step 2 makes it).
 
-Check the tests still pass before you touch anything:
+Missing or too old? Install it into your home folder (no admin rights needed).
+Python first:
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+uv python install 3.12 --default
+```
+
+Then Node (the `touch` line is for zsh, the Mac default; skip it on bash):
+
+```bash
+touch ~/.zshrc
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+\. "$HOME/.nvm/nvm.sh"
+nvm install 24
+```
+
+Already use Homebrew? Run `brew install node python` instead of the lines above.
+Then open a new terminal (or run the `source` and `\.` lines again) so the new
+versions are on your PATH. Setup (step 3) prints these same lines for whatever
+is missing.
+
+Check the tests still pass before you touch anything. The Python suite needs
+pytest, so give it its own environment first. If `venv` says `ensurepip is not
+available` (Debian and Ubuntu system Python), run the uv lines above first; no
+sudo needed.
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate && python -m pip install pytest
 npm test                              # node suite — success: every test passes, 0 fail (under a minute)
 python3 -m pytest skills/super-jev/tests -q   # python suite — success: "passed" with 0 failed (4 to 6 minutes; a few skips are normal)
 ```
+
+Both suites start from a clean environment: they clear every `SUPERJEV_*`
+setting (except `SUPERJEV_TEST_*`), the judge key and url variables and
+`SWEEP_BATCH` first, so what your shell exports cannot change the result.
 
 ## 2. Set the key — do not skip this
 
 Every ask and check needs the key in the environment of the shell you
 run them from. **Super Jev never reads a `.env` file.**
+
+The key lives in one file only you can read, `~/.typesafe-api-key`. If it does
+not exist yet, make it in your own terminal (never paste a key into chat): run
+this, paste the key, press Enter, then Ctrl-D:
+
+```bash
+(umask 077; cat > ~/.typesafe-api-key)
+```
+
+Then load it into the shell:
 
 ```bash
 export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"
@@ -31,10 +72,16 @@ export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"
 Success: `echo "${#TYPESAFE_API_KEY}"` prints a non-zero length (the length,
 never the key). A new shell needs the export again.
 
-For hooks that cannot inherit your shell, copy
-`skills/skill-search/deploy/key-provider.example.py` to
-`~/.skill-search-key-provider.py` and set `TYPESAFE_API_KEY_FILE` to your key
-file; that provider prints the key and nothing else.
+For hooks that cannot inherit your shell (the skill finder is the one that
+needs it), copy `skills/skill-search/deploy/key-provider.example.py` to
+`skills/skill-search/deploy/local-key-provider.py` (gitignored). It prints the
+key from `$TYPESAFE_API_KEY_FILE`, or from `~/.typesafe-api-key` when that is
+not set, and nothing else.
+
+The skill finder also needs to know which skill folders to search. Inside
+Claude Code it uses `~/.claude/skills` and needs nothing. Any other agent copies
+`skills/skill-search/roots.example.json` to `skills/skill-search/roots.json`
+(gitignored) and lists its own skill folders there.
 
 ## 3. Run setup
 
@@ -100,8 +147,10 @@ for `--writer builtin`). Pick the description writer:
   file (a secret-like value, or a note over 250,000 bytes) has no override: read the held list the command
   printed, then remove or move the value, or split the note, and re-run. A password or key keyword holds a
   file only when a literal value follows it (a digit or symbol in it, not a placeholder or a call).
-- **Where state lives:** under `$SUPERJEV_STATE_DIR` or
-  `~/.local/state/super-jev/<principal>/` — never in this repo.
+- **Where state lives:** per-principal logs and the memory config under `$SUPERJEV_STATE_DIR` or
+  `~/.local/state/super-jev/<principal>/`. Preparation records land in the checkout:
+  `skills/super-jev/prepare-cache/` (descriptions, reports and the recipe a refresh replays),
+  `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (see step 9).
 
 ## 5. Ask your first question
 
@@ -143,10 +192,7 @@ Success for `--approve`: asking the same question again is a cache hit.
 
 A saved answer is the answer to one question, saved through one door: whether it saves itself on a repeat question, or you use `--approve` or `--add`, the same secret scan runs, and `--approve` and `--add` also run the claim check (CLEAN, 0.80 or higher, against the cited file); a repeat question saves the file itself, not an answer, and its N wins stand in for the claim check; a fact with no file gets the secret scan only and is shown as "no source file", and a `--source` that does not exist is refused. It lasts until its source file changes (there is no clock expiry), or until `--miss` removes it; `--miss` exits 1 when there was nothing saved to remove. The same question means the same words after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier matches. A question saves itself when the same file wins it N times in a row (`SUPERJEV_SAVE_AFTER`, default 2); `--approve` meets that threshold at once. A hit says `saved answer, from FILE, saved DATE` (an auto-saved one prints the file path, not an answer) (or `no source file`); if the file changed, it says so and searches live instead.
 `--add` quotes are taken verbatim from reviewed text; the same wording twice
-refuses unless you pass `--replace-entry`. `--add` is off by default: it needs
-`"allowAgentAssist": true` added to the memory config setup wrote
-(`~/.local/state/super-jev/_memory/config.json`); without it `--add` says so
-and exits 1.
+refuses unless you pass `--replace-entry`.
 
 ## 8. Check a draft
 
@@ -170,6 +216,10 @@ Jev reads the evidence files and answers, per claim, `SUPPORTED`,
 - Any other exit — the check itself failed (no key, network, unreadable
   output). Treat it as blocked.
 
+Don't know which file holds the fact, or want the proof file and line? Use
+`python3 skills/super-jev/ask.py --principal me --claim "claim one"` instead: it exits
+0 only for TRUE (FALSE is 5, every other result is non-zero), so only exit 0 is a pass there too.
+
 Add `--json` for machine-readable output. Set `SUPERJEV_GATE_CMD` to use your
 own claim-gate tool instead of the built-in client
 (`skills/super-jev/lib/jev_client.py`).
@@ -180,11 +230,26 @@ When the connected folder changes on disk, re-run prepare with `--refresh`:
 
 ```bash
 python3 skills/super-jev/prepare_bulk.py \
-  --root /path/to/folder --pointer MYPOINTER --principal ME --writer builtin --refresh
+  --pointer MYPOINTER --principal ME --refresh
 ```
+
+This replays how you connected it, writer included. Give a writer flag to
+change it, and later refreshes keep it.
 
 Success: the summary shows newly drafted or re-gated files; unchanged files
 are skipped.
+
+**Auto-heal, best effort.** Nothing watches your folders. An `ask` that meets a
+set whose files changed starts this same refresh in the background and does not
+wait for it; the next ask finds the result. Only asks trigger it. It runs one
+refresh per set at a time, waits out a cooldown before touching a set again, and
+caps how many refreshes it starts per hour. If a background refresh fails, the
+ask says `auto-heal: last refresh FAILED: <reason>`; run the refresh command
+printed on that line to see the error and refresh by hand. Auto-heal writes its locks,
+cooldowns and logs, which name your sets and files, to
+`skills/super-jev/autoheal-state/`. `SUPERJEV_NEW_FILE_SCAN=0` turns off the
+scan that looks for new notes in connected folders; refreshing a changed set has
+no off switch.
 
 ## 10. Uninstall
 
@@ -192,9 +257,11 @@ are skipped.
 python3 skills/super-jev/setup.py --uninstall
 ```
 
-Removes the state folder, the memory config, `skills/super-jev/prepare-cache/`,
-`skills/super-jev/ledger/`, and any `~/.claude/skills` links into this
-checkout. Your own files are never touched.
+Removes everything Super Jev wrote: the state folder (memory config, logs, pointers),
+`skills/super-jev/prepare-cache/`, `ledger/` and `autoheal-state/`, the chat CLI's
+config and launcher if you installed it, and any `~/.claude/skills` links into this
+checkout. A file of yours that sits in one of those folders stays, and the output lists it.
+Your own files are never touched.
 
 ## Notes
 

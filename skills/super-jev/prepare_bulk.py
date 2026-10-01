@@ -4,7 +4,7 @@
 Usage:
   python3 prepare_bulk.py --root DIR [--root DIR2 ...] --pointer NAME --principal AGENT [--principal AGENT2 ...]
                           [--exclude SUBPATH ...] [--no-recurse] [--name GLOB ...] [--limit 50] [--max-files 250]
-                          [--batch 10] [--line 0.80] [--writer-model haiku]
+                          [--batch 10] [--line 0.80] [--writer auto|claude|builtin] [--writer-model haiku]
                           [--writer-command 'COMMAND [ARG ...]']
                           [--no-connect]
                           [--findability] [--refresh] [--no-shared] [--shareable]
@@ -14,6 +14,16 @@ Usage:
   default `claude -p --model <writer-model>`. When neither flag nor env var is set, a second
   line recommends a cheap writer model -- bulk labeling should never run on a premium model --
   and names the proven default (Claude Code CLI, Haiku).
+
+  --refresh replays the pointer's recorded recipe: roots, --exclude, --no-recurse, --name, --allow-target,
+  --limit, every --principal and the writer. Anything given on the command line replaces that part and is
+  recorded for later refreshes, so a refresh never widens or re-describes a pointer by accident. Run limits
+  and gate settings (--max-files, --line, --batch, --findability, --no-connect) are never recorded.
+  The writer flags (--writer, --writer-model, --writer-command) are one choice: give any one of them and
+  the recorded writer is replaced whole; --writer auto switches back to auto. The SUPERJEV_WRITER_COMMAND env var is
+  never recorded. A refresh may run from the skill folder (auto-heal, refresh_changed.py), so name a
+  --writer-command on PATH or by absolute path, and keep keys out of it: it is stored in prepare-cache/
+  and shown in the banner. A report from before the writer was recorded replays none: it keeps auto.
 
   python3 prepare_bulk.py --list [--pointer NAME] [--principal AGENT] [--status active] [--kind dashboard]
                           [--within-days 30] [--subject CLOV]
@@ -104,6 +114,7 @@ HERE = Path(__file__).resolve().parent
 # Connect scope, also imported by coverage/preflight callers: Markdown notes only.
 CONNECTABLE_EXTENSIONS = ('.md',)
 MAX_FILES = 250  # --max-files default
+WRITERS = ("auto", "claude", "builtin")  # --writer choices; the first is the default
 UNCONNECTED_TRIES = 3  # refreshes that retry a new file whose connect failed
 # Credential containers are not ordinary text inputs; no flag can opt
 # them in. Check compound suffixes and symlink targets as well.
@@ -1106,7 +1117,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     connects on its plain description -- a label problem never drops a file.
 
     `principals` carries every principal this pointer must stay registered for -- a pointer
-    connected under several principals (e.g. primary + primary-helper) must repeat all of
+    connected under several principals (e.g. me + work) must repeat all of
     them on every reconnect, or the harness sees the request as narrowing its scope and
     refuses with "scope-change"."""
     sources = []
@@ -1291,7 +1302,7 @@ def replay_recipe(a) -> None:
     # Whoever named the principal here (auto_heal's asking agent) is only a stand-in: see keep_unrecorded.
     a.standin = not (rep.get("principals") or rep.get("principal"))
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
-    # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
+    # a refresh that repeats the recorded roots/excludes (typed by hand or by an older script) must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
     if rep.get('extensions', list(CONNECTABLE_EXTENSIONS)) != list(CONNECTABLE_EXTENSIONS):
         raise ValueError(f"pointer {a.pointer} was connected with code/text suffixes; connect supports Markdown only. "
@@ -1309,8 +1320,17 @@ def replay_recipe(a) -> None:
     a.allow_targets = a.allow_targets or rep.get("allowTargets") or []
     if a.limit is None and isinstance(rep.get("limit"), int):
         a.limit = rep["limit"]
+    # The writer is one choice: give any of --writer, --writer-model, --writer-command and the recorded
+    # one is replaced whole; give none and it is replayed. A rescope below keeps it too.
+    if a.writer is None and a.writer_model is None and a.writer_command is None:
+        a.writer, a.writer_model, a.writer_command = (rep.get(k) for k in ("writer", "writerModel", "writerCommand"))
+        a.writer = a.writer if a.writer in WRITERS else None
+        a.writer_model = a.writer_model if isinstance(a.writer_model, str) else None
+        a.writer_command = a.writer_command if isinstance(a.writer_command, str) else None
+    # builtin outranks a command when the writer is chosen (main), so it is what the line names too.
+    shown = "builtin" if a.writer == "builtin" else a.writer_command or a.writer or "auto"
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, part size {a.limit or 50})")
+          f"no-recurse {a.no_recurse}, part size {a.limit or 50}, writer {shown})")
     # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
     # the whole (possibly grown) folder, so its recorded file list is the scope instead.
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
@@ -1468,7 +1488,7 @@ def main() -> int:
     ap.add_argument("--pointer")
     ap.add_argument("--principal", dest="principals", action="append", default=[], type=principal_name,
                     help="repeatable. On --refresh, a pointer registered for several principals "
-                         "(e.g. primary + primary-helper) must repeat --principal for each one it "
+                         "(e.g. me + work) must repeat --principal for each one it "
                          "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
@@ -1480,15 +1500,18 @@ def main() -> int:
                     help="folder a symlinked file may point into besides the roots (repeatable)")
     ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=MAX_FILES)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=JUDGE_PROFILE.confidence_line)
-    ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
+    ap.add_argument("--writer", choices=WRITERS, default=None,
                     help="builtin: no model call and no judge call (no TypeSafe key is used to connect, unless --findability adds its searches); "
                          "descriptions are quoted from each file's headings and checked locally. auto (default): --writer-command if given, else the claude CLI if it is "
-                         "installed, else builtin")
-    ap.add_argument("--writer-model", default="haiku",
-                    help="model passed to the default Claude writer")
+                         "installed, else builtin. The writer flags are recorded and replayed by --refresh as one "
+                         "choice (give any one and the recorded writer is replaced whole); --writer auto switches back to auto")
+    ap.add_argument("--writer-model", default=None,
+                    help="model passed to the default Claude writer (default haiku); recorded and replayed with --writer")
     ap.add_argument("--writer-command", metavar="COMMAND",
                     help="shell-style command for another writer; it receives the prompt on stdin and returns a JSON array on stdout. "
-                         "Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted")
+                         "Recorded and replayed by --refresh, which can run from the skill folder: use a command on PATH "
+                         "or an absolute path, and keep keys out of it (it is stored in prepare-cache/ and shown in the "
+                         "banner). Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted; the env var is not recorded")
     ap.add_argument("--no-connect", action="store_true")
     ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--findability", action="store_true",
@@ -1532,6 +1555,14 @@ def main() -> int:
             print(f'REFUSED: {e}'); return 2
     if a.limit is None:
         a.limit = 50
+    # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
+    # after, so they are never recorded and can still change. The env var is never recorded either.
+    writer_recipe = {k: v for k, v in (("writer", a.writer), ("writerModel", a.writer_model),
+                                       ("writerCommand", a.writer_command or None)) if v is not None}
+    if a.writer is None:
+        a.writer = WRITERS[0]
+    if a.writer_model is None:
+        a.writer_model = "haiku"
     if not a.roots or not a.principals or not a.pointer:
         print("REFUSED: --root, --pointer and --principal are required unless --list is given"); return 2
     if a.limit > 50:
@@ -1788,16 +1819,18 @@ def main() -> int:
     for p, why in exceptions:
         print(f"  EXCEPTION  {relstr(p, roots)}  ({why})\n"
               f"      to include it: check the file says what it should, then run: {rerun}"
-              + ("" if use_builtin else " --writer builtin"))
+              + ("" if use_builtin else
+                 " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)"))
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
         if "binary" not in why:
             print(f"      then run: {rerun}")
 
-    # principal/excludes/noRecurse let refresh_changed.py re-run this exact prepare later.
+    # The recipe: what --refresh replays (replay_recipe), so every later refresh runs it as connected.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
               "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
+              **writer_recipe,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
 
               "approved": [str(p) for p in connect_set],

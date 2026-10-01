@@ -39,7 +39,7 @@ and properties 1, 2 and 4 cover every case regardless.
 
 The model is compared against the composer in its OWN directory by
 default, and then, in a child process, against PR #53's composer at
-`SUPERJEV_PR53_DIR` when that worktree is on this machine — the two
+`SUPERJEV_TEST_PR53_DIR` when that worktree is on this machine — the two
 branches render a previous turn's relayed reports differently (PR #53
 prefixes them with `[relayed reports in this turn]`) and `render()` has
 to be byte-identical on both. `SUPERJEV_WM_COMPOSER_DIR` is what the
@@ -67,7 +67,7 @@ COMPOSER_DIR = Path(os.environ.get("SUPERJEV_WM_COMPOSER_DIR") or SKILL_DIR)
 #: PR #53's worktree, whose composer renders a previous turn's relayed
 #: reports behind a `[relayed reports in this turn]` mark that `main` does
 #: not emit. `render()` has to match both.
-PR53_DIR = Path(os.environ.get("SUPERJEV_PR53_DIR") or SKILL_DIR)
+PR53_DIR = Path(os.environ.get("SUPERJEV_TEST_PR53_DIR") or SKILL_DIR)
 
 
 def _load_superjev(directory):

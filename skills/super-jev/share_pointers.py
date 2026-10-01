@@ -18,8 +18,11 @@ refused (printed, skipped). As a backstop, a pointer is refused, and cannot be m
 original sources sits under another agent's brain (~/agents/<bot>-brain/) or in a documents/ or
 profile/ folder.
 
-  python3 share_pointers.py --mark NAME [--mark NAME2 ...]     mark shareable (a person's decision)
-  python3 share_pointers.py --unmark NAME                      back to private (existing shares stay)
+  python3 share_pointers.py --principal AGENT --mark NAME [--mark NAME2 ...]   mark shareable (a person's decision)
+  python3 share_pointers.py --principal AGENT --unmark NAME                    back to private (existing shares stay)
+
+--mark and --unmark name the asking agent too (--principal, or SUPERJEV_PRINCIPAL as ask.py reads it);
+no agent is assumed.
 
 --shared applies the fleet's shared list, <state dir>/shared-pointers.json (or $SUPERJEV_SHARED_POINTERS):
   {"pointers": ["fleet-knowledge", "main-skills-catalog", "main-skills-catalog-2"]}
@@ -136,8 +139,11 @@ def share(names: list, principals: list, dry_run: bool = False, memory=memory) -
 def mark(names: list, value: bool = True, memory=memory, principal: str = None) -> dict:
     """Record each named pointer's dataset as shareable (or private again) in the registry, under
     the connect lock. Returns {pointer: outcome}: "marked", "unmarked", "unknown-pointer",
-    "refused: <why>" or "error: <reason>". Marking never shares by itself."""
-    panel = memory({"action": "panel", "principal": principal or "primary"})
+    "refused: <why>" or "error: <reason>". Marking never shares by itself. `principal` is the asking
+    agent (the panel call is made as it); none is assumed."""
+    if not principal:
+        return {n: "error: no principal (pass --principal or set SUPERJEV_PRINCIPAL)" for n in names}
+    panel = memory({"action": "panel", "principal": principal})
     paths = panel.get("storagePaths") or {}
     db, registry = paths.get("db"), paths.get("registry")
     if not db or not registry or not Path(db).is_file() or not Path(registry).is_file():
@@ -198,7 +204,10 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     if a.mark or a.unmark:
-        out = mark(a.mark or a.unmark, value=bool(a.mark))
+        caller = a.principals[0] if a.principals else os.environ.get("SUPERJEV_PRINCIPAL", "")
+        if not caller:
+            ap.error("--principal (or SUPERJEV_PRINCIPAL) is required to mark or unmark")
+        out = mark(a.mark or a.unmark, value=bool(a.mark), principal=caller)
         for name, outcome in out.items():
             print(f"{outcome:<16} {name}")
         return 1 if any(o != "marked" and o != "unmarked" for o in out.values()) else 0

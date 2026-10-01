@@ -147,9 +147,9 @@ provider's preview terms restrict publishing performance numbers here.
 11. **BRAIN SWAP** — let Super Jev run on other Jev-like models (first
     candidate CLM-8B, Apache 2.0, needs Linux + NVIDIA GPU host). Plan: a
     small ClmEvaluator adapter behind the existing Evaluator interface plus
-    an env switch; benchmark vs Jev on the businessfi set (right-first,
-    top-3, false hits, speed, cost). Needs GPU rental (Kelvin's OK).
-    Research done 2026-09-24 (kept in the lead agent's notes).
+    an env switch; benchmark vs Jev on a held-out question set (right-first,
+    top-3, false hits, speed, cost). Needs GPU rental (the maintainer's OK).
+    Research done 2026-09-24 (notes kept outside this repo).
     Status: later — not yet ("not yet, put it in the wishlist").
 
 12. **ENFORCED PERMIT** — make a risky action (delete, pay, email) actually

@@ -56,6 +56,6 @@ No arbitrary file-path mutation endpoint, automatic conflict resolution, distrib
 
 ## Assisted recovery and retention
 
-An operator may enable bounded assistance from the same reviewed dataset after a partial/no-match/refused attempt. Source discovery and line references do not authorize unregistered paths. The harness returns prepared evidence IDs for explicit review; absent or conflicting support stays unresolved. Advisory hints recommend preparation/refresh or investigation, never grant permission.
+An agent may use bounded assistance from the same reviewed dataset after a partial/no-match/refused attempt. Source discovery and line references do not authorize unregistered paths. The harness returns prepared evidence IDs for explicit review; absent or conflicting support stays unresolved. Advisory hints recommend preparation/refresh or investigation, never grant permission.
 
 The database retains original attempt request/context/status/trace/reason metadata across pointer replacement/removal. Full raw responses remain caller-owned private artifacts. Cache entries record retrieval versus agent-assisted resolution and originating attempt ID, but invalidation clears those entries: this is not a permanent answer-history archive. Old-generation audit rows remain stored for trusted local inspection; the ordinary attempt API cannot resurrect their visibility by reusing a pointer name. Plan retention for those private audit rows and backups as data grows; no automatic audit-pruning service is included.
