@@ -43,9 +43,9 @@ def test_a_long_file_is_not_sunk_by_its_unrelated_passages(tmp_path, monkeypatch
 
 
 def test_a_written_phone_number_counts_as_phone_number():
-    # q02 "NYP ENT phone number": the answer line lists "NYP ENT ..., 212-305-6390" and never
+    # q02 "Riverside ENT phone number": the answer line lists "Riverside ENT ..., 212-555-0101" and never
     # says "phone", so the file could not cover the question's words.
-    words = ask.passage_words("NYP ENT 622 W 168th St 10th fl, 212-305-6390; (212) 979-4340.")
+    words = ask.passage_words("Riverside ENT 12 Main St 3rd fl, 212-555-0101; (212) 555-0102.")
     assert words["phone"] == 2 and words["number"] == 2
     assert ask.passage_words("Labs 2026-09-11, A1c 5.2%, visit 03/19/2026")["phone"] == 0
 

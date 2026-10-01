@@ -36,7 +36,7 @@ HELD = [
     "8" * 9 + ":AA" + "Zx9Qp2Lm8" * 4, "-----BEGIN RSA PRIV" + "ATE KEY-----", "4111 1111 " + "1111 1111",
     "Authorization: Basic " + "dXNlcjpwYXNzd29yZA==",
     # Letters-only values: a quoted one, or a single word of 4+ letters ending the line.
-    "password: kelvin", 'password = "hunter"', "Password: Sunshine", "api_key: abcdefgh\nnext line",
+    "password: marvin", 'password = "hunter"', "Password: Sunshine", "api_key: abcdefgh\nnext line",
     "passwd = 'x'", "password: Pass(w0rd", "api_key=get_key2(\"abc\"",
 ]
 # The false holds named in the audit (ordinary code, pointers, placeholders) and their kin.
@@ -51,7 +51,7 @@ NOT_HELD = [
     "1password: " + "abc123", "password", "the api key is yours",
     # The short stop list, and letters-only words that do not end the line.
     "password: see below", "password: none", "api_key = todo", 'password = "example"', "password: here",
-    "password: kelvin is set in vault", "password: (moved to logins.md)", "password: Pass(w0rd)",
+    "password: marvin is set in vault", "password: (moved to logins.md)", "password: Pass(w0rd)",
     "api_key=get_key2(\"abc\")", 'password = "true"', "password: abc",
 ]
 
