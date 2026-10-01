@@ -8,7 +8,7 @@ A judge (a profile in `judge_profiles.json`, or the test judge `fake`) is "suppo
 python3 judge_support.py --fingerprint --ask BUILD/ask.py --judge NAME [--env NAME=VALUE ...]
 ```
 
-Free: no ask, no judge call, no key. It prints one JSON line: the five parts below and `fingerprint`, a SHA-256 over them. Exit 0 prints it; exit 2 is bad input (an unknown judge, a malformed or repeated `--env`, a build whose `judge_profiles.json` cannot be read).
+Free: no ask, no judge call, no key. It prints one JSON line: the five parts below and `fingerprint`, a SHA-256 over them. Exit 0 prints it; exit 2 is bad input (an unknown judge, a malformed or repeated `--env`, an `--env` for a setting the tool sets itself, a build whose `judge_profiles.json` cannot be read).
 
 | part | what it is |
 |---|---|
@@ -40,7 +40,7 @@ It asks the judge every case in the file once, on a frozen copy of your state an
 
 Exit codes: `0` supported, `1` not supported, `3` incomplete (nothing is claimed either way), `2` bad input (nothing was asked, no record is written).
 
-The child ask runs with your environment minus every `SUPERJEV_*` variable, plus the `--env` pairs, plus `SUPERJEV_JUDGE` set to `--judge`. A stray `SUPERJEV_*` in your shell therefore never reaches the judge, and the fingerprint (which hashes the `--env` pairs) describes what actually ran. A setting the tool owns (`SUPERJEV_JUDGE` and the replay settings) cannot be passed with `--env`. `--env` values are scrubbed from the record, even inside an error line.
+The child ask runs with your environment minus every `SUPERJEV_*` variable, plus the `--env` pairs, plus `SUPERJEV_JUDGE` set to `--judge`. A stray `SUPERJEV_*` in your shell therefore never reaches the judge, and the fingerprint (which hashes the `--env` pairs) describes what actually ran. A setting the tool owns (`SUPERJEV_JUDGE` and the replay settings) cannot be passed with `--env`, whichever command reads it. The record names the `--env` settings and never holds their values: a value of six or more characters is also scrubbed from any error line it shows up in (a shorter one is left alone, because it would blank ordinary text, so do not pass a secret that short).
 
 ### Case file
 

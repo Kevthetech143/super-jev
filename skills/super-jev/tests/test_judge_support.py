@@ -376,6 +376,16 @@ def test_an_unknown_judge_or_a_setting_the_tool_owns_is_exit_2_with_no_ask(w, ex
     assert why in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("name", ["SUPERJEV_JUDGE", "SUPERJEV_REPLAY", "SUPERJEV_AUTO_CACHE"])
+def test_the_fingerprint_command_refuses_a_setting_the_tool_owns_like_the_run_does(w, name, capsys):
+    base = ["--fingerprint", "--ask", build(w.tmp, {}), "--judge", "typesafe-jev"]
+    assert js.main([*base, "--env", "QUILLBROOK_URL=http://127.0.0.1:1"]) == 0  # any other setting is fine
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as e:
+        js.main([*base, "--env", f"{name}=1"])
+    assert e.value.code == 2 and "the tool sets this one itself" in capsys.readouterr().err
+
+
 def test_a_record_is_never_overwritten(w, capsys):
     rows = [Q(w, "one", "a")]
     plan = {rows[0]["question"]: {"final": [(0.9, w.f["a"])]}}
