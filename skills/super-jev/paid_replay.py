@@ -12,7 +12,10 @@ for "kind": "claim" cases (graded against "expected": TRUE or FALSE), and the lo
 
 --max-asks is required: it refuses to start when cases x builds is larger, and says how
 many it would need. Cases use the scorecard's format (question, gold, principal, split);
-a held-out row must match its frozen reservation exactly.
+a held-out row must match its frozen reservation exactly. A not-in-files case takes
+"gold": []: a question marked "absent": true passes only when no file is ranked, and a
+claim with "expected": "ABSENT" passes only when it is not asserted (any verdict but
+TRUE or FALSE).
 
 Freezing: one snapshot is taken before the first ask: the principals' state (links
 followed, without traces, lookups, approvals or saved claim verdicts) and the memory
@@ -59,6 +62,7 @@ VERDICT_RE = re.compile(r"^(TRUE|FALSE|CONFLICT|PARTIAL|UNSURE|NOT FOUND)\b"
                         r"(?: \((?:(supported|contradicted) )?(\d+(?:\.\d+)?)(, saved)?)?", re.M)
 LEAN = {"supported": "TRUE", "contradicted": "FALSE"}
 REPLAY_PROTOCOL = 2  # the ask.py replay guarantees this replay needs (see ask.py REPLAY_PROTOCOL)
+CLAIM_EXPECTED = ("TRUE", "FALSE", "ABSENT")  # what a claim case may expect; ABSENT = nothing settles it
 
 
 def state_root() -> Path:
@@ -222,9 +226,18 @@ def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
     out["read"] = {p: file_sha(p) for p in sorted(set(paths) | set(checked) | gold)}
     if claim:
         out["verdict"], out["prob"] = (m.group(1), float(m.group(3)) if m.group(3) else None) if m else (None, None)
-        out["ok"] = out["verdict"] == case["expected"]
-        leans = out["ok"] or (out["verdict"] == "UNSURE" and LEAN.get(m.group(2)) == case["expected"])
-        out["margin"] = (out["prob"] or 0) - CLAIM_SURE if leans and out["prob"] is not None else -1.0
+        if case["expected"] == "ABSENT":  # nothing settles it: right unless the ask asserted TRUE or FALSE
+            out["ok"] = out["verdict"] not in ("TRUE", "FALSE")
+            room = CLAIM_SURE - (out["prob"] or 0)
+            out["margin"] = max(0, room) if out["ok"] else min(0, room)
+        else:
+            out["ok"] = out["verdict"] == case["expected"]
+            leans = out["ok"] or (out["verdict"] == "UNSURE" and LEAN.get(m.group(2)) == case["expected"])
+            out["margin"] = (out["prob"] or 0) - CLAIM_SURE if leans and out["prob"] is not None else -1.0
+    elif sc.is_absent(case):  # nothing in the files answers it: right only when no file is ranked
+        out["ok"] = not paths
+        room = POSSIBLE_FLOOR - max(scores if paths else checked.values(), default=0)
+        out["margin"] = max(0, room) if out["ok"] else min(0, room)
     elif rank:  # cleared the best file it kept out of the top 5
         out["ok"] = True
         out["margin"] = out["score"] - max((s for p, s in checked.items() if p not in paths), default=0)
@@ -327,13 +340,14 @@ def main(argv=None) -> int:
         rows = [c for f in a.cases for c in sc.input_cases(f)]
         reserved = sc.frozen_cases(a.held_out, a.held_out_sha256) if a.held_out else []
         if reserved:  # an unfrozen row may repeat a frozen one, never change it (scorecard's rule)
-            for c in sc.normalize_cases(rows, a.principal[0]):
+            for c in sc.normalize_cases(rows, a.principal[0], absent_ok=True):
                 if c["split"] == "held-out" and c not in reserved:
                     raise ValueError("held-out input differs from the frozen reservation")
-        cases = [c for c in sc.normalize_cases(rows + reserved, a.principal[0]) if c["principal"] in a.principal]
+        cases = [c for c in sc.normalize_cases(rows + reserved, a.principal[0], absent_ok=True)
+                 if c["principal"] in a.principal]
         for c in cases:
-            if c.get("kind") == "claim" and c.get("expected") not in ("TRUE", "FALSE"):
-                raise ValueError(f"claim case needs expected TRUE or FALSE: {c['question']}")
+            if c.get("kind") == "claim" and c.get("expected") not in CLAIM_EXPECTED:
+                raise ValueError(f"claim case needs expected {', '.join(CLAIM_EXPECTED)}: {c['question']}")
     except (OSError, ValueError, TypeError, AttributeError) as e:
         ap.error(str(e))
     builds = [Path(p).expanduser().resolve() for p in a.ask]
