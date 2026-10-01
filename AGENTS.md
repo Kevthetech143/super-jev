@@ -134,8 +134,9 @@ unless you add `--findability`.
    `ask.py --claim` instead (see "Check a claim: which door" below).
 
 8. **Uninstall when your human asks** (removes everything Super Jev wrote, including logs,
-   auto-heal state and the chat CLI's config; their files are never touched, even one
-   that sits in a folder Super Jev writes to):
+   auto-heal state and an older chat CLI's config. It keeps the key file
+   `~/.typesafe-api-key`: tell them to delete it if they want the key gone. Their files
+   are never touched, even one that sits in a folder Super Jev writes to):
 
    ```bash
    python3 skills/super-jev/setup.py --uninstall

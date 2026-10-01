@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadJudgeProfile } from './judge-profile.ts';
 import {
-  COMMANDS, HELP, OPEN, childEnv, confirmText, helperCall, keyAction, launchLine, pack, pointerName, prose, readLine, render,
+  COMMANDS, HELP, OPEN, USAGE, childEnv, confirmText, helperCall, keyAction, launchLine, pack, pointerName, prose, readLine, render,
   type Session, type Turn,
 } from './jev-chat-config.ts';
 
@@ -136,6 +136,7 @@ export async function run(io: IO): Promise<number> {
     const push = (x: string | symbol) => { queue.push(x); wake?.(); };
     const clear = () => { rl.write(null as any, { ctrl: true, name: 'e' }); rl.write(null as any, { ctrl: true, name: 'u' }); };
     const pull = async (): Promise<string | symbol | null> => {
+      queue.length = 0; // a line typed before the question was asked (while a helper ran) is not its answer
       while (!queue.length && !closed) await new Promise<void>((r) => (wake = r));
       return queue.shift() ?? null;
     };
@@ -162,7 +163,6 @@ export async function run(io: IO): Promise<number> {
         }
       },
       async confirm(text: string): Promise<boolean> {
-        queue.length = 0; // a line typed ahead was not an answer to this question
         out(text);
         rl.setPrompt(''); // so clearing the line on Esc does not redraw a prompt
         mode = 'confirm';
@@ -221,7 +221,7 @@ export async function run(io: IO): Promise<number> {
   // ------------------------------------------------------------ the one-shot door
   async function door(): Promise<number> {
     const t = readLine(argv.join(' '), home);
-    if (t.kind === 'help' || t.kind === 'version') { out(t.kind === 'help' ? HELP : TITLE); return 0; }
+    if (t.kind === 'help' || t.kind === 'version') { out(t.kind === 'help' ? `${USAGE}\n\n${HELP}` : TITLE); return 0; }
     if (t.kind === 'exit') return 0;
     if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }

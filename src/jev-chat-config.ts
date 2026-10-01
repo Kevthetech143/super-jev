@@ -154,15 +154,17 @@ const uniq = (xs: string[]) => [...new Set(xs)];
 
 export const HELP = [
   'Ask a question in plain words, or:',
-  '  drag a folder of Markdown notes in here  connect it',
-  '  /check <statement>  check a statement against your notes',
+  '  drag a folder in    connect its Markdown notes',
+  '  /check <statement>  check it against your notes',
   '  /status             show what is connected',
   '  /help or ?          show this list',
   '  /exit               leave (Ctrl+D works too)'].join('\n');
+/** What `superjev --help` leads with, before the list. */
+export const USAGE = 'Usage: superjev "your question"\n       superjev            open the window';
 
 export function confirmText(label: string, refresh: boolean, vendor: string, width: number): string {
   const text = `${refresh ? 'Refresh' : 'Connect'} ${label}? It's free and stays on this Mac. When you ask, your question and matching passages go to ${vendor}.`;
-  return pack([...prose(text), gap('enter yes · esc no')], width, '', '').join('\n');
+  return pack([...prose(text), gap('enter yes · esc no')], width, '  ', '  ').join('\n');
 }
 
 export function launchLine(version: string, sets: { state: string }[], width: number): string {
@@ -204,12 +206,12 @@ export function render(shown: Shown, look: Look): string {
   let title: string[] = [], tone = '', nextLine = '';
   const head = (text: string | string[], color = '') => { title = parts(text); tone = color; };
   // Every row goes through pack: prose as words, a path row as its parts. A row that fits stays as it is.
-  const lay = (s: string | string[], fmt = '', first = '  ', hang = '    ') => pack(parts(s), look.width, first, hang).map((l) => paint(fmt, l));
+  const lay = (s: string | string[], fmt = '', first = '  ', hang = typeof s === 'string' ? '  ' : '    ') => pack(parts(s), look.width, first, hang).map((l) => paint(fmt, l));
   const body = (s: string | string[]) => out.push(...lay(s));
   const next = (s: string) => { nextLine = s; };
-  const quote = (text: string) => out.push(...lay(`"${text}"`, 'dim', '    '));
+  const quote = (text: string) => out.push(...lay(`"${text}"`, 'dim', '    ', '    '));
   const place = (f: { path: string; line?: number; date?: string; says?: string }, lead = '') =>
-    [lead + path(f.path) + (f.line ? ':' + f.line : ''), ...(f.date ? [`· ${f.date}`] : []), ...(f.says ? after(`says ${f.says}`) : [])];
+    [lead + path(f.path) + (f.line ? ':' + f.line : ''), ...(f.date ? [`· ${f.date}`] : []), ...(f.says ? [`· says ${f.says}`] : [])];
   const keyNext = () => next(look.keySource === 'env' ? `fix ${look.keyEnv ?? 'the key variable'} in your shell, then restart.`
     : look.keySource === 'file' ? `delete ~/.typesafe-api-key, then ${OPEN} to paste a new key.` : `${OPEN} to paste your key.`);
   const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => LEFT[r.kind] && Number.isInteger(r.count) ? `Left out ${LEFT[r.kind](r.count)}.`

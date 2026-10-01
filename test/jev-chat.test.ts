@@ -215,9 +215,13 @@ test('S6 claim CONFLICT: both files, newest first, each with its own verdict', (
   assert.match(s, /^• CONFLICT/m);
   const a = s.indexOf('expenses.md:4'), b = s.indexOf('travel-old.md:9');
   assert.ok(a > -1 && b > a, 'newest first');
-  assert.match(flat(s), /expenses\.md:4 · 2026-09-20 · says FALSE/);
-  assert.match(flat(s), /travel-old\.md:9 · 2026-08-01 · says TRUE/);
   assert.match(s, /Read both before relying on either\./);
+  // Each file is one row: path, date and its own verdict on the same line (a window wide enough for it; W3 sweeps the narrow ones).
+  const wide = lines(R('check', { outcome: 'found', why: 'ok', next: 'none', claim: { verdict: 'CONFLICT', proof: null, read: 2, files: [
+    { path: '/Users/sam/Team Notes/policies/expenses.md', says: 'FALSE', line: 4, date: '2026-09-20' },
+    { path: '/Users/sam/Team Notes/policies/travel-old.md', says: 'TRUE', line: 9, date: '2026-08-01' }] } }, {}, { width: 80 }));
+  assert.ok(wide.includes('  ~/Team Notes/policies/expenses.md:4 · 2026-09-20 · says FALSE'), wide.join('\n'));
+  assert.ok(wide.includes('  ~/Team Notes/policies/travel-old.md:9 · 2026-08-01 · says TRUE'), wide.join('\n'));
 });
 
 test('S7 skills first, then the guess tag, then the file', () => {
@@ -254,6 +258,14 @@ test('S15 help lists exactly the commands that exist, and ? is the same help', (
   assert.equal(cfg.readLine('?').kind, 'help');
   assert.equal(cfg.readLine('/help').kind, 'help');
   for (const c of ['/check x', '/status', '/help', '/exit']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
+});
+
+test('S15b help rows line up: every description starts in the same column, and a row fits 60 columns', () => {
+  const rows = cfg.HELP.split('\n').slice(1);
+  assert.equal(rows.length, 5, 'the drag row and the four commands');
+  const col = rows.map((l) => { const m = /^( {2}.+?\S)( {2,})(\S.*)$/.exec(l); assert.ok(m, `no description column in ${JSON.stringify(l)}`); return m![1].length + m![2].length; });
+  assert.equal(new Set(col).size, 1, `descriptions start in columns ${col.join(', ')}:\n${cfg.HELP}`);
+  for (const l of rows) assert.ok(l.length <= 60, l);
 });
 
 test('S16 saved_now: says Saved for next time.', () => {
@@ -688,7 +700,10 @@ test('I13 whole app: --help and -h print the usage, --version the version, exit 
   for (const args of [['--help'], ['-h'], ['--help', 'me']]) {
     const d = await door(r, args);
     assert.equal(d.code, 0, args.join(' '));
-    assert.match(d.out, /\/check/, 'the usage lists the commands');
+    assert.match(d.out, /^Usage: superjev "your question"$/m, 'the usage leads');
+    assert.match(d.out, /^ +superjev +open the window$/m, 'and says that no words opens the window');
+    assert.match(d.out, /\/check/, 'then the list of commands');
+    assert.ok(d.out.indexOf('Usage:') < d.out.indexOf('/check'), 'the usage comes first');
   }
   const v = await door(r, ['--version']);
   assert.equal(v.code, 0);
@@ -1202,12 +1217,14 @@ test('K4 whole app: Up recalls the last question; Tab completes /st to /status',
   const r = rig([STATUS_EMPTY, { when: '--json -- ', out: FOUND() }]);
   const w = win(r);
   await w.ready();
+  const found = () => w.text().split('Found 1 note').length - 1;
   w.say('first question?');
+  await w.waitFor(() => found() === 1); // a line typed while a search runs is ignored (K8), so wait for the prompt
   w.say('second question?');
-  await w.waitFor(() => r.asks().length === 2);
+  await w.waitFor(() => found() === 2);
   w.send('\x1b[A');
   w.send('\r');
-  await w.waitFor(() => r.asks().length === 3);
+  await w.waitFor(() => found() === 3);
   assert.equal(r.asks()[2].args.at(-1), 'second question?');
   const before = r.calls().filter((c: any) => c.args.includes('--status')).length;
   w.send('/st\t');
@@ -1263,15 +1280,15 @@ test('D1b a door that got JSON never runs setup.py, and a declined connect does 
   assert.deepEqual(r.calls().map((c: any) => c.script), ['ask.py']);
 });
 
-test('W1 every line fits the window: long rows and the Next line wrap with an indent, a row that fits is untouched', () => {
+test('W1 every line fits the window: long rows and the Next line wrap, a row that fits is untouched', () => {
   const miss = R('ask', { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 28 } });
   const left = R('connect', { connected: 25, skipped: [{ what: '.md file(s) in folders skipped by default: documents/ (2), profile/ (1)', count: 3,
     way_in: 'to connect one, connect that folder on its own and ask again later' }] }, { label: 'Team Notes' });
   const setup = R('ask', { outcome: 'needs-setup', why: 'x', next: 'setup' });
   for (const s of [miss, left, setup]) for (const l of lines(s)) assert.ok(l.length <= 60, `${l.length} wide:\n${s}`);
   assert.ok(lines(miss).includes('  Searched 1 folder (28 notes); nothing matched.'), 'a row that fits is one line');
-  assert.match(miss, /^ {2}That doesn't prove it's nowhere: it may be in a folder you\n {4}haven't connected\.$/m, 'a line is filled up to the window width');
-  assert.match(setup, /^ {2}Next: open the window \(npm run jev, or superjev with no\n {4}words\); setup runs there\.$/m);
+  assert.match(miss, /^ {2}That doesn't prove it's nowhere: it may be in a folder you\n {2}haven't connected\.$/m, 'a line is filled up to the window width');
+  assert.match(setup, /^ {2}Next: open the window \(npm run jev, or superjev with no\n {2}words\); setup runs there\.$/m);
   assert.equal(left.split('\n').filter((l) => /^ {2}Left out/.test(l)).length, 1, 'one Left out row, wrapped under itself');
 });
 
@@ -1367,6 +1384,40 @@ test('W1 a headline longer than the window wraps between its parts and keeps the
   }
 });
 
+const CONFLICT = { outcome: 'found', why: 'ok', next: 'none', claim: { verdict: 'CONFLICT', proof: null, read: 2, files: [
+  { path: '/Users/sam/Team Notes/policies/expenses.md', says: 'FALSE', line: 4, date: '2026-09-20' },
+  { path: '/Users/sam/Team Notes/policies/travel-old.md', says: 'TRUE', line: 9, date: '2026-08-01' }] } };
+
+test('W3 a verdict is never left alone on a line: "· says X" is one piece at every width from 30 to 80', () => {
+  for (const color of [false, true]) for (let width = 30; width <= 80; width++) {
+    const s = stripVTControlCharacters(R('check', CONFLICT, {}, { width, color }));
+    assert.ok(!lines(s).some((l) => /^\s*(TRUE|FALSE|PARTLY)$/.test(l)), `a verdict is alone on its line at width ${width}:\n${s}`);
+    assert.equal(lines(s).filter((l) => /· says (FALSE|TRUE)$/.test(l)).length, 2, `a verdict lost its "says" at width ${width}:\n${s}`);
+  }
+});
+
+test('W4 a wrapped sentence hangs under its own first column (two spaces); a wrapped path row and a quote hang at four', () => {
+  const miss = R('ask', { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 28 } });
+  const setup = R('ask', { outcome: 'needs-setup', why: 'x', next: 'setup' });
+  const left = R('connect', { connected: 25, skipped: [{ kind: 'folder', what: 'x', count: 3, way_in: 'y' }] }, { label: 'Team Notes' });
+  for (const s of [miss, setup, left]) {
+    assert.ok(lines(s).length > 2, s);
+    for (const l of lines(s).slice(1)) assert.match(l, /^ {2}\S/, `a sentence line is not at two spaces:\n${s}`);
+  }
+  assert.ok(lines(R('check', CONFLICT)).some((l) => /^ {4}· says (FALSE|TRUE)$/.test(l)), 'a path row continues at four spaces');
+  const found = lines(R('ask', FOUND()));
+  assert.ok(found.some((l) => l.startsWith('    "The canary')) && found.some((l) => /^ {4}\S/.test(l) && l.endsWith('promoted."')), found.join('\n'));
+});
+
+test('S8c the confirm is indented two columns like the rest of a screen, wraps under itself, and ends with its hint', () => {
+  for (const refresh of [false, true]) for (const width of [40, 60, 80]) {
+    const t = cfg.confirmText('Team Notes', refresh, 'TypeSafe', width);
+    for (const l of t.split('\n')) assert.ok(/^ {2}\S/.test(l) && l.length <= width, `${JSON.stringify(l)} at width ${width}`);
+    assert.ok(t.endsWith('enter yes · esc no'), t);
+    assert.ok(t.startsWith(`  ${refresh ? 'Refresh' : 'Connect'} Team Notes?`), t);
+  }
+});
+
 test('W2 one way back to the window: every Next and message names how to open it, never "run superjev again"', () => {
   const setup = flat(R('ask', { outcome: 'needs-setup', why: 'x', next: 'setup' }));
   assert.match(setup, /Next: open the window \(npm run jev, or superjev with no words\); setup runs there\./);
@@ -1455,6 +1506,39 @@ test('K6 a line typed ahead is not an answer to the next yes/no: an early Enter 
   w.send('\r');
   await w.waitFor('Connected Team Notes: 3 notes');
   await w.quit();
+});
+
+test('K8 a line typed while a search runs is ignored: no second paid ask, and the window answers the next line', async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 600, out: FOUND() }, { when: '-- again', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say('slow question');
+  await w.waitFor(() => r.asks().length === 1);
+  w.say('typed while it searched');
+  await w.waitFor(/Found 1 note/);
+  await new Promise((x) => setTimeout(x, 300));
+  assert.equal(r.asks().length, 1, 'the line typed while busy was sent as a second ask');
+  w.say('again');
+  await w.waitFor(() => r.asks().length === 2);
+  assert.ok(r.asks()[1].args.includes('again'), r.asks()[1].args.join(' '));
+  assert.equal(await w.quit(), 0);
+});
+
+// ---------------------------------------------------------------- the docs say where the key lives
+const DOC = (f: string) => readFileSync(join(ROOT, f), 'utf8');
+const between = (text: string, from: RegExp, to: RegExp) => { const i = text.search(from); assert.ok(i >= 0, `${from} not found`); const rest = text.slice(i + 1); const j = rest.search(to); return text.slice(i, j < 0 ? undefined : i + 1 + j); };
+
+test('U1 the docs say what the app writes and what uninstall does with it: the key file is named and kept, never "removed with the chat config"', () => {
+  const readme = DOC('README.md'), agents = DOC('AGENTS.md'), start = DOC('docs/GETTING-STARTED.md');
+  const writes = readme.split('\n').find((l) => l.startsWith('| Writes |'))!;
+  assert.ok(writes.includes('~/.typesafe-api-key'), 'the Writes row names the key file the app saves');
+  const parts = { 'README Uninstall': between(readme, /^## Uninstall/m, /^## (?!Uninstall)/m), 'AGENTS step 8': between(agents, /^8\. \*\*Uninstall/m, /^## /m),
+    'GETTING-STARTED 10': between(start, /^## 10\. Uninstall/m, /^## (?!10)/m) };
+  for (const [name, text] of Object.entries(parts)) {
+    assert.ok(text.includes('~/.typesafe-api-key'), `${name} does not name the key file`);
+    assert.match(flat(text), /(keeps|kept|stays|leaves)[^.]*\.typesafe-api-key|\.typesafe-api-key[^.]*(is kept|stays|is left)/, `${name} does not say the key file is kept`);
+  }
+  for (const text of [readme, agents, start]) assert.ok(!/config\.json`?,? (\()?it holds your API key/.test(flat(text)), 'a doc still says the key lives in config.json');
 });
 
 // ---------------------------------------------------------------- real engine (free, no key)

@@ -12,13 +12,14 @@ npm run jev            # the window
 superjev "How long does the canary hold?"   # one question, then exit
 ```
 
-`install.sh` copies itself to `~/.local/share/super-jev`; folders are kept
+`install.sh` clones the repo to `~/.local/share/super-jev`; folders are kept
 per copy, so connect and ask from the same door.
 
 The first launch asks once for your TypeSafe key (hidden, saved only on
-this Mac in `~/.typesafe-api-key`, owner-only) and runs setup. Later
-launches print one line: the version, the folder count and whether they
-are up to date. A key in `TYPESAFE_API_KEY` wins over the saved one.
+this Mac in `~/.typesafe-api-key`, owner-only; `--uninstall` keeps it, as
+hooks read it too) and runs setup. Later launches print one line: the
+version, the folder count and whether they are up to date. A key in
+`TYPESAFE_API_KEY` wins over the saved one.
 
 ## In the window
 
@@ -33,7 +34,8 @@ are up to date. A key in `TYPESAFE_API_KEY` wins over the saved one.
 
 Keys: Esc clears the line, Ctrl+C clears it (twice on an empty line quits),
 Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
-yes and Esc is no; Ctrl+D leaves, which counts as no.
+yes and Esc is no; Ctrl+D leaves, which counts as no. Lines typed while it
+works are dropped.
 
 ## One question from a shell
 
