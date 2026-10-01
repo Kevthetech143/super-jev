@@ -1,14 +1,19 @@
 """ask.py --preflight: free readiness + per-folder coverage; asks only with --about/--skill."""
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+SKILLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ask
 import prepare_bulk
+
+_REAL_RUN = subprocess.run  # the `world` fixture replaces subprocess.run; one test runs the real launcher
 
 
 @pytest.fixture
@@ -120,10 +125,79 @@ def test_about_known_topic_is_not_new_ground(world, monkeypatch, capsys):
     assert "NEW GROUND" not in out
 
 
-def test_not_ready_skips_paid_questions(world, monkeypatch, capsys):
+def skills_reply(monkeypatch, body, calls=None):
+    """Fake the skills door: one reply to every subprocess call, recorded in `calls`."""
+    seen = calls if calls is not None else []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: seen.append(cmd) or _R(json.dumps(body)))
+    return seen
+
+
+def test_not_ready_skips_the_connection_questions_but_still_searches_skills(world, monkeypatch, capsys):
+    """One rule: a paid check runs when its own inputs are ready. --about reads the connections, so a
+    NOT READY preflight makes no --about ask; --skill reads skill folders, so it still runs."""
     monkeypatch.setattr(ask, "memory", panel(("bad", "error")))
+    seen = skills_reply(monkeypatch, {"status": "suggestions", "source": "jev",
+                                      "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
     rc, out = run(monkeypatch, capsys, "--about", "anything", "--skill", "posts things")
-    assert rc == 1 and world["calls"] == []
+    assert rc == 1 and "NOT READY" in out
+    assert len(seen) == 1 and "dispatch.py" in seen[0][1] and "skills" in seen[0]  # no ask.py, no --about question
+    assert "x-poster" in out and "x-poster (unverified guess)" not in out
+
+
+def test_skill_search_runs_while_nothing_is_connected(world, monkeypatch, capsys):
+    """A fresh install: no connections at all, and --skill still reports (it used to be skipped silently)."""
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "error", "reason": "not-set-up"})
+    skills_reply(monkeypatch, {"status": "exact", "source": "local", "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
+    rep = json.loads(out)
+    assert rc == 1 and rep["verdict"] == "NOT READY"
+    assert rep["existing_skills"] == ["x-poster"]
+
+
+@pytest.mark.parametrize("body,labelled,warning", [
+    ({"status": "exact", "source": "local"}, False, None),
+    ({"status": "suggestions", "source": "jev"}, False, None),
+    ({"status": "suggestions", "source": "local"}, True, None),
+    ({"status": "clarify", "source": "jev", "error": "Did you mean one of: a, b?"}, True, None),
+    ({"status": "fallback", "source": "local", "error": "Judge unavailable (key rejected); local-only results"}, True,
+     "skill search fell back to local guesses: Judge unavailable (key rejected); local-only results"),
+])
+def test_preflight_labels_a_skill_only_a_confirmed_result_is_called_a_match(world, monkeypatch, capsys, body, labelled, warning):
+    """The ask path and preflight read one door with one rule: only an exact name or a live judge pick is a match.
+    A clarify question is no warning; a fallback is, with its cause (a rejected key must not look like READY)."""
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    skills_reply(monkeypatch, {**body, "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
+    rep = json.loads(out)
+    assert rep["existing_skills"] == (["x-poster (unverified guess)"] if labelled else ["x-poster"])
+    assert rep["warnings"] == ([warning] if warning else [])
+    assert rep["verdict"] == ("READY WITH WARNINGS" if warning else "READY")
+
+
+def test_the_launchers_setup_line_reaches_the_user_whole_from_a_deep_checkout(world, monkeypatch, capsys):
+    """The real launcher message for a missing roots.json, from a deep checkout path, is printed uncut."""
+    deep = world["tmp"] / ("a-deep-checkout-folder-" * 4) / "super-jev"
+    shutil.copytree(SKILLS / "skill-search", deep / "skills/skill-search")
+    (deep / "skills/skill-search/roots.json").unlink(missing_ok=True)  # this checkout may have its own
+    request = deep / "request.json"
+    request.write_text('{"request": "posts a tweet"}')
+    r = _REAL_RUN(["bash", str(deep / "skills/skill-search/launcher.sh"), "--request-file", str(request)],
+                  capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "CLAUDECODE"})
+    assert r.returncode == 2 and "roots.example.json" in r.stdout  # the real message, not a made-up one
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R(r.stdout, "", r.returncode))
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet")
+    warning = next(l for l in out.splitlines() if "existing-skill search failed" in l)
+    assert str(deep / "skills/skill-search") in warning
+    assert "copy roots.example.json to roots.json and list your skill folders" in warning
+
+
+def test_no_match_is_none_found_not_a_failed_search(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    skills_reply(monkeypatch, {"status": "no_match", "source": "jev", "candidates": []})
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
+    rep = json.loads(out)
+    assert rep["existing_skills"] == [] and rep["warnings"] == []
 
 
 def test_skill_search_lists_existing_skills(world, monkeypatch, capsys):

@@ -6,12 +6,15 @@ refreshed, and a file added inside a connected folder stays invisible until the 
 re-prepared. This walks every prepare-cache/<pointer>-report.json, compares each approved file's
 sha256 with the cache, re-walks the recorded recipe for in-scope files the pointer has never seen
 (for a legacy report pinned to its file list: new files directly in a folder that list connects),
-and runs prepare_bulk.py --refresh with the pointer's recorded roots, principal, excludes and
---no-recurse ONLY for pointers with a change or a new file. Unchanged pointers are not touched,
-so their approved answers survive (a reconnect rotates them).
+and runs prepare_bulk.py --refresh, which replays each pointer's recorded recipe (folders and filters,
+principals, part size, writer), ONLY for pointers with a change or a new file. Unchanged pointers are not
+touched, so their approved answers survive (a reconnect rotates them).
 
 Usage:
   python3 refresh_changed.py [--dry-run] [--pointer NAME ...] [--skip NAME ...] [--writer builtin]
+
+--writer replaces and records the writer of each pointer it refreshes on this run; without it every
+pointer keeps the writer it was connected with.
 
 Output opens with one outcome line: fresh | refreshed | stale (--dry-run) | needs-setup | error.
 Exit code: 0 fresh/refreshed, 1 error, 2 needs-setup, 3 stale. A report that records no principal
@@ -180,28 +183,20 @@ def waiting(report: dict) -> list[str]:
 
 
 def prepare_args(report: dict, asker: str = None) -> list[str] | None:
-    # "principals" is the current field (every principal the pointer is registered for, so a
-    # --refresh repeats them all and never narrows the pointer's scope); "principal" is the
-    # older single-value field, still read for reports written before this field existed.
-    # `asker` is the agent whose lookup sees this pointer (auto_heal gives it); it stands in only
-    # when the report records no principal, and the refresh then records it. connect_part keeps
-    # every principal the pointer is registered for.
+    """The refresh command's arguments: the pointer and every principal it serves, then --refresh.
+    prepare_bulk.replay_recipe replays everything else the pointer was connected with (roots, excludes,
+    --no-recurse, names, allow-targets, part size, writer): the recipe is replayed in that one place.
+    "principals" is the current field (every principal the pointer is registered for, so a --refresh
+    repeats them all and never narrows the pointer's scope); "principal" is the older single-value field,
+    still read for reports written before this field existed. `asker` is the agent whose lookup sees this
+    pointer (auto_heal gives it); it stands in only when the report records no principal, and the refresh
+    then records it. connect_part keeps every principal the pointer is registered for. None when there is
+    no principal to name or no recorded roots to replay."""
     principals = report.get("principals") or ([report["principal"]] if report.get("principal") else [])
     principals = principals or ([asker] if asker else [])
     if not principals or not report.get("roots"):
         return None
-    args = []
-    for r in report["roots"]:
-        args += ["--root", r]
-    for e in report.get("excludes") or []:
-        args += ["--exclude", e]
-    if report.get("noRecurse"):
-        args.append("--no-recurse")
-    for n in report.get("names") or []:
-        args += ["--name", n]
-    for t in report.get("allowTargets") or []:
-        args += ["--allow-target", t]
-    args += ["--pointer", report["pointer"]]
+    args = ["--pointer", report["pointer"]]
     for p in principals:
         args += ["--principal", p]
     return args + ["--refresh"]
@@ -212,7 +207,8 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--pointer", action="append", default=[])
     ap.add_argument("--skip", action="append", default=[])
-    ap.add_argument("--writer", choices=["auto", "claude", "builtin"])
+    ap.add_argument("--writer", choices=["auto", "claude", "builtin"],
+                    help="replaces and records the writer of each pointer it refreshes on this run")
     a = ap.parse_args(argv)
     lines, stale, failed, setup = [], 0, 0, 0
     reported = set()
@@ -247,9 +243,8 @@ def main(argv=None) -> int:
         if args is None:
             # No recorded principal and no asker to stand in: a person names one once, and the
             # refresh records it, so this pointer heals on its own after that.
-            roots = " ".join(f"--root {r}" for r in report.get("roots") or [])
             lines.append(f"NEEDS-SETUP {name}: {len(changed)} changed, {len(added)} new, but its report records no "
-                         f"principal. Run once: python3 {HERE / 'prepare_bulk.py'} {roots} --pointer {name} "
+                         f"principal. Run once: python3 {HERE / 'prepare_bulk.py'} --pointer {name} "
                          f"--principal AGENT --refresh (one --principal per agent it serves); after that it heals itself")
             setup += 1
             continue

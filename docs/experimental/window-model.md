@@ -364,7 +364,7 @@ report body cannot reach it, is unaffected.
   network): byte-identity against the composer, `meta` identity against
   the composer, the round-trip property both ways, and the safety
   direction keyed by piece kind as well as by line. Then again, in a
-  child process, against PR #53's composer at `SUPERJEV_PR53_DIR` when
+  child process, against PR #53's composer at `SUPERJEV_TEST_PR53_DIR` when
   that worktree is on the machine — the two branches render a previous
   turn's relayed reports differently and `render()` has to match both.
   Skips with a note when the benches are not on the machine; says so

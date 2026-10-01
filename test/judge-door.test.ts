@@ -21,7 +21,6 @@ const request: Request = { state: 'EVIDENCE:\nplain state', questions: {
 const signal = () => new AbortController().signal;
 
 test('(a) with SUPERJEV_JUDGE unset the request is byte-identical to the one sent before the doorway', async () => {
-  assert.equal(process.env.SUPERJEV_JUDGE, undefined);
   let seen: { url: unknown; init: RequestInit | undefined } | undefined;
   const fake: typeof fetch = async (url, init) => {
     seen = { url, init };

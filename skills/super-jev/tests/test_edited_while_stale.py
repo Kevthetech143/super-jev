@@ -72,7 +72,9 @@ def test_a_stale_split_part_prints_its_parents_refresh_command(tmp_path, monkeyp
         "pointer": "cat", "principals": ["me"], "roots": ["/r"], "names": ["SKILL.md"],
         "parts": [{"pointer": "cat-2"}, {"pointer": "cat-3"}]}))
     hint = ask.refresh_hint("cat-3", "me", "preparation-required")
-    assert "--root /r" in hint and "--pointer cat" in hint and "replaying its connect recipe failed" not in hint
+    # The parent's short refresh, exactly (a bare "--pointer cat" would also match cat-3): the refresh replays the recipe.
+    assert hint.endswith("prepare_bulk.py --pointer cat --principal me --refresh")
+    assert "replaying its connect recipe failed" not in hint
 
 
 def test_an_entry_never_reviewed_at_a_known_version_is_not_searched(tmp_path, monkeypatch):

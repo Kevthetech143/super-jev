@@ -7,14 +7,24 @@
 Setup creates the state folder ($SUPERJEV_STATE_DIR, default
 ~/.local/state/super-jev) with owner-only permissions and a memory config
 inside it, checks Node, Python and the TypeSafe key, and prints the next
-step. It never overwrites an existing config and never reads or prints the
-key's value.
+step. For anything missing it prints the exact steps to get it, none needing
+admin rights (the docs repeat those lines word for word; a test keeps them
+identical). It never overwrites an existing config and never reads or prints
+the key's value.
 
-Uninstall removes the state folder (connected pointers, cached answers,
-lookup logs, manual records), this skill's prepare-cache/ and ledger/
-folders, and any ~/.claude/skills links that point into this checkout.
-Your original files are never touched.
+This file and what it imports (judges/, judge_profile.py) must stay runnable on
+Python 3.9, the interpreter a stock Mac has, because it is the one door that
+tells that Mac how to get Python 3.10 or newer.
+
+Uninstall removes what Super Jev wrote: the state folder (connected pointers,
+cached answers, logs, manual records), this skill's prepare-cache/, ledger/ and
+autoheal-state/ folders, the chat CLI's config (it holds your API key) and its
+launcher if install.sh made it for this checkout, and any ~/.claude/skills links
+that point into this checkout. One rule: in each of those folders it deletes the
+names it writes (the OWNED table below) and keeps everything else. Your original
+files are never touched.
 """
+import fnmatch
 import glob
 import json
 import os
@@ -32,9 +42,39 @@ import judges  # noqa: E402
 WRITTEN_MANIFEST = ".superjev-written"
 # In-repo folders Super Jev writes to. Uninstall deletes only files it can prove it
 # wrote (see _ours_in); anything else is left in place.
-IN_REPO_LEFTOVERS = (SKILL_DIR / "prepare-cache", SKILL_DIR / "ledger")
-# what ask.py writes under <state>/<principal>/
-PRINCIPAL_FILES = {"lookups.jsonl", "manual"}
+IN_REPO_LEFTOVERS = (SKILL_DIR / "prepare-cache", SKILL_DIR / "ledger", SKILL_DIR / "autoheal-state")
+# Every name Super Jev writes, folder by folder (fnmatch patterns, matched on the name only). Uninstall
+# deletes a match and keeps everything else; a folder goes once it is empty. "principal" is each
+# <state>/<principal>/ folder. tests/test_uninstall_complete.py scans the writers and fails when a
+# name they build is missing here, so add a new writer's name below.
+OWNED = {
+    "principal": ("lookups.jsonl", "traces.jsonl", "traces.jsonl.1", "approvals.jsonl", "claim-verdicts.json",
+                  "pointer_health.json", "pointer-words.json", "pointer-words.*.tmp",
+                  "scorecard-cases.jsonl", "scorecard-cases.tmp", "manual", "github"),
+    "ledger": ("calls.jsonl", "catches.jsonl", "catches.jsonl.lock", "catches.jsonl.tmp", "catch-cases.json",
+               "catch-cases.json.tmp", "signals.jsonl", "payloads", "state", "last", "calibration"),
+    "autoheal-state": ("autoheal.log", "*.json", ".*.json.*", ".*.state-lock", ".*.lock-control", "*.lock",
+                       ".*.lock.tmp.*", "*-last-refresh.log"),
+}
+# install.sh writes the chat launcher with this marker line and an exec of its checkout
+LAUNCHER_MARKER = "# super-jev-installer"
+
+MIN_NODE = 24
+MIN_PYTHON = (3, 10)
+# The exact lines for a machine that lacks one. No admin rights needed: uv and nvm install into
+# the home folder. AGENTS.md and docs/GETTING-STARTED.md repeat these lines word for word
+# (install.sh repeats the node ones); tests/test_setup_toolchain.py keeps them identical.
+INSTALL = {
+    "python": ('curl -LsSf https://astral.sh/uv/install.sh | sh',
+               'source "$HOME/.local/bin/env"',
+               'uv python install 3.12 --default'),
+    # nvm keeps itself on PATH only by editing a shell startup file that already exists
+    "node_zsh": ('touch ~/.zshrc',),
+    "node": ('curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash',
+             '\\. "$HOME/.nvm/nvm.sh"',
+             'nvm install 24'),
+}
+HOMEBREW = "Already use Homebrew? Run: brew install node python"
 
 
 def state_root() -> Path:
@@ -54,14 +94,29 @@ def _node_major():
         return None
 
 
+def _python_version():
+    return tuple(sys.version_info[:3])
+
+
+def _block(*lines) -> str:
+    return "".join("\n        " + ln for ln in lines)
+
+
 def setup() -> int:
     problems = []
+    steps = False   # an install block was printed, so say how to pick it up in this shell
+    python = _python_version()
+    if python < MIN_PYTHON:
+        problems.append("Python %d.%d or newer is required (found: %s). Install it with uv (into your home folder, no admin rights needed):%s"
+                        % (MIN_PYTHON + (".".join(map(str, python)), _block(*INSTALL["python"]))))
+        steps = True
     node = _node_major()
-    if node is None or node < 24:
-        problems.append("Node 24 or newer is required (found: %s). Install it, then run setup again."
-                        % ("none" if node is None else f"v{node}"))
-    if sys.version_info < (3, 10):
-        problems.append("Python 3.10 or newer is required.")
+    if node is None or node < MIN_NODE:
+        zsh = "zsh" in os.environ.get("SHELL", "")
+        problems.append("Node %d or newer is required (found: %s). Install it with nvm (into your home folder, no admin rights needed):%s"
+                        % (MIN_NODE, "none" if node is None else f"v{node}",
+                           _block(*(INSTALL["node_zsh"] if zsh else ()), *INSTALL["node"])))
+        steps = True
 
     cfg = config_path()
     root = state_root()
@@ -85,10 +140,19 @@ def setup() -> int:
 
     key_env = judges.key_env()
     if judges.key_present():
-        print(f"ok    {key_env} is set")
+        if key_env:
+            print(f"ok    {key_env} is set")
     else:
-        problems.append(f"{key_env} is not set. Every ask and check needs it. Run:\n"
-                        f"        export {key_env}=\"$(cat /path/to/your/key-file)\"")
+        where = judges.key_file()
+        lines = [f'export {key_env}="$(cat {where})"']
+        note = ""
+        if not Path(where).expanduser().exists():   # existence only: setup never opens the key file
+            lines.insert(0, f"(umask 077; cat > {where})")
+            note = (" Make the key file first: run the first line, paste the key, press Enter, then Ctrl-D"
+                    " (your human does this in their own terminal; never paste a key into chat)."
+                    " Then load it:")
+        problems.append(f"{key_env} is not set. Every ask and check needs it.{note or ' Run:'}"
+                        + _block(*lines))
 
     if shutil.which("claude"):
         print("ok    description writer: claude CLI found (connect uses it only if it is logged in; "
@@ -101,7 +165,11 @@ def setup() -> int:
         print("\nNOT READY:")
         for p in problems:
             print("  - " + p)
-        print("\nFix the above, then run setup again.")
+        if steps:
+            print("\n  " + HOMEBREW)
+            print("\nRun the source lines above in this shell, or open a new terminal, then run setup again.")
+        else:
+            print("\nFix the above, then run setup again.")
         return 1
     print("\nREADY. Next step: connect a folder of .md files (AGENTS.md step 4):\n"
           "  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
@@ -132,10 +200,15 @@ def _registered_pointers() -> list:
         return []
 
 
+def _owned(name: str, folder: str) -> bool:
+    """True when `name` is one Super Jev writes in a folder of this kind (see OWNED)."""
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in OWNED.get(folder, ()))
+
+
 def _ours_in(d: Path) -> set:
-    """Files in d Super Jev can prove it wrote: the ledger, names listed in d's manifest,
-    and names derived from registered pointers (installs from before the manifest)."""
-    ours = {d / "calls.jsonl"}
+    """Files in d Super Jev can prove it wrote: the names in OWNED for this folder, names listed
+    in d's manifest, and names derived from registered pointers (installs from before the manifest)."""
+    ours = {f for f in d.iterdir() if _owned(f.name, d.name)}
     m = d / WRITTEN_MANIFEST
     if m.is_file() and not m.is_symlink():
         ours |= {d / n for n in m.read_text().split("\n") if n and "/" not in n and n not in (".", "..")}
@@ -144,6 +217,44 @@ def _ours_in(d: Path) -> set:
         ours |= {d / f"{p}.json", d / f"{p}-held.txt", d / f"{p}-report.json"}
         ours |= {f for f in d.glob(f"{glob.escape(p)}-*.json") if re.fullmatch(rf"{re.escape(p)}-\d+\.json", f.name)}
     return ours
+
+
+def _clear(d: Path, folder: str, removed: list, kept: list) -> None:
+    """Delete the names Super Jev writes in d (OWNED[folder]); add what stays to `kept`; remove d once empty."""
+    left = []
+    for f in sorted(d.iterdir()):
+        if _owned(f.name, folder) and not f.is_symlink():
+            shutil.rmtree(f) if f.is_dir() else f.unlink()
+            removed.append(str(f))
+        else:
+            left.append(str(f))
+    kept.extend(left)
+    if not left:
+        d.rmdir()
+        removed.append(str(d))
+
+
+def _remove_chat_cli(removed: list, kept: list) -> None:
+    """The chat CLI's config (it holds an API key) and the launcher install.sh wrote. The folders
+    are the ones src/jev-chat-config.ts and install.sh use. The launcher goes only when it carries
+    install.sh's marker line and execs THIS checkout's chat CLI."""
+    config_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "superjev"
+    config = config_dir / "config.json"
+    if config_dir.is_dir() and not config_dir.is_symlink() and config.is_file() and not config.is_symlink():
+        config.unlink()
+        removed.append(str(config))
+        if any(config_dir.iterdir()):
+            kept.extend(str(f) for f in sorted(config_dir.iterdir()))
+        else:
+            config_dir.rmdir()
+            removed.append(str(config_dir))
+    launcher = Path(os.environ.get("SUPERJEV_BIN_DIR") or Path.home() / ".local/bin") / "superjev"
+    if launcher.is_file() and not launcher.is_symlink() and launcher.stat().st_size < 4096:
+        lines = launcher.read_text(errors="replace").splitlines()
+        execs = [m.group(1) for m in (re.fullmatch(r'exec node "(.+)/src/jev-chat-cli\.ts" "\$@"', ln) for ln in lines) if m]
+        if LAUNCHER_MARKER in lines and any(Path(e).resolve() == REPO for e in execs):
+            launcher.unlink()
+            removed.append(str(launcher))
 
 
 def uninstall() -> int:
@@ -170,27 +281,30 @@ def uninstall() -> int:
                 # prepare_bulk's new-file snapshots (one <pointer>.json each; they name file paths)
                 shutil.rmtree(f)
                 removed.append(str(f))
+            elif f.is_dir() and not f.is_symlink() and _owned(f.name, d.name):
+                shutil.rmtree(f)  # a folder Super Jev writes (ledger/payloads/, ledger/state/ ...)
+                removed.append(str(f))
             else:
                 repo_kept.append(str(f))
         if not any(d.iterdir()):
             d.rmdir()
             removed.append(str(d))
     if root.is_dir():
-        # Delete only what setup, connect and ask make: _memory/ and per-principal folders
-        # holding nothing but lookups.jsonl and manual/. Anything else stays, and so does
-        # the folder unless it is then empty.
+        # _memory/ is setup's. In each other folder (one per principal) delete the names Super Jev
+        # writes there (OWNED) and keep the rest; a folder goes once it is empty, and so does the
+        # state folder.
         for child in sorted(root.iterdir()):
-            ours = child.name == "_memory" or (
-                child.is_dir() and not child.is_symlink()
-                and all(c.name in PRINCIPAL_FILES for c in child.iterdir()))
-            if ours:
+            if child.name == "_memory":
                 shutil.rmtree(child)
                 removed.append(str(child))
+            elif child.is_dir() and not child.is_symlink():
+                _clear(child, "principal", removed, kept)
             else:
                 kept.append(str(child))
         if not kept:
             root.rmdir()
             removed.append(str(root))
+    _remove_chat_cli(removed, repo_kept)
     for link in _links_into_repo():
         link.unlink()
         removed.append(str(link))
