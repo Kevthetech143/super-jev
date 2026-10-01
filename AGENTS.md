@@ -71,6 +71,9 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    or disproves it (`CONTRADICTED`). Any other exit means the check itself
    failed; treat it as blocked too.
 
+   Want the proof file and line, or don't know which file holds the fact? Use
+   `ask.py --claim` instead (see "Check a claim: which door" below).
+
 8. **Uninstall when your human asks** (removes everything setup and connect made;
    their files are never touched):
 
@@ -108,9 +111,13 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
   `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`, and
   `--claims-file FILE` checks one statement per line. Use `dispatch.py check FILE --claim "..."`
   when you already have the file, diff or report and want a send/no-send gate; it gives no proof
-  line. Both doors: only exit 0 passes. `ask --claim` exits TRUE 0, FALSE 5, not settled 1,
-  refused input 2, check failed 3, setup needed 4 (several statements: the highest code);
-  `check` exits CLEAN 0, ERROR 1, REJECT 2, READ 3 (step 7).
+  line. Both doors: only exit 0 passes. `ask --claim` exits TRUE 0, FALSE 5; every other result is
+  not a pass, and its code says how the search went: 1 searched fully and nothing settles it
+  (NOT FOUND, UNSURE, PARTIAL, CONFLICT), 3 a set or the check failed (a NOT FOUND after a failed set,
+  or `UNSURE: the true/false check did not run`), 4 setup needed (a NOT FOUND where a set is stale or
+  files were skipped or held), 2 refused input; several statements exit with the highest code.
+  `check` exits CLEAN 0, READ 3, REJECT 2; any other code (1 error, 5 refused) means the check
+  failed (step 7). The two doors use different numbers: ask's 5 is FALSE, check's 5 is a refusal.
 - **Building something bigger than one answer:** use the `super-jev-build-cycle` skill. Six steps —
   preflight, start, check-report, review, reply-check, learn — and the review step must come from a
   fresh, independent agent, never the builder; it refuses to close while the latest review says FIX.
