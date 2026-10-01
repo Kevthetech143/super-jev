@@ -36,6 +36,12 @@ Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
 yes and Esc is no; Ctrl+D leaves, which counts as no. While a search or
 connect runs, Esc or Ctrl+C stops it (`Stopped.`); other lines are dropped.
 
+When a question needs one fix, the window does it and asks again once:
+a key TypeSafe rejected (from the saved file) gets the hidden key prompt, and
+a folder that is stale and not refreshing on its own gets `Refresh <folder>?`
+(Enter yes, Esc no). A second failure stops there with its Next line. The
+one-shot door never asks; it prints the Next line and exits.
+
 A paste is one question: it waits for Enter, and Esc or Ctrl+C throws it
 away. Up recalls it whole. A paste made during a search or connect is dropped.
 Needs a terminal with bracketed paste (the usual ones).

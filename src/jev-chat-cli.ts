@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadJudgeProfile } from './judge-profile.ts';
 import {
-  COMMANDS, HELP, OPEN, USAGE, childEnv, confirmText, helperCall, keyAction, launchLine, pack, pointerName, prose, readLine, render,
+  COMMANDS, HELP, OPEN, USAGE, childEnv, confirmText, fixOf, helperCall, keyAction, launchLine, pack, pointerName, prose, readLine, render,
   type Session, type Turn,
 } from './jev-chat-config.ts';
 
@@ -26,7 +26,8 @@ const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
 type IO = { argv: string[]; env: NodeJS.ProcessEnv; stdin: any; stdout: any; stderr: any };
 type Done = { code: number; out: string; err: string; stopped: boolean };
-type Reply = { text: string; code: number; data?: any; stopped?: boolean };
+type Fix = NonNullable<ReturnType<typeof fixOf>>;
+type Reply = { text: string; code: number; data?: any; stopped?: boolean; fix?: Fix | null };
 const lastLine = (s: string) => s.trim().split('\n').pop()?.trim() ?? '';
 
 export async function run(io: IO): Promise<number> {
@@ -89,8 +90,9 @@ export async function run(io: IO): Promise<number> {
     return () => { clearTimeout(start); clearInterval(tick); if (shown) stderr.write('\r\x1b[2K'); };
   }
 
-  /** Runs one helper turn and draws its reply. data is null when the helper did not print one JSON object. */
-  async function helper(t: Turn, extra: { label?: string; refreshed?: boolean } = {}): Promise<Reply & { data: any }> {
+  /** Runs one helper turn and draws its reply. data is null when the helper did not print one JSON object.
+   *  offer (the window only): a reply the app can fix is returned with its fix, and its Next line is left out because the app does it. */
+  async function helper(t: Turn, extra: { label?: string; refreshed?: boolean; offer?: boolean } = {}): Promise<Reply & { data: any }> {
     const stop = working({ ask: 'Searching your notes', check: 'Checking your notes', connect: 'Connecting' }[t.kind as string] ?? '');
     const t0 = Date.now();
     let res: Done;
@@ -103,7 +105,8 @@ export async function run(io: IO): Promise<number> {
     const secs = t.kind === 'status' ? undefined : (Date.now() - t0) / 1000;
     if (!data) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
     for (const s of data.sets ?? []) session.connected.add(s.name);
-    return { data, code: res.code, text: render({ kind: t.kind as any, data, secs, ...extra }, look()) };
+    const fix = extra.offer ? fixOf(data, keySource()) : null;
+    return { data, code: res.code, fix, text: render({ kind: t.kind as any, data, secs, label: extra.label, refreshed: extra.refreshed, noNext: !!fix }, look()) };
   }
 
   const askedKey = (t: Turn) => (t.kind === 'ask' || t.kind === 'check') && needsKey();
@@ -117,8 +120,8 @@ export async function run(io: IO): Promise<number> {
 
   /** Connect or refresh a folder or note after a yes. askYes shows the question and returns the answer. */
   async function connectFlow(t: Extract<Turn, { kind: 'connect' }>, askYes: (text: string) => Promise<boolean>) {
-    const name = pointerName(t.path), label = basename(t.path).replace(/\.md$/i, '');
-    const refresh = session.connected.has(name);
+    const name = t.pointer ?? pointerName(t.path), label = basename(t.path).replace(/\.md$/i, '');
+    const refresh = !!t.pointer || session.connected.has(name);
     if (!(await askYes(confirmText(label, refresh, vendor, look().width)))) return { text: render({ kind: 'connect', data: {}, declined: true, refreshed: refresh }, look()), code: 1, data: {} };
     const r = await helper(t, { label, refreshed: refresh });
     if (r.data?.connected && !r.data.refused) session.connected.add(name);
@@ -149,10 +152,22 @@ export async function run(io: IO): Promise<number> {
     });
   }
 
-  /** The line editor: lines go to a queue, so the loop (and the yes/no) read them in order. */
-  function terminal() {
+  /** Asks for the key and saves it owner-only. False when cancelled. */
+  async function getKey(): Promise<boolean> {
+    stdout.write('key › ');
+    const key = await readKey();
+    if (!key) return false;
+    writeFileSync(keyFile, key + '\n', { mode: 0o600 });
+    chmodSync(keyFile, 0o600);
+    fileKey = key;
+    return true;
+  }
+  const NO_KEY = `No key entered. Open the window again to paste it, or set ${keyEnv}.`;
+
+  /** The line editor: lines go to a queue, so the loop (and the yes/no) read them in order. Its history carries over when it is reopened. */
+  function terminal(history: string[] = []) {
     const rl = createInterface({
-      input: stdin, output: stdout, terminal: true, prompt: '› ',
+      input: stdin, output: stdout, terminal: true, prompt: '› ', history,
       completer: (l: string): [string[], string] => [l.startsWith('/') ? COMMANDS.filter((c) => c.startsWith(l)) : [], l],
     });
     const queue: (string | symbol)[] = [];
@@ -216,7 +231,7 @@ export async function run(io: IO): Promise<number> {
         mode = 'busy';
         return typeof x === 'string' && keyAction({ mode: 'confirm', line: x, armed: false }, 'enter') === 'yes';
       },
-      close: () => { escStops = false; marks(false); rl.close(); },
+      close: () => { escStops = false; marks(false); rl.close(); return [...(rl as any).history] as string[]; },
     };
   }
 
@@ -230,12 +245,7 @@ export async function run(io: IO): Promise<number> {
     if (!(r.data?.sets ?? []).length) out(`${TITLE}\nPoints you to the notes that answer your question.\n`);
     if (needsKey()) {
       out(pack(prose(`Paste your ${vendor} API key. It stays hidden and is saved only on this Mac.`), look().width, '', '').join('\n'));
-      stdout.write('key › ');
-      const key = await readKey();
-      if (!key) { out(`No key entered. Open the window again to paste it, or set ${keyEnv}.`); return 1; }
-      writeFileSync(keyFile, key + '\n', { mode: 0o600 });
-      chmodSync(keyFile, 0o600);
-      fileKey = key;
+      if (!(await getKey())) { out(NO_KEY); return 1; }
     }
     if (fresh) {
       const bad = await notReady();
@@ -246,7 +256,26 @@ export async function run(io: IO): Promise<number> {
     const sets: { state: string }[] = r.data.sets ?? [];
     out(sets.length ? launchLine(VERSION, sets, look().width) : '• Ready. Nothing connected yet.\n  Drag a folder of Markdown notes in here.');
 
-    const term = terminal();
+    let term = terminal();
+    /** A question whose answer needs one fix: the app does it (a new key, a refresh) and asks again, once. */
+    async function answer(t: Turn): Promise<string> {
+      const r = await helper(t, { offer: true });
+      if (!r.fix) return r.text;
+      stdout.write(r.text + '\n');
+      if (r.fix.kind === 'key') {
+        const history = term.close(); // the hidden prompt reads raw keys, so the line editor steps aside and comes back with its history
+        const got = await getKey();
+        term = terminal(history);
+        if (!got) return NO_KEY;
+      } else {
+        for (const u of r.fix.rows) {
+          const c = await connectFlow({ kind: 'connect', path: u.root, dir: true, pointer: u.set }, term.confirm);
+          stdout.write(c.text + '\n');
+          if (!c.data?.connected || c.data.refused) return '';
+        }
+      }
+      return (await helper(t)).text;
+    }
     try {
       for (let line = await term.next(); line !== null; line = await term.next()) {
         const t = readLine(line, home);
@@ -256,6 +285,7 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'version') text = TITLE;
         else if (t.kind === 'say') text = t.text;
         else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
+        else if (t.kind === 'ask' || t.kind === 'check') text = await answer(t);
         else if (t.kind !== 'empty') text = (await helper(t)).text;
         if (text) stdout.write(text + '\n\n');
       }
