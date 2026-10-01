@@ -369,13 +369,13 @@ export function dropConfirmDefault(plan: DropPlan): boolean {
   return plan.names !== null;
 }
 
-/** One-key confirm message. Connecting makes paid judge calls, so the chat
+/** One-key confirm message. Connecting can make paid judge calls, so the chat
  * must never connect without an explicit yes. `pointerAlreadyExists` (from a
  * pre-confirm local panel check) adds a plain warning that connecting will
  * replace that pointer's existing approved answers. */
 export function formatDropConfirm(plan: DropPlan, principal: string, pointerAlreadyExists: boolean = false): string {
   const what = plan.names ? `${plan.fileCount} file${plan.fileCount === 1 ? '' : 's'}` : 'the whole folder';
-  let msg = `Connect ${what} from ${plan.root} as pointer "${plan.pointer}" for ${principal}? This makes paid judge calls.`;
+  let msg = `Connect ${what} from ${plan.root} as pointer "${plan.pointer}" for ${principal}? This can make paid judge calls.`;
   if (pointerAlreadyExists) msg += ` Pointer "${plan.pointer}" already exists and will be REPLACED.`;
   return msg;
 }
@@ -428,12 +428,15 @@ export function parseReplaceWarning(stdout: string): string | null {
   return line ? line.trim() : null;
 }
 
-export type ConnectSummary = { approved: number; exceptions: number; held: number; heldLines: string[]; exceptionLines: string[] };
+export type ConnectSummary = {
+  approved: number; exceptions: number; held: number;
+  heldLines: string[]; exceptionLines: string[]; skipLines: string[];
+};
 
 const SUMMARY_LINE = /^approved:\s*(\d+)\s+exceptions:\s*(\d+)\s+held:\s*(\d+)/;
 
 /** Parses prepare_bulk.py's closing `approved: N  exceptions: N  held: N`
- * line (plus any HELD/EXCEPTION detail lines above it) out of its stdout. */
+ * line (plus any HELD/EXCEPTION/SKIP detail lines above it) out of its stdout. */
 export function parseConnectSummary(stdout: string): ConnectSummary | null {
   const lines = stdout.split('\n');
   const summaryLine = lines.find((l) => SUMMARY_LINE.test(l.trim()));
@@ -444,11 +447,14 @@ export function parseConnectSummary(stdout: string): ConnectSummary | null {
   // it twice.
   const heldLines = [...new Set(lines.filter((l) => l.trim().startsWith('HELD')).map((l) => l.trim()))];
   const exceptionLines = [...new Set(lines.filter((l) => l.trim().startsWith('EXCEPTION')).map((l) => l.trim()))];
-  return { approved: Number(m[1]), exceptions: Number(m[2]), held: Number(m[3]), heldLines, exceptionLines };
+  // SKIP lines say what a default rule left out (counts and folder or extension names, with the way in).
+  const skipLines = [...new Set(lines.filter((l) => l.trim().startsWith('SKIP')).map((l) => l.trim()))];
+  return { approved: Number(m[1]), exceptions: Number(m[2]), held: Number(m[3]), heldLines, exceptionLines, skipLines };
 }
 
-/** Plain-words final report -- held/exception files are surfaced, never
- * hidden, alongside the required "Connected N file(s)." line. */
+/** Plain-words final report -- held/exception files and everything a default
+ * rule left out are surfaced, never hidden, alongside the required
+ * "Connected N file(s)." line. */
 export function formatConnectSummary(summary: ConnectSummary): string {
   const lines = [`Connected ${summary.approved} file${summary.approved === 1 ? '' : 's'}. Ask me about them.`];
   if (summary.held > 0) {
@@ -457,6 +463,7 @@ export function formatConnectSummary(summary: ConnectSummary): string {
   if (summary.exceptions > 0) {
     lines.push(`${summary.exceptions} file${summary.exceptions === 1 ? '' : 's'} failed the check: ${summary.exceptionLines.map((l) => l.replace(/^EXCEPTION\s+/, '')).join(', ')}`);
   }
+  for (const l of summary.skipLines) lines.push(`Left out: ${l.replace(/^SKIP\s+/, '')}`);
   return lines.join('\n');
 }
 

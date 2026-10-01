@@ -515,6 +515,7 @@ test('parseConnectSummary reads the approved/exceptions/held line and dedupes re
     approved: 2, exceptions: 1, held: 1,
     heldLines: ['HELD  secret.md  (secret-like text)'],
     exceptionLines: ['EXCEPTION  bad.md  (gate failed)'],
+    skipLines: [],
   });
 });
 
@@ -533,6 +534,6 @@ test('formatConnectSummary prints the required "Connected N file(s)" line and su
 });
 
 test('formatConnectSummary singular file wording', () => {
-  const summary = { approved: 1, exceptions: 0, held: 0, heldLines: [], exceptionLines: [] };
+  const summary = { approved: 1, exceptions: 0, held: 0, heldLines: [], exceptionLines: [], skipLines: [] };
   assert.equal(formatConnectSummary(summary), 'Connected 1 file. Ask me about them.');
 });
