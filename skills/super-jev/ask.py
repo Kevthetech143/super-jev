@@ -37,6 +37,17 @@
       (blank lines and # comments skipped): a draft's facts, or a worker
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
 
+  ask.py --principal AGENT --json REQUEST
+      For a program (the terminal app) instead of a person. REQUEST is a question, one
+      --claim "statement", --status, --approve or --miss; anything else is refused
+      (exit 2) before any work. It does the same work, prints exactly one JSON line
+      (schema "v": 1; empty fields left out; no scores) and exits with text mode's
+      code. An ask or claim: outcome, why, next (setup|key|connect|refresh|include|
+      rephrase|none), files [{path, tier, line?, text?}], skills, saved, saved_now,
+      unsearched, left_out, errors, claim. --status: {next, principal, sets}.
+      --approve / --miss: {done, why, removed?}. --json is read only as the first
+      word after --principal, so after "--" or inside a question it is just text.
+
 SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
 save by hand. All save through one function and run the secret scan. A repeat-question
 save stores the file, and its N wins stand in for the claim check; only --approve and
@@ -532,6 +543,93 @@ def _lost_pointers(principal: str, rec: dict) -> list:
     have = {(p.get("pointer") if isinstance(p, dict) else p) for p in memory({"action": "panel", "principal": principal}).get("pointers", [])}
     return sorted({f["pointer"] for f in rec.get("files") or []} - have)
 
+# One result per ask feeds both printers (contract C1): the text lines and the `--json` object are made
+# from the same _RESULT, so they cannot drift. Every ordinary ask's text starts with one OUTCOME line,
+# computed from the whole search state, and its exit code is the outcome's. A claim check keeps its own
+# verdict lines and exit codes. The JSON has no scores on purpose (schema v: 1; see run_json).
+OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
+_RESULT = {}
+_FILE_PRIVATE = ("score", "pointer")  # a file row's own bookkeeping; never in the JSON
+UNCHECKED_NOTE = "  (inconclusive: content check did not finish; routing score)"
+JUDGE_KINDS = {k.kind for k in judges.ERROR_KINDS}  # the wire names a navigate row may carry as `kind`
+KEY_KINDS = {"no-key", "auth-rejected"}  # a failure only a new key fixes: `next: key`
+
+
+def _done(kind: str, why: str, cmd: str = "", next: str = "none", claim_rc: int = 0) -> int:
+    """Record an ask's outcome. `why` and the text-mode command `cmd` make the OUTCOME line; `next` is the
+    same step as one word for --json (setup, key, connect, refresh, include, rephrase or none)."""
+    _RESULT.update(outcome=kind, why=why, cmd=cmd, next=next)
+    return claim_rc if _CLAIM["text"] else OUTCOME_EXIT[kind]
+
+
+def line_text(path: str, n: int):
+    """File line n (1-based) cut to 160 characters, or None when it cannot be read or looks like a
+    secret: a line that looks like a secret is never quoted."""
+    try:
+        line = Path(path).read_text(errors="replace").splitlines()[n - 1].strip()
+    except (OSError, IndexError):
+        return None
+    return line[:160] if line and not has_secret(line) else None
+
+
+def file_row(score, path: str, pointer: str, tier: str) -> dict:
+    """One ranked file (tier: confirmed, possible or unchecked). `line` is the file line the content check
+    judged best and `text` that line; text mode prints neither."""
+    row = {"path": path, "tier": tier, "score": score, "pointer": pointer}
+    n = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
+    if isinstance(n, int) and n > 0:
+        row["line"] = n
+        if text := line_text(path, n):
+            row["text"] = text
+    return row
+
+
+def show_file(f: dict) -> None:
+    note = {"possible": POSSIBLE_NOTE, "unchecked": UNCHECKED_NOTE}.get(f["tier"], "")
+    score = f"{f['score']:5.2f}" if isinstance(f.get("score"), (int, float)) else "saved"
+    print(f"{score}  {f['path']}  [{f['pointer']}]{note}")
+
+
+def unsearched_rows(ptrs, state_of: dict, healing: set) -> list:
+    """The sets this ask did not fully search, one row per base set (a split part folds into its base)."""
+    rows = {}
+    for ptr in ptrs:
+        report, owner = auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)
+        row = rows.setdefault(owner or ptr, {"set": owner or ptr, "state": state_of.get(ptr, "failed"), "healing": False})
+        if report and report.get("roots"):
+            row["root"] = report["roots"][0]
+        row["healing"] = row["healing"] or ptr in healing
+    return list(rows.values())
+
+
+def error_rows(ptrs, kinds: dict) -> list:
+    """One {set, kind} per failed set. A kind is kept only if the navigate row carried a judge's name for it;
+    today's navigation does not, so it is `unknown` (the app then shows the plain error)."""
+    names = ((auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[1] or ptr,
+              kinds.get(ptr) if kinds.get(ptr) in JUDGE_KINDS else "unknown") for ptr in ptrs)
+    return [{"set": n, "kind": k} for n, k in dict.fromkeys(names)]
+
+
+def left_out_rows(skipped, held) -> list:
+    """Files not searched, grouped by reason: {what, count, where, way_in}. `skipped` is (path, why, fix)
+    rows from setup; `held` is files the content check withheld for holding a secret."""
+    groups = {}
+    for path, what, fix in [*skipped, *((p, SECRET_WHAT, SECRET_FIX) for p in held)]:
+        groups.setdefault((what, fix), {})[path] = None
+    return [{"what": what, "count": len(ps), "where": os.path.commonpath([os.path.dirname(p) for p in ps]), "way_in": fix}
+            for (what, fix), ps in groups.items()]
+
+
+def skill_rows(pairs) -> list:
+    """[(name, SKILL.md path)] from the catalog, where a guess carries the GUESS suffix, as rows."""
+    return [{"name": n.removesuffix(" " + GUESS), "path": p, "guess": n.endswith(GUESS)} for n, p in pairs]
+
+
+def show_skill(s: dict) -> None:
+    name = s["name"] + (" " + GUESS if s["guess"] else "")
+    print(f"skill  {s['path']}  [skills: {name}]{skill_note(name)}")
+
+
 def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     # The harness's evidence "path" is always its own internal prepared-copy path,
     # never the caller's file -- so staleness is checked against the file recorded when
@@ -551,22 +649,30 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
         return 1
     print("CACHE HIT")
     who = approver(sdir, question)
-    if who.get("approved_by") == "auto-save" and rec and rec.get("file"):
+    when = rec["ts"][:10] if rec and rec.get("ts") else "date not recorded"
+    auto = who.get("approved_by") == "auto-save"
+    _RESULT["saved"] = {"by": "auto" if auto else "you", **({"date": when} if rec and rec.get("ts") else {})}
+    if auto and rec and rec.get("file"):
         # A repeat win saved the ranked files, not an answer: print them like a found result.
-        for s in rec.get("skills") or []:
-            print(f"skill  {s['path']}  [skills: {s['name']}]{skill_note(s['name'])}")
-        for f in rec.get("files") or [{"score": None, "path": rec["file"], "pointer": rec.get("pointer", "")}]:
-            score = f"{f['score']:5.2f}" if isinstance(f["score"], (int, float)) else "saved"
-            print(f"{score}  {f['path']}  [{f['pointer']}]")
+        _RESULT["skills"] = skill_rows((s["name"], s["path"]) for s in rec.get("skills") or [])
+        _RESULT["files"] = [{"path": f["path"], "tier": "confirmed", "score": f.get("score"), "pointer": f["pointer"]}
+                            for f in rec.get("files") or [{"path": rec["file"], "pointer": rec.get("pointer", "")}]]
+        for s in _RESULT["skills"]:
+            show_skill(s)
+        for f in _RESULT["files"]:
+            show_file(f)
         if rec.get("leans_none"):
+            _RESULT["leans_none"] = True
             print(LEANS_NONE_NOTE)
     else:
         print("answer:", hit.get("answer") or "")
+        _RESULT["saved"]["answer"] = hit.get("answer") or ""
+        if rec and rec.get("file"):
+            _RESULT["files"] = [{"path": rec["file"], "tier": "confirmed", "pointer": rec.get("pointer", "")}]
     print("approved_by:", who.get("approved_by", "human") + (
         f" (evidence {who['evidence_file']}, score {who['score']:.2f})" if who.get("evidence_file") else ""))
     origin = (f"from {rec['file']}" if rec and rec.get("file")
               else "no source file" if rec and rec.get("no_source") else "source not recorded")
-    when = rec["ts"][:10] if rec and rec.get("ts") else "date not recorded"
     print(f"saved answer, {origin}, saved {when}")
     for e in ([] if who.get("approved_by") == "auto-save" else (hit.get("evidence") or []))[:3]:
         quote = str(e.get("quote", ""))
@@ -1090,11 +1196,34 @@ def _file_date(p: str):
     except OSError:
         return 0
 
+CLAIM_SAYS = {"supported": "TRUE", "contradicted": "FALSE", "partly": "PARTLY"}
+
+def file_day(p: str) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(_file_date(p))) if _file_date(p) else ""
+
+def claim_file(p: str, f: dict, proof: bool = False) -> dict:
+    """A file a claim verdict names, for --json: what it says (or, as the proof, the line quoted),
+    the line the judge picked and the file's date. A line that looks like a secret is never quoted."""
+    row = {"path": p} if proof else {"path": p, "says": CLAIM_SAYS.get(f["verdict"], f["verdict"])}
+    if f.get("line_no"):
+        row["line"] = f["line_no"]
+    if proof and f.get("line") and not has_secret(f["line"]):
+        row["text"] = f["line"][:160]
+    if file_day(p):
+        row["date"] = file_day(p)
+    return row
+
+def claim_result(word: str, files: dict, paths: list, read: int, proof: str = None) -> None:
+    """Record a claim verdict for --json; only TRUE and FALSE have a proof."""
+    _RESULT["claim"] = {"verdict": word, "proof": claim_file(proof, files[proof], True) if proof else None,
+                        "files": [claim_file(p, files[p]) for p in paths], "read": read}
+
 def claim_verdict(files: dict, read: list) -> tuple:
     """(word, lines) combining per-file answers. word is TRUE, FALSE, CONFLICT, PARTIAL,
     UNSURE or NOT FOUND. Only answers at >= CLAIM_SURE decide; files that disagree
-    are a CONFLICT with the newest (by modified date) first."""
-    day = lambda p: time.strftime("%Y-%m-%d", time.localtime(_file_date(p))) if _file_date(p) else "date unknown"
+    are a CONFLICT with the newest (by modified date) first. The same verdict is
+    recorded for --json (claim_result)."""
+    day = lambda p: file_day(p) or "date unknown"
     sure = {p: f for p, f in files.items() if isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE}
     yes = [p for p, f in sure.items() if f["verdict"] == "supported"]
     no = [p for p, f in sure.items() if f["verdict"] == "contradicted"]
@@ -1104,6 +1233,7 @@ def claim_verdict(files: dict, read: list) -> tuple:
     if yes and no:
         both = sorted(yes + no, key=_file_date, reverse=True)
         word = "CONFLICT"
+        claim_result(word, files, both, len(read))
         out = [f"CONFLICT: the files disagree; the newest says {'TRUE' if both[0] in yes else 'FALSE'}. Read both before answering."]
         out += [f"  {'TRUE ' if p in yes else 'FALSE'} {p} ({day(p)}) {quote(p)}" for p in both]
         return word, out
@@ -1111,6 +1241,7 @@ def claim_verdict(files: dict, read: list) -> tuple:
         side = yes or no
         word = "TRUE" if yes else "FALSE"
         best = max(side, key=lambda p: files[p]["prob"])
+        claim_result(word, files, sorted(side, key=lambda p: -files[p]["prob"]), len(read), best)
         out = [f"{word} ({files[best]['prob']:.2f})", f"Proof: {best} ({day(best)})", f"  {quote(best)}"]
         also = [p for p in side if p != best]
         if also:
@@ -1120,16 +1251,19 @@ def claim_verdict(files: dict, read: list) -> tuple:
             out.append("Other files read: " + ", ".join(Path(p).name for p in other))
         return word, out
     if part:
+        claim_result("PARTIAL", files, part, len(read))
         out = ["PARTIAL: each file holds only part of it; read these before answering:"]
         out += [f"  {p} ({day(p)}) {quote(p)}" for p in part]
         return "PARTIAL", out
     leaning = sorted((p for p, f in files.items() if f["verdict"] != "not_stated"),
                      key=lambda p: -(files[p].get("prob") or 0))
     if leaning:
+        claim_result("UNSURE", files, leaning, len(read))
         f0 = files[leaning[0]]
         out = [f"UNSURE ({f0['verdict']} {f0.get('prob') or 0:.2f}): read these files before answering:"]
         out += [f"  {p}" for p in leaning]
         return "UNSURE", out
+    claim_result("NOT FOUND", files, [], len(read))
     if not read:
         return "NOT FOUND", ["NOT FOUND in the connected files; it may still exist somewhere not connected."]
     return "NOT FOUND", [f"NOT FOUND in the {len(read)} file(s) I read; it may still exist in a file that was not read."]
@@ -1816,22 +1950,10 @@ def question_people(question: str, folks: dict) -> set:
         return self_ if words & FIRST_PERSON else set()
     return who | self_ if words & {"i", "me", "myself"} else who
 
-# The one promise of an ordinary ask: its output starts with exactly one OUTCOME line, computed from
-# the whole search state, and the exit code is the outcome's. Claim checks keep their own verdict lines.
-OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
-_OUTCOME = {}
-
-
-def _done(kind: str, why: str, nxt: str = "", claim_rc: int = 0) -> int:
-    """Record an ordinary ask's outcome. A claim check has no OUTCOME line and keeps its own exit code."""
-    _OUTCOME.update(kind=kind, why=why, next=nxt)
-    return claim_rc if _CLAIM["text"] else OUTCOME_EXIT[kind]
-
-
 def lookup(question: str, principal: str, sdir: Path) -> int:
+    _RESULT.clear()
     if _CLAIM["text"]:
         return _lookup(question, principal, sdir)
-    _OUTCOME.clear()
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
@@ -1840,12 +1962,13 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         if isinstance(e, SecretHeld):
             sys.stdout.write(buf.getvalue())
             raise
+        _RESULT.clear()
         _done("error", f"the lookup failed ({type(e).__name__}: {e})", f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status")
         traceback.print_exc()
-    o = _OUTCOME or dict(kind="error", why="the lookup ended without a result", next="")
-    print(f"OUTCOME: {o['kind']} - {o['why']}" + (f"; next: {o['next']}" if o["next"] else ""))
+    o = _RESULT if "outcome" in _RESULT else dict(outcome="error", why="the lookup ended without a result", cmd="")
+    print(f"OUTCOME: {o['outcome']} - {o['why']}" + (f"; next: {o['cmd']}" if o["cmd"] else ""))
     sys.stdout.write(buf.getvalue())
-    return OUTCOME_EXIT[o["kind"]]
+    return OUTCOME_EXIT[o["outcome"]]
 
 
 def _lookup(question: str, principal: str, sdir: Path) -> int:
@@ -1854,10 +1977,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     status_cmd = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status"
     if not question.strip():
         return _done("not-supported", "empty question", "ask one focused question, e.g. "
-                     f'ask.py --principal {principal} "find the note about X"', claim_rc=2)
+                     f'ask.py --principal {principal} "find the note about X"', "rephrase", claim_rc=2)
     if len(question) > MAX_QUESTION:
         return _done("not-supported", f"question too long ({len(question):,} chars, max {MAX_QUESTION:,})",
-                     "ask one shorter, focused question", claim_rc=2)
+                     "ask one shorter, focused question", "rephrase", claim_rc=2)
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
@@ -1879,7 +2002,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             if q:
                 print(f"  {q}")
             log(sdir, "claim", question=question, result="saved", verdict=saved["verdict"])
-            return 0
+            claim_result(saved["verdict"], {saved["path"]: {**saved, "verdict": "supported" if saved["verdict"] == "TRUE"
+                                                            else "contradicted"}}, [saved["path"]], 1, saved["path"])
+            return _done("found", "the claim was checked before; its proof file is unchanged")
         cache = {"status": "skipped (claim)"}  # saved answers answer questions, not statements
     elif replay:
         cache = {"status": "skipped (replay)"}
@@ -1913,7 +2038,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                      if isinstance(row, dict) and row.get("viewOriginals")}
     _STAGE["view_pointers"] = sorted(view_pointers)
     if panel.get("reason") == "not-set-up":
-        return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}", claim_rc=1)
+        return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}",
+                     "setup", claim_rc=1)
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
                             for p in panel.get("pointers", [])) if n and n not in withheld]
     # A saved note whose source file changed after it was recorded is not a current answer.
@@ -1944,7 +2070,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     stages={"cache": cache_stage})
         return _done("needs-setup", f"nothing is connected yet for principal '{principal}'",
                      f"python3 {here / 'prepare_bulk.py'} --root /path/to/folder --pointer my-notes "
-                     f"--principal {principal}", claim_rc=1)
+                     f"--principal {principal}", "connect", claim_rc=1)
 
     # Sick-pointer circuit breaker: skip pointers already benched from repeated
     # recent failures instead of waiting on them (and re-erroring) again this call.
@@ -1996,7 +2122,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if learner:
         learner.start()
 
-    nav_none = {}
+    nav_none, nav_kinds = {}, {}
     # A stale set is routed on the catalog of its last refresh (memory navigate lastGood), so
     # a refresh cooldown never hides the whole set: {pointer: {"changed": [...], "missing": [...]}}.
     stale_served = {}
@@ -2004,6 +2130,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     def classify(ptr, out, elapsed):
         status, reason = out.get("status"), out.get("reason", "")
         nav_none[ptr] = (_root_none(out), round(elapsed, 2))
+        nav_kinds[ptr] = out.get("kind")
         if isinstance(out.get("stale"), dict) and status in ("candidates", "no-candidates"):
             stale_served[ptr] = out["stale"]
         else:
@@ -2078,6 +2205,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
         _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
     merged, statuses, stale_held = [], {}, []
+    state_of, healing = {}, set()  # --json: why each unsearched set was left out, and whether it is being refreshed
     _STAGE["stale_changed"] = []
     for ptr, kind, rows, elapsed, ok in results:
         served = stale_served.get(ptr)
@@ -2108,8 +2236,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         else:
             statuses[ptr] = kind
             (stale_ptrs if auto_heal.is_stale_kind(kind) else failed).append(ptr)
+            if auto_heal.is_stale_kind(kind):
+                state_of[ptr] = "unprepared" if kind.startswith("preparation-required") else "stale"
         if served:
             stale_ptrs.append(ptr)
+            state_of[ptr] = "stale"
             statuses[ptr] += " (stale: last refresh)"
         if served or kind not in ("candidates", "no-candidates"):
             stale_kind = served.get("status", "preparation-required") if served else kind
@@ -2127,6 +2258,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             if stale and not replay:
                 result = (reconnected.get(ptr, "no-recipe") if ptr in view_pointers else
                           auto_heal.maybe_heal(ptr, principal))
+                if result in ("started", "in-progress"):
+                    healing.add(ptr)
                 if result == "started":
                     heal_note = " (auto-heal: refresh started in background)"
                 elif result == "in-progress":
@@ -2339,6 +2472,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         files = _STAGE.get("claim_files")
         if (top or _STAGE.get("claim_read")) and files is None:
             word, lines = "UNSURE", ["UNSURE: the true/false check did not run; read the files below before answering."]
+            claim_result(word, {}, [], len(_STAGE.get("claim_read") or []))
         else:
             word, lines = claim_verdict(files or {}, _STAGE.get("claim_read") or list(content_check))
         for line in lines:
@@ -2355,17 +2489,19 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             print("Files found:")
     # Hits always print first: a pointer error must never bury a real candidate
     # from a healthy pointer under the "unresolved" summary below it.
-    for name, path in skills:
-        print(f"skill  {path}  [skills: {name}]{skill_note(name)}")
-    for s, p, ptr in top:
-        note = ("  (inconclusive: content check did not finish; routing score)" if notes.get(p) == INCONCLUSIVE
-                else possible.get(p, ""))
-        print(f"{s:5.2f}  {p}  [{ptr}]" + note)
-    if top and (_STAGE.get("listwise") or {}).get("leans_none"):
+    file_list = [file_row(sc, p, ptr, "unchecked" if notes.get(p) == INCONCLUSIVE
+                          else "possible" if p in possible else "confirmed") for sc, p, ptr in top]
+    skill_list = skill_rows(skills)
+    held = [p for p, note in notes.items() if note == HELD_SECRET]
+    leans = bool(top and (_STAGE.get("listwise") or {}).get("leans_none"))
+    for sk in skill_list:
+        show_skill(sk)
+    for f in file_list:
+        show_file(f)
+    if leans:
         print(LEANS_NONE_NOTE)
-    for p, note in notes.items():
-        if note == HELD_SECRET:
-            print(f"HELD  {p}  ({HELD_SECRET})")
+    for p in held:
+        print(f"HELD  {p}  ({HELD_SECRET})")
     for line in error_lines:
         print(line)
     # One outcome from the whole search state. A set that failed, is stale or is unprepared was not
@@ -2373,6 +2509,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
+    errors = error_rows(failed, nav_kinds)
+    _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
+                   unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows([], held))
+    if not skill_job and SKILL_Q_RE.search(question):
+        _RESULT["skills_off"] = "no skill catalog was searched: skill search is off (SUPERJEV_SKILLS=0)"
     if top or skills:
         # Files are the ranked files only; skill suggestions get their own label, never the file count.
         unconfirmed = " (unconfirmed: content check failed)" if check_error and any(m[1] in possible for m in top) else ""
@@ -2380,31 +2521,35 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         if skills:
             parts.append(f"{len(skills)} skill suggestion{'s' if len(skills) != 1 else ''}")
         found = "; ".join(parts)
-        autosave(principal, question, sdir, win)
+        _RESULT["saved_now"] = autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
     skipped = skipped_for_question(question, original_pointers, principal)
-    held = [p for p, note in notes.items() if note == HELD_SECRET]
+    _RESULT["left_out"] = left_out_rows(skipped, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
     if failed or check_error:
         why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed")
-        rc = _done("error", why, f"{ask_py} --status", claim_rc=1)
+        key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
+        rc = _done("error", why, f"{ask_py} --status", "key" if key else "none", claim_rc=1)
     elif stale_ptrs or skipped or held:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
-        rc = _done("needs-setup", why, first or f"{ask_py} --status", claim_rc=1)
+        rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include", claim_rc=1)
     else:
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    "no matching file (it may still exist)", f"{ask_py} --trace-show last")
+        _RESULT["searched"] = {"sets": len(original_pointers),
+                               "notes": sum(len(load_cache_files(ptr)) for ptr in original_pointers)}
     for line in miss_report(principal, len(original_pointers), routing, content_check,
                             question, original_pointers):
         print(line)
-    if _OUTCOME["kind"] == "not-found" or _CLAIM["text"]:
+    if _RESULT["outcome"] == "not-found" or _CLAIM["text"]:
+        _RESULT["voice"] = VOICE_LINE
         print(VOICE_LINE)
     return rc
 
@@ -2436,6 +2581,8 @@ MISS_SKIPPED = 3
 SKIPPED_READ_BYTES = 256_000
 SKIPPED_TEXT_COVERAGE = 0.75
 SECRET_HELD = ("card/password", "secret-keyword")
+SECRET_WHAT = "held back: it looks like it holds a password, key or card number"
+SECRET_FIX = "remove or move the flagged value, then re-run setup"
 PART_RE = re.compile(r"^(.+)-\d+$")
 
 
@@ -2485,8 +2632,7 @@ def skipped_files(pointers, principal: str = "") -> dict:
                         f"{int(m.group(2).replace(',', '')) // 1000} KB)") if m else ""
                 out[path] = ("too big to connect" + size, "split it into smaller files, then re-run setup", "name")
             elif any(k in why for k in SECRET_HELD):
-                out[path] = ("held back: it looks like it holds a password, key or card number",
-                             "remove or move the flagged value, then re-run setup", True)
+                out[path] = (SECRET_WHAT, SECRET_FIX, True)
             elif "UTF-8" in why:
                 out[path] = ("not saved as UTF-8 text", "re-save it as UTF-8, then re-run setup", False)
             elif (path, why) in failed and "no draft" in why:
@@ -2914,17 +3060,17 @@ def win_count(sdir: Path, question: str, win: dict) -> int:
             count = 0
     return count
 
-def autosave(principal: str, question: str, sdir: Path, win) -> None:
+def autosave(principal: str, question: str, sdir: Path, win) -> bool:
     """The one rule for saving a file: once it has won this question N times in a row, save the
     FILE (path, pointer, content hash, question, principal, date), not an answer line. Each win
     already passed the content check ("does this file state the answer"), so no claim check runs
-    here: the secret scan and the unchanged-file check still do."""
+    here: the secret scan and the unchanged-file check still do. True when this ask saved the list."""
     if not win or not auto_cache_on() or win_count(sdir, question, win) < save_after():
-        return
+        return False
     why = uncalibrated_why()
     if why:
         print(f"not saved: {why}")
-        return
+        return False
     key = norm_q(question)
     if saved_record(sdir, key):  # reached a live search, so the saved file was withheld as stale
         for k in dict.fromkeys([key, question]):
@@ -2941,6 +3087,7 @@ def autosave(principal: str, question: str, sdir: Path, win) -> None:
               f"{save_after()} times; the next ask returns them at once, no search (--miss removes it).")
     else:
         print(f"not saved: {_LAST_WHY['why'] or 'the save was refused'}")
+    return rc == 0
 
 def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
     """--miss: the saved answer is wrong. Removes it (and a manual note's own record) and exits 1,
@@ -2965,6 +3112,7 @@ def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
               + ("" if lookup_id else " (and no earlier lookup of it to mark wrong)"))
         return 1
     record_approver(sdir, key, None, removed_by="miss", was=who)
+    _RESULT["removed"] = list(dict.fromkeys(removed))
     print("miss recorded")
     print(f"un-saved: the saved answer (approved_by: {who}) was removed from {', '.join(dict.fromkeys(removed))}")
     return 0
@@ -3254,14 +3402,35 @@ def add_manual(principal: str, question: str, answer: str, source, sdir: Path,
             write_outcome(sdir, lid, question, "wrong-added", file=added_file)
     return rc
 
-def connection_status(principal: str) -> int:
-    """Read scoped registration metadata, without searching or refreshing."""
+STATE_RANK = ("ready", "stale", "refreshing", "failed")  # worst last: a set is as bad as its worst part
+
+def fold_status(sets: dict, name: str, status: str, principal: str) -> None:
+    """Add one pointer to --status's per-set rows. A split part folds into its base set; the set's
+    roots and note count come from its prepare report."""
+    report, owner = auto_heal._report_for(name, prepare_bulk.CACHE_DIR)
+    base = owner or name
+    if str(status).startswith(("preparation-required", "refresh-required")):
+        state = "refreshing" if auto_heal._lock_holder_alive(auto_heal._lock_path(principal, base)) else "stale"
+    else:
+        state = "ready" if status == "available" else "failed"
+    row = sets.setdefault(base, {"name": base, "state": state})
+    row["state"] = max(row["state"], state, key=STATE_RANK.index)
+    if report and report.get("roots"):
+        row["roots"] = report["roots"]
+    if notes := sum(x.get("count") or 0 for x in (report or {}).get("parts") or [] if isinstance(x, dict)):
+        row["notes"] = notes
+
+def connection_status(principal: str, as_json: bool = False) -> int:
+    """Read scoped registration metadata, without searching or refreshing. With as_json the sets are
+    also recorded, folded by base set, for the one JSON object."""
     skill = skill_dir_for_display()
     panel = memory({"action": "panel", "principal": principal})
+    sets = {}
     if (not isinstance(panel, dict) or panel.get("status") == "error"
             or not isinstance(panel.get("pointers"), list)):
         if isinstance(panel, dict) and panel.get("reason") == "not-set-up":
             print(f"Not set up. Next: python3 {skill / 'setup.py'}")
+            _RESULT.update(next="setup", principal=principal, sets=[])
         else:
             print("Connection status unavailable. Next: check the memory connector configuration.")
         return 1
@@ -3269,6 +3438,7 @@ def connection_status(principal: str) -> int:
     if not pointers:
         print(f"Nothing connected for {principal}.")
         print(f"Next: follow {skill.parent / 'super-jev-connect' / 'SKILL.md'} to connect a folder.")
+        _RESULT.update(next="connect", principal=principal, sets=[])
         return 0
     print(f"Connections for {principal} (registered snapshots, not a freshness guarantee):")
     for row in pointers:
@@ -3280,6 +3450,8 @@ def connection_status(principal: str) -> int:
         else:
             print("Connection status unavailable: malformed pointer metadata.")
             return 1
+        if as_json:
+            fold_status(sets, name, status, principal)
         if status == "available":
             print(f"  {name}: ready")
         elif str(status).startswith(("preparation-required", "refresh-required")):
@@ -3290,6 +3462,8 @@ def connection_status(principal: str) -> int:
             print(f"  {name}: {status}")
     print("Next: refresh stale sets with their listed instructions; inspect unknown/error sets before use. "
           "Ready sets can be searched with ask.py --principal " + principal + ' "question".')
+    _RESULT.update(next="refresh" if any(r["state"] == "stale" for r in sets.values()) else "none",
+                   principal=principal, sets=list(sets.values()))
     return 0
 
 
@@ -3525,14 +3699,62 @@ def main() -> int:
         print(f"ask: {e}", file=sys.stderr)
         return 1
 
+JSON_REQUESTS = ("--", "--status", "--miss", "--approve", "--claim")
+
+def json_refusal(a: list) -> str:
+    """Why --json will not run this request (before any work), or "". It covers an ask,
+    --claim (one statement), --status, --approve and --miss."""
+    if a[0].startswith("--") and a[0] not in JSON_REQUESTS:
+        return f"--json covers an ask, --claim, --status, --approve and --miss, not {a[0]}"
+    if a[0] == "--claim" and len(a) != 2:
+        return "--json checks one statement at a time: use --claim STATEMENT once"
+    return ""
+
+def run_json(principal: str, a: list) -> int:
+    """--json: do the request exactly as text mode does, with its output held back, then print one
+    JSON object from the same result (contract C1, v: 1) and return the same exit code."""
+    _RESULT.clear()
+    buf, crash = io.StringIO(), None
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = _dispatch(principal, a, as_json=True)
+    except SecretHeld as e:  # exits 1, as main() does in text mode
+        rc, crash = 1, str(e)
+    except Exception as e:  # any other crash is an error, exit 3
+        traceback.print_exc()
+        rc, crash = OUTCOME_EXIT["error"], f"{type(e).__name__}: {e}"
+    lines = [crash] if crash else [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
+    if a[:1] == ["--status"]:
+        out = dict(_RESULT) if "sets" in _RESULT else {"next": "none", "principal": principal, "sets": []}
+    elif a[:1] in (["--approve"], ["--miss"]):  # done is the exit code; why is the last thing text mode said
+        out = {"done": rc == 0, "why": lines[-1] if lines else "", **({"removed": _RESULT["removed"]} if _RESULT.get("removed") else {})}
+    else:
+        if crash or "outcome" not in _RESULT:  # a crash, or refused before any search: the same shape, with the reason
+            _RESULT.clear()
+            _done("error" if crash or rc != 2 else "not-supported", lines[0] if lines else "no result", "",
+                  "rephrase" if rc == 2 and not crash else "none")
+        out = {k: v for k, v in _RESULT.items() if v and k != "cmd"}
+        if out.get("files"):
+            out["files"] = [{k: v for k, v in f.items() if k not in _FILE_PRIVATE} for f in out["files"]]
+    print(json.dumps({"v": 1, **out}))
+    return rc
+
 def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
+    if a[:1] == ["--json"]:  # only a leading flag: after `--`, or inside a question, it is just words
+        return run_json(principal, a[1:])
+    return _dispatch(principal, a)
+
+def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
     if not principal or not a:
-        print(__doc__)
+        print("--json needs --principal AGENT and a request" if as_json else __doc__)
         return 2
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", principal):  # same rule as the memory runtime
         print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
               "'.', '_', '-'; no spaces or slashes)")
+        return 2
+    if as_json and (why := json_refusal(a)):
+        print(why)
         return 2
     if a[0] == "--":  # the rest is the question, read literally (never a --flag)
         if len(a) == 1:
@@ -3545,7 +3767,7 @@ def _main() -> int:
         if len(a) != 1:
             print("usage: --principal AGENT --status")
             return 2
-        return connection_status(principal)
+        return connection_status(principal, as_json)
     sdir = state_dir(principal)
     if "--no-auto" in a:
         os.environ["SUPERJEV_AUTO_CACHE"] = "0"
