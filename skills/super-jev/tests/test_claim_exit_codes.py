@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """ask.py --claim exits 0 only when a connected file proves the statement.
 
-One exit table for every result: TRUE 0, not settled 1, refused input 2, check failed 3,
-setup needed 4, FALSE 5. A run of several statements exits with its highest code. A statement
-that ends before any verdict prints the same OUTCOME line an ordinary ask prints, and never a
-traceback. Made-up notes, a fake memory and a fake judge: no Jev, no network.
+One exit table for every result: TRUE 0, FALSE 5, a check that did not run 3, and every other result
+exits by how the search went: 1 searched fully, 2 refused input, 3 a set or the check failed, 4 setup
+needed. That holds whether or not files were listed. A run of several statements exits with its highest
+code. A statement that ends before any verdict prints the same OUTCOME line an ordinary ask prints, and
+never a traceback. Made-up notes, a fake memory and a fake judge: no Jev, no network.
 
     python3 -m pytest skills/super-jev/tests/test_claim_exit_codes.py -q
 """
@@ -56,6 +57,22 @@ class World:
         monkeypatch.setattr(ask.auto_heal, "reconnect_now", lambda *a, **k: "changed")
         monkeypatch.setattr(ask.auto_heal, "last_refresh_error", lambda *a: None)
         self.monkeypatch = monkeypatch
+
+    def second_set(self, answer):
+        """Connect a second set, 'other', that always answers `answer`; 'notes' answers as before."""
+        self.panel = {"pointers": [{"pointer": "notes"}, {"pointer": "other"}]}
+        base = self._memory
+
+        def memory(req):
+            if ask.payload_has_secret(req):  # keep the real guard here too
+                raise ask.SecretHeld("memory request contains a secret; not sent")
+            if req.get("action") == "navigate-many":
+                return {"status": "ok", "results": {p: self._answer() if p == "notes" else answer
+                                                    for p in req["pointers"]}}
+            if req.get("action") == "navigate" and req.get("pointer") != "notes":
+                return answer
+            return base(req)
+        self.monkeypatch.setattr(ask, "memory", memory)
 
     def _answer(self):
         if self.nav == "none":
@@ -158,6 +175,58 @@ def test_a_stale_set_with_nothing_settled_exits_4(tmp_path, monkeypatch, capfd):
     rc, out, _ = claim(w, monkeypatch, capfd)
     first = out.splitlines()[0]
     assert rc == 4 and first.startswith("NOT FOUND") and "incomplete" in first
+
+
+# One rule for a claim nothing settles: it exits by how the search went, whether or not the judge left files
+# listed. A healthy set plus a failed or stale one is the usual real setup, and the judge's confidence in the
+# files it read must not change the exit code.
+NOT_SETTLED = {
+    "NOT FOUND (judge unsure the files lack it)": ({"new": ("not_stated", 0.60)}, "NOT FOUND"),
+    "NOT FOUND (judge sure the files lack it)": ({"new": ("not_stated", 0.97), "old": ("not_stated", 0.97)}, "NOT FOUND"),
+    "UNSURE": ({"new": ("contradicted", 0.55)}, "UNSURE"),
+    "PARTIAL": ({"new": ("partly", 0.95)}, "PARTIAL"),
+    "CONFLICT": ({"new": ("contradicted", 0.97), "old": ("supported", 0.95)}, "CONFLICT"),
+}
+OTHER_SET = {"failed": ({"status": "error", "message": "boom"}, 3),
+             "stale": ({"status": "preparation-required"}, 4),
+             "healthy": ({"status": "no-candidates", "candidates": []}, 1)}
+
+
+@pytest.mark.parametrize("other", list(OTHER_SET))
+@pytest.mark.parametrize("case", list(NOT_SETTLED))
+def test_a_claim_nothing_settles_exits_by_how_the_search_went_even_with_files_listed(
+        tmp_path, monkeypatch, capfd, case, other):
+    answer, code = OTHER_SET[other]
+    verdicts, word = NOT_SETTLED[case]
+    w = World(tmp_path, monkeypatch)
+    w.second_set(answer)
+    w.judge({getattr(w, k): v for k, v in verdicts.items()})
+    rc, out, _ = claim(w, monkeypatch, capfd)
+    first = out.splitlines()[0]
+    assert first.startswith(word) and rc == code
+    if word == "NOT FOUND" and other != "healthy":
+        assert "incomplete" in first  # the exit and the first line agree
+
+
+@pytest.mark.parametrize("other", ["failed", "stale"])
+@pytest.mark.parametrize("verdict,code", [("supported", 0), ("contradicted", 5)])
+def test_a_settled_claim_keeps_its_own_code_on_a_partial_search(tmp_path, monkeypatch, capfd, verdict, code, other):
+    # TRUE and FALSE name a proof line, so a set that was not searched does not change their code.
+    w = World(tmp_path, monkeypatch)
+    w.second_set(OTHER_SET[other][0])
+    w.judge({w.new: (verdict, 0.98)})
+    rc, out, _ = claim(w, monkeypatch, capfd)
+    assert out.startswith(("TRUE", "FALSE")) and rc == code
+
+
+@pytest.mark.parametrize("verdict,code", [("contradicted", 4), ("supported", 0)])
+def test_files_skipped_at_setup_make_an_unsettled_claim_exit_4_not_a_settled_one(
+        tmp_path, monkeypatch, capfd, verdict, code):
+    w = World(tmp_path, monkeypatch)
+    w.judge({w.new: (verdict, 0.55 if verdict == "contradicted" else 0.98)})
+    monkeypatch.setattr(ask, "skipped_for_question", lambda *a, **k: [("notes/hotels.pdf", "scanned image", "run ocr")])
+    rc, out, _ = claim(w, monkeypatch, capfd)
+    assert rc == code and out.startswith("UNSURE" if code else "TRUE")
 
 
 def test_a_claim_the_judge_never_judged_exits_3(tmp_path, monkeypatch, capfd):

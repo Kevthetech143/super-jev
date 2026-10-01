@@ -37,13 +37,14 @@
       (blank lines and # comments skipped): a draft's facts, or a worker
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
       Exit codes: only TRUE exits 0; FALSE 5; every other result is not a pass, and
-      its code says how the search went: 1 searched fully, nothing settles it (NOT
-      FOUND, UNSURE, PARTIAL, CONFLICT); 3 a set or the check failed (a NOT FOUND
-      after a failed set, or "UNSURE: the true/false check did not run"); 4 setup
-      needed (a NOT FOUND where a set is stale or files were skipped or held); 2
-      refused input (empty, too long, holds a secret). Several statements exit with
-      the highest code. A statement that ends before any verdict prints the OUTCOME
-      line an ordinary ask prints, first. Only exit 0 passes.
+      its code says how the search went, whatever the verdict word and whether or
+      not files are listed: 1 searched fully, nothing settles it (NOT FOUND, UNSURE,
+      PARTIAL, CONFLICT); 3 a set or the content check failed (or "UNSURE: the
+      true/false check did not run"); 4 setup needed (a set is stale or unprepared,
+      or files were skipped or held); 2 refused input (empty, too long, holds a
+      secret). Several statements exit with the highest code. A statement that ends
+      before any verdict prints the OUTCOME line an ordinary ask prints, first.
+      Only exit 0 passes.
 
 SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
 save by hand. All save through one function and run the secret scan. A repeat-question
@@ -1831,8 +1832,9 @@ def question_people(question: str, folks: dict) -> set:
 
 # The one promise of an ordinary ask: its output starts with exactly one OUTCOME line, computed from
 # the whole search state, and the exit code is the outcome's. A claim check prints its verdict first and
-# exits by it (TRUE 0, FALSE 5, a check that did not run 3, else the outcome's code but never 0); a claim
-# that ends before any verdict prints the same OUTCOME line, first, and exits by it.
+# exits by it (TRUE 0, FALSE 5, a check that did not run 3); any other claim result exits by the search
+# outcome's code (1 searched fully, 3 a set or the check failed, 4 setup needed), listed files or not,
+# and never 0. A claim that ends before any verdict prints the same OUTCOME line, first, and exits by it.
 OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
 CLAIM_EXIT = {"TRUE": 0, "FALSE": 5, "NOT RUN": 3}
 _OUTCOME = {}
@@ -2413,7 +2415,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
-    if top or skills:
+    listed = bool(top or skills)
+    # A claim that nothing settles takes its exit from how the search went, listed files or not: the judge's
+    # confidence in the files it read must not decide whether a failed or stale set shows in the exit code.
+    unsettled = bool(_CLAIM["text"]) and _CLAIM["word"] not in ("TRUE", "FALSE")
+    if listed and not unsettled:
         # Files are the ranked files only; skill suggestions get their own label, never the file count.
         unconfirmed = " (unconfirmed: content check failed)" if check_error and any(m[1] in possible for m in top) else ""
         parts = ([f"{len(top)} file{'s' if len(top) != 1 else ''}{unconfirmed}"] if top else [])
@@ -2422,7 +2428,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         found = "; ".join(parts)
         autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
-    if dropped:
+    if dropped and not listed:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
     skipped = skipped_for_question(question, original_pointers, principal)
     held = [p for p, note in notes.items() if note == HELD_SECRET]
@@ -2441,6 +2447,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     else:
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    "no matching file (it may still exist)", f"{ask_py} --trace-show last")
+    if listed:  # an unsettled claim that listed files: the verdict lines above are its answer; this is its exit
+        return rc
     for line in miss_report(principal, len(original_pointers), routing, content_check,
                             question, original_pointers):
         print(line)
