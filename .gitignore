@@ -18,3 +18,7 @@ skills/super-jev/prepare-cache/
 # Private local datasets, pointer databases, and demonstration configuration.
 .local/
 skills/super-jev/autoheal-state/
+
+# This machine's own skill-finder files: its skill folders and its key provider. Never shipped.
+skills/skill-search/roots.json
+skills/skill-search/deploy/local-key-provider.py

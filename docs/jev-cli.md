@@ -16,6 +16,10 @@ curl -fsSL https://raw.githubusercontent.com/<org>/super-jev/main/install.sh | b
 Safe to re-run any time — it just updates the checkout and re-links the
 binary. It never touches your config or stored API key.
 
+To remove it, run `python3 skills/super-jev/setup.py --uninstall` from the checkout.
+That also deletes the chat config (it holds your API key) and the launcher, but only a
+launcher `install.sh` made for that checkout.
+
 Manual/dev install from a checkout:
 
 ```bash
