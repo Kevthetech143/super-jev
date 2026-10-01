@@ -284,7 +284,7 @@ export function render(shown: Shown, look: Look): string {
     const files: any[] = d.files ?? [], skills: any[] = d.skills ?? [];
     const found = [skills.length && plural(skills.length, 'skill'), files.length && plural(files.length, 'note')].filter(Boolean).join(' and ') || '0 notes';
     head(d.saved ? ['Saved answer', ...after('notes unchanged')] : headline(`Found ${found}`), d.saved ? 'green' : '');
-    if (d.saved?.by === 'you' && d.saved.answer) out.push(...lay(d.saved.answer, '', '  ', '  '));
+    if (d.saved?.by === 'you' && d.saved.answer) out.push(...String(d.saved.answer).split('\n').flatMap((l: string) => lay(l, '', '  ', '  ')));
     for (const s of skills) body([s.name, gap(path(s.path)), ...(s.guess ? [tag('guess')] : [])]);
     files.forEach((f, i) => {
       body([...place(f, `${i + 1} `), ...(f.tier === 'possible' ? [tag('possible')] : f.tier === 'unchecked' ? [tag('not checked')] : [])]);

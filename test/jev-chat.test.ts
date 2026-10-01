@@ -192,6 +192,15 @@ test('S3 saved answer by you: shows the answer text and the file', () => {
   assert.ok(s.includes('~/Team Notes/eng/handbook.md'));
 });
 
+test('S3b a saved answer keeps its own line breaks (a list stays a list); each line still wraps to the window', () => {
+  const s = R('ask', FOUND({ saved: { by: 'you', date: '2026-09-12', answer: 'Steps:\n1. hold at 5 percent\n2. wait forty minutes, then promote it to everyone unless a rollback ticket is open' }, files: [{ path: HB, tier: 'confirmed' }] }), {}, { width: 60 });
+  const lines = s.split('\n');
+  assert.ok(lines.includes('  Steps:') && lines.includes('  1. hold at 5 percent'), s);
+  assert.ok(lines.some((l) => l.startsWith('  2. wait forty minutes')), s);
+  assert.ok(!lines.some((l) => l.includes('1. hold') && l.includes('2. wait')), 'the list was joined into one paragraph');
+  assert.ok(lines.every((l) => l.length <= 60), s);
+});
+
 test('S4 claim TRUE: verdict, path:line · date, and the quote', () => {
   const s = R('check', { outcome: 'found', why: 'ok', next: 'none', claim: { verdict: 'TRUE', read: 4,
     proof: { path: HB, line: 39, text: HANDBOOK_QUOTE, date: '2026-09-12' }, files: [{ path: HB, says: 'TRUE', line: 39, date: '2026-09-12' }] } });
