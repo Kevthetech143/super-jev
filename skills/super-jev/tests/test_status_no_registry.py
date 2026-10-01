@@ -37,7 +37,7 @@ def fresh(tmp_path):
     state = tmp_path / "state"
     env = {k: v for k, v in os.environ.items() if k not in ("SUPERJEV_REPO", "SUPERJEV_PRINCIPAL")}
     env.update(HOME=str(home), SUPERJEV_STATE_DIR=str(state), SUPERJEV_SKILLS="0",
-               TYPESAFE_API_KEY="made-up-key-for-setup-only")
+               TYPESAFE_API_KEY="example-not-a-real-key")
     return state, env
 
 
