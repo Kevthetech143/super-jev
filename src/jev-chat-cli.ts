@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadJudgeProfile } from './judge-profile.ts';
 import {
-  COMMANDS, HELP, childEnv, confirmText, helperCall, keyAction, launchLine, pointerName, readLine, render, wrap,
+  COMMANDS, HELP, OPEN, childEnv, confirmText, helperCall, keyAction, launchLine, pointerName, readLine, render, wrap,
   type Session, type Turn,
 } from './jev-chat-config.ts';
 
@@ -25,6 +25,7 @@ const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
 type IO = { argv: string[]; env: NodeJS.ProcessEnv; stdin: any; stdout: any; stderr: any };
 type Done = { code: number; out: string; err: string };
+type Reply = { text: string; code: number; data?: any };
 const lastLine = (s: string) => s.trim().split('\n').pop()?.trim() ?? '';
 
 export async function run(io: IO): Promise<number> {
@@ -81,13 +82,19 @@ export async function run(io: IO): Promise<number> {
   }
 
   const askedKey = (t: Turn) => (t.kind === 'ask' || t.kind === 'check') && needsKey();
-  const noKey = `No ${vendor} key: run superjev once to paste it, or set ${keyEnv}.`;
+  const noKey = `No ${vendor} key: ${OPEN} to paste it, or set ${keyEnv}.`;
+
+  /** A helper gave no JSON before any session: setup.py says what is missing (an old Python, no setup). Null when setup is fine. */
+  async function notReady(): Promise<Reply | null> {
+    const s = await exec([join(SKILL, 'setup.py')]);
+    return s.code === 0 ? null : { text: [s.out, s.err].map((x) => x.trim()).filter(Boolean).join('\n'), code: s.code };
+  }
 
   /** Connect or refresh a folder or note after a yes. askYes shows the question and returns the answer. */
   async function connectFlow(t: Extract<Turn, { kind: 'connect' }>, askYes: (text: string) => Promise<boolean>) {
     const name = pointerName(t.path), label = basename(t.path).replace(/\.md$/i, '');
     const refresh = session.connected.has(name);
-    if (!(await askYes(confirmText(label, refresh, vendor, look().width)))) return { text: render({ kind: 'connect', data: {}, declined: true }, look()), code: 1 };
+    if (!(await askYes(confirmText(label, refresh, vendor, look().width)))) return { text: render({ kind: 'connect', data: {}, declined: true, refreshed: refresh }, look()), code: 1, data: {} };
     const r = await helper(t, { label, refreshed: refresh });
     if (r.data?.connected && !r.data.refused) session.connected.add(name);
     return r;
@@ -132,6 +139,8 @@ export async function run(io: IO): Promise<number> {
       return queue.shift() ?? null;
     };
     rl.on('line', (l) => push(l));
+    const write = (rl as any)._ttyWrite; // readline closes on Ctrl+D at an empty line; at a yes/no it does nothing
+    if (write) (rl as any)._ttyWrite = (s: string, key: any) => (mode === 'confirm' && key?.ctrl && key.name === 'd' ? undefined : write.call(rl, s, key));
     rl.on('close', () => { closed = true; wake?.(); });
     const act = (a: string) => { if (a === 'clear') clear(); else if (a === 'quit') rl.close(); else if (a === 'no') { clear(); push(ESC); } };
     rl.on('SIGINT', () => {
@@ -158,6 +167,7 @@ export async function run(io: IO): Promise<number> {
         }
       },
       async confirm(text: string): Promise<boolean> {
+        queue.length = 0; // a line typed ahead was not an answer to this question
         out(text);
         rl.setPrompt(''); // so clearing the line on Esc does not redraw a prompt
         mode = 'confirm';
@@ -181,14 +191,14 @@ export async function run(io: IO): Promise<number> {
       out(wrap(`Paste your ${vendor} API key. It stays hidden and is saved only on this Mac.`, look().width).join('\n'));
       stdout.write('key › ');
       const key = await readKey();
-      if (!key) { out(`No key entered. Run superjev again to paste it, or set ${keyEnv}.`); return 1; }
+      if (!key) { out(`No key entered. Open the window again to paste it, or set ${keyEnv}.`); return 1; }
       writeFileSync(keyFile, key + '\n', { mode: 0o600 });
       chmodSync(keyFile, 0o600);
       fileKey = key;
     }
     if (fresh) {
-      const s = await exec([join(SKILL, 'setup.py')]);
-      if (s.code !== 0) return stop({ text: [s.out, s.err].map((x) => x.trim()).filter(Boolean).join('\n'), code: s.code });
+      const bad = await notReady();
+      if (bad) return stop(bad);
       r = await helper({ kind: 'status' });
       if (!r.data || r.data.outcome) return stop(r);
     }
@@ -221,7 +231,7 @@ export async function run(io: IO): Promise<number> {
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
     if (askedKey(t)) { stderr.write(noKey + '\n'); return 4; }
     if (t.kind === 'connect') {
-      let r: { text: string; code: number };
+      let r: Reply;
       if (stdin.isTTY) {
         await helper({ kind: 'status' });
         const term = terminal();
@@ -229,14 +239,16 @@ export async function run(io: IO): Promise<number> {
         term.close();
       } else {
         r = await connectFlow(t, async () => false);
-        stderr.write('Connecting needs a keyboard to confirm. Run superjev, then drag the folder in.\n');
+        stderr.write(`Connecting needs a keyboard to confirm: ${OPEN}, then drag the folder in.\n`);
       }
-      out(r.text);
-      return r.code;
+      return finish(r);
     }
-    const r = await helper(t);
-    out(r.text);
-    return r.code;
+    return finish(await helper(t));
+  }
+  async function finish(r: Reply): Promise<number> {
+    const bad = r.data ? null : await notReady();
+    out((bad ?? r).text);
+    return (bad ?? r).code;
   }
 
   try {

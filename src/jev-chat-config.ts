@@ -6,6 +6,8 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { styleText } from 'node:util';
 
 export const COMMANDS = ['/check', '/status', '/help', '/exit'];
+/** How a user gets back to the window: the one wording every screen and message uses. */
+export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
 export type Turn =
   | { kind: 'empty' | 'help' | 'exit' | 'status' }
@@ -167,16 +169,19 @@ export function render(shown: Shown, look: Look): string {
   const out: string[] = [];
   let title = '', tone = '', nextLine = '';
   const head = (text: string, color = '') => { title = text; tone = color; };
-  const body = (s: string) => out.push('  ' + s);
+  // A row that fits stays as it is; a longer one wraps to the window, its continuation indented.
+  const fit = (s: string, fmt = '') => (s.length + 2 <= look.width ? [s] : wrap(s, look.width - 4)).map((l, i) => (i ? '    ' : '  ') + (fmt ? paint(fmt, l) : l));
+  const body = (s: string) => out.push(...fit(s));
   const next = (s: string) => { nextLine = s; };
   const quote = (text: string) => { for (const l of wrap(`"${text}"`, look.width - 4)) out.push('    ' + paint('dim', l)); };
   const place = (f: { path: string; line?: number; date?: string; says?: string }) =>
     path(f.path) + (f.line ? ':' + f.line : '') + (f.date ? ` · ${f.date}` : '') + (f.says ? ` · says ${f.says}` : '');
   const keyNext = () => next(look.keySource === 'env' ? `fix ${look.keyEnv ?? 'the key variable'} in your shell, then restart.`
-    : look.keySource === 'file' ? 'delete ~/.typesafe-api-key, then run superjev again to paste a new key.' : 'run superjev again to paste your key.');
+    : look.keySource === 'file' ? `delete ~/.typesafe-api-key, then ${OPEN} to paste a new key.` : `${OPEN} to paste your key.`);
   const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach(body);
-  const empty = (setup: boolean) => { head(setup ? 'Not set up yet' : 'Nothing connected yet'); next(setup ? 'run superjev again; setup runs at launch.' : 'drag a folder of Markdown notes in here.'); };
-  const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); if (!shown.noNext && shown.kind !== 'status') next('/status, or ask again.'); };
+  const empty = (setup: boolean) => { head(setup ? 'Not set up yet' : 'Nothing connected yet'); next(setup ? `${OPEN}; setup runs there.` : 'drag a folder of Markdown notes in here.'); };
+  const retry = () => { if (!shown.noNext && shown.kind !== 'status') next('/status, or ask again.'); };
+  const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); retry(); };
   // Folders the helper did not search, said once and added to every headline, so a partial search never reads as complete.
   const rows: any[] = d.unsearched ?? [];
   const lost = uniq([...rows.map((u) => `${u.root ? basename(u.root) : u.set} not searched (${u.healing ? 'refreshing' : u.state})`),
@@ -187,7 +192,7 @@ export function render(shown: Shown, look: Look): string {
   if (shown.kind === 'crash') crash(d.line ?? '');
   else if (shown.kind === 'connect') {
     const word = shown.refreshed ? 'Refreshed' : 'Connected';
-    if (shown.declined) head('Not connected');
+    if (shown.declined) head(shown.refreshed ? 'Not refreshed' : 'Not connected');
     else if (d.refused) { head(`Not connected: ${d.refused.why}`, 'red'); next('drag in a smaller folder inside it.'); }
     else {
       head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : 'Not connected', d.connected ? 'green' : 'red');
@@ -202,7 +207,7 @@ export function render(shown: Shown, look: Look): string {
     if (kind) head(`Couldn't search: ${why[kind]}`, 'red');
     if (kind === 'auth-rejected' || kind === 'no-key') keyNext();
     else if (kind) body('Saved answers still work. Try again, or /status.');
-    else if (lost.length) { head("Couldn't search", 'red'); lost.forEach((l) => body(sentence(l))); }
+    else if (lost.length) { head("Couldn't search", 'red'); lost.forEach((l) => body(sentence(l))); retry(); }
     else crash(d.why ?? '');
   } else if (o === 'needs-setup') {
     if (d.next === 'connect' || d.next === 'setup') empty(d.next === 'setup');
@@ -216,13 +221,13 @@ export function render(shown: Shown, look: Look): string {
     }
   } else if (o === 'not-supported') {
     head('Not answered'); body(d.why ?? '');
-    if (shown.kind !== 'status') next('ask one focused question.');
+    if (shown.kind !== 'status' && d.next === 'rephrase') next('ask one focused question.');
   } else if (shown.kind === 'status') {
     const sets: any[] = d.sets ?? [];
     if (d.next === 'setup' || !sets.length) empty(d.next === 'setup');
     else {
       head(`${plural(sets.length, 'folder')} connected`);
-      for (const s of sets) body(`${s.name}  ${(s.roots ?? []).map(path).join(', ')}  ${plural(s.notes ?? 0, 'note')}  ${s.state}`);
+      for (const s of sets) body(`${(s.roots ?? []).map(path).join(', ') || s.name}  ${plural(s.notes ?? 0, 'note')}  ${s.state}`);
     }
   } else if (d.claim) {
     const c = d.claim, saved = d.saved ? ' · saved, proof file unchanged' : '';
@@ -252,7 +257,7 @@ export function render(shown: Shown, look: Look): string {
     body("That doesn't prove it's nowhere: it may be in a folder you haven't connected.");
     next('drag in the folder that has it.');
   } else crash(d.why ?? '');
-  if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off));
+  if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off).replace(/^./, (c) => c.toUpperCase()));
   const time = shown.secs === undefined ? '' : paint('dim', ` · ${shown.secs.toFixed(1)}s`);
-  return [(tone ? paint(tone, `• ${title}`) : `• ${title}`) + time, ...out, ...(nextLine ? ['  ' + paint('dim', 'Next: ' + nextLine)] : [])].join('\n');
+  return [(tone ? paint(tone, `• ${title}`) : `• ${title}`) + time, ...out, ...(nextLine ? fit('Next: ' + nextLine, 'dim') : [])].join('\n');
 }

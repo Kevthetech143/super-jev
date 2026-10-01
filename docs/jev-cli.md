@@ -41,9 +41,9 @@ yes and Esc is no.
 `superjev <words>` handles the words exactly as if typed in the window.
 The answer goes to stdout (no colour when piped) and the progress row to
 stderr. The exit code is the helper's own: found 0, not found 1, not
-supported 2, error 3, needs setup 4. A line the app cannot use (a path that
-does not exist, an unknown command) exits 2. With no key, it says so and
-exits 4. A folder or note is never connected without a keyboard to confirm.
+supported 2, error 3, needs setup 4 (`/check` keeps the claim check's own
+codes). A line the app cannot use (no such path, unknown command) exits 2.
+With no key it says so and exits 4. Nothing connects without a keyboard.
 
 ## Tests
 

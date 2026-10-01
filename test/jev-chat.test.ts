@@ -214,8 +214,8 @@ test('S6 claim CONFLICT: both files, newest first, each with its own verdict', (
   assert.match(s, /^• CONFLICT/m);
   const a = s.indexOf('expenses.md:4'), b = s.indexOf('travel-old.md:9');
   assert.ok(a > -1 && b > a, 'newest first');
-  assert.match(lines(s).find((l) => l.includes('expenses.md')) || '', /FALSE.*2026-09-20|2026-09-20.*FALSE/);
-  assert.match(lines(s).find((l) => l.includes('travel-old.md')) || '', /TRUE.*2026-08-01|2026-08-01.*TRUE/);
+  assert.match(flat(s), /expenses\.md:4 · 2026-09-20 · says FALSE/);
+  assert.match(flat(s), /travel-old\.md:9 · 2026-08-01 · says TRUE/);
   assert.match(s, /Read both before relying on either\./);
 });
 
@@ -228,12 +228,14 @@ test('S7 skills first, then the guess tag, then the file', () => {
   assert.equal((s.match(/guess/g) || []).length, 1);
 });
 
-test('S14 status lists names, roots, note counts and states', () => {
+test('S14 status leads each row with the folder, then note count and state, never the internal name', () => {
   const s = R('status', { next: 'none', principal: 'me', sets: [
-    SET('team-notes-3fa9c1', '/Users/sam/Team Notes', 28), SET('handbook-ab12cd', '/Users/sam/Handbook', 12, 'refreshing')] });
-  for (const x of ['team-notes-3fa9c1', '~/Team Notes', '28 notes', 'ready', 'handbook-ab12cd', '~/Handbook', '12 notes', 'refreshing']) {
-    assert.ok(s.includes(x), `${x} missing:\n${s}`);
-  }
+    SET('team-notes-3fa9c1', '/Users/sam/Team Notes', 28), SET('handbook-ab12cd', '/Users/sam/Handbook', 12, 'refreshing'),
+    { name: 'loose-000000', notes: 1, state: 'ready' }] });
+  assert.match(s, /^ {2}~\/Team Notes {2}28 notes {2}ready$/m);
+  assert.match(s, /^ {2}~\/Handbook {2}12 notes {2}refreshing$/m);
+  assert.match(s, /^ {2}loose-000000 {2}1 note {2}ready$/m, 'a set with no folder falls back to its name');
+  assert.ok(!s.includes('team-notes-3fa9c1') && !s.includes('handbook-ab12cd'), s);
 });
 
 test('S15 help lists exactly the commands that exist, and ? is the same help', () => {
@@ -312,8 +314,8 @@ test('I4 connect with a held note and skipped files: Connected, a held line, lef
     { label: 'Team Notes' });
   assert.match(s, /^• Connected Team Notes: 25 notes · 1\.4s$/m);
   assert.match(s, /Held back.*ops\/creds\.md/);
-  assert.ok(s.includes('documents/ (2)') && s.includes('only .md files connect'));
-  assert.equal((s.match(/only \.md files connect/g) || []).length, 1, 'a repeated left-out row is shown once');
+  assert.ok(flat(s).includes('documents/ (2)') && flat(s).includes('only .md files connect'));
+  assert.equal((flat(s).match(/only \.md files connect/g) || []).length, 1, 'a repeated left-out row is shown once');
   assert.ok(!/Not connected|failed/i.test(s), s);
 });
 
@@ -399,7 +401,7 @@ test('H1d a TRUE claim still names a folder that was not searched, on the same l
 test('H1e a status the helper could not read says why: never "Nothing connected" or "Ready", and no Next', () => {
   const why = 'Connection status unavailable. Next: check the memory connector configuration.';
   const s = R('status', { outcome: 'error', why, next: 'none' }, { secs: undefined });
-  assert.ok(s.includes(why), s);
+  assert.ok(flat(s).includes(why), s);
   assert.ok(!/Nothing connected|Ready|ask again/.test(s), s);
   assert.equal((s.match(/Next:/g) || []).length, 1, 'only the engine\'s own words, no second Next line');
 });
@@ -423,6 +425,7 @@ test('M2 skills_off: one line says no skill catalog was searched, before the Nex
   for (const s of [found, none]) {
     assert.equal((s.match(/skill catalog/g) || []).length, 1, s);
     assert.ok(s.includes('SUPERJEV_SKILLS=0'), s);
+    assert.ok(flat(s).includes('No skill catalog was searched'), 'the line starts with a capital');
   }
   assert.ok(none.indexOf('skill catalog') < none.indexOf('Next:'), 'Next stays last');
   assert.ok(!R('ask', FOUND()).includes('skill catalog'));
@@ -660,7 +663,7 @@ test('S11 door: no key anywhere for an ask prints the key message, exit 4, no he
   const r = rig([{ when: '--json', out: FOUND() }]);
   const d = await door(r, ['canary?'], { key: false });
   assert.equal(d.code, 4);
-  assert.match(d.out + d.err, /No TypeSafe key: run superjev once to paste it, or set TYPESAFE_API_KEY\./);
+  assert.match(d.out + d.err, /No TypeSafe key: open the window \(npm run jev, or superjev with no words\) to paste it, or set TYPESAFE_API_KEY\./);
   assert.equal(r.calls().length, 0);
 });
 
@@ -690,12 +693,14 @@ test('E2 door: an env key the judge rejected says fix it in the shell, writes no
 });
 
 test('E5 door: a helper that exits 3 with non-JSON stdout gives Super Jev hit an error plus its last stderr line, exit 3', async () => {
-  const r = rig([{ when: '--json', out: 'Traceback (most recent call last):\n', err: 'File "x.py", line 3\nValueError: bad registry\n', code: 3 }]);
+  const r = rig([{ when: '--json', out: 'Traceback (most recent call last):\n', err: 'File "x.py", line 3\nValueError: bad registry\n', code: 3 },
+    { when: 'setup.py', out: 'READY.\n', code: 0 }]);
   const d = await door(r, ['canary?']);
   assert.equal(d.code, 3);
   assert.match(d.out, /Super Jev hit an error/);
   assert.ok(d.out.includes('ValueError: bad registry'));
   assert.ok(!d.out.includes('line 3'), 'only the last stderr line');
+  assert.deepEqual(r.calls().map((c: any) => c.script), ['ask.py', 'setup.py'], 'setup was fine, so the crash stays as it is');
 });
 
 test('E6 door: no python3 on PATH gives the Python 3.10 message and exit 1', async () => {
@@ -710,7 +715,8 @@ test('S14 door: /status shows what the helper reported and passes its exit code'
   const r = rig([{ when: '--status', out: { v: 1, next: 'refresh', principal: 'me', sets: [SET('team-notes-3fa9c1', '/Users/sam/Team Notes', 28, 'stale')] }, code: 0 }]);
   const d = await door(r, ['/status']);
   assert.equal(d.code, 0);
-  assert.ok(d.out.includes('team-notes-3fa9c1') && d.out.includes('28 notes') && d.out.includes('stale'));
+  assert.ok(d.out.includes('/Users/sam/Team Notes') && d.out.includes('28 notes') && d.out.includes('stale'));
+  assert.ok(!d.out.includes('team-notes-3fa9c1'), 'the folder leads the row, not the internal name');
 });
 
 const STATUS_ERR = { v: 1, outcome: 'error', why: 'Connection status unavailable. Next: check the memory connector configuration.', next: 'none' };
@@ -719,7 +725,7 @@ test('H1 door: a /status the helper could not read prints why and its exit code,
   const r = rig([{ when: '--status', out: STATUS_ERR, code: 1 }]);
   const d = await door(r, ['/status']);
   assert.equal(d.code, 1);
-  assert.ok(d.out.includes(STATUS_ERR.why), d.out);
+  assert.ok(flat(d.out).includes(STATUS_ERR.why), d.out);
   assert.ok(!/Nothing connected|ask again/.test(d.out), d.out);
 });
 
@@ -828,7 +834,7 @@ test('I12 Esc at the key prompt: a No key message, exit 1, no key file written',
   await w.waitFor('key ›');
   w.send('\x1b');
   assert.equal(await w.exit(), 1);
-  assert.match(w.text(), /No key/);
+  assert.match(w.text(), /No key entered\. Open the window again to paste it, or set TYPESAFE_API_KEY\./);
   assert.ok(!existsSync(r.keyFile()));
 });
 
@@ -858,7 +864,7 @@ test('H1 launch: a status the helper could not read is shown with its reason and
   const r = rig([{ when: '--status', out: STATUS_ERR, code: 1 }]);
   const w = win(r);
   assert.equal(await w.exit(), 1);
-  assert.ok(w.text().includes(STATUS_ERR.why), w.text());
+  assert.ok(flat(w.text()).includes(STATUS_ERR.why), w.text());
   assert.ok(!/Ready|Nothing connected|for help/.test(w.text()), w.text());
   assert.equal(r.calls().length, 1, 'no setup and no second status');
   w.all();
@@ -940,7 +946,7 @@ test('S8 whole app: drop a folder, confirm with Enter, connect runs with the wri
   await w.waitFor('Connected Team Notes: 28 notes');
   const c = r.calls().find((x: any) => x.script === 'prepare_bulk.py');
   assert.deepEqual(c.args, ['--root', FOLDER, '--pointer', cfg.pointerName(FOLDER), '--principal', 'me', '--writer', 'builtin', '--json']);
-  assert.match(w.text(), /Left out 1 .*only \.md files connect/);
+  assert.match(flat(w.text()), /Left out 1 .*only \.md files connect/);
   w.all();
   await w.quit();
 });
@@ -1018,7 +1024,7 @@ test('I4 whole app: connect exits 3 with a held note and left-out files: shown a
   w.send('\r');
   await w.waitFor('Connected Team Notes: 25 notes');
   assert.match(w.text(), /Held back.*ops\/creds\.md/);
-  assert.match(w.text(), /only \.md files connect/);
+  assert.match(flat(w.text()), /only \.md files connect/);
   assert.ok(!/Not connected/.test(w.text()));
   await w.quit();
 });
@@ -1028,7 +1034,7 @@ test('S14 whole app: /status in the window', async () => {
   const w = win(r);
   await w.ready();
   w.say('/status');
-  await w.waitFor('handbook-ab12cd');
+  await w.waitFor('/Users/sam/Handbook');
   assert.ok(w.text().includes('12 notes') && w.text().includes('refreshing'));
   await w.quit();
 });
@@ -1147,6 +1153,105 @@ test('I7 whole app: a missing path prints Can\'t find and calls nothing more', a
   w.say('~/notes/Team Notse');
   await w.waitFor("Can't find");
   assert.equal(r.calls().length, n);
+  await w.quit();
+});
+
+// ---------------------------------------------------------------- review round 3 cases
+test('D1 door on an old Python: a helper with no JSON runs setup.py and shows what is missing, never "hit an error"', async () => {
+  const text = 'NOT READY:\n  - Python 3.10 or newer is required (found: 3.9.6). Install it, then run setup again.\n';
+  const r = rig([
+    { when: '--json', out: 'Traceback (most recent call last):\n', err: "TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'\n", code: 1 },
+    { when: 'setup.py', out: text, code: 1 }]);
+  for (const args of [['canary?'], ['/status'], ['/check', 'the canary holds at 5 percent']]) {
+    const d = await door(r, args);
+    assert.equal(d.code, 1, args.join(' '));
+    assert.ok(d.out.includes(text.trim()), d.out);
+    assert.ok(!/hit an error|Next:|TypeError/.test(d.out + d.err), d.out + d.err);
+  }
+  assert.deepEqual(r.calls().map((c: any) => c.script), ['ask.py', 'setup.py', 'ask.py', 'setup.py', 'ask.py', 'setup.py']);
+});
+
+test('D1b a door that got JSON never runs setup.py, and a declined connect does not either', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json', out: FOUND() }, { when: 'setup.py', out: 'NOT READY\n', code: 1 }]);
+  assert.equal((await door(r, ['canary?'])).code, 0);
+  assert.equal((await door(r, [FOLDER])).code, 1);
+  assert.deepEqual(r.calls().map((c: any) => c.script), ['ask.py']);
+});
+
+test('W1 every line fits the window: long rows and the Next line wrap with an indent, a row that fits is untouched', () => {
+  const miss = R('ask', { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 28 } });
+  const left = R('connect', { connected: 25, skipped: [{ what: '.md file(s) in folders skipped by default: documents/ (2), profile/ (1)', count: 3,
+    way_in: 'to connect one, connect that folder on its own and ask again later' }] }, { label: 'Team Notes' });
+  const setup = R('ask', { outcome: 'needs-setup', why: 'x', next: 'setup' });
+  for (const s of [miss, left, setup]) for (const l of lines(s)) assert.ok(l.length <= 60, `${l.length} wide:\n${s}`);
+  assert.ok(lines(miss).includes('  Searched 1 folder (28 notes); nothing matched.'), 'a row that fits is one line');
+  assert.match(miss, /^ {2}That doesn't prove it's nowhere: it may be in a folder\n {4}you haven't connected\.$/m);
+  assert.match(setup, /^ {2}Next: open the window \(npm run jev, or superjev with no\n {4}words\); setup runs there\.$/m);
+  assert.equal(left.split('\n').filter((l) => /^ {2}Left out/.test(l)).length, 1, 'one Left out row, wrapped under itself');
+});
+
+test('W2 one way back to the window: every Next and message names how to open it, never "run superjev again"', () => {
+  const setup = flat(R('ask', { outcome: 'needs-setup', why: 'x', next: 'setup' }));
+  assert.match(setup, /Next: open the window \(npm run jev, or superjev with no words\); setup runs there\./);
+  const gone = { outcome: 'error', why: 'x', next: 'key', errors: [{ set: 'a', kind: 'auth-rejected' }] };
+  assert.match(flat(R('ask', gone, {}, { keySource: 'none' })), /Next: open the window \(npm run jev, or superjev with no words\) to paste your key\./);
+  assert.match(flat(R('ask', gone, {}, { keySource: 'file' })), /Next: delete ~\/\.typesafe-api-key, then open the window \(npm run jev, or superjev with no words\) to paste a new key\./);
+  for (const s of [setup, R('ask', gone, {}, { keySource: 'none' }), R('ask', gone, {}, { keySource: 'file' })]) assert.ok(!/run superjev/i.test(s), s);
+});
+
+test('X1 Esc at "Refresh Team Notes?" says Not refreshed (the folder is still connected) and calls nothing', async () => {
+  const n = cfg.pointerName(FOLDER);
+  const r = rig([{ when: '--status', out: { v: 1, next: 'none', principal: 'me', sets: [SET(n, FOLDER, 3)] } }, { when: 'prepare_bulk.py', out: { v: 1, connected: 4 } }]);
+  const w = win(r);
+  await w.ready();
+  w.say(FOLDER);
+  await w.waitFor(/Refresh Team Notes\?/);
+  w.send('\x1b');
+  await w.waitFor('Not refreshed');
+  assert.ok(!/Not connected/.test(w.text()), w.text());
+  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'));
+  await w.quit();
+});
+
+test('E9 a search lost with no reason ends with a next step, except on a status', () => {
+  const lost = R('check', { outcome: 'error', why: 'no match, and 1 set failed', next: 'none', claim: NOT_FOUND_CLAIM, ...SET_LOST });
+  assert.match(lost, /^• Couldn't search/m);
+  assert.match(lost, /^ {2}Next: \/status, or ask again\.$/m);
+  assert.match(R('ask', { outcome: 'error', why: 'x', next: 'none', ...SET_LOST }), /Next: \/status, or ask again\./);
+  assert.ok(!/Next:/.test(R('status', { outcome: 'error', why: 'x', next: 'none', ...SET_LOST }, { secs: undefined })));
+});
+
+test('I6b not supported draws the rephrase hint only when the engine says next: rephrase', () => {
+  assert.match(R('ask', { outcome: 'not-supported', why: 'the question has several parts', next: 'rephrase' }), /Next: ask one focused question\./);
+  const bad = R('ask', { outcome: 'not-supported', why: 'that name is not valid', next: 'none' });
+  assert.ok(bad.includes('that name is not valid') && !/Next:/.test(bad), bad);
+});
+
+test('K5 Ctrl+D at a yes/no does nothing: the window stays open and the question is still waiting', async () => {
+  const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+  const w = win(r);
+  await w.ready();
+  w.say(FOLDER);
+  await w.waitFor(/Connect Team Notes\?/);
+  w.send('\x04');
+  assert.equal(await Promise.race([w.done.then(() => 'closed'), new Promise((x) => setTimeout(() => x('open'), 200))]), 'open', w.text());
+  assert.ok(!/Not connected/.test(w.text()), w.text());
+  w.send('\r');
+  await w.waitFor('Connected Team Notes: 3 notes');
+  assert.equal(await w.quit(), 0);
+});
+
+test('K6 a line typed ahead is not an answer to the next yes/no: an early Enter connects nothing', async () => {
+  const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+  const w = win(r);
+  await w.ready();
+  w.send(FOLDER + '\r\r'); // the drop, then an Enter typed before the question was on screen
+  await w.waitFor(/Connect Team Notes\?/);
+  await new Promise((x) => setTimeout(x, 200));
+  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'), 'the early Enter was not a yes');
+  assert.ok(!/Connected|Not connected/.test(w.text()), w.text());
+  w.send('\r');
+  await w.waitFor('Connected Team Notes: 3 notes');
   await w.quit();
 });
 
