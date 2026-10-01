@@ -1,6 +1,6 @@
 # Judge support: which judge on which build
 
-A judge (a profile in `judge_profiles.json`, or the test judge `fake`) is "supported" on a build only when a measured run on that same build says so. This page covers the two pieces that exist: the fingerprint that ties a result to a build and a judge, and the run that grades the judge against your own bar and writes one record. `--applies` reads a record back and says whether it still applies to a build.
+A judge (a profile in `judge_profiles.json`, or the test judge `fake`) is "supported" on a build only when a measured run on that same build says so. This page covers the three pieces that exist: the fingerprint that ties a result to a build and a judge, the run that grades the judge against your own bar and writes one record, and `--applies`, which reads a record back and says whether it still applies to a build.
 
 ## The fingerprint
 

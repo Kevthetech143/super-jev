@@ -13,7 +13,7 @@ import pytest
 SKILL = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL))
 import judge_support as js  # noqa: E402
-from test_judge_support import Q, asked, go, sha, w  # noqa: E402,F401
+from test_judge_support import Q, TOKEN, asked, go, sha, w  # noqa: E402,F401
 from test_paid_replay import env  # noqa: E402,F401
 
 BAR = [{"measure": "top5", "min_rate": 1.0}, {"measure": "secs", "percentile": 90, "max_secs": 60}]
@@ -126,8 +126,8 @@ def test_a_different_judge_or_env_setting_is_a_different_fingerprint(w, capsys):
     rec, p = made(w)
     assert applies(rec, p, capsys, judge="laya")[1] == "does not apply: fingerprint differs\n"
     assert applies(rec, p, capsys, env=["SAM_TOKEN=something"])[1] == "does not apply: fingerprint differs\n"
-    rec, p = made(w, extra=("--env", "SAM_TOKEN=quillbrook-token-123456"))
-    assert applies(rec, p, capsys, env=["SAM_TOKEN=quillbrook-token-123456"])[0] == 0
+    rec, p = made(w, extra=("--env", f"SAM_TOKEN={TOKEN}"))
+    assert applies(rec, p, capsys, env=[f"SAM_TOKEN={TOKEN}"])[0] == 0
     assert applies(rec, p, capsys)[0] == 1
 
 
@@ -163,6 +163,12 @@ def test_the_printed_verdict_comes_from_the_stored_hits_not_the_verdict_field(w,
     rec3, p3 = made(w, hit=False)
     edit(rec3, lambda r: [x.update(hits=x["n"]) for x in r["rows"]])
     assert applies(rec3, p3, capsys)[1].startswith("applies: not supported")
+    # A stored open row (pass: null) or a stored pass: true is never read; the verdict comes from hits and n.
+    edit(rec3, lambda r: [x.update({"pass": None}) for x in r["rows"]])
+    assert applies(rec3, p3, capsys)[1].startswith("applies: not supported")
+    rec4, p4 = made(w)
+    edit(rec4, lambda r: [x.update({"pass": None}) for x in r["rows"]])
+    assert applies(rec4, p4, capsys)[1].startswith("applies: supported")
 
 
 def test_the_integer_rate_rule_is_applied_again_from_the_stored_row(w, capsys):

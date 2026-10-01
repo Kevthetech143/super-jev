@@ -159,13 +159,18 @@ def _hundredths(x, what: str) -> int:
     return int(h)
 
 
+def check_sha(flag: str, path, sha) -> bytes:
+    """The file's bytes, after its SHA-256 matched the pin. ValueError names the actual SHA."""
+    data = Path(path).expanduser().read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise ValueError(f"{flag} sha256 mismatch: the file is {hashlib.sha256(data).hexdigest()}")
+    return data
+
+
 def load_bar(path, sha) -> dict:
     """The bar file, after its SHA-256 matched: {"max_excluded": N, "rows": [row, ...]}; each row names its
     measure, its bar and its stratum, and (rate and secs rows) its hundredths. ValueError: anything else."""
-    data = Path(path).expanduser().read_bytes()
-    if hashlib.sha256(data).hexdigest() != sha:
-        raise ValueError(f"bar sha256 mismatch: the file is {hashlib.sha256(data).hexdigest()}")
-    bar = json.loads(data)
+    bar = json.loads(check_sha("bar", path, sha))
     if not isinstance(bar, dict) or set(bar) != {"max_excluded", "rows"}:
         raise ValueError('a bar is {"max_excluded": N, "rows": [...]} and nothing else; there are no defaults')
     if not isinstance(bar["max_excluded"], int) or isinstance(bar["max_excluded"], bool) or bar["max_excluded"] < 0:
@@ -221,6 +226,16 @@ def row_passes(row: dict, hits: int, n: int) -> bool:
     return row_state(row, hits, n) is True
 
 
+def finished(stop) -> bool:
+    """A run that ended complete, or because a row's bar was out of reach, counts; any other stop is incomplete."""
+    return isinstance(stop, str) and (stop == "complete" or stop.startswith("bar-unreachable"))
+
+
+def verdict_of(met: bool, stop: str) -> str:
+    """The one verdict rule, for a run and for a stored record: supported needs a complete run with every row met."""
+    return ("supported" if met and stop == "complete" else "not supported") if finished(stop) else "incomplete"
+
+
 def row_score(row: dict, case: dict, res: dict):
     """None when the case is not in this row's stratum; else 1 or 0: a hit, or for a count row a bad case.
     An errored case never hits; an errored question is over every time line; an errored claim is held,
@@ -253,10 +268,7 @@ def check_env_names(env: dict) -> None:
 def run(a, ap) -> int:
     """One judge, one build, the whole case file, one record. Returns the exit code."""
     try:
-        for flag, path, sha in (("cases", a.cases, a.cases_sha256), ("bar", a.bar, a.bar_sha256)):
-            actual = hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
-            if actual != sha:
-                raise ValueError(f"{flag} sha256 mismatch: the file is {actual}")
+        check_sha("cases", a.cases, a.cases_sha256)
         bar = load_bar(a.bar, a.bar_sha256)
         env = parse_env(a.env)
         check_env_names(env)
@@ -356,8 +368,7 @@ def run(a, ap) -> int:
                      **({"not_run": left} if left else {}), "by_split": x["split"]})
     if not stop:
         stop = "complete"
-    finished = stop == "complete" or stop.startswith("bar-unreachable")
-    verdict = ("supported" if all(r["pass"] for r in rows) and stop == "complete" else "not supported") if finished else "incomplete"
+    verdict = verdict_of(all(r["pass"] for r in rows), stop)
     rec.update(end=_now(), rows=rows, excluded=excluded, error_count=errors, asks=asks, n_run=len(graded) - len(excluded["drift"]),
                N=len(runnable), stop_reason=stop, verdict=verdict, cases=graded,
                secs_total=round(time.monotonic() - t0, 1))
@@ -413,10 +424,8 @@ def rederive(rows) -> bool:
 def applies(a, ap) -> int:
     """Does this record belong to this build, these cases and this bar? Exit 0 yes (and its verdict), 1 no."""
     try:
-        for flag, path, sha in (("cases", a.cases, a.cases_sha256), ("bar", a.bar, a.bar_sha256)):
-            actual = hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
-            if actual != sha:
-                raise ValueError(f"{flag} sha256 mismatch: the file is {actual}")
+        check_sha("cases", a.cases, a.cases_sha256)
+        check_sha("bar", a.bar, a.bar_sha256)
         env = parse_env(a.env)
     except (OSError, ValueError) as e:
         ap.error(str(e))
@@ -432,7 +441,7 @@ def applies(a, ap) -> int:
     except (OSError, ValueError) as e:
         return no(f"record unreadable ({e})")
     stop = rec.get("stop_reason")
-    if not isinstance(stop, str) or not (stop == "complete" or stop.startswith("bar-unreachable")):
+    if not finished(stop):
         return no(f"incomplete ({stop or 'no stop reason'})")
     if not isinstance(rec.get("fingerprint"), str) or not rec["fingerprint"]:
         return no("no fingerprint")
@@ -449,7 +458,7 @@ def applies(a, ap) -> int:
         met = rederive(rec.get("rows"))
     except ValueError as e:
         return no(str(e))
-    verdict = "supported" if met and stop == "complete" else "not supported"
+    verdict = verdict_of(met, stop)
     print(f"applies: {verdict} (re-derived from the stored hits; ended {rec.get('end')}, "
           f"fingerprint {rec['fingerprint'][:12]})")
     return 0
