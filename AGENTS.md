@@ -71,8 +71,9 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    or disproves it (`CONTRADICTED`). Any other exit means the check itself
    failed; treat it as blocked too.
 
-8. **Uninstall when your human asks** (removes everything setup and connect made;
-   their files are never touched):
+8. **Uninstall when your human asks** (removes everything Super Jev wrote, including logs,
+   auto-heal state and the chat CLI's config; their files are never touched, even one
+   that sits in a folder Super Jev writes to):
 
    ```bash
    python3 skills/super-jev/setup.py --uninstall
