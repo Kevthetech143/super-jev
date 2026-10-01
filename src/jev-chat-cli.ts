@@ -221,7 +221,7 @@ function runConnect(plan: ReturnType<typeof buildDropPlan>, principal: string) {
  * whether the pointer name already exists so a reuse is called out plainly,
  * gets a one-key confirm (folder drops default No, file drops default Yes),
  * then runs the connector. Never connects without an explicit yes --
- * connecting makes paid judge calls. */
+ * connecting can make paid judge calls. */
 async function handleDrop(line: string, principal: string) {
   const dropped = detectDroppedPaths(line)!;
   const plan = buildDropPlan(dropped, principal);
