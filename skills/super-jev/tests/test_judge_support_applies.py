@@ -131,6 +131,13 @@ def test_a_different_judge_or_env_setting_is_a_different_fingerprint(w, capsys):
     assert applies(rec, p, capsys)[0] == 1
 
 
+@pytest.mark.parametrize("name", ["SUPERJEV_JUDGE", "SUPERJEV_REPLAY", "SUPERJEV_AUTO_CACHE"])
+def test_a_setting_the_tool_owns_is_exit_2_here_as_in_the_run(w, capsys, name):
+    rec, p = made(w)
+    rc, out, err = applies(rec, p, capsys, env=[f"{name}=1"])
+    assert rc == 2 and out == "" and "the tool sets this one itself" in err
+
+
 def test_changed_cases_or_a_changed_bar_does_not_apply_and_a_wrong_pin_is_exit_2(w, capsys):
     rec, p = made(w)
     # Cases changed, correctly re-pinned: a different set, so the record is not for it.

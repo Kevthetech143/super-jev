@@ -103,7 +103,8 @@ def judge_path_sha(root: Path) -> str:
 
 
 def parse_env(pairs) -> dict:
-    """--env NAME=VALUE pairs as {NAME: VALUE}; a malformed or repeated NAME is a ValueError."""
+    """--env NAME=VALUE pairs as {NAME: VALUE}; a malformed or repeated NAME, or one the tool sets itself
+    (SUPERJEV_JUDGE and the replay settings), is a ValueError. Every command that reads --env comes here."""
     env = {}
     for pair in pairs or []:
         m = ENV_PAIR.match(pair)
@@ -111,6 +112,8 @@ def parse_env(pairs) -> dict:
             raise ValueError(f"--env takes NAME=VALUE, got a value with no NAME=: {pair.split('=')[0]!r}")
         if m.group(1) in env:
             raise ValueError(f"--env {m.group(1)} is given twice")
+        if m.group(1) in PROTECTED_ENV or m.group(1) in pr.REPLAY_ENV:
+            raise ValueError(f"--env {m.group(1)}: the tool sets this one itself")
         env[m.group(1)] = m.group(2)
     return env
 
@@ -141,6 +144,11 @@ def stratum(case: dict) -> str:
     if case.get("kind") == "claim":
         return "claim_absent" if case["expected"] == "ABSENT" else "claim"
     return "absent" if sc.is_absent(case) else "answerable"
+
+
+def in_row(row: dict, case: dict) -> bool:
+    """The one membership rule: this case is one the bar row measures."""
+    return row["stratum"] in ("all", stratum(case))
 
 
 def need(hundredths: int, n: int) -> int:
@@ -240,7 +248,7 @@ def row_score(row: dict, case: dict, res: dict):
     """None when the case is not in this row's stratum; else 1 or 0: a hit, or for a count row a bad case.
     An errored case never hits; an errored question is over every time line; an errored claim is held,
     never asserted (it fails 'claims_right' only)."""
-    if row["stratum"] not in ("all", stratum(case)):
+    if not in_row(row, case):
         return None
     err, m = "error" in res, row["measure"]
     if m == "top5":
@@ -259,19 +267,12 @@ def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def check_env_names(env: dict) -> None:
-    for name in env:
-        if name in PROTECTED_ENV or name in pr.REPLAY_ENV:
-            raise ValueError(f"--env {name}: the tool sets this one itself")
-
-
 def run(a, ap) -> int:
     """One judge, one build, the whole case file, one record. Returns the exit code."""
     try:
         check_sha("cases", a.cases, a.cases_sha256)
         bar = load_bar(a.bar, a.bar_sha256)
         env = parse_env(a.env)
-        check_env_names(env)
         if Path(a.record).expanduser().exists():
             raise ValueError(f"{a.record} exists; a record is never overwritten")
         plan = pr.load_run([a.ask], [a.cases], None, a.max_asks, memory_hint="")
@@ -282,7 +283,7 @@ def run(a, ap) -> int:
                 raise ValueError(str(e)) from None
         fp = fingerprint(Path(a.ask), a.judge, env)
         for row in bar["rows"]:
-            if not any(row["stratum"] in ("all", stratum(c)) for c in plan.cases):
+            if not any(in_row(row, c) for c in plan.cases):
                 raise ValueError(f"bar row {row['name']} measures {row['stratum']} cases and the file has none")
     except (OSError, ValueError, TypeError, AttributeError) as e:
         ap.error(str(e))
@@ -297,7 +298,7 @@ def run(a, ap) -> int:
            "env_names": sorted(env), "ask": str(build), "cases_sha256": a.cases_sha256, "bar_sha256": a.bar_sha256,
            "max_excluded": bar["max_excluded"], "seed": a.seed, "start": _now()}
     acc = {r["name"]: {"hits": 0, "n": 0, "seen": 0, "split": {}} for r in bar["rows"]}
-    total = {r["name"]: sum(r["stratum"] in ("all", stratum(c)) for c in runnable) for r in bar["rows"]}
+    total = {r["name"]: sum(in_row(r, c) for c in runnable) for r in bar["rows"]}
     graded, excluded, asks, stop, t0 = [], {"missing_gold": [c["question"] for c in missing], "drift": []}, 0, "", time.monotonic()
     snap, errors = {}, 0
 
@@ -326,7 +327,7 @@ def run(a, ap) -> int:
                     res = pr.grade(build, base, c, a.timeout, environ=child)
                     asks += 1
                     why = pr.drifted({"read": {}}, res, before) if "error" not in res else ""
-                    members = [r for r in bar["rows"] if r["stratum"] in ("all", stratum(c))]
+                    members = [r for r in bar["rows"] if in_row(r, c)]
                     for r in members:
                         acc[r["name"]]["seen"] += 1
                     entry = {"question": c["question"], "principal": c["principal"], "split": c["split"],

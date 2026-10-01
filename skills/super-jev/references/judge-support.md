@@ -8,7 +8,7 @@ A judge (a profile in `judge_profiles.json`, or the test judge `fake`) is "suppo
 python3 judge_support.py --fingerprint --ask BUILD/ask.py --judge NAME [--env NAME=VALUE ...]
 ```
 
-Free: no ask, no judge call, no key. It prints one JSON line: the five parts below and `fingerprint`, a SHA-256 over them. Exit 0 prints it; exit 2 is bad input (an unknown judge, a malformed or repeated `--env`, a build whose `judge_profiles.json` cannot be read).
+Free: no ask, no judge call, no key. It prints one JSON line: the five parts below and `fingerprint`, a SHA-256 over them. Exit 0 prints it; exit 2 is bad input (an unknown judge, a malformed or repeated `--env`, an `--env` for a setting the tool sets itself, a build whose `judge_profiles.json` cannot be read).
 
 | part | what it is |
 |---|---|
@@ -40,7 +40,7 @@ It asks the judge every case in the file once, on a frozen copy of your state an
 
 Exit codes: `0` supported, `1` not supported, `3` incomplete (nothing is claimed either way), `2` bad input (nothing was asked, no record is written).
 
-The child ask runs with your environment minus every `SUPERJEV_*` variable, plus the `--env` pairs, plus `SUPERJEV_JUDGE` set to `--judge`. A stray `SUPERJEV_*` in your shell therefore never reaches the judge, and the fingerprint (which hashes the `--env` pairs) describes what actually ran. A setting the tool owns (`SUPERJEV_JUDGE` and the replay settings) cannot be passed with `--env`. `--env` values are scrubbed from the record, even inside an error line.
+The child ask runs with your environment minus every `SUPERJEV_*` variable, plus the `--env` pairs, plus `SUPERJEV_JUDGE` set to `--judge`. A stray `SUPERJEV_*` in your shell therefore never reaches the judge, and the fingerprint (which hashes the `--env` pairs) describes what actually ran. A setting the tool owns (`SUPERJEV_JUDGE` and the replay settings) cannot be passed with `--env`, whichever command reads it. The record names the `--env` settings and never holds their values: a value of six or more characters is also scrubbed from any error line it shows up in (a shorter one is left alone, because it would blank ordinary text, so do not pass a secret that short).
 
 ### Case file
 
@@ -95,7 +95,7 @@ python3 judge_support.py --applies RECORD --ask BUILD/ask.py --judge NAME \
 
 Free: no ask, no judge call. Exit 0 when the record is finished (the run ended complete, or stopped because the bar was out of reach) and its fingerprint, `cases_sha256` and `bar_sha256` equal today's for that build, judge, cases and bar. It then prints one line: `applies: supported` or `applies: not supported`, worked out again from the record's stored rows (each row's stored bar against its stored hits and n, with the same integer rule). The record's own `verdict` field is never read, so editing it changes nothing. A run that stopped early on an unreachable bar always prints `not supported`.
 
-Exit 1 prints `does not apply: <reason>`: the record is unreadable or damaged, incomplete (the stop reason is named), has no fingerprint, the judge is unknown (the known ones are listed), or the fingerprint, the cases or the bar differ. A fake judge's record never applies to the default judge: the fingerprint carries which implementation ran. Exit 2 is bad input, such as a pin that does not match the file it names (the real SHA is printed).
+Exit 1 prints `does not apply: <reason>`: the record is unreadable or damaged, incomplete (the stop reason is named), has no fingerprint, the judge is unknown (the known ones are listed), or the fingerprint, the cases or the bar differ. A fake judge's record never applies to the default judge: the fingerprint carries which implementation ran. Exit 2 is bad input, such as a pin that does not match the file it names (the real SHA is printed) or an `--env` for a setting the tool sets itself.
 
 A record holds for one build, one set and one bar. Changing any of them means a new run and a new record; the old record stays as it was.
 
