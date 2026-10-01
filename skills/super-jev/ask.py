@@ -1703,35 +1703,36 @@ def skill_question(question: str) -> bool:
 SKILL_SEARCH_TIMEOUT = 60
 
 def skill_search(request: str) -> tuple:
-    """(status, [(label, SKILL.md path)], failure or ""): the one reader of the skills connector, for asks
-    and preflight. One labelling rule: only an exact name or a live judge pick is a match; everything else
-    (local ranking, doubt, a clarify question, a fallback) is an "(unverified guess)". A failure is never
-    an empty answer."""
+    """(status, [(label, SKILL.md path)], failure or "", fallback cause or ""): the one reader of the skills
+    connector, for asks and preflight. One labelling rule: only an exact name or a live judge pick is a
+    match; everything else (local ranking, doubt, a clarify question, a fallback) is an "(unverified
+    guess)". A failure is never an empty answer. The door's own error sentence (setup steps included) is
+    returned whole; only output that is not the door's JSON is cut."""
     try:
         r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "dispatch.py"),
                             "skills", "--request", request], capture_output=True, text=True,
                            timeout=SKILL_SEARCH_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return "", [], f"timed out after {SKILL_SEARCH_TIMEOUT}s"
+        return "", [], f"timed out after {SKILL_SEARCH_TIMEOUT}s", ""
     except OSError as e:
-        return "", [], str(e)
+        return "", [], str(e), ""
     try:
         out = json.loads(r.stdout)
     except ValueError:
         out = None
     if not isinstance(out, dict):
-        return "", [], f"exit {r.returncode}: unreadable output: {(r.stdout or '').strip()[-200:]}"
+        return "", [], f"exit {r.returncode}: unreadable output: {(r.stdout or '').strip()[-200:]}", ""
     status = out.get("status") or ""
     if status == "error" or r.returncode:
-        return status, [], str(out.get("error") or out.get("reason") or f"exit {r.returncode}")[:200]
+        return status, [], str(out.get("error") or out.get("reason") or f"exit {r.returncode}"), ""
     match = status == "exact" or (status == "suggestions" and out.get("source") == "jev")
     picks = [((c.get("name") or c.get("id") or "") + ("" if match else " " + GUESS), c["path"] if isinstance(c.get("path"), str) else "")
              for c in out.get("candidates") or [] if isinstance(c, dict)]
-    return status, picks, ""
+    return status, picks, "", (str(out.get("error") or "") if status == "fallback" else "")
 
 def skill_catalog(question: str) -> list:
     """[(name, SKILL.md path)] for the ask path; [] on any failure, which prints one cause line."""
-    _status, picks, err = skill_search(question)
+    _status, picks, err, _fallback = skill_search(question)
     if err:
         print(f"skill search failed: {err}", file=sys.stderr)
     return [(name, path) for name, path in picks if path]
@@ -3488,9 +3489,11 @@ def preflight(principal: str, args: list) -> int:
     if skill:
         # A paid check runs when its own inputs are ready: --about reads the connections (so it waits for
         # READY); --skill reads skill folders, which a fresh install already has.
-        _status, picks, err = skill_search(f"a skill that {skill}")
+        status, picks, err, fallback = skill_search(f"a skill that {skill}")
         if err:
             warnings.append(f"existing-skill search failed ({err}); not proof that no skill does this")
+        elif status == "fallback":  # guesses are labelled, and the user is told why the judge did not run
+            warnings.append(f"skill search fell back to local guesses: {fallback or 'no reason given'}")
         report["existing_skills"] = None if err else [name for name, _path in picks]
     verdict = "NOT READY" if problems else ("READY WITH WARNINGS" if warnings else "READY")
     report.update(verdict=verdict, problems=problems, warnings=warnings)

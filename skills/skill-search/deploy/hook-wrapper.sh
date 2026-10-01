@@ -11,11 +11,11 @@ done
 PROVIDER="${SKILL_SEARCH_PROVIDER_CMD:-}"
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
   if [ -z "$PROVIDER" ]; then
-    printf '%s\n' '{"status":"error","candidates":[],"error":"No TYPESAFE_API_KEY in the environment and no credential provider configured (docs/GETTING-STARTED.md, step 2); rerun with --local-only for unverified local guesses"}'
+    printf '%s\n' '{"status":"error","candidates":[],"error":"No TYPESAFE_API_KEY in the environment and no credential provider configured (docs/GETTING-STARTED.md, step 2); rerun search.sh with --local-only for unverified local guesses"}'
     exit 2
   fi
-  KEY="$($PROVIDER 2>/dev/null)" || { printf '%s\n' '{"status":"error","candidates":[],"error":"Jev credential provider failed; rerun with --local-only for unverified local guesses"}' ; exit 2; }
-  [ -n "$KEY" ] || { printf '%s\n' '{"status":"error","candidates":[],"error":"Jev credential provider returned no key; rerun with --local-only for unverified local guesses"}' ; exit 2; }
+  KEY="$($PROVIDER 2>/dev/null)" || { printf '%s\n' '{"status":"error","candidates":[],"error":"Jev credential provider failed; rerun search.sh with --local-only for unverified local guesses"}' ; exit 2; }
+  [ -n "$KEY" ] || { printf '%s\n' '{"status":"error","candidates":[],"error":"Jev credential provider returned no key; rerun search.sh with --local-only for unverified local guesses"}' ; exit 2; }
   TYPESAFE_API_KEY="$KEY"; export TYPESAFE_API_KEY
 fi
 exec bash "$(dirname "$0")/../launcher.sh" "$@"
