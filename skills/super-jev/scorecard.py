@@ -136,9 +136,12 @@ SPLITS = ("tuned", "held-out", "retrospective")
 
 
 def is_absent(case) -> bool:
-    """A not-in-files case: an absent question ("absent": true) or a claim expecting ABSENT.
-    Nothing in the files settles it, so its gold list is empty."""
-    return case.get("absent") is True or (case.get("kind") == "claim" and case.get("expected") == "ABSENT")
+    """A not-in-files case: an absent question ("absent": true) or a claim expecting ABSENT (the flag is for
+    questions only; a TRUE or FALSE claim always names its gold). Nothing in the files settles it, so its
+    gold list is empty."""
+    if case.get("kind") == "claim":
+        return case.get("expected") == "ABSENT"
+    return case.get("absent") is True
 
 
 def normalize_cases(cases, default_principal, absent_ok=False):
