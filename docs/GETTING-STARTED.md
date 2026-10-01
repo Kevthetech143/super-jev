@@ -88,8 +88,10 @@ against the file before it is connected. Pick the description writer:
   file (a secret-like value, or a note over 250,000 bytes) has no override: read the held list the command
   printed, then remove or move the value, or split the note, and re-run. A password or key keyword holds a
   file only when a literal value follows it (a digit or symbol in it, not a placeholder or a call).
-- **Where state lives:** under `$SUPERJEV_STATE_DIR` or
-  `~/.local/state/super-jev/<principal>/` — never in this repo.
+- **Where state lives:** per-principal logs and the memory config under `$SUPERJEV_STATE_DIR` or
+  `~/.local/state/super-jev/<principal>/`. Preparation records land in the checkout:
+  `skills/super-jev/prepare-cache/` (descriptions, reports and the recipe a refresh replays),
+  `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (see step 9).
 
 ## 5. Ask your first question
 
@@ -169,11 +171,26 @@ When the connected folder changes on disk, re-run prepare with `--refresh`:
 
 ```bash
 python3 skills/super-jev/prepare_bulk.py \
-  --root /path/to/folder --pointer MYPOINTER --principal ME --writer builtin --refresh
+  --pointer MYPOINTER --principal ME --refresh
 ```
+
+This replays how you connected it, writer included. Give a writer flag to
+change it, and later refreshes keep it.
 
 Success: the summary shows newly drafted or re-gated files; unchanged files
 are skipped.
+
+**Auto-heal, best effort.** Nothing watches your folders. An `ask` that meets a
+set whose files changed starts this same refresh in the background and does not
+wait for it; the next ask finds the result. Only asks trigger it. It runs one
+refresh per set at a time, waits out a cooldown before touching a set again, and
+caps how many refreshes it starts per hour. If a background refresh fails, the
+ask says `auto-heal: last refresh FAILED: <reason>`; run the refresh command
+printed on that line to see the error and refresh by hand. Auto-heal writes its locks,
+cooldowns and logs, which name your sets and files, to
+`skills/super-jev/autoheal-state/`. `SUPERJEV_NEW_FILE_SCAN=0` turns off the
+scan that looks for new notes in connected folders; refreshing a changed set has
+no off switch.
 
 ## 10. Uninstall
 
