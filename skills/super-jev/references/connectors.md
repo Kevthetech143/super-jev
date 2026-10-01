@@ -213,6 +213,14 @@ python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME
 ```
 
 `--writer-command` takes precedence over the env var; either is parsed into an argument list and run without a shell.
+
+The writer flags (`--writer`, `--writer-model`, `--writer-command`) are recorded with the pointer's recipe and
+replayed by every `--refresh`: the background refresh an ask starts, the `next:` command it prints and
+`refresh_changed.py` included. They are one choice: give any one of them on a refresh and the recorded writer is
+replaced whole, and recorded for the refreshes after it; `--writer auto` clears it. The `SUPERJEV_WRITER_COMMAND`
+env var is never recorded. A refresh can run from the skill folder, so name the command on PATH or by absolute path,
+not relative to your folder. The command is stored in `prepare-cache/` and shown in the banner: keep keys out of it
+(have your adapter read them from its own environment).
 The program receives the existing UTF-8 writer prompt on standard input: its
 final `FILES:` section is a JSON array of the file records. It must write only
 a JSON array to standard output. Each array member must be an object with
