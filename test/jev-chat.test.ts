@@ -344,7 +344,7 @@ test('I4 connect with a held note and skipped files: Connected, a held line, lef
   const s = R('connect', { connected: 25, held: [{ path: 'ops/creds.md', why: 'looks like it holds a secret' }], skipped: [skip, other, other, link] },
     { label: 'Team Notes' });
   assert.match(s, /^• Connected Team Notes: 25 notes · 1\.4s$/m);
-  assert.match(s, /Held back.*ops\/creds\.md/);
+  assert.match(s, /^ {2}Held back 1 note: looks like it holds a secret\n {4}ops\/creds\.md$/m);
   assert.match(flat(s), /Left out 3 notes in folders skipped by default; drag a folder in on its own to connect it\./);
   assert.match(flat(s), /Left out 2 files of other types; only \.md notes connect\./);
   assert.match(flat(s), /Left out 1 linked note pointing outside this folder\./);
@@ -426,7 +426,7 @@ test('E5 a crash screen: Super Jev hit an error, its last line, a next step', ()
 test('E8 connect failed: Not connected plus the reasons', () => {
   const s = R('connect', { connected: 0, failed: [{ path: '/Users/sam/Team Notes', why: 'no .md file left to connect' }] }, { label: 'Team Notes' });
   assert.match(s, /^• Not connected/m);
-  assert.match(s, /^ {2}~\/Team Notes: no \.md file left to connect$/m);
+  assert.match(s, /^ {2}Failed: no \.md file left to connect\n {4}~\/Team Notes$/m);
 });
 
 // ---------------------------------------------------------------- review round 1: the helper's outcome decides the screen
@@ -1132,7 +1132,7 @@ test('I4 whole app: connect exits 3 with a held note and left-out files: shown a
   await w.waitFor(/Connect Team Notes\?/);
   w.send('\r');
   await w.waitFor('Connected Team Notes: 25 notes');
-  assert.match(w.text(), /Held back.*ops\/creds\.md/);
+  assert.match(w.text(), /Held back 1 note: looks like it holds a secret\n {4}ops\/creds\.md/);
   assert.match(flat(w.text()), /Left out 1 file of other types; only \.md notes connect\./);
   assert.ok(!/Not connected/.test(w.text()));
   await w.quit();
@@ -1533,6 +1533,97 @@ test('K8 a line typed while a search runs is ignored: no second paid ask, and th
   assert.equal(await w.quit(), 0);
 });
 
+// ---------------------------------------------------------------- round 6: a reason is said once; the door drops typed-ahead lines too
+const WHY_SECRET = 'card/password-like text; held for secret-like text; Super Jev never sends that text. Remove or move the value, then reconnect.';
+const nine = (why: string) => Array.from({ length: 9 }, (_, i) => ({ path: `/Users/sam/Ops Notes/creds-${i}.md`, why }));
+
+test('G1 nine held notes with one reason say it once: every path whole on its own line, at most held+3 body lines, widths 60 and 80', () => {
+  for (const width of [60, 80]) for (const color of [false, true]) {
+    const s = stripVTControlCharacters(R('connect', { connected: 1, held: nine(WHY_SECRET) }, { label: 'Ops Notes' }, { width, color }));
+    const at = `width ${width}, colour ${color}:\n${s}`;
+    assert.equal(flat(s).split(WHY_SECRET).length - 1, 1, `the reason is not said exactly once at ${at}`);
+    assert.ok(flat(s).includes('Held back 9 notes: ' + WHY_SECRET), at);
+    for (let i = 0; i < 9; i++) assert.ok(lines(s).includes(`    ~/Ops Notes/creds-${i}.md`), `path ${i} is not whole on its own line at ${at}`);
+    assert.ok(lines(s).slice(1).length <= 9 + 3, `${lines(s).slice(1).length} body lines at ${at}`);
+    assert.ok(lines(s).every((l) => l.length <= width), at);
+  }
+});
+
+test('G1b nine failed notes with one reason say it once, the same way', () => {
+  const why = 'could not be read: the file changed while it was being connected, so nothing of it was kept';
+  for (const width of [60, 80]) for (const color of [false, true]) {
+    const s = stripVTControlCharacters(R('connect', { connected: 1, failed: nine(why) }, { label: 'Ops Notes' }, { width, color }));
+    const at = `width ${width}, colour ${color}:\n${s}`;
+    assert.equal(flat(s).split(why).length - 1, 1, `the reason is not said exactly once at ${at}`);
+    assert.ok(flat(s).includes('Failed: ' + why), at);
+    for (let i = 0; i < 9; i++) assert.ok(lines(s).includes(`    ~/Ops Notes/creds-${i}.md`), `path ${i} is not whole on its own line at ${at}`);
+    assert.ok(lines(s).slice(1).length <= 9 + 3, `${lines(s).slice(1).length} body lines at ${at}`);
+  }
+});
+
+test('G1c two different reasons are two groups, each with its own count and its own paths, in the order the engine gave them', () => {
+  const a = '/Users/sam/Ops Notes/', big = 'too big, split it', bin = 'binary file, not text';
+  const s = R('connect', { connected: 5, held: [{ path: a + 'one.md', why: big }, { path: a + 'two.md', why: bin }, { path: a + 'three.md', why: big }, { path: a + 'four.md', why: big }],
+    failed: [{ path: a + 'five.md', why: 'could not be read' }] }, { label: 'Ops Notes' }, { width: 80 });
+  assert.deepEqual(lines(s), ['• Connected Ops Notes: 5 notes · 1.4s',
+    '  Held back 3 notes: too big, split it', '    ~/Ops Notes/one.md', '    ~/Ops Notes/three.md', '    ~/Ops Notes/four.md',
+    '  Held back 1 note: binary file, not text', '    ~/Ops Notes/two.md',
+    '  Failed: could not be read', '    ~/Ops Notes/five.md']);
+});
+
+test('S3c a saved answer keeps its blank lines and its indentation: a sub-item is not a sibling, and a wrapped one stays under itself', () => {
+  const answer = 'Steps:\n\n1. hold at 5 percent\n   a. watch the error rate and the latency for the whole forty minutes of the hold\n2. wait 40 minutes\n';
+  const l = lines(R('ask', FOUND({ saved: { by: 'you', date: '2026-09-12', answer }, files: [{ path: HB, tier: 'confirmed' }] }), {}, { width: 60 }));
+  const at = l.indexOf('  Steps:');
+  assert.deepEqual(l.slice(at, at + 4), ['  Steps:', '', '  1. hold at 5 percent', '     a. watch the error rate and the latency for the whole']);
+  assert.equal(l[at + 4], '     forty minutes of the hold', 'a wrapped sub-item continues under itself');
+  assert.equal(l[at + 5], '  2. wait 40 minutes', 'a trailing newline adds no empty row');
+});
+
+test('W5 at the one-shot door, a Next that points at dragging says how to open the window first; in the window it is unchanged', () => {
+  const lonely = { outcome: 'needs-setup', why: 'nothing is connected for me', next: 'connect' };
+  const miss = { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 28 } };
+  const stale = { outcome: 'needs-setup', why: 'x', next: 'refresh', unsearched: [{ set: 'a', root: '/Users/sam/Handbook', state: 'stale', healing: false }] };
+  const way = 'open the window \\(npm run jev, or superjev with no words\\), then';
+  for (const [d, rest] of [[lonely, 'drag a folder of Markdown notes in here'], [miss, 'drag in the folder that has it'], [stale, 'drag the folder in again to refresh it']] as const) {
+    assert.match(flat(R('ask', d, {}, { door: true })), new RegExp(`Next: ${way} ${rest}\\.`));
+    assert.match(flat(R('ask', d)), new RegExp(`Next: ${rest}\\.`), 'the window says it as before');
+    assert.ok(!new RegExp(way).test(flat(R('ask', d))), 'the window never points at itself');
+  }
+  assert.match(flat(R('status', { next: 'connect', principal: 'me', sets: [] }, {}, { door: true })), new RegExp(`Next: ${way} drag a folder`));
+});
+
+test('W5 whole app: the one-shot door with nothing connected tells a shell user to open the window, not to drag', async () => {
+  const r = rig([{ when: '--status', out: { v: 1, next: 'connect', principal: 'me', sets: [] } }, { when: '-- canary', code: 1, out: { v: 1, outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 1, notes: 4 } } }]);
+  for (const args of [['/status'], ['canary question']]) {
+    const d = await door(r, args);
+    assert.match(flat(d.out), /Next: open the window \(npm run jev, or superjev with no words\), then drag /, d.out);
+  }
+});
+
+test('K9 at the door, a line typed while the status runs is dropped like any other: it is not the answer to the yes/no', async () => {
+  const r = rig([{ when: '--status', sleep: 700, out: { v: 1, next: 'connect', principal: 'me', sets: [] } }, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+  const w = win(r, { argv: [FOLDER] });
+  await w.waitFor(() => r.calls().some((c: any) => c.args.includes('--status')));
+  w.send('\r'); // an Enter typed before the question was on screen
+  await w.waitFor(/Connect Team Notes\?/);
+  await new Promise((x) => setTimeout(x, 300));
+  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'), 'the early Enter was taken as the yes');
+  w.send('\r');
+  await w.waitFor('Connected Team Notes: 3 notes');
+  assert.equal(await w.exit(), 0);
+});
+
+test('K9b Ctrl+C while the door checks its status exits 130, asks nothing and connects nothing', async () => {
+  const r = rig([{ when: '--status', sleep: 5000, out: { v: 1, next: 'connect', principal: 'me', sets: [] } }, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+  const w = win(r, { argv: [FOLDER] });
+  await w.waitFor(() => r.calls().some((c: any) => c.args.includes('--status')));
+  w.send('\x03');
+  assert.equal(await w.exit(), 130, w.text());
+  assert.ok(!/Connect Team Notes\?/.test(w.text()), w.text());
+  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py' || c.script === 'setup.py'), 'a helper ran after the interrupt');
+});
+
 // ---------------------------------------------------------------- the docs say where the key lives
 const DOC = (f: string) => readFileSync(join(ROOT, f), 'utf8');
 const between = (text: string, from: RegExp, to: RegExp) => { const i = text.search(from); assert.ok(i >= 0, `${from} not found`); const rest = text.slice(i + 1); const j = rest.search(to); return text.slice(i, j < 0 ? undefined : i + 1 + j); };
@@ -1672,4 +1763,22 @@ test('R4 real engine, registry unreadable: /status and the launch say why, never
   assert.equal(await w.done, 1);
   assert.match(w.text(), /Connection status unavailable/);
   assert.ok(!/Ready|Nothing connected/.test(w.text()), w.text());
+});
+
+test('R5 real connect with three notes the secret scan holds: one Held back row, the reason once, each path whole', { timeout: 120000 }, async () => {
+  const rr = realRig();
+  assert.equal(rr.setup().status, 0);
+  for (const n of ['wifi', 'database', 'deploy']) writeFileSync(join(rr.folder, `${n}.md`), `# ${n}\n\nThe ${n} login for the office.\npassword: hunter2\n`);
+  const w = realWin(rr);
+  await w.waitFor(/Ready\./);
+  w.say(rr.folder.replace(/ /g, '\\ '));
+  await w.waitFor(/Connect Team Notes\?/);
+  w.send('\r');
+  await w.waitFor('Connected Team Notes: 2 notes');
+  const s = w.text();
+  assert.equal((s.match(/Held back/g) || []).length, 1, s);
+  assert.match(s, /^ {2}Held back 3 notes: /m);
+  assert.equal((flat(s).match(/never sends that text/g) || []).length, 1, 'the reason is said once:\n' + s);
+  for (const n of ['wifi', 'database', 'deploy']) assert.ok(lines(s).some((l) => /^ {4}\S/.test(l) && l.endsWith(`/Team Notes/${n}.md`)), `${n}.md is not whole on its own line:\n${s}`);
+  await w.quit();
 });

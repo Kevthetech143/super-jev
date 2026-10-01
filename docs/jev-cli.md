@@ -17,9 +17,8 @@ per copy, so connect and ask from the same door.
 
 The first launch asks once for your TypeSafe key (hidden, saved only on
 this Mac in `~/.typesafe-api-key`, owner-only; `--uninstall` keeps it, as
-hooks read it too) and runs setup. Later launches print one line: the
-version, the folder count and whether they are up to date. A key in
-`TYPESAFE_API_KEY` wins over the saved one.
+hooks read it too) and runs setup. Later launches print one line: version,
+folder count, up to date or not. `TYPESAFE_API_KEY` wins over the saved key.
 
 ## In the window
 
@@ -34,8 +33,8 @@ version, the folder count and whether they are up to date. A key in
 
 Keys: Esc clears the line, Ctrl+C clears it (twice on an empty line quits),
 Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
-yes and Esc is no; Ctrl+D leaves, which counts as no. Lines typed while it
-works are dropped.
+yes and Esc is no; Ctrl+D leaves, which counts as no. Lines typed while a
+search or connect runs are dropped.
 
 ## One question from a shell
 
@@ -47,6 +46,5 @@ exit code is the helper's own: found 0, not found 1, not supported 2, error
 unknown command, or a first word starting with `-`, never a question)
 exits 2. No key: it says so, exit 4. Nothing connects without a keyboard.
 
-## Tests
-
-`node --test test/jev-chat.test.ts` uses made-up notes and a stand-in `python3`, so it needs no key.
+Tests: `node --test test/jev-chat.test.ts` uses made-up notes and a stand-in
+`python3`, so it needs no key.

@@ -40,7 +40,8 @@ export async function run(io: IO): Promise<number> {
   const keySource = () => (keyEnv && env[keyEnv] ? 'env' : fileKey ? 'file' : 'none') as 'env' | 'file' | 'none';
   const needsKey = () => profile.keyRequired && keySource() === 'none';
   const session: Session = { principal: env.SUPERJEV_PRINCIPAL || 'me', skillDir: SKILL, connected: new Set() };
-  const look = () => ({ width: Math.min(stdout.columns || 80, 80), color: !!stdout.isTTY && !env.NO_COLOR, home, keyEnv, keySource: keySource(), vendor });
+  const look = () => ({ width: Math.min(stdout.columns || 80, 80), color: !!stdout.isTTY && !env.NO_COLOR, home, keyEnv, keySource: keySource(), vendor,
+    door: argv.length > 0 });
   const out = (text: string) => stdout.write(text + '\n');
   let child: ChildProcess | null = null;
   let interrupted = false;
@@ -132,7 +133,8 @@ export async function run(io: IO): Promise<number> {
       completer: (l: string): [string[], string] => [l.startsWith('/') ? COMMANDS.filter((c) => c.startsWith(l)) : [], l],
     });
     const queue: (string | symbol)[] = [];
-    let closed = false, wake: (() => void) | null = null, mode: 'prompt' | 'busy' | 'confirm' = 'prompt', armed = false;
+    // busy until a prompt or a question is shown, so a key typed before that is never an answer
+    let closed = false, wake: (() => void) | null = null, mode: 'prompt' | 'busy' | 'confirm' = 'busy', armed = false;
     const push = (x: string | symbol) => { queue.push(x); wake?.(); };
     const clear = () => { rl.write(null as any, { ctrl: true, name: 'e' }); rl.write(null as any, { ctrl: true, name: 'u' }); };
     const pull = async (): Promise<string | symbol | null> => {
@@ -229,10 +231,12 @@ export async function run(io: IO): Promise<number> {
     if (t.kind === 'connect') {
       let r: Reply;
       if (stdin.isTTY) {
-        await helper({ kind: 'status' });
-        const term = terminal();
-        r = await connectFlow(t, term.confirm);
-        term.close();
+        const term = terminal(); // first, so a line typed while the status runs is dropped like any other, never taken as the yes
+        try {
+          await helper({ kind: 'status' });
+          if (interrupted) return 130;
+          r = await connectFlow(t, term.confirm);
+        } finally { term.close(); }
       } else {
         r = await connectFlow(t, async () => false);
         stderr.write(`Connecting needs a keyboard to confirm: ${OPEN}, then drag the folder in.\n`);

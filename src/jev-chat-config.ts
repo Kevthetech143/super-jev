@@ -14,7 +14,8 @@ export type Turn =
   | { kind: 'ask' | 'check' | 'say'; text: string }
   | { kind: 'connect'; path: string; dir: boolean };
 export type Session = { principal: string; skillDir: string; connected: Set<string> };
-export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string };
+export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
+  door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: the turn was a status, so a next step would only point back at it.
 export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
   refreshed?: boolean; declined?: boolean; noNext?: boolean };
@@ -209,14 +210,30 @@ export function render(shown: Shown, look: Look): string {
   const lay = (s: string | string[], fmt = '', first = '  ', hang = typeof s === 'string' ? '  ' : '    ') => pack(parts(s), look.width, first, hang).map((l) => paint(fmt, l));
   const body = (s: string | string[]) => out.push(...lay(s));
   const next = (s: string) => { nextLine = s; };
+  // A step that is a drag: at the one-shot door there is no window yet, so the way in comes first.
+  const drag = (s: string) => next(look.door ? `${OPEN}, then ${s}` : s);
   const quote = (text: string) => out.push(...lay(`"${text}"`, 'dim', '    ', '    '));
   const place = (f: { path: string; line?: number; date?: string; says?: string }, lead = '') =>
     [lead + path(f.path) + (f.line ? ':' + f.line : ''), ...(f.date ? [`· ${f.date}`] : []), ...(f.says ? [`· says ${f.says}`] : [])];
   const keyNext = () => next(look.keySource === 'env' ? `fix ${look.keyEnv ?? 'the key variable'} in your shell, then restart.`
     : look.keySource === 'file' ? `delete ~/.typesafe-api-key, then ${OPEN} to paste a new key.` : `${OPEN} to paste your key.`);
+  // A saved answer as its writer laid it out: a blank line stays blank, each line keeps its own indent and wraps under itself.
+  const saved = (answer: string) => answer.replace(/^\s*\n/, '').trimEnd().split('\n').flatMap((l) => {
+    const at = '  ' + /^[ \t]*/.exec(l)![0].replace(/\t/g, '    ');
+    return l.trim() ? lay(l, '', at, at) : [''];
+  });
+  // Notes that share a reason are said once: the reason, then each path whole on its own line.
+  const said = (rows: any[], lead: (n: number) => string) => {
+    const by = new Map<string, string[]>();
+    for (const r of rows ?? []) by.set(r.why, [...(by.get(r.why) ?? []), path(r.path)]);
+    for (const [why, paths] of by) { body(`${lead(paths.length)} ${why}`); for (const p of paths) out.push(...lay([p], '', '    ', '    ')); }
+  };
   const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => LEFT[r.kind] && Number.isInteger(r.count) ? `Left out ${LEFT[r.kind](r.count)}.`
     : `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach((l) => body(l));
-  const empty = (setup: boolean) => { head(setup ? 'Not set up yet' : 'Nothing connected yet'); next(setup ? `${OPEN}; setup runs there.` : 'drag a folder of Markdown notes in here.'); };
+  const empty = (setup: boolean) => {
+    head(setup ? 'Not set up yet' : 'Nothing connected yet');
+    if (setup) next(`${OPEN}; setup runs there.`); else drag('drag a folder of Markdown notes in here.');
+  };
   const retry = () => { if (!shown.noNext && shown.kind !== 'status') next('/status, or ask again.'); };
   const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); retry(); };
   // Folders the helper did not search, said once and added to every headline, so a partial search never reads as complete.
@@ -236,8 +253,8 @@ export function render(shown: Shown, look: Look): string {
       if (d.refused.kind === 'too_many') next('drag in a smaller folder inside it.');
     } else {
       head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : 'Not connected', d.connected ? 'green' : 'red');
-      for (const h of d.held ?? []) body(['Held back', path(h.path) + ':', ...prose(h.why)]);
-      for (const f of d.failed ?? []) body([...(d.connected ? ['Failed'] : []), path(f.path) + ':', ...prose(f.why)]);
+      said(d.held, (n) => `Held back ${plural(n, 'note')}:`);
+      said(d.failed, () => 'Failed:');
       leftOut(d.skipped);
     }
   } else if (o === 'error') {
@@ -257,7 +274,7 @@ export function render(shown: Shown, look: Look): string {
       leftOut(d.left_out);
       if (!rows.length && !(d.left_out ?? []).length && d.why) body(d.why);
       if (d.next === 'include') next('use the way in above, then ask again.');
-      else if (rows.some((u) => !u.healing)) next('drag the folder in again to refresh it.');
+      else if (rows.some((u) => !u.healing)) drag('drag the folder in again to refresh it.');
     }
   } else if (o === 'not-supported') {
     head('Not answered'); body(d.why ?? '');
@@ -284,7 +301,7 @@ export function render(shown: Shown, look: Look): string {
     const files: any[] = d.files ?? [], skills: any[] = d.skills ?? [];
     const found = [skills.length && plural(skills.length, 'skill'), files.length && plural(files.length, 'note')].filter(Boolean).join(' and ') || '0 notes';
     head(d.saved ? ['Saved answer', ...after('notes unchanged')] : headline(`Found ${found}`), d.saved ? 'green' : '');
-    if (d.saved?.by === 'you' && d.saved.answer) out.push(...String(d.saved.answer).split('\n').flatMap((l: string) => lay(l, '', '  ', '  ')));
+    if (d.saved?.by === 'you' && d.saved.answer) out.push(...saved(String(d.saved.answer)));
     for (const s of skills) body([s.name, gap(path(s.path)), ...(s.guess ? [tag('guess')] : [])]);
     files.forEach((f, i) => {
       body([...place(f, `${i + 1} `), ...(f.tier === 'possible' ? [tag('possible')] : f.tier === 'unchecked' ? [tag('not checked')] : [])]);
@@ -297,7 +314,7 @@ export function render(shown: Shown, look: Look): string {
     head('Not in your notes');
     if (d.searched) body(`Searched ${plural(d.searched.sets, 'folder')} (${plural(d.searched.notes, 'note')}); nothing matched.`);
     body("That doesn't prove it's nowhere: it may be in a folder you haven't connected.");
-    next('drag in the folder that has it.');
+    drag('drag in the folder that has it.');
   } else crash(d.why ?? '');
   if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off).replace(/^./, (c) => c.toUpperCase()));
   const time = shown.secs === undefined ? [] : [paint('dim', `· ${shown.secs.toFixed(1)}s`)];
