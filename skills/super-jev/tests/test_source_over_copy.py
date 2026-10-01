@@ -57,9 +57,9 @@ def test_folder_readme_uses_content_order(tmp_path):
 
 
 def test_profile_uses_content_order(tmp_path):
-    prof = str(tmp_path / "documents/esteban/medical/PROFILE.md")
-    note = str(tmp_path / "documents/esteban/medical/insurance/healthfirst-travel-coverage.md")
-    top, _, _ = _run(tmp_path, "does the Healthfirst plan cover travel abroad?",
+    prof = str(tmp_path / "documents/gustavo/medical/PROFILE.md")
+    note = str(tmp_path / "documents/gustavo/medical/insurance/bluecrest-travel-coverage.md")
+    top, _, _ = _run(tmp_path, "does the Bluecrest plan cover travel abroad?",
                      {prof: "summary", note: "travel coverage"},
                      [{"score": 0.9, "originalPath": prof}, {"score": 0.8, "originalPath": note}],
                      {prof: 0.98, note: 0.93})
@@ -99,31 +99,31 @@ def test_pr_writeup_uses_content_order(tmp_path):
 
 def _family(tmp_path):
     d = tmp_path / "agents/global/documents"
-    files = {str(d / "kelvin/medical/PROFILE.md"): "# Kelvin\n- Relation: self\n",
-             str(d / "esteban/medical/PROFILE.md"): "# Esteban\n- Relation: father\n",
-             str(d / "iris/medical/PROFILE.md"): "# Iris\n- Relation: mother\n",
-             str(d / "kelvin/medical/medications/current.md"): "meds",
-             str(d / "esteban/medical/medications/current.md"): "meds"}
-    caches = {"p1": {}, **{f"{n}-medical": {p: {} for p in files if f"/{n}/" in p} for n in ("kelvin", "esteban", "iris")}}
+    files = {str(d / "marvin/medical/PROFILE.md"): "# Marvin\n- Relation: self\n",
+             str(d / "gustavo/medical/PROFILE.md"): "# Gustavo\n- Relation: father\n",
+             str(d / "nora/medical/PROFILE.md"): "# Nora\n- Relation: mother\n",
+             str(d / "marvin/medical/medications/current.md"): "meds",
+             str(d / "gustavo/medical/medications/current.md"): "meds"}
+    caches = {"p1": {}, **{f"{n}-medical": {p: {} for p in files if f"/{n}/" in p} for n in ("marvin", "gustavo", "nora")}}
     return files, caches
 
 
 def test_my_dad_never_confirms_my_own_file(tmp_path):
     files, caches = _family(tmp_path)
-    mine = str(tmp_path / "agents/global/documents/kelvin/medical/medications/current.md")
-    dads = str(tmp_path / "agents/global/documents/esteban/medical/medications/current.md")
+    mine = str(tmp_path / "agents/global/documents/marvin/medical/medications/current.md")
+    dads = str(tmp_path / "agents/global/documents/gustavo/medical/medications/current.md")
     top, checked, navigated = _run(tmp_path, "how many prescriptions is my dad on?", files,
                                    [{"score": 0.9, "originalPath": mine}, {"score": 0.8, "originalPath": dads}],
                                    {mine: 0.90, dads: 0.80}, caches)
     assert [t["path"] for t in top] == [dads]
     assert mine not in checked
-    assert "kelvin-medical" not in navigated and "iris-medical" not in navigated
+    assert "marvin-medical" not in navigated and "nora-medical" not in navigated
 
 
 def test_no_person_named_filters_nothing(tmp_path):
     files, caches = _family(tmp_path)
-    mine = str(tmp_path / "agents/global/documents/kelvin/medical/medications/current.md")
-    dads = str(tmp_path / "agents/global/documents/esteban/medical/medications/current.md")
+    mine = str(tmp_path / "agents/global/documents/marvin/medical/medications/current.md")
+    dads = str(tmp_path / "agents/global/documents/gustavo/medical/medications/current.md")
     top, _, navigated = _run(tmp_path, "list the medications on file", files,
                              [{"score": 0.9, "originalPath": mine}, {"score": 0.8, "originalPath": dads}],
                              {mine: 0.90, dads: 0.88}, caches)
@@ -132,11 +132,11 @@ def test_no_person_named_filters_nothing(tmp_path):
 
 
 def test_question_people():
-    folks = {"kelvin": {"self"}, "esteban": {"father"}, "iris": {"mother"}, "milbeny": {"wife"}}
-    assert ask.question_people("what's still open for my mom?", folks) == {"iris"}
-    assert ask.question_people("what did my dad's DEXA scan show?", folks) == {"esteban"}
-    assert ask.question_people("who is milbeny's neurologist?", folks) == {"milbeny"}
-    assert ask.question_people("is LASIK a good idea for me?", folks) == {"kelvin"}
+    folks = {"marvin": {"self"}, "gustavo": {"father"}, "nora": {"mother"}, "belinda": {"wife"}}
+    assert ask.question_people("what's still open for my mom?", folks) == {"nora"}
+    assert ask.question_people("what did my dad's blood test show?", folks) == {"gustavo"}
+    assert ask.question_people("who is belinda's dentist?", folks) == {"belinda"}
+    assert ask.question_people("is a flu shot a good idea for me?", folks) == {"marvin"}
     assert ask.question_people("what is on the pending list", folks) == set()
 
 
@@ -151,15 +151,15 @@ def test_readme_keeps_confirm_over_possible_sibling(tmp_path):
 
 
 def test_group_and_multi_person_questions():
-    folks = {"kelvin": {"self"}, "esteban": {"father"}, "iris": {"mother"}, "milbeny": {"wife"}, "kelsie": {"daughter"}}
+    folks = {"marvin": {"self"}, "gustavo": {"father"}, "nora": {"mother"}, "belinda": {"wife"}, "joanie": {"daughter"}}
     for q in ["what meds are my parents on?", "when are my kids' checkups?", "do my children need shots?",
               "what does my family owe?", "what's our insurance plan?"]:
         assert ask.question_people(q, folks) == set(), q
-    assert ask.question_people("when did my wife and I see the doctor?", folks) == {"milbeny", "kelvin"}
-    assert ask.question_people("my dad and my mom's appointments", folks) == {"esteban", "iris"}
+    assert ask.question_people("when did my wife and I see the doctor?", folks) == {"belinda", "marvin"}
+    assert ask.question_people("my dad and my mom's appointments", folks) == {"gustavo", "nora"}
     assert ask.question_people("what did my grandma say?", folks) == set()
 
 
 def test_person_filter_only_under_global_documents():
-    assert ask.person_of("/Users/x/agents/global/documents/iris/medical/a.md") == "iris"
-    assert ask.person_of("/Users/x/projects/documents/iris/a.md") is None
+    assert ask.person_of("/Users/x/agents/global/documents/nora/medical/a.md") == "nora"
+    assert ask.person_of("/Users/x/projects/documents/nora/a.md") is None

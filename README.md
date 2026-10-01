@@ -70,7 +70,7 @@ Tested on macOS and Linux. Windows is untested.
 | Scope | Detail |
 |---|---|
 | Reads | Your connected folders and configured skill roots. |
-| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/`, `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (background-refresh locks, cooldowns and logs that name your sets and files) in the checkout. |
+| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/`, `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (background-refresh locks, cooldowns and logs that name your sets and files) in the checkout. The chat CLI (`install.sh`) also writes its config, which holds your API key, to `~/.config/superjev/config.json` (or `$XDG_CONFIG_HOME/superjev/`) and a launcher at `~/.local/bin/superjev`. |
 | Leaves the machine | Sent to the TypeSafe provider: connected file text (to check each description), descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. |
 | Provider receives | The above; never files the secret scan holds — those stay local. |
 | Never leaves | Files the secret scan holds, and vault-style folders the inventory skips. |
@@ -81,11 +81,14 @@ Tested on macOS and Linux. Windows is untested.
 python3 skills/super-jev/setup.py --uninstall
 ```
 
-Removes the state directory (`$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`,
-including the memory config setup wrote, connected pointers and cached answers),
-`skills/super-jev/prepare-cache/` and `skills/super-jev/ledger/` in this checkout,
-and any `~/.claude/skills` links that point into this checkout. Your own files are
-never touched. Delete the checkout folder to remove the code.
+Removes everything Super Jev wrote: the state directory (`$SUPERJEV_STATE_DIR` or
+`~/.local/state/super-jev`: the memory config, connected pointers, cached answers and
+logs), `skills/super-jev/prepare-cache/`, `ledger/` and `autoheal-state/` in this
+checkout, the chat CLI's config (`~/.config/superjev/config.json`, it holds your API key),
+`~/.local/bin/superjev` if `install.sh` made it for this checkout, and any
+`~/.claude/skills` links that point into this checkout. It deletes only the names Super Jev
+writes in each folder; a file of yours in the same folder stays, and the output lists it.
+Your own files are never touched. Delete the checkout folder to remove the code.
 
 ## Doors
 

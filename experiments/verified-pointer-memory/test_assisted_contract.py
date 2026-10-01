@@ -14,7 +14,7 @@ class AssistedContractTests(unittest.TestCase):
         self.addCleanup(self.f.tearDown)
         self.registry, self.manifest = self.f.dataset()
         command, self.calls = self.f.provider(json.dumps({'status': 'no-match', 'trace': []}))
-        self.config = self.f.config(self.registry, command, allowAgentAssist=True)
+        self.config = self.f.config(self.registry, command)
         self.f.register(self.config)
 
     def action(self, **body):
@@ -78,14 +78,6 @@ class AssistedContractTests(unittest.TestCase):
                        self.action(action='attempt', attemptId=initial['attemptId'], principal='bob')]:
             self.assertNotIn(result['status'], ['ready', 'verified-cache-hit', 'ok'])
             self.assertNotIn('The synthetic launch policy is blue.', json.dumps(result))
-
-    def test_disabled_assistance_does_not_expose_recovery_evidence(self):
-        initial = self.search()
-        config = json.loads(self.config.read_text());config['allowAgentAssist'] = False
-        self.config.write_text(json.dumps(config))
-        result = self.assist(initial)
-        self.assertNotEqual(result['status'], 'ready')
-        self.assertNotIn('The synthetic launch policy is blue.', json.dumps(result))
 
     def test_source_mutation_blocks_assistance_and_approval(self):
         initial = self.search()
