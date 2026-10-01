@@ -1700,23 +1700,41 @@ def skill_note(name: str) -> str:
 def skill_question(question: str) -> bool:
     return os.environ.get("SUPERJEV_SKILLS", "1") != "0" and bool(SKILL_Q_RE.search(question))
 
-def skill_catalog(question: str) -> list:
-    """[(name, SKILL.md path)] from the skills connector; [] on any failure."""
+SKILL_SEARCH_TIMEOUT = 60
+
+def skill_search(request: str) -> tuple:
+    """(status, [(label, SKILL.md path)], failure or ""): the one reader of the skills connector, for asks
+    and preflight. One labelling rule: only an exact name or a live judge pick is a match; everything else
+    (local ranking, doubt, a clarify question, a fallback) is an "(unverified guess)". A failure is never
+    an empty answer."""
     try:
         r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "dispatch.py"),
-                            "skills", "--request", question], capture_output=True, text=True, timeout=60)
+                            "skills", "--request", request], capture_output=True, text=True,
+                           timeout=SKILL_SEARCH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "", [], f"timed out after {SKILL_SEARCH_TIMEOUT}s"
+    except OSError as e:
+        return "", [], str(e)
+    try:
         out = json.loads(r.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
+    except ValueError:
+        out = None
     if not isinstance(out, dict):
-        return []
-    if out.get("status") == "error":
-        print(f"skill search failed: {str(out.get('error') or 'unknown cause')[:200]}", file=sys.stderr)
-        return []
-    # Only a live judge pick or an exact name is a match; local ranking and doubt are guesses.
-    guess = GUESS if not (out.get("status") == "exact" or (out.get("status") == "suggestions" and out.get("source") == "jev")) else ""
-    return [((c.get("name") or c.get("id") or "") + (" " + guess if guess else ""), c["path"]) for c in out.get("candidates") or []
-            if isinstance(c, dict) and isinstance(c.get("path"), str)]
+        return "", [], f"exit {r.returncode}: unreadable output: {(r.stdout or '').strip()[-200:]}"
+    status = out.get("status") or ""
+    if status == "error" or r.returncode:
+        return status, [], str(out.get("error") or out.get("reason") or f"exit {r.returncode}")[:200]
+    match = status == "exact" or (status == "suggestions" and out.get("source") == "jev")
+    picks = [((c.get("name") or c.get("id") or "") + ("" if match else " " + GUESS), c["path"] if isinstance(c.get("path"), str) else "")
+             for c in out.get("candidates") or [] if isinstance(c, dict)]
+    return status, picks, ""
+
+def skill_catalog(question: str) -> list:
+    """[(name, SKILL.md path)] for the ask path; [] on any failure, which prints one cause line."""
+    _status, picks, err = skill_search(question)
+    if err:
+        print(f"skill search failed: {err}", file=sys.stderr)
+    return [(name, path) for name, path in picks if path]
 
 def path_rank(question: str, path: str) -> tuple:
     """Tie-break for equal scores: more question words in the file's name or folder
@@ -3467,23 +3485,13 @@ def preflight(principal: str, args: list) -> int:
         report["knowledge"] = answers
         # New ground only when every ask ran and none found a confirmed strong note; a failed ask proves nothing.
         report["new_ground"] = False if strong else (None if failed else True)
-    if skill and not problems:
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"request": f"a skill that {skill}", "context": []}, f)
-        out, err = _run_ask([sys.executable, str(skill_dir_for_display() / "dispatch.py"), "skills", "--request-file", f.name])
-        os.unlink(f.name)
-        found = None
-        if not err:
-            try:
-                data = json.loads(out)
-                found = [c.get("name") for c in data.get("candidates", []) if isinstance(c, dict)]
-                if data.get("status") == "error" or data.get("error"):
-                    found, err = None, str(data.get("error") or data.get("reason") or "status error")[:200]
-            except (ValueError, AttributeError):
-                err = "unreadable output: " + out.strip()[:200]
+    if skill:
+        # A paid check runs when its own inputs are ready: --about reads the connections (so it waits for
+        # READY); --skill reads skill folders, which a fresh install already has.
+        _status, picks, err = skill_search(f"a skill that {skill}")
         if err:
             warnings.append(f"existing-skill search failed ({err}); not proof that no skill does this")
-        report["existing_skills"] = found
+        report["existing_skills"] = None if err else [name for name, _path in picks]
     verdict = "NOT READY" if problems else ("READY WITH WARNINGS" if warnings else "READY")
     report.update(verdict=verdict, problems=problems, warnings=warnings)
     if as_json:
