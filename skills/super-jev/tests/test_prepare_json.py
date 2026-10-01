@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Frozen contract tests (2026-10-01), contract item C1, PR 2: `prepare_bulk.py --json`.
+
+With --json, a connect prints exactly one JSON object on stdout (schema v: 1) and exits with the code
+text mode gives: 0 all connected, 1 something failed, 2 refused, 3 something held. The object is
+{connected, held [{path, why}], failed [{path, why}], skipped [{what, count, way_in}], refused {why}};
+a field with nothing in it is left out, and nothing in it is a score or a note's text. Text mode
+prints from the same result, so the two are held together here. Made-up company Quillbrook, made-up
+user "sam"; no network, no real key, no Jev call.
+
+    python3 -m pytest skills/super-jev/tests/test_prepare_json.py -q
+"""
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+SKILL = Path(__file__).resolve().parent.parent
+spec = importlib.util.spec_from_file_location("pb_json", SKILL / "prepare_bulk.py")
+pb = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pb)
+
+OK = {"state": "SUPPORTED", "confidence": 0.95, "secs": 0}
+COUNTS = re.compile(r"^CONNECTED (\d+), HELD (\d+), FAILED (\d+)\b", re.M)
+TOKEN = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7cF0hJ3kLm"  # made up, split so a secret scan does not flag this file
+OTHER_TYPES = "file(s) of other types"  # the connect SKIP rule's own words
+
+
+def folder(tmp_path, **files):
+    root = tmp_path / "Quillbrook Notes"  # a path with a space
+    root.mkdir(exist_ok=True)
+    for name, text in files.items():
+        (root / name).write_text(text)
+    return root
+
+
+def mixed(tmp_path):
+    """The DESIGN case: 2 notes, 1 code file, 1 note holding a made-up token."""
+    return folder(tmp_path, **{"warranty.md": "# Warranty\n\nParts are covered for 24 months.\n",
+                               "returns.md": "# Returns\n\nItems come back within 30 days.\n",
+                               "calc.py": "x = 1\n",
+                               "keys.md": f"# Keys\n\nThe deploy token is {TOKEN}\n"})
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    """A fake engine: every note drafts and passes, every part connects. Returns the connect calls."""
+    calls = []
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "0")
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
+    monkeypatch.setattr(pb, "gate", lambda *a, **k: OK)
+    monkeypatch.setattr(pb, "gate_many", lambda p, claims, *a, **k: [OK for _ in claims], raising=False)
+    monkeypatch.setattr(pb, "connect_part", lambda pointer, principals, files, cache, shareable=False:
+                        calls.append(pointer) or {"connected": True})
+    return calls
+
+
+@pytest.fixture
+def go(tmp_path, monkeypatch, capfd):
+    """run(root, *extra, json_mode=True) -> (exit code, stdout). Each run has its own prepare-cache."""
+    n = [0]
+
+    def run(root, *extra, json_mode=True, pointer="qb"):
+        n[0] += 1
+        monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / f"cache{n[0]}")
+        argv = ["prepare_bulk.py", "--root", str(root), "--pointer", pointer, "--principal", "sam",
+                "--no-findability", "--no-shared", "--writer", "claude", *extra]
+        monkeypatch.setattr(sys, "argv", argv + (["--json"] if json_mode else []))
+        capfd.readouterr()
+        code = pb.main()
+        return code, capfd.readouterr().out
+    return run
+
+
+def one_object(out):
+    """stdout is exactly one line holding exactly one JSON object, v: 1."""
+    assert out.endswith("\n") and len(out.splitlines()) == 1, out
+    obj = json.loads(out)
+    assert isinstance(obj, dict) and obj["v"] == 1
+    return obj
+
+
+def test_clean_connect_is_one_object_exit_0_and_empty_fields_are_left_out(tmp_path, fake, go):
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nParts are covered.\n", "returns.md": "# Returns\n\nBack in 30 days.\n"}))
+    obj = one_object(out)
+    assert code == 0
+    assert obj == {"v": 1, "connected": 2}
+    assert fake == ["qb"]
+
+
+def test_mixed_folder_holds_one_path_only_skips_one_with_its_way_in_and_exits_3(tmp_path, fake, go):
+    code, out = go(mixed(tmp_path))
+    obj = one_object(out)
+    assert code == 3
+    assert obj["connected"] == 2
+    assert set(obj) == {"v", "connected", "held", "skipped"}
+    assert len(obj["held"]) == 1 and set(obj["held"][0]) == {"path", "why"}
+    assert obj["held"][0]["path"].endswith("keys.md") and obj["held"][0]["why"]
+    assert TOKEN not in out and "deploy token" not in out
+    [row] = obj["skipped"]
+    assert set(row) == {"what", "count", "way_in"} and row["count"] == 1
+    assert row["what"] == f"{OTHER_TYPES} (.py 1)" and ".md" in row["way_in"]
+
+
+def test_over_max_files_is_refused_with_its_reason_and_exit_2_and_no_work(tmp_path, fake, go):
+    root = folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(3)})
+    code, out = go(root, "--max-files", "2")
+    obj = one_object(out)
+    assert code == 2
+    assert obj == {"v": 1, "connected": 0, "refused": {"why": obj["refused"]["why"]}}
+    assert "3 files exceed" in obj["refused"]["why"]
+    assert fake == []
+
+
+def test_a_part_that_will_not_connect_fails_each_of_its_notes_with_a_reason_and_exits_1(tmp_path, monkeypatch, fake, go):
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": False, "why": "the engine refused it"})
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}))
+    obj = one_object(out)
+    assert code == 1
+    assert obj["connected"] == 0 and "held" not in obj and "refused" not in obj
+    assert sorted(Path(f["path"]).name for f in obj["failed"]) == ["returns.md", "warranty.md"]
+    assert all(f["why"] == "the engine refused it" for f in obj["failed"])
+
+
+def test_a_part_with_no_reason_still_gets_a_plain_one(tmp_path, monkeypatch, fake, go):
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": False})
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n"}))
+    obj = one_object(out)
+    assert code == 1 and obj["failed"][0]["why"].strip()
+
+
+def test_a_note_the_check_rejects_fails_alone_with_no_score_and_none_of_the_judges_words(tmp_path, monkeypatch, fake, go):
+    bad = {"state": "NOT_SUPPORTED", "confidence": 0.31, "secs": 0, "reason": "quoted XYZZY from the note"}
+    monkeypatch.setattr(pb, "gate", lambda desc, path: bad if path.endswith("returns.md") else OK)
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}))
+    obj = one_object(out)
+    assert code == 1 and obj["connected"] == 1
+    [row] = obj["failed"]
+    assert row["path"].endswith("returns.md") and row["why"]
+    assert "XYZZY" not in out and "0.31" not in out and "confidence" not in out and "score" not in out
+
+
+def test_a_note_the_writer_drafts_nothing_for_fails_with_a_reason(tmp_path, monkeypatch, fake, go):
+    monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {})
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n"}))
+    obj = one_object(out)
+    assert code == 1 and obj["connected"] == 0
+    assert obj["failed"][0]["path"].endswith("warranty.md") and "draft" in obj["failed"][0]["why"]
+
+
+def test_a_folder_with_no_markdown_fails_on_the_folder_and_still_says_what_was_left_out(tmp_path, fake, go):
+    root = folder(tmp_path, **{"calc.py": "x = 1\n", "data.csv": "a,b\n"})
+    code, out = go(root)
+    obj = one_object(out)
+    assert code == 1 and obj["connected"] == 0
+    assert obj["failed"][0]["path"] == str(root) and ".md" in obj["failed"][0]["why"]
+    assert obj["skipped"] == [{"what": f"{OTHER_TYPES} (.csv 1, .py 1)", "count": 2, "way_in": "only .md files connect"}]
+
+
+def test_a_writer_that_fails_fails_the_run_with_its_reason_and_exits_1(tmp_path, monkeypatch, fake, go):
+    def broken(items, *a, **k):
+        raise pb.WriterError("writer exited with status 1")
+    monkeypatch.setattr(pb, "writer", broken)
+    root = folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n"})
+    code, out = go(root)
+    obj = one_object(out)
+    assert code == 1 and obj["failed"] == [{"path": str(root), "why": "description writer failed: writer exited with status 1"}]
+
+
+def test_a_crash_is_still_one_object_and_exit_1(tmp_path, monkeypatch, fake, go, capfd):
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(pb, "connect_part", boom)
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n"}))
+    obj = one_object(out)
+    assert code == 1 and obj["failed"] and "boom" in obj["failed"][0]["why"]
+
+
+def test_a_missing_folder_is_refused_and_exit_2(tmp_path, fake, go):
+    code, out = go(tmp_path / "nowhere")
+    obj = one_object(out)
+    assert code == 2 and obj["refused"]["why"].startswith("--root is not a folder") and "failed" not in obj
+
+
+def test_missing_required_flags_are_refused_in_json_not_left_to_argparse_text(tmp_path, monkeypatch, capfd):
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--json", "--root", str(tmp_path)])
+    code = pb.main()
+    obj = one_object(capfd.readouterr().out)
+    assert code == 2 and "--principal" in obj["refused"]["why"]
+
+
+def test_an_argument_error_under_json_is_one_refused_object_and_exit_2(tmp_path, monkeypatch, capfd):
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--json", "--root", str(tmp_path), "--limit", "many"])
+    with pytest.raises(SystemExit) as e:
+        pb.main()
+    obj = one_object(capfd.readouterr().out)
+    assert e.value.code == 2 and "--limit" in obj["refused"]["why"]
+
+
+def test_an_argument_error_without_json_is_still_argparse_text_on_stderr(tmp_path, monkeypatch, capfd):
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--root", str(tmp_path), "--limit", "many"])
+    with pytest.raises(SystemExit) as e:
+        pb.main()
+    cap = capfd.readouterr()
+    assert e.value.code == 2 and cap.out == "" and "usage:" in cap.err
+
+
+def test_json_does_not_cover_list_so_it_is_refused_not_printed_as_a_table(tmp_path, monkeypatch, capfd):
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--json", "--list", "--pointer", "qb"])
+    code = pb.main()
+    obj = one_object(capfd.readouterr().out)
+    assert code == 2 and "--list" in obj["refused"]["why"]
+
+
+def test_a_held_note_whose_name_carries_a_secret_shows_the_name_without_it(tmp_path, fake, go):
+    root = folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "password-hunter2xyz-notes.md": "# Notes\n\nPlain words.\n"})
+    code, out = go(root)
+    obj = one_object(out)
+    assert code == 3 and "hunter2xyz" not in out
+    assert obj["held"][0]["path"].endswith("password-[REDACTED].md")
+
+
+def scenario_clean(tmp_path, monkeypatch):
+    return folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}), []
+
+
+def scenario_mixed(tmp_path, monkeypatch):
+    return mixed(tmp_path), []
+
+
+def scenario_part_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(pb, "connect_part", lambda *a, **k: {"connected": False, "why": "no"})
+    return folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}), []
+
+
+def scenario_check_rejects_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "NOT_SUPPORTED", "confidence": 0.3, "secs": 0}
+                        if path.endswith("returns.md") else OK)
+    return folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}), []
+
+
+def scenario_refused(tmp_path, monkeypatch):
+    return folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(3)}), ["--max-files", "2"]
+
+
+@pytest.mark.parametrize("scenario", [scenario_clean, scenario_mixed, scenario_part_fails, scenario_check_rejects_one,
+                                      scenario_refused])
+def test_text_and_json_agree_on_exit_code_and_on_every_count(scenario, tmp_path, monkeypatch, fake, go):
+    root, extra = scenario(tmp_path, monkeypatch)
+    text_code, text_out = go(root, *extra, json_mode=False)
+    json_code, json_out = go(root, *extra, json_mode=True)
+    obj = one_object(json_out)
+    assert json_code == text_code
+    assert text_code == {"scenario_clean": 0, "scenario_mixed": 3, "scenario_part_fails": 1,
+                         "scenario_check_rejects_one": 1, "scenario_refused": 2}[scenario.__name__]
+    assert not any(line.startswith('{"v"') for line in text_out.splitlines())  # text mode prints no JSON
+    m = COUNTS.search(text_out)
+    if m:
+        assert (obj["connected"], len(obj.get("held", [])), len(obj.get("failed", []))) == tuple(map(int, m.groups()))
+        assert "refused" not in obj
+    else:
+        assert text_code == 2 and f"REFUSED: {obj['refused']['why']}" in text_out
+    # a non-zero code always comes with something the person can read
+    if json_code:
+        assert obj.get("refused") or obj.get("failed") or obj.get("held")
+
+
+def test_text_mode_keeps_its_last_line_its_held_lines_and_its_exit_code(tmp_path, fake, go):
+    code, out = go(mixed(tmp_path), json_mode=False)
+    assert code == 3 and out.rstrip().splitlines()[-1].startswith("CONNECTED 2, HELD 1, FAILED 0")
+    assert "  HELD  keys.md  (card/password-like text;" in out
+
+
+def test_skipped_rows_are_the_skip_lines_text_mode_prints_one_for_one(tmp_path, fake, go):
+    """Every reason the connect left files out for is one SKIP line in text and one row in --json, from the
+    same table, so the two cannot say different things (and a reason with no way in has no way_in)."""
+    root = folder(tmp_path, **{"notes.md": "# Notes\n\nText.\n", "calc.py": "x = 1\n", "data.txt": "a\n",
+                               ".hidden.md": "# H\n\nh\n", "blank.md": "\n",
+                               "superjev-test-run.md": "# Run\n\nQuestions.\n", "superjev-test-two.md": "# Two\n\nQ.\n"})
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "n.md").write_text("# N\n\nn\n")
+    text_code, text = go(root, json_mode=False)
+    obj = one_object(go(root)[1])
+    assert text_code == 0 and obj["connected"] == 1
+    # the line text mode already printed for test/scratch files, unchanged
+    assert ("  SKIP  2 test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); "
+            "name one exactly with --name to connect it") in text
+    from_rows = [f"  SKIP  {r['count']} {r['what']}" + (f"; {r['way_in']}" if "way_in" in r else "") for r in obj["skipped"]]
+    assert len(from_rows) == 5 and from_rows == [x for x in text.splitlines() if x.startswith("  SKIP  ")]
+    assert [r["what"] for r in obj["skipped"] if "way_in" not in r] == ["empty .md file(s)"]
+
+
+def test_a_refusal_carries_only_why_even_when_notes_were_held_or_left_out(tmp_path, fake, go):
+    """A refused run did nothing, so the app can show the refusal alone, never "Held back" under "Not connected"."""
+    root = folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(3)})
+    (root / "keys.md").write_text(f"# Keys\n\nThe deploy token is {TOKEN}\n")
+    (root / "calc.py").write_text("x = 1\n")
+    code, text = go(root, "--max-files", "2", json_mode=False)
+    assert code == 2 and "  HELD  keys.md" in text and "  SKIP  1 file(s) of other types" in text
+    code, out = go(root, "--max-files", "2")
+    obj = one_object(out)
+    assert code == 2 and set(obj) == {"v", "connected", "refused"} and obj["connected"] == 0
+
+
+def test_when_every_note_is_held_nothing_connected_exit_1_and_connected_is_the_signal(tmp_path, fake, go):
+    """Exit 1 with held notes and no failed row (as in text mode: CONNECTED 0, HELD 1, FAILED 0). The app
+    reads connected == 0, not a failed row."""
+    root = folder(tmp_path, **{"keys.md": f"# Keys\n\nThe deploy token is {TOKEN}\n"})
+    code, text = go(root, json_mode=False)
+    assert code == 1 and "CONNECTED 0, HELD 1, FAILED 0" in text
+    code, out = go(root)
+    obj = one_object(out)
+    assert code == 1 and obj["connected"] == 0 and set(obj) == {"v", "connected", "held"} and TOKEN not in out
+    assert fake == []
+
+
+def test_a_crash_after_one_part_connected_still_reports_it(tmp_path, monkeypatch, fake, go):
+    calls = []
+
+    def second_part_crashes(pointer, principals, files, cache, shareable=False):
+        calls.append(pointer)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return {"connected": True}
+    monkeypatch.setattr(pb, "connect_part", second_part_crashes)
+    code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}),
+                   "--limit", "1")
+    obj = one_object(out)
+    assert code == 1 and calls == ["qb", "qb-2"] and obj["connected"] == 1 and "boom" in obj["failed"][0]["why"]
+
+
+def test_real_engine_free_connect_json_with_the_builtin_writer_and_no_key(tmp_path, monkeypatch, capfd):
+    """R3: a real connect (no key, no model call): 2 notes connect, the note with a token is held, the code
+    file is left out, and the pointer is really registered."""
+    state = tmp_path / "state"
+    (state / "_memory").mkdir(parents=True)
+    (state / "_memory" / "config.json").write_text(json.dumps({"db": "memory.sqlite3", "registry": "registry.json"}))
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(state))
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("SUPERJEV_REPO", raising=False)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "gate", lambda *a, **k: pytest.fail("a free connect must not call the judge"))
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--root", str(mixed(tmp_path)), "--pointer", "qb", "--principal", "sam",
+                                      "--writer", "builtin", "--no-shared", "--json"])
+    code = pb.main()
+    obj = one_object(capfd.readouterr().out)
+    assert code == 3
+    assert obj["connected"] == 2 and len(obj["held"]) == 1 and obj["held"][0]["path"].endswith("keys.md")
+    assert obj["skipped"][0]["count"] == 1 and TOKEN not in json.dumps(obj)
+    assert '"qb"' in (state / "_memory" / "registry.json").read_text()

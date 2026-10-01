@@ -101,12 +101,18 @@ Pipeline per run:
   a refresh without the flag keeps the mark it had.
 Every run ends with one line, `CONNECTED n, HELD m, FAILED k`, and exits 0 only when m and k are 0
 (1 if anything failed, 3 if anything was held), so a run that left files out never reads as a complete connect.
+Exit 1 also means nothing was left to connect (every file failed or was held), and exit 2 means it refused.
+--json prints exactly one JSON object instead of the text (the same run, the same exit code): v 1 and
+{connected, held [{path, why}], failed [{path, why}], skipped [{what, count, way_in}], refused {why}}. A field with
+nothing in it is left out; connected is always there; a refused run carries only refused. No scores and no note
+text, only paths and plain reasons. The skipped rows are the SKIP lines. It covers a connect only: --list with
+--json is refused (exit 2).
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, fnmatch, functools, hashlib, json, math, os, re, shlex, shutil, subprocess, sys, time, unicodedata
+import argparse, contextlib, fnmatch, functools, hashlib, io, json, math, os, re, shlex, shutil, subprocess, sys, time, traceback, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -186,6 +192,9 @@ def gate_pack(items: list) -> dict:
     return {p: tuple(v) for p, v in out.items()}
 
 CACHE_DIR = HERE / "prepare-cache"
+# What one run found, for both printers: the text lines and --json read the same rows
+# (skipped, held, failed, refused, connected). main() clears it at the start of a run.
+_RESULT = {}
 # Names of the files written into CACHE_DIR, one per line; uninstall deletes only these.
 WRITTEN_MANIFEST = ".superjev-written"
 
@@ -773,23 +782,23 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
 
 
 # Every .md file a DEFAULT rule leaves out of a connect, and every file of another type that is not
-# hidden, is counted under one of these reasons and printed as one "  SKIP  ..." line (counts plus
-# folder names and extensions, never file names or paths), with the way in where there is one. Files
-# the user's own flags leave out (--name, --exclude, --no-recurse) are never counted. Dict order is
-# print order.
+# hidden, is counted under one of these reasons: (what, way in), the way in empty where there is none.
+# One reason is one "  SKIP  N what; way in" line (counts plus folder names and extensions, never file
+# names or paths) and one {what, count, way_in} row of --json. Files the user's own flags leave out
+# (--name, --exclude, --no-recurse) are never counted. Dict order is print order.
 SKIP_REASONS = {
-    "link": "{n} linked file(s) point outside every --root; add --allow-target FOLDER to admit them",
-    "name": "{n} .md file(s) with backup or credential-style names (.bak, logins, *-secret); never connected",
-    "folder": "{n} .md file(s) in folders skipped by default: {names}; "
-              "to connect one, connect that folder as its own set (--root FOLDER --pointer NEW-NAME)",
-    "folder_other": "{n} file(s) of other types in folders skipped by default: {names}; only .md files connect",
-    "hidden": "{n} hidden .md file(s); rename to connect",
-    "dataset": "{n} file(s) in prepared dataset copies (.local/retrieval-datasets/); "
-               "they connect through their own dataset pointer",
-    "test": "{n} test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/); name one exactly with --name to connect it",
-    "worktree": "{n} file(s) inside git worktree copies (.claude/worktrees/ or a worktree checkout)",
-    "empty": "{n} empty .md file(s)",
-    "types": "{n} file(s) of other types ({names}); only .md files connect",
+    "link": ("linked file(s) point outside every --root", "add --allow-target FOLDER to admit them"),
+    "name": (".md file(s) with backup or credential-style names (.bak, logins, *-secret); never connected", ""),
+    "folder": (".md file(s) in folders skipped by default: {names}",
+               "to connect one, connect that folder as its own set (--root FOLDER --pointer NEW-NAME)"),
+    "folder_other": ("file(s) of other types in folders skipped by default: {names}", "only .md files connect"),
+    "hidden": ("hidden .md file(s)", "rename to connect"),
+    "dataset": ("file(s) in prepared dataset copies (.local/retrieval-datasets/)",
+                "they connect through their own dataset pointer"),
+    "test": ("test/scratch output file(s) (e.g. *superjev-test*, ops/sj*/)", "name one exactly with --name to connect it"),
+    "worktree": ("file(s) inside git worktree copies (.claude/worktrees/ or a worktree checkout)", ""),
+    "empty": ("empty .md file(s)", ""),
+    "types": ("file(s) of other types ({names})", "only .md files connect"),
 }
 SKIP_NAMES_SHOWN = 5  # folders or extensions named per line; the rest is "+K more"
 
@@ -815,9 +824,11 @@ def extension_label(name: str) -> str:
     return ext if ext in KNOWN_EXTENSIONS else "other"
 
 
-def print_skips(skips: dict) -> None:
-    """One SKIP line per reason in `skips` ({reason: {folder or extension: count}})."""
-    for reason, text in SKIP_REASONS.items():
+def skip_rows(skips: dict) -> list:
+    """One {what, count, way_in} row per reason in `skips` ({reason: {folder or extension: count}}), in print
+    order; way_in is left out where the reason has none."""
+    rows = []
+    for reason, (what, way_in) in SKIP_REASONS.items():
         counts = skips.get(reason)
         if not counts:
             continue
@@ -826,7 +837,14 @@ def print_skips(skips: dict) -> None:
         names = ", ".join(fmt.format(k, n) for k, n in ranked[:SKIP_NAMES_SHOWN])
         if len(ranked) > SKIP_NAMES_SHOWN:
             names += f", +{len(ranked) - SKIP_NAMES_SHOWN} more"
-        print("  SKIP  " + text.format(n=sum(counts.values()), names=names))
+        rows.append({"what": what.format(names=names), "count": sum(counts.values()), **({"way_in": way_in} if way_in else {})})
+    return rows
+
+
+def print_skips(rows: list) -> None:
+    """One SKIP line per row; --json prints the same rows."""
+    for r in rows:
+        print(f"  SKIP  {r['count']} {r['what']}" + (f"; {r['way_in']}" if "way_in" in r else ""))
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
@@ -917,7 +935,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             if path_has_secret(p.name) or path_has_secret(rp.name):
                 held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
             files.append(p)
-    print_skips(skips)
+    _RESULT["skipped"] = skip_rows(skips)
+    print_skips(_RESULT["skipped"])
     return files, held
 
 
@@ -1109,6 +1128,11 @@ def connect_outcome(connected: int, held: int, failed: int, note: str = "") -> i
     return 1 if failed else 3 if held else 0
 
 
+def _engine_word(answer) -> str:
+    """The engine's own short word for what went wrong (its reason or status), never file text."""
+    return str((answer or {}).get("reason") or (answer or {}).get("status") or "no answer")[:80]
+
+
 def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
     Labels ride in the bracketed description only for a file whose stage-2 label gate passed
@@ -1136,7 +1160,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     held = [s["path"] for s in sources if payload_has_secret(s)]
     if held:
         print(f"connect held for {pointer}: secret-like text in {', '.join(held)}; not sent")
-        return {"connected": False}
+        return {"connected": False, "why": "secret-like text in the description; not sent"}
     req = {"action": "connect", "pointer": pointer, "principals": list(principals), "sources": sources}
     if shareable:
         req["shareable"] = True
@@ -1156,7 +1180,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     prev = memory(req)
     if prev.get("status") != "preparation-required":
         print(f"connect preview failed for {pointer}:", json.dumps(prev)[:300])
-        return {"connected": False}
+        return {"connected": False, "why": f"connect preview failed ({_engine_word(prev)})"}
     # The backend echoes each path in realpath form: a symlinked file (a skill folder whose SKILL.md
     # links into tools/) came back under its target and crashed the skills reconnect with a KeyError.
     hashes = {os.path.realpath(x["path"]): x["sha256"] for x in prev["sources"]}
@@ -1182,7 +1206,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     print(f"connect: {reg.get('status')} pointer={reg.get('pointer')} sources={len(reg.get('sources', []))}")
     if not connected:
         print(json.dumps(reg)[:300])
-    return {"connected": connected}
+    return {"connected": connected, **({} if connected else {"why": f"the engine did not register it ({_engine_word(reg)})"})}
 
 
 def load_cache_files(pointer: str) -> dict:
@@ -1482,8 +1506,60 @@ def principal_name(name: str) -> str:
     return name
 
 
+def refuse(why: str) -> int:
+    """A run that did nothing: print REFUSED and return exit code 2. --json reads the same reason."""
+    _RESULT["refused"] = why
+    print(f"REFUSED: {why}")
+    return 2
+
+
+def fail(path, why: str) -> None:
+    """One thing that failed: a file, or (for a whole-run failure) the first root, with a plain reason."""
+    _RESULT.setdefault("failed", []).append((str(path), why))
+
+
+def result_object() -> dict:
+    """The --json object, built from the rows the text lines were printed from. `connected` is always
+    there; every other field is left out when empty. Paths lose any secret-looking name part. A refused
+    run did nothing, so it reports only why it refused."""
+    if _RESULT.get("refused"):
+        return {"v": 1, "connected": 0, "refused": {"why": _RESULT["refused"]}}
+
+    def rows(key):
+        return [{"path": redact_path_secrets(str(p)), "why": why} for p, why in _RESULT.get(key, [])]
+    out = {"connected": _RESULT.get("connected", 0), "held": rows("held"), "failed": rows("failed"),
+           "skipped": _RESULT.get("skipped", [])}
+    return {"v": 1, **{k: v for k, v in out.items() if v or k == "connected"}}
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message):
+        """Under --json an argument error is one more refusal: the same object, exit 2."""
+        if "--json" in sys.argv[1:]:
+            _RESULT.clear()
+            _RESULT["refused"] = message
+            print(json.dumps(result_object()))
+            raise SystemExit(2)
+        super().error(message)
+
+
+def run_json(a) -> int:
+    """--json: do the run exactly as text mode does, its lines held back, then print one object and
+    return the same exit code. A crash is a failure (exit 1, as in text mode) with the traceback on stderr."""
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = run(a)
+    except Exception as e:
+        traceback.print_exc()
+        text = f"{type(e).__name__}: {e}"
+        fail(given_path(a.roots[0]) if a.roots else "", "internal error: " + (type(e).__name__ if has_secret(text) else text))
+        rc = 1
+    print(json.dumps(result_object()))
+    return rc
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = _Parser()
     ap.add_argument("--root", dest="roots", action="append")
     ap.add_argument("--pointer")
     ap.add_argument("--principal", dest="principals", action="append", default=[], type=principal_name,
@@ -1513,6 +1589,9 @@ def main() -> int:
                          "or an absolute path, and keep keys out of it (it is stored in prepare-cache/ and shown in the "
                          "banner). Falls back to the SUPERJEV_WRITER_COMMAND env var when omitted; the env var is not recorded")
     ap.add_argument("--no-connect", action="store_true")
+    ap.add_argument("--json", action="store_true",
+                    help="print one JSON object (v 1: connected, held, failed, skipped, refused) instead of text; "
+                         "same run, same exit code; a connect only")
     ap.add_argument("--no-findability", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--findability", action="store_true",
                     help="after connecting, search each file's own sample question (one search per file, "
@@ -1530,9 +1609,17 @@ def main() -> int:
     ap.add_argument("--within-days", type=int, default=None)
     a = ap.parse_args()
     a.no_findability = a.no_findability or not a.findability
+    _RESULT.clear()
+    return run_json(a) if a.json else run(a)
+
+
+def run(a) -> int:
+    """One connect (or --list) as text mode prints it; --json reads the same rows."""
+    if a.json and a.list:
+        return refuse("--json covers a connect only; --list prints its own table")
     if a.list:
         if not a.pointer and not a.principals:
-            print("REFUSED: --list needs --pointer and/or --principal"); return 2
+            return refuse("--list needs --pointer and/or --principal")
         rows, excluded = [], 0
         if a.pointer:
             r, e = list_cmd(a.pointer, a.status, a.kind, a.within_days, a.subject)
@@ -1552,7 +1639,7 @@ def main() -> int:
         try:
             replay_recipe(a)
         except (ValueError, argparse.ArgumentTypeError) as e:
-            print(f'REFUSED: {e}'); return 2
+            return refuse(str(e))
     if a.limit is None:
         a.limit = 50
     # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
@@ -1564,16 +1651,16 @@ def main() -> int:
     if a.writer_model is None:
         a.writer_model = "haiku"
     if not a.roots or not a.principals or not a.pointer:
-        print("REFUSED: --root, --pointer and --principal are required unless --list is given"); return 2
+        return refuse("--root, --pointer and --principal are required unless --list is given")
     if a.limit > 50:
-        print("REFUSED: connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)"); return 2
+        return refuse("connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)")
     writer_command_str = a.writer_command or os.environ.get("SUPERJEV_WRITER_COMMAND")
     try:
         writer_command = shlex.split(writer_command_str) if writer_command_str else None
     except ValueError as e:
-        print(f"REFUSED: invalid --writer-command: {e}"); return 2
+        return refuse(f"invalid --writer-command: {e}")
     if writer_command_str and not writer_command:
-        print("REFUSED: --writer-command must name a command"); return 2
+        return refuse("--writer-command must name a command")
 
     use_builtin = a.writer == "builtin" or (a.writer == "auto" and not writer_command
                                               and not shutil.which("claude"))
@@ -1596,7 +1683,7 @@ def main() -> int:
 
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
-        print(f"REFUSED: --root is not a folder: {', '.join(missing)}"); return 2
+        return refuse(f"--root is not a folder: {', '.join(missing)}")
     walked_at = time.time()  # a growth snapshot counts as "since" only what the walk below could miss
     files, held = inventory(roots, a.excludes, a.no_recurse, a.names, a.allow_targets)
     scope = getattr(a, "legacy_scope", None)
@@ -1644,11 +1731,13 @@ def main() -> int:
                   "them out may still apply. Reconnect with --root (not --refresh) to rescope.")
         files = [p for p in files if str(p) in scope]
         held = [(p, why) for p, why in held if str(p) in scope]
+    _RESULT["held"] = held
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
     if not files and not held:
+        fail(roots[0], "no .md file left to connect")
         print(f"ERROR: no .md file left to connect under {', '.join(str(r) for r in roots)}; nothing to connect "
               "(the SKIP lines above, if any, say what was left out)"); return 1
 
@@ -1659,8 +1748,7 @@ def main() -> int:
     # files that would actually need a writer call (below), and total size is reported, not refused.
     if not (a.refresh and cache):
         if len(files) > a.max_files:
-            print(f"REFUSED: {len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
-            return 2
+            return refuse(f"{len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
 
     removed = []
     if a.refresh:
@@ -1695,9 +1783,8 @@ def main() -> int:
         print(f"refresh: {len(files)} files total (over --max-files {a.max_files}), "
               f"but only {len(todo)} need a writer call this run (cost); the rest are unchanged and reused for free")
         if len(todo) > a.max_files:
-            print(f"REFUSED: {len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
-                  "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
-            return 2
+            return refuse(f"{len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
+                          "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
 
     drafts = {}
     for i in range(0, len(todo), a.batch):
@@ -1710,6 +1797,7 @@ def main() -> int:
             else:
                 got = writer([excerpt(p) for p in batch], a.writer_model)
         except WriterError as e:
+            fail(roots[0], f"description writer failed: {e}")
             print(f"ERROR: description writer failed: {e}")
             if not writer_command:
                 print("  The claude CLI must be installed and logged in for this writer. Or re-run with "
@@ -1741,10 +1829,15 @@ def main() -> int:
             print(f"gate packs: {len(packed)} files checked in shared calls")
 
     exceptions, passing = [], []
+
+    def reject(p, why: str, plain: str) -> None:
+        exceptions.append((str(p), why))
+        fail(p, plain)
+
     for p in todo:
         d = drafts.get(str(p))
         if not d or not d.get("description"):
-            exceptions.append((str(p), "writer returned no draft")); continue
+            reject(p, "writer returned no draft", "the description writer returned no draft"); continue
 
         # Stage 1: gate the description alone -- exactly the pre-labels claim. A label
         # problem must never cost a file its place; only a description problem does.
@@ -1769,6 +1862,7 @@ def main() -> int:
                 else:
                     redo = writer([excerpt(p)], a.writer_model, feedback=fb).get(str(p))
             except WriterError as e:
+                fail(roots[0], f"description writer failed: {e}")
                 print(f"ERROR: description writer failed: {e}"); return 1
             if redo and redo.get("description"):
                 redo_desc = redo["description"].strip()
@@ -1783,7 +1877,8 @@ def main() -> int:
                              "labels_ok": False,
                              "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
             print(f"  {v['state']:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
-            exceptions.append((str(p), f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip()))
+            reject(p, f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip(),
+                   f"the description check did not pass ({v['state']})")
             continue
 
         # Stage 2 (only reached on a stage-1 pass): gate the label sentence alone. A miss here
@@ -1867,8 +1962,11 @@ def main() -> int:
         if not result["connected"]:
             all_connected = False
             failed_n += len(part_files)
+            for p in part_files:
+                fail(p, result.get("why") or "the engine did not register it")
             continue
         connected_n += len(part_files)
+        _RESULT["connected"] = connected_n  # as each part connects, so a crash after part 1 still reports it
         if not a.no_findability and not search_failed:
             for p in part_files:
                 q = cache[str(p)].get("question") or ""
