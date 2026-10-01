@@ -71,9 +71,9 @@ Tested on macOS and Linux. Windows is untested.
 |---|---|
 | Reads | Your connected folders and configured skill roots. |
 | Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/`, `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (background-refresh locks, cooldowns and logs that name your sets and files) in the checkout. The chat CLI (`install.sh`) also writes its config, which holds your API key, to `~/.config/superjev/config.json` (or `$XDG_CONFIG_HOME/superjev/`) and a launcher at `~/.local/bin/superjev`. |
-| Leaves the machine | Sent to the TypeSafe provider: connected file text (to check each description), descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. |
+| Leaves the machine | Sent to the TypeSafe provider: file text when `ask` reads a file to confirm an answer, descriptions (a builtin description quotes the file's first words) and questions (to rank files), and the claim plus evidence files you pass to `check`. A connect sends file text only with a model writer (the default when the `claude` CLI is installed): the writer model reads an excerpt of each file and TypeSafe checks each description against its file. `--writer builtin` sends nothing while connecting, unless you add `--findability`: that runs one ranking search per file, which sends the descriptions and that file's sample question. |
 | Provider receives | The above; never files the secret scan holds — those stay local. |
-| Never leaves | Files the secret scan holds, and vault-style folders the inventory skips. |
+| Never leaves | Files the secret scan holds, and files connect skips by default below a `--root` you connect (folders named `profile/` or `documents/`, hidden and generated folders, other file types), unless you pass one to `check` yourself; connect prints a `SKIP` line for each kind. |
 
 ## Uninstall
 

@@ -165,8 +165,8 @@ test('parseMissReport extracts the searched/next-step block from a true-miss ask
   const stdout = [
     'OUTCOME: not-found - searched 3 sets, no matching file',
     'What was searched:',
-    '  - 3 connected sets; 2 searched after the topic filter, 1 had matches: marvin-notes',
-    '  - 2 file(s) read; none contained the answer. Closest: notes/pricing.md, notes/other.md',
+    '  - 3 connected sets; 2 searched after the topic filter; descriptions matched in 1: marvin-notes',
+    '  - 2 file(s) read (picked by description or by words in the file); no answer confirmed. Closest: notes/pricing.md, notes/other.md',
     'Next step (pick one):',
     '  - The answer is in a file you have: it is probably not connected. Connect its folder:',
     '      python3 prepare_bulk.py --root <folder> --pointer marvin-<name> --principal marvin',
@@ -515,6 +515,7 @@ test('parseConnectSummary reads the approved/exceptions/held line and dedupes re
     approved: 2, exceptions: 1, held: 1,
     heldLines: ['HELD  secret.md  (secret-like text)'],
     exceptionLines: ['EXCEPTION  bad.md  (gate failed)'],
+    skipLines: [],
   });
 });
 
@@ -533,6 +534,6 @@ test('formatConnectSummary prints the required "Connected N file(s)" line and su
 });
 
 test('formatConnectSummary singular file wording', () => {
-  const summary = { approved: 1, exceptions: 0, held: 0, heldLines: [], exceptionLines: [] };
+  const summary = { approved: 1, exceptions: 0, held: 0, heldLines: [], exceptionLines: [], skipLines: [] };
   assert.equal(formatConnectSummary(summary), 'Connected 1 file. Ask me about them.');
 });

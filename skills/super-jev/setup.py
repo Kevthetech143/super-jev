@@ -151,7 +151,7 @@ def setup() -> int:
             note = (" Make the key file first: run the first line, paste the key, press Enter, then Ctrl-D"
                     " (your human does this in their own terminal; never paste a key into chat)."
                     " Then load it:")
-        problems.append(f"{key_env} is not set. Every check and connect needs it.{note or ' Run:'}"
+        problems.append(f"{key_env} is not set. Every ask and check needs it.{note or ' Run:'}"
                         + _block(*lines))
 
     if shutil.which("claude"):

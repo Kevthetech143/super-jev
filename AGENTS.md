@@ -2,8 +2,11 @@
 
 You are an agent. Your human wants you to find facts in their own files and to
 check what you say before you say it. Follow the steps below in order, from the
-repo root. You need no private files and no help. Budget about 10 minutes; the
-connect step makes live TypeSafe calls (well under a cent for a small folder at the published input rate).
+repo root. You need no private files and no help. Budget about 10 minutes. An
+`ask` or `check` makes live TypeSafe calls (an answer Super Jev already saved is
+served without one). A connect makes them only with a model writer (the default
+when the `claude` CLI is installed); a `--writer builtin` connect makes none
+unless you add `--findability`.
 
 ## Set yourself up (numbered path)
 
@@ -32,8 +35,9 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    `source "$HOME/.local/bin/env"; \. "$HOME/.nvm/nvm.sh";` until the session
    restarts. Setup (step 3) prints these same lines for whatever is missing.
 
-2. **Load the TypeSafe key into this shell. Do not skip this.** Every check and
-   every connect needs it. The key lives in one file, `~/.typesafe-api-key`. If
+2. **Load the TypeSafe key into this shell. Do not skip this.** Every ask and
+   every check needs it (a `--writer builtin` connect does not unless you add
+   `--findability`, but your next steps do). The key lives in one file, `~/.typesafe-api-key`. If
    that file does not exist yet, ask your human to make it in their own terminal
    (the key never goes through chat). They run this, paste the key, press Enter,
    then Ctrl-D:
@@ -68,11 +72,35 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
      --pointer my-notes --principal me --writer builtin
    ```
 
-   Success: `connect: registered pointer=my-notes` (add `--findability` for a
-   `findability:` report; it costs one search per file).
-   `--writer builtin` writes each file's description from its own headings, so
-   the TypeSafe key is all you need. If the `claude` CLI is installed and logged
-   in, you can drop that flag to get model-written descriptions instead.
+   Success: `connect: registered pointer=my-notes`, then a last line
+   `CONNECTED n, HELD 0, FAILED 0`, and exit code 0 (add `--findability` for a
+   `findability:` report; it costs one paid search per file, with any writer).
+   `--writer builtin` writes each file's description from its own headings and
+   checks it locally: no model call and no TypeSafe call while connecting. If the
+   `claude` CLI is installed and logged in, you can drop that flag to get
+   model-written descriptions instead (those are checked by TypeSafe).
+
+   Read the last line and the exit code, never just the word "registered":
+
+   - Exit 3: connected, but some files were held (a secret-like value, or a note
+     over 250,000 bytes). Read the `HELD` lines; those files are not searchable.
+   - Exit 1: a file failed its check or the run could not finish. Read the
+     `EXCEPTION` and `ERROR` lines. Other files may still have connected: read
+     `CONNECTED n` on the last line.
+   - Exit 2: refused. A first connect refuses more than 250 files, even with
+     `--writer builtin` (`--max-files` raises it). It is a cost guard for model
+     writers, so narrow `--root` or `--exclude` first.
+   - `SKIP` lines: what a default rule left out, counted by reason, with folder
+     or extension names and never file names. Every `.md` file left out is
+     counted, and so is every file of another type except hidden ones (a hidden
+     file, or anything inside a hidden folder such as `.git/`, is not counted).
+     `.md` files in a skipped folder (`documents/`, `profile/`, `node_modules/`, a
+     hidden folder) are counted per folder. To connect one, connect that folder
+     as its own set: `--root FOLDER --pointer NEW-NAME`. Re-running with a
+     pointer that already exists replaces that set's files, so use a new name. A
+     folder under `documents/` or `profile/` (`~/Documents` included) does not
+     pick up new files on its own: run it again with `--refresh` after adding
+     files. Only `.md` files connect; other types are never read.
 
 5. **Ask a question you know the answer to.**
 

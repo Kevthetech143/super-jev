@@ -56,8 +56,8 @@ three doors need no env at all when the skill is used from inside a clone.
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | every question of every record, with proof nothing was skipped | **LIVE** | `npm run sweep` in the harness |
 | `fetch "<request>" --catalog <catalog.json> [--prefilter N]` | which few entries in the catalog actually serve this request; `noMatch: true` when none does | **LIVE** (experimental) | `npm run fetch` in the harness |
 | `bench [--dry-run] [--stub]` | how good is the harness, measured | **LIVE** | `npm run bench:live` |
-| `permit <snapshot> --action "..."` | is it safe to click / pay / send / delete automatically | **NOT BUILT** — wishlist item 5 | — |
-| `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **NOT BUILT** — wishlist item 4 | — |
+| `permit <snapshot> --action "..."` | is it safe to click / pay / send / delete automatically | **LIVE** (advisory: it answers; nothing stops a caller that ignores the answer) | `npm run permit` in the harness |
+| `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **LIVE** (experimental) | `npm run chain` in the harness |
 | `ask "<one plain sentence>"` | picks the door for you | **LIVE** | a keyword table, no model call |
 | `status` | which doors are live here, right now | **LIVE** | — |
 | `doctor` | does the PROTECTED repo's own git config name a program git would execute | **LIVE** | `git config --list --show-origin` |
