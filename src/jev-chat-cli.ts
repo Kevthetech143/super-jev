@@ -6,6 +6,7 @@
 // failure text, which it shows as it is.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,7 +29,7 @@ const lastLine = (s: string) => s.trim().split('\n').pop()?.trim() ?? '';
 
 export async function run(io: IO): Promise<number> {
   const { argv, env, stdin, stdout, stderr } = io;
-  const home = env.HOME ?? '';
+  const home = env.HOME || homedir();
   const profile = loadJudgeProfile(undefined, undefined, env);
   const { keyEnv, vendor } = profile;
   const keyFile = join(home, '.typesafe-api-key');
