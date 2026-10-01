@@ -113,7 +113,7 @@ one; v stays 1). Skipped kinds, one per default reason: `link` (a link points ou
 (backup or credential-style name), `folder` (.md in a skipped folder), `folder_other` (other types in a skipped
 folder), `hidden`, `dataset` (a prepared dataset copy), `test` (test or scratch output), `worktree` (a git
 worktree copy), `empty`, `types` (files of other types). Refusal kinds: `too_many` (more files than one connect
-takes; it also carries whole numbers `count`, how many files, and `max`, the limit, so a program words
+takes; it also carries whole numbers `count`, how many files it would draft, and `max`, the limit, so a program words
 "count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder),
 `not_markdown` (a refresh of a set connected with code files) and `usage` (the arguments are wrong).
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
