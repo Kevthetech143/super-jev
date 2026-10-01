@@ -30,10 +30,16 @@ export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"
 Success: `echo "${#TYPESAFE_API_KEY}"` prints a non-zero length (the length,
 never the key). A new shell needs the export again.
 
-For hooks that cannot inherit your shell, copy
-`skills/skill-search/deploy/key-provider.example.py` to
-`~/.skill-search-key-provider.py` and set `TYPESAFE_API_KEY_FILE` to your key
-file; that provider prints the key and nothing else.
+For hooks that cannot inherit your shell (the skill finder is the one that
+needs it), copy `skills/skill-search/deploy/key-provider.example.py` to
+`skills/skill-search/deploy/local-key-provider.py` (gitignored). It prints the
+key from `$TYPESAFE_API_KEY_FILE`, or from `~/.typesafe-api-key` when that is
+not set, and nothing else.
+
+The skill finder also needs to know which skill folders to search. Inside
+Claude Code it uses `~/.claude/skills` and needs nothing. Any other agent copies
+`skills/skill-search/roots.example.json` to `skills/skill-search/roots.json`
+(gitignored) and lists its own skill folders there.
 
 ## 3. Run setup
 
