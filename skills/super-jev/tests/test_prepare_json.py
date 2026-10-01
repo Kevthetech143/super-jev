@@ -3,8 +3,11 @@
 
 With --json, a connect prints exactly one JSON object on stdout (schema v: 1) and exits with the code
 text mode gives: 0 all connected, 1 something failed, 2 refused, 3 something held. The object is
-{connected, held [{path, why}], failed [{path, why}], skipped [{what, count, way_in}], refused {why}};
-a field with nothing in it is left out, and nothing in it is a score or a note's text. Text mode
+{connected, held [{path, why}], failed [{path, why}], skipped [{kind, what, count, way_in}], refused {kind, why}};
+a field with nothing in it is left out, and nothing in it is a score or a note's text. PR 2c: every skipped
+row and every refusal also carries a stable `kind` (a short fixed word list), so a program words them from
+the kind and never parses the free text. A `too_many` refusal also carries whole numbers `count` and `max`, so the
+app shows "count is more than one connect takes (max)" without parsing `why`. Text mode
 prints from the same result, so the two are held together here. Made-up company Quillbrook, made-up
 user "sam"; no network, no real key, no Jev call.
 
@@ -101,7 +104,7 @@ def test_mixed_folder_holds_one_path_only_skips_one_with_its_way_in_and_exits_3(
     assert obj["held"][0]["path"].endswith("keys.md") and obj["held"][0]["why"]
     assert TOKEN not in out and "deploy token" not in out
     [row] = obj["skipped"]
-    assert set(row) == {"what", "count", "way_in"} and row["count"] == 1
+    assert set(row) == {"kind", "what", "count", "way_in"} and row["count"] == 1 and row["kind"] == "types"
     assert row["what"] == f"{OTHER_TYPES} (.py 1)" and ".md" in row["way_in"]
 
 
@@ -110,7 +113,8 @@ def test_over_max_files_is_refused_with_its_reason_and_exit_2_and_no_work(tmp_pa
     code, out = go(root, "--max-files", "2")
     obj = one_object(out)
     assert code == 2
-    assert obj == {"v": 1, "connected": 0, "refused": {"why": obj["refused"]["why"]}}
+    assert obj == {"v": 1, "connected": 0,
+                   "refused": {"kind": "too_many", "why": obj["refused"]["why"], "count": 3, "max": 2}}
     assert "3 files exceed" in obj["refused"]["why"]
     assert fake == []
 
@@ -158,7 +162,8 @@ def test_a_folder_with_no_markdown_fails_on_the_folder_and_still_says_what_was_l
     obj = one_object(out)
     assert code == 1 and obj["connected"] == 0
     assert obj["failed"][0]["path"] == str(root) and ".md" in obj["failed"][0]["why"]
-    assert obj["skipped"] == [{"what": f"{OTHER_TYPES} (.csv 1, .py 1)", "count": 2, "way_in": "only .md files connect"}]
+    assert obj["skipped"] == [{"kind": "types", "what": f"{OTHER_TYPES} (.csv 1, .py 1)", "count": 2,
+                               "way_in": "only .md files connect"}]
 
 
 def test_a_writer_that_fails_fails_the_run_with_its_reason_and_exits_1(tmp_path, monkeypatch, fake, go):
@@ -354,3 +359,174 @@ def test_real_engine_free_connect_json_with_the_builtin_writer_and_no_key(tmp_pa
     assert obj["connected"] == 2 and len(obj["held"]) == 1 and obj["held"][0]["path"].endswith("keys.md")
     assert obj["skipped"][0]["count"] == 1 and TOKEN not in json.dumps(obj)
     assert '"qb"' in (state / "_memory" / "registry.json").read_text()
+
+
+# ---- PR 2c: every skipped row and every refusal carries a stable `kind` --------------------------------
+
+# The documented word lists. A program words a skipped row or a refusal from its kind; a kind it does not
+# know is shown by its `what` / `why`. Each skip kind is a SKIP_REASONS key and maps to the start of that
+# reason's own words.
+SKIP_KINDS = {
+    "link": "linked file(s) point outside",
+    "name": ".md file(s) with backup or credential-style names",
+    "folder": ".md file(s) in folders skipped by default",
+    "folder_other": "file(s) of other types in folders skipped by default",
+    "hidden": "hidden .md file(s)",
+    "dataset": "file(s) in prepared dataset copies",
+    "test": "test/scratch output file(s)",
+    "worktree": "file(s) inside git worktree copies",
+    "empty": "empty .md file(s)",
+    "types": "file(s) of other types (",
+}
+REFUSAL_KINDS = {"too_many", "not_a_folder", "not_markdown", "usage"}
+
+
+def every_reason_folder(tmp_path):
+    """(root, extra args): a folder, plus a second root that is a prepared dataset copy, that together make
+    the connect leave something out for each of the ten default reasons."""
+    dataset = tmp_path / ".local" / "retrieval-datasets" / "Quillbrook Passages"
+    dataset.mkdir(parents=True)
+    (dataset / "passages.md").write_text("# Passages\n\nCopied text.\n")      # dataset
+    root = folder(tmp_path)
+    (root / "notes.md").write_text("# Notes\n\nText.\n")
+    (root / "calc.py").write_text("x = 1\n")                                   # types
+    (root / ".hidden.md").write_text("# H\n\nh\n")                             # hidden
+    (root / "blank.md").write_text("\n")                                       # empty
+    (root / "superjev-test-run.md").write_text("# Run\n\nQuestions.\n")        # test
+    (root / "notes.bak.md").write_text("# Old\n\nOld text.\n")                 # name
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "n.md").write_text("# N\n\nn\n")                  # folder
+    (root / "node_modules" / "data.csv").write_text("a,b\n")                   # folder_other
+    (root / "wt").mkdir()
+    (root / "wt" / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+    (root / "wt" / "copy.md").write_text("# Copy\n\nA stale copy.\n")          # worktree
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "far.md").write_text("# Far\n\nOutside.\n")
+    (root / "far-link.md").symlink_to(tmp_path / "elsewhere" / "far.md")       # link
+    return root, ["--root", str(dataset)]
+
+
+def test_every_default_skip_reason_carries_its_documented_kind(tmp_path, fake, go):
+    root, extra = every_reason_folder(tmp_path)
+    code, out = go(root, *extra)
+    obj = one_object(out)
+    assert code == 0 and obj["connected"] == 1
+    by_kind = {r["kind"]: r for r in obj["skipped"]}
+    assert len(by_kind) == len(obj["skipped"]) and set(by_kind) == set(SKIP_KINDS)
+    for kind, words in SKIP_KINDS.items():
+        row = by_kind[kind]
+        assert row["what"].startswith(words), (kind, row)
+        assert set(row) <= {"kind", "what", "count", "way_in"} and row["count"] >= 1
+
+
+def test_the_text_skip_lines_do_not_change_and_never_show_a_kind(tmp_path, fake, go):
+    root, extra = every_reason_folder(tmp_path)
+    obj = one_object(go(root, *extra)[1])
+    text = [x for x in go(root, *extra, json_mode=False)[1].splitlines() if x.startswith("  SKIP  ")]
+    assert text == [f"  SKIP  {r['count']} {r['what']}" + (f"; {r['way_in']}" if "way_in" in r else "") for r in obj["skipped"]]
+    assert not any(word in " ".join(text) for word in ("kind", "folder_other"))
+
+
+def test_the_skip_kinds_are_a_fixed_list_that_is_documented_next_to_the_schema():
+    """A new reason must be added here and to the docstring: one list, no silent extra word."""
+    assert set(pb.SKIP_REASONS) == set(SKIP_KINDS)
+    for kind in set(SKIP_KINDS) | REFUSAL_KINDS:
+        assert f"`{kind}`" in pb.__doc__, kind
+
+
+def run_main(monkeypatch, capfd, cache, *args):
+    monkeypatch.setattr(pb, "CACHE_DIR", cache)
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--principal", "sam", "--no-findability", "--no-shared",
+                                      "--writer", "claude", "--json", *args])
+    capfd.readouterr()
+    try:
+        code = pb.main()
+    except SystemExit as e:  # an argument error leaves through argparse
+        code = e.code
+    return code, one_object(capfd.readouterr().out)
+
+
+@pytest.mark.parametrize("kind, args", [
+    ("too_many", ["--max-files", "2"]),
+    ("not_a_folder", None),
+    ("usage", ["--limit", "51"]),
+    ("usage", ["--limit", "many"]),
+    ("usage", ["--writer-command", "'"]),
+    ("usage", ["--writer-command", "  "]),
+    ("usage", ["--list", "--pointer", "qb"]),
+], ids=["too-many-files", "not-a-folder", "limit-over-50", "argument-error", "bad-quote", "blank-command", "json-with-list"])
+def test_each_refusal_gives_its_documented_kind_and_its_reason(kind, args, tmp_path, monkeypatch, fake, capfd):
+    root = folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(3)})
+    base = ["--root", str(root if args is not None else tmp_path / "nowhere"), "--pointer", "qb"]
+    code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", *base, *(args or []))
+    assert code == 2 and set(obj) == {"v", "connected", "refused"} and obj["connected"] == 0
+    assert set(obj["refused"]) == {"kind", "why"} | ({"count", "max"} if kind == "too_many" else set())
+    assert obj["refused"]["why"].strip() and obj["refused"]["kind"] == kind and kind in REFUSAL_KINDS
+    assert fake == []
+
+
+def test_missing_required_flags_are_a_usage_refusal(tmp_path, monkeypatch, capfd):
+    code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", "--root", str(tmp_path))
+    assert code == 2 and obj["refused"]["kind"] == "usage" and "--pointer" in obj["refused"]["why"]
+
+
+def test_a_refresh_that_needs_too_many_drafts_is_the_same_too_many_kind(tmp_path, monkeypatch, fake, capfd):
+    root = folder(tmp_path, **{"n0.md": "# Note 0\n\nText 0.\n"})
+    cache = tmp_path / "cache"
+    assert run_main(monkeypatch, capfd, cache, "--root", str(root), "--pointer", "qb")[0] == 0
+    for i in range(1, 4):
+        (root / f"n{i}.md").write_text(f"# Note {i}\n\nText {i}.\n")
+    code, obj = run_main(monkeypatch, capfd, cache, "--root", str(root), "--pointer", "qb", "--refresh", "--max-files", "2")
+    assert code == 2 and obj["refused"]["kind"] == "too_many" and "need drafting" in obj["refused"]["why"]
+    assert (obj["refused"]["count"], obj["refused"]["max"]) == (3, 2)  # the 3 new notes, not the 4 in the folder
+
+
+def test_too_many_carries_its_numbers_as_whole_numbers_the_app_can_show_without_the_text(tmp_path, monkeypatch, fake, capfd):
+    """"1,230 notes is more than one connect takes (250)": count and max, never parsed out of `why`."""
+    root = folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(5)})
+    code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", "--root", str(root), "--pointer", "qb", "--max-files", "4")
+    refused = obj["refused"]
+    assert code == 2 and refused["kind"] == "too_many" and type(refused["count"]) is int and type(refused["max"]) is int
+    assert (refused["count"], refused["max"]) == (5, 4)
+    assert "5 files exceed --max-files 4" in refused["why"]
+    assert "`count`" in pb.__doc__ and "`max`" in pb.__doc__
+
+
+def test_an_unexpected_error_while_replaying_a_recipe_is_an_internal_failure_not_a_usage_refusal(
+        tmp_path, monkeypatch, fake, capfd):
+    """Only a recipe of code files is refused (not_markdown). Any other error is the engine's own fault, so it is
+    a failure (exit 1, as in text mode), never blamed on the user's arguments."""
+    def boom(a):
+        raise ValueError("recipe unreadable")
+    monkeypatch.setattr(pb, "replay_recipe", boom)
+    root = folder(tmp_path, **{"a.md": "# A\n\nText.\n"})
+    code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", "--root", str(root), "--pointer", "qb", "--refresh")
+    assert code == 1 and "refused" not in obj
+    assert obj["failed"][0]["why"] == "internal error: ValueError: recipe unreadable"
+
+
+def test_a_refresh_of_a_set_connected_with_code_files_is_the_not_markdown_kind(tmp_path, monkeypatch, fake, capfd):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "qb-report.json").write_text(json.dumps({"extensions": [".py"], "principals": ["sam"]}))
+    code, obj = run_main(monkeypatch, capfd, cache, "--root", str(folder(tmp_path, **{"a.md": "# A\n\nText.\n"})),
+                         "--pointer", "qb", "--refresh")
+    assert code == 2 and obj["refused"]["kind"] == "not_markdown" and "Markdown only" in obj["refused"]["why"]
+
+
+def test_text_mode_keeps_its_refused_line_with_no_kind(tmp_path, fake, go):
+    root = folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(3)})
+    code, text = go(root, "--max-files", "2", json_mode=False)
+    assert code == 2 and "REFUSED: 3 files exceed --max-files 2;" in text and "too_many" not in text
+
+
+def test_a_kind_this_version_does_not_list_still_comes_through_as_one_valid_object(tmp_path, monkeypatch, capfd):
+    """No closed list is checked while printing: a reason or refusal added later carries its own kind, so a
+    reader that does not know it can still show `what` / `why`, and v stays 1."""
+    monkeypatch.setitem(pb.SKIP_REASONS, "future", ("future thing(s) ({names})", "ask again later"))
+    assert pb.skip_rows({"future": {".xyz": 2}}) == [
+        {"kind": "future", "what": "future thing(s) (.xyz 2)", "count": 2, "way_in": "ask again later"}]
+    monkeypatch.setattr(pb, "_RESULT", {})
+    assert pb.refuse("future", "a reason from a later version") == 2
+    assert json.loads(json.dumps(pb.result_object())) == {
+        "v": 1, "connected": 0, "refused": {"kind": "future", "why": "a reason from a later version"}}
