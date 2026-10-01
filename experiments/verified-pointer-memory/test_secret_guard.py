@@ -29,7 +29,7 @@ class SecretGuardTests(unittest.TestCase):
         self.rec.write_text('# Rec\nThe box is blue.\n')
         self.config = {'db': str(self.root / 'db.sqlite'), 'registry': str(self.root / 'registry.json'),
                        'navigationCommand': NAV, 'retrievalCommand': NAV, 'providerTimeoutSeconds': 30,
-                       'cacheTtlSeconds': 60, 'reviewTtlSeconds': 60, 'allowAgentAssist': False}
+                       'cacheTtlSeconds': 60, 'reviewTtlSeconds': 60}
 
     def sent(self):
         return self.sends.read_text().count('FETCH') if self.sends.exists() else 0
