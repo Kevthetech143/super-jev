@@ -39,14 +39,16 @@
 
   ask.py --principal AGENT --json REQUEST
       For a program (the terminal app) instead of a person. REQUEST is a question, one
-      --claim "statement", --status, --approve or --miss; anything else is refused
-      (exit 2) before any work. It does the same work, prints exactly one JSON line
-      (schema "v": 1; empty fields left out; no scores) and exits with text mode's
-      code. An ask or claim: outcome, why, next (setup|key|connect|refresh|include|
-      rephrase|none), files [{path, tier, line?, text?}], skills, saved, saved_now,
-      unsearched, left_out, errors, claim. --status: {next, principal, sets}.
-      --approve / --miss: {done, why, removed?}. --json is read only as the first
-      word after --principal, so after "--" or inside a question it is just text.
+      --claim "statement", --status, --approve or --miss; any other mode (--add,
+      --followup, --preflight, --trace-*) is refused (exit 2) before any work. It does
+      the same work, prints exactly one JSON line (schema "v": 1; empty fields left
+      out; no scores) and exits with text mode's code; a crash exits 3. An ask or claim:
+      outcome, why, next (setup|key|connect|refresh|include|rephrase|none), files
+      [{path, tier, line?, text?}], skills, skills_off, saved, saved_now, unsearched,
+      left_out, errors, claim. --status: {next, principal, sets}, or {outcome: error,
+      why} when it could not be read. --approve / --miss: {done, why, removed?}.
+      --json is read only as the first word of the request, so after "--" or inside a
+      question it is just text.
 
 SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
 save by hand. All save through one function and run the secret scan. A repeat-question
@@ -543,10 +545,12 @@ def _lost_pointers(principal: str, rec: dict) -> list:
     have = {(p.get("pointer") if isinstance(p, dict) else p) for p in memory({"action": "panel", "principal": principal}).get("pointers", [])}
     return sorted({f["pointer"] for f in rec.get("files") or []} - have)
 
-# One result per ask feeds both printers (contract C1): the text lines and the `--json` object are made
-# from the same _RESULT, so they cannot drift. Every ordinary ask's text starts with one OUTCOME line,
-# computed from the whole search state, and its exit code is the outcome's. A claim check keeps its own
-# verdict lines and exit codes. The JSON has no scores on purpose (schema v: 1; see run_json).
+# One result per ask feeds both printers (contract C1): an ask's OUTCOME line, files and skills and its
+# `--json` object are made from the same _RESULT, so they cannot drift. A claim verdict and --status are
+# recorded beside their own text lines (claim_result, fold_status), and a test holds the two together.
+# Every ordinary ask's text starts with one OUTCOME line, computed from the whole search state, and its
+# exit code is the outcome's. A claim check keeps its own verdict lines and exit codes. The JSON has no
+# scores on purpose (schema v: 1; see run_json).
 OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
 _RESULT = {}
 _FILE_PRIVATE = ("score", "pointer")  # a file row's own bookkeeping; never in the JSON
@@ -560,6 +564,13 @@ def _done(kind: str, why: str, cmd: str = "", next: str = "none", claim_rc: int 
     same step as one word for --json (setup, key, connect, refresh, include, rephrase or none)."""
     _RESULT.update(outcome=kind, why=why, cmd=cmd, next=next)
     return claim_rc if _CLAIM["text"] else OUTCOME_EXIT[kind]
+
+
+def say(text: str, why: str = None) -> None:
+    """Print a line and record its reason for --json (approve and miss). `why` is the reason in plain
+    words when the line itself carries a score or a command-line flag; otherwise the line is the reason."""
+    print(text)
+    _RESULT["why"] = why or text
 
 
 def line_text(path: str, n: int):
@@ -1834,18 +1845,23 @@ def skill_note(name: str) -> str:
 def skill_question(question: str) -> bool:
     return os.environ.get("SUPERJEV_SKILLS", "1") != "0" and bool(SKILL_Q_RE.search(question))
 
+SKILL_FAILED = {}  # question -> why its catalog search failed; the ask that started it reads it (skills_off)
+
 def skill_catalog(question: str) -> list:
-    """[(name, SKILL.md path)] from the skills connector; [] on any failure."""
+    """[(name, SKILL.md path)] from the skills connector; [] on any failure, and why is kept for --json."""
     try:
         r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "dispatch.py"),
                             "skills", "--request", question], capture_output=True, text=True, timeout=60)
         out = json.loads(r.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
+        out = None
     if not isinstance(out, dict):
+        SKILL_FAILED[question] = "the skill search did not run"
         return []
     if out.get("status") == "error":
-        print(f"skill search failed: {str(out.get('error') or 'unknown cause')[:200]}", file=sys.stderr)
+        why = str(out.get("error") or out.get("reason") or "unknown cause")[:200]
+        print(f"skill search failed: {why}", file=sys.stderr)
+        SKILL_FAILED[question] = why
         return []
     # Only a live judge pick or an exact name is a match; local ranking and doubt are guesses.
     guess = GUESS if not (out.get("status") == "exact" or (out.get("status") == "suggestions" and out.get("source") == "jev")) else ""
@@ -1963,7 +1979,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
             sys.stdout.write(buf.getvalue())
             raise
         _RESULT.clear()
-        _done("error", f"the lookup failed ({type(e).__name__}: {e})", f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status")
+        _done("error", _redact(f"the lookup failed ({type(e).__name__}: {e})"), f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status")
         traceback.print_exc()
     o = _RESULT if "outcome" in _RESULT else dict(outcome="error", why="the lookup ended without a result", cmd="")
     print(f"OUTCOME: {o['outcome']} - {o['why']}" + (f"; next: {o['cmd']}" if o["cmd"] else ""))
@@ -2003,7 +2019,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 print(f"  {q}")
             log(sdir, "claim", question=question, result="saved", verdict=saved["verdict"])
             claim_result(saved["verdict"], {saved["path"]: {**saved, "verdict": "supported" if saved["verdict"] == "TRUE"
-                                                            else "contradicted"}}, [saved["path"]], 1, saved["path"])
+                                                            else "contradicted"}}, [saved["path"]], 0, saved["path"])
+            _RESULT["saved"] = {"by": "auto", **({"date": time.strftime("%Y-%m-%d", time.localtime(saved["saved"]))}
+                                                 if isinstance(saved.get("saved"), (int, float)) else {})}
             return _done("found", "the claim was checked before; its proof file is unchanged")
         cache = {"status": "skipped (claim)"}  # saved answers answer questions, not statements
     elif replay:
@@ -2512,8 +2530,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     errors = error_rows(failed, nav_kinds)
     _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
                    unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows([], held))
-    if not skill_job and SKILL_Q_RE.search(question):
-        _RESULT["skills_off"] = "no skill catalog was searched: skill search is off (SUPERJEV_SKILLS=0)"
+    if why := SKILL_FAILED.pop(question, "") if skill_job else (
+            "skill search is off (SUPERJEV_SKILLS=0)" if SKILL_Q_RE.search(question) else ""):
+        _RESULT["skills_off"] = _redact(f"no skill catalog was searched: {why}")
     if top or skills:
         # Files are the ranked files only; skill suggestions get their own label, never the file count.
         unconfirmed = " (unconfirmed: content check failed)" if check_error and any(m[1] in possible for m in top) else ""
@@ -2542,7 +2561,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include", claim_rc=1)
     else:
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
-                   "no matching file (it may still exist)", f"{ask_py} --trace-show last")
+                   "no matching file (it may still exist)", f"{ask_py} --trace-show last",
+                   "none" if _CLAIM["text"] else "connect")
         _RESULT["searched"] = {"sets": len(original_pointers),
                                "notes": sum(len(load_cache_files(ptr)) for ptr in original_pointers)}
     for line in miss_report(principal, len(original_pointers), routing, content_check,
@@ -2857,14 +2877,14 @@ def send_approval(principal: str, question: str, answer: str, pointer: str, tick
                   approved_by: str = None, **fields) -> int:
     why = uncalibrated_why()  # the one place every save and approval passes through (--add included)
     if why:
-        print(f"not saved: {why}")
+        say(f"not saved: {why}", why)
         log(sdir, "approve", question=question, pointer=pointer, result="refused-uncalibrated", approved_by=approved_by)
         return 1
     approved_by = approved_by if approved_by is not None else f"principal:{principal}"
     evidence = [{"sourceId": p["sourceId"], "quote": p["reviewedText"]} for p in ticket_result.get("passages", [])[:3] if p.get("reviewedText")]
     res = memory({"action": "approve", "ticket": ticket_result["approvalTicket"], "principal": principal, "approved": True, "answer": answer, "evidence": evidence})
     ok = res.get("status") in ("approved", "saved", "ok")
-    print("approve:", res.get("status"), "" if ok else json.dumps(res)[:200])
+    say(f"approve: {res.get('status')} {'' if ok else json.dumps(res)[:200]}", "saved" if ok else f"not saved ({res.get('status')})")
     log(sdir, "approve", question=question, pointer=pointer, result=res.get("status"), approved_by=approved_by)
     if ok:
         record_approver(sdir, question, approved_by, pointer=pointer, **fields)
@@ -2934,9 +2954,9 @@ def run_gate(claim: str, path: str, passage=None):
 
 _LAST_WHY = {"why": None}
 
-def not_saved(sdir: Path, question: str, why: str) -> int:
+def not_saved(sdir: Path, question: str, why: str, plain: str = None) -> int:
     _LAST_WHY["why"] = why
-    print(f"not saved: {why}")
+    say(f"not saved: {why}", plain or why)
     log(sdir, "auto-approve", question=question, result="not-saved", why=why)
     return 1
 
@@ -2994,7 +3014,7 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
         return not_saved(sdir, key, f"stale: {evidence_file} changed since connect (or is not in {pointer})")
     out, why = ask_evidence(principal, pointer, key, answer, evidence_file, row.get("sourceId"))
     if out and out.get("status") == "verified-cache-hit":
-        print("already cached")
+        say("already cached")
         return 0
     if not out:
         return not_saved(sdir, key, f"{why}; nothing to save")
@@ -3004,7 +3024,7 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
     # The claim check reads exactly the passages that will be saved as evidence.
     why, score = gate_why(key, answer, evidence_file, evidence_text(out))
     if why:
-        return not_saved(sdir, key, why)
+        return not_saved(sdir, key, why, "the claim check did not pass it, so it was not saved")
     print(f"auto-check CLEAN (score {score:.2f}, evidence {evidence_file})")
     return send_approval(principal, key, stored or answer, pointer, out, sdir, approved_by=approved_by,
                          evidence_file=evidence_file, score=score,
@@ -3108,13 +3128,14 @@ def miss(principal: str, question: str, actual: str, sdir: Path) -> int:
             record.unlink()
             removed.append(record.stem)
     if not removed:
-        print("miss logged, but there is no saved answer for that question, so nothing was removed"
-              + ("" if lookup_id else " (and no earlier lookup of it to mark wrong)"))
+        say("miss logged, but there is no saved answer for that question, so nothing was removed"
+            + ("" if lookup_id else " (and no earlier lookup of it to mark wrong)"))
         return 1
     record_approver(sdir, key, None, removed_by="miss", was=who)
     _RESULT["removed"] = list(dict.fromkeys(removed))
     print("miss recorded")
-    print(f"un-saved: the saved answer (approved_by: {who}) was removed from {', '.join(dict.fromkeys(removed))}")
+    say(f"un-saved: the saved answer (approved_by: {who}) was removed from {', '.join(dict.fromkeys(removed))}",
+        "the saved answer was removed")
     return 0
 
 FOLLOWUP_MAX_TRIES = 5
@@ -3258,21 +3279,21 @@ def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, f
     to meet the repeat-win threshold; same secret scan and claim check as every other save)."""
     why = uncalibrated_why()
     if why:
-        print(f"not saved: {why}")
+        say(f"not saved: {why}", why)
         return 1
     chosen = None
     if rank is not None or file is not None:
         # The lead picked a listed candidate by hand (any rank, possible tier included).
         chosen, why = find_candidate(sdir, question, rank=rank, file=file)
         if not chosen:
-            print(why)
+            say(why)
             return 1
     if chosen is None:
         top = find_top(sdir, question)  # the file ask() ranked first, unless possible-only
         chosen = top if top and not top.get("possible") else None
     if not chosen:
-        print("no confirmed top candidate for that question; run ask first, pick a listed "
-              "file with --rank N or --file PATH, or use --add")
+        say("no confirmed top candidate for that question; run ask first, pick a listed "
+            "file with --rank N or --file PATH, or use --add")
         return 1
     rc = save_answer(principal, question, answer, sdir, top=chosen,
                      approved_by=f"principal:{principal}", automatic=False)
@@ -3420,6 +3441,13 @@ def fold_status(sets: dict, name: str, status: str, principal: str) -> None:
     if notes := sum(x.get("count") or 0 for x in (report or {}).get("parts") or [] if isinstance(x, dict)):
         row["notes"] = notes
 
+def status_unavailable(line: str) -> int:
+    """Status could not be read: say so (exit 1), and record it as an error so --json does not
+    show a failed read as an empty, healthy list."""
+    print(line)
+    _done("error", line)
+    return 1
+
 def connection_status(principal: str, as_json: bool = False) -> int:
     """Read scoped registration metadata, without searching or refreshing. With as_json the sets are
     also recorded, folded by base set, for the one JSON object."""
@@ -3432,7 +3460,7 @@ def connection_status(principal: str, as_json: bool = False) -> int:
             print(f"Not set up. Next: python3 {skill / 'setup.py'}")
             _RESULT.update(next="setup", principal=principal, sets=[])
         else:
-            print("Connection status unavailable. Next: check the memory connector configuration.")
+            return status_unavailable("Connection status unavailable. Next: check the memory connector configuration.")
         return 1
     pointers = panel["pointers"]
     if not pointers:
@@ -3448,8 +3476,7 @@ def connection_status(principal: str, as_json: bool = False) -> int:
             name = row["pointer"]
             status = row.get("snapshotStatus") or row.get("status") or "unknown"
         else:
-            print("Connection status unavailable: malformed pointer metadata.")
-            return 1
+            return status_unavailable("Connection status unavailable: malformed pointer metadata.")
         if as_json:
             fold_status(sets, name, status, principal)
         if status == "available":
@@ -3720,14 +3747,14 @@ def run_json(principal: str, a: list) -> int:
             rc = _dispatch(principal, a, as_json=True)
     except SecretHeld as e:  # exits 1, as main() does in text mode
         rc, crash = 1, str(e)
-    except Exception as e:  # any other crash is an error, exit 3
+    except Exception as e:  # any other crash is an error, exit 3 (text mode lets it fall out)
         traceback.print_exc()
-        rc, crash = OUTCOME_EXIT["error"], f"{type(e).__name__}: {e}"
+        rc, crash = OUTCOME_EXIT["error"], _redact(f"{type(e).__name__}: {e}")
     lines = [crash] if crash else [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
-    if a[:1] == ["--status"]:
-        out = dict(_RESULT) if "sets" in _RESULT else {"next": "none", "principal": principal, "sets": []}
-    elif a[:1] in (["--approve"], ["--miss"]):  # done is the exit code; why is the last thing text mode said
-        out = {"done": rc == 0, "why": lines[-1] if lines else "", **({"removed": _RESULT["removed"]} if _RESULT.get("removed") else {})}
+    if a[:1] == ["--status"] and "sets" in _RESULT and not crash:
+        out = dict(_RESULT)
+    elif a[:1] in (["--approve"], ["--miss"]):  # done is the exit code; why is the reason recorded where it was decided
+        out = {"done": rc == 0, "why": crash or _RESULT.get("why", ""), **({"removed": _RESULT["removed"]} if _RESULT.get("removed") else {})}
     else:
         if crash or "outcome" not in _RESULT:  # a crash, or refused before any search: the same shape, with the reason
             _RESULT.clear()
@@ -3747,18 +3774,21 @@ def _main() -> int:
 
 def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
     if not principal or not a:
-        print("--json needs --principal AGENT and a request" if as_json else __doc__)
+        if as_json:
+            say("--json needs --principal AGENT and a request")
+        else:
+            print(__doc__)
         return 2
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", principal):  # same rule as the memory runtime
-        print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
-              "'.', '_', '-'; no spaces or slashes)")
+        say(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
+            "'.', '_', '-'; no spaces or slashes)")
         return 2
     if as_json and (why := json_refusal(a)):
         print(why)
         return 2
     if a[0] == "--":  # the rest is the question, read literally (never a --flag)
         if len(a) == 1:
-            print(__doc__)
+            print("--json needs a question after --" if as_json else __doc__)
             return 2
         return lookup(" ".join(a[1:]), principal, state_dir(principal))
     if a[0] == "--preflight":
@@ -3807,7 +3837,7 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
         except (IndexError, ValueError):
             rest = []
         if len(rest) != 2 or (rank is not None and file is not None):
-            print('usage: --approve "question" "answer" [--rank N | --file PATH]')
+            say('usage: --approve "question" "answer" [--rank N | --file PATH]')
             return 2
         return approve(principal, rest[0], rest[1], sdir, rank=rank, file=file)
     if a[0] == "--add":
@@ -3840,7 +3870,7 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
             try:
                 rc = max(rc, lookup(claim, principal, sdir))
             except Exception as e:  # one failed statement must not drop the rest of the file
-                print(f"ERROR: this statement could not be checked ({type(e).__name__}: {e}); "
+                print(f"ERROR: this statement could not be checked ({_redact(f'{type(e).__name__}: {e}')}); "
                       "check it by hand")
                 traceback.print_exc()
                 rc = max(rc, 3)  # distinct from 2 (bad arguments)
