@@ -135,8 +135,19 @@ def merge_saved(sdir: Path, new: list) -> list:
 SPLITS = ("tuned", "held-out", "retrospective")
 
 
-def normalize_cases(cases, default_principal):
-    """Reject known leakage instead of silently merging split labels."""
+def is_absent(case) -> bool:
+    """A not-in-files case: an absent question ("absent": true) or a claim expecting ABSENT (the flag is for
+    questions only; a TRUE or FALSE claim always names its gold). Nothing in the files settles it, so its
+    gold list is empty."""
+    if case.get("kind") == "claim":
+        return case.get("expected") == "ABSENT"
+    return case.get("absent") is True
+
+
+def normalize_cases(cases, default_principal, absent_ok=False):
+    """Reject known leakage instead of silently merging split labels. A caller that grades
+    not-in-files cases (paid replay) passes absent_ok: such a case then takes gold [] and
+    every other case still needs its gold files; the free word search cannot grade one."""
     seen, merged = {}, {}
     for raw in cases:
         c = dict(raw)
@@ -150,10 +161,12 @@ def normalize_cases(cases, default_principal):
             split = "retrospective"
         c["split"] = split
         c["principal"] = c.get("principal") or default_principal
+        absent = absent_ok and is_absent(c)  # a not-in-files case takes no gold; every other case needs some
         if (not isinstance(c.get("question"), str) or not c["question"].strip()
-                or not isinstance(c.get("gold"), list) or not c["gold"]
+                or not isinstance(c.get("gold"), list) or bool(c["gold"]) == absent
                 or any(not isinstance(g, str) or not os.path.isabs(g) for g in c["gold"])):
-            raise ValueError("cases need a question and a nonempty list of absolute gold paths")
+            raise ValueError("cases need a question and a nonempty list of absolute gold paths"
+                             + ("; an absent question or ABSENT claim takes an empty gold list" if absent_ok else ""))
         question = " ".join(c["question"].casefold().split()).rstrip(".!?")
         identities = [("question", question)] + [("source", os.path.realpath(g)) for g in c["gold"]]
         for field in ("group", "source_family"):
@@ -168,6 +181,8 @@ def normalize_cases(cases, default_principal):
         key = (c["principal"], question)
         if key in merged and any(merged[key].get(f) != c.get(f) for f in ("group", "source_family")):
             raise ValueError("duplicate question has conflicting family metadata")
+        if absent_ok and key in merged and is_absent(merged[key]) != absent:
+            raise ValueError("duplicate question is a not-in-files case in one row and not in another")
         m = merged.setdefault(key, {**c, "gold": []})
         m["gold"] += [g for g in c["gold"] if g not in m["gold"]]
     return list(merged.values())
