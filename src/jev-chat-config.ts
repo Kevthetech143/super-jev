@@ -3,14 +3,14 @@
 import { statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { styleText } from 'node:util';
+import { styleText, stripVTControlCharacters } from 'node:util';
 
 export const COMMANDS = ['/check', '/status', '/help', '/exit'];
 /** How a user gets back to the window: the one wording every screen and message uses. */
 export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
 export type Turn =
-  | { kind: 'empty' | 'help' | 'exit' | 'status' }
+  | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' }
   | { kind: 'ask' | 'check' | 'say'; text: string }
   | { kind: 'connect'; path: string; dir: boolean };
 export type Session = { principal: string; skillDir: string; connected: Set<string> };
@@ -56,12 +56,17 @@ function distance(a: string, b: string): number {
   return row[b.length];
 }
 
-/** A line is `?`, `exit`/`quit`, a path, a /command, or a question, in that order. */
+/** A first word that starts with `-` is an option, never a question: --help and -h, --version, else unknown. */
+const option = (w: string): Turn => w === '--help' || w === '-h' ? { kind: 'help' } : w === '--version' ? { kind: 'version' }
+  : { kind: 'say', text: `Unknown option ${w}. Try --help.` };
+
+/** A line is `?`, `exit`/`quit`, an option, a path, a /command, or a question, in that order. */
 export function readLine(line: string, home: string = process.env.HOME ?? ''): Turn {
   const t = line.trim();
   if (!t) return { kind: 'empty' };
   if (t === '?') return { kind: 'help' };
   if (t === 'exit' || t === 'quit') return { kind: 'exit' };
+  if (t.startsWith('-')) return option(t.split(/\s+/)[0]);
   const ws = /^\/[a-z]+(\s|$)/i.test(t) ? [] : words(t);
   const typed = ws.length > 0 && pathy(ws[0]);
   if (typed && ws.length > 1 && ws.every(pathy)) return { kind: 'say', text: 'One at a time: drag in one folder or note, then the next.' };
@@ -117,21 +122,31 @@ export function childEnv(env: NodeJS.ProcessEnv, keyEnv: string, fileKey: string
 /** What a key press does in each mode (prompt, yes/no, hidden key). */
 export function keyAction(s: { mode: 'prompt' | 'confirm' | 'secret'; line: string; armed: boolean }, key: string): string {
   if (s.mode === 'confirm') return key === 'enter' ? (/^(y|yes)?$/i.test(s.line.trim()) ? 'yes' : 'no') : key === 'escape' || key === 'ctrl-c' ? 'no' : 'none';
-  if (s.mode === 'secret') return key === 'enter' ? 'send' : key === 'escape' || key === 'ctrl-c' ? 'cancel' : 'none';
+  if (s.mode === 'secret') return key === 'enter' ? 'send' : key === 'escape' || key === 'ctrl-c' || key === 'ctrl-d' ? 'cancel' : 'none';
   if (key === 'escape') return 'clear';
-  if (key === 'ctrl-c') return s.line ? 'clear' : s.armed ? 'quit' : 'hint';
-  return key === 'ctrl-d' && !s.line ? 'quit' : 'none';
+  return key === 'ctrl-c' ? (s.line ? 'clear' : s.armed ? 'quit' : 'hint') : 'none'; // Ctrl+D at the prompt is readline's own close
 }
 
 // ---------------------------------------------------------------- drawing a reply
-export function wrap(text: string, width: number): string[] {
-  const out: string[] = [];
+/** The one layout rule. A row is a list of pieces that never break (a path with its :line, a date, a tag; in prose, each word).
+ *  They fill lines of at most `width` visible columns, so a line breaks only between pieces and a piece wider than the
+ *  window stays whole. A piece that starts with a space asks for a wider gap, dropped when it starts a line. */
+export function pack(pieces: string[], width: number, first = '  ', hang = '    '): string[] {
+  const rows: string[] = [];
   let cur = '';
-  for (const w of text.split(/\s+/).filter(Boolean)) {
-    if (cur && cur.length + 1 + w.length > width) { out.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w;
+  for (const p of pieces) {
+    const indent = rows.length ? hang : first;
+    if (cur && stripVTControlCharacters(indent + cur + ' ' + p).length > width) { rows.push(indent + cur); cur = p.trimStart(); }
+    else cur = cur ? cur + ' ' + p : p.trimStart();
   }
-  return cur ? [...out, cur] : out;
+  return cur ? [...rows, (rows.length ? hang : first) + cur] : rows;
 }
+/** Prose: every word is a piece. */
+export const prose = (s: string) => s.split(/\s+/).filter(Boolean);
+const parts = (x: string | string[]) => (typeof x === 'string' ? prose(x) : x);
+/** Text that follows a dot (` · says X`): the dot stays with its first word. */
+const after = (s: string) => { const [w, ...rest] = prose(s); return [`· ${w}`, ...rest]; };
+const gap = (s: string) => ' ' + s;
 
 export const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const sentence = (s: string) => (/[.!?]$/.test(s) ? s : s + '.');
@@ -147,38 +162,58 @@ export const HELP = [
 
 export function confirmText(label: string, refresh: boolean, vendor: string, width: number): string {
   const text = `${refresh ? 'Refresh' : 'Connect'} ${label}? It's free and stays on this Mac. When you ask, your question and matching passages go to ${vendor}.`;
-  const rows = wrap(text, width);
-  const hint = 'enter yes · esc no';
-  return rows.length && rows[rows.length - 1].length + 2 + hint.length <= width ? [...rows.slice(0, -1), rows[rows.length - 1] + '  ' + hint].join('\n') : [...rows, hint].join('\n');
+  return pack([...prose(text), gap('enter yes · esc no')], width, '', '').join('\n');
 }
 
-export function launchLine(version: string, sets: { state: string }[]): string {
+export function launchLine(version: string, sets: { state: string }[], width: number): string {
   const by = new Map<string, number>();
   for (const s of sets) if (s.state !== 'ready') by.set(s.state, (by.get(s.state) ?? 0) + 1);
   const state = by.size ? [...by].map(([k, n]) => `${n} ${k}`).join(', ') : 'up to date';
-  return `Super Jev ${version} · ${plural(sets.length, 'folder')} · ${state} · ? for help`;
+  return pack([`Super Jev ${version}`, `· ${plural(sets.length, 'folder')}`, `· ${state}`, '· ? for help'], width, '', '').join('\n');
 }
+
+// What the engine left out and why it refused, worded from its stable `kind` (PR 2c). A kind not listed shows the engine's own words.
+const LEFT: Record<string, (n: number) => string> = {
+  link: (n) => `${plural(n, 'linked note')} pointing outside this folder`,
+  name: (n) => `${plural(n, 'note')} with backup or key-style names; they are never connected`,
+  folder: (n) => `${plural(n, 'note')} in folders skipped by default; drag a folder in on its own to connect it`,
+  folder_other: (n) => `${plural(n, 'file')} of other types in folders skipped by default`,
+  hidden: (n) => `${plural(n, 'hidden note')}; rename one to connect it`,
+  dataset: (n) => `${plural(n, 'file')} in prepared dataset copies`,
+  test: (n) => plural(n, 'test or scratch file'),
+  worktree: (n) => `${plural(n, 'file')} in git worktree copies`,
+  empty: (n) => plural(n, 'empty note'),
+  types: (n) => `${plural(n, 'file')} of other types; only .md notes connect`,
+};
+const num = (n: number) => n.toLocaleString('en-US');
+const REFUSED: Record<string, (r: any) => string | undefined> = {
+  too_many: (r) => Number.isInteger(r.count) && Number.isInteger(r.max) ? `That folder has ${num(r.count)} notes; one connect takes up to ${num(r.max)}.` : undefined,
+  not_a_folder: () => 'That is not a folder.',
+  not_markdown: () => "This folder was connected with other file types, so it can't be refreshed here.",
+  usage: () => 'That request was not accepted.',
+};
 
 /** The outcome decides the screen; a connect has none. Whatever the helper reports is drawn, never a calmer screen. */
 export function render(shown: Shown, look: Look): string {
   const d = shown.data ?? {}, o: string = d.outcome ?? '';
-  const paint = (fmt: string, s: string) => (look.color ? styleText(fmt as any, s, { validateStream: false }) : s);
+  const paint = (fmt: string, s: string) => (look.color && fmt ? styleText(fmt as any, s, { validateStream: false }) : s);
   const vendor = look.vendor ?? 'TypeSafe';
   const path = (p: string) => tilde(p, look.home);
-  const tag = (s: string) => '  ' + paint('dim', s);
+  const tag = (s: string) => gap(paint('dim', s));
   const out: string[] = [];
-  let title = '', tone = '', nextLine = '';
-  const head = (text: string, color = '') => { title = text; tone = color; };
-  // A row that fits stays as it is; a longer one wraps to the window, its continuation indented.
-  const fit = (s: string, fmt = '') => (s.length + 2 <= look.width ? [s] : wrap(s, look.width - 4)).map((l, i) => (i ? '    ' : '  ') + (fmt ? paint(fmt, l) : l));
-  const body = (s: string) => out.push(...fit(s));
+  let title: string[] = [], tone = '', nextLine = '';
+  const head = (text: string | string[], color = '') => { title = parts(text); tone = color; };
+  // Every row goes through pack: prose as words, a path row as its parts. A row that fits stays as it is.
+  const lay = (s: string | string[], fmt = '', first = '  ', hang = '    ') => pack(parts(s), look.width, first, hang).map((l) => paint(fmt, l));
+  const body = (s: string | string[]) => out.push(...lay(s));
   const next = (s: string) => { nextLine = s; };
-  const quote = (text: string) => { for (const l of wrap(`"${text}"`, look.width - 4)) out.push('    ' + paint('dim', l)); };
-  const place = (f: { path: string; line?: number; date?: string; says?: string }) =>
-    path(f.path) + (f.line ? ':' + f.line : '') + (f.date ? ` · ${f.date}` : '') + (f.says ? ` · says ${f.says}` : '');
+  const quote = (text: string) => out.push(...lay(`"${text}"`, 'dim', '    '));
+  const place = (f: { path: string; line?: number; date?: string; says?: string }, lead = '') =>
+    [lead + path(f.path) + (f.line ? ':' + f.line : ''), ...(f.date ? [`· ${f.date}`] : []), ...(f.says ? after(`says ${f.says}`) : [])];
   const keyNext = () => next(look.keySource === 'env' ? `fix ${look.keyEnv ?? 'the key variable'} in your shell, then restart.`
     : look.keySource === 'file' ? `delete ~/.typesafe-api-key, then ${OPEN} to paste a new key.` : `${OPEN} to paste your key.`);
-  const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach(body);
+  const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => LEFT[r.kind] && Number.isInteger(r.count) ? `Left out ${LEFT[r.kind](r.count)}.`
+    : `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach((l) => body(l));
   const empty = (setup: boolean) => { head(setup ? 'Not set up yet' : 'Nothing connected yet'); next(setup ? `${OPEN}; setup runs there.` : 'drag a folder of Markdown notes in here.'); };
   const retry = () => { if (!shown.noNext && shown.kind !== 'status') next('/status, or ask again.'); };
   const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); retry(); };
@@ -186,18 +221,21 @@ export function render(shown: Shown, look: Look): string {
   const rows: any[] = d.unsearched ?? [];
   const lost = uniq([...rows.map((u) => `${u.root ? basename(u.root) : u.set} not searched (${u.healing ? 'refreshing' : u.state})`),
     ...(d.errors ?? []).filter((e: any) => !rows.some((u) => u.set === e.set)).map((e: any) => `${e.set} not searched (failed)`)]);
-  const headline = (text: string) => [text, ...lost].join(' · ');
+  const headline = (text: string | string[]) => [...parts(text), ...lost.flatMap(after)];
 
   if (shown.kind === 'help') return HELP;
   if (shown.kind === 'crash') crash(d.line ?? '');
   else if (shown.kind === 'connect') {
     const word = shown.refreshed ? 'Refreshed' : 'Connected';
     if (shown.declined) head(shown.refreshed ? 'Not refreshed' : 'Not connected');
-    else if (d.refused) { head(`Not connected: ${d.refused.why}`, 'red'); next('drag in a smaller folder inside it.'); }
-    else {
+    else if (d.refused) {
+      head('Not connected', 'red');
+      body(REFUSED[d.refused.kind]?.(d.refused) ?? d.refused.why ?? '');
+      if (d.refused.kind === 'too_many') next('drag in a smaller folder inside it.');
+    } else {
       head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : 'Not connected', d.connected ? 'green' : 'red');
-      for (const h of d.held ?? []) body(`Held back ${h.path}: ${h.why}`);
-      for (const f of d.failed ?? []) body(`${d.connected ? 'Failed ' : ''}${f.path}: ${f.why}`);
+      for (const h of d.held ?? []) body(['Held back', path(h.path) + ':', ...prose(h.why)]);
+      for (const f of d.failed ?? []) body([...(d.connected ? ['Failed'] : []), path(f.path) + ':', ...prose(f.why)]);
       leftOut(d.skipped);
     }
   } else if (o === 'error') {
@@ -227,13 +265,15 @@ export function render(shown: Shown, look: Look): string {
     if (d.next === 'setup' || !sets.length) empty(d.next === 'setup');
     else {
       head(`${plural(sets.length, 'folder')} connected`);
-      for (const s of sets) body(`${(s.roots ?? []).map(path).join(', ') || s.name}  ${plural(s.notes ?? 0, 'note')}  ${s.state}`);
+      const at = (s: any) => (s.roots ?? []).map(path).join(', ') || s.name;
+      // Two sets with the same folder (a folder, then one note in it) are told apart by their name.
+      for (const s of sets) body([at(s), gap(plural(s.notes ?? 0, 'note')), gap(s.state), ...(sets.filter((x) => at(x) === at(s)).length > 1 ? [tag(s.name)] : [])]);
     }
   } else if (d.claim) {
-    const c = d.claim, saved = d.saved ? ' · saved, proof file unchanged' : '';
+    const c = d.claim;
     if (c.verdict === 'NOT FOUND') { head(headline(`NOT FOUND in the ${plural(c.read ?? 0, 'note')} read`)); body('It may be in a note not read or not connected.'); }
     else {
-      head(headline(c.verdict + saved), c.verdict === 'TRUE' ? 'green' : c.verdict === 'FALSE' ? 'red' : '');
+      head(headline([c.verdict, ...(d.saved ? after('saved, proof file unchanged') : [])]), c.verdict === 'TRUE' ? 'green' : c.verdict === 'FALSE' ? 'red' : '');
       if (c.proof) { body(place(c.proof)); if (c.proof.text) quote(c.proof.text); }
       for (const f of c.files ?? []) body(place(f));
       if (c.verdict === 'CONFLICT') body('Read both before relying on either.');
@@ -241,11 +281,11 @@ export function render(shown: Shown, look: Look): string {
   } else if (o === 'found') {
     const files: any[] = d.files ?? [], skills: any[] = d.skills ?? [];
     const found = [skills.length && plural(skills.length, 'skill'), files.length && plural(files.length, 'note')].filter(Boolean).join(' and ') || '0 notes';
-    head(d.saved ? 'Saved answer · notes unchanged' : headline(`Found ${found}`), d.saved ? 'green' : '');
-    if (d.saved?.by === 'you' && d.saved.answer) for (const l of wrap(d.saved.answer, look.width - 2)) body(l);
-    for (const s of skills) body(`${s.name}  ${path(s.path)}` + (s.guess ? tag('guess') : ''));
+    head(d.saved ? ['Saved answer', ...after('notes unchanged')] : headline(`Found ${found}`), d.saved ? 'green' : '');
+    if (d.saved?.by === 'you' && d.saved.answer) out.push(...lay(d.saved.answer, '', '  ', '  '));
+    for (const s of skills) body([s.name, gap(path(s.path)), ...(s.guess ? [tag('guess')] : [])]);
     files.forEach((f, i) => {
-      body(`${i + 1} ${place(f)}` + (f.tier === 'possible' ? tag('possible') : f.tier === 'unchecked' ? tag('not checked') : ''));
+      body([...place(f, `${i + 1} `), ...(f.tier === 'possible' ? [tag('possible')] : f.tier === 'unchecked' ? [tag('not checked')] : [])]);
       if (i === 0 && f.text) quote(f.text);
     });
     if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
@@ -258,6 +298,7 @@ export function render(shown: Shown, look: Look): string {
     next('drag in the folder that has it.');
   } else crash(d.why ?? '');
   if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off).replace(/^./, (c) => c.toUpperCase()));
-  const time = shown.secs === undefined ? '' : paint('dim', ` · ${shown.secs.toFixed(1)}s`);
-  return [(tone ? paint(tone, `• ${title}`) : `• ${title}`) + time, ...out, ...(nextLine ? fit('Next: ' + nextLine, 'dim') : [])].join('\n');
+  const time = shown.secs === undefined ? [] : [paint('dim', `· ${shown.secs.toFixed(1)}s`)];
+  return [...pack([...title.map((w) => paint(tone, w)), ...time], look.width, paint(tone, '• '), '  '), ...out,
+    ...(nextLine ? lay('Next: ' + nextLine, 'dim') : [])].join('\n');
 }

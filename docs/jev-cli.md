@@ -2,8 +2,7 @@
 
 A window in your terminal over the same helpers agents call. What you see
 is what the helpers report: each helper prints one JSON object and an exit
-code, and the app only draws it. It has no dependencies beyond Node 24 and
-Python 3.10.
+code, and the app only draws it. It needs only Node 24 and Python 3.10.
 
 ## Start
 
@@ -13,12 +12,12 @@ npm run jev            # the window
 superjev "How long does the canary hold?"   # one question, then exit
 ```
 
-`install.sh` makes its own copy in `~/.local/share/super-jev`. Folders you
-connect are kept per copy, so connect and ask from the same door.
+`install.sh` copies itself to `~/.local/share/super-jev`; folders are kept
+per copy, so connect and ask from the same door.
 
 The first launch asks once for your TypeSafe key (hidden, saved only on
 this Mac in `~/.typesafe-api-key`, owner-only) and runs setup. Later
-launches print one line: the version, how many folders, and whether they
+launches print one line: the version, the folder count and whether they
 are up to date. A key in `TYPESAFE_API_KEY` wins over the saved one.
 
 ## In the window
@@ -34,16 +33,17 @@ are up to date. A key in `TYPESAFE_API_KEY` wins over the saved one.
 
 Keys: Esc clears the line, Ctrl+C clears it (twice on an empty line quits),
 Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
-yes and Esc is no.
+yes and Esc is no; Ctrl+D leaves, which counts as no.
 
 ## One question from a shell
 
-`superjev <words>` handles the words exactly as if typed in the window.
-The answer goes to stdout (no colour when piped) and the progress row to
-stderr. The exit code is the helper's own: found 0, not found 1, not
-supported 2, error 3, needs setup 4 (`/check` keeps the claim check's own
-codes). A line the app cannot use (no such path, unknown command) exits 2.
-With no key it says so and exits 4. Nothing connects without a keyboard.
+`superjev <words>` handles the words as if typed in the window. The answer
+goes to stdout (no colour when piped) and the progress row to stderr. The
+exit code is the helper's own: found 0, not found 1, not supported 2, error
+3, needs setup 4 (`/check` keeps the claim check's own codes). `--help` and
+`--version` print and exit 0. A line the app cannot use (no such path,
+unknown command, or a first word starting with `-`, never a question)
+exits 2. No key: it says so, exit 4. Nothing connects without a keyboard.
 
 ## Tests
 

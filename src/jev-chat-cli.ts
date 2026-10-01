@@ -12,13 +12,14 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadJudgeProfile } from './judge-profile.ts';
 import {
-  COMMANDS, HELP, OPEN, childEnv, confirmText, helperCall, keyAction, launchLine, pointerName, readLine, render, wrap,
+  COMMANDS, HELP, OPEN, childEnv, confirmText, helperCall, keyAction, launchLine, pack, pointerName, prose, readLine, render,
   type Session, type Turn,
 } from './jev-chat-config.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL = join(ROOT, 'skills', 'super-jev');
 const VERSION: string = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
+const TITLE = `Super Jev ${VERSION}`;
 const NO_PYTHON = 'Super Jev needs Python 3.10 or newer, and python3 was not found. Install it (python.org/downloads), then run npm run jev again.';
 const ESC = Symbol('esc');
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
@@ -139,9 +140,7 @@ export async function run(io: IO): Promise<number> {
       return queue.shift() ?? null;
     };
     rl.on('line', (l) => push(l));
-    const write = (rl as any)._ttyWrite; // readline closes on Ctrl+D at an empty line; at a yes/no it does nothing
-    if (write) (rl as any)._ttyWrite = (s: string, key: any) => (mode === 'confirm' && key?.ctrl && key.name === 'd' ? undefined : write.call(rl, s, key));
-    rl.on('close', () => { closed = true; wake?.(); });
+    rl.on('close', () => { closed = true; wake?.(); }); // Ctrl+D closes the window; a pending yes/no then counts as no
     const act = (a: string) => { if (a === 'clear') clear(); else if (a === 'quit') rl.close(); else if (a === 'no') { clear(); push(ESC); } };
     rl.on('SIGINT', () => {
       if (mode === 'busy') { interrupted = true; child?.kill('SIGTERM'); rl.close(); return; }
@@ -149,11 +148,7 @@ export async function run(io: IO): Promise<number> {
       if (a === 'hint') { armed = true; setTimeout(() => (armed = false), 2000).unref(); stdout.write('\nPress Ctrl+C again to quit\n'); rl.prompt(); }
       else act(a);
     });
-    stdin.on('keypress', (_s: string, key: any) => {
-      if (!key || mode === 'busy') return;
-      const name = key.name === 'escape' ? 'escape' : key.ctrl && key.name === 'd' ? 'ctrl-d' : '';
-      if (name) act(keyAction({ mode, line: rl.line, armed }, name));
-    });
+    stdin.on('keypress', (_s: string, key: any) => { if (key?.name === 'escape' && mode !== 'busy') act(keyAction({ mode, line: rl.line, armed }, 'escape')); });
     return {
       /** The next line, or null once the window is closed. */
       async next(): Promise<string | null> {
@@ -186,9 +181,9 @@ export async function run(io: IO): Promise<number> {
     let r = await helper({ kind: 'status' });
     if (r.data?.outcome) return stop(r); // the helper could not read the status: show why, never an empty window
     const fresh = !r.data || r.data.next === 'setup'; // no JSON at all (an old Python) goes to setup.py, which says what is missing
-    if (!(r.data?.sets ?? []).length) out(`Super Jev ${VERSION}\nPoints you to the notes that answer your question.\n`);
+    if (!(r.data?.sets ?? []).length) out(`${TITLE}\nPoints you to the notes that answer your question.\n`);
     if (needsKey()) {
-      out(wrap(`Paste your ${vendor} API key. It stays hidden and is saved only on this Mac.`, look().width).join('\n'));
+      out(pack(prose(`Paste your ${vendor} API key. It stays hidden and is saved only on this Mac.`), look().width, '', '').join('\n'));
       stdout.write('key › ');
       const key = await readKey();
       if (!key) { out(`No key entered. Open the window again to paste it, or set ${keyEnv}.`); return 1; }
@@ -203,7 +198,7 @@ export async function run(io: IO): Promise<number> {
       if (!r.data || r.data.outcome) return stop(r);
     }
     const sets: { state: string }[] = r.data.sets ?? [];
-    out(sets.length ? launchLine(VERSION, sets) : '• Ready. Nothing connected yet.\n  Drag a folder of Markdown notes in here.');
+    out(sets.length ? launchLine(VERSION, sets, look().width) : '• Ready. Nothing connected yet.\n  Drag a folder of Markdown notes in here.');
 
     const term = terminal();
     try {
@@ -212,6 +207,7 @@ export async function run(io: IO): Promise<number> {
         if (t.kind === 'exit') break;
         let text = '';
         if (t.kind === 'help') text = HELP;
+        else if (t.kind === 'version') text = TITLE;
         else if (t.kind === 'say') text = t.text;
         else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
         else if (t.kind !== 'empty') text = (await helper(t)).text;
@@ -225,7 +221,7 @@ export async function run(io: IO): Promise<number> {
   // ------------------------------------------------------------ the one-shot door
   async function door(): Promise<number> {
     const t = readLine(argv.join(' '), home);
-    if (t.kind === 'help') { out(HELP); return 0; }
+    if (t.kind === 'help' || t.kind === 'version') { out(t.kind === 'help' ? HELP : TITLE); return 0; }
     if (t.kind === 'exit') return 0;
     if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
@@ -246,6 +242,7 @@ export async function run(io: IO): Promise<number> {
     return finish(await helper(t));
   }
   async function finish(r: Reply): Promise<number> {
+    if (interrupted) return 130; // the helper was stopped on purpose, so its missing JSON says nothing about Python
     const bad = r.data ? null : await notReady();
     out((bad ?? r).text);
     return (bad ?? r).code;

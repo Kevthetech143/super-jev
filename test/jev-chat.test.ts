@@ -17,6 +17,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripVTControlCharacters } from 'node:util';
 import * as cfg from '../src/jev-chat-config.ts';
 
 const cli: any = await import('../src/jev-chat-cli.ts').catch(() => ({}));
@@ -112,14 +113,14 @@ async function door(r: Rig, args: string[], o: { key?: boolean; env?: Record<str
 const tty = () => Object.assign(new PassThrough(), { isTTY: true, columns: 60, setRawMode() { return this; } });
 
 /** The window: run() with fake terminal streams. */
-function win(r: Rig, o: { key?: boolean; env?: Record<string, string> } = {}) {
+function win(r: Rig, o: { key?: boolean; env?: Record<string, string>; argv?: string[] } = {}) {
   let out = '', err = '';
   const rawLog: { on: boolean; screen: string }[] = []; // each raw-mode switch, with what was on screen at that moment
   const stdin = Object.assign(tty(), { setRawMode(on: boolean) { rawLog.push({ on, screen: out }); return this; } });
   const stdout = tty(), stderr = tty();
   stdout.on('data', (d) => (out += d)); stderr.on('data', (d) => (err += d));
   const env = { ...r.env, ...(o.key === false ? {} : { TYPESAFE_API_KEY: KEY }), ...o.env };
-  const done: Promise<number> = cli.run({ argv: [], env, stdin, stdout, stderr });
+  const done: Promise<number> = cli.run({ argv: o.argv ?? [], env, stdin, stdout, stderr });
   const w = {
     done, rawLog, raw: () => out, text: () => strip(out), err: () => strip(err),
     send: (s: string) => stdin.write(s),
@@ -238,6 +239,14 @@ test('S14 status leads each row with the folder, then note count and state, neve
   assert.ok(!s.includes('team-notes-3fa9c1') && !s.includes('handbook-ab12cd'), s);
 });
 
+test('S14b two sets with the same folder are told apart by their name; a folder shown once never shows one', () => {
+  const s = R('status', { next: 'none', principal: 'me', sets: [
+    SET('plan-draft-v2-ae3e74', '/Users/sam/Team Notes', 1), SET('team-notes-b5391a', '/Users/sam/Team Notes', 3), SET('handbook-ab12cd', '/Users/sam/Handbook', 12)] });
+  assert.match(s, /^ {2}~\/Team Notes {2}1 note {2}ready {2}plan-draft-v2-ae3e74$/m);
+  assert.match(s, /^ {2}~\/Team Notes {2}3 notes {2}ready {2}team-notes-b5391a$/m);
+  assert.match(s, /^ {2}~\/Handbook {2}12 notes {2}ready$/m);
+});
+
 test('S15 help lists exactly the commands that exist, and ? is the same help', () => {
   const s = clean(cfg.render({ kind: 'help', data: {} }, OPTS));
   assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/status']);
@@ -299,31 +308,66 @@ test('I2 needs refresh while healing: refreshing now, Ask again', () => {
   assert.match(s, /Ask again/);
 });
 
-test('I3 needs include: names documents and the engine\'s own way in', () => {
+test('I3 needs include: ask.py\'s left-out rows have no kind, so they show the engine\'s own words and way in', () => {
   const s = R('ask', { outcome: 'needs-setup', why: 'no match, but the search was incomplete: 2 files skipped at setup', next: 'include',
     left_out: [{ what: 'file(s) in folders skipped by default: documents (2)', count: 2, where: '/Users/sam/Team Notes/documents', way_in: 'drag documents/ in on its own' }] });
   assert.ok(s.includes('documents'));
   assert.ok(s.includes('drag documents/ in on its own'));
 });
 
-test('I4 connect with a held note and skipped files: Connected, a held line, left-out lines with their way in, not a failure', () => {
-  const skip = { what: '.md file(s) in folders skipped by default: documents/ (2), profile/ (1)', count: 3,
+test('I4 connect with a held note and skipped files: Connected, a held line, left-out lines worded from kind, not a failure', () => {
+  const skip = { kind: 'folder', what: '.md file(s) in folders skipped by default: documents/ (2), profile/ (1)', count: 3,
     way_in: 'to connect one, connect that folder as its own set (--root FOLDER --pointer NEW-NAME)' };
-  const other = { what: 'file(s) of other types (.py 1, .csv 1)', count: 2, way_in: 'only .md files connect' };
-  const s = R('connect', { connected: 25, held: [{ path: 'ops/creds.md', why: 'looks like it holds a secret' }], skipped: [skip, other, other] },
+  const other = { kind: 'types', what: 'file(s) of other types (.py 1, .csv 1)', count: 2, way_in: 'only .md files connect' };
+  const link = { kind: 'link', what: 'linked file(s) point outside every --root', count: 1, way_in: 'add --allow-target FOLDER to admit them' };
+  const s = R('connect', { connected: 25, held: [{ path: 'ops/creds.md', why: 'looks like it holds a secret' }], skipped: [skip, other, other, link] },
     { label: 'Team Notes' });
   assert.match(s, /^• Connected Team Notes: 25 notes · 1\.4s$/m);
   assert.match(s, /Held back.*ops\/creds\.md/);
-  assert.ok(flat(s).includes('documents/ (2)') && flat(s).includes('only .md files connect'));
-  assert.equal((flat(s).match(/only \.md files connect/g) || []).length, 1, 'a repeated left-out row is shown once');
+  assert.match(flat(s), /Left out 3 notes in folders skipped by default; drag a folder in on its own to connect it\./);
+  assert.match(flat(s), /Left out 2 files of other types; only \.md notes connect\./);
+  assert.match(flat(s), /Left out 1 linked note pointing outside this folder\./);
+  assert.equal((s.match(/only \.md notes connect/g) || []).length, 1, 'a repeated left-out row is shown once');
+  assert.ok(!/--|\(s\)|FOLDER|NEW-NAME/.test(s), 'no command-line words and no "file(s)" from the engine text:\n' + s);
   assert.ok(!/Not connected|failed/i.test(s), s);
 });
 
-test('I5 connect refused over the cap: Not connected, the reason, drag in a smaller folder', () => {
-  const s = R('connect', { connected: 0, refused: { why: '1,230 notes is more than one connect takes (250)' } }, { label: 'Everything' });
-  assert.match(s, /^• Not connected/m);
-  assert.ok(s.includes('1,230 notes is more than one connect takes (250)'));
-  assert.match(s, /drag in a smaller folder/i);
+test('I4b every skipped kind the engine documents has its own wording; a kind the app does not know shows the engine\'s words', () => {
+  const kinds = ['link', 'name', 'folder', 'folder_other', 'hidden', 'dataset', 'test', 'worktree', 'empty', 'types'];
+  const seen = new Set<string>();
+  for (const kind of kinds) {
+    const s = R('connect', { connected: 5, skipped: [{ kind, what: 'ENGINE TEXT (--root X)', count: 2, way_in: 'ENGINE WAY (--name Y)' }] }, { label: 'Team Notes' }, { width: 200 });
+    const row = lines(s).filter((l) => /^ {2}Left out/.test(l)).join(' ');
+    assert.match(row, /^ {2}Left out 2 .+\.$/, kind);
+    assert.ok(!/ENGINE|--/.test(s), `${kind} is worded from its kind:\n${s}`);
+    seen.add(row);
+  }
+  assert.equal(seen.size, kinds.length, 'each kind has its own wording');
+  const odd = R('connect', { connected: 5, skipped: [{ kind: 'future_kind', what: 'file(s) of a new sort', count: 4, way_in: 'rename them' }] }, { label: 'Team Notes' });
+  assert.ok(flat(odd).includes('Left out 4 file(s) of a new sort; rename them.'), odd);
+});
+
+test('I5 connect refused over the cap: Not connected, the numbers from the engine, drag in a smaller folder, no command-line words', () => {
+  const why = '1230 files exceed --max-files 250; narrow --root/--exclude/--no-recurse or raise --max-files';
+  const s = R('connect', { connected: 0, refused: { kind: 'too_many', why, count: 1230, max: 250 } }, { label: 'Everything' });
+  assert.match(s, /^• Not connected · 1\.4s$/m, 'the headline stays short');
+  assert.match(s, /^ {2}That folder has 1,230 notes; one connect takes up to 250\.$/m);
+  assert.match(s, /Next: drag in a smaller folder inside it\./);
+  assert.ok(!/--|exceed/.test(s), s);
+});
+
+test('I5b every refusal kind has its own wording; a kind the app does not know shows the engine\'s reason', () => {
+  const said = new Set<string>();
+  for (const kind of ['not_a_folder', 'not_markdown', 'usage']) {
+    const s = R('connect', { connected: 0, refused: { kind, why: 'ENGINE WHY (--root X)' } }, { label: 'Notes' });
+    assert.match(s, /^• Not connected/m, kind);
+    assert.ok(!/ENGINE|--/.test(s), `${kind} is worded from its kind:\n${s}`);
+    said.add(lines(s)[1]);
+  }
+  assert.equal(said.size, 3);
+  const odd = R('connect', { connected: 0, refused: { kind: 'future_kind', why: 'the folder is on a slow disk' } }, { label: 'Notes' });
+  assert.match(odd, /^• Not connected/m);
+  assert.ok(odd.includes('the folder is on a slow disk'), odd);
 });
 
 test('I6 not supported: the engine reason plus Ask one focused question.', () => {
@@ -361,7 +405,7 @@ test('E5 a crash screen: Super Jev hit an error, its last line, a next step', ()
 test('E8 connect failed: Not connected plus the reasons', () => {
   const s = R('connect', { connected: 0, failed: [{ path: '/Users/sam/Team Notes', why: 'no .md file left to connect' }] }, { label: 'Team Notes' });
   assert.match(s, /^• Not connected/m);
-  assert.ok(s.includes('no .md file left to connect'));
+  assert.match(s, /^ {2}~\/Team Notes: no \.md file left to connect$/m);
 });
 
 // ---------------------------------------------------------------- review round 1: the helper's outcome decides the screen
@@ -550,7 +594,7 @@ test('grammar order: bare words, then a path, then /command, then a question', (
   assert.deepEqual(cfg.readLine('/status'), { kind: 'status' });
   assert.deepEqual(cfg.readLine('How long does the canary hold?'), { kind: 'ask', text: 'How long does the canary hold?' });
   assert.deepEqual(cfg.readLine('exit the building plan'), { kind: 'ask', text: 'exit the building plan' });
-  assert.deepEqual(cfg.readLine('--help me'), { kind: 'ask', text: '--help me' });
+  assert.deepEqual(cfg.readLine('--help me'), { kind: 'help' });
 });
 
 test('S12 childEnv: the env key wins over the file key; with only a file key the child gets it; neither adds nothing', () => {
@@ -566,13 +610,12 @@ test('K3 keyAction: Ctrl+C clears a line, hints on an empty one, quits when arme
   assert.equal(ka({ mode: 'prompt', line: '', armed: false }, 'ctrl-c'), 'hint');
   assert.equal(ka({ mode: 'prompt', line: '', armed: true }, 'ctrl-c'), 'quit');
   assert.equal(ka({ mode: 'prompt', line: 'abc', armed: false }, 'escape'), 'clear');
-  assert.equal(ka({ mode: 'prompt', line: '', armed: false }, 'ctrl-d'), 'quit');
-  assert.equal(ka({ mode: 'prompt', line: 'abc', armed: false }, 'ctrl-d'), 'none');
   assert.equal(ka({ mode: 'confirm', line: '', armed: false }, 'enter'), 'yes');
   assert.equal(ka({ mode: 'confirm', line: '', armed: false }, 'escape'), 'no');
   assert.equal(ka({ mode: 'confirm', line: '', armed: false }, 'ctrl-c'), 'no');
   assert.equal(ka({ mode: 'secret', line: '', armed: false }, 'enter'), 'send');
   assert.equal(ka({ mode: 'secret', line: '', armed: false }, 'escape'), 'cancel');
+  assert.equal(ka({ mode: 'secret', line: '', armed: false }, 'ctrl-d'), 'cancel', 'Ctrl+D leaves the key prompt like Esc');
 });
 
 test('no runtime dependencies: package.json lists none and no source file imports a package', () => {
@@ -625,10 +668,52 @@ test('S5 whole app: a FALSE claim exits with the stub\'s code and is not framed 
   assert.deepEqual(r.calls()[0].args.slice(-2), ['--claim', 'Hotels are capped at $300 a night.']);
 });
 
-test('I13 whole app: a question that starts with --help reaches the helper after --', async () => {
+test('I13 a first word that starts with - is never a question: --help and -h print the usage, --version the version, anything else is an unknown option', () => {
+  assert.equal(cfg.readLine('--help').kind, 'help');
+  assert.equal(cfg.readLine('-h').kind, 'help');
+  assert.equal(cfg.readLine('--help me').kind, 'help');
+  assert.equal(cfg.readLine('--version').kind, 'version');
+  for (const line of ['--bogus', '-x what is this', '-5 degrees in fahrenheit', '--principal evil']) {
+    const t: any = cfg.readLine(line);
+    assert.equal(t.kind, 'say', line);
+    assert.match(t.text, new RegExp(`^Unknown option ${line.split(' ')[0]}\\.`), line);
+    assert.match(t.text, /--help/, 'the usage hint');
+    assert.ok(!t.text.includes('\n'), 'one line');
+  }
+  assert.equal(cfg.readLine('what is -h?').kind, 'ask', 'a dash after the first word is part of the question');
+});
+
+test('I13 whole app: --help and -h print the usage, --version the version, exit 0, no helper; an unknown option exits 2, no helper', async () => {
   const r = rig([{ when: '--json', out: FOUND(), code: 0 }]);
-  await door(r, ['--help', 'me']);
-  assert.deepEqual(r.asks()[0].args.slice(-2), ['--', '--help me']);
+  for (const args of [['--help'], ['-h'], ['--help', 'me']]) {
+    const d = await door(r, args);
+    assert.equal(d.code, 0, args.join(' '));
+    assert.match(d.out, /\/check/, 'the usage lists the commands');
+  }
+  const v = await door(r, ['--version']);
+  assert.equal(v.code, 0);
+  assert.ok(v.out.includes(VERSION), v.out);
+  for (const args of [['--bogus'], ['-x', 'what', 'is', 'this']]) {
+    const d = await door(r, args);
+    assert.equal(d.code, 2, args.join(' '));
+    assert.equal(d.out, '');
+    assert.match(d.err, new RegExp(`^Unknown option ${args[0]}\\..*--help`));
+    assert.equal(d.err.trim().split('\n').length, 1, 'one line');
+  }
+  assert.equal(r.calls().length, 0, 'no helper was called, so nothing was asked');
+});
+
+test('I13 window: --version prints the version and -x says Unknown option; no helper runs and the window stays open', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  const n = r.calls().length;
+  w.say('--version');
+  await w.waitFor(() => w.text().split(`Super Jev ${VERSION}`).length > 2); // the launch banner is the first one
+  w.say('-x what');
+  await w.waitFor('Unknown option -x.');
+  assert.equal(r.calls().length, n);
+  assert.equal(await w.quit(), 0);
 });
 
 test('I11 no terminal and no line: one usage line on stderr, exit 2, no python3 text, no helper called', async () => {
@@ -935,7 +1020,7 @@ test('E6 window: no python3 on PATH gives the Python 3.10 message and exit 1', a
 });
 
 test('S8 whole app: drop a folder, confirm with Enter, connect runs with the writer builtin and --json', async () => {
-  const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', out: { v: 1, connected: 28, skipped: [{ what: 'file(s) of other types (.py 1)', count: 1, way_in: 'only .md files connect' }] }, code: 0 }]);
+  const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', out: { v: 1, connected: 28, skipped: [{ kind: 'types', what: 'file(s) of other types (.py 1)', count: 1, way_in: 'only .md files connect' }] }, code: 0 }]);
   const w = win(r);
   await w.ready();
   w.say(FOLDER.replace(/ /g, '\\ '));
@@ -946,7 +1031,7 @@ test('S8 whole app: drop a folder, confirm with Enter, connect runs with the wri
   await w.waitFor('Connected Team Notes: 28 notes');
   const c = r.calls().find((x: any) => x.script === 'prepare_bulk.py');
   assert.deepEqual(c.args, ['--root', FOLDER, '--pointer', cfg.pointerName(FOLDER), '--principal', 'me', '--writer', 'builtin', '--json']);
-  assert.match(flat(w.text()), /Left out 1 .*only \.md files connect/);
+  assert.match(flat(w.text()), /Left out 1 file of other types; only \.md notes connect\./);
   w.all();
   await w.quit();
 });
@@ -1016,7 +1101,7 @@ test('S10b whole app: dropping the same folder twice in a session refreshes the 
 test('I4 whole app: connect exits 3 with a held note and left-out files: shown as Connected, not a failure', async () => {
   const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', code: 3, out: { v: 1, connected: 25,
     held: [{ path: 'ops/creds.md', why: 'looks like it holds a secret' }],
-    skipped: [{ what: 'file(s) of other types (.py 1)', count: 1, way_in: 'only .md files connect' }] } }]);
+    skipped: [{ kind: 'types', what: 'file(s) of other types (.py 1)', count: 1, way_in: 'only .md files connect' }] } }]);
   const w = win(r);
   await w.ready();
   w.say(FOLDER);
@@ -1024,7 +1109,7 @@ test('I4 whole app: connect exits 3 with a held note and left-out files: shown a
   w.send('\r');
   await w.waitFor('Connected Team Notes: 25 notes');
   assert.match(w.text(), /Held back.*ops\/creds\.md/);
-  assert.match(flat(w.text()), /only \.md files connect/);
+  assert.match(flat(w.text()), /Left out 1 file of other types; only \.md notes connect\./);
   assert.ok(!/Not connected/.test(w.text()));
   await w.quit();
 });
@@ -1185,9 +1270,101 @@ test('W1 every line fits the window: long rows and the Next line wrap with an in
   const setup = R('ask', { outcome: 'needs-setup', why: 'x', next: 'setup' });
   for (const s of [miss, left, setup]) for (const l of lines(s)) assert.ok(l.length <= 60, `${l.length} wide:\n${s}`);
   assert.ok(lines(miss).includes('  Searched 1 folder (28 notes); nothing matched.'), 'a row that fits is one line');
-  assert.match(miss, /^ {2}That doesn't prove it's nowhere: it may be in a folder\n {4}you haven't connected\.$/m);
+  assert.match(miss, /^ {2}That doesn't prove it's nowhere: it may be in a folder you\n {4}haven't connected\.$/m, 'a line is filled up to the window width');
   assert.match(setup, /^ {2}Next: open the window \(npm run jev, or superjev with no\n {4}words\); setup runs there\.$/m);
   assert.equal(left.split('\n').filter((l) => /^ {2}Left out/.test(l)).length, 1, 'one Left out row, wrapped under itself');
+});
+
+// ---------------------------------------------------------------- round 4: one layout rule (prose wraps, a path row never breaks inside the path)
+const LONG = '~/Quillbrook Team Notes/Engineering Handbook/Release Checklist for the Canary Rollout.md'; // 88 wide with ~, over both windows
+const LONG_ABS = '/Users/sam' + LONG.slice(1);
+const LONG_DIR = '~/Quillbrook Team Notes/Engineering Handbook/Release Checklists and Rollback Plans';
+const LONG_SKILL = '~/Quillbrook Team Notes/skills/summarize-meeting/SKILL.md';
+const LONG_HELD = 'Quillbrook Team Notes/Engineering Handbook/Credentials and Access Notes for Contractors.md';
+
+/** The screen at widths 60 and 80, colour off and on: each path is whole on one line, every other line fits, and colour changes nothing. */
+function everywhere(kind: string, data: object, paths: string[], extra: object = {}) {
+  for (const width of [60, 80]) {
+    const plain = R(kind, data, extra, { width });
+    const colour = R(kind, data, extra, { width, color: true });
+    const at = `width ${width}:\n${plain}`;
+    assert.equal(stripVTControlCharacters(colour), plain, `colour moved the layout at ${at}`);
+    for (const p of paths) assert.ok(lines(plain).some((l) => l.includes(p)), `${p} is broken across lines at ${at}`);
+    for (const l of lines(plain)) assert.ok(l.length <= width || paths.some((p) => l.includes(p)), `${l.length} wide, not a path row, at ${at}`);
+  }
+}
+
+test('W1 pack: any pieces, any width: lines fit unless one piece is alone and too wide, order is kept, no piece is split', () => {
+  let seed = 7;
+  const rnd = (n: number) => (seed = (seed * 1103515245 + 12345) % 2147483648) % n;
+  const bits = ['a', 'note', '~/Team Notes/runbooks/rollback-steps-2.md:12', '\x1b[2mdim\x1b[0m', 'possible', 'x'.repeat(90), '· 3', '12:30'];
+  for (let k = 0; k < 300; k++) {
+    const pieces = Array.from({ length: 1 + rnd(12) }, () => (rnd(4) === 0 ? ' ' : '') + bits[rnd(bits.length)]);
+    const width = 20 + rnd(70);
+    const lines = cfg.pack(pieces, width);
+    const plain = (x: string) => stripVTControlCharacters(x).trim();
+    let i = 0;
+    for (const l of lines) {
+      let j = i + 1;
+      const row = (to: number) => plain(pieces.slice(i, to).map((p, n) => (n ? ' ' + p : p.trimStart())).join(''));
+      while (j < pieces.length && row(j) !== plain(l)) j++;
+      assert.equal(row(j), plain(l), `a line is not whole pieces in order: ${JSON.stringify(l)}`);
+      assert.ok(stripVTControlCharacters(l).length <= width || j === i + 1, `too wide with several pieces: ${JSON.stringify(l)}`);
+      i = j;
+    }
+    assert.equal(i, pieces.length, 'a piece was lost');
+  }
+});
+
+test('W1 a path with a space, wider than the window, is never broken: found file and skill rows, widths 60 and 80, colour on and off', () => {
+  everywhere('ask', FOUND({ skills: [{ name: 'summarize-meeting', path: '/Users/sam' + LONG_SKILL.slice(1), guess: true }],
+    files: [{ path: LONG_ABS, tier: 'possible', line: 39, date: '2026-09-12', text: HANDBOOK_QUOTE }, { path: LONG_ABS, tier: 'unchecked', line: 7 }] }),
+  [LONG + ':39', LONG + ':7', LONG_SKILL]);
+});
+
+test('W1 a path with a space, wider than the window, is never broken: claim proof and claim file rows, widths 60 and 80, colour on and off', () => {
+  everywhere('check', { outcome: 'found', why: 'ok', next: 'none', claim: { verdict: 'CONFLICT', read: 2,
+    proof: { path: LONG_ABS, line: 39, text: HANDBOOK_QUOTE, date: '2026-09-12' },
+    files: [{ path: LONG_ABS, says: 'FALSE', line: 39, date: '2026-09-12' }, { path: LONG_ABS, says: 'a quarter of all traffic for an hour', line: 12, date: '2026-08-01' }] } },
+  [LONG + ':39', LONG + ':12']);
+});
+
+test('W1 a path with a space, wider than the window, is never broken: held, failed and status rows, widths 60 and 80, colour on and off', () => {
+  everywhere('connect', { connected: 25, held: [{ path: LONG_HELD, why: 'looks like it holds a secret' }], failed: [{ path: LONG_ABS, why: 'could not be read' }] },
+    [LONG_HELD, LONG], { label: 'Team Notes' });
+  everywhere('status', { next: 'none', principal: 'me', sets: [SET('release-3fa9c1', '/Users/sam' + LONG_DIR.slice(1), 28), SET('handbook-ab12cd', '/Users/sam/Handbook', 12, 'refreshing')] },
+    [LONG_DIR]);
+});
+
+test('W1 prose rows, the quote, the saved answer and the Next line fit both windows with colour on and off', () => {
+  const answer = 'Forty minutes at five percent of traffic, then the release owner promotes it, unless a rollback ticket is open for the same service.';
+  everywhere('ask', FOUND({ saved: { by: 'you', date: '2026-09-12', answer }, skills_off: 'no skill catalog was searched: skill search is off (SUPERJEV_SKILLS=0)',
+    left_out: [{ what: 'file(s) in folders skipped by default: documents (2), profile (1)', count: 3, way_in: 'drag documents/ in on its own, or profile/' }] }), []);
+  everywhere('ask', { outcome: 'not-found', why: 'x', next: 'connect', searched: { sets: 2, notes: 280 } }, []);
+  everywhere('crash', { line: 'ValueError: the registry file is not valid JSON and could not be read by the helper at all' }, []);
+});
+
+test('W1 a 55-column tagged row stays one line with colour on, and its two-space gap stays', () => {
+  const row = { path: '/Users/sam/Team Notes/runbooks/rollback-plan.md', tier: 'possible', line: 12 };
+  for (const color of [false, true]) {
+    const s = R('ask', FOUND({ files: [{ path: HB, tier: 'confirmed' }, { path: RC, tier: 'confirmed' }, row] }), {}, { color });
+    const l = lines(stripVTControlCharacters(s)).filter((x) => x.includes('rollback-plan.md'));
+    assert.deepEqual(l, ['  3 ~/Team Notes/runbooks/rollback-plan.md:12  possible'], `colour ${color}\n${s}`);
+    assert.equal(l[0].length, 55);
+  }
+});
+
+test('W1 a headline longer than the window wraps between its parts and keeps the time on its last line', () => {
+  const data = { outcome: 'found', why: 'ok', next: 'none', claim: { verdict: 'TRUE', read: 3, proof: { path: HB, line: 39, text: HANDBOOK_QUOTE }, files: [] },
+    unsearched: [{ set: 'a', root: '/Users/sam/Quillbrook Engineering Handbook', state: 'stale', healing: true }] };
+  for (const color of [false, true]) {
+    const s = stripVTControlCharacters(R('check', data, {}, { color }));
+    const head = lines(s).slice(0, lines(s).findIndex((l) => l.startsWith('  ~/')));
+    assert.ok(head.length > 1 && head.every((l) => l.length <= 60), s);
+    assert.ok(head[0].startsWith('• TRUE · Quillbrook'), head[0]);
+    assert.ok(head.slice(1).every((l) => l.startsWith('  ') && !l.startsWith('   ')), 'a continuation is indented two columns');
+    assert.ok(head[head.length - 1].endsWith('(refreshing) · 1.4s'), head.join('\n'));
+  }
 });
 
 test('W2 one way back to the window: every Next and message names how to open it, never "run superjev again"', () => {
@@ -1227,18 +1404,43 @@ test('I6b not supported draws the rephrase hint only when the engine says next: 
   assert.ok(bad.includes('that name is not valid') && !/Next:/.test(bad), bad);
 });
 
-test('K5 Ctrl+D at a yes/no does nothing: the window stays open and the question is still waiting', async () => {
+test('K5 Ctrl+D at a yes/no closes the window like anywhere else: the question counts as no, nothing connects, exit 0', async () => {
   const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
   const w = win(r);
   await w.ready();
   w.say(FOLDER);
   await w.waitFor(/Connect Team Notes\?/);
   w.send('\x04');
-  assert.equal(await Promise.race([w.done.then(() => 'closed'), new Promise((x) => setTimeout(() => x('open'), 200))]), 'open', w.text());
-  assert.ok(!/Not connected/.test(w.text()), w.text());
+  assert.equal(await w.exit(), 0, w.text());
+  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'), 'a pending yes/no is a no');
+});
+
+test('K5b the window uses no private readline API: Ctrl+D is the public close event', () => {
+  const src = readFileSync(CLI, 'utf8');
+  assert.ok(!/_ttyWrite|as any\)\._/.test(src), 'a private readline member is used');
+});
+
+test('K7 Ctrl+D at the key prompt leaves it like Esc: a No key message, exit 1, no key file written', async () => {
+  const r = rig([STATUS_EMPTY]);
+  const w = win(r, { key: false });
+  await w.waitFor('key ›');
+  w.send('\x04');
+  assert.equal(await w.exit(), 1, w.text());
+  assert.match(w.text(), /No key entered\./);
+  assert.ok(!existsSync(r.keyFile()));
+});
+
+test('D2 Ctrl+C during a door connect exits 130 and does not run setup.py (an interrupt is not an old Python)', async () => {
+  const r = rig([STATUS_EMPTY, { when: 'prepare_bulk.py', sleep: 5000, out: { v: 1, connected: 3 } },
+    { when: 'setup.py', out: 'NOT READY:\n  - TYPESAFE_API_KEY is not set\n', code: 1 }]);
+  const w = win(r, { argv: [FOLDER] });
+  await w.waitFor(/Connect Team Notes\?/);
   w.send('\r');
-  await w.waitFor('Connected Team Notes: 3 notes');
-  assert.equal(await w.quit(), 0);
+  await w.waitFor(() => r.calls().some((c: any) => c.script === 'prepare_bulk.py'));
+  w.send('\x03');
+  assert.equal(await w.exit(), 130, w.text());
+  assert.ok(!r.calls().some((c: any) => c.script === 'setup.py'), 'setup.py was run for an interrupt');
+  assert.ok(!/NOT READY|not set/.test(w.text()), w.text());
 });
 
 test('K6 a line typed ahead is not an answer to the next yes/no: an early Enter connects nothing', async () => {
