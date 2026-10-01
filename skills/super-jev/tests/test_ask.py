@@ -394,38 +394,6 @@ def test_add_falls_back_to_assist_on_no_match_then_approves_with_returned_ticket
     assert approve_calls[0]["evidence"] == [{"sourceId": "file:src-id", "quote": "The manual answer text."}]
 
 
-def test_add_prints_config_hint_and_exits_1_when_assist_disabled(tmp_path, monkeypatch, capsys):
-    src_file = tmp_path / "src.txt"
-    src_file.write_text("hello source\n")
-    calls = []
-
-    def fake_memory(req):
-        calls.append(req)
-        if req["action"] == "panel":
-            return {"pointers": []}
-        if req["action"] == "connect" and not req.get("reviewed"):
-            return {"status": "preparation-required",
-                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
-        if req["action"] == "connect" and req.get("reviewed"):
-            return {"status": "registered",
-                     "sources": [{"id": "file:src-id", "originalPath": req["sources"][0]["path"]}]}
-        if req["action"] == "search":
-            return {"status": "no-match", "attemptId": "attempt-1"}
-        if req["action"] == "assist":
-            return {"status": "error", "reason": "agent assist is disabled"}
-        raise AssertionError(req)
-
-    monkeypatch.setattr(ask, "memory", fake_memory)
-    question = "which pointers hold the shared brain when disabled"
-    rc = ask.add_manual("alice", question, "The manual answer text.", str(src_file), tmp_path)
-
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "allowAgentAssist" in out
-    approve_calls = [c for c in calls if c["action"] == "approve"]
-    assert approve_calls == []
-
-
 def test_add_refuses_when_pointer_already_exists_for_question(tmp_path, monkeypatch, capsys):
     question = "duplicate wording"
     expected_pointer = f"alice-manual-{hashlib.sha1(question.encode()).hexdigest()[:10]}"

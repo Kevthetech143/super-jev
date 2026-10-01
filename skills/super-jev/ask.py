@@ -71,9 +71,7 @@ saved DATE" (or "no source file"); a changed source says STALE and searches live
       approves it. Approval never depends on retrieval matching the tiny
       record: it searches once, and on anything short of "ready" falls back
       to the harness's assisted path (quoting the record's own reviewed
-      text) so the answer is still cached. If agent assist is disabled on
-      this deployment, --add prints the config to flip and exits 1 instead
-      of silently leaving the answer uncached. Never replaces a pointer or
+      text) so the answer is still cached. Never replaces a pointer or
       touches another pointer's answers; many small manual pointers are
       fine, `cached` checks them all. Same wording twice refuses unless
       --replace-entry is given, which removes the existing manual pointer
@@ -2707,8 +2705,6 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
             out = memory({"action": "assist", "attemptId": out["attemptId"], "principal": principal,
                           "reason": f"reviewer picked {path}; citing its own lines that state the answer.",
                           "references": refs})
-            if out.get("status") == "error" and out.get("reason") == "agent assist is disabled":
-                return None, ASSIST_DISABLED_HINT
             # The file may have changed since connect: the cited reviewed text must still support the answer.
             passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid]
             if not any(support(p)[0] > 0 for p in passages):
@@ -2744,8 +2740,6 @@ def ask_evidence(principal: str, pointer: str, question: str, answer: str, path:
     if hit.get("status") == "verified-cache-hit":
         return hit, None
     out = memory({"action": "open", "pointer": pointer, "principal": principal, "question": question})
-    if out.get("reason") == "agent assist is disabled":
-        return None, ASSIST_DISABLED_HINT
     if out.get("status") != "ok":
         out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
         if out.get("status") == "verified-cache-hit":
@@ -3180,11 +3174,6 @@ def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, f
         write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=chosen.get("path"))
     return rc
 
-ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
-                        "memory config (the one setup.py wrote, ~/.local/state/super-jev/_memory/"
-                        "config.json, or the file passed with --config) before --add can approve a "
-                        "manual entry that retrieval does not match on its own.")
-
 def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path,
                    **fields) -> int:
     """Approve a just-registered manual pointer, falling back to assisted review on a retrieval miss."""
@@ -3203,10 +3192,6 @@ def approve_manual(principal: str, question: str, answer: str, pointer: str, sou
     reason = f"manual entry for {pointer}: the record is a single small reviewed source and its own text is the answer."
     assisted = memory({"action": "assist", "attemptId": attempt_id, "principal": principal, "reason": reason,
                        "references": [{"sourceId": source_id, "startLine": 1, "endLine": last_line}]})
-    if assisted.get("status") == "error" and assisted.get("reason") == "agent assist is disabled":
-        print(ASSIST_DISABLED_HINT)
-        log(sdir, "approve", question=question, pointer=pointer, result="assist-disabled")
-        return 1
     if assisted.get("status") != "ready":
         print(f"cannot approve: assist returned {assisted.get('status')} on {pointer}.")
         log(sdir, "approve", question=question, pointer=pointer, result=assisted.get("status"))
