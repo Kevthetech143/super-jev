@@ -267,7 +267,7 @@ async function main() {
     if (!line) continue;
 
     // Check drag-drop shape BEFORE slash commands: an absolute path like
-    // /Users/kelvin/notes.md also starts with '/' and must not be parsed as
+    // /Users/example/notes.md also starts with '/' and must not be parsed as
     // a slash command.
     if (detectDroppedPaths(line)) {
       await handleDrop(line, principal);
