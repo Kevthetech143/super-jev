@@ -25,8 +25,8 @@ const ESC = Symbol('esc');
 const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
 type IO = { argv: string[]; env: NodeJS.ProcessEnv; stdin: any; stdout: any; stderr: any };
-type Done = { code: number; out: string; err: string };
-type Reply = { text: string; code: number; data?: any };
+type Done = { code: number; out: string; err: string; stopped: boolean };
+type Reply = { text: string; code: number; data?: any; stopped?: boolean };
 const lastLine = (s: string) => s.trim().split('\n').pop()?.trim() ?? '';
 
 export async function run(io: IO): Promise<number> {
@@ -43,19 +43,30 @@ export async function run(io: IO): Promise<number> {
   const look = () => ({ width: Math.min(stdout.columns || 80, 80), color: !!stdout.isTTY && !env.NO_COLOR, home, keyEnv, keySource: keySource(), vendor,
     door: argv.length > 0 });
   const out = (text: string) => stdout.write(text + '\n');
-  let child: ChildProcess | null = null;
-  let interrupted = false;
+  let child: ChildProcess | null = null, stopped: ChildProcess | null = null;
 
   // ------------------------------------------------------------ helpers
+  // Each helper runs in its own process group, so one stop reaches everything it started.
   const exec = (args: string[]) => new Promise<Done>((done, fail) => {
-    const p = spawn('python3', args, { env: childEnv(env, keyEnv, fileKey), stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn('python3', args, { env: childEnv(env, keyEnv, fileKey), stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     child = p;
     let o = '', e = '';
     p.stdout.on('data', (d) => (o += d));
     p.stderr.on('data', (d) => (e += d));
     p.on('error', (err: any) => fail(err.code === 'ENOENT' ? Object.assign(new Error(NO_PYTHON), { noPython: true }) : err));
-    p.on('close', (code) => { child = null; done({ code: code ?? 1, out: o, err: e }); });
+    p.on('close', (code) => { child = null; done({ code: code ?? 1, out: o, err: e, stopped: stopped === p }); });
   });
+
+  /** Esc and Ctrl+C while a helper runs: SIGTERM to its whole group, SIGKILL two seconds later if anything is left. */
+  function stopRun() {
+    const p = child;
+    if (!p?.pid) return;
+    stopped = p;
+    const send = (sig: NodeJS.Signals) => { try { process.kill(-p.pid!, sig); } catch { /* the group is gone */ } };
+    send('SIGTERM');
+    const hard = setTimeout(() => send('SIGKILL'), 2000);
+    p.once('close', () => clearTimeout(hard));
+  }
 
   /** The working row goes to stderr, only on a terminal and only after 300 ms, so quick answers never flicker. */
   function working(label: string): () => void {
@@ -68,13 +79,14 @@ export async function run(io: IO): Promise<number> {
   }
 
   /** Runs one helper turn and draws its reply. data is null when the helper did not print one JSON object. */
-  async function helper(t: Turn, extra: { label?: string; refreshed?: boolean } = {}): Promise<{ text: string; code: number; data: any }> {
+  async function helper(t: Turn, extra: { label?: string; refreshed?: boolean } = {}): Promise<Reply & { data: any }> {
     const stop = working({ ask: 'Searching your notes', check: 'Checking your notes', connect: 'Connecting' }[t.kind as string] ?? '');
     const t0 = Date.now();
     let res: Done;
     try { res = await exec(helperCall(t, session)); }
-    catch (e: any) { if (e.noPython) throw e; res = { code: 3, out: '', err: String(e.message ?? e) }; }
+    catch (e: any) { if (e.noPython) throw e; res = { code: 3, out: '', err: String(e.message ?? e), stopped: false }; }
     finally { stop(); }
+    if (res.stopped) return { data: null, code: 130, stopped: true, text: render({ kind: t.kind as any, data: {}, stopped: true }, look()) };
     let data: any = null;
     try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
     const secs = t.kind === 'status' ? undefined : (Date.now() - t0) / 1000;
@@ -146,12 +158,15 @@ export async function run(io: IO): Promise<number> {
     rl.on('close', () => { closed = true; wake?.(); }); // Ctrl+D closes the window; a pending yes/no then counts as no
     const act = (a: string) => { if (a === 'clear') clear(); else if (a === 'quit') rl.close(); else if (a === 'no') { clear(); push(ESC); } };
     rl.on('SIGINT', () => {
-      if (mode === 'busy') { interrupted = true; child?.kill('SIGTERM'); rl.close(); return; }
+      if (mode === 'busy') return stopRun();
       const a = keyAction({ mode, line: rl.line, armed }, 'ctrl-c');
       if (a === 'hint') { armed = true; setTimeout(() => (armed = false), 2000).unref(); stdout.write('\nPress Ctrl+C again to quit\n'); rl.prompt(); }
       else act(a);
     });
-    stdin.on('keypress', (_s: string, key: any) => { if (key?.name === 'escape' && mode !== 'busy') act(keyAction({ mode, line: rl.line, armed }, 'escape')); });
+    stdin.on('keypress', (_s: string, key: any) => {
+      if (key?.name !== 'escape') return;
+      if (mode === 'busy') stopRun(); else act(keyAction({ mode, line: rl.line, armed }, 'escape'));
+    });
     return {
       /** The next line, or null once the window is closed. */
       async next(): Promise<string | null> {
@@ -204,7 +219,7 @@ export async function run(io: IO): Promise<number> {
 
     const term = terminal();
     try {
-      for (let line = await term.next(); line !== null && !interrupted; line = await term.next()) {
+      for (let line = await term.next(); line !== null; line = await term.next()) {
         const t = readLine(line, home);
         if (t.kind === 'exit') break;
         let text = '';
@@ -213,11 +228,11 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'say') text = t.text;
         else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
         else if (t.kind !== 'empty') text = (await helper(t)).text;
-        if (text && !interrupted) stdout.write(text + '\n\n');
+        if (text) stdout.write(text + '\n\n');
       }
     } finally { term.close(); }
     stdout.write('\n');
-    return interrupted ? 130 : 0;
+    return 0;
   }
 
   // ------------------------------------------------------------ the one-shot door
@@ -234,7 +249,6 @@ export async function run(io: IO): Promise<number> {
         const term = terminal(); // first, so a line typed while the status runs is dropped like any other, never taken as the yes
         try {
           const s = await helper({ kind: 'status' });
-          if (interrupted) return 130;
           if (!s.data || s.data.outcome || s.data.next === 'setup') return finish(s); // never set up: the status says what to do next, and no question is asked
           r = await connectFlow(t, term.confirm);
         } finally { term.close(); }
@@ -247,14 +261,16 @@ export async function run(io: IO): Promise<number> {
     return finish(await helper(t));
   }
   async function finish(r: Reply): Promise<number> {
-    if (interrupted) return 130; // the helper was stopped on purpose, so its missing JSON says nothing about Python
-    const bad = r.data ? null : await notReady();
+    const bad = r.data || r.stopped ? null : await notReady(); // a stopped helper printed nothing on purpose: that says nothing about Python
     out((bad ?? r).text);
     return (bad ?? r).code;
   }
 
   try {
-    if (argv.length) return await door();
+    if (argv.length) {
+      process.once('SIGINT', stopRun); // a shell's Ctrl+C reaches this process only, never the helper's own group; a second one ends it
+      try { return await door(); } finally { process.off('SIGINT', stopRun); }
+    }
     if (stdin.isTTY) return await window();
     stderr.write('Usage: superjev "your question"   (run it in a terminal, with no words, for the window)\n');
     return 2;

@@ -1,4 +1,5 @@
 // Frozen contract tests (2026-10-01), PR 3: the terminal app shows exactly what the helpers report.
+// PR 4 adds the stop tests (K1, K1b, K1c, K1d, K2, K2b, S18, R6, R7): Esc and Ctrl+C stop a search or a connect.
 //
 // Layers (no Jev, no network):
 //   pure        render, readLine, helperCall, childEnv, keyAction, pointerName on fixtures
@@ -11,6 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -56,6 +58,14 @@ fs.appendFileSync(log, JSON.stringify({ argv: args, rule: at, key_set: key !== '
 if (at < 0) process.exit(99);
 const n = prior.filter((c) => c.rule === at).length;
 const r = rules[at].replies ? rules[at].replies[Math.min(n, rules[at].replies.length - 1)] : rules[at];
+if (r.group) { // a search or connect that will not end by itself: this stub and its child share one process group
+  const touch = (n) => fs.writeFileSync(path.join(dir, n), String(process.pid));
+  touch('stub.pid');
+  process.on('SIGTERM', () => { touch('term-stub'); if (!r.stubborn) process.exit(143); });
+  require('child_process').spawn(process.execPath, ['-e',
+    "const fs=require('fs'),p=require('path'),d=process.env.FAKE_DIR;fs.writeFileSync(p.join(d,'child.pid'),String(process.pid));" +
+    "process.on('SIGTERM',()=>{fs.writeFileSync(p.join(d,'term-child'),'1');process.exit(143)});setInterval(()=>{},1000)"], { stdio: 'inherit' });
+}
 setTimeout(() => {
   if (r.err) process.stderr.write(r.err);
   if (r.out !== undefined) process.stdout.write(typeof r.out === 'string' ? r.out : JSON.stringify(r.out) + '\\n');
@@ -67,7 +77,7 @@ const made: string[] = [];
 const cleanups: (() => void)[] = [];
 process.on('exit', () => { for (const f of cleanups) f(); for (const d of made) rmSync(d, { recursive: true, force: true }); });
 
-type Rule = { when: string; out?: unknown; code?: number; err?: string; sleep?: number; replies?: Rule[] };
+type Rule = { when: string; out?: unknown; code?: number; err?: string; sleep?: number; group?: boolean; stubborn?: boolean; replies?: Rule[] };
 function rig(rules: Rule[] = []) {
   const dir = mkdtempSync(join(tmpdir(), 'jev-app-'));
   made.push(dir);
@@ -122,7 +132,7 @@ function win(r: Rig, o: { key?: boolean; env?: Record<string, string>; argv?: st
   const env = { ...r.env, ...(o.key === false ? {} : { TYPESAFE_API_KEY: KEY }), ...o.env };
   const done: Promise<number> = cli.run({ argv: o.argv ?? [], env, stdin, stdout, stderr });
   const w = {
-    done, rawLog, raw: () => out, text: () => strip(out), err: () => strip(err),
+    done, rawLog, raw: () => out, text: () => strip(out), err: () => strip(err), rawErr: () => err,
     send: (s: string) => stdin.write(s),
     say: (line: string) => stdin.write(line + '\r'),
     async waitFor(what: string | RegExp | (() => boolean), ms = 8000) {
@@ -1665,6 +1675,127 @@ test('K9b Ctrl+C while the door checks its status exits 130, asks nothing and co
   assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py' || c.script === 'setup.py'), 'a helper ran after the interrupt');
 });
 
+// ---------------------------------------------------------------- PR 4: Esc and Ctrl+C stop a search or a connect
+// The stub and its child sleep 30 s in one process group (bug 3.7: only the leader was ever killed).
+const SLOW = (extra: Partial<Rule> = {}): Rule => ({ when: '-- slow', group: true, sleep: 30000, out: FOUND(), ...extra });
+const HANG_CONNECT: Rule = { when: 'prepare_bulk.py', group: true, sleep: 30000, out: { v: 1, connected: 3 } };
+const pidOf = (r: Rig, f: string) => { try { return Number(readFileSync(join(r.dir, f), 'utf8')); } catch { return 0; } };
+const alive = (pid: number) => { if (!pid) return false; try { process.kill(pid, 0); return true; } catch { return false; } };
+const running = (r: Rig) => pidOf(r, 'stub.pid') > 0 && pidOf(r, 'child.pid') > 0;
+const termed = (r: Rig) => existsSync(join(r.dir, 'term-stub')) && existsSync(join(r.dir, 'term-child'));
+const gone = (r: Rig) => !alive(pidOf(r, 'stub.pid')) && !alive(pidOf(r, 'child.pid'));
+/** Takes out whatever a failing test left running. */
+const reap = (r: Rig) => { for (const f of ['stub.pid', 'child.pid']) { const p = pidOf(r, f); if (alive(p)) try { process.kill(p, 'SIGKILL'); } catch { /* gone */ } } };
+const SPIN = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
+const drawn = (w: { rawErr(): string }, label: string) => (w.rawErr().match(new RegExp(`[${SPIN}] ${label}`, 'g')) ?? []).length;
+async function until(ok: () => boolean, ms: number, what: string) {
+  const end = Date.now() + ms;
+  while (!ok()) { if (Date.now() > end) throw new Error(`timed out after ${ms} ms: ${what}`); await new Promise((x) => setTimeout(x, 15)); }
+}
+const GROUP = 'the whole process group (the helper and its child) gets SIGTERM within 1 s';
+
+for (const [id, key, name] of [['K1', '\x1b', 'Esc'], ['K1b', '\x03', 'Ctrl+C']] as const) {
+  test(`${id} ${name} while a search runs: ${GROUP}, the working row stops, Stopped. shows, and the prompt returns`, { timeout: 30000 }, async () => {
+    const r = rig([STATUS_EMPTY, SLOW(), { when: '-- again', out: FOUND() }]);
+    try {
+      const w = win(r);
+      await w.ready();
+      w.say('slow question');
+      await w.waitFor(() => running(r) && drawn(w, 'Searching your notes') >= 2); // the row redraws while it works
+      const at = Date.now();
+      w.send(key);
+      await until(() => termed(r), 1000, GROUP);
+      assert.ok(Date.now() - at <= 1000);
+      await w.waitFor('Stopped.', 5000);
+      assert.ok(gone(r), 'a process of the search is still running');
+      assert.ok(w.rawErr().endsWith('\r\x1b[2K'), 'the working row was left on screen');
+      assert.ok(!/Found|Super Jev hit an error|Not sure/.test(w.text()), w.text());
+      assert.equal(r.asks().length, 1);
+      w.say('again'); // the prompt is back, and the window answers
+      await w.waitFor(/Found 1 note/);
+      assert.equal(r.asks().length, 2);
+      assert.equal(await w.quit(), 0, 'Ctrl+C in the window stops the search, it never closes the window');
+    } finally { reap(r); }
+  });
+}
+
+test('K1c a search that ignores SIGTERM is killed two seconds later: Stopped. shows and nothing of it is left running', { timeout: 30000 }, async () => {
+  const r = rig([STATUS_EMPTY, SLOW({ stubborn: true })]);
+  try {
+    const w = win(r);
+    await w.ready();
+    w.say('slow question');
+    await w.waitFor(() => running(r) && drawn(w, 'Searching your notes') >= 2);
+    w.send('\x1b');
+    await until(() => termed(r), 1000, 'SIGTERM reached the helper and its child');
+    await w.waitFor('Stopped.', 6000);
+    assert.ok(gone(r), 'the helper that ignored SIGTERM is still running');
+    assert.equal(await w.quit(), 0);
+  } finally { reap(r); }
+});
+
+test('K1d a real SIGINT to the one-shot door stops its search the same way: the group gets SIGTERM, Stopped. is printed, exit 130', { timeout: 30000 }, async () => {
+  const r = rig([STATUS_EMPTY, SLOW()]);
+  try {
+    const p = spawn(process.execPath, [CLI, 'slow question'], { env: { ...r.env, TYPESAFE_API_KEY: KEY }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    p.stdout.on('data', (d) => (out += d));
+    const code = new Promise<number>((done) => p.on('close', (c) => done(c ?? -1)));
+    await until(() => running(r), 8000, 'the search started');
+    p.kill('SIGINT'); // a terminal's Ctrl+C reaches the door, not the helper's own group
+    await until(() => termed(r), 1000, GROUP);
+    assert.equal(await code, 130, out);
+    assert.match(strip(out), /^Stopped\.$/m);
+    assert.ok(gone(r), 'a process of the search is still running');
+  } finally { reap(r); }
+});
+
+test('K2 Esc while connecting: Stopped. says some notes may be connected and how to finish, the group is stopped, and the folder asks to be connected again', { timeout: 30000 }, async () => {
+  const r = rig([STATUS_EMPTY, HANG_CONNECT]);
+  try {
+    const w = win(r);
+    await w.ready();
+    w.say(FOLDER);
+    await w.waitFor(/Connect Team Notes\?/);
+    w.send('\r');
+    await w.waitFor(() => running(r) && drawn(w, 'Connecting') >= 2);
+    w.send('\x1b');
+    await until(() => termed(r), 1000, GROUP);
+    await w.waitFor('Stopped.', 5000);
+    assert.match(flat(w.text()), /Stopped\. Some notes may be connected; drag the folder in again to finish\./);
+    assert.ok(!/Connected Team|Not connected|Refreshed/.test(w.text()), w.text());
+    assert.ok(gone(r), 'a process of the connect is still running');
+    w.say(FOLDER); // never recorded as connected, so it is a connect again, not a refresh
+    await w.waitFor(() => (w.text().match(/Connect Team Notes\?/g) ?? []).length === 2);
+    assert.ok(!/Refresh Team Notes/.test(w.text()));
+    assert.equal(await w.quit(), 0); // Ctrl+D at the question counts as no
+  } finally { reap(r); }
+});
+
+test('K2b Ctrl+C during a door connect: the group gets SIGTERM, Stopped. says how to finish from the shell, exit 130, setup.py never runs', { timeout: 30000 }, async () => {
+  const r = rig([STATUS_EMPTY, HANG_CONNECT, { when: 'setup.py', out: 'NOT READY:\n  - TYPESAFE_API_KEY is not set\n', code: 1 }]);
+  try {
+    const w = win(r, { argv: [FOLDER] });
+    await w.waitFor(/Connect Team Notes\?/);
+    w.send('\r');
+    await w.waitFor(() => running(r));
+    w.send('\x03');
+    await until(() => termed(r), 1000, GROUP);
+    assert.equal(await w.exit(), 130, w.text());
+    assert.match(flat(w.text()), /Stopped\. Some notes may be connected; open the window \(npm run jev, or superjev with no words\), then drag the folder in again to finish\./);
+    assert.ok(!r.calls().some((c: any) => c.script === 'setup.py'), 'setup.py was run for a stop');
+    assert.ok(gone(r), 'a process of the connect is still running');
+  } finally { reap(r); }
+});
+
+test('S18 stopped: a search says Stopped. alone; a connect adds that some notes may be connected and how to finish, in the window and at the door', () => {
+  const at = (kind: string, door = false, width = 80) => cfg.render({ kind, data: {}, stopped: true } as any, { ...OPTS, width, door });
+  for (const kind of ['ask', 'check', 'status']) assert.equal(at(kind), 'Stopped.');
+  assert.equal(at('connect'), 'Stopped. Some notes may be connected; drag the folder in again to finish.');
+  assert.equal(flat(at('connect', true)), 'Stopped. Some notes may be connected; open the window (npm run jev, or superjev with no words), then drag the folder in again to finish.');
+  assert.ok(lines(at('connect', true, 60)).every((l) => l.length <= 60), at('connect', true, 60));
+});
+
 // ---------------------------------------------------------------- the docs say where the key lives
 const DOC = (f: string) => readFileSync(join(ROOT, f), 'utf8');
 const between = (text: string, from: RegExp, to: RegExp) => { const i = text.search(from); assert.ok(i >= 0, `${from} not found`); const rest = text.slice(i + 1); const j = rest.search(to); return text.slice(i, j < 0 ? undefined : i + 1 + j); };
@@ -1734,10 +1865,10 @@ function realWin(rr: ReturnType<typeof realRig>, withKey = true) {
   if (!withKey) delete env.TYPESAFE_API_KEY;
   const done: Promise<number> = cli.run({ argv: [], env, stdin, stdout, stderr });
   const w = {
-    done, text: () => strip(out), send: (s: string) => stdin.write(s), say: (l: string) => stdin.write(l + '\r'),
-    async waitFor(what: string | RegExp, ms = 30000) {
+    done, text: () => strip(out), rawErr: () => err, send: (s: string) => stdin.write(s), say: (l: string) => stdin.write(l + '\r'),
+    async waitFor(what: string | RegExp | (() => boolean), ms = 30000) {
       const end = Date.now() + ms;
-      while (!(typeof what === 'string' ? w.text().includes(what) : what.test(w.text()))) {
+      while (!(typeof what === 'function' ? what() : typeof what === 'string' ? w.text().includes(what) : what.test(w.text()))) {
         if (Date.now() > end) throw new Error(`timed out waiting for ${String(what)}; screen:\n${w.text()}\n${strip(err)}`);
         await new Promise((x) => setTimeout(x, 25));
       }
@@ -1828,4 +1959,100 @@ test('R5 real connect with three notes the secret scan holds: one Held back row,
   assert.equal((flat(s).match(/never sends that text/g) || []).length, 1, 'the reason is said once:\n' + s);
   for (const n of ['wifi', 'database', 'deploy']) assert.ok(lines(s).some((l) => /^ {4}\S/.test(l) && l.endsWith(`/Team Notes/${n}.md`)), `${n}.md is not whole on its own line:\n${s}`);
   await w.quit();
+});
+
+// ---------------------------------------------------------------- PR 4: a real ask and a real connect, stopped
+/** A fake judge over HTTP (SUPERJEV_JEV_URL): it says yes to whatever mentions the canary, or, while hold is set, never answers. */
+async function fakeJudge() {
+  const j = { hold: false, calls: 0, open: 0, url: '' };
+  const says = (t: unknown) => /canary/i.test(JSON.stringify(t ?? ''));
+  const srv = createServer((req, res) => {
+    let b = ''; req.on('data', (d) => (b += d));
+    req.on('end', () => {
+      j.calls++;
+      if (j.hold) { j.open++; res.on('close', () => j.open--); return; } // a held call ends only when the client goes away
+      const body = JSON.parse(b), answers: Record<string, unknown> = {};
+      for (const [id, q] of Object.entries<any>(body.questions)) {
+        const passage = body.state?.passages?.[id.replace(/^b\d+_/, '')]; // a passage check: yes or no on this text
+        const keys = Object.keys(q.criteria ?? {});
+        const pick = passage !== undefined ? (says(passage) ? 'o_0' : 'o_none') : keys.find((k) => k !== 'o_none' && says(q.criteria[k])) ?? 'o_none';
+        if (q.type === 'choice') answers[id] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: Object.fromEntries(keys.map((k) => [k, k === pick ? 0.95 : 0.05 / (keys.length - 1 || 1)])) };
+        else if (q.type === 'noul') answers[id] = { type: 'noul', noul: 0.1 };
+        else answers[id] = { type: 'score', score: 0, confidence: 0.9, probabilities: Object.fromEntries(q.criteria.map((_: unknown, i: number) => [String(i), i === 0 ? 1 : 0])) };
+      }
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ model: 'fake', answers }));
+    });
+  });
+  await new Promise<void>((up) => srv.listen(0, '127.0.0.1', up));
+  srv.unref(); // a server left open would keep the test process from ending
+  j.url = `http://127.0.0.1:${(srv.address() as { port: number }).port}/`;
+  cleanups.push(() => { srv.closeAllConnections(); srv.close(); });
+  return j;
+}
+
+/** The one-shot door as a child process with this env (the judge runs in this process, so nothing here may block it). */
+const door2 = (env: Record<string, string>, args: string[]) => new Promise<{ code: number; out: string }>((done) => {
+  const p = spawn(process.execPath, [CLI, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d) => (out += d));
+  p.on('close', (code) => done({ code: code ?? -1, out: strip(out) }));
+});
+
+test('R6 real ask killed mid-run: Esc stops the whole chain down to the judge call, and a saved answer is still served', { timeout: 120000 }, async () => {
+  const rr = realRig();
+  assert.equal(rr.setup().status, 0);
+  assert.equal(JSON.parse(rr.connect().stdout).connected, 2);
+  const judge = await fakeJudge();
+  rr.env.SUPERJEV_JEV_URL = judge.url; // every helper the app runs now asks this judge
+  const env = rr.env;
+  const Q = 'How long does the canary hold?';
+  let said = '';
+  for (let i = 0; i < 2; i++) said = (await door2(env, [Q])).out; // the second ask saves it; async, because this process is the judge
+  assert.match(said, /Saved for next time\./, said);
+  const w = realWin(rr);
+  await w.waitFor(/\? for help/);
+  judge.hold = true;
+  w.say('What does the runbook say about rolling back?');
+  await until(() => judge.open === 1, 30000, 'the ask reached the judge');
+  w.send('\x1b');
+  await w.waitFor('Stopped.', 8000);
+  await until(() => judge.open === 0, 3000, 'the judge call is still open: only the first link of the chain was stopped');
+  judge.hold = false;
+  const calls = judge.calls;
+  w.say(Q);
+  await w.waitFor(/Saved answer/);
+  assert.match(w.text(), /handbook\.md/);
+  assert.equal(judge.calls, calls, 'a saved answer cost a judge call');
+  const st = spawnSync('python3', [join(SKILL, 'ask.py'), '--principal', 'me', '--json', '--status'], { env, encoding: 'utf8' });
+  assert.ok(!JSON.parse(st.stdout).outcome, 'the state is not readable after the stop: ' + st.stdout);
+  assert.equal(await w.quit(), 0);
+});
+
+test('R7 real connect stopped partway: the state is still readable, and dragging the folder in again finishes it', { timeout: 180000 }, async () => {
+  const rr = realRig();
+  assert.equal(rr.setup().status, 0);
+  const big = join(rr.dir, 'Big Notes'); mkdirSync(big);
+  for (let i = 0; i < 240; i++) writeFileSync(join(big, `note-${i}.md`), `# Note ${i}\n\nThe widget ${i} holds at ${i} percent for ${i} minutes.\n`);
+  cleanups.push(() => sweepCache(cfg.pointerName(big)));
+  const w = realWin(rr);
+  await w.waitFor(/Ready\./);
+  const drag = () => w.say(big.replace(/ /g, '\\ '));
+  drag();
+  await w.waitFor(/Connect Big Notes\?/);
+  w.send('\r');
+  await w.waitFor(() => drawn(w, 'Connecting') >= 2); // it is working: stop it here
+  w.send('\x1b');
+  await w.waitFor('Stopped.', 8000);
+  assert.match(flat(w.text()), /Stopped\. Some notes may be connected; drag the folder in again to finish\./);
+  assert.ok(!/Connected Big Notes/.test(w.text()), 'the connect finished before it was stopped: the folder is too small for this machine');
+  const st = spawnSync('python3', [join(SKILL, 'ask.py'), '--principal', 'me', '--json', '--status'], { env: rr.env, encoding: 'utf8' });
+  assert.ok(!JSON.parse(st.stdout).outcome, 'the state is not readable after the stop: ' + st.stdout);
+  drag();
+  await w.waitFor(() => (w.text().match(/Connect Big Notes\?/g) ?? []).length === 2); // the question again, not the first one
+  w.send('\r');
+  await w.waitFor('Connected Big Notes: 240 notes');
+  w.say('/status');
+  await w.waitFor(/240 notes/);
+  assert.equal(await w.quit(), 0);
 });
