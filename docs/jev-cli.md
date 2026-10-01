@@ -36,13 +36,9 @@ Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
 yes and Esc is no; Ctrl+D leaves, which counts as no. While a search or
 connect runs, Esc or Ctrl+C stops it (`Stopped.`); other lines are dropped.
 
-A paste is one question. Paste several lines and nothing is sent yet; press
-Enter and the whole paste goes as one question, exactly as pasted. Type more
-before Enter and it joins the same question. Esc or Ctrl+C throws a paste
-away. A paste made while a search or connect runs is dropped, like any line
-typed then. This needs a terminal that marks pastes (bracketed paste, which
-the usual ones do); the window turns it on while it is open and off when it
-closes.
+A paste is one question: it waits for Enter, and Esc or Ctrl+C throws it
+away. Up recalls it whole. A paste made during a search or connect is dropped.
+Needs a terminal with bracketed paste (the usual ones).
 
 ## One question from a shell
 
@@ -51,7 +47,7 @@ goes to stdout (no colour when piped) and the progress row to stderr. The
 exit code is the helper's own: found 0, not found 1, not supported 2, error
 3, needs setup 4 (`/check` keeps the claim check's own codes). A stop
 (Ctrl+C) exits 130. `--help` and `--version` print and exit 0. A line the app
-cannot use (no such path, unknown command, or a first word starting with `-`,
+cannot use (no such path, unknown command, or a first word shaped like an option such as `-x`,
 never a question) exits 2. No key: it says so, exit 4. Nothing connects
 without a keyboard.
 

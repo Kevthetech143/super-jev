@@ -705,7 +705,7 @@ test('I13 a first word that starts with - is never a question: --help and -h pri
   assert.equal(cfg.readLine('-h').kind, 'help');
   assert.equal(cfg.readLine('--help me').kind, 'help');
   assert.equal(cfg.readLine('--version').kind, 'version');
-  for (const line of ['--bogus', '-x what is this', '-5 degrees in fahrenheit', '--principal evil']) {
+  for (const line of ['--bogus', '-x what is this', '--principal evil']) {
     const t: any = cfg.readLine(line);
     assert.equal(t.kind, 'say', line);
     assert.match(t.text, new RegExp(`^Unknown option ${line.split(' ')[0]}\\.`), line);
@@ -713,6 +713,7 @@ test('I13 a first word that starts with - is never a question: --help and -h pri
     assert.ok(!t.text.includes('\n'), 'one line');
   }
   assert.equal(cfg.readLine('what is -h?').kind, 'ask', 'a dash after the first word is part of the question');
+  for (const line of ['- the refund window\n- the restocking fee', '-5 degrees in fahrenheit']) assert.equal(cfg.readLine(line).kind, 'ask', line);
 });
 
 test('I13 whole app: --help and -h print the usage, --version the version, exit 0, no helper; an unknown option exits 2, no helper', async () => {
@@ -2361,5 +2362,66 @@ test('R7 real connect stopped partway: the state is still readable, and dragging
   await w.waitFor('Connected Big Notes: 240 notes');
   w.say('/status');
   await w.waitFor(/240 notes/);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14l a paste made during a search, with no newline at its end, is dropped whole: the next question is only itself', async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 600, out: FOUND() }, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.say('slow question');
+  await w.waitFor(() => r.asks().length === 1);
+  w.send(MARKED(PASTE.join('\r')));      // its last line stays on the edited line
+  await w.waitFor(/Found 1 note/);
+  await quiet(200);
+  w.send('\r');
+  await quiet(200);
+  assert.equal(r.asks().length, 1, 'Enter asked what was left of a dropped paste: ' + JSON.stringify(asked(r)));
+  w.say('Why?');
+  await w.waitFor(() => r.asks().length === 2);
+  assert.deepEqual(asked(r), ['slow question', 'Why?']);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14m a paste still arriving when the search ends is dropped to its closing mark: no ask without Enter', async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 600, out: FOUND() }, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.say('slow question');
+  await w.waitFor(() => r.asks().length === 1);
+  w.send('\x1b[200~Line A\rLine B\r');
+  await w.waitFor(/Found 1 note/);
+  w.send('Line C\rLine D\x1b[201~');
+  await quiet(300);
+  assert.equal(r.asks().length, 1, 'the rest of a dropped paste was asked: ' + JSON.stringify(asked(r)));
+  w.say('Why?');
+  await w.waitFor(() => r.asks().length === 2);
+  assert.deepEqual(asked(r), ['slow question', 'Why?']);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14n Up after a paste recalls the whole question, not its last line', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  const found = () => w.text().split('Found 1 note').length - 1;
+  w.send(MARKED(PASTE.join('\r')));
+  w.send('\r');
+  await w.waitFor(() => found() === 1);
+  w.send('\x1b[A');
+  w.send('\r');
+  await w.waitFor(() => found() === 2);
+  assert.deepEqual(asked(r), [PASTE.join('\n'), PASTE.join(' ')]);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I13b a pasted bullet list is a question, not an option', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.send(MARKED('- the refund window\r- the restocking fee') + '\r');
+  await w.waitFor(/Found 1 note/);
+  assert.deepEqual(asked(r), ['- the refund window\n- the restocking fee']);
+  assert.ok(!/Unknown option/.test(w.text()));
   assert.equal(await w.quit(), 0);
 });
