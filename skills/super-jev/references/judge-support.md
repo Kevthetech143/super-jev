@@ -48,11 +48,13 @@ The paid-replay case format (JSONL, one case per line): `question`, `gold` (abso
 
 ### Bar file
 
+An example only; choose your own numbers:
+
 ```json
-{"max_excluded": 5, "rows": [
+{"max_excluded": 2, "rows": [
   {"measure": "top5", "min_rate": 0.9},
-  {"measure": "claims_wrong", "max_count": 0},
-  {"measure": "secs", "percentile": 50, "max_secs": 60}
+  {"measure": "claims_wrong", "max_count": 1},
+  {"measure": "secs", "percentile": 50, "max_secs": 45}
 ]}
 ```
 
@@ -63,7 +65,7 @@ There are no defaults: a bar without `max_excluded`, with no rows, with an unkno
 | `top5` | answerable questions whose gold file is in the final five | `min_rate` |
 | `rank1` | answerable questions whose gold file is ranked first | `min_rate` |
 | `absent` | not-in-files questions left unanswered (see below) | `min_rate` |
-| `claims_right` | claims whose verdict is the expected one (an `ABSENT` claim is right when it is held) | `min_rate` |
+| `claims_right` | TRUE or FALSE claims whose verdict is the expected one (an `ABSENT` claim is not counted here; `claims_absent_asserted` covers it) | `min_rate` |
 | `claims_wrong` | claims asserted TRUE or FALSE against the expected verdict | `max_count` |
 | `claims_absent_asserted` | `ABSENT` claims asserted TRUE or FALSE | `max_count` |
 | `secs` | the asks finished within `max_secs`; it passes when that share reaches `percentile` (nearest rank) | `percentile`, `max_secs` |
@@ -76,12 +78,13 @@ A not-in-files question passes only when the final ranking is empty, whatever th
 
 - A case whose gold files are all missing at the start, or whose gold or source files changed while its ask ran (drift), is excluded and counted. At most `max_excluded` of them are allowed; one more ends the run `incomplete`.
 - The run stops early, `not supported`, as soon as a row can no longer reach its bar even if every remaining case hits (a count row: as soon as it is over its limit). The record says which row and how many cases were not run.
+- After an early stop a row reads `PASS` or `FAIL` only when the cases already run settle it: `need` is worked out over every case the row would see (`n`, of which `not_run` have not run), so a rate row is `PASS` once its hits reach that need and `FAIL` once they cannot, and a count row is `FAIL` once it is over its limit. Any other row reads `OPEN` (`"pass": null` in the record) and the verdict does not depend on it.
 - `--time-cap-min`, a change to the prepared sets during the run, a pointer that is not ready at the start (nothing is asked) and an interrupt all end it `incomplete`.
 - `supported` needs a complete run with every row met. Otherwise a finished run is `not supported`.
 
 ### The record
 
-One JSON file, never overwritten (a second run to the same path exits 2). It holds the judge, implementation and fingerprint (with its parts), the `--env` names (never values), both SHA-256 pins, `max_excluded`, the seed, start and end times, the replay state root and snapshot, one entry per bar row (`hits`, `n`, `need`, the bar, `not_run`, and hits per split), the excluded cases, the error and ask counts, the stop reason, the verdict, and every case with its result, exit code and seconds. Run it on a copy of the build you mean to ship: the fingerprint is the build's.
+One JSON file, never overwritten (a second run to the same path exits 2). It holds the judge, implementation and fingerprint (with its parts), the `--env` names (never values), both SHA-256 pins, `max_excluded`, the seed, start and end times, the replay state root and snapshot, one entry per bar row (`hits`, `n`, `need`, `pass`: true, false or null for open, the bar, `not_run`, and hits per split), the excluded cases, the error and ask counts, the stop reason, the verdict, and every case with its result, exit code and seconds. Run it on a copy of the build you mean to ship: the fingerprint is the build's.
 
 ## Does a record still apply?
 
@@ -96,4 +99,4 @@ Exit 1 prints `does not apply: <reason>`: the record is unreadable or damaged, i
 
 A record holds for one build, one set and one bar. Changing any of them means a new run and a new record; the old record stays as it was.
 
-A hosted model alias can change behind the same profile (see below); a record does not see that.
+A hosted model alias can change behind the same profile (see "What the fingerprint cannot see" above); a record does not see that.

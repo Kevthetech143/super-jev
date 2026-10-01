@@ -16,10 +16,11 @@ no fingerprint, unknown judge, or fingerprint, cases or bar differ); exit 2 is b
 
 The run asks every case of the file once through the build's full paid ask path, on paid_replay's frozen
 copy of state and memory (fresh copy per ask, SUPERJEV_REPLAY=1), times each ask, grades it, and holds the
-totals against the bar. It prints PASS or FAIL per bar row with hits/n, then the verdict, and writes one
-JSON record (refusing to overwrite one). Exit 0 supported, 1 not supported, 3 incomplete (a time cap, a
-prepare-cache change mid-run, more excluded cases than the bar allows, a pointer not ready, an interrupt),
-2 bad input (a SHA mismatch prints the actual SHA). See references/judge-support.md for the file formats.
+totals against the bar. It prints PASS, FAIL or OPEN (a stop before the cases run settle it) per bar row
+with hits/n, then the verdict, and writes one JSON record (refusing to overwrite one). Exit 0 supported,
+1 not supported, 3 incomplete (a time cap, a prepare-cache change mid-run, more excluded cases than the bar
+allows, a pointer not ready, an interrupt), 2 bad input (a SHA mismatch prints the actual SHA). See
+references/judge-support.md for the file formats.
 
 Cases are paid_replay's (question, gold, principal, split; a question with "absent": true and "gold": [], a
 claim with "kind": "claim" and "expected" TRUE, FALSE or ABSENT). The whole file runs; every row names its
@@ -81,6 +82,7 @@ MEASURES = {
 }
 BAR_KEYS = {"rate": "min_rate", "count": "max_count", "secs": None}
 PROTECTED_ENV = ("SUPERJEV_JUDGE", "SUPERJEV_STATE_DIR")
+ROW_MARK = {True: "PASS", False: "FAIL", None: "OPEN"}  # OPEN: the run stopped before the cases run settled the row
 
 
 def _sha(obj) -> str:
@@ -201,11 +203,22 @@ def load_bar(path, sha) -> dict:
     return {"max_excluded": bar["max_excluded"], "rows": rows}
 
 
-def row_passes(row: dict, hits: int, n: int) -> bool:
-    """The one grading rule for a finished row. A row that measured nothing never passes."""
+def row_state(row: dict, hits: int, n: int, left: int = 0):
+    """The one grading rule for a bar row: `n` cases have been graded and `left` have not run. True: met, whatever
+    the cases not yet run do. False: out of reach, or nothing measured (a row that measured nothing never passes).
+    None: still open. The bar's needs are worked out over every case the row will see, n + left."""
+    n += left
     if n == 0:
         return False
-    return hits <= row["bar"]["max_count"] if row["kind"] == "count" else hits >= need(row["h"], n)
+    if row["kind"] == "count":
+        return False if hits > row["bar"]["max_count"] else (None if left else True)
+    short = need(row["h"], n)
+    return True if hits >= short else (False if hits + left < short else None)
+
+
+def row_passes(row: dict, hits: int, n: int) -> bool:
+    """A finished row (nothing left to run) meets its bar."""
+    return row_state(row, hits, n) is True
 
 
 def row_score(row: dict, case: dict, res: dict):
@@ -232,8 +245,8 @@ def _now() -> str:
 
 
 def check_env_names(env: dict) -> None:
-    for name, value in env.items():
-        if name in PROTECTED_ENV or (name in pr.REPLAY_ENV and value != pr.REPLAY_ENV[name]):
+    for name in env:
+        if name in PROTECTED_ENV or name in pr.REPLAY_ENV:
             raise ValueError(f"--env {name}: the tool sets this one itself")
 
 
@@ -274,14 +287,11 @@ def run(a, ap) -> int:
     acc = {r["name"]: {"hits": 0, "n": 0, "seen": 0, "split": {}} for r in bar["rows"]}
     total = {r["name"]: sum(r["stratum"] in ("all", stratum(c)) for c in runnable) for r in bar["rows"]}
     graded, excluded, asks, stop, t0 = [], {"missing_gold": [c["question"] for c in missing], "drift": []}, 0, "", time.monotonic()
-    snap, errors, out_of_reach = {}, 0, []
+    snap, errors = {}, 0
 
     def unreachable(row):
         r = acc[row["name"]]
-        left = total[row["name"]] - r["seen"]
-        if row["kind"] == "count":
-            return r["hits"] > row["bar"]["max_count"]
-        return r["hits"] + left < need(row["h"], r["n"] + left)
+        return row_state(row, r["hits"], r["n"], total[row["name"]] - r["seen"]) is False
 
     with tempfile.TemporaryDirectory(prefix="sj-support-base-") as base:
         base = Path(base)
@@ -338,10 +348,10 @@ def run(a, ap) -> int:
     rows = []
     for r in bar["rows"]:
         x = acc[r["name"]]
-        left = total[r["name"]] - x["seen"] if r["name"] in out_of_reach and r["kind"] != "count" else 0
-        n = x["n"] + left  # a row the bar is out of reach for counts the cases never run as misses
+        left = total[r["name"]] - x["seen"]  # cases never run (0 after a complete run); a row's n counts them
+        n = x["n"] + left
         rows.append({"name": r["name"], "measure": r["measure"], "kind": r["kind"], "stratum": r["stratum"],
-                     "bar": r["bar"], "hits": x["hits"], "n": n, "pass": row_passes(r, x["hits"], n),
+                     "bar": r["bar"], "hits": x["hits"], "n": n, "pass": row_state(r, x["hits"], x["n"], left),
                      **({"need": need(r["h"], n)} if r["kind"] != "count" else {}),
                      **({"not_run": left} if left else {}), "by_split": x["split"]})
     if not stop:
@@ -364,8 +374,8 @@ def run(a, ap) -> int:
         print("  not started, no ask spent: every pointer must be ready (a run never reconnects):\n  " + rec["not_ready"])
     for r in rows:
         shown = (f"{r['hits']} bad" if r["kind"] == "count" else f"{r['hits']}/{r['n']}"
-                 + (f", {r['not_run']} not run" if "not_run" in r else ""))
-        print(f"  {'PASS' if r['pass'] else 'FAIL':5} {r['name']:24} {shown}  (bar: "
+                 ) + (f", {r['not_run']} not run" if "not_run" in r else "")
+        print(f"  {ROW_MARK[r['pass']]:5} {r['name']:24} {shown}  (bar: "
               + ", ".join(f"{k} {v}" for k, v in r["bar"].items()) + (f"; needs {r['need']}" if "need" in r else "") + ")")
     if any(excluded.values()):
         print(f"  excluded: {len(excluded['missing_gold'])} missing gold, {len(excluded['drift'])} drift "
