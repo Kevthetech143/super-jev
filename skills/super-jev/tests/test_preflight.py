@@ -120,10 +120,58 @@ def test_about_known_topic_is_not_new_ground(world, monkeypatch, capsys):
     assert "NEW GROUND" not in out
 
 
-def test_not_ready_skips_paid_questions(world, monkeypatch, capsys):
+def skills_reply(monkeypatch, body, calls=None):
+    """Fake the skills door: one reply to every subprocess call, recorded in `calls`."""
+    seen = calls if calls is not None else []
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: seen.append(cmd) or _R(json.dumps(body)))
+    return seen
+
+
+def test_not_ready_skips_the_connection_questions_but_still_searches_skills(world, monkeypatch, capsys):
+    """One rule: a paid check runs when its own inputs are ready. --about reads the connections, so a
+    NOT READY preflight makes no --about ask; --skill reads skill folders, so it still runs."""
     monkeypatch.setattr(ask, "memory", panel(("bad", "error")))
+    seen = skills_reply(monkeypatch, {"status": "suggestions", "source": "jev",
+                                      "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
     rc, out = run(monkeypatch, capsys, "--about", "anything", "--skill", "posts things")
-    assert rc == 1 and world["calls"] == []
+    assert rc == 1 and "NOT READY" in out
+    assert len(seen) == 1 and "dispatch.py" in seen[0][1] and "skills" in seen[0]  # no ask.py, no --about question
+    assert "x-poster" in out and "x-poster (unverified guess)" not in out
+
+
+def test_skill_search_runs_while_nothing_is_connected(world, monkeypatch, capsys):
+    """A fresh install: no connections at all, and --skill still reports (it used to be skipped silently)."""
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "error", "reason": "not-set-up"})
+    skills_reply(monkeypatch, {"status": "exact", "source": "local", "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
+    rep = json.loads(out)
+    assert rc == 1 and rep["verdict"] == "NOT READY"
+    assert rep["existing_skills"] == ["x-poster"]
+
+
+@pytest.mark.parametrize("body,labelled", [
+    ({"status": "exact", "source": "local"}, False),
+    ({"status": "suggestions", "source": "jev"}, False),
+    ({"status": "suggestions", "source": "local"}, True),
+    ({"status": "clarify", "source": "jev", "error": "Did you mean one of: a, b?"}, True),
+    ({"status": "fallback", "source": "local", "error": "No TYPESAFE_API_KEY in the environment"}, True),
+])
+def test_preflight_labels_a_skill_only_a_confirmed_result_is_called_a_match(world, monkeypatch, capsys, body, labelled):
+    """The ask path and preflight read one door with one rule: only an exact name or a live judge pick is a match."""
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    skills_reply(monkeypatch, {**body, "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
+    rep = json.loads(out)
+    assert rep["existing_skills"] == (["x-poster (unverified guess)"] if labelled else ["x-poster"])
+    assert rep["warnings"] == []  # a clarify question or a fallback note is not a failed search
+
+
+def test_no_match_is_none_found_not_a_failed_search(world, monkeypatch, capsys):
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    skills_reply(monkeypatch, {"status": "no_match", "source": "jev", "candidates": []})
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
+    rep = json.loads(out)
+    assert rep["existing_skills"] == [] and rep["warnings"] == []
 
 
 def test_skill_search_lists_existing_skills(world, monkeypatch, capsys):

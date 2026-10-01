@@ -1,7 +1,7 @@
 #!/bin/sh
-# Local deployment hook — REFERENCE implementation of ENV-CONTRACT.md.
-# NOT installed by default; the lead adapts it with the existing local
-# provider at deployment time. See ENV-CONTRACT.md for the exact contract.
+# Key hook for the skill finder: search.sh runs it for every live search. With TYPESAFE_API_KEY
+# in the environment it does nothing; otherwise it asks the provider command for the key.
+# See ENV-CONTRACT.md for the exact contract.
 set -u
 for arg in "$@"; do
   if [ "$arg" = "--local-only" ]; then
@@ -11,7 +11,7 @@ done
 PROVIDER="${SKILL_SEARCH_PROVIDER_CMD:-}"
 if [ -z "${TYPESAFE_API_KEY:-}" ]; then
   if [ -z "$PROVIDER" ]; then
-    printf '%s\n' '{"status":"error","candidates":[],"error":"No Jev credential provider configured; rerun with --local-only for unverified local guesses"}'
+    printf '%s\n' '{"status":"error","candidates":[],"error":"No TYPESAFE_API_KEY in the environment and no credential provider configured (docs/GETTING-STARTED.md, step 2); rerun with --local-only for unverified local guesses"}'
     exit 2
   fi
   KEY="$($PROVIDER 2>/dev/null)" || { printf '%s\n' '{"status":"error","candidates":[],"error":"Jev credential provider failed; rerun with --local-only for unverified local guesses"}' ; exit 2; }

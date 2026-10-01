@@ -1,4 +1,4 @@
-# Local deployment hook contract — skill-search (NOT installed by default)
+# Key hook contract — skill-search
 
 The launcher and the generic super-jev runtime are secret-free: they never
 read a secret file, never invoke a provider, never place a key in argv or
@@ -8,10 +8,12 @@ reaches the runtime ONLY through environment inheritance: the launcher's
 so a key exported before the launcher runs arrives at the runtime with no
 launcher-side secret handling at all.
 
-This directory stages the EXACT contract the lead implements at local
-deployment, plus a reference implementation (`hook-wrapper.sh`). The wrapper
-is a local deployment artifact: it is never installed by default, runs only when search.sh is invoked (or explicitly selected), and the
-secret-free launcher never references it.
+This directory holds the exact contract for supplying that key from a place
+the shell cannot reach (a hook, a scheduler), plus the implementation
+(`hook-wrapper.sh`). `search.sh` always runs a live search through the
+wrapper. When `TYPESAFE_API_KEY` is already in the environment the wrapper does
+nothing and the launcher runs at once; the secret-free launcher never
+references the wrapper.
 
 ## Contract (exact)
 
@@ -33,14 +35,19 @@ secret-free launcher never references it.
    endpoint needs a private CA, add the site's usual CA variables
    (e.g. `SSL_CERT_FILE`) inside the deployment wrapper only.
 
-## Lead adapter point
+## Provider command
 
 `hook-wrapper.sh` reads the provider command from `SKILL_SEARCH_PROVIDER_CMD`
-(e.g. `/usr/local/bin/local-provider api-key`). The production search.sh defaults that to local-key-provider.py, which reuses
-the existing jev-check loader. An explicitly configured provider wins. The wrapper `exec`s the launcher so
-the environment — including the key — is inherited, never re-typed.
+(e.g. `/usr/local/bin/my-provider api-key`). When that is unset and the key is
+not in the environment, `search.sh` defaults it to
+`deploy/local-key-provider.py` if that file exists on this machine (it is
+gitignored and never shipped; copy `key-provider.example.py` to it). An
+explicitly configured provider wins. With no key, no provider variable and no
+such file, the wrapper prints one error naming `TYPESAFE_API_KEY` and exits
+nonzero; `--local-only` still works. The wrapper `exec`s the launcher so the
+environment — including the key — is inherited, never re-typed.
 
-## Verification (fake provider fixture, in tests/run-tests.sh)
+## Verification (fake provider fixture)
 
 - env reaches the child: `TYPESAFE_API_KEY=FAKE-...` exported before the
   launcher is visible to the fake runtime's environment.
