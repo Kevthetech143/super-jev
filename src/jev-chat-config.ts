@@ -5,19 +5,19 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { styleText, stripVTControlCharacters } from 'node:util';
 
-export const COMMANDS = ['/check', '/status', '/help', '/exit'];
+export const COMMANDS = ['/check', '/wrong', '/status', '/help', '/exit'];
 /** How a user gets back to the window: the one wording every screen and message uses. */
 export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
 export type Turn =
-  | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' }
+  | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' | 'wrong' }
   | { kind: 'ask' | 'check' | 'say'; text: string }
   | { kind: 'connect'; path: string; dir: boolean; pointer?: string /* the engine's own name for a set to refresh */ };
-export type Session = { principal: string; skillDir: string; connected: Set<string> };
+export type Session = { principal: string; skillDir: string; connected: Set<string>; last?: string /* the last question asked in this session */ };
 export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
   door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: no Next line: the turn was a status (a next step would only point back at it), or the window is about to do the fix itself.
-export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
+export type Shown = { kind: 'ask' | 'check' | 'wrong' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
   refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean };
 
 // ---------------------------------------------------------------- reading a line
@@ -86,6 +86,7 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (cmd === '/help') return { kind: 'help' };
   if (cmd === '/exit') return { kind: 'exit' };
   if (cmd === '/status') return { kind: 'status' };
+  if (cmd === '/wrong') return { kind: 'wrong' };
   if (cmd === '/check') return rest ? { kind: 'check', text: rest } : { kind: 'say', text: 'Usage: /check <a statement to check against your notes>' };
   const [far, near] = COMMANDS.map((c) => [distance(cmd, c), c] as const).sort((a, b) => a[0] - b[0])[0];
   return { kind: 'say', text: `Unknown command ${cmd}.` + (far <= 2 ? ` Did you mean ${near}?` : '') };
@@ -107,6 +108,7 @@ export function helperCall(turn: Turn, s: Session): string[] {
   if (turn.kind === 'ask') return [...ask, '--', turn.text];
   if (turn.kind === 'check') return [...ask, '--claim', turn.text];
   if (turn.kind === 'status') return [...ask, '--status'];
+  if (turn.kind === 'wrong') return [...ask, '--miss', s.last ?? ''];
   if (turn.kind !== 'connect') throw new Error(`no helper call for ${turn.kind}`);
   const name = turn.pointer ?? pointerName(turn.path);
   return [join(s.skillDir, 'prepare_bulk.py'), '--root', turn.dir ? turn.path : dirname(turn.path), '--pointer', name,
@@ -165,6 +167,7 @@ export const HELP = [
   'Ask a question in plain words, or:',
   '  drag a folder in    connect its Markdown notes',
   '  /check <statement>  check it against your notes',
+  '  /wrong              the last answer was wrong: forget it',
   '  /status             show what is connected',
   '  /help or ?          show this list',
   '  /exit               leave (Ctrl+D works too)'].join('\n');
@@ -269,7 +272,8 @@ export function render(shown: Shown, look: Look): string {
       said(d.failed, () => 'Failed:');
       leftOut(d.skipped);
     }
-  } else if (o === 'error') {
+  } else if (shown.kind === 'wrong') head(d.removed?.length ? 'Forgotten. Searching fresh…' : "Noted. It won't be saved.");
+  else if (o === 'error') {
     const why: Record<string, string> = { 'auth-rejected': `${vendor} rejected the key`, 'no-key': `no ${vendor} key was found`,
       unreachable: `${vendor} can't be reached`, overloaded: `${vendor} is busy` };
     const kind = Object.keys(why).find((k) => (d.errors ?? []).some((e: any) => e.kind === k)) ?? (d.next === 'key' ? 'auth-rejected' : '');
