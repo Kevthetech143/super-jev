@@ -128,7 +128,7 @@ ROOTS_SRC="${ROOTS_FILE:-$CONFIG}"
 if [ -z "$ROOTS_SRC" ] || [ ! -r "$ROOTS_SRC" ]; then
   # Only the default file can be missing for a reason a new user can fix: it is never shipped.
   if [ -z "$ROOTS_FILE" ] && [ "$CONFIG_GIVEN" -eq 0 ]; then
-    error_json "no skill folders are set for this agent: copy $LAUNCHER_DIR/roots.example.json to $LAUNCHER_DIR/roots.json and list your skill folders in it (Claude Code needs none: it searches ~/.claude/skills)"
+    error_json "no skill folders are set for this agent: in $LAUNCHER_DIR, copy roots.example.json to roots.json and list your skill folders (Claude Code needs none: it searches ~/.claude/skills)"
   fi
   error_json "roots source not readable: ${ROOTS_SRC:-<none>}"
 fi
