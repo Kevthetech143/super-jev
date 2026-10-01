@@ -87,7 +87,7 @@ def setup() -> int:
     if judges.key_present():
         print(f"ok    {key_env} is set")
     else:
-        problems.append(f"{key_env} is not set. Every check and connect needs it. Run:\n"
+        problems.append(f"{key_env} is not set. Every ask and check needs it. Run:\n"
                         f"        export {key_env}=\"$(cat /path/to/your/key-file)\"")
 
     if shutil.which("claude"):

@@ -10,7 +10,7 @@ Onboarding and refresh for [Super Jev](../super-jev/SKILL.md). Scripts live in `
 
 ## What to connect
 
-Connect what agents will search again: notes, lessons, decisions, runbooks, a code library they keep asking about. Don't connect one-off material (a single report, a draft, today's diff, a pasted page); check it directly with `dispatch.py check FILE --claim "..."` from the super-jev skill instead. Connecting costs writer and Jev calls up front and keeps the files in every lookup; a direct check costs one call and keeps nothing.
+Connect what agents will search again: notes, lessons, decisions, runbooks, a code library they keep asking about. Don't connect one-off material (a single report, a draft, today's diff, a pasted page); check it directly with `dispatch.py check FILE --claim "..."` from the super-jev skill instead. Connecting with a model writer costs writer and Jev calls up front (a `--writer builtin` connect makes none) and keeps the files in every lookup; a direct check costs one call and keeps nothing.
 ## 1. What a connector is
 
 A connector is one named set of reviewed files, registered as one pointer, for one or more principals (agents). "Connected" means registered and prepared for search — never automatically synced to the live source. Update a connector by refreshing it (section 8), not by assuming it tracks its source.
@@ -40,12 +40,12 @@ python3 dispatch.py memory --principal NAME
 - Original files that must stay redacted → attach a reviewed declarative viewTransform policy per source; follow [reviewed-view recipes](../super-jev/references/reviewed-views.md). Never reconnect a redacted legacy dataset as raw originals.
 - A handful of hand-picked files → `python3 connect_checked.py CONNECT.json`
 - A whole folder, or an agent's whole brain across several folders → `python3 prepare_bulk.py --root DIR --pointer NAME --principal NAME`
-- Markdown only: code and other text files are not supported. A note over 250,000 bytes is held "too big, split it"; split it into smaller .md files and reconnect.
+- Markdown only: code and other text files are not supported (connect counts them in a `SKIP` line). A note over 250,000 bytes is held "too big, split it"; split it into smaller .md files and reconnect. A first connect refuses more than 250 files (`--max-files`).
 - A GitHub repo's history (PRs with reviews, issues, commit messages, release notes) → `python3 connect_github.py OWNER/REPO --pointer NAME --principal NAME` (or `superjev connect-github ...`); add `--refresh` after each merge to fetch only what changed. Uses your signed-in `gh`; secret-looking lines are dropped. See [connectors.md](../super-jev/references/connectors.md#github-repo-history).
 - A fact with no backing file → `python3 ask.py --principal NAME --add "question" "answer"`
 - A human at the `superjev` terminal chat → drag the file or folder into the window: it shows what will connect and asks first (a folder defaults to No), then runs `prepare_bulk.py` for them.
 
-Cost: each connected file gets its description and labels checked by Jev; small files are checked several to one call (`SUPERJEV_BATCH_JEV=0` checks one file per call). The findability report (each file's own sample question searched after connecting) is off by default; add `--findability` for it, one paid search per file.
+Cost: with a model writer, each connected file gets its description and labels checked by Jev (a `--writer builtin` connect checks descriptions locally and makes no Jev call); small files are checked several to one call (`SUPERJEV_BATCH_JEV=0` checks one file per call). The findability report (each file's own sample question searched after connecting) is off by default; add `--findability` for it, one paid search per file.
 
 Before connecting a folder, `python3 ../super-jev/ask.py --principal NAME --preflight --project-dir DIR` shows how many of its files are already connected (free), so you do not connect it twice.
 
@@ -59,7 +59,7 @@ Bulk prepare and manual entries draft four labels — `kind`, `status`, `as_of`,
 
 ## 7. Held files
 
-The secret scan holds a file that looks like it carries card/password text, and separately holds any file over the 250,000-byte size ceiling ("too big, split it": no sections, no size approval); `prepare-cache/<pointer>-held.txt` records each hold's reason (and, for the secret-pattern case, the matching line and a digit-masked excerpt) so a human can review without opening the file. A held file has no override: for secret-like text or name, or a credential/key suffix, Super Jev never sends that text, so remove or move the value; for a size hold, edit or split the note; then reconnect. Real secret files and vault-style folders stay out of every run regardless. Every connect ends with `CONNECTED n, HELD m, FAILED k` and exits 0 only when m and k are 0 (1 if anything failed, 3 if anything was held): read that line, never report "connected" while HELD or FAILED is above 0.
+The secret scan holds a file that looks like it carries card/password text, and separately holds any file over the 250,000-byte size ceiling ("too big, split it": no sections, no size approval); `prepare-cache/<pointer>-held.txt` records each hold's reason (and, for the secret-pattern case, the matching line and a digit-masked excerpt) so a human can review without opening the file. A held file has no override: for secret-like text or name, or a credential/key suffix, Super Jev never sends that text, so remove or move the value; for a size hold, edit or split the note; then reconnect. Real secret files and vault-style folders stay out of every run regardless; connect counts everything a default rule skipped in `SKIP` lines (counts and folder or extension names, never file names), and a skipped folder connects when you name it with `--root` yourself. Every connect ends with `CONNECTED n, HELD m, FAILED k` and exits 0 only when m and k are 0 (1 if anything failed, 3 if anything was held): read that line, never report "connected" while HELD or FAILED is above 0.
 
 ## 8. Refresh
 
