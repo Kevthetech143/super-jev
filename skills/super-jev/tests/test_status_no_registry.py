@@ -63,10 +63,7 @@ def test_status_after_setup_with_nothing_connected_is_ready_and_says_connect(set
 def test_status_json_after_setup_has_no_sets_and_next_connect(set_up):
     _, env = set_up
     rc, out, _ = engine(env, SKILL / "ask.py", "--principal", "sam", "--json", "--status")
-    try:
-        obj = json.loads(out)
-    except ValueError:
-        pytest.skip("this ask.py has no --json yet (PR 278); the same case runs once it lands")
+    obj = json.loads(out)
     assert rc == 0
     assert obj["next"] == "connect" and obj["sets"] == []
     assert obj.get("outcome") != "error" and "why" not in obj

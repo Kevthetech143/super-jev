@@ -14,19 +14,19 @@ spec = importlib.util.spec_from_file_location("ask_cover_gate", SKILL / "ask.py"
 ask = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ask)
 
-QUESTION = "What was Kelvin's final personal verdict on pulling out of CLOV last month?"
+QUESTION = "What was Marvin's final personal verdict on pulling out of CLOV last month?"
 
 
 def _files(tmp_path):
     recall = tmp_path / "history-recall" / "SKILL.md"
     recall.parent.mkdir()
-    recall.write_text("# History Recall\nRead the last N exchanges Kelvin had with any bot. "
-                      "Use it to catch up on what Kelvin and the bot discussed last.\n")
+    recall.write_text("# History Recall\nRead the last N exchanges Marvin had with any bot. "
+                      "Use it to catch up on what Marvin and the bot discussed last.\n")
     clov = tmp_path / "clov-notes.md"
-    clov.write_text("# CLOV\nKelvin's verdict on pulling out of CLOV last month: final, stay in.\n")
+    clov.write_text("# CLOV\nMarvin's verdict on pulling out of CLOV last month: final, stay in.\n")
     others = [tmp_path / f"u{i}.md" for i in range(10)]
     for i, f in enumerate(others):
-        f.write_text(f"Kelvin note {i} about groceries, rent and the last month.\n")
+        f.write_text(f"Marvin note {i} about groceries, rent and the last month.\n")
     return recall, clov, others
 
 

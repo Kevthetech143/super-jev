@@ -286,7 +286,7 @@ def test_big_file_not_kept_for_live_value_ask(tmp_path, monkeypatch, capsys):
     ("what's on my todo list", "ANSWER_LABEL"),
     ("what car do I have", "CONFIRM_LABEL"),
     ("what is the list price", "CONFIRM_LABEL"),
-    ("what is the phone number for NYP ENT on Kelvin's referral options list", "CONFIRM_LABEL")])
+    ("what is the phone number for Riverside ENT on Marvin's referral options list", "CONFIRM_LABEL")])
 def test_list_questions_get_same_criterion(q, label):
     assert ask.confirm_label(q) == ask.SOURCE_LABEL
 

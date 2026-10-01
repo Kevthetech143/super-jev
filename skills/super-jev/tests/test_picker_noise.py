@@ -83,7 +83,7 @@ SECRET = ["api_key" + ": " + "Zq8rTvLmWp4K", "API_KEY" + "=" + "sk-" + "a1B2" * 
           "api_key" + ': "' + "Qm9vYmFy" + "YmF6cXV4" + '"',
           "secret_key" + "=" + "abcdefghij", "client_secret" + ": " + "x#y",
           "aws_secret_access_key" + " = " + "wJalr" + "XUtnFEMIK7MDENG",
-          "passwd" + ": " + "hunter", "password" + ": " + "kelvin", "password" + ": " + "instance"]
+          "passwd" + ": " + "hunter", "password" + ": " + "marvin", "password" + ": " + "instance"]
 
 
 @pytest.mark.parametrize("text", NOT_SECRET)
