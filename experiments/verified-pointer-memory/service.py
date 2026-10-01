@@ -29,9 +29,14 @@ def invalidate_registry(path: str | Path) -> None:
 def load_registry(path: str | Path) -> Any:
     """Parsed registry JSON, re-parsed only when (size, mtime_ns, inode) changes.
 
+    No registry file means nothing is connected: the first connect writes it, so a set-up install
+    has none until then, and it reads as an empty registry.
     The returned object is shared: callers must deepcopy anything they keep or change."""
     key_path = str(path)
-    st = Path(path).stat()
+    try:
+        st = Path(path).stat()
+    except FileNotFoundError:
+        return {'version': 1, 'datasets': {}}
     key = (st.st_size, st.st_mtime_ns, st.st_ino)
     hit = _REGISTRY_CACHE.get(key_path)
     if hit and hit[0] == key:
