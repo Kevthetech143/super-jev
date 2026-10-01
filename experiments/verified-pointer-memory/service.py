@@ -138,7 +138,7 @@ def valid_v2_schema(connection: sqlite3.Connection, tables: set[str]) -> bool:
 
 
 # An agent name: letters, digits, ".", "_", "-", starting with a letter or digit. A space or a path
-# separator made a second, empty identity ("businessfi " beside "businessfi") and could point an
+# separator made a second, empty identity ("sales " beside "sales") and could point an
 # agent's state folder at another agent's ("x/../primary").
 PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
@@ -159,7 +159,6 @@ class Service:
         navigate_many_provider: Callable[[str, list, Any], Any] | None = None,
         cache_ttl_seconds: float | None = None,
         review_ttl_seconds: float = 600,
-        allow_agent_assist: bool = False,
     ) -> None:
         # cache_ttl_seconds None (the default): a saved answer has no clock expiry and lasts
         # until its source changes. An operator may still set a positive finite limit.
@@ -180,9 +179,6 @@ class Service:
         self.navigate_many_provider = navigate_many_provider
         self.cache_ttl_seconds = None if cache_ttl_seconds is None else float(cache_ttl_seconds)
         self.review_ttl_seconds = float(review_ttl_seconds)
-        if not isinstance(allow_agent_assist, bool):
-            raise ValueError('allow_agent_assist must be a boolean')
-        self.allow_agent_assist = allow_agent_assist
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             rows = c.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -588,8 +584,6 @@ class Service:
     ) -> dict[str, Any]:
         """Record an attempt without running retrieval, for assist to cite a file the
         caller's own ranking already chose. assist still checks the reviewed preparation."""
-        if not self.allow_agent_assist:
-            raise ValueError('agent assist is disabled')
         require_text('pointer', name)
         require_text('question', question)
         require_text('principal', principal)
@@ -610,8 +604,6 @@ class Service:
         references: list[dict[str, Any]], now: float | None = None,
     ) -> dict[str, Any]:
         """Create a review ticket from referenced, registered preparations."""
-        if not self.allow_agent_assist:
-            raise ValueError('agent assist is disabled')
         require_text('reason', reason)
         inspected = self.attempt(attempt_id, principal)
         if inspected['retrievalStatus'] not in {'ready', 'no-match', 'refused', 'caller-ranked'}:

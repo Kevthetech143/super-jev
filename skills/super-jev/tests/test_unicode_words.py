@@ -51,7 +51,7 @@ def test_accented_words_stay_whole():
 
 
 def test_english_words_unchanged():
-    q = "What's the NYP ENT phone number for Kelvin's v1.0.22 release?"
+    q = "What's the Riverside ENT phone number for Marvin's v1.0.22 release?"
     old = [w for w in __import__("re").findall(r"[a-z0-9]+", q.lower().replace("'", ""))
            if len(w) > 2 and w not in ask.QUERY_STOPWORDS]
     assert ask.query_terms(q) == list(dict.fromkeys(old))

@@ -16,10 +16,32 @@ BIN_DIR="${SUPERJEV_BIN_DIR:-$HOME/.local/bin}"
 info()  { printf '\033[36m==>\033[0m %s\n' "$1"; }
 fail()  { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 
-command -v node >/dev/null 2>&1 || fail "Node.js is required (>=24). Install it first: https://nodejs.org"
+# The exact Node steps, the same lines setup.py prints and the docs repeat. Into your home
+# folder, no admin rights needed.
+node_steps() {
+  {
+    printf '\033[31merror:\033[0m %s\n' "$1"
+    echo "Install Node 24 or newer, then run this installer again:"
+    case "${SHELL:-}" in
+      *zsh*) cat <<'ZSH'
+  touch ~/.zshrc
+ZSH
+        ;;
+    esac
+    cat <<'NVM'
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+  \. "$HOME/.nvm/nvm.sh"
+  nvm install 24
+NVM
+    echo "Already use Homebrew? Run: brew install node"
+  } >&2
+  exit 1
+}
+
+command -v node >/dev/null 2>&1 || node_steps "Node.js is required (>=24) and was not found."
 node_major=$(node -e 'console.log(process.versions.node.split(".")[0])')
 if [ "$node_major" -lt 24 ]; then
-  fail "Node >=24 required, found $(node -v). Upgrade Node and re-run."
+  node_steps "Node >=24 is required, found $(node -v)."
 fi
 command -v git >/dev/null 2>&1 || fail "git is required."
 

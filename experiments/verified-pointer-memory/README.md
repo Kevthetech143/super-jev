@@ -93,9 +93,8 @@ requires absolute paths inside the registry/manifest. Source URLs are unsupporte
 | `reviewTtlSeconds` | 600 | Time allowed to approve a fresh retrieval ticket |
 | `providerTimeoutSeconds` | 120 | Whole retrieval subprocess timeout |
 | `retrievalCommand` | Bundled Node bridge | Optional trusted executable argument array; receives JSON on stdin and returns JSON |
-| `allowAgentAssist` | false | Operator-enabled recovery from existing reviewed sources; never automatic approval |
 
-Time settings must be positive finite numbers. Cache/review TTL changes apply to new answers/tickets; remove or re-register a pointer to discard existing entries immediately. Unknown options are rejected.
+Time settings must be positive finite numbers. Cache/review TTL changes apply to new answers/tickets; remove or re-register a pointer to discard existing entries immediately. Unknown options are rejected (an `allowAgentAssist` line left in an older config is accepted and ignored).
 No options disable source verification or auto-approve answers.
 Inputs are JSON files; every result has `status` and `nextAction`:
 
@@ -205,7 +204,7 @@ Configure persistent `db` and `registry` paths for the agent/project; a pointer 
 
 Fresh retrievals return `attemptId`. The database preserves original request/context, status, trace, source binding and any reason; it does **not** archive every raw passage response. The caller retains complete raw responses in its configured private work artifacts. Removing/replacing a pointer clears cache/tickets but retains attempt metadata for trusted local audit. The public `attempt` action only exposes records authorized by the matching current pointer generation. Approved answers carry `resolution` (`retrieval` or `agent-assisted`) and `originatingAttemptId`; that resolution metadata lives with the cache entry and is not a permanent answer-history archive.
 
-When the operator has enabled `allowAgentAssist`, an agent may recover a partial, `no-match`, or `refused` result within the authorized dataset:
+An agent may recover a partial, `no-match`, or `refused` result within the authorized dataset:
 
 1. Preserve the original result. Inspect `attempt` and paginate `sources` to locate registered source IDs, descriptions, paths and line counts.
 2. Independently investigate those sources, then submit `assist` with the original attempt ID, reason and concrete source-line references. New sources require reviewed onboarding, registry refresh and a new original attempt.

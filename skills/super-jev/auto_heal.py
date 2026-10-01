@@ -3,9 +3,10 @@
 
 ask.py calls maybe_heal(pointer, principal) whenever a lookup hits a stale pointer. This never
 runs the refresh inline and never blocks the caller: at most it starts a detached background
-process, using the exact same prepare_path (prepare_bulk.py --refresh with the pointer's own
-recorded roots/excludes/principals from refresh_changed.py's prepare_args -- same secret scan,
-same held-file behavior) that a human would run by hand. It also calls maybe_scan on every
+process, using the exact same prepare_path (prepare_bulk.py --refresh, naming the pointer and its
+principals from refresh_changed.py's prepare_args; --refresh replays the rest of the pointer's
+recorded recipe, writer included -- same secret scan, same held-file behavior) that a human would
+run by hand. It also calls maybe_scan on every
 lookup: at most once per SCAN_SECS per principal, a detached scan finds files written into a
 connected folder since its connect (which never make a pointer stale) and heals those pointers.
 
