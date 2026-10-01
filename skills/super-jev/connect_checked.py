@@ -93,7 +93,12 @@ def main() -> int:
         print(__doc__); return 2
     req_path = Path(args[0]).resolve()
     check_only = "--check-only" in args
-    line = float(args[args.index("--line") + 1]) if "--line" in args else PROFILE.confidence_line
+    line = PROFILE.confidence_line
+    if "--line" in args:
+        try:
+            line = float(args[args.index("--line") + 1])
+        except (IndexError, ValueError):
+            print(f"--line needs a number, such as --line 0.80\n\n{__doc__}"); return 2
     req = json.loads(req_path.read_text())
     sources = req.get("sources", [])
     if not sources or any(not s.get("description", "").strip() for s in sources):

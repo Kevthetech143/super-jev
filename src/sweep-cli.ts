@@ -173,7 +173,8 @@ try {
     else if (flag === '--stub') stub = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
-  if (!recordsPath || !questionsPath) throw new CliError(usage);
+  const missing = [!recordsPath && '--records RECORDS.jsonl', !questionsPath && '--questions QUESTIONS.json'].filter(Boolean);
+  if (missing.length) throw new CliError(`Missing required argument${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}\n\n${usage}`);
   if (!outDir && !dryRun) throw new CliError('--out is required unless --dry-run');
   if (gate !== undefined && (gate <= 0 || gate > 1)) throw new CliError('--gate must be greater than 0 and at most 1');
   if (batch !== undefined && (!Number.isInteger(batch) || batch < 1)) throw new CliError('--batch must be a positive integer');

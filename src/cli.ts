@@ -26,7 +26,8 @@ try {
   const args = process.argv.slice(2);
   if (args.length === 0 || args.includes('--help')) { console.log(usage); process.exit(0); }
   const [command, file, ...flags] = args;
-  if (command !== 'organize' || !file || file.startsWith('--')) throw new CliError(usage);
+  if (command !== 'organize') throw new CliError(`Unknown command ${command}\n\n${usage}`);
+  if (!file || file.startsWith('--')) throw new CliError(`Missing required argument: INPUT.json\n\n${usage}`);
   let mode = '';
   for (let i = 0; i < flags.length; i++) {
     if (flags[i] === '--live' || flags[i] === '--demo') {
