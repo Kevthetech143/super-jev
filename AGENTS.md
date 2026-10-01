@@ -81,8 +81,8 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 ## How to drive it for your human
 
 - Before you state a fact from their files: run `ask`, open the top file, read it.
-- Before you send an answer: run `check` with each claim and the file you read.
-  Only exit 0 is a pass.
+- Before you send an answer: run `check FILE --claim "..."` with each claim and the file you read,
+  or `ask.py --claim "..."` when you do not know which file holds the fact. Only exit 0 is a pass.
 - Nothing found means say "Super Jev couldn't find it; it may still exist" and offer to search by hand, never a guess.
 - When their files change, run step 4 again with `--refresh`.
 - A question you ask again saves itself: when the same file wins it N times
@@ -103,9 +103,14 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 - **Remember vs. one-off.** Connect a folder (step 4) only if you will ask it more than once. For
   a one-off file, a diff, or a worker's report, skip connecting and check it directly:
   `dispatch.py check FILE... --claim "..."` or `dispatch.py verify REPORT --worktree DIR`.
-- **Check a claim against connected files.** `ask.py --principal me --claim "statement"` answers
-  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`;
-  `--claims-file FILE` checks one statement per line.
+- **Check a claim: which door.** Use `ask.py --principal me --claim "statement"` when you do not
+  know which file holds the fact and you want the proof file and line; it answers
+  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`, and
+  `--claims-file FILE` checks one statement per line. Use `dispatch.py check FILE --claim "..."`
+  when you already have the file, diff or report and want a send/no-send gate; it gives no proof
+  line. Both doors: only exit 0 passes. `ask --claim` exits TRUE 0, FALSE 5, not settled 1,
+  refused input 2, check failed 3, setup needed 4 (several statements: the highest code);
+  `check` exits CLEAN 0, ERROR 1, REJECT 2, READ 3 (step 7).
 - **Building something bigger than one answer:** use the `super-jev-build-cycle` skill. Six steps —
   preflight, start, check-report, review, reply-check, learn — and the review step must come from a
   fresh, independent agent, never the builder; it refuses to close while the latest review says FIX.

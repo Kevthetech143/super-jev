@@ -55,7 +55,7 @@ Secret-shaped text never blocks the check: a file of the diff that holds any (a 
 ## Rules
 
 - A listed file is a lead, not an answer: open it before you rely on it.
-- A non-zero exit from Super Jev is kept in the receipt, not hidden; act on its printed next step.
+- A non-zero exit from Super Jev is kept in the receipt, not hidden; act on its printed next step (claims: 5 means a claim is FALSE and 1 means no file settles it; fix the claim, not the tool).
 - Each ask and each claim check is a Super Jev call and may be paid.
 - The tool only calls `ask.py`, `dispatch.py` and `git`; no daemon, no other network.
 - Builders and helpers run on Sonnet 5.5 (`claude-sonnet-5-5`); the independent reviewer runs on Opus.
