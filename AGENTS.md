@@ -59,13 +59,17 @@ unless you add `--findability`.
    - Exit 2: refused. A first connect refuses more than 250 files, even with
      `--writer builtin` (`--max-files` raises it). It is a cost guard for model
      writers, so narrow `--root` or `--exclude` first.
-   - `SKIP` lines: files a default rule left out, counted by reason, with folder
-     or extension names and never file names. Markdown in a skipped folder
-     (`documents/`, `profile/`, `node_modules/`, a hidden folder) is counted
-     there; connect that folder by itself with `--root` to include it (a folder
-     under `documents/` or `profile/`, `~/Documents` included, then does not pick
-     up new files on its own: run it again with `--refresh` after adding files).
-     Only `.md` files connect; other types are counted and never read.
+   - `SKIP` lines: what a default rule left out, counted by reason, with folder
+     or extension names and never file names. Every `.md` file left out is
+     counted, and so is every file of another type except hidden ones (a hidden
+     file, or anything inside a hidden folder such as `.git/`, is not counted).
+     `.md` files in a skipped folder (`documents/`, `profile/`, `node_modules/`, a
+     hidden folder) are counted per folder. To connect one, connect that folder
+     as its own set: `--root FOLDER --pointer NEW-NAME`. Re-running with a
+     pointer that already exists replaces that set's files, so use a new name. A
+     folder under `documents/` or `profile/` (`~/Documents` included) does not
+     pick up new files on its own: run it again with `--refresh` after adding
+     files. Only `.md` files connect; other types are never read.
 
 5. **Ask a question you know the answer to.**
 
@@ -94,11 +98,6 @@ unless you add `--findability`.
    means do not send it: the file does not support the claim (`NOT_SUPPORTED`)
    or disproves it (`CONTRADICTED`). Any other exit means the check itself
    failed; treat it as blocked too.
-
-   Two doors, two jobs. `dispatch.py check` (above) checks a file you have in
-   hand. To check a statement against folders you already connected, use
-   `ask.py --principal me --claim "statement"` (see "Before real work" below);
-   it prints its own verdict word and proof line.
 
 8. **Uninstall when your human asks** (removes everything setup and connect made;
    their files are never touched):

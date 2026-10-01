@@ -7,7 +7,7 @@ import { parseConnectSummary, formatConnectSummary } from '../src/jev-chat-confi
 test('formatConnectSummary shows the SKIP lines connect printed', () => {
   const stdout = [
     'writer: builtin -- descriptions quoted from each file\'s headings, no model call',
-    '  SKIP  3 .md file(s) in folders skipped by default: documents/ (2), profile/ (1); to connect one, connect that folder by itself (--root FOLDER)',
+    '  SKIP  3 .md file(s) in folders skipped by default: documents/ (2), profile/ (1); to connect one, connect that folder as its own set (--root FOLDER --pointer NEW-NAME)',
     '  SKIP  2 file(s) of other types (.py 1, .csv 1); only .md files connect',
     '  SKIP  2 file(s) of other types (.py 1, .csv 1); only .md files connect',
     'inventory: 1 files to prepare, 0 held',

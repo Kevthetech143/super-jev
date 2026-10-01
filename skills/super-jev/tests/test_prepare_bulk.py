@@ -447,6 +447,38 @@ def test_findability_hit_and_miss(tmp_path, monkeypatch, capsys):
     assert miss_paths == {"b.md"}
 
 
+def test_findability_says_when_the_search_itself_failed(tmp_path, monkeypatch, capsys):
+    """A search that errors (no key, an unreachable judge) is not "ranked absent": say it did not run."""
+    root = tmp_path / "root"
+    root.mkdir()
+    fa = root / "a.md"
+    fa.write_text("# A\nAbout a.\n")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    monkeypatch.setattr(pb, "CACHE_DIR", cache_dir)
+    (cache_dir / "my-records.json").write_text(json.dumps({
+        str(fa): {"sha256": sha256_of(fa), "description": "Describes a.", "question": "What is a?",
+                  "verdict": "SUPPORTED", "confidence": 0.9, "pass": True, "checkedAt": "2026-01-01T00:00:00"},
+    }))
+    monkeypatch.setattr(pb, "writer", lambda items, model, feedback=None: (_ for _ in ()).throw(AssertionError("writer should not run")))
+    monkeypatch.setattr(pb, "gate", lambda desc, path: (_ for _ in ()).throw(AssertionError("gate should not run")))
+    connect = fake_connect_memory([])
+
+    def memory(req):
+        if req.get("action") == "navigate":
+            return {"status": "error", "reason": "Navigation failed: TYPESAFE_API_KEY is not set"}
+        return connect(req)
+
+    monkeypatch.setattr(pb, "memory", memory)
+    monkeypatch.setattr(sys, "argv", base_argv(root, extra=["--findability"]))
+    assert pb.main() == 0   # the connect itself worked; findability is a report
+    out = capsys.readouterr().out
+    assert "findability: not completed (Navigation failed: TYPESAFE_API_KEY is not set)" in out, out
+    assert "files rank first" not in out and "MISS" not in out and "ranked absent" not in out, out
+    report = json.loads((cache_dir / "my-records-report.json").read_text())
+    assert report["findability"] == {"notRun": "Navigation failed: TYPESAFE_API_KEY is not set"}
+
+
 def test_no_connect_writes_report_and_never_calls_memory(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()
