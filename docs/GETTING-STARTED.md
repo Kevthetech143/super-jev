@@ -188,14 +188,15 @@ read. Success: you can point at the exact line that answers the question.
 ## 7. Approve, miss, or add
 
 ```bash
-python3 skills/super-jev/ask.py --principal ME --approve "the question" "the answer"   # good hit: caches it
+python3 skills/super-jev/ask.py --principal ME --approve "the question"                # good list: saves the ranked files
+python3 skills/super-jev/ask.py --principal ME --approve "the question" "the answer"   # one file, with the claim check
 python3 skills/super-jev/ask.py --principal ME --miss "the question" "where it actually was"   # bad hit: log-only
 python3 skills/super-jev/ask.py --principal ME --add "the question" "the answer"               # no file: writes a manual record
 ```
 
 Success for `--approve`: asking the same question again is a cache hit.
 
-A saved answer is the answer to one question, saved through one door: whether it saves itself on a repeat question, or you use `--approve` or `--add`, the same secret scan runs, and `--approve` and `--add` also run the claim check (CLEAN, 0.80 or higher, against the cited file); a repeat question saves the file itself, not an answer, and its N wins stand in for the claim check; a fact with no file gets the secret scan only and is shown as "no source file", and a `--source` that does not exist is refused. It lasts until its source file changes (there is no clock expiry), or until `--miss` removes it; `--miss` exits 1 when there was nothing saved to remove. The same question means the same words after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier matches. A question saves itself when the same file wins it N times in a row (`SUPERJEV_SAVE_AFTER`, default 2); `--approve` meets that threshold at once. A hit says `saved answer, from FILE, saved DATE` (an auto-saved one prints the file path, not an answer) (or `no source file`); if the file changed, it says so and searches live instead.
+A saved answer is the answer to one question, saved through one door: whether it saves itself on a repeat question, or you use `--approve` or `--add`, the same secret scan runs, and `--approve` and `--add` also run the claim check (CLEAN, 0.80 or higher, against the cited file); a repeat question saves the file itself, not an answer, and its N wins stand in for the claim check, and `--approve "question"` with no answer does the same for the list you were just shown (you vouch for it; `--rank N` puts that file first; no claim check, secret scan and unchanged-file check still run); a fact with no file gets the secret scan only and is shown as "no source file", and a `--source` that does not exist is refused. It lasts until its source file changes (there is no clock expiry), or until `--miss` removes it; `--miss` exits 1 when there was nothing saved to remove. The same question means the same words after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier matches. A question saves itself when the same file wins it N times in a row (`SUPERJEV_SAVE_AFTER`, default 2); `--approve` meets that threshold at once. A hit says `saved answer, from FILE, saved DATE` (an auto-saved one prints the file path, not an answer) (or `no source file`); if the file changed, it says so and searches live instead.
 `--add` quotes are taken verbatim from reviewed text; the same wording twice
 refuses unless you pass `--replace-entry`.
 

@@ -69,7 +69,11 @@ until --miss (wrong) removes it. "The same question" = lowercased, spaces collap
 trailing punctuation dropped; nothing fuzzier. A hit prints "saved answer, from FILE,
 saved DATE" (or "no source file"); a changed source says STALE and searches live.
 
-  ask.py --principal AGENT --approve "question" "answer" [--rank N | --file PATH]
+  ask.py --principal AGENT --approve "question" ["answer"] [--rank N | --file PATH]
+      With no answer text the person vouches for the last lookup's ranked list (up to
+      five files): it is saved as a repeat win saves it, approved_by principal:AGENT,
+      the secret scan and unchanged-file check run, no claim check. --rank N or --file
+      puts that file first. With an answer:
       Re-searches the last lookup's top pointer and approves it, quotes taken
       verbatim from reviewedText. Next ask of the same question is a cache
       hit. Nothing ready -> hints --add. --rank N (1-based, as printed) or
@@ -674,9 +678,10 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     who = approver(sdir, question)
     when = rec["ts"][:10] if rec and rec.get("ts") else "date not recorded"
     auto = who.get("approved_by") == "auto-save"
+    listed = bool(rec and rec.get("file") and (auto or rec.get("files")))  # a saved file list, not an answer
     _RESULT["saved"] = {"by": "auto" if auto else "you", **({"date": when} if rec and rec.get("ts") else {})}
-    if auto and rec and rec.get("file"):
-        # A repeat win saved the ranked files, not an answer: print them like a found result.
+    if listed:
+        # A repeat win or a no-text --approve saved the ranked files, not an answer: print them like a found result.
         _RESULT["skills"] = skill_rows((s["name"], s["path"]) for s in rec.get("skills") or [])
         _RESULT["files"] = [{"path": f["path"], "tier": "confirmed", "score": f.get("score"), "pointer": f["pointer"]}
                             for f in rec.get("files") or [{"path": rec["file"], "pointer": rec.get("pointer", "")}]]
@@ -697,7 +702,7 @@ def print_hit(hit: dict, sdir: Path, principal: str, question: str) -> int:
     origin = (f"from {rec['file']}" if rec and rec.get("file")
               else "no source file" if rec and rec.get("no_source") else "source not recorded")
     print(f"saved answer, {origin}, saved {when}")
-    for e in ([] if who.get("approved_by") == "auto-save" else (hit.get("evidence") or []))[:3]:
+    for e in ([] if listed else (hit.get("evidence") or []))[:3]:
         quote = str(e.get("quote", ""))
         line = best_evidence_line(quote, hit.get("answer") or "", question)
         print("  evidence:", e.get("sourceId", ""), "|", line[:120])
@@ -2801,17 +2806,8 @@ def find_candidate(sdir: Path, question: str, rank=None, file=None):
     """The row {score, path, pointer, possible} the lead picked from the last lookup's
     printed list: by 1-based rank, or by path (full path or unique file name).
     Returns (row, None) or (None, reason)."""
-    path = sdir / "lookups.jsonl"
-    top = None
-    if path.is_file():
-        for line in reversed(path.read_text().splitlines()):
-            try:
-                rec = json.loads(line)
-            except ValueError:
-                continue
-            if rec.get("kind") == "lookup" and norm_q(rec.get("question") or "") == norm_q(question) and rec.get("top"):
-                top = rec["top"]
-                break
+    rec = last_lookup(sdir, question)
+    top = rec and rec["top"]
     if not top:
         return None, "no prior lookup with candidates for that question; run ask first, or use --add"
     if rank is not None:
@@ -2954,19 +2950,22 @@ def send_approval(principal: str, question: str, answer: str, pointer: str, tick
         record_approver(sdir, question, approved_by, pointer=pointer, **fields)
     return 0 if ok else 1
 
-def find_top(sdir: Path, question: str):
-    """The last lookup's top row {score, path, pointer} for this exact question."""
+def last_lookup(sdir: Path, question: str):
+    """The last lookup record for this exact question that listed files, else None."""
     path = sdir / "lookups.jsonl"
-    if not path.is_file():
-        return None
-    for line in reversed(path.read_text().splitlines()):
+    for line in reversed(path.read_text().splitlines() if path.is_file() else []):
         try:
             rec = json.loads(line)
         except ValueError:
             continue
         if rec.get("kind") == "lookup" and norm_q(rec.get("question") or "") == norm_q(question) and rec.get("top"):
-            return rec["top"][0]
+            return rec
     return None
+
+def find_top(sdir: Path, question: str):
+    """The last lookup's top row {score, path, pointer} for this exact question."""
+    rec = last_lookup(sdir, question)
+    return rec["top"][0] if rec else None
 
 def auto_cache_on() -> bool:
     """Default ON; SUPERJEV_AUTO_CACHE=0/off/false/no turns it off."""
@@ -3338,9 +3337,11 @@ def followup(principal: str, sdir: Path, max_tries: int = FOLLOWUP_MAX_TRIES) ->
     print(f"{proposed} proposal(s), {len(pending)} miss(es) checked")
     return 0
 
-def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, file=None) -> int:
+def approve(principal: str, question: str, answer, sdir: Path, rank=None, file=None) -> int:
     """--approve: a person's choice of file, saved through save_answer at once (the manual way
-    to meet the repeat-win threshold; same secret scan and claim check as every other save)."""
+    to meet the repeat-win threshold; same secret scan as every other save). With an answer, the
+    claim check runs on the chosen file. With no answer, the person vouches for the ranked list:
+    it is saved as a repeat win saves it (the chosen file, else the top one, leads), no claim check."""
     why = uncalibrated_why()
     if why:
         say(f"not saved: {why}", why)
@@ -3359,8 +3360,22 @@ def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, f
         say("no confirmed top candidate for that question; run ask first, pick a listed "
             "file with --rank N or --file PATH, or use --add")
         return 1
-    rc = save_answer(principal, question, answer, sdir, top=chosen,
-                     approved_by=f"principal:{principal}", automatic=False)
+    extra = {}
+    if answer is None:
+        rec = last_lookup(sdir, question)
+        rows = [chosen] + [r for r in rec["top"][:5] if r["path"] != chosen["path"]]
+        try:
+            files = [{"score": r["score"], "path": r["path"], "pointer": r["pointer"], "sha": live_sha(r["path"])} for r in rows]
+            why = secret_why(*(Path(f["path"]).read_text(errors="replace") for f in files))
+        except OSError as e:
+            return not_saved(sdir, norm_q(question), f"cannot read {e.filename}: {e.strerror or e}")
+        if why:
+            return not_saved(sdir, norm_q(question), why)
+        win = rec.get("win") or {}
+        extra = {"files": files, **{k: win[k] for k in ("skills", "leans_none") if win.get(k)}}
+    rc = save_answer(principal, question, answer or norm_q(question), sdir, top=chosen,
+                     approved_by=f"principal:{principal}", automatic=False,
+                     **({"claim_check": False, "stored": f"Saved file: {chosen['path']}", "extra": extra} if answer is None else {}))
     if rc == 0:
         write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=chosen.get("path"))
     return rc
@@ -3894,10 +3909,10 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
                 i = rest.index("--file"); file = rest[i + 1]; del rest[i:i + 2]
         except (IndexError, ValueError):
             rest = []
-        if len(rest) != 2 or (rank is not None and file is not None):
-            say('usage: --approve "question" "answer" [--rank N | --file PATH]')
+        if len(rest) not in (1, 2) or (rank is not None and file is not None):
+            say('usage: --approve "question" ["answer"] [--rank N | --file PATH]')
             return 2
-        return approve(principal, rest[0], rest[1], sdir, rank=rank, file=file)
+        return approve(principal, rest[0], rest[1] if len(rest) == 2 else None, sdir, rank=rank, file=file)
     if a[0] == "--add":
         return do_add(principal, a[1:], sdir)
     if a[0] in ("--claim", "--claims-file"):
