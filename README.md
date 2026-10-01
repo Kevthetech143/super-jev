@@ -10,7 +10,7 @@ One judge (Jev) between your agent and your data: the agent asks in its own word
 - Agents burn whole LLM turns on lookups, re-hunt the same answers daily, and state things the files never said. Jev is a fast, cheap judge for yes/no and which-one questions; the LLM keeps the writing.
 - The daily loop: ask → read the top file → answer → approve / miss / add. Connectors are how your data gets in; the cache fills only from your own approvals — nothing is cached that you did not approve.
 - 1.0 promises the proven core: skill search, file navigate, connect + bulk prepare, check gate, permit gate, the harness loop. The core works well when it works; edges still want an agent in the seat — see KNOWN-QUIRKS.md and AGENTS.md.
-- 1.0 does not promise unattended answering, semantic cache matching, automatic sync, or live browsing. Next: auto-catch, recipes, a Jev-decided browser driver — each ships only after its own live bench.
+- 1.0 does not promise unattended answering, semantic cache matching, automatic sync (nothing watches your folders: an ask that meets a changed set starts a bounded, best-effort background refresh, and refreshing stays your step), or live browsing. Next: auto-catch, recipes, a Jev-decided browser driver — each ships only after its own live bench.
 
 ## Quick start
 
@@ -53,7 +53,7 @@ LIVE = proven in daily use. MEASURED = exercised by live bench scripts. EXPERIME
 
 - Answer unattended — an agent stays in the seat for the final call.
 - Match paraphrases from cache — cache hits are exact wording only.
-- Sync automatically — data gets in through connectors you run.
+- Sync automatically — data gets in through connectors you run. Nothing watches your folders. An ask that meets a changed set starts a bounded, best-effort background refresh; refreshing stays your step.
 - Browse the web — doors work on connected local data only.
 - Rewrite history — the scrub covers current files; history is untouched by design.
 
@@ -70,7 +70,7 @@ Tested on macOS and Linux. Windows is untested.
 | Scope | Detail |
 |---|---|
 | Reads | Your connected folders and configured skill roots. |
-| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/` and `skills/super-jev/ledger/` in the checkout. |
+| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/`, `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (background-refresh locks, cooldowns and logs that name your sets and files) in the checkout. |
 | Leaves the machine | Sent to the TypeSafe provider: connected file text (to check each description), descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. |
 | Provider receives | The above; never files the secret scan holds — those stay local. |
 | Never leaves | Files the secret scan holds, and vault-style folders the inventory skips. |
