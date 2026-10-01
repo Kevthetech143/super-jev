@@ -618,7 +618,7 @@ BENCH_COOLDOWN_SECS = _bench_cooldown_secs()
 # preparation-required / refresh-required is a STALE pointer (needs a refresh run),
 # not a live failure of the provider -- benching it hides its real, current facts
 # behind a generic "benched" message instead of the honest "still preparing" one
-# (post-#133 regression: amazon's amazon-bm-fb-brain-root sat preparation-required
+# (post-#133 regression: one team's brain-root pointer sat preparation-required
 # on 451 files > the 250-file cap and got benched, turning its real facts into
 # "no candidates" every call). Only a real error (5xx/timeout/provider failure)
 # should count toward the circuit breaker. Same rule auto_heal.py already uses to
@@ -877,7 +877,7 @@ def confirm_finish(question: str, ctx: dict, body, error):
 # --- Near-twin tie-break -----------------------------------------------
 # When the top 2-3 ranked files are near-twins -- scores within a small gap,
 # and either the same folder or similar file names (e.g. a note and its own
-# summary sibling) -- ranking alone is often a coin flip: businessfi stress
+# summary sibling) -- ranking alone is often a coin flip: stress
 # test 4 put the right file at rank 2-4 behind a close sibling/summary about
 # half the time. One bounded Jev call over the short snippets of just those
 # 2-3 files picks the one that best answers the question; anything else
@@ -1373,8 +1373,8 @@ def load_cache_files(pointer: str) -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
-# A written phone number ("212-305-6390") counts as the words "phone" and "number": a note lists
-# the number without ever saying "phone" (NYP ENT line in the medical timeline).
+# A written phone number ("212-555-0100") counts as the words "phone" and "number": a note lists
+# the number without ever saying "phone" (a clinic line in a timeline note).
 PHONE_RE = re.compile(r"(?<!\d)\(?\d{3}\)?[-. ]\d{3}[-.]\d{4}(?!\d)")
 
 def passage_words(text: str) -> Counter:
@@ -3054,7 +3054,7 @@ def fresh_top(sdir: Path, question: str):
 # A same-domain neighbor file shares SOME vocabulary with almost any in-domain
 # question (a buyback report mentions "macbook"/"bid" on every page); a single
 # shared word proves nothing. Real subject matches share most of the question's
-# terms, not one -- the v1.0.6 amazon-bm-fb miss (a price-ceiling question
+# terms, not one -- the v1.0.6 miss (a price-ceiling question
 # proposing a different-date snapshot report) hit 4/8 terms by vocabulary
 # alone, while the actually-correct file hit 6/8. 0.6 sits between the two.
 SUBJECT_MATCH_FLOOR = 0.6
