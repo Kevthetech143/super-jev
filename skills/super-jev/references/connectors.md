@@ -213,6 +213,15 @@ python3 prepare_bulk.py --root DIR --pointer NAME --principal YOUR_AGENT_NAME
 ```
 
 `--writer-command` takes precedence over the env var; either is parsed into an argument list and run without a shell.
+
+The writer flags (`--writer`, `--writer-model`, `--writer-command`) are recorded with the pointer's recipe and
+replayed by every `--refresh`: the background refresh an ask starts, the refresh command an ask prints and
+`refresh_changed.py` included. They are one choice: give any one of them on a refresh and the recorded writer is
+replaced whole, and recorded for the refreshes after it; `--writer auto` switches back to auto. The `SUPERJEV_WRITER_COMMAND`
+env var is never recorded. A refresh can run from the skill folder, so name the command on PATH or by absolute path,
+not relative to your folder. The command is stored in `prepare-cache/` and shown in the banner: keep keys out of it
+(have your adapter read them from its own environment).
+
 The program receives the existing UTF-8 writer prompt on standard input: its
 final `FILES:` section is a JSON array of the file records. It must write only
 a JSON array to standard output. Each array member must be an object with
@@ -272,8 +281,9 @@ change of principals as `scope-change`. `register` starts a new generation, so
 the pointer's cached and pending answers are dropped (the count is printed
 first); keep shared pointers to reference sets. Every connection is private
 until a person marks it shareable (`prepare_bulk.py --shareable` at connect, or
-`share_pointers.py --mark NAME` later; `--unmark` reverts; refreshes keep the
-mark). An unmarked pointer is refused (printed, skipped), and a pointer with any
+`share_pointers.py --principal AGENT --mark NAME` later; `--unmark` reverts;
+refreshes keep the mark; no agent is assumed, so name one or set
+`SUPERJEV_PRINCIPAL`). An unmarked pointer is refused (printed, skipped), and a pointer with any
 original source under an agent's brain (`~/agents/<bot>-brain/`) or in a
 `documents/` or `profile/` folder is refused and cannot be marked. A stale pointer
 (`preparation-required`) must be refreshed before it can be shared. A later

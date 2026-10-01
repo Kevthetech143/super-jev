@@ -36,6 +36,15 @@
       its proof file changes. --claims-file FILE checks one statement per line
       (blank lines and # comments skipped): a draft's facts, or a worker
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
+      Exit codes: only TRUE exits 0; FALSE 5; every other result is not a pass, and
+      its code says how the search went, whatever the verdict word and whether or
+      not files are listed: 1 searched fully, nothing settles it (NOT FOUND, UNSURE,
+      PARTIAL, CONFLICT); 3 a set or the content check failed (or "UNSURE: the
+      true/false check did not run"); 4 setup needed (a set is stale or unprepared,
+      or files were skipped or held); 2 refused input (empty, too long, holds a
+      secret). Several statements exit with the highest code. A statement that ends
+      before any verdict prints the OUTCOME line an ordinary ask prints, first.
+      Only exit 0 passes.
 
 SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
 save by hand. All save through one function and run the secret scan. A repeat-question
@@ -62,9 +71,7 @@ saved DATE" (or "no source file"); a changed source says STALE and searches live
       approves it. Approval never depends on retrieval matching the tiny
       record: it searches once, and on anything short of "ready" falls back
       to the harness's assisted path (quoting the record's own reviewed
-      text) so the answer is still cached. If agent assist is disabled on
-      this deployment, --add prints the config to flip and exits 1 instead
-      of silently leaving the answer uncached. Never replaces a pointer or
+      text) so the answer is still cached. Never replaces a pointer or
       touches another pointer's answers; many small manual pointers are
       fine, `cached` checks them all. Same wording twice refuses unless
       --replace-entry is given, which removes the existing manual pointer
@@ -203,7 +210,8 @@ def state_dir(principal: str) -> Path:
     return base / principal
 
 class SecretHeld(RuntimeError):
-    """A request carried a secret, so it was never sent. main() exits 1."""
+    """A request carried a secret, so it was never sent. A claim catches it in lookup() and exits 2
+    with an OUTCOME line; an ordinary ask lets it reach main(), which exits 1 (a known gap, a follow-up)."""
 
 
 def memory(req: dict) -> dict:
@@ -618,7 +626,7 @@ BENCH_COOLDOWN_SECS = _bench_cooldown_secs()
 # preparation-required / refresh-required is a STALE pointer (needs a refresh run),
 # not a live failure of the provider -- benching it hides its real, current facts
 # behind a generic "benched" message instead of the honest "still preparing" one
-# (post-#133 regression: amazon's amazon-bm-fb-brain-root sat preparation-required
+# (post-#133 regression: one team's brain-root pointer sat preparation-required
 # on 451 files > the 250-file cap and got benched, turning its real facts into
 # "no candidates" every call). Only a real error (5xx/timeout/provider failure)
 # should count toward the circuit breaker. Same rule auto_heal.py already uses to
@@ -877,7 +885,7 @@ def confirm_finish(question: str, ctx: dict, body, error):
 # --- Near-twin tie-break -----------------------------------------------
 # When the top 2-3 ranked files are near-twins -- scores within a small gap,
 # and either the same folder or similar file names (e.g. a note and its own
-# summary sibling) -- ranking alone is often a coin flip: businessfi stress
+# summary sibling) -- ranking alone is often a coin flip: stress
 # test 4 put the right file at rank 2-4 behind a close sibling/summary about
 # half the time. One bounded Jev call over the short snippets of just those
 # 2-3 files picks the one that best answers the question; anything else
@@ -980,7 +988,7 @@ CLAIM_VERDICT_INSTRUCTIONS = ("Statement: %s\nJudge only the file `%s.text` (%s)
                               "statement is true or false? When torn, pick not_stated.")
 CLAIM_LINE_INSTRUCTIONS = ("Statement: %s\nWhich line of the file `%s.text` (%s) shows whether the statement "
                            "is true or false? When torn, pick none.")
-_CLAIM = {"text": None}
+_CLAIM = {"text": None, "word": None}
 
 def claim_lines(text: str) -> list:
     """Up to CLAIM_LINES distinct candidate lines of a passage (non-empty, 12+ characters), in order."""
@@ -1090,10 +1098,11 @@ def _file_date(p: str):
     except OSError:
         return 0
 
-def claim_verdict(files: dict, read: list) -> tuple:
+def claim_verdict(files: dict, read: list, incomplete: bool = False) -> tuple:
     """(word, lines) combining per-file answers. word is TRUE, FALSE, CONFLICT, PARTIAL,
     UNSURE or NOT FOUND. Only answers at >= CLAIM_SURE decide; files that disagree
-    are a CONFLICT with the newest (by modified date) first."""
+    are a CONFLICT with the newest (by modified date) first. incomplete: a set failed or
+    is stale, or the content check failed, so a NOT FOUND says the search was incomplete."""
     day = lambda p: time.strftime("%Y-%m-%d", time.localtime(_file_date(p))) if _file_date(p) else "date unknown"
     sure = {p: f for p, f in files.items() if isinstance(f.get("prob"), (int, float)) and f["prob"] >= CLAIM_SURE}
     yes = [p for p, f in sure.items() if f["verdict"] == "supported"]
@@ -1130,9 +1139,12 @@ def claim_verdict(files: dict, read: list) -> tuple:
         out = [f"UNSURE ({f0['verdict']} {f0.get('prob') or 0:.2f}): read these files before answering:"]
         out += [f"  {p}" for p in leaning]
         return "UNSURE", out
+    gap = "the search was incomplete (a set failed or is stale, or the content check failed)"
     if not read:
-        return "NOT FOUND", ["NOT FOUND in the connected files; it may still exist somewhere not connected."]
-    return "NOT FOUND", [f"NOT FOUND in the {len(read)} file(s) I read; it may still exist in a file that was not read."]
+        return "NOT FOUND", [f"NOT FOUND: {gap}; it may still exist in a file that was not searched." if incomplete
+                             else "NOT FOUND in the connected files; it may still exist somewhere not connected."]
+    return "NOT FOUND", [f"NOT FOUND in the {len(read)} file(s) I read" + (f", and {gap}" if incomplete else "")
+                         + "; it may still exist in a file that was not read."]
 
 def claim_key(claim: str) -> str:
     """Case and spacing folded, every symbol kept: "-50" and "50", "<" and ">" stay different claims."""
@@ -1373,8 +1385,8 @@ def load_cache_files(pointer: str) -> dict:
         return {}
     return data if isinstance(data, dict) else {}
 
-# A written phone number ("212-305-6390") counts as the words "phone" and "number": a note lists
-# the number without ever saying "phone" (NYP ENT line in the medical timeline).
+# A written phone number ("212-555-0100") counts as the words "phone" and "number": a note lists
+# the number without ever saying "phone" (a clinic line in a timeline note).
 PHONE_RE = re.compile(r"(?<!\d)\(?\d{3}\)?[-. ]\d{3}[-.]\d{4}(?!\d)")
 
 def passage_words(text: str) -> Counter:
@@ -1655,9 +1667,10 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
         return ""
     if "-manual-" in ptr:
         return "; its source changed: re-add it with ask.py --add ... --replace-entry"
-    # The printed command must run as-is from any folder: the absolute script path plus the
-    # pointer's recorded roots/excludes and every principal it serves (a bare --refresh with
-    # no report is refused for want of --root; one principal short is refused as a scope change).
+    # The printed command must run as-is from any folder: the absolute script path plus the pointer
+    # and every principal it serves (--refresh replays the recorded recipe, so no --root or writer
+    # here; a bare --refresh with no report is refused for want of --root, and one principal short
+    # is refused as a scope change).
     script = skill_dir_for_display() / "prepare_bulk.py"  # stable across releases
     # A split part (<pointer>-N) has no report of its own: it refreshes through its parent's.
     report = auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0]
@@ -1700,23 +1713,42 @@ def skill_note(name: str) -> str:
 def skill_question(question: str) -> bool:
     return os.environ.get("SUPERJEV_SKILLS", "1") != "0" and bool(SKILL_Q_RE.search(question))
 
-def skill_catalog(question: str) -> list:
-    """[(name, SKILL.md path)] from the skills connector; [] on any failure."""
+SKILL_SEARCH_TIMEOUT = 60
+
+def skill_search(request: str) -> tuple:
+    """(status, [(label, SKILL.md path)], failure or "", fallback cause or ""): the one reader of the skills
+    connector, for asks and preflight. One labelling rule: only an exact name or a live judge pick is a
+    match; everything else (local ranking, doubt, a clarify question, a fallback) is an "(unverified
+    guess)". A failure is never an empty answer. The door's own error sentence (setup steps included) is
+    returned whole; only output that is not the door's JSON is cut."""
     try:
         r = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "dispatch.py"),
-                            "skills", "--request", question], capture_output=True, text=True, timeout=60)
+                            "skills", "--request", request], capture_output=True, text=True,
+                           timeout=SKILL_SEARCH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return "", [], f"timed out after {SKILL_SEARCH_TIMEOUT}s", ""
+    except OSError as e:
+        return "", [], str(e), ""
+    try:
         out = json.loads(r.stdout)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
+    except ValueError:
+        out = None
     if not isinstance(out, dict):
-        return []
-    if out.get("status") == "error":
-        print(f"skill search failed: {str(out.get('error') or 'unknown cause')[:200]}", file=sys.stderr)
-        return []
-    # Only a live judge pick or an exact name is a match; local ranking and doubt are guesses.
-    guess = GUESS if not (out.get("status") == "exact" or (out.get("status") == "suggestions" and out.get("source") == "jev")) else ""
-    return [((c.get("name") or c.get("id") or "") + (" " + guess if guess else ""), c["path"]) for c in out.get("candidates") or []
-            if isinstance(c, dict) and isinstance(c.get("path"), str)]
+        return "", [], f"exit {r.returncode}: unreadable output: {(r.stdout or '').strip()[-200:]}", ""
+    status = out.get("status") or ""
+    if status == "error" or r.returncode:
+        return status, [], str(out.get("error") or out.get("reason") or f"exit {r.returncode}"), ""
+    match = status == "exact" or (status == "suggestions" and out.get("source") == "jev")
+    picks = [((c.get("name") or c.get("id") or "") + ("" if match else " " + GUESS), c["path"] if isinstance(c.get("path"), str) else "")
+             for c in out.get("candidates") or [] if isinstance(c, dict)]
+    return status, picks, "", (str(out.get("error") or "") if status == "fallback" else "")
+
+def skill_catalog(question: str) -> list:
+    """[(name, SKILL.md path)] for the ask path; [] on any failure, which prints one cause line."""
+    _status, picks, err, _fallback = skill_search(question)
+    if err:
+        print(f"skill search failed: {err}", file=sys.stderr)
+    return [(name, path) for name, path in picks if path]
 
 def path_rank(question: str, path: str) -> tuple:
     """Tie-break for equal scores: more question words in the file's name or folder
@@ -1817,22 +1849,43 @@ def question_people(question: str, folks: dict) -> set:
     return who | self_ if words & {"i", "me", "myself"} else who
 
 # The one promise of an ordinary ask: its output starts with exactly one OUTCOME line, computed from
-# the whole search state, and the exit code is the outcome's. Claim checks keep their own verdict lines.
+# the whole search state, and the exit code is the outcome's. A claim check prints its verdict first and
+# exits by it (TRUE 0, FALSE 5, a check that did not run 3); any other claim result exits by the search
+# outcome's code (1 searched fully, 3 a set or the check failed, 4 setup needed), listed files or not,
+# and never 0. A claim that ends before any verdict prints the same OUTCOME line, first, and exits by it.
 OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
+CLAIM_EXIT = {"TRUE": 0, "FALSE": 5, "NOT RUN": 3}
 _OUTCOME = {}
 
 
-def _done(kind: str, why: str, nxt: str = "", claim_rc: int = 0) -> int:
-    """Record an ordinary ask's outcome. A claim check has no OUTCOME line and keeps its own exit code."""
+def _done(kind: str, why: str, nxt: str = "") -> int:
+    """Record the search's outcome; its exit code is the outcome's."""
     _OUTCOME.update(kind=kind, why=why, next=nxt)
-    return claim_rc if _CLAIM["text"] else OUTCOME_EXIT[kind]
+    return OUTCOME_EXIT[kind]
+
+
+def _outcome_line(o: dict) -> str:
+    return f"OUTCOME: {o['kind']} - {o['why']}" + (f"; next: {o['next']}" if o["next"] else "")
 
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
-    if _CLAIM["text"]:
-        return _lookup(question, principal, sdir)
     _OUTCOME.clear()
     buf = io.StringIO()
+    if _CLAIM["text"]:
+        _CLAIM["word"] = None
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = _lookup(question, principal, sdir)
+        except SecretHeld:  # an expected refusal, not a crash
+            rc = _done("not-supported", "the statement holds a secret, so it was not sent",
+                       "remove the secret and check again")
+        except Exception:  # a crash: keep what it printed, then let the caller report it
+            sys.stdout.write(buf.getvalue())
+            raise
+        if _CLAIM["word"] is None:  # ended before any verdict: its first line is the OUTCOME line
+            print(_outcome_line(_OUTCOME))
+        sys.stdout.write(buf.getvalue())
+        return rc if _CLAIM["word"] is None else CLAIM_EXIT.get(_CLAIM["word"], max(1, rc))
     try:
         with contextlib.redirect_stdout(buf):
             _lookup(question, principal, sdir)
@@ -1843,7 +1896,7 @@ def lookup(question: str, principal: str, sdir: Path) -> int:
         _done("error", f"the lookup failed ({type(e).__name__}: {e})", f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status")
         traceback.print_exc()
     o = _OUTCOME or dict(kind="error", why="the lookup ended without a result", next="")
-    print(f"OUTCOME: {o['kind']} - {o['why']}" + (f"; next: {o['next']}" if o["next"] else ""))
+    print(_outcome_line(o))
     sys.stdout.write(buf.getvalue())
     return OUTCOME_EXIT[o["kind"]]
 
@@ -1852,12 +1905,15 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # Relative route mass ranks candidates; it is not ordinary evidence confidence.
     route_floor = ROUTE_FLOOR if _CLAIM["text"] else 0
     status_cmd = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status"
+    claim = bool(_CLAIM["text"])  # a claim is told what to fix in a claim's words, not a question's
     if not question.strip():
-        return _done("not-supported", "empty question", "ask one focused question, e.g. "
-                     f'ask.py --principal {principal} "find the note about X"', claim_rc=2)
+        return _done("not-supported", "empty statement" if claim else "empty question",
+                     f'check one fact, e.g. ask.py --principal {principal} --claim "the lease ends in June"' if claim
+                     else f'ask one focused question, e.g. ask.py --principal {principal} "find the note about X"')
     if len(question) > MAX_QUESTION:
-        return _done("not-supported", f"question too long ({len(question):,} chars, max {MAX_QUESTION:,})",
-                     "ask one shorter, focused question", claim_rc=2)
+        return _done("not-supported", f"{'statement' if claim else 'question'} too long "
+                     f"({len(question):,} chars, max {MAX_QUESTION:,})",
+                     "check one shorter, focused statement" if claim else "ask one shorter, focused question")
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
@@ -1879,7 +1935,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             if q:
                 print(f"  {q}")
             log(sdir, "claim", question=question, result="saved", verdict=saved["verdict"])
-            return 0
+            _CLAIM["word"] = saved["verdict"]
+            return _done("found", "saved verdict")
         cache = {"status": "skipped (claim)"}  # saved answers answer questions, not statements
     elif replay:
         cache = {"status": "skipped (replay)"}
@@ -1913,7 +1970,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                      if isinstance(row, dict) and row.get("viewOriginals")}
     _STAGE["view_pointers"] = sorted(view_pointers)
     if panel.get("reason") == "not-set-up":
-        return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}", claim_rc=1)
+        return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}")
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
                             for p in panel.get("pointers", [])) if n and n not in withheld]
     # A saved note whose source file changed after it was recorded is not a current answer.
@@ -1944,7 +2001,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     stages={"cache": cache_stage})
         return _done("needs-setup", f"nothing is connected yet for principal '{principal}'",
                      f"python3 {here / 'prepare_bulk.py'} --root /path/to/folder --pointer my-notes "
-                     f"--principal {principal}", claim_rc=1)
+                     f"--principal {principal}")
 
     # Sick-pointer circuit breaker: skip pointers already benched from repeated
     # recent failures instead of waiting on them (and re-erroring) again this call.
@@ -2337,10 +2394,13 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 stages=stages)
     if _CLAIM["text"]:
         files = _STAGE.get("claim_files")
-        if (top or _STAGE.get("claim_read")) and files is None:
+        not_run = bool((top or _STAGE.get("claim_read")) and files is None)
+        if not_run:
             word, lines = "UNSURE", ["UNSURE: the true/false check did not run; read the files below before answering."]
         else:
-            word, lines = claim_verdict(files or {}, _STAGE.get("claim_read") or list(content_check))
+            word, lines = claim_verdict(files or {}, _STAGE.get("claim_read") or list(content_check),
+                                        incomplete=bool(failed or stale_ptrs or check_error))
+        _CLAIM["word"] = "NOT RUN" if not_run else word  # the exit code reads this; the printed line and the log keep UNSURE
         for line in lines:
             print(line)
         if word in ("TRUE", "FALSE"):
@@ -2373,7 +2433,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
-    if top or skills:
+    listed = bool(top or skills)
+    # A claim that nothing settles takes its exit from how the search went, listed files or not: the judge's
+    # confidence in the files it read must not decide whether a failed or stale set shows in the exit code.
+    unsettled = bool(_CLAIM["text"]) and _CLAIM["word"] not in ("TRUE", "FALSE")
+    if listed and not unsettled:
         # Files are the ranked files only; skill suggestions get their own label, never the file count.
         unconfirmed = " (unconfirmed: content check failed)" if check_error and any(m[1] in possible for m in top) else ""
         parts = ([f"{len(top)} file{'s' if len(top) != 1 else ''}{unconfirmed}"] if top else [])
@@ -2382,7 +2446,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         found = "; ".join(parts)
         autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
-    if dropped:
+    if dropped and not listed:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
     skipped = skipped_for_question(question, original_pointers, principal)
     held = [p for p, note in notes.items() if note == HELD_SECRET]
@@ -2390,17 +2454,19 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if failed or check_error:
         why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed")
-        rc = _done("error", why, f"{ask_py} --status", claim_rc=1)
+        rc = _done("error", why, f"{ask_py} --status")
     elif stale_ptrs or skipped or held:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
-        rc = _done("needs-setup", why, first or f"{ask_py} --status", claim_rc=1)
+        rc = _done("needs-setup", why, first or f"{ask_py} --status")
     else:
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    "no matching file (it may still exist)", f"{ask_py} --trace-show last")
+    if listed:  # an unsettled claim that listed files: the verdict lines above are its answer; this is its exit
+        return rc
     for line in miss_report(principal, len(original_pointers), routing, content_check,
                             question, original_pointers):
         print(line)
@@ -2659,8 +2725,6 @@ def file_evidence(principal: str, pointer: str, question: str, answer: str, path
             out = memory({"action": "assist", "attemptId": out["attemptId"], "principal": principal,
                           "reason": f"reviewer picked {path}; citing its own lines that state the answer.",
                           "references": refs})
-            if out.get("status") == "error" and out.get("reason") == "agent assist is disabled":
-                return None, ASSIST_DISABLED_HINT
             # The file may have changed since connect: the cited reviewed text must still support the answer.
             passages = [p for p in out.get("passages") or [] if p.get("sourceId") == sid]
             if not any(support(p)[0] > 0 for p in passages):
@@ -2696,8 +2760,6 @@ def ask_evidence(principal: str, pointer: str, question: str, answer: str, path:
     if hit.get("status") == "verified-cache-hit":
         return hit, None
     out = memory({"action": "open", "pointer": pointer, "principal": principal, "question": question})
-    if out.get("reason") == "agent assist is disabled":
-        return None, ASSIST_DISABLED_HINT
     if out.get("status") != "ok":
         out = memory({"action": "search", "pointer": pointer, "principal": principal, "question": question})
         if out.get("status") == "verified-cache-hit":
@@ -3036,7 +3098,7 @@ def fresh_top(sdir: Path, question: str):
 # A same-domain neighbor file shares SOME vocabulary with almost any in-domain
 # question (a buyback report mentions "macbook"/"bid" on every page); a single
 # shared word proves nothing. Real subject matches share most of the question's
-# terms, not one -- the v1.0.6 amazon-bm-fb miss (a price-ceiling question
+# terms, not one -- the v1.0.6 miss (a price-ceiling question
 # proposing a different-date snapshot report) hit 4/8 terms by vocabulary
 # alone, while the actually-correct file hit 6/8. 0.6 sits between the two.
 SUBJECT_MATCH_FLOOR = 0.6
@@ -3132,11 +3194,6 @@ def approve(principal: str, question: str, answer: str, sdir: Path, rank=None, f
         write_outcome(sdir, last_lookup_id(sdir, question), question, "right", file=chosen.get("path"))
     return rc
 
-ASSIST_DISABLED_HINT = ("assist disabled: an operator must set \"allowAgentAssist\": true in the "
-                        "memory config (the one setup.py wrote, ~/.local/state/super-jev/_memory/"
-                        "config.json, or the file passed with --config) before --add can approve a "
-                        "manual entry that retrieval does not match on its own.")
-
 def approve_manual(principal: str, question: str, answer: str, pointer: str, source_id: str, record: Path, sdir: Path,
                    **fields) -> int:
     """Approve a just-registered manual pointer, falling back to assisted review on a retrieval miss."""
@@ -3155,10 +3212,6 @@ def approve_manual(principal: str, question: str, answer: str, pointer: str, sou
     reason = f"manual entry for {pointer}: the record is a single small reviewed source and its own text is the answer."
     assisted = memory({"action": "assist", "attemptId": attempt_id, "principal": principal, "reason": reason,
                        "references": [{"sourceId": source_id, "startLine": 1, "endLine": last_line}]})
-    if assisted.get("status") == "error" and assisted.get("reason") == "agent assist is disabled":
-        print(ASSIST_DISABLED_HINT)
-        log(sdir, "approve", question=question, pointer=pointer, result="assist-disabled")
-        return 1
     if assisted.get("status") != "ready":
         print(f"cannot approve: assist returned {assisted.get('status')} on {pointer}.")
         log(sdir, "approve", question=question, pointer=pointer, result=assisted.get("status"))
@@ -3467,23 +3520,15 @@ def preflight(principal: str, args: list) -> int:
         report["knowledge"] = answers
         # New ground only when every ask ran and none found a confirmed strong note; a failed ask proves nothing.
         report["new_ground"] = False if strong else (None if failed else True)
-    if skill and not problems:
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"request": f"a skill that {skill}", "context": []}, f)
-        out, err = _run_ask([sys.executable, str(skill_dir_for_display() / "dispatch.py"), "skills", "--request-file", f.name])
-        os.unlink(f.name)
-        found = None
-        if not err:
-            try:
-                data = json.loads(out)
-                found = [c.get("name") for c in data.get("candidates", []) if isinstance(c, dict)]
-                if data.get("status") == "error" or data.get("error"):
-                    found, err = None, str(data.get("error") or data.get("reason") or "status error")[:200]
-            except (ValueError, AttributeError):
-                err = "unreadable output: " + out.strip()[:200]
+    if skill:
+        # A paid check runs when its own inputs are ready: --about reads the connections (so it waits for
+        # READY); --skill reads skill folders, which a fresh install already has.
+        status, picks, err, fallback = skill_search(f"a skill that {skill}")
         if err:
             warnings.append(f"existing-skill search failed ({err}); not proof that no skill does this")
-        report["existing_skills"] = found
+        elif status == "fallback":  # guesses are labelled, and the user is told why the judge did not run
+            warnings.append(f"skill search fell back to local guesses: {fallback or 'no reason given'}")
+        report["existing_skills"] = None if err else [name for name, _path in picks]
     verdict = "NOT READY" if problems else ("READY WITH WARNINGS" if warnings else "READY")
     report.update(verdict=verdict, problems=problems, warnings=warnings)
     if as_json:

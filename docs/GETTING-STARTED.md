@@ -71,11 +71,16 @@ export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"
 Success: `echo "${#TYPESAFE_API_KEY}"` prints a non-zero length (the length,
 never the key). A new shell needs the export again.
 
-For hooks that cannot inherit your shell, copy
-`skills/skill-search/deploy/key-provider.example.py` to
-`~/.skill-search-key-provider.py` and set `TYPESAFE_API_KEY_FILE` to the full
-path of that same file (`$HOME/.typesafe-api-key`; the provider does not expand
-`~`); that provider prints the key and nothing else.
+For hooks that cannot inherit your shell (the skill finder is the one that
+needs it), copy `skills/skill-search/deploy/key-provider.example.py` to
+`skills/skill-search/deploy/local-key-provider.py` (gitignored). It prints the
+key from `$TYPESAFE_API_KEY_FILE`, or from `~/.typesafe-api-key` when that is
+not set, and nothing else.
+
+The skill finder also needs to know which skill folders to search. Inside
+Claude Code it uses `~/.claude/skills` and needs nothing. Any other agent copies
+`skills/skill-search/roots.example.json` to `skills/skill-search/roots.json`
+(gitignored) and lists its own skill folders there.
 
 ## 3. Run setup
 
@@ -124,8 +129,10 @@ against the file before it is connected. Pick the description writer:
   file (a secret-like value, or a note over 250,000 bytes) has no override: read the held list the command
   printed, then remove or move the value, or split the note, and re-run. A password or key keyword holds a
   file only when a literal value follows it (a digit or symbol in it, not a placeholder or a call).
-- **Where state lives:** under `$SUPERJEV_STATE_DIR` or
-  `~/.local/state/super-jev/<principal>/` — never in this repo.
+- **Where state lives:** per-principal logs and the memory config under `$SUPERJEV_STATE_DIR` or
+  `~/.local/state/super-jev/<principal>/`. Preparation records land in the checkout:
+  `skills/super-jev/prepare-cache/` (descriptions, reports and the recipe a refresh replays),
+  `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (see step 9).
 
 ## 5. Ask your first question
 
@@ -167,10 +174,7 @@ Success for `--approve`: asking the same question again is a cache hit.
 
 A saved answer is the answer to one question, saved through one door: whether it saves itself on a repeat question, or you use `--approve` or `--add`, the same secret scan runs, and `--approve` and `--add` also run the claim check (CLEAN, 0.80 or higher, against the cited file); a repeat question saves the file itself, not an answer, and its N wins stand in for the claim check; a fact with no file gets the secret scan only and is shown as "no source file", and a `--source` that does not exist is refused. It lasts until its source file changes (there is no clock expiry), or until `--miss` removes it; `--miss` exits 1 when there was nothing saved to remove. The same question means the same words after lowercasing, collapsing spaces and dropping trailing punctuation; nothing fuzzier matches. A question saves itself when the same file wins it N times in a row (`SUPERJEV_SAVE_AFTER`, default 2); `--approve` meets that threshold at once. A hit says `saved answer, from FILE, saved DATE` (an auto-saved one prints the file path, not an answer) (or `no source file`); if the file changed, it says so and searches live instead.
 `--add` quotes are taken verbatim from reviewed text; the same wording twice
-refuses unless you pass `--replace-entry`. `--add` is off by default: it needs
-`"allowAgentAssist": true` added to the memory config setup wrote
-(`~/.local/state/super-jev/_memory/config.json`); without it `--add` says so
-and exits 1.
+refuses unless you pass `--replace-entry`.
 
 ## 8. Check a draft
 
@@ -194,6 +198,10 @@ Jev reads the evidence files and answers, per claim, `SUPPORTED`,
 - Any other exit — the check itself failed (no key, network, unreadable
   output). Treat it as blocked.
 
+Don't know which file holds the fact, or want the proof file and line? Use
+`python3 skills/super-jev/ask.py --principal me --claim "claim one"` instead: it exits
+0 only for TRUE (FALSE is 5, every other result is non-zero), so only exit 0 is a pass there too.
+
 Add `--json` for machine-readable output. Set `SUPERJEV_GATE_CMD` to use your
 own claim-gate tool instead of the built-in client
 (`skills/super-jev/lib/jev_client.py`).
@@ -204,11 +212,26 @@ When the connected folder changes on disk, re-run prepare with `--refresh`:
 
 ```bash
 python3 skills/super-jev/prepare_bulk.py \
-  --root /path/to/folder --pointer MYPOINTER --principal ME --writer builtin --refresh
+  --pointer MYPOINTER --principal ME --refresh
 ```
+
+This replays how you connected it, writer included. Give a writer flag to
+change it, and later refreshes keep it.
 
 Success: the summary shows newly drafted or re-gated files; unchanged files
 are skipped.
+
+**Auto-heal, best effort.** Nothing watches your folders. An `ask` that meets a
+set whose files changed starts this same refresh in the background and does not
+wait for it; the next ask finds the result. Only asks trigger it. It runs one
+refresh per set at a time, waits out a cooldown before touching a set again, and
+caps how many refreshes it starts per hour. If a background refresh fails, the
+ask says `auto-heal: last refresh FAILED: <reason>`; run the refresh command
+printed on that line to see the error and refresh by hand. Auto-heal writes its locks,
+cooldowns and logs, which name your sets and files, to
+`skills/super-jev/autoheal-state/`. `SUPERJEV_NEW_FILE_SCAN=0` turns off the
+scan that looks for new notes in connected folders; refreshing a changed set has
+no off switch.
 
 ## 10. Uninstall
 
@@ -216,9 +239,11 @@ are skipped.
 python3 skills/super-jev/setup.py --uninstall
 ```
 
-Removes the state folder, the memory config, `skills/super-jev/prepare-cache/`,
-`skills/super-jev/ledger/`, and any `~/.claude/skills` links into this
-checkout. Your own files are never touched.
+Removes everything Super Jev wrote: the state folder (memory config, logs, pointers),
+`skills/super-jev/prepare-cache/`, `ledger/` and `autoheal-state/`, the chat CLI's
+config and launcher if you installed it, and any `~/.claude/skills` links into this
+checkout. A file of yours that sits in one of those folders stays, and the output lists it.
+Your own files are never touched.
 
 ## Notes
 

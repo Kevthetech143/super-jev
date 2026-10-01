@@ -21,7 +21,8 @@ THIS = Path(__file__).resolve()
 PROFILES = json.loads((SKILL / "judge_profiles.json").read_text())["profiles"]
 
 # set per test by the autouse fixtures in conftest.py, so they are expected to be present
-FIXTURE_SET = {"SUPERJEV_BATCH_JEV", "SUPERJEV_SKILLS", "SUPERJEV_SHARED_POINTERS", "SUPERJEV_NEW_FILE_SCAN"}
+FIXTURE_SET = {"SUPERJEV_BATCH_JEV", "SUPERJEV_SKILLS", "SUPERJEV_SHARED_POINTERS", "SUPERJEV_NEW_FILE_SCAN",
+               "SUPERJEV_BIN_DIR"}
 
 
 def judge_variables():
