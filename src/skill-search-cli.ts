@@ -20,14 +20,15 @@
  *   exact       — a /slash-name or unambiguous exact skill name resolved
  *                 locally; no judge call was made.
  *   suggestions — advisory top-3 (judge-ranked, or locally ranked).
- *   no_match    — nothing under the roots serves this request.
+ *   no_match    — nothing under the roots serves this request (no skill rated
+ *                 medium or high).
  *   fallback    — the judge path failed (no key, timeout, transport error,
  *                 unusable or incomplete answers); candidates are local-only
  *                 and clearly marked as such. A service failure is NEVER
  *                 reported as no_match.
  *   clarify     — the request is too thin to search on, or the judge's top
- *                 pick was too close to call; candidates are the closest
- *                 things found, if any.
+ *                 pick was too close to call; candidates are the skills the
+ *                 judge says help (medium or high), if any.
  * source is "local" when no judge call was made and "jev" when one was.
  *
  * Scanning: SKILL.md / skill.md in each root itself and in first-level
@@ -50,7 +51,7 @@ import { getJudge, keyEnv, keyPresent } from './judge.ts';
 import { extractDescription } from './catalog-build-cli.ts';
 import {
   DEFAULT_CONTEXT_TURNS, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN,
-  applyNoneGate, prefilterCatalog, runFetch, tokenize,
+  HELPING_SCORE, applyNoneGate, prefilterCatalog, runFetch, tokenize,
   type FetchCatalogEntry
 } from './enhance/fetch.ts';
 import type { Evaluator } from './types.ts';
@@ -398,17 +399,21 @@ export async function runSkillSearch(options: SkillSearchOptions): Promise<{ res
     if (!run.manifest.complete) {
       return fallback('Judge coverage incomplete; local-only results', usage);
     }
-    if (run.noMatch) {
-      return { result: { status: 'no_match', candidates: [], source: 'jev', metadataSkipped: skipped, duplicateCount: duplicates, model: run.model, usage }, diagnostics };
-    }
+    const noMatch = () => ({ result: { status: 'no_match' as const, candidates: [], source: 'jev' as const, metadataSkipped: skipped, duplicateCount: duplicates, model: run.model, usage }, diagnostics });
+    if (run.noMatch) return noMatch();
     if (!run.ranked.length) {
       // The judge returned no usable answers: a service failure, never a no-match.
       return fallback('Judge returned no usable answers; local-only results', usage);
     }
+    // A candidate is a skill the judge says helps (medium or high). Low means it would not
+    // actually help, so when nothing helps the honest answer is no_match, not a "did you mean".
+    const helping = run.ranked.filter(r => r.score >= HELPING_SCORE);
+    if (!helping.length) return noMatch();
     const byId = new Map(skills.map(s => [s.id, s]));
     const hydrate = (list: Array<{ id: string }>): SkillCandidate[] =>
       list.map(r => byId.get(r.id)).filter((s): s is SkillEntry => !!s).map(toCandidate);
-    const gate = applyNoneGate(run, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN);
+    // The gate sees only helping skills, so its margin and its clarify list never involve a skill that would not help.
+    const gate = applyNoneGate({ ...run, ranked: helping, allScored: helping }, DEFAULT_FETCH_FLOOR, DEFAULT_FETCH_MARGIN);
     if (gate.noMatch) {
       return {
         result: { status: 'clarify', candidates: hydrate(gate.candidates), source: 'jev', metadataSkipped: skipped, duplicateCount: duplicates, model: run.model, usage, error: gate.ask },
