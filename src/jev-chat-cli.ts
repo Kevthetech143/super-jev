@@ -102,7 +102,7 @@ export async function run(io: IO): Promise<number> {
     if (res.stopped) return { data: null, code: 130, stopped: true, text: render({ kind: t.kind as any, data: {}, stopped: true }, look()) };
     let data: any = null;
     try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
-    const secs = t.kind === 'status' || t.kind === 'wrong' ? undefined : (Date.now() - t0) / 1000;
+    const secs = t.kind === 'status' || t.kind === 'wrong' || t.kind === 'right' ? undefined : (Date.now() - t0) / 1000;
     // a miss that failed (exit 2 or more) is an error whatever it printed; exit 1 only means there was no saved answer to remove
     if (!data || (t.kind === 'wrong' && res.code > 1)) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: data?.why || lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
     for (const s of data.sets ?? []) session.connected.add(s.name);
@@ -280,14 +280,18 @@ export async function run(io: IO): Promise<number> {
     }
     /** /wrong: the engine forgets the saved answer for the last question; if it had one, that question is searched fresh at once. */
     let afterCheck = false; // the last answered turn was a /check: its TRUE/FALSE saves itself
+    /** The rating commands share their two guards: a /check saves itself, and a rating needs a question. */
+    const noRating = () => afterCheck ? 'Sure TRUE/FALSE results save themselves; edit the note if it is wrong.' : session.last ? '' : NO_QUESTION;
     async function wrong(): Promise<string> {
-      if (afterCheck) return 'Sure TRUE/FALSE results save themselves; edit the note if it is wrong.';
-      if (!session.last) return NO_QUESTION;
+      const no = noRating();
+      if (no) return no;
       const r = await helper({ kind: 'wrong' });
       if (!r.data?.removed?.length) return r.text;
       stdout.write(r.text + '\n');
       return answer({ kind: 'ask', text: session.last });
     }
+    /** /right [n]: the engine saves the last answer's ranked list now. */
+    async function right(t: Turn): Promise<string> { return noRating() || (await helper(t)).text; }
     try {
       for (let line = await term.next(); line !== null; line = await term.next()) {
         const t = readLine(line, home);
@@ -299,6 +303,7 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
         else if (t.kind === 'ask' || t.kind === 'check') { afterCheck = t.kind === 'check'; if (t.kind === 'ask') session.last = t.text; text = await answer(t); }
         else if (t.kind === 'wrong') text = await wrong();
+        else if (t.kind === 'right') text = await right(t);
         else if (t.kind !== 'empty') text = (await helper(t)).text;
         if (text) stdout.write(text + '\n\n');
       }
@@ -313,7 +318,7 @@ export async function run(io: IO): Promise<number> {
     if (t.kind === 'help' || t.kind === 'version') { out(t.kind === 'help' ? `${USAGE}\n\n${HELP}` : TITLE); return 0; }
     if (t.kind === 'exit') return 0;
     if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
-    if (t.kind === 'wrong') { stderr.write(NO_QUESTION + '\n'); return 2; } // a one-shot line has no earlier question
+    if (t.kind === 'wrong' || t.kind === 'right') { stderr.write(NO_QUESTION + '\n'); return 2; } // a one-shot line has no earlier question
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
     if (askedKey(t)) { stderr.write(noKey + '\n'); return 4; }
     if (t.kind === 'connect') {
