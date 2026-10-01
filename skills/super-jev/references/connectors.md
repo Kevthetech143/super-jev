@@ -281,8 +281,9 @@ change of principals as `scope-change`. `register` starts a new generation, so
 the pointer's cached and pending answers are dropped (the count is printed
 first); keep shared pointers to reference sets. Every connection is private
 until a person marks it shareable (`prepare_bulk.py --shareable` at connect, or
-`share_pointers.py --mark NAME` later; `--unmark` reverts; refreshes keep the
-mark). An unmarked pointer is refused (printed, skipped), and a pointer with any
+`share_pointers.py --principal AGENT --mark NAME` later; `--unmark` reverts;
+refreshes keep the mark; no agent is assumed, so name one or set
+`SUPERJEV_PRINCIPAL`). An unmarked pointer is refused (printed, skipped), and a pointer with any
 original source under an agent's brain (`~/agents/<bot>-brain/`) or in a
 `documents/` or `profile/` folder is refused and cannot be marked. A stale pointer
 (`preparation-required`) must be refreshed before it can be shared. A later

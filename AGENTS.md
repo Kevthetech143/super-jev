@@ -71,8 +71,12 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    or disproves it (`CONTRADICTED`). Any other exit means the check itself
    failed; treat it as blocked too.
 
-8. **Uninstall when your human asks** (removes everything setup and connect made;
-   their files are never touched):
+   Want the proof file and line, or don't know which file holds the fact? Use
+   `ask.py --claim` instead (see "Check a claim: which door" below).
+
+8. **Uninstall when your human asks** (removes everything Super Jev wrote, including logs,
+   auto-heal state and the chat CLI's config; their files are never touched, even one
+   that sits in a folder Super Jev writes to):
 
    ```bash
    python3 skills/super-jev/setup.py --uninstall
@@ -81,8 +85,8 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 ## How to drive it for your human
 
 - Before you state a fact from their files: run `ask`, open the top file, read it.
-- Before you send an answer: run `check` with each claim and the file you read.
-  Only exit 0 is a pass.
+- Before you send an answer: run `check FILE --claim "..."` with each claim and the file you read,
+  or `ask.py --claim "..."` when you do not know which file holds the fact. Only exit 0 is a pass.
 - Nothing found means say "Super Jev couldn't find it; it may still exist" and offer to search by hand, never a guess.
 - When their files change, run `python3 skills/super-jev/prepare_bulk.py --pointer NAME --principal me --refresh`:
   it replays how the folder was connected, writer included. An ask also starts that refresh in the
@@ -102,12 +106,23 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
   per-folder coverage with no paid call. Add `--about "the work"` for what's already known (4 paid
   asks: tried before, rules, traps, files) or `--skill "what a new skill would do"` (one paid ask)
   to find an existing skill before building one — both cost a call, the base preflight does not.
+  `--skill` needs only skill folders, so it also runs while connections are NOT READY.
 - **Remember vs. one-off.** Connect a folder (step 4) only if you will ask it more than once. For
   a one-off file, a diff, or a worker's report, skip connecting and check it directly:
   `dispatch.py check FILE... --claim "..."` or `dispatch.py verify REPORT --worktree DIR`.
-- **Check a claim against connected files.** `ask.py --principal me --claim "statement"` answers
-  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`;
-  `--claims-file FILE` checks one statement per line.
+- **Check a claim: which door.** Use `ask.py --principal me --claim "statement"` when you do not
+  know which file holds the fact and you want the proof file and line; it answers
+  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`, and
+  `--claims-file FILE` checks one statement per line. Use `dispatch.py check FILE --claim "..."`
+  when you already have the file, diff or report and want a send/no-send gate; it gives no proof
+  line. Both doors: only exit 0 passes. `ask --claim` exits TRUE 0, FALSE 5; every other result is
+  not a pass, and its code says how the search went, whatever the verdict word and whether or not
+  files are listed: 1 searched fully and nothing settles it (NOT FOUND, UNSURE, PARTIAL, CONFLICT),
+  3 a set or the content check failed (or `UNSURE: the true/false check did not run`), 4 setup needed
+  (a set is stale or unprepared, or files were skipped or held), 2 refused input; several statements
+  exit with the highest code.
+  `check` exits CLEAN 0, READ 3, REJECT 2; any other code (1 error, 5 refused) means the check
+  failed (step 7). The two doors use different numbers: ask's 5 is FALSE, check's 5 is a refusal.
 - **Building something bigger than one answer:** use the `super-jev-build-cycle` skill. Six steps —
   preflight, start, check-report, review, reply-check, learn — and the review step must come from a
   fresh, independent agent, never the builder; it refuses to close while the latest review says FIX.

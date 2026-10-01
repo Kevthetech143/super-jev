@@ -238,7 +238,7 @@ def test_a_pinned_folder_inside_documents_never_grows_or_is_walked(tmp_path, mon
 
 
 def test_a_recipe_pointer_rooted_inside_documents_is_never_walked_for_new_files(tmp_path, monkeypatch):
-    # Review 8: kelvin-medical-full is a recipe report rooted in documents/kelvin/medical.
+    # Review 8: marvin-medical-full is a recipe report rooted in documents/marvin/medical.
     calls = _setup(tmp_path, monkeypatch)
     vault = tmp_path / "documents" / "bob" / "medical"; vault.mkdir(parents=True)
     (vault / "visit.md").write_text("# visit\n")

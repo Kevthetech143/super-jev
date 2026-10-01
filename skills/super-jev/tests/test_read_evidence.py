@@ -48,7 +48,7 @@ def test_contradiction_reaches_judge_even_when_answer_filter_drops_file(tmp_path
                                            "line": p.read_text().splitlines()[1], "line_no": 2}}
         return ask.LISTWISE_NONE, ask.LISTWISE_PROMOTE_FLOOR
     monkeypatch.setattr(ask, "judge_listwise", judge)
-    assert ask.lookup(claim, "reader", tmp_path / "state") == 0
+    assert ask.lookup(claim, "reader", tmp_path / "state") == 5  # a FALSE claim exits 5, not 0
     out = capsys.readouterr().out
     assert out.startswith("FALSE")
     assert "The team requested email, not postal mail." in out
@@ -82,6 +82,6 @@ def test_strong_word_search_evidence_reaches_bounded_claim_judge(tmp_path, monke
         ask._STAGE["claim_read"] = seen
         return path, ask.LISTWISE_PROMOTE_FLOOR
     monkeypatch.setattr(ask, "judge_listwise", judge)
-    assert ask.lookup("Postal delivery is authorized.", "reader", tmp_path / "state") == 0
+    assert ask.lookup("Postal delivery is authorized.", "reader", tmp_path / "state") == 5  # FALSE exits 5
     assert seen[0] == path
     assert capsys.readouterr().out.startswith("FALSE")

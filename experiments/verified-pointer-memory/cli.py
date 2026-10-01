@@ -93,7 +93,6 @@ def describe():
         'navigationLimits': {'beamWidth': {'default': 3, 'min': 1, 'max': 5},
                              'maxRounds': {'default': 6, 'min': 1, 'max': 10},
                              'maxResults': {'default': 3, 'min': 1, 'max': 10}},
-        'optionalConfigDefaults': {'allowAgentAssist': False},
         'assistLimits': {'maxPreparations': 20, 'maxReviewedCharacters': 60000},
         'freshnessPolicies': {
             'default': {'mode': 'snapshot'},
@@ -107,8 +106,7 @@ def describe():
             'remove': 'Removes the pointer, cache and pending tickets only; it never removes originals.',
         },
         'requiredConfig': ['db', 'registry'],
-        'optionalConfig': ['retrievalCommand', 'navigationCommand',
-                           'allowAgentAssist', *DEFAULTS],
+        'optionalConfig': ['retrievalCommand', 'navigationCommand', *DEFAULTS],
         'resultActions': NEXT,
         'requirements': ['Python 3.10+', 'Node 24+ for bundled retrieval',
                          'Reviewed local dataset', 'TYPESAFE_API_KEY for live Jev calls'],
@@ -121,7 +119,7 @@ def describe():
     }
 
 
-def add_hints(result, config=None):
+def add_hints(result):
     """Attach small deterministic operator guidance to actionable results."""
     status = result.get('status')
     hints = []
@@ -147,7 +145,7 @@ def add_hints(result, config=None):
                                 'sources': [{'path': '/absolute/path/to/original-record.md'}]},
             'command': 'python3 <skill-directory>/dispatch.py memory --input CONNECT.json',
         })
-    if status == 'no-match' and config and config.get('allowAgentAssist'):
+    if status == 'no-match':
         hints.append({'code': 'inspect-sources',
                       'message': 'Review registered sources for relevant line ranges.',
                       'action': 'sources'})
@@ -167,10 +165,6 @@ def add_hints(result, config=None):
         hints.append({'code': 'connect-records',
                       'message': 'Use gettingStarted to connect your authorized original files, or select an existing pointer from your memory panel.',
                       'action': 'connect'})
-    elif (status == 'error' and result.get('reason') == 'agent assist is disabled'):
-        hints.append({'code': 'assist-disabled',
-                      'message': 'An operator can enable assistance with allowAgentAssist.',
-                      'action': 'panel'})
     if status in ('ready', 'verified-cache-hit') and result.get('freshness', {}).get('mode') == 'snapshot':
         hints.append({'code': 'snapshot-freshness',
                       'message': 'Based on the registered snapshot, not a live sync. For current-state questions, refresh the source and preparation or request current-mode freshness checks.',
@@ -193,10 +187,13 @@ def load_config(path):
     config = json.loads(location.read_text())
     if not isinstance(config, dict):
         raise ValueError('Config must be an object.')
+    # allowAgentAssist: retired (saving is decided by ask.py's checks); configs written
+    # before its removal still carry it, so it is accepted and ignored.
     unknown = set(config) - {'db', 'registry', 'retrievalCommand', 'navigationCommand',
                              'allowAgentAssist', *DEFAULTS}
     if unknown:
         raise ValueError('Unsupported configuration setting.')
+    config.pop('allowAgentAssist', None)
     for name in ('db', 'registry'):
         p = Path(config[name]).expanduser()
         config[name] = str(p if p.is_absolute() else location.parent / p)
@@ -212,9 +209,6 @@ def load_config(path):
     navigation = config.setdefault('navigationCommand', ['node', str(Path(__file__).parents[2] / 'src' / 'navigation-cli.ts')])
     if not isinstance(navigation, list) or not navigation or any(not isinstance(x, str) or not x for x in navigation):
         raise ValueError('navigationCommand must be an administrator-provided argument array.')
-    assist = config.setdefault('allowAgentAssist', False)
-    if not isinstance(assist, bool):
-        raise ValueError('allowAgentAssist must be a boolean.')
     return config
 
 
@@ -286,8 +280,7 @@ def run(request, config):
                       navigate_provider=navigate_provider,
                       navigate_many_provider=navigate_many_provider,
                       cache_ttl_seconds=config['cacheTtlSeconds'],
-                      review_ttl_seconds=config['reviewTtlSeconds'],
-                      allow_agent_assist=config['allowAgentAssist'])
+                      review_ttl_seconds=config['reviewTtlSeconds'])
     action = request.get('action', 'search')
     if action not in ACTIONS:
         raise ValueError('Unknown action; use --describe.')
@@ -324,7 +317,6 @@ def run(request, config):
                     or not source['description'].strip()),
             })
         return {**describe(), 'settings': {k: config[k] for k in DEFAULTS},
-                'agentAssistEnabled': config['allowAgentAssist'],
                 'storagePaths': {'db': config['db'], 'registry': config['registry']},
                 'pointers': pointers,
                 'datasets': [{'name': name, 'description': entry.get('description', '')}
@@ -427,7 +419,7 @@ def main():
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
         # Do not expose provider stderr, credentials, source passages or cache bodies.
         result = {'status': 'error', 'reason': str(error) if isinstance(error, ValueError) and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
-    add_hints(result, config)
+    add_hints(result)
     result.setdefault('nextAction', NEXT.get(result['status'], 'record-unresolved'))
     if 'message' in result:
         result = {'message': result.pop('message'), **result}
