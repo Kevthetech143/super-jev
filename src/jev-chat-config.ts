@@ -279,7 +279,17 @@ export function render(shown: Shown, look: Look): string {
       said(d.failed, () => 'Failed:');
       leftOut(d.skipped);
     }
-  } else if (shown.kind === 'right') { if (d.done) head('Saved. Ask it again and it comes back at once.', 'green'); else { head('Not saved.', 'red'); body(/--|answer text/.test(d.why ?? '') ? 'Some of these notes were not checked. Use /check to test a claim against them.' : sentence(d.why ?? '')); } }
+  } else if (shown.kind === 'right') {
+    if (d.done) head('Saved. Ask it again and it comes back at once.', 'green');
+    else {
+      head('Not saved.', 'red');
+      const why = d.why ?? '';
+      if (/possible-tier/.test(why)) body('One of these notes is only a possible match. Use /check to test a claim against them.');
+      else if (/out of range/.test(why)) body('There is no note with that number.');
+      else if (/no (prior lookup|confirmed top)/.test(why)) body('There is nothing to save. Ask a question first.');
+      else if (!/--/.test(why)) body(sentence(why));
+    }
+  }
   else if (shown.kind === 'wrong') head(d.removed?.length ? 'Forgotten. Searching fresh…' : "Noted. It won't be saved.");
   else if (o === 'error') {
     const why: Record<string, string> = { 'auth-rejected': `${vendor} rejected the key`, 'no-key': `no ${vendor} key was found`,
@@ -333,7 +343,7 @@ export function render(shown: Shown, look: Look): string {
     });
     if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
     if (d.saved_now) body('Saved for next time.');
-    else if (shown.hint && files.length && !d.saved) body('Open them to check. /right saves this answer.');
+    else if (shown.hint && files.length && !d.saved && !files.some((f) => f.tier === 'possible')) body('Open them to check. /right saves this answer.');
     leftOut(d.left_out);
   } else if (o === 'not-found') {
     head('Not in your notes');

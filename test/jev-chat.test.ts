@@ -2792,6 +2792,26 @@ test('RT3b whole app: the engine\'s real possible-tier refusal becomes one plain
   assert.match(w.text(), /Use \/check/);
   assert.ok(!/--rank|answer text/.test(w.text()));
   await w.quit();
+  for (const [reason, line] of [['--rank 5 is out of range: the last lookup listed 3 candidate(s)', 'no note with that number'],
+    ['no confirmed top candidate for that question; run ask first, pick a listed file with --rank N or --file PATH, or use --add', 'nothing to save']]) {
+    const e = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, done: false, why: reason }, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+    const y = win(e);
+    await y.ready();
+    y.say(Q);
+    await y.waitFor('Found 1 note');
+    y.say('/right');
+    await y.waitFor('Not saved.');
+    assert.match(y.text(), new RegExp(line));
+    assert.ok(!/--|not checked|Use \/check/.test(y.text().split('Not saved.')[1]), reason);
+    await y.quit();
+  }
+  const pf = rig([STATUS_EMPTY, { when: '--json -- ', out: FOUND({ files: [{ ...FOUND().files[0], tier: 'possible' }] }) }]);
+  const pw = win(pf);
+  await pw.ready();
+  pw.say(Q);
+  await pw.waitFor('Found 1 note');
+  assert.ok(!/saves this answer/.test(pw.text()));
+  await pw.quit();
   const c = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, outcome: 'error', why: 'engine broke' }, code: 2 }, { when: '--json -- ', out: FOUND() }]);
   const x = win(c);
   await x.ready();
