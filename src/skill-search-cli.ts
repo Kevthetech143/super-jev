@@ -505,7 +505,8 @@ async function main(): Promise<number> {
     else if (flag === '--local-only') localOnly = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
-  if (!rootsFile || !requestFile) throw new CliError(usage);
+  const missing = [!rootsFile && '--roots-file ROOTS.json', !requestFile && '--request-file REQUEST.json'].filter(Boolean);
+  if (missing.length) throw new CliError(`Missing required argument${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}\n\n${usage}`);
 
   const roots = parseRoots(await readSmallFile(rootsFile, MAX_FILE_BYTES, 'roots'));
   const { request, context } = parseRequestFile(await readSmallFile(requestFile, MAX_FILE_BYTES, 'request'));

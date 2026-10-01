@@ -87,9 +87,9 @@ def test_a_which_skill_question_is_answered_from_the_skill_catalog(tmp_path, mon
 
 def test_only_skill_and_tool_questions_ask_the_catalog(monkeypatch):
     monkeypatch.setenv("SUPERJEV_SKILLS", "1")
-    assert ask.skill_question("Which tool or skill checks Kelvin's live Robinhood buying power?")
+    assert ask.skill_question("Which tool or skill checks Marvin's live Robinhood buying power?")
     assert ask.skill_question("what tool buys a shipping label")
-    assert not ask.skill_question("what did my dad's DEXA scan show?")
+    assert not ask.skill_question("what did my dad's blood test show?")
     assert not ask.skill_question("how much do we still owe Payability")
     monkeypatch.setenv("SUPERJEV_SKILLS", "0")
     assert not ask.skill_question("which skill posts to the forums")

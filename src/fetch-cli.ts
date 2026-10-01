@@ -199,7 +199,7 @@ async function main(): Promise<number> {
     else if (flag === '--explain') explain = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
-  if (!catalogPath) throw new CliError(usage);
+  if (!catalogPath) throw new CliError(`Missing required argument: --catalog CATALOG.json\n\n${usage}`);
   if (!request || !request.trim()) throw new CliError('--request needs a non-empty value');
   if (k !== undefined && (!Number.isInteger(k) || k < 1)) throw new CliError('--k must be a positive integer');
   if (batch !== undefined && (!Number.isInteger(batch) || batch < 1)) throw new CliError('--batch must be a positive integer');

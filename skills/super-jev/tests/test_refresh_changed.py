@@ -45,7 +45,9 @@ def test_only_the_changed_pointer_is_refreshed_with_its_recorded_args(tmp_path, 
     cmd = calls[0]
     assert cmd[cmd.index("--pointer") + 1] == "moving"
     assert cmd[cmd.index("--principal") + 1] == "agent"
-    assert "--refresh" in cmd and "--no-recurse" in cmd and cmd[cmd.index("--exclude") + 1] == "links.md"
+    # One rule: the refresh names the pointer and its principals; prepare_bulk --refresh replays the rest
+    # (excludes and --no-recurse: test_prepare_bulk.py::test_refresh_replays_recorded_no_recurse_and_excludes).
+    assert cmd[2:] == ["--pointer", "moving", "--principal", "agent", "--refresh"]  # after python and the script
     assert "steady" not in capsys.readouterr().out
 
 
@@ -60,7 +62,10 @@ def test_dry_run_and_skip_never_run_prepare(tmp_path, monkeypatch, capsys):
 def test_report_without_principal_needs_setup_not_guessed(tmp_path, monkeypatch, capsys):
     calls = _setup(tmp_path, monkeypatch, principal=None)
     assert rc.main([]) == 2
-    assert calls == [] and "NEEDS-SETUP moving" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert calls == [] and "NEEDS-SETUP moving" in out
+    # The printed command has the one refresh shape: --refresh replays the roots, so none is rebuilt here.
+    assert "prepare_bulk.py --pointer moving --principal AGENT --refresh" in out and "--root" not in out
 
 
 def test_multi_principal_pointer_repeats_every_principal_on_refresh(tmp_path, monkeypatch):
@@ -233,7 +238,7 @@ def test_a_pinned_folder_inside_documents_never_grows_or_is_walked(tmp_path, mon
 
 
 def test_a_recipe_pointer_rooted_inside_documents_is_never_walked_for_new_files(tmp_path, monkeypatch):
-    # Review 8: kelvin-medical-full is a recipe report rooted in documents/kelvin/medical.
+    # Review 8: marvin-medical-full is a recipe report rooted in documents/marvin/medical.
     calls = _setup(tmp_path, monkeypatch)
     vault = tmp_path / "documents" / "bob" / "medical"; vault.mkdir(parents=True)
     (vault / "visit.md").write_text("# visit\n")

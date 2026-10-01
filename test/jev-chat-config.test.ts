@@ -25,11 +25,11 @@ test('loadConfig returns {} when no file exists', () => {
 
 test('saveConfig writes a 0600 file and round-trips', () => {
   withTempConfig((path) => {
-    saveConfig({ typesafeApiKey: 'sk-fake-123', principal: 'kelvin', folders: ['/a', '/b'] }, path);
+    saveConfig({ typesafeApiKey: 'sk-fake-123', principal: 'marvin', folders: ['/a', '/b'] }, path);
     assert.equal(configFileMode(path), 0o600);
     const loaded = loadConfig(path);
     assert.equal(loaded.typesafeApiKey, 'sk-fake-123');
-    assert.equal(loaded.principal, 'kelvin');
+    assert.equal(loaded.principal, 'marvin');
     assert.deepEqual(loaded.folders, ['/a', '/b']);
   });
 });
@@ -111,8 +111,8 @@ test('canned replies do not hijack real questions that merely contain small talk
 
 test('askLookupArgs never lets user text become an ask.py flag', () => {
   for (const q of ['--miss', '--add x y', '--approve a b', '--principal evil', '--no-auto', '-x']) {
-    const args = askLookupArgs('kelvin', q);
-    assert.deepEqual(args.slice(0, 2), ['--principal', 'kelvin']);
+    const args = askLookupArgs('marvin', q);
+    assert.deepEqual(args.slice(0, 2), ['--principal', 'marvin']);
     const rest = args.slice(2);
     assert.ok(rest.every((a) => !a.startsWith('-')), JSON.stringify(rest));
   }
@@ -144,9 +144,9 @@ test('parseMissCandidate returns null on a cache hit', () => {
 });
 
 test('parseMissCandidate picks the top-ranked candidate line', () => {
-  const stdout = ' 0.85  /notes/pricing.md  [kelvin-notes]  possible\n 0.40  /notes/other.md  [kelvin-notes]\n';
+  const stdout = ' 0.85  /notes/pricing.md  [marvin-notes]  possible\n 0.40  /notes/other.md  [marvin-notes]\n';
   const c = parseMissCandidate(stdout);
-  assert.deepEqual(c, { score: 0.85, path: '/notes/pricing.md', pointer: 'kelvin-notes' });
+  assert.deepEqual(c, { score: 0.85, path: '/notes/pricing.md', pointer: 'marvin-notes' });
 });
 
 test('parseMissCandidate returns null on true no-candidates output', () => {
@@ -155,23 +155,23 @@ test('parseMissCandidate returns null on true no-candidates output', () => {
 });
 
 test('formatMissCandidateReply names the top file and gives a one-line why, not raw data', () => {
-  const reply = formatMissCandidateReply({ score: 0.85, path: '/notes/pricing.md', pointer: 'kelvin-notes' });
+  const reply = formatMissCandidateReply({ score: 0.85, path: '/notes/pricing.md', pointer: 'marvin-notes' });
   assert.match(reply, /\/notes\/pricing\.md/);
   assert.match(reply, /no approved answer/);
-  assert.doesNotMatch(reply, /\[kelvin-notes\]/);
+  assert.doesNotMatch(reply, /\[marvin-notes\]/);
 });
 
 test('parseMissReport extracts the searched/next-step block from a true-miss ask.py run', () => {
   const stdout = [
     'OUTCOME: not-found - searched 3 sets, no matching file',
     'What was searched:',
-    '  - 3 connected sets; 2 searched after the topic filter, 1 had matches: kelvin-notes',
-    '  - 2 file(s) read; none contained the answer. Closest: notes/pricing.md, notes/other.md',
+    '  - 3 connected sets; 2 searched after the topic filter; descriptions matched in 1: marvin-notes',
+    '  - 2 file(s) read (picked by description or by words in the file); no answer confirmed. Closest: notes/pricing.md, notes/other.md',
     'Next step (pick one):',
     '  - The answer is in a file you have: it is probably not connected. Connect its folder:',
-    '      python3 prepare_bulk.py --root <folder> --pointer kelvin-<name> --principal kelvin',
+    '      python3 prepare_bulk.py --root <folder> --pointer marvin-<name> --principal marvin',
     '  - You know the answer: save it for next time:',
-    '      python3 ask.py --principal kelvin --add "<question>" "<answer>"',
+    '      python3 ask.py --principal marvin --add "<question>" "<answer>"',
     '  - Neither: tell your human it was not found and offer to search by hand.',
     MISS_LINE,
     '',
@@ -351,12 +351,12 @@ test('slugify', () => {
 });
 
 test('buildDropPointerName includes a 6-hex location hash so same-named items in different folders never collide', () => {
-  const a = buildDropPointerName('Kelvin', 'notes.md', '/a/notes.md');
-  const b = buildDropPointerName('Kelvin', 'notes.md', '/b/notes.md');
-  assert.match(a, /^kelvin-drop-notes-md-[0-9a-f]{6}$/);
-  assert.match(b, /^kelvin-drop-notes-md-[0-9a-f]{6}$/);
+  const a = buildDropPointerName('Marvin', 'notes.md', '/a/notes.md');
+  const b = buildDropPointerName('Marvin', 'notes.md', '/b/notes.md');
+  assert.match(a, /^marvin-drop-notes-md-[0-9a-f]{6}$/);
+  assert.match(b, /^marvin-drop-notes-md-[0-9a-f]{6}$/);
   assert.notEqual(a, b);
-  assert.equal(a, expectedPointerName('Kelvin', 'notes.md', '/a/notes.md'));
+  assert.equal(a, expectedPointerName('Marvin', 'notes.md', '/a/notes.md'));
 });
 
 test('escapeNameGlob neutralizes fnmatch-magic characters so --name matches only the literal file', () => {
@@ -366,32 +366,32 @@ test('escapeNameGlob neutralizes fnmatch-magic characters so --name matches only
 });
 
 test('buildDropPlan for a single file uses its folder as root and --name for the file', () => {
-  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'marvin');
   assert.equal('error' in plan, false);
   if ('error' in plan) return;
   assert.equal(plan.root, '/a');
   assert.deepEqual(plan.names, ['notes.md']);
   assert.equal(plan.fileCount, 1);
   assert.equal(plan.label, 'file /a/notes.md');
-  assert.equal(plan.pointer, expectedPointerName('kelvin', 'notes.md', '/a/notes.md'));
+  assert.equal(plan.pointer, expectedPointerName('marvin', 'notes.md', '/a/notes.md'));
 });
 
 test('buildDropPlan for a single folder connects the whole folder', () => {
-  const plan = buildDropPlan([{ raw: '/a/Tax Docs', path: '/a/Tax Docs', isDirectory: true }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/Tax Docs', path: '/a/Tax Docs', isDirectory: true }], 'marvin');
   assert.equal('error' in plan, false);
   if ('error' in plan) return;
   assert.equal(plan.root, '/a/Tax Docs');
   assert.equal(plan.names, null);
   assert.equal(plan.fileCount, 0);
   assert.equal(plan.label, 'folder /a/Tax Docs');
-  assert.equal(plan.pointer, expectedPointerName('kelvin', 'Tax Docs', '/a/Tax Docs'));
+  assert.equal(plan.pointer, expectedPointerName('marvin', 'Tax Docs', '/a/Tax Docs'));
 });
 
 test('buildDropPlan for several files in the same folder connects them by name', () => {
   const plan = buildDropPlan([
     { raw: '/a/one.md', path: '/a/one.md', isDirectory: false },
     { raw: '/a/two.md', path: '/a/two.md', isDirectory: false },
-  ], 'kelvin');
+  ], 'marvin');
   assert.equal('error' in plan, false);
   if (!('error' in plan)) {
     assert.equal(plan.root, '/a');
@@ -404,7 +404,7 @@ test('buildDropPlan refuses paths spanning different folders', () => {
   const plan = buildDropPlan([
     { raw: '/a/one.md', path: '/a/one.md', isDirectory: false },
     { raw: '/b/two.md', path: '/b/two.md', isDirectory: false },
-  ], 'kelvin');
+  ], 'marvin');
   assert.ok('error' in plan);
 });
 
@@ -412,22 +412,22 @@ test('buildDropPlan refuses a folder mixed with loose files', () => {
   const plan = buildDropPlan([
     { raw: '/a/sub', path: '/a/sub', isDirectory: true },
     { raw: '/a/one.md', path: '/a/one.md', isDirectory: false },
-  ], 'kelvin');
+  ], 'marvin');
   assert.ok('error' in plan);
 });
 
 test('dropConfirmDefault: folder drops default to No, file drops default to Yes', () => {
-  const filePlan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'kelvin');
-  const folderPlan = buildDropPlan([{ raw: '/a/Tax Docs', path: '/a/Tax Docs', isDirectory: true }], 'kelvin');
+  const filePlan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'marvin');
+  const folderPlan = buildDropPlan([{ raw: '/a/Tax Docs', path: '/a/Tax Docs', isDirectory: true }], 'marvin');
   if ('error' in filePlan || 'error' in folderPlan) throw new Error('unexpected error plan');
   assert.equal(dropConfirmDefault(filePlan), true);
   assert.equal(dropConfirmDefault(folderPlan), false);
 });
 
 test('formatDropConfirm names the count/folder/pointer and warns about paid calls', () => {
-  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'marvin');
   if ('error' in plan) throw new Error('unexpected error plan');
-  const msg = formatDropConfirm(plan, 'kelvin');
+  const msg = formatDropConfirm(plan, 'marvin');
   assert.match(msg, /1 file/);
   assert.match(msg, /\/a/);
   assert.match(msg, new RegExp(plan.pointer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
@@ -436,9 +436,9 @@ test('formatDropConfirm names the count/folder/pointer and warns about paid call
 });
 
 test('formatDropConfirm warns plainly when the pointer already exists and will be replaced', () => {
-  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'marvin');
   if ('error' in plan) throw new Error('unexpected error plan');
-  const msg = formatDropConfirm(plan, 'kelvin', true);
+  const msg = formatDropConfirm(plan, 'marvin', true);
   assert.match(msg, /already exists and will be REPLACED/);
 });
 
@@ -451,34 +451,34 @@ test('shouldConnect gate: only an explicit true proceeds -- no connect without y
 });
 
 test('buildConnectArgs escapes glob-magic names, adds --no-recurse, and never invents flags', () => {
-  const plan = buildDropPlan([{ raw: '/a/one[1].md', path: '/a/one[1].md', isDirectory: false }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/one[1].md', path: '/a/one[1].md', isDirectory: false }], 'marvin');
   if ('error' in plan) throw new Error('unexpected error plan');
-  const args = buildConnectArgs(plan, 'kelvin');
+  const args = buildConnectArgs(plan, 'marvin');
   assert.deepEqual(args, [
-    '--root', '/a', '--pointer', plan.pointer, '--principal', 'kelvin',
+    '--root', '/a', '--pointer', plan.pointer, '--principal', 'marvin',
     '--no-recurse', '--name', 'one[[]1[]].md',
   ]);
 });
 
 test('buildConnectArgs for a plain-named single file still adds --no-recurse', () => {
-  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/notes.md', path: '/a/notes.md', isDirectory: false }], 'marvin');
   if ('error' in plan) throw new Error('unexpected error plan');
-  const args = buildConnectArgs(plan, 'kelvin');
-  assert.deepEqual(args, ['--root', '/a', '--pointer', plan.pointer, '--principal', 'kelvin', '--no-recurse', '--name', 'notes.md']);
+  const args = buildConnectArgs(plan, 'marvin');
+  assert.deepEqual(args, ['--root', '/a', '--pointer', plan.pointer, '--principal', 'marvin', '--no-recurse', '--name', 'notes.md']);
 });
 
 test('buildConnectArgs for a folder omits --name and --no-recurse', () => {
-  const plan = buildDropPlan([{ raw: '/a/Tax Docs', path: '/a/Tax Docs', isDirectory: true }], 'kelvin');
+  const plan = buildDropPlan([{ raw: '/a/Tax Docs', path: '/a/Tax Docs', isDirectory: true }], 'marvin');
   if ('error' in plan) throw new Error('unexpected error plan');
-  const args = buildConnectArgs(plan, 'kelvin');
-  assert.deepEqual(args, ['--root', '/a/Tax Docs', '--pointer', plan.pointer, '--principal', 'kelvin']);
+  const args = buildConnectArgs(plan, 'marvin');
+  assert.deepEqual(args, ['--root', '/a/Tax Docs', '--pointer', plan.pointer, '--principal', 'marvin']);
 });
 
 test('parsePointerNames and pointerExists read the local panel JSON', () => {
-  const stdout = JSON.stringify({ pointers: [{ pointer: 'kelvin-drop-notes-md-ab12cd' }, { pointer: 'kelvin-manual-x' }] });
-  assert.deepEqual(parsePointerNames(stdout), ['kelvin-drop-notes-md-ab12cd', 'kelvin-manual-x']);
-  assert.equal(pointerExists(stdout, 'kelvin-drop-notes-md-ab12cd'), true);
-  assert.equal(pointerExists(stdout, 'kelvin-drop-other-999999'), false);
+  const stdout = JSON.stringify({ pointers: [{ pointer: 'marvin-drop-notes-md-ab12cd' }, { pointer: 'marvin-manual-x' }] });
+  assert.deepEqual(parsePointerNames(stdout), ['marvin-drop-notes-md-ab12cd', 'marvin-manual-x']);
+  assert.equal(pointerExists(stdout, 'marvin-drop-notes-md-ab12cd'), true);
+  assert.equal(pointerExists(stdout, 'marvin-drop-other-999999'), false);
 });
 
 test('parsePointerNames returns null on unparseable or unexpected output', () => {
@@ -489,10 +489,10 @@ test('parsePointerNames returns null on unparseable or unexpected output', () =>
 test('parseReplaceWarning surfaces prepare_bulk.py\'s reuse warning verbatim', () => {
   const stdout = [
     'inventory: 1 files to prepare, 0 held',
-    "WARNING: replace:true on pointer kelvin-drop-notes-md-ab12cd rotates that pointer's approved answers",
+    "WARNING: replace:true on pointer marvin-drop-notes-md-ab12cd rotates that pointer's approved answers",
     'approved: 1  exceptions: 0  held: 0',
   ].join('\n');
-  assert.equal(parseReplaceWarning(stdout), "WARNING: replace:true on pointer kelvin-drop-notes-md-ab12cd rotates that pointer's approved answers");
+  assert.equal(parseReplaceWarning(stdout), "WARNING: replace:true on pointer marvin-drop-notes-md-ab12cd rotates that pointer's approved answers");
 });
 
 test('parseReplaceWarning returns null when the pointer is new', () => {
@@ -515,6 +515,7 @@ test('parseConnectSummary reads the approved/exceptions/held line and dedupes re
     approved: 2, exceptions: 1, held: 1,
     heldLines: ['HELD  secret.md  (secret-like text)'],
     exceptionLines: ['EXCEPTION  bad.md  (gate failed)'],
+    skipLines: [],
   });
 });
 
@@ -533,6 +534,6 @@ test('formatConnectSummary prints the required "Connected N file(s)" line and su
 });
 
 test('formatConnectSummary singular file wording', () => {
-  const summary = { approved: 1, exceptions: 0, held: 0, heldLines: [], exceptionLines: [] };
+  const summary = { approved: 1, exceptions: 0, held: 0, heldLines: [], exceptionLines: [], skipLines: [] };
   assert.equal(formatConnectSummary(summary), 'Connected 1 file. Ask me about them.');
 });

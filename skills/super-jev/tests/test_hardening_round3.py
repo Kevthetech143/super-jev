@@ -203,7 +203,7 @@ def test_stale_pointer_line_names_the_refresh_command(tmp_path, monkeypatch, cap
     out = capsys.readouterr().out
     script = Path(ask.__file__).resolve().parent / "prepare_bulk.py"
     assert (f"[x] preparation-required; its files changed since connect. Run: python3 {script} "
-            "--root /r --pointer x --principal me --principal helper --refresh") in out
+            "--pointer x --principal me --principal helper --refresh") in out
 
 
 def test_stale_pointer_without_report_says_root_is_needed(tmp_path, monkeypatch, capsys):

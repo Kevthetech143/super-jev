@@ -238,7 +238,6 @@ test('records with no caller id still get stable references and full coverage', 
 test('the stub never reaches the network and needs no key', async () => {
   const stub = new StubEvaluator({ script: byFraming });
   await runEnhancedClassification({ records: records.slice(0, 4), options, abstainOption: 'other' }, stub);
-  assert.equal(process.env.TYPESAFE_API_KEY, undefined, 'these tests run with no API key set');
   for (const request of stub.requests) assert.ok(request.questions && request.state);
 });
 

@@ -2,19 +2,54 @@
 
 You are an agent. Your human wants you to find facts in their own files and to
 check what you say before you say it. Follow the steps below in order, from the
-repo root. You need no private files and no help. Budget about 10 minutes; the
-connect step makes live TypeSafe calls (well under a cent for a small folder at the published input rate).
+repo root. You need no private files and no help. Budget about 10 minutes. An
+`ask` or `check` makes live TypeSafe calls (an answer Super Jev already saved is
+served without one). A connect makes them only with a model writer (the default
+when the `claude` CLI is installed); a `--writer builtin` connect makes none
+unless you add `--findability`.
 
 ## Set yourself up (numbered path)
 
 1. **Check the tools.** `node --version` must print `v24` or newer, and
-   `python3 --version` must print `3.10` or newer.
-
-2. **Load the TypeSafe key into this shell. Do not skip this.** Every check and
-   every connect needs it. Ask your human where the key file is, then:
+   `python3 --version` must print `3.10` or newer. If either is missing or too
+   old, install it into your home folder (no admin rights needed). Python first:
 
    ```bash
-   export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   source "$HOME/.local/bin/env"
+   uv python install 3.12 --default
+   ```
+
+   Then Node (the `touch` line is for zsh, the Mac default; skip it on bash):
+
+   ```bash
+   touch ~/.zshrc
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+   \. "$HOME/.nvm/nvm.sh"
+   nvm install 24
+   ```
+
+   Already use Homebrew? Run `brew install node python` instead of the lines above.
+   If your tool starts every command in a fresh shell and `node` or `python3`
+   still shows the old version, start each command with
+   `source "$HOME/.local/bin/env"; \. "$HOME/.nvm/nvm.sh";` until the session
+   restarts. Setup (step 3) prints these same lines for whatever is missing.
+
+2. **Load the TypeSafe key into this shell. Do not skip this.** Every ask and
+   every check needs it (a `--writer builtin` connect does not unless you add
+   `--findability`, but your next steps do). The key lives in one file, `~/.typesafe-api-key`. If
+   that file does not exist yet, ask your human to make it in their own terminal
+   (the key never goes through chat). They run this, paste the key, press Enter,
+   then Ctrl-D:
+
+   ```bash
+   (umask 077; cat > ~/.typesafe-api-key)
+   ```
+
+   Then load it:
+
+   ```bash
+   export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"
    ```
 
    Never print the key, paste it into a command line, or write it into this repo.
@@ -37,11 +72,35 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
      --pointer my-notes --principal me --writer builtin
    ```
 
-   Success: `connect: registered pointer=my-notes` (add `--findability` for a
-   `findability:` report; it costs one search per file).
-   `--writer builtin` writes each file's description from its own headings, so
-   the TypeSafe key is all you need. If the `claude` CLI is installed and logged
-   in, you can drop that flag to get model-written descriptions instead.
+   Success: `connect: registered pointer=my-notes`, then a last line
+   `CONNECTED n, HELD 0, FAILED 0`, and exit code 0 (add `--findability` for a
+   `findability:` report; it costs one paid search per file, with any writer).
+   `--writer builtin` writes each file's description from its own headings and
+   checks it locally: no model call and no TypeSafe call while connecting. If the
+   `claude` CLI is installed and logged in, you can drop that flag to get
+   model-written descriptions instead (those are checked by TypeSafe).
+
+   Read the last line and the exit code, never just the word "registered":
+
+   - Exit 3: connected, but some files were held (a secret-like value, or a note
+     over 250,000 bytes). Read the `HELD` lines; those files are not searchable.
+   - Exit 1: a file failed its check or the run could not finish. Read the
+     `EXCEPTION` and `ERROR` lines. Other files may still have connected: read
+     `CONNECTED n` on the last line.
+   - Exit 2: refused. A first connect refuses more than 250 files, even with
+     `--writer builtin` (`--max-files` raises it). It is a cost guard for model
+     writers, so narrow `--root` or `--exclude` first.
+   - `SKIP` lines: what a default rule left out, counted by reason, with folder
+     or extension names and never file names. Every `.md` file left out is
+     counted, and so is every file of another type except hidden ones (a hidden
+     file, or anything inside a hidden folder such as `.git/`, is not counted).
+     `.md` files in a skipped folder (`documents/`, `profile/`, `node_modules/`, a
+     hidden folder) are counted per folder. To connect one, connect that folder
+     as its own set: `--root FOLDER --pointer NEW-NAME`. Re-running with a
+     pointer that already exists replaces that set's files, so use a new name. A
+     folder under `documents/` or `profile/` (`~/Documents` included) does not
+     pick up new files on its own: run it again with `--refresh` after adding
+     files. Only `.md` files connect; other types are never read.
 
 5. **Ask a question you know the answer to.**
 
@@ -71,8 +130,12 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    or disproves it (`CONTRADICTED`). Any other exit means the check itself
    failed; treat it as blocked too.
 
-8. **Uninstall when your human asks** (removes everything setup and connect made;
-   their files are never touched):
+   Want the proof file and line, or don't know which file holds the fact? Use
+   `ask.py --claim` instead (see "Check a claim: which door" below).
+
+8. **Uninstall when your human asks** (removes everything Super Jev wrote, including logs,
+   auto-heal state and the chat CLI's config; their files are never touched, even one
+   that sits in a folder Super Jev writes to):
 
    ```bash
    python3 skills/super-jev/setup.py --uninstall
@@ -81,10 +144,12 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 ## How to drive it for your human
 
 - Before you state a fact from their files: run `ask`, open the top file, read it.
-- Before you send an answer: run `check` with each claim and the file you read.
-  Only exit 0 is a pass.
+- Before you send an answer: run `check FILE --claim "..."` with each claim and the file you read,
+  or `ask.py --claim "..."` when you do not know which file holds the fact. Only exit 0 is a pass.
 - Nothing found means say "Super Jev couldn't find it; it may still exist" and offer to search by hand, never a guess.
-- When their files change, run step 4 again with `--refresh`.
+- When their files change, run `python3 skills/super-jev/prepare_bulk.py --pointer NAME --principal me --refresh`:
+  it replays how the folder was connected, writer included. An ask also starts that refresh in the
+  background; if it says `auto-heal: last refresh FAILED: <reason>`, run the refresh command printed on that line.
 - A question you ask again saves itself: when the same file wins it N times
   (`SUPERJEV_SAVE_AFTER`, default 2) and passes the check, the next ask returns it at once,
   labelled saved (auto-save on by default; `--no-auto` or `SUPERJEV_AUTO_CACHE=0` to opt out).
@@ -100,12 +165,23 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
   per-folder coverage with no paid call. Add `--about "the work"` for what's already known (4 paid
   asks: tried before, rules, traps, files) or `--skill "what a new skill would do"` (one paid ask)
   to find an existing skill before building one — both cost a call, the base preflight does not.
+  `--skill` needs only skill folders, so it also runs while connections are NOT READY.
 - **Remember vs. one-off.** Connect a folder (step 4) only if you will ask it more than once. For
   a one-off file, a diff, or a worker's report, skip connecting and check it directly:
   `dispatch.py check FILE... --claim "..."` or `dispatch.py verify REPORT --worktree DIR`.
-- **Check a claim against connected files.** `ask.py --principal me --claim "statement"` answers
-  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`;
-  `--claims-file FILE` checks one statement per line.
+- **Check a claim: which door.** Use `ask.py --principal me --claim "statement"` when you do not
+  know which file holds the fact and you want the proof file and line; it answers
+  `TRUE`/`FALSE` (with the proof file and line), `CONFLICT`, `PARTIAL`, `UNSURE`, or `NOT FOUND`, and
+  `--claims-file FILE` checks one statement per line. Use `dispatch.py check FILE --claim "..."`
+  when you already have the file, diff or report and want a send/no-send gate; it gives no proof
+  line. Both doors: only exit 0 passes. `ask --claim` exits TRUE 0, FALSE 5; every other result is
+  not a pass, and its code says how the search went, whatever the verdict word and whether or not
+  files are listed: 1 searched fully and nothing settles it (NOT FOUND, UNSURE, PARTIAL, CONFLICT),
+  3 a set or the content check failed (or `UNSURE: the true/false check did not run`), 4 setup needed
+  (a set is stale or unprepared, or files were skipped or held), 2 refused input; several statements
+  exit with the highest code.
+  `check` exits CLEAN 0, READ 3, REJECT 2; any other code (1 error, 5 refused) means the check
+  failed (step 7). The two doors use different numbers: ask's 5 is FALSE, check's 5 is a refusal.
 - **Building something bigger than one answer:** use the `super-jev-build-cycle` skill. Six steps —
   preflight, start, check-report, review, reply-check, learn — and the review step must come from a
   fresh, independent agent, never the builder; it refuses to close while the latest review says FIX.
@@ -164,4 +240,4 @@ ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 
 Full reference, the exit-code table, and the `ask` routing keywords: [`skills/super-jev/SKILL.md`](skills/super-jev/SKILL.md).
 
-Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill`. Fully offline; every wrapped door is a fake in the test suite.
+Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill` (pytest goes in a venv; see [GETTING-STARTED](docs/GETTING-STARTED.md) step 1). Fully offline; every wrapped door is a fake in the test suite.

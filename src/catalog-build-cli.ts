@@ -200,7 +200,7 @@ export async function buildCatalog(skillsDir: string): Promise<CatalogV2Record[]
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
   if (!args.length || args.includes('--help')) { console.log(usage); return 0; }
-  if (args.length < 2) throw new CliError(usage);
+  if (args.length < 2) throw new CliError(`Missing required argument: <out.json>\n\n${usage}`);
 
   const skillsDir = resolve(args[0]);
   const outPath = resolve(args[1]);

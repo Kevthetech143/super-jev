@@ -145,6 +145,28 @@ class PublicCliTests(unittest.TestCase):
         self.assertNotEqual(process.returncode, 0)
         self.assertEqual(result, {"status": "error", "reason": "Unsupported configuration setting.", "nextAction": "record-error"})
 
+    def test_config_with_a_leftover_allow_agent_assist_line_still_loads(self):
+        """Regression guard (passes on old code too, not a promise test). The switch is retired,
+        but configs written before that still carry it, true or false, and must keep loading,
+        while a misspelt key is still rejected. A later cleanup of the accepted name would break
+        every such config at once."""
+        from cli import load_config
+        for value in (True, False):
+            path = self.write_json(f"old-{value}.json", {"db": "state.sqlite", "registry": "registry.json",
+                                                         "allowAgentAssist": value})
+            self.assertEqual(load_config(path)["registry"], str(self.root / "registry.json"))
+        typo = self.write_json("typo.json", {"db": "state.sqlite", "registry": "registry.json", "allowAgentAssit": True})
+        with self.assertRaisesRegex(ValueError, "Unsupported configuration setting"):
+            load_config(typo)
+
+    def test_a_leftover_allow_agent_assist_line_is_ignored_whatever_its_value(self):
+        """The retired key is dropped on load, so no later code can read it by accident."""
+        from cli import load_config
+        for value in (True, False, "yes"):
+            path = self.write_json("retired.json", {"db": "state.sqlite", "registry": "registry.json",
+                                                    "allowAgentAssist": value})
+            self.assertNotIn("allowAgentAssist", load_config(path))
+
     def test_invalid_input_json_is_a_structured_error(self):
         registry, _ = self.dataset()
         config = self.config(registry)

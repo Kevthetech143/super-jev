@@ -1,6 +1,6 @@
 # super-jev wishlist
 
-Seven items, no filler. super-jev is a Jev-tuned harness: one judge behind one
+No filler. super-jev is a Jev-tuned harness: one judge behind one
 adapter, thresholds measured against Jev. Each module (batching, named
 records, coverage, evidence chains, outcomes, cost, sweep) stands alone and
 can be replaced or left out. A different judge is possible but means
@@ -147,10 +147,31 @@ provider's preview terms restrict publishing performance numbers here.
 11. **BRAIN SWAP** — let Super Jev run on other Jev-like models (first
     candidate CLM-8B, Apache 2.0, needs Linux + NVIDIA GPU host). Plan: a
     small ClmEvaluator adapter behind the existing Evaluator interface plus
-    an env switch; benchmark vs Jev on the businessfi set (right-first,
-    top-3, false hits, speed, cost). Needs GPU rental (Kelvin's OK).
-    Research done 2026-09-24 (kept in the lead agent's notes).
+    an env switch; benchmark vs Jev on a held-out question set (right-first,
+    top-3, false hits, speed, cost). Needs GPU rental (the maintainer's OK).
+    Research done 2026-09-24 (notes kept outside this repo).
     Status: later — not yet ("not yet, put it in the wishlist").
+
+12. **ENFORCED PERMIT** — make a risky action (delete, pay, email) actually
+    block until it is approved, instead of only advising. Item 5's `permit`
+    door answers the question; nothing stops a caller that ignores the answer.
+    Closes: an irreversible action taken by an agent that never asked, or
+    ignored a "needs approval" answer.
+    Plan: ship a hook that refuses the action unless a permit verdict allows
+    it, so the rule holds even when the agent forgets to ask.
+    Added 2026-09-30.
+    Status: later.
+
+13. **SECRET GUARD** — catch secrets in unusual formats that carry no key word
+    (an entropy-style check on long random-looking strings), and mask the
+    held-file report fully, so a held value is never readable from the report.
+    Closes: a secret of a format the scan does not know reaching a provider, and
+    a held value being readable from its own report.
+    Today the scan holds card numbers, key-word values and known token formats
+    (sk-, ghp_, AKIA, JWT and others); a bare random value in an unknown format
+    with no key word next to it can pass.
+    Added 2026-09-30.
+    Status: later.
 
 Proof for the first seven: the live bench (`bench/live-measure.ts`) reports
 accuracy, accepted-error rate, review rate, coverage, tokens and latency

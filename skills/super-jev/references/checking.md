@@ -56,8 +56,8 @@ three doors need no env at all when the skill is used from inside a clone.
 | `sweep <records.jsonl> --questions <q.json> --out <dir>` | every question of every record, with proof nothing was skipped | **LIVE** | `npm run sweep` in the harness |
 | `fetch "<request>" --catalog <catalog.json> [--prefilter N]` | which few entries in the catalog actually serve this request; `noMatch: true` when none does | **LIVE** (experimental) | `npm run fetch` in the harness |
 | `bench [--dry-run] [--stub]` | how good is the harness, measured | **LIVE** | `npm run bench:live` |
-| `permit <snapshot> --action "..."` | is it safe to click / pay / send / delete automatically | **NOT BUILT** — wishlist item 5 | — |
-| `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **NOT BUILT** — wishlist item 4 | — |
+| `permit <snapshot> --action "..."` | is it safe to click / pay / send / delete automatically | **LIVE** (advisory: it answers; nothing stops a caller that ignores the answer) | `npm run permit` in the harness |
+| `chain <spec.json> <docs...>` | is the ticket-to-order-to-policy chain complete | **LIVE** (experimental) | `npm run chain` in the harness |
 | `ask "<one plain sentence>"` | picks the door for you | **LIVE** | a keyword table, no model call |
 | `status` | which doors are live here, right now | **LIVE** | — |
 | `doctor` | does the PROTECTED repo's own git config name a program git would execute | **LIVE** | `git config --list --show-origin` |
@@ -196,7 +196,7 @@ A direct `gate` (a person or agent running `gate`/`dispatch.py check`, not the S
 
 A diff is judged as code by the built-in client in-process, which reads the key only from `TYPESAFE_API_KEY`. When that is not in the environment but `SUPERJEV_GATE_CMD` is set (the judge prose checks already use), the check stays in code mode (judgment-word refusal and pattern arm unchanged) and the claims the pattern arm does not settle go to that judge as evidence claims, with a note saying so and `[reply:judge]` on their rows, rather than failing with `TYPESAFE_API_KEY is not set`.
 
-For the Stop hook, which has a wall-clock budget, and for `verify`'s extra `--paths`, the evidence + draft/report is counted in judge tokens (UTF-8 bytes / 2, the same unit every judge call is sized in, so the cap and the calls agree). If that count is over `SUPERJEV_INPUT_CAP_TOK` (default `32000`, a hair under Jev's own measured 32,768-token ceiling — see `~/agents/global/knowledge/typesafe-ai-jev/CAPABILITIES.md`), one warning line prints to stderr and the OLDEST evidence is truncated first (receipts and previous-turn material ahead of current-turn, matching the order the Stop hook already assembles) until the estimate fits; the warning names every file dropped and the one cut to its tail, since a claim about them may come back NOT_SUPPORTED. The draft/report itself is never truncated. A truncated run's ledger entry carries `truncated: true`.
+For the Stop hook, which has a wall-clock budget, and for `verify`'s extra `--paths`, the evidence + draft/report is counted in judge tokens (UTF-8 bytes / 2, the same unit every judge call is sized in, so the cap and the calls agree). If that count is over `SUPERJEV_INPUT_CAP_TOK` (default `32000`, a hair under the 32,768-token input ceiling measured for Jev, stated as `window_tokens` in `judge_profiles.json`), one warning line prints to stderr and the OLDEST evidence is truncated first (receipts and previous-turn material ahead of current-turn, matching the order the Stop hook already assembles) until the estimate fits; the warning names every file dropped and the one cut to its tail, since a claim about them may come back NOT_SUPPORTED. The draft/report itself is never truncated. A truncated run's ledger entry carries `truncated: true`.
 
 ## Feedback and the calibration set
 

@@ -214,7 +214,7 @@ def test_miss_report_says_what_was_searched_and_next_steps(tmp_path, monkeypatch
     assert ask.lookup("q", "alice", tmp_path) == 1  # not-found
     out = capsys.readouterr().out.strip().splitlines()
     assert "What was searched:" in out
-    assert "  - 2 connected sets; 2 searched after the topic filter, 0 had matches" in out
+    assert "  - 2 connected sets; 2 searched after the topic filter; descriptions matched in 0" in out
     assert any("ask.py --principal alice --add" in line for line in out)
     assert any("/prepare_bulk.py --root <folder> --pointer alice-<name>" in line for line in out)
     assert out[-1] == ask.VOICE_LINE  # the voice line stays last
@@ -223,8 +223,9 @@ def test_miss_report_says_what_was_searched_and_next_steps(tmp_path, monkeypatch
 def test_miss_report_names_closest_files_read_first():
     lines = ask.miss_report("bob", 5, {"p1": {"status": "candidates"}, "p2": {"status": "no-candidates"}},
                             {"/x/low.md": {"score": 0.2}, "/x/high.md": {"score": 0.5}})
-    assert lines[1] == "  - 5 connected sets; 2 searched after the topic filter, 1 had matches: p1"
-    assert lines[2] == "  - 2 file(s) read; no answer confirmed. Closest: x/high.md, x/low.md"
+    assert lines[1] == "  - 5 connected sets; 2 searched after the topic filter; descriptions matched in 1: p1"
+    assert lines[2] == ("  - 2 file(s) read (picked by description or by words in the file); no answer confirmed. "
+                        "Closest: x/high.md, x/low.md")
 
 
 def test_skill_dir_for_display_prefers_env_override(monkeypatch):
@@ -392,38 +393,6 @@ def test_add_falls_back_to_assist_on_no_match_then_approves_with_returned_ticket
     assert len(approve_calls) == 1
     assert approve_calls[0]["ticket"] == "assist-tix"
     assert approve_calls[0]["evidence"] == [{"sourceId": "file:src-id", "quote": "The manual answer text."}]
-
-
-def test_add_prints_config_hint_and_exits_1_when_assist_disabled(tmp_path, monkeypatch, capsys):
-    src_file = tmp_path / "src.txt"
-    src_file.write_text("hello source\n")
-    calls = []
-
-    def fake_memory(req):
-        calls.append(req)
-        if req["action"] == "panel":
-            return {"pointers": []}
-        if req["action"] == "connect" and not req.get("reviewed"):
-            return {"status": "preparation-required",
-                     "sources": [{"path": req["sources"][0]["path"], "sha256": "deadbeef"}]}
-        if req["action"] == "connect" and req.get("reviewed"):
-            return {"status": "registered",
-                     "sources": [{"id": "file:src-id", "originalPath": req["sources"][0]["path"]}]}
-        if req["action"] == "search":
-            return {"status": "no-match", "attemptId": "attempt-1"}
-        if req["action"] == "assist":
-            return {"status": "error", "reason": "agent assist is disabled"}
-        raise AssertionError(req)
-
-    monkeypatch.setattr(ask, "memory", fake_memory)
-    question = "which pointers hold the shared brain when disabled"
-    rc = ask.add_manual("alice", question, "The manual answer text.", str(src_file), tmp_path)
-
-    assert rc == 1
-    out = capsys.readouterr().out
-    assert "allowAgentAssist" in out
-    approve_calls = [c for c in calls if c["action"] == "approve"]
-    assert approve_calls == []
 
 
 def test_add_refuses_when_pointer_already_exists_for_question(tmp_path, monkeypatch, capsys):

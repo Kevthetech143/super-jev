@@ -19,6 +19,7 @@ implementation (lib/jev_client.py for the Jev profile) knows the vendor:
 
     judges.ask(state, questions, timeout)   one call, answers + usage
     judges.key_present() / key_env()         the key check, by the profile's env name
+    judges.key_file()                        where that key is kept (~/.<env name>), for the setup steps
     judges.door_script()                     the implementation's own claim-check CLI
     judges.with_retry(send)                  the one retry rule (Overloaded only)
 
@@ -57,7 +58,7 @@ from judges.errors import (JudgeError, NoKey, AuthRejected, Unreachable,   # noq
                            Overloaded, BadReply, TooBig, SecretBlocked, ERROR_KINDS)
 
 __all__ = ["JudgeResult", "Judge", "ProfileJudge", "FakeJudge", "get_judge", "JUDGE_ENV",
-           "ask", "profile", "key_env", "key_present", "require_key", "door_script", "with_retry",
+           "ask", "profile", "key_env", "key_file", "key_present", "require_key", "door_script", "with_retry",
            "JudgeError", "NoKey", "AuthRejected", "Unreachable", "Overloaded", "BadReply", "TooBig",
            "SecretBlocked", "ERROR_KINDS"]
 
@@ -79,6 +80,14 @@ def key_env():
     return profile().key_env
 
 
+def key_file():
+    """Where the active judge's key is kept: ~/. plus its variable name, lowercased with dashes
+    (ACME_API_KEY -> ~/.acme-api-key). "" for a judge that takes no key. Setup and the
+    NoKey message both name this one file; nothing reads it for you."""
+    env = key_env()
+    return "~/." + env.lower().replace("_", "-") if env else ""
+
+
 def key_present():
     """True when the judge can be called as far as its key goes: a keyless judge always can."""
     if not profile().key_required:
@@ -93,8 +102,10 @@ def require_key():
     env = key_env()
     key = os.environ.get(env, "").strip()
     if not key:
+        where = key_file()
         raise NoKey(f"{env} is not set -- export it first "
-                    f"(export {env}=\"$(cat /path/to/your/key-file)\")")
+                    f"(export {env}=\"$(cat {where})\"; no {where} yet? "
+                    f"your human makes it: (umask 077; cat > {where}))")
     return key
 
 
