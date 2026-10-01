@@ -1,6 +1,7 @@
 """Skill finder promise (frozen tests, offline, no Jev):
 1. the released copy runs only its own runtime (never a home-directory checkout);
-2. skill roots are chosen in one place (search.sh), not also in dispatch.py;
+2. skill roots are chosen in one place (search.sh), not also in dispatch.py, and follow the
+   agent that asks: Claude Code searches ~/.claude/skills, any other agent its own roots.json;
 3. a real runtime/launcher failure is an error outcome carrying the real cause;
 4. local fallback guesses are labelled as guesses, never as a catalog match.
 
@@ -58,7 +59,9 @@ def release(tmp_path):
     log = tmp_path / "log"
     log.mkdir()
     env = {**os.environ, "HOME": str(home), "SKILL_SEARCH_NODE_BIN": str(node), "FAKE_LOG": str(log)}
-    for k in ("CLAW4MAC_AI_MODEL", "SKILL_SEARCH_AI_MODEL", "FAKE_MODE"):
+    # CLAUDECODE is set in every shell Claude Code spawns, so a contributor running pytest there has it
+    for k in ("CLAUDECODE", "CLAW4MAC_AI_MODEL", "SKILL_SEARCH_AI_MODEL", "FAKE_MODE",
+              "SKILL_SEARCH_PROVIDER_CMD"):
         env.pop(k, None)
     return rel, env, log
 
@@ -93,12 +96,77 @@ def test_roots_are_chosen_in_search_sh_only(release):
     dispatch(rel, env, "--request", "x")
     assert "--config" not in (log / "args").read_text().split()
     stub.write_text(real)
-    # search.sh picks the Claude roots from the seat's model name
-    rc, out, _ = dispatch(rel, {**env, "CLAW4MAC_AI_MODEL": "claude-opus-5"}, "--local-only", "--request", "x")
+    # search.sh picks the Claude roots when it runs inside Claude Code
+    rc, out, _ = dispatch(rel, {**env, "CLAUDECODE": "1"}, "--local-only", "--request", "x")
     assert rc == 0
     assert json.loads((log / "roots.json").read_text()) == [str(Path(env["HOME"]) / ".claude/skills")]
     rc, out, _ = dispatch(rel, env, "--local-only", "--request", "x")
     assert json.loads((log / "roots.json").read_text()) == [str(Path(env["HOME"]) / ".codex/skills")]
+
+
+def test_claude_code_searches_its_own_skill_folder_with_no_roots_file(release):
+    """A new user's Claude Code has no roots.json (it is never shipped) and still gets a search."""
+    rel, env, log = release
+    (rel / "skills/skill-search/roots.json").unlink()
+    rc, out, _ = dispatch(rel, {**env, "CLAUDECODE": "1"}, "--local-only", "--request", "x")
+    assert rc == 0, out
+    assert json.loads((log / "roots.json").read_text()) == [str(Path(env["HOME"]) / ".claude/skills")]
+
+
+def test_another_agent_with_no_roots_file_gets_one_setup_line(release):
+    rel, env, log = release
+    (rel / "skills/skill-search/roots.json").unlink()
+    rc, out, _ = dispatch(rel, env, "--local-only", "--request", "x")
+    body = one_json(out)
+    assert rc == 2 and body["status"] == "error" and body["candidates"] == []
+    assert "roots.example.json" in body["error"] and "roots.json" in body["error"]
+    assert not (log / "entries").exists()  # the runtime never ran
+
+
+def test_an_explicit_missing_config_keeps_the_plain_message(release):
+    rel, env, _ = release
+    rc, out, _ = dispatch(rel, env, "--local-only", "--config", str(rel / "nope.json"), "--request", "x")
+    body = one_json(out)
+    assert rc == 2 and "roots source not readable" in body["error"] and "roots.example.json" not in body["error"]
+
+
+def test_a_fleet_model_variable_no_longer_picks_the_roots(release):
+    """The old rule keyed on an app-specific variable; one agent's own roots.json now wins outside Claude Code."""
+    rel, env, log = release
+    (rel / "skills/skill-search/roots-claude.json").write_text('["~/.claude/skills"]')
+    for var in ("CLAW4MAC_AI_MODEL", "SKILL_SEARCH_AI_MODEL"):
+        rc, out, _ = dispatch(rel, {**env, var: "claude-x"}, "--local-only", "--request", "x")
+        assert rc == 0, out
+        assert json.loads((log / "roots.json").read_text()) == [str(Path(env["HOME"]) / ".codex/skills")]
+
+
+def test_the_machines_own_roots_file_and_key_provider_are_never_tracked():
+    repo = SKILLS.parent
+    if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=repo, capture_output=True).returncode:
+        pytest.skip("not a git checkout")
+    for path in ("skills/skill-search/roots.json", "skills/skill-search/deploy/local-key-provider.py"):
+        r = subprocess.run(["git", "check-ignore", "--no-index", "-q", path], cwd=repo)
+        assert r.returncode == 0, f"{path} is not gitignored"
+
+
+def test_no_key_and_no_provider_says_which_key_and_that_no_provider_is_set(release):
+    """Through search.sh (the real door): it used to point the wrapper at a provider file nobody ships."""
+    rel, env, _ = release
+    (rel / "skills/skill-search/deploy/local-key-provider.py").unlink(missing_ok=True)
+    rc, out, _ = dispatch(rel, {**env, "TYPESAFE_API_KEY": ""}, "--request", "x")
+    body = one_json(out)
+    assert rc == 2 and body["status"] == "error"
+    assert "TYPESAFE_API_KEY" in body["error"] and "credential provider" in body["error"]
+    assert "failed" not in body["error"] and "--local-only" in body["error"]
+
+
+def test_a_provider_the_machine_ships_is_still_used(release):
+    rel, env, log = release
+    provider = rel / "skills/skill-search/deploy/local-key-provider.py"
+    provider.write_text("#!/bin/sh\necho FAKE-KEY-FROM-PROVIDER\n")
+    provider.chmod(0o755)
+    rc, out, _ = dispatch(rel, {**env, "TYPESAFE_API_KEY": ""}, "--request", "x")
+    assert rc == 0 and one_json(out)["status"] == "suggestions"
 
 
 def test_runtime_failure_is_an_error_with_the_real_cause(release):

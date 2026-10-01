@@ -29,13 +29,13 @@
 // ------------------------------------------------------------- blocked paths
 
 export const BLOCKED_PATH_PATTERNS: readonly string[] = [
-  '(^|/)logins\\.md$',                 // the fleet login vault
-  '(^|/)[^/]*-secret\\.md(/|$)',       // ~/agents/global/tools/*-secret.md
+  '(^|/)logins\\.md$',                 // a login vault file
+  '(^|/)[^/]*-secret\\.md(/|$)',       // a tools folder's *-secret.md files
   '(^|/)[^/]*secret[^/]*(/|$)',        // any path segment naming a secret
   '(^|/)\\.env(/|$)',                  // .env
   '(^|/)\\.env\\.[^/]*(/|$)',          // .env.local, .env.production
-  '(^|/)profile(/|$)',                 // ~/agents/global/profile/
-  '(^|/)documents(/|$)',               // ~/agents/global/documents/
+  '(^|/)profile(/|$)',                 // a private profile/ folder
+  '(^|/)documents(/|$)',               // a private documents/ folder
   '(^|/)\\.config/pw-[^/]*',           // playwright session profiles
   '(^|/)[^/]*cookies[^/]*(/|$)',       // cookies.sqlite, Cookies
   '(^|/)[^/]*\\.pem(/|$)',

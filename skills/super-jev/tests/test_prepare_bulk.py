@@ -29,6 +29,11 @@ spec = importlib.util.spec_from_file_location("prepare_bulk", SCRIPT)
 pb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pb)
 
+# The one argument builder behind auto-heal, refresh_changed.py and the printed `next:` command.
+_rc_spec = importlib.util.spec_from_file_location("refresh_changed_pb", SKILL / "refresh_changed.py")
+rc = importlib.util.module_from_spec(_rc_spec)
+_rc_spec.loader.exec_module(rc)
+
 
 @pytest.fixture(autouse=True)
 def _claude_cli_present(monkeypatch):
@@ -1046,12 +1051,12 @@ def test_refresh_of_legacy_report_keeps_recorded_file_set(tmp_path, monkeypatch,
     assert "inventory: 2 files to prepare" in out
     assert "REFUSED" not in out
     # The rewritten report now carries a recipe; the pinned list must survive into the next refresh,
-    # including refresh_changed.py's form that re-passes the recorded root.
+    # including a refresh typed by hand that repeats the recorded root.
     monkeypatch.setattr(sys, "argv", sys.argv + ["--root", str(root)])
     assert pb.main() == 0
     out = capsys.readouterr().out
     assert "inventory: 2 files to prepare" in out and "REFUSED" not in out
-    # refresh_changed.py also re-passes recorded excludes; an unchanged exclude list must not unpin.
+    # A hand refresh that repeats the recorded excludes: an unchanged exclude list must not unpin.
     rep = json.loads((cache_dir / "my-records-report.json").read_text())
     rep["excludes"] = ["INDEX.md"]
     (cache_dir / "my-records-report.json").write_text(json.dumps(rep))
@@ -1463,6 +1468,154 @@ def test_writer_banner_reads_env_var_when_flag_omitted(tmp_path, monkeypatch, ca
     assert "cheap writer model" not in out
 
 
+def _writer_notes(tmp_path, monkeypatch):
+    """Two made-up notes, a tmp cache, the gate and the env var faked; claude counts as installed."""
+    root = tmp_path / "notes"
+    root.mkdir()
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot C.\n")
+    (root / "travel.md").write_text("# Travel\nThe nightly hotel limit is 180 dollars.\n")
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.delenv("SUPERJEV_WRITER_COMMAND", raising=False)
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9, "secs": 0.1})
+    return root
+
+
+def _fake_model_writer(monkeypatch, fail=False):
+    """Records the command each model-writer call got (None = the default claude CLI). With fail=True it
+    fails like a claude CLI that is installed but not logged in."""
+    calls = []
+
+    def fake(items, model, feedback=None, command=None):
+        calls.append(command)
+        if fail:
+            raise pb.WriterError("writer exited with status 1")
+        return {i["path"]: {"path": i["path"], "description": "Describes it.", "question": "What?"} for i in items}
+
+    monkeypatch.setattr(pb, "writer", fake)
+    return calls
+
+
+def _prepare(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", *argv])
+    return pb.main()
+
+
+def _connect_notes(monkeypatch, root, *flags):
+    return _prepare(monkeypatch, "--root", str(root), "--pointer", "notes", "--principal", "alice",
+                    *flags, "--no-connect")
+
+
+def _refresh_like_the_callers(monkeypatch, *given):
+    """The refresh auto-heal starts, refresh_changed.py runs and ask prints: rc.prepare_args(report)."""
+    report = json.loads((pb.CACHE_DIR / "notes-report.json").read_text())
+    return _prepare(monkeypatch, *rc.prepare_args(report), *given, "--no-connect")
+
+
+def test_refresh_replays_the_builtin_writer_it_was_connected_with(tmp_path, monkeypatch, capsys):
+    # Trial 2026-09-30: a folder connected with --writer builtin was healed with the claude CLI,
+    # and the refresh failed because claude was installed but not logged in.
+    root = _writer_notes(tmp_path, monkeypatch)
+    calls = _fake_model_writer(monkeypatch, fail=True)
+    assert _connect_notes(monkeypatch, root, "--writer", "builtin") == 0
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    capsys.readouterr()
+    assert _refresh_like_the_callers(monkeypatch) == 0, capsys.readouterr().out
+    assert calls == []  # the model writer was never handed the notes
+    assert "writer: builtin" in capsys.readouterr().out
+
+
+def test_refresh_replays_a_writer_command(tmp_path, monkeypatch):
+    root = _writer_notes(tmp_path, monkeypatch)
+    calls = _fake_model_writer(monkeypatch)
+    assert _connect_notes(monkeypatch, root, "--writer-command", "local-writer --small") == 0
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    assert calls == [["local-writer", "--small"]] * 2  # the connect, then the refresh, same command
+
+
+def test_a_writer_given_on_refresh_replaces_the_recorded_one_as_a_whole(tmp_path, monkeypatch):
+    root = _writer_notes(tmp_path, monkeypatch)
+    calls = _fake_model_writer(monkeypatch)
+    assert _connect_notes(monkeypatch, root, "--writer", "builtin") == 0
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    assert _refresh_like_the_callers(monkeypatch, "--writer-command", "other-writer") == 0
+    assert calls == [["other-writer"]]  # the recorded builtin does not override the writer just given
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot E.\n")
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    assert calls == [["other-writer"]] * 2  # and the new choice is what later refreshes replay
+
+
+def test_a_rescoped_refresh_keeps_the_recorded_writer(tmp_path, monkeypatch, capsys):
+    # A rescope (here --exclude) changes the folders and filters; it must not change who writes.
+    root = _writer_notes(tmp_path, monkeypatch)
+    calls = _fake_model_writer(monkeypatch, fail=True)
+    assert _connect_notes(monkeypatch, root, "--writer", "builtin") == 0
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    capsys.readouterr()
+    assert _refresh_like_the_callers(monkeypatch, "--exclude", "travel.md") == 0, capsys.readouterr().out
+    assert calls == []
+    assert "writer: builtin" in capsys.readouterr().out
+    report = json.loads((pb.CACHE_DIR / "notes-report.json").read_text())
+    assert report["excludes"] == ["travel.md"] and report["writer"] == "builtin"
+
+
+def test_the_replay_line_names_the_writer_that_runs(tmp_path, monkeypatch, capsys):
+    # A --writer-command user who follows the EXCEPTION hint records builtin plus their command; builtin
+    # is what runs (main picks it first), so it is what the visibility line must say.
+    root = _writer_notes(tmp_path, monkeypatch)
+    _fake_model_writer(monkeypatch)
+    assert _connect_notes(monkeypatch, root, "--writer-command", "local-writer --small", "--writer", "builtin") == 0
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    capsys.readouterr()
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "writer builtin)" in out and "local-writer" not in out
+    assert "writer: builtin" in out
+
+
+def test_a_refresh_keeps_the_recorded_name_filter_and_allow_target(tmp_path, monkeypatch):
+    # The replayed recipe, not the command line, carries --name and --allow-target. A refresh that lost
+    # them would widen a SKILL.md pointer to every note in the folder and drop the file its symlink reaches.
+    root = _writer_notes(tmp_path, monkeypatch)  # holds parking.md and travel.md: not skill entry files
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_text("# Skill B\nDoes B.\n")
+    (root / "a").mkdir()
+    (root / "a" / "SKILL.md").write_text("# Skill A\nDoes A.\n")
+    (root / "a" / "notes.md").write_text("# Notes\nScratch.\n")
+    (root / "b").mkdir()
+    (root / "b" / "SKILL.md").symlink_to(elsewhere / "SKILL.md")
+    _fake_model_writer(monkeypatch)
+
+    def approved():
+        report = json.loads((pb.CACHE_DIR / "notes-report.json").read_text())
+        return sorted(Path(p).parent.name for p in report["approved"]), report
+
+    assert _connect_notes(monkeypatch, root, "--name", "SKILL.md", "--allow-target", str(elsewhere)) == 0
+    connected, _ = approved()
+    assert connected == ["a", "b"]
+    (root / "a" / "SKILL.md").write_text("# Skill A\nDoes A better.\n")
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    refreshed, report = approved()
+    assert refreshed == connected
+    assert report["names"] == ["SKILL.md"] and report["allowTargets"] == [str(elsewhere.resolve())]
+
+
+def test_a_report_with_no_recorded_writer_still_uses_the_default(tmp_path, monkeypatch):
+    # Guard: a report written before the writer was recorded keeps `auto`; the writer is never inferred.
+    root = _writer_notes(tmp_path, monkeypatch)
+    calls = _fake_model_writer(monkeypatch)
+    assert _connect_notes(monkeypatch, root) == 0
+    report_path = pb.CACHE_DIR / "notes-report.json"
+    report = json.loads(report_path.read_text())
+    for k in [k for k in report if k.lower().startswith("writer")]:
+        report.pop(k)
+    report_path.write_text(json.dumps(report))
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    assert calls[-1] is None  # auto: the claude CLI, as before
+
+
 def test_refresh_drops_removed_file_from_cache_and_reports_it(tmp_path, monkeypatch, capsys):
     root = tmp_path / "root"
     root.mkdir()
@@ -1611,7 +1764,8 @@ def test_refresh_with_a_new_root_drops_the_old_no_recurse(tmp_path, monkeypatch)
 
     def args(roots):
         return argparse.Namespace(pointer="my-records", roots=roots, principals=[], excludes=[], names=[],
-                                  no_recurse=False, allow_targets=[], limit=None)
+                                  no_recurse=False, allow_targets=[], limit=None,
+                                  writer=None, writer_model=None, writer_command=None)
 
     fresh = args([str(tmp_path / "skills")])
     pb.replay_recipe(fresh)

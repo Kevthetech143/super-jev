@@ -14,7 +14,7 @@
   "scripts": {
     "jev": "node src/jev-chat-cli.ts",
     "demo": "node examples/demo.ts",
-    "test": "node --test test/*.test.ts test/enhance/*.test.ts test/bench/*.test.ts",
+    "test": "node --import ./test/clean-env.ts --test test/*.test.ts test/enhance/*.test.ts test/bench/*.test.ts",
     "replay": "node src/replay.ts",
     "organize": "node src/cli.ts organize",
     "sweep": "node src/sweep-cli.ts",

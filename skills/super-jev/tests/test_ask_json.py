@@ -199,7 +199,7 @@ def test_skills_off_says_why_no_catalog_was_searched(tmp_path, monkeypatch, caps
 @pytest.mark.parametrize("stdout,why", [
     ('{"status": "error", "candidates": [], "error": "Jev credential provider failed"}', "Jev credential provider failed"),
     ('{"status": "error", "reason": "not-set-up"}', "not-set-up"),
-    ("Traceback: the skill search fell over", "the skill search did not run"),
+    ("Traceback: the skill search fell over", "exit 1: unreadable output: Traceback: the skill search fell over"),
 ])
 def test_skills_off_says_when_the_catalog_search_failed(tmp_path, monkeypatch, capsys, notes, stdout, why):
     world(tmp_path, monkeypatch, navigate=lambda p: {"status": "no-candidates"})
@@ -383,12 +383,12 @@ def rec(verdict, prob, line, line_no):
     return {"verdict": verdict, "prob": prob, "line": line, "line_no": line_no}
 
 
-@pytest.mark.parametrize("verdict,word", [("supported", "TRUE"), ("contradicted", "FALSE")])
-def test_claim_true_and_false_carry_their_proof(tmp_path, monkeypatch, capsys, notes, verdict, word):
+@pytest.mark.parametrize("verdict,word,code", [("supported", "TRUE", 0), ("contradicted", "FALSE", 5)])
+def test_claim_true_and_false_carry_their_proof(tmp_path, monkeypatch, capsys, notes, verdict, word, code):
     claim_world(tmp_path, monkeypatch, notes,
                 {"warranty.md": rec(verdict, 0.97, "The warranty lasts 24 months from delivery.", 4)})
     rc, text, _, obj = both(monkeypatch, capsys, "--claim", "The warranty lasts 24 months.")
-    assert rc == 0 and text.splitlines()[0].startswith(word) and obj["outcome"] == "found"
+    assert rc == code and text.splitlines()[0].startswith(word) and obj["outcome"] == "found"
     claim = obj["claim"]
     assert claim["verdict"] == word and claim["read"] == 1
     assert claim["proof"] == {"path": str(notes / "warranty.md"), "line": 4,
@@ -409,7 +409,7 @@ def test_claim_conflict_lists_both_files_newest_first(tmp_path, monkeypatch, cap
                 files=("warranty.md", "returns.md"))
     rc, text, _, obj = both(monkeypatch, capsys, "--claim", "The warranty lasts 24 months.")
     claim = obj["claim"]
-    assert rc == 0 and claim["verdict"] == "CONFLICT" and text.splitlines()[0].startswith("CONFLICT")
+    assert rc == 1 and claim["verdict"] == "CONFLICT" and text.splitlines()[0].startswith("CONFLICT")
     assert [(f["path"], f["says"], f["line"]) for f in claim["files"]] == [(str(new), "TRUE", 4), (str(old), "FALSE", 3)]
     assert claim["proof"] is None
 
@@ -417,14 +417,14 @@ def test_claim_conflict_lists_both_files_newest_first(tmp_path, monkeypatch, cap
 def test_claim_not_found_says_how_many_files_were_read(tmp_path, monkeypatch, capsys, notes):
     claim_world(tmp_path, monkeypatch, notes, {"warranty.md": rec("not_stated", 0.99, None, None)})
     rc, text, _, obj = both(monkeypatch, capsys, "--claim", "The warranty covers dents.")
-    assert rc == 0 and obj["claim"] == {"verdict": "NOT FOUND", "proof": None, "files": [], "read": 1}
+    assert rc == 1 and obj["claim"] == {"verdict": "NOT FOUND", "proof": None, "files": [], "read": 1}
     assert "NOT FOUND in the 1 file(s) I read" in text
 
 
 def test_claim_not_found_with_nothing_connected_to_read_has_no_next_step(tmp_path, monkeypatch, capsys, notes):
     world(tmp_path, monkeypatch, navigate=lambda p: {"status": "no-candidates"})
     rc, text, _, obj = both(monkeypatch, capsys, "--claim", "The warranty covers dents.")
-    assert rc == 0 and obj["next"] == "none" and obj["claim"]["verdict"] == "NOT FOUND" and obj["claim"]["read"] == 0
+    assert rc == 1 and obj["next"] == "none" and obj["claim"]["verdict"] == "NOT FOUND" and obj["claim"]["read"] == 0
     assert text.startswith("NOT FOUND in the connected files")
 
 
@@ -434,13 +434,13 @@ def test_claim_unsure_when_the_check_did_not_run(tmp_path, monkeypatch, capsys, 
     monkeypatch.setenv("SUPERJEV_REPLAY", "1")
     monkeypatch.setattr(ask, "judge_listwise", lambda q, ps: (None, None))
     rc, text, _, obj = both(monkeypatch, capsys, "--claim", "The warranty lasts 24 months.")
-    assert rc == 0 and obj["claim"]["verdict"] == "UNSURE" and text.startswith("UNSURE")
+    assert rc == 3 and obj["claim"]["verdict"] == "UNSURE" and text.startswith("UNSURE")  # the check did not run
 
 
-def test_claim_that_needs_setup_keeps_its_own_exit_code(tmp_path, monkeypatch, capsys):
+def test_claim_that_needs_setup_exits_like_an_ask(tmp_path, monkeypatch, capsys):
     world(tmp_path, monkeypatch, panel={"status": "error", "reason": "not-set-up"})
     rc, _, _, obj = both(monkeypatch, capsys, "--claim", "The warranty lasts 24 months.")
-    assert rc == 1 and obj["outcome"] == "needs-setup" and obj["next"] == "setup"  # claims exit 1, asks exit 4
+    assert rc == 4 and obj["outcome"] == "needs-setup" and obj["next"] == "setup"  # one exit table for asks and claims
 
 
 def test_a_saved_claim_verdict_is_the_same_shape(tmp_path, monkeypatch, capsys, notes):
@@ -634,32 +634,27 @@ def test_json_refuses_what_it_does_not_cover_without_doing_it(tmp_path, monkeypa
     assert "--claim" in obj["why"] or argv == []
 
 
-def test_dashes_with_no_question_get_a_usage_line_not_the_docstring(tmp_path, monkeypatch, capsys, notes):
+def test_dashes_with_no_question_name_what_is_missing_not_the_docstring(tmp_path, monkeypatch, capsys, notes):
     world(tmp_path, monkeypatch, navigate=lambda p: (_ for _ in ()).throw(AssertionError("no work")))
     rc, raw = run(monkeypatch, capsys, "--json", "--")
     obj = json.loads(raw)
-    assert rc == 2 and obj["outcome"] == "not-supported" and obj["why"] == "--json needs a question after --"
+    assert rc == 2 and obj["outcome"] == "not-supported" and obj["why"] == "a question is required"
     assert "Front door" not in raw
 
 
 def test_a_crash_in_approve_or_miss_exits_3_and_is_not_done(tmp_path, monkeypatch, capsys, notes):
     world(tmp_path, monkeypatch, navigate=lambda p: {"status": "no-candidates"})
-
-    def boom(*args, **kwargs):
-        raise IndexError("list index out of range")  # text mode lets it fall out; JSON says what happened, exit 3
-    monkeypatch.setattr(ask, "miss", boom)
-    rc, raw = run(monkeypatch, capsys, "--json", "--miss", Q)
+    monkeypatch.setattr(ask, "miss", lambda *a, **k: (_ for _ in ()).throw(IndexError("the miss list ran out")))
+    rc, raw = run(monkeypatch, capsys, "--json", "--miss", Q)  # text mode lets it fall out, JSON exits 3
     obj = json.loads(raw)
     assert rc == 3 and obj["done"] is False and "IndexError" in obj["why"]
 
 
-def test_miss_with_no_question_is_a_usage_error_that_names_it_in_both_modes(tmp_path, monkeypatch, capsys, notes):
+def test_miss_with_no_question_names_what_is_missing(tmp_path, monkeypatch, capsys, notes):
     world(tmp_path, monkeypatch, navigate=lambda p: {"status": "no-candidates"})
-    t_rc, text = run(monkeypatch, capsys, "--miss")
-    j_rc, raw = run(monkeypatch, capsys, "--json", "--miss")
+    rc, raw = run(monkeypatch, capsys, "--json", "--miss")
     obj = json.loads(raw)
-    assert t_rc == j_rc == 2 and "--miss" in text.splitlines()[0]
-    assert obj["done"] is False and "--miss" in obj["why"] and "question" in obj["why"]
+    assert rc == 2 and obj["done"] is False and obj["why"] == "a question after --miss is required"
 
 
 def test_crash_text_never_carries_a_secret_shaped_value(tmp_path, monkeypatch, capsys, notes):

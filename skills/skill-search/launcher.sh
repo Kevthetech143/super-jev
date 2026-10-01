@@ -43,6 +43,7 @@ RUN_TIMEOUT_SECS="${SKILL_SEARCH_RUN_TIMEOUT_SECS:-120}"
 
 REPO="$DEFAULT_REPO"
 CONFIG="$DEFAULT_CONFIG"
+CONFIG_GIVEN=0
 ROOTS_FILE=""
 REQUEST_FILE=""
 NODE_BIN="${SKILL_SEARCH_NODE_BIN:-node}"
@@ -92,7 +93,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --request-file) need_value "$1" "$#"; REQUEST_FILE="$2"; shift 2 ;;
     --roots-file)   need_value "$1" "$#"; ROOTS_FILE="$2";   shift 2 ;;
-    --config)       need_value "$1" "$#"; CONFIG="$2";       shift 2 ;;
+    --config)       need_value "$1" "$#"; CONFIG="$2"; CONFIG_GIVEN=1; shift 2 ;;
     --repo)         need_value "$1" "$#"; REPO="$2";         shift 2 ;;
     --node-bin)     need_value "$1" "$#"; NODE_BIN="$2";     shift 2 ;;
     --local-only)   LOCAL_ONLY=1;          shift ;;
@@ -125,6 +126,10 @@ fi
 # report the search incomplete.
 ROOTS_SRC="${ROOTS_FILE:-$CONFIG}"
 if [ -z "$ROOTS_SRC" ] || [ ! -r "$ROOTS_SRC" ]; then
+  # Only the default file can be missing for a reason a new user can fix: it is never shipped.
+  if [ -z "$ROOTS_FILE" ] && [ "$CONFIG_GIVEN" -eq 0 ]; then
+    error_json "no skill folders are set for this agent: in $LAUNCHER_DIR, copy roots.example.json to roots.json and list your skill folders (Claude Code needs none: it searches ~/.claude/skills)"
+  fi
   error_json "roots source not readable: ${ROOTS_SRC:-<none>}"
 fi
 
