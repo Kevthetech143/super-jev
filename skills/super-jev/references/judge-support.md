@@ -1,6 +1,6 @@
 # Judge support: which judge on which build
 
-A judge (a profile in `judge_profiles.json`, or the test judge `fake`) is "supported" on a build only when a measured run on that same build says so. This page covers the two pieces that exist: the fingerprint that ties a result to a build and a judge, and the run that grades the judge against your own bar and writes one record. A later change reads a record back to say whether it still applies to a build.
+A judge (a profile in `judge_profiles.json`, or the test judge `fake`) is "supported" on a build only when a measured run on that same build says so. This page covers the two pieces that exist: the fingerprint that ties a result to a build and a judge, and the run that grades the judge against your own bar and writes one record. `--applies` reads a record back and says whether it still applies to a build.
 
 ## The fingerprint
 
@@ -82,5 +82,18 @@ A not-in-files question passes only when the final ranking is empty, whatever th
 ### The record
 
 One JSON file, never overwritten (a second run to the same path exits 2). It holds the judge, implementation and fingerprint (with its parts), the `--env` names (never values), both SHA-256 pins, `max_excluded`, the seed, start and end times, the replay state root and snapshot, one entry per bar row (`hits`, `n`, `need`, the bar, `not_run`, and hits per split), the excluded cases, the error and ask counts, the stop reason, the verdict, and every case with its result, exit code and seconds. Run it on a copy of the build you mean to ship: the fingerprint is the build's.
+
+## Does a record still apply?
+
+```sh
+python3 judge_support.py --applies RECORD --ask BUILD/ask.py --judge NAME \
+    --cases FILE --cases-sha256 SHA --bar FILE --bar-sha256 SHA [--env NAME=VALUE ...]
+```
+
+Free: no ask, no judge call. Exit 0 when the record is finished (the run ended complete, or stopped because the bar was out of reach) and its fingerprint, `cases_sha256` and `bar_sha256` equal today's for that build, judge, cases and bar. It then prints one line: `applies: supported` or `applies: not supported`, worked out again from the record's stored rows (each row's stored bar against its stored hits and n, with the same integer rule). The record's own `verdict` field is never read, so editing it changes nothing. A run that stopped early on an unreachable bar always prints `not supported`.
+
+Exit 1 prints `does not apply: <reason>`: the record is unreadable or damaged, incomplete (the stop reason is named), has no fingerprint, the judge is unknown (the known ones are listed), or the fingerprint, the cases or the bar differ. A fake judge's record never applies to the default judge: the fingerprint carries which implementation ran. Exit 2 is bad input, such as a pin that does not match the file it names (the real SHA is printed).
+
+A record holds for one build, one set and one bar. Changing any of them means a new run and a new record; the old record stays as it was.
 
 A hosted model alias can change behind the same profile (see below); a record does not see that.
