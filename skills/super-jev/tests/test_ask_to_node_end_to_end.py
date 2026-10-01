@@ -42,7 +42,7 @@ def test_ask_reaches_the_judge_through_node_and_never_says_navigation_input_is_i
     (state / "_memory").mkdir(parents=True)
     config = {"db": str(tmp_path / "db.sqlite"), "registry": str(tmp_path / "registry.json"),
               "navigationCommand": NAV, "retrievalCommand": NAV, "providerTimeoutSeconds": 60,
-              "cacheTtlSeconds": 60, "reviewTtlSeconds": 60, "allowAgentAssist": False}
+              "cacheTtlSeconds": 60, "reviewTtlSeconds": 60}
     (state / "_memory" / "config.json").write_text(json.dumps(config))
     env = {**os.environ, "SUPERJEV_STATE_DIR": str(state), "TYPESAFE_API_KEY": "fake-not-real",
            "NODE_OPTIONS": f"--require={hook}", "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_REPO": str(REPO)}
