@@ -706,7 +706,7 @@ def _pr53_module():
     """PR #53's superjev, loaded under its own module name so it cannot
     collide with this checkout's. None when that worktree is not on this
     machine — the cross-check then skips rather than pretending."""
-    configured = os.environ.get("SUPERJEV_PR53_DIR")
+    configured = os.environ.get("SUPERJEV_TEST_PR53_DIR")
     if not configured:
         return None
     path = Path(configured) / "skills/super-jev/superjev.py"
@@ -755,7 +755,7 @@ def test_the_arm_matches_pr53s_own_verdict_on_the_same_windows():
     pr53 = _pr53_module()
     if pr53 is None:
         pytest.skip("PR #53 worktree not on this machine "
-                    "(set SUPERJEV_PR53_DIR)")
+                    "(set SUPERJEV_TEST_PR53_DIR)")
     for name, text, draft, _reason, _note in _ARM_CASES:
         if name in _ARM_PARITY_SKIP:
             continue
@@ -768,7 +768,7 @@ def test_the_arms_signals_match_pr53s_field_for_field():
     pr53 = _pr53_module()
     if pr53 is None:
         pytest.skip("PR #53 worktree not on this machine "
-                    "(set SUPERJEV_PR53_DIR)")
+                    "(set SUPERJEV_TEST_PR53_DIR)")
     for name, text, _draft, _reason, _note in _ARM_CASES:
         if name in _ARM_PARITY_SKIP:
             continue
@@ -825,7 +825,7 @@ def test_who_fuzz_can_never_produce_a_trusted_merged_piece(_no_transcript_reads)
        piece is never trusted.
     """
     holder = _no_transcript_reads
-    n = int(os.environ.get("SUPERJEV_WM_FUZZ_N", "100000"))
+    n = int(os.environ.get("SUPERJEV_TEST_WM_FUZZ_N", "100000"))
     rng = random.Random(20260918)
 
     def rand_who():
@@ -884,7 +884,7 @@ def test_who_fuzz_render_stays_byte_identical_to_the_composer(
     are still the composer's bytes on every one of these shapes, including
     the ones where `who` breaks the label across two physical lines."""
     holder = _no_transcript_reads
-    n = int(os.environ.get("SUPERJEV_WM_FUZZ_BYTES_N", "3000"))
+    n = int(os.environ.get("SUPERJEV_TEST_WM_FUZZ_BYTES_N", "3000"))
     rng = random.Random(4242)
     for _ in range(n):
         who = "".join(rng.choice(_WHO_ATOMS) for _ in range(rng.randint(0, 6)))
@@ -954,9 +954,9 @@ def _pr53_render(records):
     `reason` is a skip reason and is None when the child ran."""
     import json
     import subprocess
-    configured = os.environ.get("SUPERJEV_PR53_DIR")
+    configured = os.environ.get("SUPERJEV_TEST_PR53_DIR")
     if not configured:
-        return None, "SUPERJEV_PR53_DIR is not configured"
+        return None, "SUPERJEV_TEST_PR53_DIR is not configured"
     composer = Path(configured) / "skills/super-jev"
     if not (composer / "superjev.py").is_file():
         return None, f"PR #53 worktree not on this machine ({composer})"
@@ -1047,7 +1047,7 @@ def test_from_text_fuzz_never_gains_trust_on_reparse(_no_transcript_reads):
        `is_trusted(origin)`.
     """
     holder = _no_transcript_reads
-    n = int(os.environ.get("SUPERJEV_WM_REPARSE_FUZZ_N", "20000"))
+    n = int(os.environ.get("SUPERJEV_TEST_WM_REPARSE_FUZZ_N", "20000"))
     rng = random.Random(20260918)
 
     #: The atoms that matter here: every line the composer's own grammar
