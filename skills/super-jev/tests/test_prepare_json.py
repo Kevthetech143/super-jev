@@ -6,7 +6,8 @@ text mode gives: 0 all connected, 1 something failed, 2 refused, 3 something hel
 {connected, held [{path, why}], failed [{path, why}], skipped [{kind, what, count, way_in}], refused {kind, why}};
 a field with nothing in it is left out, and nothing in it is a score or a note's text. PR 2c: every skipped
 row and every refusal also carries a stable `kind` (a short fixed word list), so a program words them from
-the kind and never parses the free text. Text mode
+the kind and never parses the free text. A `too_many` refusal also carries whole numbers `count` and `max`, so the
+app shows "count is more than one connect takes (max)" without parsing `why`. Text mode
 prints from the same result, so the two are held together here. Made-up company Quillbrook, made-up
 user "sam"; no network, no real key, no Jev call.
 
@@ -112,7 +113,8 @@ def test_over_max_files_is_refused_with_its_reason_and_exit_2_and_no_work(tmp_pa
     code, out = go(root, "--max-files", "2")
     obj = one_object(out)
     assert code == 2
-    assert obj == {"v": 1, "connected": 0, "refused": {"kind": "too_many", "why": obj["refused"]["why"]}}
+    assert obj == {"v": 1, "connected": 0,
+                   "refused": {"kind": "too_many", "why": obj["refused"]["why"], "count": 3, "max": 2}}
     assert "3 files exceed" in obj["refused"]["why"]
     assert fake == []
 
@@ -458,8 +460,8 @@ def test_each_refusal_gives_its_documented_kind_and_its_reason(kind, args, tmp_p
     base = ["--root", str(root if args is not None else tmp_path / "nowhere"), "--pointer", "qb"]
     code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", *base, *(args or []))
     assert code == 2 and set(obj) == {"v", "connected", "refused"} and obj["connected"] == 0
-    assert set(obj["refused"]) == {"kind", "why"} and obj["refused"]["why"].strip()
-    assert obj["refused"]["kind"] == kind and kind in REFUSAL_KINDS
+    assert set(obj["refused"]) == {"kind", "why"} | ({"count", "max"} if kind == "too_many" else set())
+    assert obj["refused"]["why"].strip() and obj["refused"]["kind"] == kind and kind in REFUSAL_KINDS
     assert fake == []
 
 
@@ -476,6 +478,31 @@ def test_a_refresh_that_needs_too_many_drafts_is_the_same_too_many_kind(tmp_path
         (root / f"n{i}.md").write_text(f"# Note {i}\n\nText {i}.\n")
     code, obj = run_main(monkeypatch, capfd, cache, "--root", str(root), "--pointer", "qb", "--refresh", "--max-files", "2")
     assert code == 2 and obj["refused"]["kind"] == "too_many" and "need drafting" in obj["refused"]["why"]
+    assert (obj["refused"]["count"], obj["refused"]["max"]) == (3, 2)  # the 3 new notes, not the 4 in the folder
+
+
+def test_too_many_carries_its_numbers_as_whole_numbers_the_app_can_show_without_the_text(tmp_path, monkeypatch, fake, capfd):
+    """"1,230 notes is more than one connect takes (250)": count and max, never parsed out of `why`."""
+    root = folder(tmp_path, **{f"n{i}.md": f"# Note {i}\n\nText {i}.\n" for i in range(5)})
+    code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", "--root", str(root), "--pointer", "qb", "--max-files", "4")
+    refused = obj["refused"]
+    assert code == 2 and refused["kind"] == "too_many" and type(refused["count"]) is int and type(refused["max"]) is int
+    assert (refused["count"], refused["max"]) == (5, 4)
+    assert "5 files exceed --max-files 4" in refused["why"]
+    assert "`count`" in pb.__doc__ and "`max`" in pb.__doc__
+
+
+def test_an_unexpected_error_while_replaying_a_recipe_is_an_internal_failure_not_a_usage_refusal(
+        tmp_path, monkeypatch, fake, capfd):
+    """Only a recipe of code files is refused (not_markdown). Any other error is the engine's own fault, so it is
+    a failure (exit 1, as in text mode), never blamed on the user's arguments."""
+    def boom(a):
+        raise ValueError("recipe unreadable")
+    monkeypatch.setattr(pb, "replay_recipe", boom)
+    root = folder(tmp_path, **{"a.md": "# A\n\nText.\n"})
+    code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", "--root", str(root), "--pointer", "qb", "--refresh")
+    assert code == 1 and "refused" not in obj
+    assert obj["failed"][0]["why"] == "internal error: ValueError: recipe unreadable"
 
 
 def test_a_refresh_of_a_set_connected_with_code_files_is_the_not_markdown_kind(tmp_path, monkeypatch, fake, capfd):

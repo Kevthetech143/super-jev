@@ -113,8 +113,9 @@ one; v stays 1). Skipped kinds, one per default reason: `link` (a link points ou
 (backup or credential-style name), `folder` (.md in a skipped folder), `folder_other` (other types in a skipped
 folder), `hidden`, `dataset` (a prepared dataset copy), `test` (test or scratch output), `worktree` (a git
 worktree copy), `empty`, `types` (files of other types). Refusal kinds: `too_many` (more files than one connect
-takes), `not_a_folder` (a --root is not a folder), `not_markdown` (a refresh of a set connected with code files)
-and `usage` (the arguments are wrong).
+takes; it also carries whole numbers `count`, how many files, and `max`, the limit, so a program words
+"count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder),
+`not_markdown` (a refresh of a set connected with code files) and `usage` (the arguments are wrong).
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
@@ -1520,10 +1521,10 @@ def principal_name(name: str) -> str:
     return name
 
 
-def refuse(kind: str, why: str) -> int:
+def refuse(kind: str, why: str, **numbers: int) -> int:
     """A run that did nothing: print REFUSED and return exit code 2. --json reads the same reason, with
-    its kind (the refusal kinds in the docstring); text mode never shows the kind."""
-    _RESULT["refused"] = {"kind": kind, "why": why}
+    its kind (the refusal kinds in the docstring) and any numbers the kind carries; text mode shows neither."""
+    _RESULT["refused"] = {"kind": kind, "why": why, **numbers}
     print(f"REFUSED: {why}")
     return 2
 
@@ -1655,8 +1656,6 @@ def run(a) -> int:
             replay_recipe(a)
         except NotMarkdown as e:
             return refuse("not_markdown", str(e))
-        except (ValueError, argparse.ArgumentTypeError) as e:
-            return refuse("usage", str(e))
     if a.limit is None:
         a.limit = 50
     # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
@@ -1765,7 +1764,8 @@ def run(a) -> int:
     # files that would actually need a writer call (below), and total size is reported, not refused.
     if not (a.refresh and cache):
         if len(files) > a.max_files:
-            return refuse("too_many", f"{len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
+            return refuse("too_many", f"{len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files",
+                          count=len(files), max=a.max_files)
 
     removed = []
     if a.refresh:
@@ -1801,7 +1801,8 @@ def run(a) -> int:
               f"but only {len(todo)} need a writer call this run (cost); the rest are unchanged and reused for free")
         if len(todo) > a.max_files:
             return refuse("too_many", f"{len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
-                          "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
+                          "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first",
+                          count=len(todo), max=a.max_files)
 
     drafts = {}
     for i in range(0, len(todo), a.batch):
