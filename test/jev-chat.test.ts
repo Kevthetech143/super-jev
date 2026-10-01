@@ -372,7 +372,7 @@ test('I5 connect refused over the cap: Not connected, the numbers from the engin
   const why = '1230 files exceed --max-files 250; narrow --root/--exclude/--no-recurse or raise --max-files';
   const s = R('connect', { connected: 0, refused: { kind: 'too_many', why, count: 1230, max: 250 } }, { label: 'Everything' });
   assert.match(s, /^• Not connected · 1\.4s$/m, 'the headline stays short');
-  assert.match(s, /^ {2}That folder has 1,230 notes; one connect takes up to 250\.$/m);
+  assert.match(s, /^ {2}1,230 notes is more than one connect takes \(250\)\.$/m, "DESIGN 3.5's words; it says nothing about the folder's size");
   assert.match(s, /Next: drag in a smaller folder inside it\./);
   assert.ok(!/--|exceed/.test(s), s);
 });
@@ -1450,6 +1450,26 @@ test('X1 Esc at "Refresh Team Notes?" says Not refreshed (the folder is still co
   await w.quit();
 });
 
+test('X2 a refresh that ends without connecting says Not refreshed, whoever ended it (the folder is still connected); a first connect says Not connected', () => {
+  const ends: [string, object][] = [
+    ['refused too_many', { connected: 0, refused: { kind: 'too_many', why: 'x', count: 260, max: 250 } }],
+    ['refused not_markdown', { connected: 0, refused: { kind: 'not_markdown', why: 'x' } }],
+    ['refused not_a_folder', { connected: 0, refused: { kind: 'not_a_folder', why: 'x' } }],
+    ['refused, a kind the app does not know', { connected: 0, refused: { kind: 'future_kind', why: 'the folder is on a slow disk' } }],
+    ['connected nothing', { connected: 0 }],
+    ['failed', { connected: 0, failed: [{ path: '/Users/sam/Team Notes', why: 'no .md file left to connect' }] }],
+  ];
+  for (const [name, d] of ends) {
+    const again = R('connect', d, { label: 'Team Notes', refreshed: true });
+    assert.match(again, /^• Not refreshed · 1\.4s$/m, `${name}:\n${again}`);
+    assert.ok(!/Not connected|That folder has/.test(again), `${name}:\n${again}`);
+    assert.match(R('connect', d, { label: 'Team Notes' }), /^• Not connected · 1\.4s$/m, `${name}, first connect`);
+  }
+  const big = R('connect', ends[0][1], { label: 'Team Notes', refreshed: true });
+  assert.match(big, /^ {2}260 notes is more than one connect takes \(250\)\.$/m, big);
+  assert.match(R('connect', { connected: 3 }, { label: 'Team Notes', refreshed: true }), /^• Refreshed Team Notes: 3 notes/m);
+});
+
 test('E9 a search lost with no reason ends with a next step, except on a status', () => {
   const lost = R('check', { outcome: 'error', why: 'no match, and 1 set failed', next: 'none', claim: NOT_FOUND_CLAIM, ...SET_LOST });
   assert.match(lost, /^• Couldn't search/m);
@@ -1596,13 +1616,22 @@ test('W5 at the one-shot door, a Next that points at dragging says how to open t
   assert.match(flat(R('connect', big, { label: 'Everything' })), /Next: drag in a smaller folder inside it\./, 'the window says it as before');
 });
 
-test('W6 the one-shot door on an install that was never set up shows the status reply and its Next, and asks nothing', async () => {
-  const r = rig([{ when: '--status', out: { v: 1, next: 'setup', principal: 'me', sets: [] } }, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
-  const w = win(r, { argv: [FOLDER] });
-  await w.exit();
-  assert.match(flat(w.text()), /Not set up yet\s+Next: open the window \(npm run jev, or superjev with no words\); setup runs there\./, w.text());
-  assert.ok(!/Connect Team Notes\?/.test(w.text()), w.text());
-  assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'), 'a connect ran on a never-set-up install');
+test('W6 the one-shot door ends on its status reply when that reply is not a ready install: it asks nothing, connects nothing, and exits with the helper\'s code', async () => {
+  const stops: [string, Rule, RegExp][] = [
+    ['never set up', { when: '--status', code: 1, out: { v: 1, next: 'setup', principal: 'me', sets: [] } },
+      /Not set up yet\s+Next: open the window \(npm run jev, or superjev with no words\); setup runs there\./],
+    ['an outcome', { when: '--status', code: 1, out: { v: 1, outcome: 'error', why: 'Connection status unavailable', next: 'none', sets: [] } },
+      /Super Jev hit an error\s+Connection status unavailable/],
+    ['no JSON at all', { when: '--status', code: 1, err: 'ValueError: bad registry\n' }, /Super Jev hit an error\s+ValueError: bad registry/],
+  ];
+  for (const [name, status, shown] of stops) {
+    const r = rig([status, { when: 'setup.py', out: '' }, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+    const w = win(r, { argv: [FOLDER] });
+    assert.equal(await w.exit(), 1, `${name}: the exit code is the helper's\n${w.text()}`);
+    assert.match(flat(w.text()), shown, `${name}:\n${w.text()}`);
+    assert.ok(!/Connect Team Notes\?/.test(w.text()), `${name} asked a question:\n${w.text()}`);
+    assert.ok(!r.calls().some((c: any) => c.script === 'prepare_bulk.py'), `${name}: a connect ran`);
+  }
 });
 
 test('W5 whole app: the one-shot door with nothing connected tells a shell user to open the window, not to drag', async () => {
@@ -1651,6 +1680,12 @@ test('U1 the docs say what the app writes and what uninstall does with it: the k
     assert.match(flat(text), /(keeps|kept|stays|leaves)[^.]*\.typesafe-api-key|\.typesafe-api-key[^.]*(is kept|stays|is left)/, `${name} does not say the key file is kept`);
   }
   for (const text of [readme, agents, start]) assert.ok(!/config\.json`?,? (\()?it holds your API key/.test(flat(text)), 'a doc still says the key lives in config.json');
+});
+
+test('U2 the CHANGELOG quotes the refusal sentence the app prints, so a merge cannot put an old one back', () => {
+  const said = /^ {2}(.+ is more than one connect takes \(\d+\)\.)$/m.exec(R('connect', { connected: 0, refused: { kind: 'too_many', why: 'x', count: 1230, max: 250 } }, { label: 'Everything' }))![1];
+  assert.equal(said, '1,230 notes is more than one connect takes (250).');
+  assert.ok(DOC('CHANGELOG.md').includes(said.replace(/\.$/, '')), 'the CHANGELOG quotes a sentence the app does not print');
 });
 
 // ---------------------------------------------------------------- real engine (free, no key)

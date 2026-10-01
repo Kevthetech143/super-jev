@@ -190,7 +190,7 @@ const LEFT: Record<string, (n: number) => string> = {
 };
 const num = (n: number) => n.toLocaleString('en-US');
 const REFUSED: Record<string, (r: any) => string | undefined> = {
-  too_many: (r) => Number.isInteger(r.count) && Number.isInteger(r.max) ? `That folder has ${num(r.count)} notes; one connect takes up to ${num(r.max)}.` : undefined,
+  too_many: (r) => Number.isInteger(r.count) && Number.isInteger(r.max) ? `${num(r.count)} notes is more than one connect takes (${num(r.max)}).` : undefined,
   not_a_folder: () => 'That is not a folder.',
   not_markdown: () => "This folder was connected with other file types, so it can't be refreshed here.",
   usage: () => 'That request was not accepted.',
@@ -245,14 +245,14 @@ export function render(shown: Shown, look: Look): string {
   if (shown.kind === 'help') return HELP;
   if (shown.kind === 'crash') crash(d.line ?? '');
   else if (shown.kind === 'connect') {
-    const word = shown.refreshed ? 'Refreshed' : 'Connected';
-    if (shown.declined) head(shown.refreshed ? 'Not refreshed' : 'Not connected');
+    const word = shown.refreshed ? 'Refreshed' : 'Connected', none = shown.refreshed ? 'Not refreshed' : 'Not connected'; // a refresh leaves the folder connected
+    if (shown.declined) head(none);
     else if (d.refused) {
-      head('Not connected', 'red');
+      head(none, 'red');
       body(REFUSED[d.refused.kind]?.(d.refused) ?? d.refused.why ?? '');
       if (d.refused.kind === 'too_many') drag('drag in a smaller folder inside it.');
     } else {
-      head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : 'Not connected', d.connected ? 'green' : 'red');
+      head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : none, d.connected ? 'green' : 'red');
       said(d.held, (n) => `Held back ${plural(n, 'note')}:`);
       said(d.failed, () => 'Failed:');
       leftOut(d.skipped);
