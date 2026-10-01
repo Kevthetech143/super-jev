@@ -139,7 +139,7 @@ def _resolve_from_config(config_path: Path) -> tuple[Path, Path]:
     resolve its db/registry the same way the live service does (cli.py):
     relative paths are relative to the config file's own directory. This is
     the real, working pointer list any principal's `ask.py` actually reads
-    (e.g. /Users/admin/super-jev/.local/pointer-memory/config.json) -- not
+    (e.g. <repo>/.local/pointer-memory/config.json) -- not
     the ~/.local/state/super-jev/_memory test-fixture store, which is a
     different, unrelated config and should never be used for a live audit."""
     location = config_path.resolve()

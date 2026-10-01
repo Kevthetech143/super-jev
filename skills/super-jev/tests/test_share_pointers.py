@@ -10,6 +10,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SKILL = Path(__file__).resolve().parent.parent
 EXP = SKILL.parent.parent / "experiments" / "verified-pointer-memory"
 sys.path.insert(0, str(SKILL))
@@ -150,27 +152,48 @@ def _shareable(tmp_path, pointer):
 def test_a_connection_is_private_until_a_person_marks_it(tmp_path, monkeypatch):
     memory, marker, calls = _runtime(tmp_path)
     monkeypatch.setattr(sp, "memory", memory)
-    _connect(memory, tmp_path, "team-notes", ["owner"], folder="agents/hearth/notes", shareable=None)
+    _connect(memory, tmp_path, "team-notes", ["owner"], folder="shared/team/notes", shareable=None)
     assert _shareable(tmp_path, "team-notes") is False  # recorded private at connect
     calls.clear()
     out = sp.share(["team-notes"], ["otherbot"], memory=memory)
     assert out["team-notes"].startswith("refused: private")
     assert "register" not in calls and _visible(memory, "otherbot") == {}
-    assert sp.mark(["team-notes"], memory=memory) == {"team-notes": "marked"}
+    assert sp.mark(["team-notes"], memory=memory, principal="owner") == {"team-notes": "marked"}
     assert _shareable(tmp_path, "team-notes") is True
     assert _visible(memory, "owner")["team-notes"] == "available"  # a mark never stales the pointer
     assert sp.share(["team-notes"], ["otherbot"], memory=memory) == {"team-notes": "shared"}
-    assert sp.mark(["team-notes"], value=False, memory=memory) == {"team-notes": "unmarked"}
+    assert sp.mark(["team-notes"], value=False, memory=memory, principal="owner") == {"team-notes": "unmarked"}
     assert _visible(memory, "owner")["team-notes"] == "available"
     assert sp.share(["team-notes"], ["third"], memory=memory)["team-notes"].startswith("refused: private")
-    assert sp.mark(["nope"], memory=memory) == {"nope": "unknown-pointer"}
+    assert sp.mark(["nope"], memory=memory, principal="owner") == {"nope": "unknown-pointer"}
     assert not marker.exists()
+
+
+def test_marking_needs_a_named_caller_and_never_assumes_one(tmp_path, monkeypatch, capsys):
+    memory, _, calls = _runtime(tmp_path)
+    monkeypatch.setattr(sp, "memory", memory)
+    monkeypatch.delenv("SUPERJEV_PRINCIPAL", raising=False)
+    _connect(memory, tmp_path, "team-notes", ["owner"], folder="shared/team/notes", shareable=None)
+    calls.clear()
+    out = sp.mark(["team-notes"], memory=memory)
+    assert out["team-notes"].startswith("error: no principal") and _shareable(tmp_path, "team-notes") is False
+    assert calls == []  # nothing was asked of the runtime under an invented name
+    asked = []
+    monkeypatch.setattr(sp, "mark", lambda names, value=True, principal=None: asked.append((names, principal)) or {n: "marked" for n in names})
+    monkeypatch.setattr(sys, "argv", ["share_pointers.py", "--mark", "team-notes"])
+    with pytest.raises(SystemExit) as stop:
+        sp.main()
+    assert stop.value.code == 2 and "--principal" in capsys.readouterr().err and asked == []
+    monkeypatch.setenv("SUPERJEV_PRINCIPAL", "owner")  # the same fallback ask.py uses
+    assert sp.main() == 0 and asked == [(["team-notes"], "owner")]
+    monkeypatch.setattr(sys, "argv", ["share_pointers.py", "--principal", "other", "--mark", "team-notes"])
+    assert sp.main() == 0 and asked[-1] == (["team-notes"], "other")
 
 
 def test_a_private_source_cannot_be_marked_shareable(tmp_path):
     memory, _, _ = _runtime(tmp_path)
     _connect(memory, tmp_path, "bot-brain-notes", ["bot"], folder="agents/bot-brain/notes", shareable=None)
-    out = sp.mark(["bot-brain-notes"], memory=memory)
+    out = sp.mark(["bot-brain-notes"], memory=memory, principal="bot")
     assert out["bot-brain-notes"].startswith("refused:") and _shareable(tmp_path, "bot-brain-notes") is False
 
 

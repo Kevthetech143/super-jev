@@ -58,8 +58,8 @@ def test_folder_readme_uses_content_order(tmp_path):
 
 def test_profile_uses_content_order(tmp_path):
     prof = str(tmp_path / "documents/gustavo/medical/PROFILE.md")
-    note = str(tmp_path / "documents/gustavo/medical/insurance/healthfirst-travel-coverage.md")
-    top, _, _ = _run(tmp_path, "does the Healthfirst plan cover travel abroad?",
+    note = str(tmp_path / "documents/gustavo/medical/insurance/bluecrest-travel-coverage.md")
+    top, _, _ = _run(tmp_path, "does the Bluecrest plan cover travel abroad?",
                      {prof: "summary", note: "travel coverage"},
                      [{"score": 0.9, "originalPath": prof}, {"score": 0.8, "originalPath": note}],
                      {prof: 0.98, note: 0.93})
@@ -134,9 +134,9 @@ def test_no_person_named_filters_nothing(tmp_path):
 def test_question_people():
     folks = {"marvin": {"self"}, "gustavo": {"father"}, "nora": {"mother"}, "belinda": {"wife"}}
     assert ask.question_people("what's still open for my mom?", folks) == {"nora"}
-    assert ask.question_people("what did my dad's DEXA scan show?", folks) == {"gustavo"}
-    assert ask.question_people("who is belinda's neurologist?", folks) == {"belinda"}
-    assert ask.question_people("is LASIK a good idea for me?", folks) == {"marvin"}
+    assert ask.question_people("what did my dad's blood test show?", folks) == {"gustavo"}
+    assert ask.question_people("who is belinda's dentist?", folks) == {"belinda"}
+    assert ask.question_people("is a flu shot a good idea for me?", folks) == {"marvin"}
     assert ask.question_people("what is on the pending list", folks) == set()
 
 
