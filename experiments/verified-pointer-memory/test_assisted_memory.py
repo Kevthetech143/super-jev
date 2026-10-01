@@ -16,7 +16,7 @@ class AssistedMemoryTests(unittest.TestCase):
         return fixture
 
     def test_no_match_can_be_assisted_and_approved_by_evidence_id(self):
-        fixture = self.fixture(allow_agent_assist=True)
+        fixture = self.fixture()
         fixture.service.retrieve = lambda dataset, question: {'status': 'no-match'}
         original = fixture.service.search('docs', 'color?', 'alice')
         assisted = fixture.service.assist(
@@ -34,7 +34,7 @@ class AssistedMemoryTests(unittest.TestCase):
         self.assertEqual(inspected['retrievalStatus'], 'no-match')
 
     def test_open_cites_a_caller_ranked_file_without_retrieval(self):
-        fixture = self.fixture(allow_agent_assist=True)
+        fixture = self.fixture()
         fixture.service.retrieve = lambda *a: self.fail('open must not run retrieval')
         opened = fixture.service.open_attempt('docs', 'color?', 'alice')
         assisted = fixture.service.assist(
@@ -49,12 +49,9 @@ class AssistedMemoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unauthorized'):
             fixture.service.assist(opened['attemptId'], 'bob', 'r',
                                    [{'sourceId': 'one', 'startLine': 1, 'endLine': 1}])
-        disabled = self.fixture(allow_agent_assist=False)
-        with self.assertRaisesRegex(ValueError, 'assist is disabled'):
-            disabled.service.open_attempt('docs', 'color?', 'alice')
 
     def test_attempt_survives_remove_but_is_not_exposed(self):
-        fixture = self.fixture(allow_agent_assist=True)
+        fixture = self.fixture()
         result = fixture.service.search('docs', 'color?', 'alice')
         fixture.service.remove('docs')
         with fixture.service.connect() as connection:
@@ -67,7 +64,7 @@ class AssistedMemoryTests(unittest.TestCase):
             fixture.service.attempt(result['attemptId'], 'bob')
 
     def test_remove_and_reregister_does_not_resurrect_attempt_visibility(self):
-        fixture = self.fixture(allow_agent_assist=True)
+        fixture = self.fixture()
         result = fixture.service.search('docs', 'color?', 'alice')
         fixture.service.remove('docs')
         fixture.service.register('docs', 'test', ['alice'])
@@ -79,7 +76,7 @@ class AssistedMemoryTests(unittest.TestCase):
                 (result['attemptId'],)).fetchone()[0], 1)
 
     def test_pointer_rebound_to_another_dataset_does_not_expose_old_attempt(self):
-        fixture = self.fixture(allow_agent_assist=True)
+        fixture = self.fixture()
         result = fixture.service.search('docs', 'color?', 'alice')
         registry = json.loads(fixture.registry.read_text())
         registry['datasets']['renamed'] = registry['datasets'].pop('test')
@@ -157,7 +154,7 @@ class AssistedMemoryTests(unittest.TestCase):
             fixture.service.sources('docs', 'alice', limit=101)
 
     def test_assist_rechecks_current_freshness_after_selection(self):
-        fixture = self.fixture(allow_agent_assist=True)
+        fixture = self.fixture()
         registry = json.loads(fixture.registry.read_text())
         registry['datasets']['test']['checkedAt'] = 90
         fixture.registry.write_text(json.dumps(registry, sort_keys=True,

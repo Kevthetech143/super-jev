@@ -197,8 +197,8 @@ def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
     claim = case.get("kind") == "claim"
     out = {"lookup_id": traces[-1].get("lookup_id") if traces else None}
     m = VERDICT_RE.search(stdout)
-    # ordinary asks exit by outcome: found 0, not-found 1, needs-setup 4 are gradable; 2 (not-supported) and 3 (error) are not
-    if rc not in ((0, 1) if claim else (0, 1, 4)):
+    # ask's one exit table: found 0, not-found 1, needs-setup 4 and a claim's FALSE 5 are gradable; 2 (not-supported) and 3 (error) are not
+    if rc not in (0, 1, 4, 5):
         out["error"] = f"exit {rc}: {(stderr or stdout).strip()[-200:]}"
     elif (m and m.group(4)) or any(t.get("tier") in ("cache", "stale") for t in traces):
         out["error"] = "answered from a saved answer, not live"
