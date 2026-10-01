@@ -213,6 +213,24 @@ def test_claim_cases_grade_the_verdict_against_both_margins(tmp_path, env, capsy
         _run(tmp_path, _cases(tmp_path, [{"question": "c", "gold": ["/a.md"], "kind": "claim"}]), {}, {})
 
 
+def test_a_false_claim_exit_is_graded_not_an_error(tmp_path, env, capsys):
+    cases = _cases(tmp_path, [{"question": "c2", "gold": ["/a.md"], "kind": "claim", "expected": "FALSE"}])
+    old = {"c2": {"final": TOP, "verdict": "UNSURE (contradicted 0.85): read these files"}}
+    new = {"c2": {"final": TOP, "verdict": "FALSE (0.93)", "rc": 5}}  # ask exits 5 for a FALSE claim
+    _run(tmp_path, cases, old, new)
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert "error" not in row["new"] and row["new"]["verdict"] == "FALSE" and row["new"]["ok"] is True
+
+
+def test_a_claim_that_needs_setup_is_graded_like_an_ordinary_ask(tmp_path, env, capsys):
+    cases = _cases(tmp_path, [{"question": "c1", "gold": ["/a.md"], "kind": "claim", "expected": "TRUE"}])
+    old = {"c1": {"final": TOP, "verdict": "TRUE (0.93)"}}
+    new = {"c1": {"final": [], "rc": 4}}  # nothing settled and a set was stale: exit 4, no verdict word
+    _run(tmp_path, cases, old, new)
+    row = json.loads(capsys.readouterr().out)["rows"][0]
+    assert "error" not in row["new"] and row["new"]["verdict"] is None
+
+
 def test_runs_never_see_or_write_real_state_links_or_the_memory_backend(tmp_path, env, capsys):
     (env / "me" / "claim-verdicts.json").write_text('{"c1": {"verdict": "TRUE"}}')
     (env / "me" / "approvals.jsonl").write_text("{}\n")
