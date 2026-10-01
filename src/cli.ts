@@ -18,7 +18,7 @@ Node 24+. Live mode requires ${keyEnv()} and sends records to TypeSafe.
 Demo mode accepts only the bundled fixture and uses scripted answers.
 JSON output goes to stdout by default. --out creates a NEW file, never overwrites.
 Exit codes: 0 complete (may contain review items), 1 failure.
-See docs/agents.md and examples/organizer.json for the input contract.`;
+See AGENTS.md (Tool: organize) and examples/organizer.json for the input contract.`;
 
 let reserved: Awaited<ReturnType<typeof open>> | undefined;
 let output: string | undefined;
@@ -26,7 +26,8 @@ try {
   const args = process.argv.slice(2);
   if (args.length === 0 || args.includes('--help')) { console.log(usage); process.exit(0); }
   const [command, file, ...flags] = args;
-  if (command !== 'organize' || !file || file.startsWith('--')) throw new CliError(usage);
+  if (command !== 'organize') throw new CliError(`Unknown command ${command}\n\n${usage}`);
+  if (!file || file.startsWith('--')) throw new CliError(`Missing required argument: INPUT.json\n\n${usage}`);
   let mode = '';
   for (let i = 0; i < flags.length; i++) {
     if (flags[i] === '--live' || flags[i] === '--demo') {
@@ -61,7 +62,7 @@ try {
   try { input = JSON.parse(raw); }
   catch { throw new CliError('Input must be valid JSON'); }
   try { validateOrganizerInput(input); }
-  catch { throw new CliError('Invalid organizer input; see docs/agents.md for the input contract'); }
+  catch { throw new CliError('Invalid organizer input; see AGENTS.md (Tool: organize) for the input contract'); }
   let evaluator: Evaluator;
   if (mode === '--demo') {
     const fixture = JSON.parse(await readFile(new URL('../examples/organizer.json', import.meta.url), 'utf8'));

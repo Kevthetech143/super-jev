@@ -8,7 +8,8 @@ step has the exact command and what success looks like. Run from the repo root.
 
 - **Node 24 or newer** — check: `node --version` → prints `v24` or newer.
 - **Python 3.10 or newer** — check: `python3 --version` → prints `3.10` or newer.
-- **A TypeSafe API key** — connect, ask and check all call TypeSafe with it.
+- **A TypeSafe API key** — ask and check call TypeSafe with it (a `--writer builtin` connect does not,
+  unless you add `--findability`).
   Do not commit it; keep it in a file only you can read (step 2 makes it).
 
 Missing or too old? Install it into your home folder (no admin rights needed).
@@ -51,7 +52,7 @@ setting (except `SUPERJEV_TEST_*`), the judge key and url variables and
 
 ## 2. Set the key — do not skip this
 
-Every connect, ask and check needs the key in the environment of the shell you
+Every ask and check needs the key in the environment of the shell you
 run them from. **Super Jev never reads a `.env` file.**
 
 The key lives in one file only you can read, `~/.typesafe-api-key`. If it does
@@ -111,20 +112,37 @@ python3 skills/super-jev/prepare_bulk.py \
   --root /path/to/folder --pointer MYPOINTER --principal ME --writer builtin
 ```
 
-Success: one `PASS` line per file, then `connect: registered pointer=MYPOINTER`.
+Success: one `PASS` line per file, then `connect: registered pointer=MYPOINTER`
+and a last line `CONNECTED n, HELD 0, FAILED 0` (exit 0).
 Add `--findability` to also search each file's own sample question and report
 `findability: N/N files rank first on their own question` (one paid search per file).
 
-Each file gets a one-sentence description, and Jev checks that description
-against the file before it is connected. Pick the description writer:
+Each file gets a one-sentence description, and that description is checked
+against the file before it is connected (by Jev for a model-written one, locally
+for `--writer builtin`). Pick the description writer:
 
-- `--writer builtin` — no model: the description quotes the file's own
-  headings. Needs only the TypeSafe key.
+- `--writer builtin` — no model and no TypeSafe call (unless you add `--findability`):
+  the description quotes the file's own headings and is checked locally.
 - no flag — uses `claude -p --model haiku` when the `claude` CLI is installed
   (it must be logged in), and falls back to builtin when it is not.
 - `--writer-command "my-writer"` — any command that reads the prompt on stdin
   and prints a JSON array.
 
+- **Skipped by default:** connect says what a default rule left out, in `SKIP` lines with
+  counts and folder or extension names (never file names). Every `.md` file left out is counted:
+  those in `documents/`, `profile/`, `node_modules/` or a hidden folder (counted per folder; to
+  connect one, connect that folder as its own set, `--root FOLDER --pointer NEW-NAME`, since
+  re-running with an existing pointer replaces that set's files; a folder under `documents/` or
+  `profile/`, `~/Documents` included, then does not pick up new files on its own, so run it again
+  with `--refresh` after adding files), plus hidden, backup-named and empty files and links that
+  point outside the roots (`--allow-target` admits them). Files of other types (only `.md`
+  connects) are counted too, except hidden ones: a hidden file, or anything inside a hidden folder
+  such as `.git/`, is not counted. Your own `--exclude` and `--name` choices are not counted.
+  Skips never change the exit code.
+- **Size guard:** a first connect refuses more than 250 files (`--max-files` raises it)
+  and exits 2. It is a cost guard for model writers (a writer call and a TypeSafe check
+  per file) but applies with `--writer builtin` too. A `--refresh` guards only the files
+  that changed.
 - **Held files:** Connect ends with `CONNECTED n, HELD m, FAILED k` and exits 3 if any file was held. A held
   file (a secret-like value, or a note over 250,000 bytes) has no override: read the held list the command
   printed, then remove or move the value, or split the note, and re-run. A password or key keyword holds a

@@ -84,7 +84,7 @@ def test_connect_empty_folder_exits_nonzero(env, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["p", "--root", str(root), "--pointer", "x", "--principal", "me",
                                       "--writer", "builtin"])
     assert pb.main() == 1
-    assert "no .md files found" in capsys.readouterr().out
+    assert "no .md file left to connect" in capsys.readouterr().out
 
 
 def test_connect_all_files_failed_exits_nonzero_with_cause(env, monkeypatch, capsys):

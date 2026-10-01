@@ -232,7 +232,7 @@ try {
     else if (flag === '--stub') stub = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
-  if (!specPath) throw new CliError(usage);
+  if (!specPath) throw new CliError(`Missing required argument: --spec SPEC.json\n\n${usage}`);
   if (!dryRun && !stub) requireKey('run live, or use --dry-run or --stub', m => new CliError(m));
 
   const config = parseChainSpec(await readSmallFile(specPath, MAX_SPEC_BYTES, 'spec'));

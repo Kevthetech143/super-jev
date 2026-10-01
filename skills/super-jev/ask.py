@@ -2601,10 +2601,10 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict,
     read = sorted((p for p in content_check if content_check[p].get("label") != "held-secret"),
                   key=lambda p: -(content_check[p].get("score") or 0))
     lines = ["What was searched:",
-             f"  - {total} connected sets; {len(routing)} searched after the topic filter, {len(on_topic)} had matches"
+             f"  - {total} connected sets; {len(routing)} searched after the topic filter; descriptions matched in {len(on_topic)}"
              + (": " + ", ".join(on_topic[:5]) + (" ..." if len(on_topic) > 5 else "") if on_topic else "")]
     if read:
-        lines.append(f"  - {len(read)} file(s) read; no answer confirmed. Closest: "
+        lines.append(f"  - {len(read)} file(s) read (picked by description or by words in the file); no answer confirmed. Closest: "
                      + ", ".join("/".join(Path(p).parts[-2:]) for p in read[:MISS_CLOSEST]))
     else:
         lines.append("  - no connected file matched the question's words closely enough to read")
@@ -3558,10 +3558,19 @@ def preflight(principal: str, args: list) -> int:
 
 
 def resolve_principal(args: list) -> tuple[str, list]:
+    """The principal and the rest of the arguments. A typed --principal with no value gives "" (never the
+    environment's), so the caller can say it is missing."""
     if "--principal" in args:
         i = args.index("--principal")
-        return args[i + 1], args[:i] + args[i + 2:]
+        return (args[i + 1] if i + 1 < len(args) else ""), args[:i] + args[i + 2:]
     return os.environ.get("SUPERJEV_PRINCIPAL", ""), args
+
+
+def need(what: str) -> int:
+    """A required argument is missing: name it, then the usage. Exit code 2."""
+    print(f"{what} is required\n\n{__doc__}")
+    return 2
+
 
 def main() -> int:
     try:
@@ -3572,17 +3581,20 @@ def main() -> int:
 
 def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
-    if not principal or not a:
+    if not sys.argv[1:] or sys.argv[1:] == ["--help"]:  # asking for the usage, not missing anything
         print(__doc__)
         return 2
+    if not principal:
+        return need("--principal AGENT (or the SUPERJEV_PRINCIPAL environment variable)")
+    if not a:
+        return need("a question")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", principal):  # same rule as the memory runtime
         print(f"invalid --principal {principal!r}: use the agent's exact name (letters, digits, "
               "'.', '_', '-'; no spaces or slashes)")
         return 2
     if a[0] == "--":  # the rest is the question, read literally (never a --flag)
         if len(a) == 1:
-            print(__doc__)
-            return 2
+            return need("a question")
         return lookup(" ".join(a[1:]), principal, state_dir(principal))
     if a[0] == "--preflight":
         return preflight(principal, a[1:])
@@ -3596,8 +3608,7 @@ def _main() -> int:
         os.environ["SUPERJEV_AUTO_CACHE"] = "0"
         a = [x for x in a if x != "--no-auto"]
         if not a:
-            print(__doc__)
-            return 2
+            return need("a question")
     if a[0] == "--trace-show":
         return trace_show(sdir, a[1] if len(a) > 1 else "last")
     if a[0] == "--trace-report":
@@ -3610,6 +3621,8 @@ def _main() -> int:
                 return 2
         return trace_report(sdir, days, principal)
     if a[0] == "--miss":
+        if len(a) < 2:
+            return need("a question after --miss")
         return miss(principal, a[1], " ".join(a[2:]), sdir)
     if a[0] == "--followup":
         max_tries = FOLLOWUP_MAX_TRIES
