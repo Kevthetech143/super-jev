@@ -467,6 +467,11 @@ An unrecognised `SUPERJEV_JUDGE` value stops the run with one line
 (`super-jev: SUPERJEV_JUDGE: unknown judge 'x' (known: fake, typesafe-jev)`)
 — a typo must never quietly leave a draft unjudged, or hand it to another judge.
 
+To grade a judge on a build against your own bar, and keep one record of the
+result tied to that build's fingerprint, see
+[judge support](../../skills/super-jev/references/judge-support.md)
+(`judge_support.py`).
+
 The judge is one doorway in both languages (`skills/super-jev/judges/`,
 `src/judge.ts`); `judge_profiles.json` holds the endpoint, model, key
 variable name, window, price, token rule and calibration for each judge.

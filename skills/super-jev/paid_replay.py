@@ -48,7 +48,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -62,6 +64,9 @@ VERDICT_RE = re.compile(r"^(TRUE|FALSE|CONFLICT|PARTIAL|UNSURE|NOT FOUND)\b"
                         r"(?: \((?:(supported|contradicted) )?(\d+(?:\.\d+)?)(, saved)?)?", re.M)
 LEAN = {"supported": "TRUE", "contradicted": "FALSE"}
 REPLAY_PROTOCOL = 2  # the ask.py replay guarantees this replay needs (see ask.py REPLAY_PROTOCOL)
+#: What a replay sets in every ask's environment, whatever else the caller passes. The state dir is set per run.
+REPLAY_ENV = {"SUPERJEV_REPLAY": "1", "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_TRACES": "1",
+              "SUPERJEV_MEMORY_WRAPPER_ACTIVE": "1"}
 CLAIM_EXPECTED = ("TRUE", "FALSE", "ABSENT")  # what a claim case may expect; ABSENT = nothing settles it
 
 
@@ -135,8 +140,11 @@ def snapshot(principals, config: Path, dest: Path) -> dict:
             "registry": file_sha(registry)}
 
 
-def run_once(ask: Path, base: Path, case: dict, timeout: float, argv=None):
-    """One full ask (or argv) in a fresh copy of the snapshot; its whole process group dies with it."""
+def run_once(ask: Path, base: Path, case: dict, timeout: float, argv=None, environ=None):
+    """One full ask (or argv) in a fresh copy of the snapshot; its whole process group dies with it.
+    `environ` replaces os.environ as the environment the ask starts from. Returns
+    ((rc, stdout, stderr, traces, secs), None), or (None, {"error": ..., "secs": ...}); secs is the ask's
+    own wall time, started after the snapshot copy."""
     pr, claim = case["principal"], case.get("kind") == "claim"
     with tempfile.TemporaryDirectory(prefix="sj-replay-") as tmp:
         tmp = Path(tmp)
@@ -147,10 +155,10 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float, argv=None):
         (tmp / "state" / "_memory").mkdir(exist_ok=True)
         (tmp / "state" / "_memory" / "config.json").write_text(json.dumps(cfg))
         # SUPERJEV_MEMORY_WRAPPER_ACTIVE: skip memory.sh (it names the real config) and use the copy.
-        env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp / "state"), "SUPERJEV_REPLAY": "1",
-               "SUPERJEV_AUTO_CACHE": "0", "SUPERJEV_TRACES": "1", "SUPERJEV_MEMORY_WRAPPER_ACTIVE": "1"}
+        env = {**(os.environ if environ is None else environ), "SUPERJEV_STATE_DIR": str(tmp / "state"), **REPLAY_ENV}
         cmd = [sys.executable, str(ask), "--principal", pr] + (argv or (
             ["--claim", case["question"]] if claim else ["--", case["question"]]))
+        t0 = time.monotonic()
         p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                              start_new_session=True)
         try:
@@ -159,20 +167,21 @@ def run_once(ask: Path, base: Path, case: dict, timeout: float, argv=None):
         except subprocess.TimeoutExpired:
             timed_out = True
         finally:
+            secs = round(time.monotonic() - t0, 3)
             try:
                 os.killpg(p.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
         if timed_out:
             p.communicate()
-            return None, {"error": f"timeout after {timeout:g}s"}
+            return None, {"error": f"timeout after {timeout:g}s", "secs": secs}
         traces = [t for t in sc._jsonl(tmp / "state" / pr / "traces.jsonl") if t.get("kind") == "trace"]
         if any((d / "traces.jsonl").exists() for d in (tmp / "state").iterdir() if d.name != pr):
-            return None, {"error": "a trace was written for another principal; not this case's lookup"}
-    return (p.returncode, stdout, stderr, traces), None
+            return None, {"error": "a trace was written for another principal; not this case's lookup", "secs": secs}
+    return (p.returncode, stdout, stderr, traces, secs), None
 
 
-def preflight(builds, base: Path, principals, timeout: float) -> str:
+def preflight(builds, base: Path, principals, timeout: float, environ=None) -> str:
     """Free: each build's `ask.py --status` on the frozen copy. Why the replay cannot
     start, or ''. Fail closed: every listed pointer must say "ready", and output in any
     other shape (nothing connected, an error, an unknown line) refuses. A replay never
@@ -180,7 +189,7 @@ def preflight(builds, base: Path, principals, timeout: float) -> str:
     problems = []
     for b in builds:
         for pr in sorted(principals):
-            ran, failed = run_once(b, base, {"principal": pr}, timeout, argv=["--status"])
+            ran, failed = run_once(b, base, {"principal": pr}, timeout, argv=["--status"], environ=environ)
             if failed or ran[0] != 0:
                 out = (failed or {}).get("error") or (ran[1] + ran[2]).strip()[-300:]
                 problems.append(f"{pr}: status unavailable ({out})")
@@ -194,13 +203,13 @@ def preflight(builds, base: Path, principals, timeout: float) -> str:
     return "\n  ".join(problems)
 
 
-def grade(ask: Path, base: Path, case: dict, timeout: float) -> dict:
-    ran, failed = run_once(ask, base, case, timeout)
+def grade(ask: Path, base: Path, case: dict, timeout: float, environ=None) -> dict:
+    ran, failed = run_once(ask, base, case, timeout, environ=environ)
     if failed:
         return failed
-    rc, stdout, stderr, traces = ran
+    rc, stdout, stderr, traces, secs = ran
     claim = case.get("kind") == "claim"
-    out = {"lookup_id": traces[-1].get("lookup_id") if traces else None}
+    out = {"lookup_id": traces[-1].get("lookup_id") if traces else None, "rc": rc, "secs": secs}
     m = VERDICT_RE.search(stdout)
     # ask's one exit table: found 0, not-found 1, needs-setup 4 and a claim's FALSE 5 are gradable; 2 (not-supported) and 3 (error) are not
     if rc not in (0, 1, 4, 5):
@@ -320,6 +329,52 @@ def describe(res: dict, claim: bool) -> str:
     return f"rank {res['rank']} {res['tier']}" if res["rank"] else f"not in top 5 ({res['tier']})"
 
 
+def load_run(ask_paths, case_files, principals, max_asks, default_principal=None, held_out=None,
+             held_out_sha256=None, memory_override=None, memory_hint="; pass --memory-config"):
+    """Everything a run checks before it spends, in one place (paid_replay and judge_support share it):
+    the cases (held-out reservation, claim expectations, dashed questions), the builds (they exist, declare
+    REPLAY_PROTOCOL, read byte-identical prepare-caches), the cap, and one existing memory config.
+    `principals` limits the cases to those agents; None keeps every row, and then each row must name its own.
+    ValueError (or OSError and the like from reading a file) says what is wrong; nothing has been spent.
+    Returns cases, builds, caches (each build's prepare-cache), config and cache_sha (their one fingerprint)."""
+    rows = [c for f in case_files for c in sc.input_cases(f)]
+    reserved = sc.frozen_cases(held_out, held_out_sha256) if held_out else []
+    if reserved:  # an unfrozen row may repeat a frozen one, never change it (scorecard's rule)
+        for c in sc.normalize_cases(rows, default_principal, absent_ok=True):
+            if c["split"] == "held-out" and c not in reserved:
+                raise ValueError("held-out input differs from the frozen reservation")
+    cases = [c for c in sc.normalize_cases(rows + reserved, default_principal, absent_ok=True)
+             if principals is None or c["principal"] in principals]
+    for c in cases:
+        if not c["principal"]:
+            raise ValueError(f"case has no principal: {c['question']}")
+        if c.get("kind") == "claim" and c.get("expected") not in CLAIM_EXPECTED:
+            raise ValueError(f"claim case needs expected {', '.join(CLAIM_EXPECTED)}: {c['question']}")
+    builds = [Path(p).expanduser().resolve() for p in ask_paths]
+    for b in builds:
+        if not b.is_file():
+            raise ValueError(f"no such build: {b}")
+    dashed = [c["question"] for c in cases if c["question"].lstrip().startswith("-")]
+    if dashed:  # ask.py would read it as a flag (--followup, --add ...), not a question
+        raise ValueError(f"a question may not start with '-': {dashed[0]!r}")
+    need = len(cases) * len(builds)
+    if not cases:
+        raise ValueError("no cases for the given --principal" if principals else "no cases in the file")
+    if need > max_asks:
+        raise ValueError(f"{len(cases)} case(s) x {len(builds)} builds needs {need} paid asks; --max-asks is {max_asks}")
+    for b in builds:
+        if why := check_build(b):
+            raise ValueError(why)
+    caches = [sc.build_path(b).parent / "prepare-cache" for b in builds]
+    cache_sha = tree_sha(caches[0])
+    if any(tree_sha(c) != cache_sha for c in caches[1:]):
+        raise ValueError("the builds read different prepare-caches; copy one release twice so they differ in code only")
+    configs = {memory_config(b, memory_override) for b in builds}
+    if len(configs) != 1 or not next(iter(configs)).is_file():
+        raise ValueError(f"the builds need one existing memory config (found {sorted(map(str, configs))}){memory_hint}")
+    return SimpleNamespace(cases=cases, builds=builds, caches=caches, config=configs.pop(), cache_sha=cache_sha)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--principal", action="append", type=sc.principal_name, required=True)
@@ -338,47 +393,19 @@ def main(argv=None) -> int:
     if bool(a.held_out) != bool(a.held_out_sha256):
         ap.error("--held-out and --held-out-sha256 must be supplied together")
     try:
-        rows = [c for f in a.cases for c in sc.input_cases(f)]
-        reserved = sc.frozen_cases(a.held_out, a.held_out_sha256) if a.held_out else []
-        if reserved:  # an unfrozen row may repeat a frozen one, never change it (scorecard's rule)
-            for c in sc.normalize_cases(rows, a.principal[0], absent_ok=True):
-                if c["split"] == "held-out" and c not in reserved:
-                    raise ValueError("held-out input differs from the frozen reservation")
-        cases = [c for c in sc.normalize_cases(rows + reserved, a.principal[0], absent_ok=True)
-                 if c["principal"] in a.principal]
-        for c in cases:
-            if c.get("kind") == "claim" and c.get("expected") not in CLAIM_EXPECTED:
-                raise ValueError(f"claim case needs expected {', '.join(CLAIM_EXPECTED)}: {c['question']}")
+        plan = load_run(a.ask, a.cases, a.principal, a.max_asks, a.principal[0], a.held_out, a.held_out_sha256,
+                        a.memory_config)
     except (OSError, ValueError, TypeError, AttributeError) as e:
         ap.error(str(e))
-    builds = [Path(p).expanduser().resolve() for p in a.ask]
-    for b in builds:
-        if not b.is_file():
-            ap.error(f"no such build: {b}")
-    dashed = [c["question"] for c in cases if c["question"].lstrip().startswith("-")]
-    if dashed:  # ask.py would read it as a flag (--followup, --add ...), not a question
-        ap.error(f"a question may not start with '-': {dashed[0]!r}")
+    cases, builds, caches, config = plan.cases, plan.builds, plan.caches, plan.config
     need = len(cases) * len(builds)
-    if not cases:
-        ap.error("no cases for the given --principal")
-    if need > a.max_asks:
-        ap.error(f"{len(cases)} case(s) x {len(builds)} builds needs {need} paid asks; --max-asks is {a.max_asks}")
-    for b in builds:
-        if why := check_build(b):
-            ap.error(why)
-    caches = [sc.build_path(b).parent / "prepare-cache" for b in builds]
-    fingerprints = {"prepare_cache": tree_sha(caches[0])}
-    if tree_sha(caches[1]) != fingerprints["prepare_cache"]:
-        ap.error("the builds read different prepare-caches; copy one release twice so they differ in code only")
-    configs = {memory_config(b, a.memory_config) for b in builds}
-    if len(configs) != 1 or not next(iter(configs)).is_file():
-        ap.error(f"the builds need one existing memory config (found {sorted(map(str, configs))}); pass --memory-config")
+    fingerprints = {"prepare_cache": plan.cache_sha}
 
     report = {"asks": need, "wobble": a.wobble, "builds": [str(b) for b in builds], "rows": []}
     with tempfile.TemporaryDirectory(prefix="sj-replay-base-") as base:
         base = Path(base)
         try:
-            fingerprints.update(snapshot({c["principal"] for c in cases}, configs.pop(), base))
+            fingerprints.update(snapshot({c["principal"] for c in cases}, config, base))
         except (OSError, ValueError, KeyError, sqlite3.Error) as e:
             ap.error(f"cannot snapshot state and memory: {e}")
         report["fingerprints"] = fingerprints
@@ -395,7 +422,8 @@ def main(argv=None) -> int:
     rows = report["rows"]
     for r in rows:
         for side in ("old", "new"):
-            r[side].pop("read", None)
+            for k in ("read", "rc", "secs"):  # judge_support's; this report never carried them
+                r[side].pop(k, None)
         if drift:
             r["result"] = "inconclusive"
     report["drift"] = drift
