@@ -31,3 +31,11 @@ def _no_live_shared_list(monkeypatch, tmp_path):
 def _no_new_file_scan(monkeypatch):
     """Lookups never start the background new-file scan in tests; test_auto_heal.py calls it directly."""
     monkeypatch.setenv("SUPERJEV_NEW_FILE_SCAN", "0")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_chat_config_or_launcher(monkeypatch, tmp_path):
+    """--uninstall also removes the chat CLI's config (it holds an API key) and its launcher.
+    No test may reach the real ones: both folders point into tmp unless a test sets its own."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-xdg-config"))
+    monkeypatch.setenv("SUPERJEV_BIN_DIR", str(tmp_path / "no-bin"))
