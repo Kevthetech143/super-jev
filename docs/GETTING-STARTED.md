@@ -174,9 +174,11 @@ are skipped.
 python3 skills/super-jev/setup.py --uninstall
 ```
 
-Removes the state folder, the memory config, `skills/super-jev/prepare-cache/`,
-`skills/super-jev/ledger/`, and any `~/.claude/skills` links into this
-checkout. Your own files are never touched.
+Removes everything Super Jev wrote: the state folder (memory config, logs, pointers),
+`skills/super-jev/prepare-cache/`, `ledger/` and `autoheal-state/`, the chat CLI's
+config and launcher if you installed it, and any `~/.claude/skills` links into this
+checkout. A file of yours that sits in one of those folders stays, and the output lists it.
+Your own files are never touched.
 
 ## Notes
 
