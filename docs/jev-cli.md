@@ -41,10 +41,11 @@ connect runs, Esc or Ctrl+C stops it (`Stopped.`); other lines are dropped.
 `superjev <words>` handles the words as if typed in the window. The answer
 goes to stdout (no colour when piped) and the progress row to stderr. The
 exit code is the helper's own: found 0, not found 1, not supported 2, error
-3, needs setup 4, stopped 130 (`/check` keeps the claim check's own codes).
-`--help` and `--version` print and exit 0. A line the app cannot use (no such
-path, unknown command, or a first word starting with `-`, never a question)
-exits 2. No key: it says so, exit 4. Nothing connects without a keyboard.
+3, needs setup 4 (`/check` keeps the claim check's own codes). A stop
+(Ctrl+C) exits 130. `--help` and `--version` print and exit 0. A line the app
+cannot use (no such path, unknown command, or a first word starting with `-`,
+never a question) exits 2. No key: it says so, exit 4. Nothing connects
+without a keyboard.
 
 Tests: `node --test test/jev-chat.test.ts` uses made-up notes and a stand-in
 `python3`, so it needs no key.

@@ -6,7 +6,7 @@
 // failure text, which it shows as it is.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { chmodSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { constants, homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,7 +43,8 @@ export async function run(io: IO): Promise<number> {
   const look = () => ({ width: Math.min(stdout.columns || 80, 80), color: !!stdout.isTTY && !env.NO_COLOR, home, keyEnv, keySource: keySource(), vendor,
     door: argv.length > 0 });
   const out = (text: string) => stdout.write(text + '\n');
-  let child: ChildProcess | null = null, stopped: ChildProcess | null = null;
+  stdout.on('error', (e: NodeJS.ErrnoException) => { if (e.code !== 'EPIPE') throw e; }); // a reader that went away (superjev "q" | head) is not a crash
+  let child: ChildProcess | null = null, stopped: ChildProcess | null = null, escStops = false;
 
   // ------------------------------------------------------------ helpers
   // Each helper runs in its own process group, so one stop reaches everything it started.
@@ -60,7 +61,7 @@ export async function run(io: IO): Promise<number> {
   /** Esc and Ctrl+C while a helper runs: SIGTERM to its whole group, SIGKILL two seconds later if anything is left. */
   function stopRun() {
     const p = child;
-    if (!p?.pid) return;
+    if (!p?.pid || stopped === p) return; // a repeat while the stop is under way (npm forwards a second Ctrl+C) changes nothing
     stopped = p;
     const send = (sig: NodeJS.Signals) => { try { process.kill(-p.pid!, sig); } catch { /* the group is gone */ } };
     send('SIGTERM');
@@ -68,12 +69,19 @@ export async function run(io: IO): Promise<number> {
     p.once('close', () => clearTimeout(hard));
   }
 
-  /** The working row goes to stderr, only on a terminal and only after 300 ms, so quick answers never flicker. */
+  /** The app ends on a signal (the terminal closed, a kill): its helper's group ends first, so nothing is left spending. */
+  function end(sig: NodeJS.Signals) {
+    const p = child, code = 128 + constants.signals[sig];
+    stopRun();
+    if (p?.pid) p.once('close', () => process.exit(code)); else process.exit(code);
+  }
+
+  /** The working row goes to stderr, only on a terminal and only after 300 ms, so quick answers never flicker. It says how to stop where Esc works. */
   function working(label: string): () => void {
     if (!label || !stderr.isTTY) return () => {};
     const t0 = Date.now();
     let i = 0, shown = false, tick: NodeJS.Timeout | undefined;
-    const draw = () => { shown = true; stderr.write(`\r\x1b[2K${SPINNER[i++ % SPINNER.length]} ${label} · ${Math.floor((Date.now() - t0) / 1000)}s`); };
+    const draw = () => { shown = true; stderr.write(`\r\x1b[2K${SPINNER[i++ % SPINNER.length]} ${label} · ${Math.floor((Date.now() - t0) / 1000)}s${escStops ? ' · esc to stop' : ''}`); };
     const start = setTimeout(() => { draw(); tick = setInterval(draw, 120); }, 300);
     return () => { clearTimeout(start); clearInterval(tick); if (shown) stderr.write('\r\x1b[2K'); };
   }
@@ -145,6 +153,7 @@ export async function run(io: IO): Promise<number> {
       completer: (l: string): [string[], string] => [l.startsWith('/') ? COMMANDS.filter((c) => c.startsWith(l)) : [], l],
     });
     const queue: (string | symbol)[] = [];
+    escStops = true;
     // busy until a prompt or a question is shown, so a key typed before that is never an answer
     let closed = false, wake: (() => void) | null = null, mode: 'prompt' | 'busy' | 'confirm' = 'busy', armed = false;
     const push = (x: string | symbol) => { queue.push(x); wake?.(); };
@@ -187,7 +196,7 @@ export async function run(io: IO): Promise<number> {
         mode = 'busy';
         return typeof x === 'string' && keyAction({ mode: 'confirm', line: x, armed: false }, 'enter') === 'yes';
       },
-      close: () => rl.close(),
+      close: () => { escStops = false; rl.close(); },
     };
   }
 
@@ -266,11 +275,12 @@ export async function run(io: IO): Promise<number> {
     return (bad ?? r).code;
   }
 
+  // One rule: whatever ends the app first ends its helper's group. A shell's Ctrl+C reaches only this process, never the helper's own group;
+  // at the door it is a stop like Esc (Stopped., exit 130), and in the window it can only arrive before the keys are read.
+  const signals = (['SIGHUP', 'SIGTERM', 'SIGINT'] as const).map((s) => [s, s === 'SIGINT' && argv.length ? stopRun : () => end(s)] as const);
+  for (const [s, f] of signals) process.on(s, f);
   try {
-    if (argv.length) {
-      process.once('SIGINT', stopRun); // a shell's Ctrl+C reaches this process only, never the helper's own group; a second one ends it
-      try { return await door(); } finally { process.off('SIGINT', stopRun); }
-    }
+    if (argv.length) return await door();
     if (stdin.isTTY) return await window();
     stderr.write('Usage: superjev "your question"   (run it in a terminal, with no words, for the window)\n');
     return 2;
@@ -278,7 +288,7 @@ export async function run(io: IO): Promise<number> {
     if (!e.noPython) throw e;
     (argv.length ? stderr : stdout).write(e.message + '\n');
     return 1;
-  }
+  } finally { for (const [s, f] of signals) process.off(s, f); }
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -1,5 +1,5 @@
 // Frozen contract tests (2026-10-01), PR 3: the terminal app shows exactly what the helpers report.
-// PR 4 adds the stop tests (K1, K1b, K1c, K1d, K2, K2b, S18, R6, R7): Esc and Ctrl+C stop a search or a connect.
+// PR 4 adds the stop tests (K1 to K2b, K10, K10b, K11, S18, R6, R7): Esc and Ctrl+C stop a search or a connect, and so does whatever ends the app.
 //
 // Layers (no Jev, no network):
 //   pure        render, readLine, helperCall, childEnv, keyAction, pointerName on fixtures
@@ -16,7 +16,7 @@ import { createServer } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { constants, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -1702,6 +1702,7 @@ for (const [id, key, name] of [['K1', '\x1b', 'Esc'], ['K1b', '\x03', 'Ctrl+C']]
       await w.ready();
       w.say('slow question');
       await w.waitFor(() => running(r) && drawn(w, 'Searching your notes') >= 2); // the row redraws while it works
+      assert.match(w.rawErr(), /Searching your notes · \ds · esc to stop/, 'the working row does not say how to stop');
       const at = Date.now();
       w.send(key);
       await until(() => termed(r), 1000, GROUP);
@@ -1734,18 +1735,37 @@ test('K1c a search that ignores SIGTERM is killed two seconds later: Stopped. sh
   } finally { reap(r); }
 });
 
-test('K1d a real SIGINT to the one-shot door stops its search the same way: the group gets SIGTERM, Stopped. is printed, exit 130', { timeout: 30000 }, async () => {
+for (const [id, times] of [['K1d', 1], ['K1e', 2]] as const) {
+  // K1e: npm forwards a second SIGINT while the stop is still under way; here the helper ignores SIGTERM, so the stop takes two seconds
+  test(`${id} ${times} real SIGINT to the one-shot door stops its search the same way: the group gets SIGTERM, Stopped. is printed, exit 130${times > 1 ? ' (a repeat is ignored)' : ''}`, { timeout: 30000 }, async () => {
+    const r = rig([STATUS_EMPTY, SLOW({ stubborn: times > 1 })]);
+    try {
+      const p = spawn(process.execPath, [CLI, 'slow question'], { env: { ...r.env, TYPESAFE_API_KEY: KEY }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      p.stdout.on('data', (d) => (out += d));
+      const code = new Promise<number>((done) => p.on('close', (c) => done(c ?? -1)));
+      await until(() => running(r), 8000, 'the search started');
+      for (let i = 0; i < times; i++) { p.kill('SIGINT'); await new Promise((x) => setTimeout(x, 40)); } // a terminal's Ctrl+C reaches the door, not the helper's own group
+      await until(() => termed(r), 1000, GROUP);
+      assert.equal(await code, 130, out);
+      assert.match(strip(out), /^Stopped\.$/m, out);
+      assert.ok(gone(r), 'a process of the search is still running');
+    } finally { reap(r); }
+  });
+}
+
+test('K1f a one-shot door whose reader goes away at the same Ctrl+C (superjev "q" | cat) exits 130 with no stack trace', { timeout: 30000 }, async () => {
   const r = rig([STATUS_EMPTY, SLOW()]);
   try {
     const p = spawn(process.execPath, [CLI, 'slow question'], { env: { ...r.env, TYPESAFE_API_KEY: KEY }, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    p.stdout.on('data', (d) => (out += d));
+    let err = '';
+    p.stderr.on('data', (d) => (err += d));
     const code = new Promise<number>((done) => p.on('close', (c) => done(c ?? -1)));
     await until(() => running(r), 8000, 'the search started');
-    p.kill('SIGINT'); // a terminal's Ctrl+C reaches the door, not the helper's own group
-    await until(() => termed(r), 1000, GROUP);
-    assert.equal(await code, 130, out);
-    assert.match(strip(out), /^Stopped\.$/m);
+    p.stdout.destroy(); // the reader dies with the Ctrl+C, so writing Stopped. finds a closed pipe
+    p.kill('SIGINT');
+    assert.equal(await code, 130, err);
+    assert.ok(!/EPIPE|Unhandled|\n\s+at /.test(err), err);
     assert.ok(gone(r), 'a process of the search is still running');
   } finally { reap(r); }
 });
@@ -1759,6 +1779,7 @@ test('K2 Esc while connecting: Stopped. says some notes may be connected and how
     await w.waitFor(/Connect Team Notes\?/);
     w.send('\r');
     await w.waitFor(() => running(r) && drawn(w, 'Connecting') >= 2);
+    assert.match(w.rawErr(), /Connecting · \ds · esc to stop/);
     w.send('\x1b');
     await until(() => termed(r), 1000, GROUP);
     await w.waitFor('Stopped.', 5000);
@@ -1778,7 +1799,8 @@ test('K2b Ctrl+C during a door connect: the group gets SIGTERM, Stopped. says ho
     const w = win(r, { argv: [FOLDER] });
     await w.waitFor(/Connect Team Notes\?/);
     w.send('\r');
-    await w.waitFor(() => running(r));
+    await w.waitFor(() => running(r) && drawn(w, 'Connecting') >= 1);
+    assert.match(w.rawErr(), /Connecting · \ds · esc to stop/, 'Esc works at a door connect, so the row says so');
     w.send('\x03');
     await until(() => termed(r), 1000, GROUP);
     assert.equal(await w.exit(), 130, w.text());
@@ -1786,6 +1808,58 @@ test('K2b Ctrl+C during a door connect: the group gets SIGTERM, Stopped. says ho
     assert.ok(!r.calls().some((c: any) => c.script === 'setup.py'), 'setup.py was run for a stop');
     assert.ok(gone(r), 'a process of the connect is still running');
   } finally { reap(r); }
+});
+
+for (const [sig, stubborn] of [['SIGHUP', false], ['SIGTERM', false], ['SIGHUP', true]] as const) {
+  test(`K10 ${sig} to the app (a closed terminal, a kill) ends the helper's group first${stubborn ? ', even one that ignores SIGTERM' : ''}, so nothing keeps spending`, { timeout: 30000 }, async () => {
+    const r = rig([STATUS_EMPTY, SLOW({ stubborn })]);
+    try {
+      const p = spawn(process.execPath, [CLI, 'slow question'], { env: { ...r.env, TYPESAFE_API_KEY: KEY }, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+      const code = new Promise<number>((done) => p.on('close', (c, s) => done(c ?? -(constants.signals[s as NodeJS.Signals] ?? 99))));
+      await until(() => running(r), 8000, 'the search started');
+      process.kill(-p.pid!, sig); // the app's own group: a closing terminal hangs up its foreground group, never the helper's
+      await until(() => termed(r), 1000, GROUP);
+      assert.equal(await code, 128 + constants.signals[sig], 'the app did not end on the signal');
+      assert.ok(gone(r), 'a process of the search is still running');
+    } finally { reap(r); }
+  });
+}
+
+/** The window in a real terminal (a pty): the status helper hangs, and the terminal closes or Ctrl+C is pressed before the prompt shows. */
+const IN_PTY = `
+import json, os, pty, sys, time
+a = json.loads(sys.argv[1])
+pid, fd = pty.fork()
+if pid == 0: os.execve(a['node'], [a['node'], a['cli']], a['env'])
+end = time.time() + 10
+while not os.path.exists(a['dir'] + '/child.pid') and time.time() < end: time.sleep(0.02)
+if a['how'] == 'hup': os.close(fd)
+else: os.write(fd, b'\\x03')
+end = time.time() + 8
+while time.time() < end:
+    done, st = os.waitpid(pid, os.WNOHANG)
+    if done: print(os.WEXITSTATUS(st) if os.WIFEXITED(st) else -os.WTERMSIG(st)); sys.exit()
+    time.sleep(0.02)
+os.kill(pid, 9); print('hung')
+`;
+for (const [how, code] of [['hup', 129], ['ctrl-c', 130]] as const) {
+  test(`K10b the window ends the helper's group first when the ${how === 'hup' ? 'terminal closes' : 'user presses Ctrl+C before the prompt shows'}: exit ${code}`, { timeout: 30000 }, () => {
+    const r = rig([{ when: '--status', group: true, sleep: 30000, out: STATUS_EMPTY.out }]);
+    try {
+      const env = { ...r.env, TYPESAFE_API_KEY: KEY };
+      const res = spawnSync('python3', ['-c', IN_PTY, JSON.stringify({ node: process.execPath, cli: CLI, env, dir: r.dir, how })], { encoding: 'utf8', timeout: 25000 });
+      assert.equal(res.stdout.trim(), String(code), res.stderr);
+      assert.ok(gone(r), 'a process of the helper is still running');
+    } finally { reap(r); }
+  });
+}
+
+test('K11 the working row says how to stop only where Esc works: a one-shot ask is bare', { timeout: 30000 }, async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 900, out: FOUND() }]);
+  const w = win(r, { argv: ['slow question'] });
+  assert.equal(await w.exit(), 0, w.text());
+  assert.ok(drawn(w, 'Searching your notes') >= 1, 'the row was never drawn: ' + w.rawErr());
+  assert.ok(!/esc to stop/.test(w.rawErr()), w.rawErr());
 });
 
 test('S18 stopped: a search says Stopped. alone; a connect adds that some notes may be connected and how to finish, in the window and at the door', () => {
@@ -2041,8 +2115,8 @@ test('R7 real connect stopped partway: the state is still readable, and dragging
   drag();
   await w.waitFor(/Connect Big Notes\?/);
   w.send('\r');
-  await w.waitFor(() => drawn(w, 'Connecting') >= 2); // it is working: stop it here
-  w.send('\x1b');
+  await w.waitFor(() => drawn(w, 'Connecting') >= 2); // it is working: stop it here (Ctrl+C lands in about 15 ms, so a fast machine has not finished)
+  w.send('\x03');
   await w.waitFor('Stopped.', 8000);
   assert.match(flat(w.text()), /Stopped\. Some notes may be connected; drag the folder in again to finish\./);
   assert.ok(!/Connected Big Notes/.test(w.text()), 'the connect finished before it was stopped: the folder is too small for this machine');
