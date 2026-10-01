@@ -1,14 +1,19 @@
 """ask.py --preflight: free readiness + per-folder coverage; asks only with --about/--skill."""
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+SKILLS = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ask
 import prepare_bulk
+
+_REAL_RUN = subprocess.run  # the `world` fixture replaces subprocess.run; one test runs the real launcher
 
 
 @pytest.fixture
@@ -149,21 +154,42 @@ def test_skill_search_runs_while_nothing_is_connected(world, monkeypatch, capsys
     assert rep["existing_skills"] == ["x-poster"]
 
 
-@pytest.mark.parametrize("body,labelled", [
-    ({"status": "exact", "source": "local"}, False),
-    ({"status": "suggestions", "source": "jev"}, False),
-    ({"status": "suggestions", "source": "local"}, True),
-    ({"status": "clarify", "source": "jev", "error": "Did you mean one of: a, b?"}, True),
-    ({"status": "fallback", "source": "local", "error": "No TYPESAFE_API_KEY in the environment"}, True),
+@pytest.mark.parametrize("body,labelled,warning", [
+    ({"status": "exact", "source": "local"}, False, None),
+    ({"status": "suggestions", "source": "jev"}, False, None),
+    ({"status": "suggestions", "source": "local"}, True, None),
+    ({"status": "clarify", "source": "jev", "error": "Did you mean one of: a, b?"}, True, None),
+    ({"status": "fallback", "source": "local", "error": "Judge unavailable (key rejected); local-only results"}, True,
+     "skill search fell back to local guesses: Judge unavailable (key rejected); local-only results"),
 ])
-def test_preflight_labels_a_skill_only_a_confirmed_result_is_called_a_match(world, monkeypatch, capsys, body, labelled):
-    """The ask path and preflight read one door with one rule: only an exact name or a live judge pick is a match."""
+def test_preflight_labels_a_skill_only_a_confirmed_result_is_called_a_match(world, monkeypatch, capsys, body, labelled, warning):
+    """The ask path and preflight read one door with one rule: only an exact name or a live judge pick is a match.
+    A clarify question is no warning; a fallback is, with its cause (a rejected key must not look like READY)."""
     monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
     skills_reply(monkeypatch, {**body, "candidates": [{"name": "x-poster", "path": "/s/x/SKILL.md"}]})
     rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet", "--json")
     rep = json.loads(out)
     assert rep["existing_skills"] == (["x-poster (unverified guess)"] if labelled else ["x-poster"])
-    assert rep["warnings"] == []  # a clarify question or a fallback note is not a failed search
+    assert rep["warnings"] == ([warning] if warning else [])
+    assert rep["verdict"] == ("READY WITH WARNINGS" if warning else "READY")
+
+
+def test_the_launchers_setup_line_reaches_the_user_whole_from_a_deep_checkout(world, monkeypatch, capsys):
+    """The real launcher message for a missing roots.json, from a deep checkout path, is printed uncut."""
+    deep = world["tmp"] / ("a-deep-checkout-folder-" * 4) / "super-jev"
+    shutil.copytree(SKILLS / "skill-search", deep / "skills/skill-search")
+    (deep / "skills/skill-search/roots.json").unlink(missing_ok=True)  # this checkout may have its own
+    request = deep / "request.json"
+    request.write_text('{"request": "posts a tweet"}')
+    r = _REAL_RUN(["bash", str(deep / "skills/skill-search/launcher.sh"), "--request-file", str(request)],
+                  capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k != "CLAUDECODE"})
+    assert r.returncode == 2 and "roots.example.json" in r.stdout  # the real message, not a made-up one
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **k: _R(r.stdout, "", r.returncode))
+    monkeypatch.setattr(ask, "memory", panel(("notes", "available")))
+    rc, out = run(monkeypatch, capsys, "--skill", "posts a tweet")
+    warning = next(l for l in out.splitlines() if "existing-skill search failed" in l)
+    assert str(deep / "skills/skill-search") in warning
+    assert "copy roots.example.json to roots.json and list your skill folders" in warning
 
 
 def test_no_match_is_none_found_not_a_failed_search(world, monkeypatch, capsys):
