@@ -53,7 +53,7 @@ def world(tmp_path, monkeypatch):
             return {"status": "candidates", "candidates": [{"score": 0.9 - 0.05 * i, "originalPath": p} for i, p in enumerate(paths)]}
         if act == "sources":
             return {"status": "ok", "sources": [
-                {"sourceId": "s1", "originalPath": p, "contentSHA": state["sha"] if p == state["routed"] else sha(p)}
+                {"sourceId": "s1", "originalPath": p, "contentSHA": state["sha"] if p == state["routed"] else state.setdefault("shas", {}).setdefault(p, sha(p))}
                 for p in [state["routed"]] + state["also"]]}
         if act == "open":
             return {"status": "ok", "attemptId": "att|" + req["question"]}
@@ -285,6 +285,7 @@ def _three_files(world, tmp_path):
         f.write_text(f"Acme {name} refund window notes.\n")
         extra.append(str(f))
     world["state"]["also"] = extra
+    world["state"]["shas"] = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in extra}  # as at connect
     return extra
 
 
@@ -461,3 +462,26 @@ def test_approve_with_no_answer_still_refuses_a_file_changed_since_connect(world
 
 def test_approve_with_no_answer_needs_an_earlier_search(world, monkeypatch):
     assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_no_answer_refuses_a_list_holding_a_possible_tier_file(world, tmp_path, monkeypatch):
+    _three_files(world, tmp_path)
+    ask_once(world)
+    log = world["sdir"] / "lookups.jsonl"
+    recs = _lines(log)
+    recs[-1]["top"][1]["possible"] = True
+    log.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_no_answer_refuses_a_listed_file_other_than_the_first_changed_since_connect(world, tmp_path, monkeypatch):
+    extra = _three_files(world, tmp_path)
+    ask_once(world)
+    Path(extra[1]).write_text(Path(extra[1]).read_text() + "Edited after connect.\n")
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_an_empty_answer_takes_the_no_text_path(world, monkeypatch):
+    ask_once(world)
+    assert approve_list(monkeypatch, "  ") == 0
+    assert world["gates"] == [] and list(world["cache"].values()) == [f"Saved file: {world['note']}"]

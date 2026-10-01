@@ -72,7 +72,8 @@ saved DATE" (or "no source file"); a changed source says STALE and searches live
   ask.py --principal AGENT --approve "question" ["answer"] [--rank N | --file PATH]
       With no answer text the person vouches for the last lookup's ranked list (up to
       five files): it is saved as a repeat win saves it, approved_by principal:AGENT,
-      the secret scan and unchanged-file check run, no claim check. --rank N or --file
+      the secret scan and unchanged-file check run on every file, no claim check; a list with a
+      possible-tier file is refused. An empty answer counts as none. --rank N or --file
       puts that file first. With an answer:
       Re-searches the last lookup's top pointer and approves it, quotes taken
       verbatim from reviewedText. Next ask of the same question is a cache
@@ -3046,7 +3047,8 @@ def save_answer(principal: str, question: str, answer: str, sdir: Path,
     """The one way a file-backed answer is saved (a repeat win, --approve):
     the secret scan, the unchanged-file check, then the claim check (CLEAN >= SAVE_FLOOR) on the
     cited file, then the write. The caller's word is recorded (approved_by) but never skips a check.
-    claim_check=False is for a repeat win only: its N wins were the evidence. `stored` is the text
+    claim_check=False skips only the claim check, for a repeat win or a no-text --approve, where the
+    N wins or the person vouch for the list. `stored` is the text
     kept as the answer when it differs from `answer` (which still ranks the cited passage).
     `extra` is a repeat win's ranked list, skill suggestions and leans-none flag, kept in the saved record.
     top is the file row {path, pointer} the caller chose, else the last lookup's top file.
@@ -3346,6 +3348,7 @@ def approve(principal: str, question: str, answer, sdir: Path, rank=None, file=N
     if why:
         say(f"not saved: {why}", why)
         return 1
+    answer = answer.strip() if answer and answer.strip() else None
     chosen = None
     if rank is not None or file is not None:
         # The lead picked a listed candidate by hand (any rank, possible tier included).
@@ -3364,6 +3367,9 @@ def approve(principal: str, question: str, answer, sdir: Path, rank=None, file=N
     if answer is None:
         rec = last_lookup(sdir, question)
         rows = [chosen] + [r for r in rec["top"][:5] if r["path"] != chosen["path"]]
+        if any(r.get("possible") for r in rec["top"][:5]):
+            return not_saved(sdir, norm_q(question), "the list has a possible-tier file nobody checked; "
+                             "give the answer text so the claim check runs, or pick one file with --rank N")
         try:
             files = [{"score": r["score"], "path": r["path"], "pointer": r["pointer"], "sha": live_sha(r["path"])} for r in rows]
             why = secret_why(*(Path(f["path"]).read_text(errors="replace") for f in files))
@@ -3371,6 +3377,10 @@ def approve(principal: str, question: str, answer, sdir: Path, rank=None, file=N
             return not_saved(sdir, norm_q(question), f"cannot read {e.filename}: {e.strerror or e}")
         if why:
             return not_saved(sdir, norm_q(question), why)
+        for f in files[1:]:
+            r, st = source_row(principal, f["pointer"], f["path"])
+            if st != "ok" or not r or r.get("contentSHA") != f["sha"]:
+                return not_saved(sdir, norm_q(question), f"stale: {f['path']} changed since connect")
         win = rec.get("win") or {}
         extra = {"files": files, **{k: win[k] for k in ("skills", "leans_none") if win.get(k)}}
     rc = save_answer(principal, question, answer or norm_q(question), sdir, top=chosen,
