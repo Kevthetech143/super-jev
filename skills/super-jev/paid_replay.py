@@ -78,11 +78,12 @@ def file_sha(path) -> str:
         return "missing"
 
 
-def tree_sha(root: Path) -> str:
-    """Contents and names of every file under root, links followed."""
+def tree_sha(root: Path, keep=None) -> str:
+    """Contents and names of every file under root, links followed. `keep`, when given, takes a
+    file's path relative to root and says whether it counts."""
     h = hashlib.sha256()
     if root.is_dir():
-        for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        for f in sorted(p for p in root.rglob("*") if p.is_file() and (keep is None or keep(p.relative_to(root)))):
             h.update(f"{f.relative_to(root)}\0{file_sha(f)}\n".encode())
     return h.hexdigest()
 
