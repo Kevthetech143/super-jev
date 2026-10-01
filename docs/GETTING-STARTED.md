@@ -152,6 +152,10 @@ Jev reads the evidence files and answers, per claim, `SUPPORTED`,
 - Any other exit — the check itself failed (no key, network, unreadable
   output). Treat it as blocked.
 
+Don't know which file holds the fact, or want the proof file and line? Use
+`python3 skills/super-jev/ask.py --principal me --claim "claim one"` instead: it exits
+0 only for TRUE (FALSE is 5, not settled 1), so only exit 0 is a pass there too.
+
 Add `--json` for machine-readable output. Set `SUPERJEV_GATE_CMD` to use your
 own claim-gate tool instead of the built-in client
 (`skills/super-jev/lib/jev_client.py`).
