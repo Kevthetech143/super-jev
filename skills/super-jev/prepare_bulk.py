@@ -982,7 +982,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
     connects on its plain description -- a label problem never drops a file.
 
     `principals` carries every principal this pointer must stay registered for -- a pointer
-    connected under several principals (e.g. primary + primary-helper) must repeat all of
+    connected under several principals (e.g. me + work) must repeat all of
     them on every reconnect, or the harness sees the request as narrowing its scope and
     refuses with "scope-change"."""
     sources = []
@@ -1344,7 +1344,7 @@ def main() -> int:
     ap.add_argument("--pointer")
     ap.add_argument("--principal", dest="principals", action="append", default=[], type=principal_name,
                     help="repeatable. On --refresh, a pointer registered for several principals "
-                         "(e.g. primary + primary-helper) must repeat --principal for each one it "
+                         "(e.g. me + work) must repeat --principal for each one it "
                          "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
