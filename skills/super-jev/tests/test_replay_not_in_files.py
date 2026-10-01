@@ -82,6 +82,7 @@ def test_empty_gold_is_accepted_only_on_an_absent_question_or_an_absent_claim(tm
     refused = [
         {"kind": "claim", "expected": "TRUE", "gold": [], "question": "sam's claim"},
         {"kind": "claim", "expected": "FALSE", "gold": [], "question": "sam's other claim"},
+        {"kind": "claim", "expected": "TRUE", "absent": True, "gold": [], "question": "sam's flagged claim"},
         {"question": "an ordinary question with no gold", "gold": []},
         {"question": "absent but names a file", "absent": True, "gold": ["/a.md"]},
     ]
