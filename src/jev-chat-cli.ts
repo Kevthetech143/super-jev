@@ -92,6 +92,7 @@ export async function run(io: IO): Promise<number> {
 
   /** Runs one helper turn and draws its reply. data is null when the helper did not print one JSON object.
    *  offer (the window only): a reply the app can fix is returned with its fix, and its Next line is left out because the app does it. */
+  let inWindow = false; // the window has /right; the one-shot door does not
   async function helper(t: Turn, extra: { label?: string; refreshed?: boolean; offer?: boolean } = {}): Promise<Reply & { data: any }> {
     const stop = working({ ask: 'Searching your notes', check: 'Checking your notes', connect: 'Connecting' }[t.kind as string] ?? '');
     const t0 = Date.now();
@@ -104,10 +105,10 @@ export async function run(io: IO): Promise<number> {
     try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
     const secs = t.kind === 'status' || t.kind === 'wrong' || t.kind === 'right' ? undefined : (Date.now() - t0) / 1000;
     // a miss that failed (exit 2 or more) is an error whatever it printed; exit 1 only means there was no saved answer to remove
-    if (!data || (t.kind === 'wrong' && res.code > 1)) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: data?.why || lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
+    if (!data || ((t.kind === 'wrong' || t.kind === 'right') && res.code > 1)) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: data?.why || lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
     for (const s of data.sets ?? []) session.connected.add(s.name);
     const fix = extra.offer ? fixOf(data, keySource()) : null;
-    return { data, code: res.code, fix, text: render({ kind: t.kind as any, data, secs, label: extra.label, refreshed: extra.refreshed, noNext: !!fix }, look()) };
+    return { data, code: res.code, fix, text: render({ kind: t.kind as any, data, secs, label: extra.label, refreshed: extra.refreshed, noNext: !!fix, hint: inWindow }, look()) };
   }
 
   const askedKey = (t: Turn) => (t.kind === 'ask' || t.kind === 'check') && needsKey();
@@ -241,6 +242,7 @@ export async function run(io: IO): Promise<number> {
   async function window(): Promise<number> {
     const stop = (r: { text: string; code: number }) => { stdin.setRawMode?.(false); out(r.text); return r.code || 1; };
     if (needsKey()) stdin.setRawMode?.(true); // from the start, so a key pasted before the prompt shows is never echoed
+    inWindow = true;
     let r = await helper({ kind: 'status' });
     if (r.data?.outcome) return stop(r); // the helper could not read the status: show why, never an empty window
     const fresh = !r.data || r.data.next === 'setup'; // no JSON at all (an old Python) goes to setup.py, which says what is missing

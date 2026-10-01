@@ -2730,7 +2730,7 @@ test('RT0 pure: /right and /right N are commands, the helper call is --approve Q
 test('RT0b pure: the screens', () => {
   assert.equal(R('right', APPROVED, { secs: undefined }), '• Saved. Ask it again and it comes back at once.');
   const no = R('right', { done: false, why: 'one of the notes is only a possible match' }, { secs: undefined });
-  assert.match(no, /^• Not saved$/m);
+  assert.match(no, /^• Not saved\.$/m);
   assert.ok(no.includes('one of the notes is only a possible match'));
 });
 
@@ -2777,6 +2777,30 @@ test('RT3 whole app: a save the engine refused is shown with its reason, never a
   assert.match(w.text(), /only a possible match/);
   assert.ok(!/Saved\. Ask/.test(w.text()));
   await w.quit();
+});
+
+test('RT3b whole app: the engine\'s real possible-tier refusal becomes one plain line with no flag; found answers hint at /right; a crash on /right is an error', async () => {
+  const why = 'the list has a possible-tier file nobody checked; give the answer text so the claim check runs (--rank N then picks the file)';
+  const r = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, done: false, why }, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Found 1 note');
+  assert.match(w.text(), /Open them to check\. \/right saves this answer\./);
+  w.say('/right');
+  await w.waitFor('Not saved.');
+  assert.match(w.text(), /Use \/check/);
+  assert.ok(!/--rank|answer text/.test(w.text()));
+  await w.quit();
+  const c = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, outcome: 'error', why: 'engine broke' }, code: 2 }, { when: '--json -- ', out: FOUND() }]);
+  const x = win(c);
+  await x.ready();
+  x.say(Q);
+  await x.waitFor('Found 1 note');
+  x.say('/right');
+  await x.waitFor('engine broke');
+  assert.ok(!/Not saved/.test(x.text()));
+  await x.quit();
 });
 
 test('RT4 whole app: /right with a bad number calls nothing', async () => {

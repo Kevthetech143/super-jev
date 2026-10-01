@@ -19,7 +19,7 @@ export type Look = { width: number; color: boolean; home: string; keyEnv?: strin
   door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: no Next line: the turn was a status (a next step would only point back at it), or the window is about to do the fix itself.
 export type Shown = { kind: 'ask' | 'check' | 'right' | 'wrong' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
-  refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean };
+  refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean; hint?: boolean };
 
 // ---------------------------------------------------------------- reading a line
 /** Shell-style words: single quotes literal, double quotes allow \" \\ \$ \`, a backslash escapes one character. */
@@ -279,7 +279,7 @@ export function render(shown: Shown, look: Look): string {
       said(d.failed, () => 'Failed:');
       leftOut(d.skipped);
     }
-  } else if (shown.kind === 'right') { if (d.done) head('Saved. Ask it again and it comes back at once.', 'green'); else { head('Not saved', 'red'); body(sentence(d.why ?? '')); } }
+  } else if (shown.kind === 'right') { if (d.done) head('Saved. Ask it again and it comes back at once.', 'green'); else { head('Not saved.', 'red'); body(/--|answer text/.test(d.why ?? '') ? 'Some of these notes were not checked. Use /check to test a claim against them.' : sentence(d.why ?? '')); } }
   else if (shown.kind === 'wrong') head(d.removed?.length ? 'Forgotten. Searching fresh…' : "Noted. It won't be saved.");
   else if (o === 'error') {
     const why: Record<string, string> = { 'auth-rejected': `${vendor} rejected the key`, 'no-key': `no ${vendor} key was found`,
@@ -333,6 +333,7 @@ export function render(shown: Shown, look: Look): string {
     });
     if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
     if (d.saved_now) body('Saved for next time.');
+    else if (shown.hint && files.length && !d.saved) body('Open them to check. /right saves this answer.');
     leftOut(d.left_out);
   } else if (o === 'not-found') {
     head('Not in your notes');
