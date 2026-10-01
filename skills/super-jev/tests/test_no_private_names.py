@@ -3,7 +3,8 @@
 
 A user-facing doc or skill file must not carry a real home path, a private agent folder, or a
 fleet seat name: the reader does not have them, and a path that only exists on the author's
-machine is a broken instruction. Patterns are generic (no bot is named here).
+machine is a broken instruction. Patterns are generic; the only fleet-specific ones are the
+primary-brain folder and the CLAW4MAC variable prefix.
 
     python3 -m pytest skills/super-jev/tests/test_no_private_names.py -q
 
@@ -26,13 +27,13 @@ PATTERNS = {
 }
 
 SCOPE = [
-    "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md",
+    "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md",
     "docs/*.md", "skills/*/SKILL.md", "skills/*/references/*.md", "skills/skill-search/**/*",
 ]
 
 # Left out by name, each for a reason. Do not widen this list to make a failure go away.
 EXCLUDED = {
-    "skills/super-jev-build-cycle/": "an internal maintainer workflow, not read by a new user (follow-up listed in the build notes)",
+    "skills/super-jev-build-cycle/": "a shipped optional skill (AGENTS.md) that still hard-codes a private contract path and an approver's name; held for a maintainer decision, not clean",
     "docs/KNOWN-QUIRKS.md": "quirk 11 honestly names the CLAW4MAC_* variables superjev.py still reads; scrubbing it would hide real behavior",
 }
 
@@ -71,7 +72,7 @@ def test_user_facing_files_name_no_private_machine():
 
 def test_the_scan_really_covers_the_files_a_user_reads():
     seen = {rel for rel, _ in _in_scope()}
-    for must in ("README.md", "AGENTS.md", "skills/super-jev/SKILL.md",
+    for must in ("README.md", "AGENTS.md", "CHANGELOG.md", "skills/super-jev/SKILL.md",
                  "skills/super-jev/references/checking.md", "skills/skill-search/SKILL.md"):
         assert must in seen, f"{must} is not scanned"
     assert not any(rel.startswith("skills/super-jev-build-cycle/") or rel == "docs/KNOWN-QUIRKS.md" for rel in seen)

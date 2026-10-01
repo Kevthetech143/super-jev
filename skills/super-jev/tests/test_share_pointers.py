@@ -152,7 +152,7 @@ def _shareable(tmp_path, pointer):
 def test_a_connection_is_private_until_a_person_marks_it(tmp_path, monkeypatch):
     memory, marker, calls = _runtime(tmp_path)
     monkeypatch.setattr(sp, "memory", memory)
-    _connect(memory, tmp_path, "team-notes", ["owner"], folder="agents/hearth/notes", shareable=None)
+    _connect(memory, tmp_path, "team-notes", ["owner"], folder="shared/team/notes", shareable=None)
     assert _shareable(tmp_path, "team-notes") is False  # recorded private at connect
     calls.clear()
     out = sp.share(["team-notes"], ["otherbot"], memory=memory)
@@ -173,7 +173,7 @@ def test_marking_needs_a_named_caller_and_never_assumes_one(tmp_path, monkeypatc
     memory, _, calls = _runtime(tmp_path)
     monkeypatch.setattr(sp, "memory", memory)
     monkeypatch.delenv("SUPERJEV_PRINCIPAL", raising=False)
-    _connect(memory, tmp_path, "team-notes", ["owner"], folder="agents/hearth/notes", shareable=None)
+    _connect(memory, tmp_path, "team-notes", ["owner"], folder="shared/team/notes", shareable=None)
     calls.clear()
     out = sp.mark(["team-notes"], memory=memory)
     assert out["team-notes"].startswith("error: no principal") and _shareable(tmp_path, "team-notes") is False

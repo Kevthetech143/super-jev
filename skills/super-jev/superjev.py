@@ -88,13 +88,13 @@ FLEET_VERIFY_PY = HOME / ".claude/skills/worker-verify/verify.py"
 # skills/super-jev/tests/test_evidence_guard.py there), so the two sides
 # cannot silently drift apart.
 BLOCKED_PATH_PATTERNS = (
-    r"(^|/)logins\.md$",                     # the fleet login vault
-    r"(^|/)[^/]*-secret\.md(/|$)",           # ~/agents/global/tools/*-secret.md
+    r"(^|/)logins\.md$",                     # a login vault file
+    r"(^|/)[^/]*-secret\.md(/|$)",           # a tools folder's *-secret.md files
     r"(^|/)[^/]*secret[^/]*(/|$)",           # any path segment naming a secret
     r"(^|/)\.env(/|$)",                      # .env
     r"(^|/)\.env\.[^/]*(/|$)",               # .env.local, .env.production
-    r"(^|/)profile(/|$)",                    # ~/agents/global/profile/
-    r"(^|/)documents(/|$)",                  # ~/agents/global/documents/
+    r"(^|/)profile(/|$)",                    # a private profile/ folder
+    r"(^|/)documents(/|$)",                  # a private documents/ folder
     r"(^|/)\.config/pw-[^/]*",               # playwright session profiles
     r"(^|/)[^/]*cookies[^/]*(/|$)",          # cookies.sqlite, Cookies
     r"(^|/)[^/]*\.pem(/|$)",
@@ -846,7 +846,7 @@ _EVIDENCE_COUNT_RES = {
         # duration and so matched none of the shapes above. It stayed
         # unmatched while an unrelated, EARLIER "53 passed in 77.52s"
         # receipt (a different task's baseline run, still in scope by the
-        # shared muse-link tool path) paired instead and blocked a true
+        # shared tool path) paired instead and blocked a true
         # report. The bold emphasis is what a worker uses to state a
         # definitive run result in prose, so it is trusted the same way
         # the glyph-prefixed node:test line above is.
@@ -1721,7 +1721,7 @@ def _judge_advisory_demotes(det_block_reasons, block_reasons, code=None):
 # WAS MISSING, in two specific and reproducible ways:
 #
 #   1. --test-cmd was a DIRECTORY-level pytest. worker-verify's
-#      `check_test_cmd` refuses those (a bare pytest in claw4mac launches
+#      `check_test_cmd` refuses those (a bare pytest in an app checkout launches
 #      the live app) and writes "NO TEST OUTPUT WAS COLLECTED" into the
 #      evidence instead of a test run. So "187 passed" had literally
 #      nothing to be checked against.
@@ -3075,7 +3075,7 @@ def _cmd_catch_list(a):
     else:
         # Width sized to the longest bot id actually being printed this call
         # (floored at len("unknown")) rather than a fixed pad — a fixed pad
-        # narrower than a real seat name (e.g. "contentcreator") let that
+        # narrower than a real seat name (e.g. "content-creator-assistant") let that
         # row's bot field run into the reason column with no gap.
         bot_width = max([len(str(rec.get("bot") or "unknown")) for rec in records]
                         + [len("unknown")])
@@ -7789,7 +7789,7 @@ def _facts_stale_report_claims(lines, window_text):
 # RECEIPT SHAPES — tool acts mapped to the plain verbs they support
 # ---------------------------------------------------------------------------
 # The OVERCLAIMS arm's remaining blind spot is not a missing number, it is a
-# missing NOUN. A draft says "logged it", "notified health-fitness",
+# missing NOUN. A draft says "logged it", "notified the ops agent",
 # "scheduled the scan"; the window holds a Write, a send.sh call, a
 # CronCreate — and the judge has to bridge the two on its own. This family
 # states the bridge: an ACT of a named shape ran against a named TARGET, and
@@ -10061,7 +10061,7 @@ def _worktree_trust(path, protected_repo=None):
       1. it resolves (realpath, so a symlink cannot launder its identity);
       2. its REALPATH is not blocked by the module's evidence guard
          (is_blocked_path / BLOCKED_PATH_PATTERNS) — a symlink named
-         innocuously that points at ~/agents/global/profile is refused;
+         innocuously that points at a profile folder is refused;
       3. it is a directory;
       4. it is not the protected repo's own main checkout;
       5. its realpath sits under one of `_worktree_roots()`;

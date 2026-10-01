@@ -138,7 +138,7 @@ def valid_v2_schema(connection: sqlite3.Connection, tables: set[str]) -> bool:
 
 
 # An agent name: letters, digits, ".", "_", "-", starting with a letter or digit. A space or a path
-# separator made a second, empty identity ("businessfi " beside "businessfi") and could point an
+# separator made a second, empty identity ("sales " beside "sales") and could point an
 # agent's state folder at another agent's ("x/../primary").
 PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
