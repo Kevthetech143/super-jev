@@ -6,6 +6,13 @@ result is tied to.
         --bar BAR.json --bar-sha256 SHA --record OUT.json --max-asks N \\
         [--env NAME=VALUE ...] [--time-cap-min M] [--timeout S] [--seed K]
     judge_support.py --fingerprint --ask BUILD/ask.py --judge NAME [--env NAME=VALUE ...]
+    judge_support.py --applies RECORD --ask BUILD/ask.py --judge NAME --cases FILE --cases-sha256 SHA \\
+        --bar BAR.json --bar-sha256 SHA [--env NAME=VALUE ...]
+
+--applies is free (no ask, no judge call): exit 0 when RECORD is a finished record made on this build, these
+cases and this bar (same fingerprint, cases_sha256 and bar_sha256), printing the verdict re-derived from its
+stored hits (the stored verdict field is never trusted); else exit 1 with the reason (unreadable, incomplete,
+no fingerprint, unknown judge, or fingerprint, cases or bar differ); exit 2 is bad input (a SHA mismatch).
 
 The run asks every case of the file once through the build's full paid ask path, on paid_replay's frozen
 copy of state and memory (fresh copy per ask, SUPERJEV_REPLAY=1), times each ask, grades it, and holds the
@@ -160,13 +167,18 @@ def _hundredths(x, what: str) -> int:
     return int(h)
 
 
+def check_sha(flag: str, path, sha) -> bytes:
+    """The file's bytes, after its SHA-256 matched the pin. ValueError names the actual SHA."""
+    data = Path(path).expanduser().read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise ValueError(f"{flag} sha256 mismatch: the file is {hashlib.sha256(data).hexdigest()}")
+    return data
+
+
 def load_bar(path, sha) -> dict:
     """The bar file, after its SHA-256 matched: {"max_excluded": N, "rows": [row, ...]}; each row names its
     measure, its bar and its stratum, and (rate and secs rows) its hundredths. ValueError: anything else."""
-    data = Path(path).expanduser().read_bytes()
-    if hashlib.sha256(data).hexdigest() != sha:
-        raise ValueError(f"bar sha256 mismatch: the file is {hashlib.sha256(data).hexdigest()}")
-    bar = json.loads(data)
+    bar = json.loads(check_sha("bar", path, sha))
     if not isinstance(bar, dict) or set(bar) != {"max_excluded", "rows"}:
         raise ValueError('a bar is {"max_excluded": N, "rows": [...]} and nothing else; there are no defaults')
     if not isinstance(bar["max_excluded"], int) or isinstance(bar["max_excluded"], bool) or bar["max_excluded"] < 0:
@@ -222,6 +234,16 @@ def row_passes(row: dict, hits: int, n: int) -> bool:
     return row_state(row, hits, n) is True
 
 
+def finished(stop) -> bool:
+    """A run that ended complete, or because a row's bar was out of reach, counts; any other stop is incomplete."""
+    return isinstance(stop, str) and (stop == "complete" or stop.startswith("bar-unreachable"))
+
+
+def verdict_of(met: bool, stop: str) -> str:
+    """The one verdict rule, for a run and for a stored record: supported needs a complete run with every row met."""
+    return ("supported" if met and stop == "complete" else "not supported") if finished(stop) else "incomplete"
+
+
 def row_score(row: dict, case: dict, res: dict):
     """None when the case is not in this row's stratum; else 1 or 0: a hit, or for a count row a bad case.
     An errored case never hits; an errored question is over every time line; an errored claim is held,
@@ -248,10 +270,7 @@ def _now() -> str:
 def run(a, ap) -> int:
     """One judge, one build, the whole case file, one record. Returns the exit code."""
     try:
-        for flag, path, sha in (("cases", a.cases, a.cases_sha256), ("bar", a.bar, a.bar_sha256)):
-            actual = hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
-            if actual != sha:
-                raise ValueError(f"{flag} sha256 mismatch: the file is {actual}")
+        check_sha("cases", a.cases, a.cases_sha256)
         bar = load_bar(a.bar, a.bar_sha256)
         env = parse_env(a.env)
         if Path(a.record).expanduser().exists():
@@ -350,8 +369,7 @@ def run(a, ap) -> int:
                      **({"not_run": left} if left else {}), "by_split": x["split"]})
     if not stop:
         stop = "complete"
-    finished = stop == "complete" or stop.startswith("bar-unreachable")
-    verdict = ("supported" if all(r["pass"] for r in rows) and stop == "complete" else "not supported") if finished else "incomplete"
+    verdict = verdict_of(all(r["pass"] for r in rows), stop)
     rec.update(end=_now(), rows=rows, excluded=excluded, error_count=errors, asks=asks, n_run=len(graded) - len(excluded["drift"]),
                N=len(runnable), stop_reason=stop, verdict=verdict, cases=graded,
                secs_total=round(time.monotonic() - t0, 1))
@@ -379,10 +397,80 @@ def run(a, ap) -> int:
     return {"supported": 0, "not supported": 1, "incomplete": 3}[verdict]
 
 
+def rederive(rows) -> bool:
+    """True when every stored row meets its stored bar, worked out again from the stored hits and n
+    (a row that measured nothing never passes). ValueError: a row that is not shaped like a record's."""
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("no bar rows")
+    for r in rows:
+        try:
+            bar, hits, n = r["bar"], r["hits"], r["n"]
+            if r["kind"] == "count":
+                row = {"kind": "count", "bar": {"max_count": bar["max_count"]}}
+            elif r["kind"] == "rate":
+                row = {"kind": "rate", "h": _hundredths(bar["min_rate"], r["name"]), "bar": bar}
+            elif r["kind"] == "secs":
+                row = {"kind": "secs", "h": bar["percentile"], "bar": bar}
+            else:
+                raise ValueError(f"row {r['name']}: unknown kind {r['kind']!r}")
+            if not all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in (hits, n)):
+                raise ValueError(f"row {r['name']}: hits and n are whole numbers")
+        except (KeyError, TypeError) as e:
+            raise ValueError(f"a stored row is malformed ({type(e).__name__}: {e})") from None
+        if not row_passes(row, hits, n):
+            return False
+    return True
+
+
+def applies(a, ap) -> int:
+    """Does this record belong to this build, these cases and this bar? Exit 0 yes (and its verdict), 1 no."""
+    try:
+        check_sha("cases", a.cases, a.cases_sha256)
+        check_sha("bar", a.bar, a.bar_sha256)
+        env = parse_env(a.env)
+    except (OSError, ValueError) as e:
+        ap.error(str(e))
+
+    def no(why):
+        print(f"does not apply: {why}")
+        return 1
+
+    try:
+        rec = json.loads(Path(a.applies).expanduser().read_text())
+        if not isinstance(rec, dict):
+            raise ValueError("not a record")
+    except (OSError, ValueError) as e:
+        return no(f"record unreadable ({e})")
+    stop = rec.get("stop_reason")
+    if not finished(stop):
+        return no(f"incomplete ({stop or 'no stop reason'})")
+    if not isinstance(rec.get("fingerprint"), str) or not rec["fingerprint"]:
+        return no("no fingerprint")
+    try:
+        now = fingerprint(Path(a.ask), a.judge, env)
+    except (OSError, ValueError) as e:
+        return no(str(e))  # an unknown judge names the known ones
+    for what, mine, theirs in (("fingerprint", now["fingerprint"], rec["fingerprint"]),
+                               ("cases", a.cases_sha256, rec.get("cases_sha256")),
+                               ("bar", a.bar_sha256, rec.get("bar_sha256"))):
+        if mine != theirs:
+            return no(f"{what} differs")
+    try:
+        met = rederive(rec.get("rows"))
+    except ValueError as e:
+        return no(str(e))
+    verdict = verdict_of(met, stop)
+    print(f"applies: {verdict} (re-derived from the stored hits; ended {rec.get('end')}, "
+          f"fingerprint {rec['fingerprint'][:12]})")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Judge support: grade one judge on one build against your bar, "
-                                             "or print its fingerprint.")
+                                             "print its fingerprint, or say whether a record applies.")
     ap.add_argument("--fingerprint", action="store_true", help="print the fingerprint (free) and stop")
+    ap.add_argument("--applies", metavar="RECORD",
+                    help="free: exit 0 when RECORD is a finished record for this build, cases and bar, else 1")
     ap.add_argument("--ask", help="the build's ask.py")
     ap.add_argument("--judge", help="the judge name (a profile, an alias or fake)")
     ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
@@ -398,7 +486,10 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=0, help="case order seed (default 0; recorded)")
     a = ap.parse_args(argv)
     os.environ.pop("SUPERJEV_JUDGE", None)  # this tool never judges: a stray selector must not stop it reading the table
-    need_flags = ["ask", "judge"] + ([] if a.fingerprint else ["cases", "cases_sha256", "bar", "bar_sha256", "record", "max_asks"])
+    if a.fingerprint and a.applies:
+        ap.error("--fingerprint and --applies are separate commands")
+    need_flags = ["ask", "judge"] + ([] if a.fingerprint else ["cases", "cases_sha256", "bar", "bar_sha256"]
+                                     + ([] if a.applies else ["record", "max_asks"]))
     if absent := [f"--{n.replace('_', '-')}" for n in need_flags if getattr(a, n) is None]:
         ap.error("required: " + ", ".join(absent))
     if a.fingerprint:
@@ -407,7 +498,7 @@ def main(argv=None) -> int:
         except (OSError, ValueError) as e:
             ap.error(str(e))
         return 0
-    return run(a, ap)
+    return applies(a, ap) if a.applies else run(a, ap)
 
 
 if __name__ == "__main__":
