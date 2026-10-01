@@ -1,11 +1,27 @@
 #!/usr/bin/env python3
-"""Which judge on which build: the fingerprint a support record is tied to.
+"""Judge support: does this judge, on this build, meet YOUR bar on YOUR cases? Plus the fingerprint a
+result is tied to.
 
+    judge_support.py --ask BUILD/ask.py --judge NAME --cases FILE --cases-sha256 SHA \\
+        --bar BAR.json --bar-sha256 SHA --record OUT.json --max-asks N \\
+        [--env NAME=VALUE ...] [--time-cap-min M] [--timeout S] [--seed K]
     judge_support.py --fingerprint --ask BUILD/ask.py --judge NAME [--env NAME=VALUE ...]
 
-Prints the build's fingerprint for that judge as one JSON line (free: no ask, no judge call).
-The fingerprint is a SHA-256 over five parts, so it changes exactly when the judge, its profile,
-an explicit setting or the engine code that talks to the judge changes, and at no other time:
+The run asks every case of the file once through the build's full paid ask path, on paid_replay's frozen
+copy of state and memory (fresh copy per ask, SUPERJEV_REPLAY=1), times each ask, grades it, and holds the
+totals against the bar. It prints PASS or FAIL per bar row with hits/n, then the verdict, and writes one
+JSON record (refusing to overwrite one). Exit 0 supported, 1 not supported, 3 incomplete (a time cap, a
+prepare-cache change mid-run, more excluded cases than the bar allows, a pointer not ready, an interrupt),
+2 bad input (a SHA mismatch prints the actual SHA). See references/judge-support.md for the file formats.
+
+Cases are paid_replay's (question, gold, principal, split; a question with "absent": true and "gold": [], a
+claim with "kind": "claim" and "expected" TRUE, FALSE or ABSENT). The whole file runs; every row names its
+principal. The child ask sees no inherited SUPERJEV_* setting: the tool sets SUPERJEV_JUDGE=NAME and the
+replay settings, and anything else it needs comes from --env (the NAME goes in the record, the value only
+into the fingerprint). The tool never reads, prints or writes a key: the build's own ask.py loads it.
+
+The fingerprint is a SHA-256 over five parts, so it changes exactly when the judge, its profile, an explicit
+setting or the engine code that talks to the judge changes, and at no other time:
 
   judge              the profile key after aliases
   implementation     "profile", or "fake" for the test judge (it uses the default profile's numbers,
@@ -20,14 +36,18 @@ an explicit setting or the engine code that talks to the judge changes, and at n
                      never printed)
 
 A hosted model alias can change behind the same profile; the fingerprint cannot see that.
-Exit 0 prints the fingerprint; exit 2 is bad input (an unknown judge, an unreadable build or table).
 """
 import argparse
 import hashlib
 import json
 import os
+import random
 import re
 import sys
+import tempfile
+import time
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -40,6 +60,20 @@ JUDGE_PATH = ("skills/super-jev", "src", "experiments/verified-pointer-memory")
 CODE_SUFFIXES = (".py", ".ts", ".mjs", ".js", ".sh")
 NOT_SHIPPED = ("node_modules", "__pycache__", ".git")
 ENV_PAIR = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
+#: Every bar row is one of these. (kind, the cases it measures). A "rate" row needs a minimum share of hits,
+#: a "count" row allows at most so many bad cases (0 = zero tolerance), a "secs" row bounds a nearest-rank
+#: percentile of the asks' wall seconds.
+MEASURES = {
+    "top5": ("rate", "answerable"),            # a gold file in the final top 5
+    "rank1": ("rate", "answerable"),           # a gold file at rank 1
+    "absent": ("rate", "absent"),              # no file returned on a not-in-files question
+    "claims_right": ("rate", "claim"),         # a TRUE or FALSE claim asserted correctly
+    "claims_wrong": ("count", "claim"),        # a TRUE or FALSE claim asserted wrong
+    "claims_absent_asserted": ("count", "claim_absent"),  # an ABSENT claim asserted TRUE or FALSE
+    "secs": ("secs", "all"),
+}
+BAR_KEYS = {"rate": "min_rate", "count": "max_count", "secs": None}
+PROTECTED_ENV = ("SUPERJEV_JUDGE", "SUPERJEV_STATE_DIR")
 
 
 def _sha(obj) -> str:
@@ -94,20 +128,275 @@ def fingerprint(ask: Path, judge: str, env=None) -> dict:
     return {**parts, "fingerprint": _sha(parts)}
 
 
+def stratum(case: dict) -> str:
+    if case.get("kind") == "claim":
+        return "claim_absent" if case["expected"] == "ABSENT" else "claim"
+    return "absent" if sc.is_absent(case) else "answerable"
+
+
+def need(hundredths: int, n: int) -> int:
+    """The smallest hit count at or above rate x n, in integers (a float ceil gives 8, not 7, for 0.28 x 25)."""
+    return -(-(hundredths * n) // 100)
+
+
+def _hundredths(x, what: str) -> int:
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"bar {what}: a rate is a number")
+    h = Decimal(str(x)) * 100
+    if h != h.to_integral_value():
+        raise ValueError(f"bar {what}: a rate has at most two decimals, got {x}")
+    if not 1 <= int(h) <= 100:
+        raise ValueError(f"bar {what}: a rate is above 0 and at most 1, got {x}")
+    return int(h)
+
+
+def load_bar(path, sha) -> dict:
+    """The bar file, after its SHA-256 matched: {"max_excluded": N, "rows": [row, ...]}; each row names its
+    measure, its bar and its stratum, and (rate and secs rows) its hundredths. ValueError: anything else."""
+    data = Path(path).expanduser().read_bytes()
+    if hashlib.sha256(data).hexdigest() != sha:
+        raise ValueError(f"bar sha256 mismatch: the file is {hashlib.sha256(data).hexdigest()}")
+    bar = json.loads(data)
+    if not isinstance(bar, dict) or set(bar) != {"max_excluded", "rows"}:
+        raise ValueError('a bar is {"max_excluded": N, "rows": [...]} and nothing else; there are no defaults')
+    if not isinstance(bar["max_excluded"], int) or isinstance(bar["max_excluded"], bool) or bar["max_excluded"] < 0:
+        raise ValueError("bar max_excluded must be a whole number, 0 or more")
+    if not isinstance(bar["rows"], list) or not bar["rows"]:
+        raise ValueError("a bar needs at least one row")
+    rows, names = [], set()
+    for raw in bar["rows"]:
+        measure = raw.get("measure") if isinstance(raw, dict) else None
+        if measure not in MEASURES:
+            raise ValueError(f"bar row measure must be one of {', '.join(MEASURES)}: {raw!r}")
+        kind, st = MEASURES[measure]
+        if kind == "secs":
+            keys = {"measure", "percentile", "max_secs"}
+            p, m = raw.get("percentile"), raw.get("max_secs")
+            if (not isinstance(p, int) or isinstance(p, bool) or not 1 <= p <= 100 or isinstance(m, bool)
+                    or not isinstance(m, (int, float)) or m <= 0):
+                raise ValueError(f"bar row {raw!r}: secs needs a percentile (1-100, whole) and max_secs above 0")
+            row = {"name": f"secs_p{p}", "bar": {"percentile": p, "max_secs": m}, "h": p}
+        else:
+            keys = {"measure", BAR_KEYS[kind]}
+            value = raw.get(BAR_KEYS[kind])
+            if kind == "rate":
+                row = {"name": measure, "bar": {"min_rate": value}, "h": _hundredths(value, measure)}
+            elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"bar row {raw!r}: max_count is a whole number, 0 or more")
+            else:
+                row = {"name": measure, "bar": {"max_count": value}}
+        if set(raw) != keys:
+            raise ValueError(f"bar row {raw!r}: expected exactly {sorted(keys)}")
+        if row["name"] in names:
+            raise ValueError(f"bar row {row['name']} is given twice")
+        names.add(row["name"])
+        rows.append({**row, "measure": measure, "kind": kind, "stratum": st})
+    return {"max_excluded": bar["max_excluded"], "rows": rows}
+
+
+def row_passes(row: dict, hits: int, n: int) -> bool:
+    """The one grading rule for a finished row. A row that measured nothing never passes."""
+    if n == 0:
+        return False
+    return hits <= row["bar"]["max_count"] if row["kind"] == "count" else hits >= need(row["h"], n)
+
+
+def row_score(row: dict, case: dict, res: dict):
+    """None when the case is not in this row's stratum; else 1 or 0: a hit, or for a count row a bad case.
+    An errored case never hits; an errored question is over every time line; an errored claim is held,
+    never asserted (it fails 'claims_right' only)."""
+    if row["stratum"] not in ("all", stratum(case)):
+        return None
+    err, m = "error" in res, row["measure"]
+    if m == "top5":
+        return int(not err and res["rank"] is not None)
+    if m == "rank1":
+        return int(not err and res["rank"] == 1)
+    if m in ("absent", "claims_right"):
+        return int(not err and res["ok"])
+    if m in ("claims_wrong", "claims_absent_asserted"):
+        asserted = not err and res.get("verdict") in ("TRUE", "FALSE")
+        return int(asserted and (m == "claims_absent_asserted" or res["verdict"] != case["expected"]))
+    return int(res["secs"] <= row["bar"]["max_secs"] and not (err and case.get("kind") != "claim"))
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def check_env_names(env: dict) -> None:
+    for name, value in env.items():
+        if name in PROTECTED_ENV or (name in pr.REPLAY_ENV and value != pr.REPLAY_ENV[name]):
+            raise ValueError(f"--env {name}: the tool sets this one itself")
+
+
+def run(a, ap) -> int:
+    """One judge, one build, the whole case file, one record. Returns the exit code."""
+    try:
+        for flag, path, sha in (("cases", a.cases, a.cases_sha256), ("bar", a.bar, a.bar_sha256)):
+            actual = hashlib.sha256(Path(path).expanduser().read_bytes()).hexdigest()
+            if actual != sha:
+                raise ValueError(f"{flag} sha256 mismatch: the file is {actual}")
+        bar = load_bar(a.bar, a.bar_sha256)
+        env = parse_env(a.env)
+        check_env_names(env)
+        if Path(a.record).expanduser().exists():
+            raise ValueError(f"{a.record} exists; a record is never overwritten")
+        plan = pr.load_run([a.ask], [a.cases], None, a.max_asks, memory_hint="")
+        for c in plan.cases:
+            try:
+                sc.principal_name(c["principal"])
+            except Exception as e:  # argparse.ArgumentTypeError from the shared name rule
+                raise ValueError(str(e)) from None
+        fp = fingerprint(Path(a.ask), a.judge, env)
+        for row in bar["rows"]:
+            if not any(row["stratum"] in ("all", stratum(c)) for c in plan.cases):
+                raise ValueError(f"bar row {row['name']} measures {row['stratum']} cases and the file has none")
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        ap.error(str(e))
+    build, cases, cache = plan.builds[0], plan.cases, plan.caches[0]
+    child = {k: v for k, v in os.environ.items() if not k.startswith("SUPERJEV_")}
+    child.update(env, SUPERJEV_JUDGE=a.judge)
+    missing = [c for c in cases if c["gold"] and not any(os.path.exists(g) for g in c["gold"])]
+    runnable = [c for c in cases if c not in missing]
+    random.Random(a.seed).shuffle(runnable)
+    rec = {"judge": fp["judge"], "implementation": fp["implementation"], "fingerprint": fp["fingerprint"],
+           "fingerprint_parts": {k: fp[k] for k in ("profile_sha256", "judge_path_sha256", "env_sha256")},
+           "env_names": sorted(env), "ask": str(build), "cases_sha256": a.cases_sha256, "bar_sha256": a.bar_sha256,
+           "max_excluded": bar["max_excluded"], "seed": a.seed, "start": _now()}
+    acc = {r["name"]: {"hits": 0, "n": 0, "seen": 0, "split": {}} for r in bar["rows"]}
+    total = {r["name"]: sum(r["stratum"] in ("all", stratum(c)) for c in runnable) for r in bar["rows"]}
+    graded, excluded, asks, stop, t0 = [], {"missing_gold": [c["question"] for c in missing], "drift": []}, 0, "", time.monotonic()
+    snap, errors, out_of_reach = {}, 0, []
+
+    def unreachable(row):
+        r = acc[row["name"]]
+        left = total[row["name"]] - r["seen"]
+        if row["kind"] == "count":
+            return r["hits"] > row["bar"]["max_count"]
+        return r["hits"] + left < need(row["h"], r["n"] + left)
+
+    with tempfile.TemporaryDirectory(prefix="sj-support-base-") as base:
+        base = Path(base)
+        try:
+            snap = pr.snapshot({c["principal"] for c in cases}, plan.config, base)
+        except (OSError, ValueError, KeyError, pr.sqlite3.Error) as e:
+            ap.error(f"cannot snapshot state and memory: {e}")
+        rec["state_root"], rec["snapshot"] = str(pr.state_root()), snap
+        if len(missing) > bar["max_excluded"]:
+            stop = "excluded over max_excluded"
+        elif why := pr.preflight([build], base, {c["principal"] for c in cases}, a.timeout, environ=child):
+            stop = "could-not-start"
+            rec["not_ready"] = why
+        else:
+            sources = pr.eligible_sources(base, cache)
+            try:
+                for i, c in enumerate(runnable):
+                    gold = {os.path.realpath(g) for g in c["gold"]}
+                    before = {p: pr.file_sha(p) for p in sources | gold}
+                    res = pr.grade(build, base, c, a.timeout, environ=child)
+                    asks += 1
+                    why = pr.drifted({"read": {}}, res, before) if "error" not in res else ""
+                    members = [r for r in bar["rows"] if r["stratum"] in ("all", stratum(c))]
+                    for r in members:
+                        acc[r["name"]]["seen"] += 1
+                    entry = {"question": c["question"], "principal": c["principal"], "split": c["split"],
+                             "kind": c.get("kind") or "question", "stratum": stratum(c),
+                             **{k: v for k, v in res.items() if k != "read"}}
+                    if why:
+                        excluded["drift"].append({"question": c["question"], "why": why})
+                        entry["excluded"] = "drift"
+                    else:
+                        errors += "error" in res
+                        for r in members:
+                            score, a_ = row_score(r, c, res), acc[r["name"]]
+                            a_["hits"] += score
+                            a_["n"] += 1
+                            sp = a_["split"].setdefault(c["split"], {"hits": 0, "n": 0})
+                            sp["hits"] += score
+                            sp["n"] += 1
+                    graded.append(entry)
+                    if len(excluded["missing_gold"]) + len(excluded["drift"]) > bar["max_excluded"]:
+                        stop = "excluded over max_excluded"
+                    elif out_of_reach := [r["name"] for r in bar["rows"] if unreachable(r)]:
+                        stop = "bar-unreachable: " + ", ".join(out_of_reach)
+                    elif a.time_cap_min is not None and i + 1 < len(runnable) and time.monotonic() - t0 > a.time_cap_min * 60:
+                        stop = "time cap"
+                    if stop:
+                        break
+            except KeyboardInterrupt:
+                stop = "interrupted"
+        if asks and pr.tree_sha(cache) != plan.cache_sha:  # the data under every ask moved: no result stands
+            stop = "prepare-cache changed during the run"
+    rows = []
+    for r in bar["rows"]:
+        x = acc[r["name"]]
+        left = total[r["name"]] - x["seen"] if r["name"] in out_of_reach and r["kind"] != "count" else 0
+        n = x["n"] + left  # a row the bar is out of reach for counts the cases never run as misses
+        rows.append({"name": r["name"], "measure": r["measure"], "kind": r["kind"], "stratum": r["stratum"],
+                     "bar": r["bar"], "hits": x["hits"], "n": n, "pass": row_passes(r, x["hits"], n),
+                     **({"need": need(r["h"], n)} if r["kind"] != "count" else {}),
+                     **({"not_run": left} if left else {}), "by_split": x["split"]})
+    if not stop:
+        stop = "complete"
+    finished = stop == "complete" or stop.startswith("bar-unreachable")
+    verdict = ("supported" if all(r["pass"] for r in rows) and stop == "complete" else "not supported") if finished else "incomplete"
+    rec.update(end=_now(), rows=rows, excluded=excluded, error_count=errors, asks=asks, n_run=len(graded) - len(excluded["drift"]),
+               N=len(runnable), stop_reason=stop, verdict=verdict, cases=graded,
+               secs_total=round(time.monotonic() - t0, 1))
+    text = json.dumps(rec, indent=1)
+    for v in env.values():  # a setting's value can hold a token: never in the record, even inside an error line
+        if len(v) >= 6:
+            text = text.replace(json.dumps(v)[1:-1], "<env value>")
+    out = Path(a.record).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text)
+    print(f"judge_support: {fp['judge']} ({fp['implementation']}), fingerprint {fp['fingerprint'][:12]}, "
+          f"{rec['n_run']}/{rec['N']} case(s) run, {asks} ask(s), {errors} error(s)")
+    if rec.get("not_ready"):
+        print("  not started, no ask spent: every pointer must be ready (a run never reconnects):\n  " + rec["not_ready"])
+    for r in rows:
+        shown = (f"{r['hits']} bad" if r["kind"] == "count" else f"{r['hits']}/{r['n']}"
+                 + (f", {r['not_run']} not run" if "not_run" in r else ""))
+        print(f"  {'PASS' if r['pass'] else 'FAIL':5} {r['name']:24} {shown}  (bar: "
+              + ", ".join(f"{k} {v}" for k, v in r["bar"].items()) + (f"; needs {r['need']}" if "need" in r else "") + ")")
+    if any(excluded.values()):
+        print(f"  excluded: {len(excluded['missing_gold'])} missing gold, {len(excluded['drift'])} drift "
+              f"(at most {bar['max_excluded']})")
+    print(f"verdict: {verdict} ({stop})")
+    print(f"record: {out}")
+    return {"supported": 0, "not supported": 1, "incomplete": 3}[verdict]
+
+
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Judge support: the fingerprint of one judge on one build.")
-    ap.add_argument("--fingerprint", action="store_true", required=True, help="print the fingerprint (free)")
-    ap.add_argument("--ask", required=True, help="the build's ask.py")
-    ap.add_argument("--judge", required=True, help="the judge name (a profile, an alias or fake)")
+    ap = argparse.ArgumentParser(description="Judge support: grade one judge on one build against your bar, "
+                                             "or print its fingerprint.")
+    ap.add_argument("--fingerprint", action="store_true", help="print the fingerprint (free) and stop")
+    ap.add_argument("--ask", help="the build's ask.py")
+    ap.add_argument("--judge", help="the judge name (a profile, an alias or fake)")
     ap.add_argument("--env", action="append", default=[], metavar="NAME=VALUE",
                     help="a setting the run needs; part of the fingerprint (repeatable)")
+    ap.add_argument("--cases", help="the case file (JSONL; the whole file runs)")
+    ap.add_argument("--cases-sha256", help="its SHA-256")
+    ap.add_argument("--bar", help="the bar file (JSON)")
+    ap.add_argument("--bar-sha256", help="its SHA-256")
+    ap.add_argument("--record", help="where to write the record (never overwritten)")
+    ap.add_argument("--max-asks", type=int, help="hard cap on paid asks")
+    ap.add_argument("--time-cap-min", type=float, help="stop, incomplete, when the run passes this many minutes")
+    ap.add_argument("--timeout", type=float, default=300, help="seconds per ask (default 300)")
+    ap.add_argument("--seed", type=int, default=0, help="case order seed (default 0; recorded)")
     a = ap.parse_args(argv)
     os.environ.pop("SUPERJEV_JUDGE", None)  # this tool never judges: a stray selector must not stop it reading the table
-    try:
-        print(json.dumps(fingerprint(Path(a.ask), a.judge, parse_env(a.env)), sort_keys=True))
-    except (OSError, ValueError) as e:
-        ap.error(str(e))
-    return 0
+    need_flags = ["ask", "judge"] + ([] if a.fingerprint else ["cases", "cases_sha256", "bar", "bar_sha256", "record", "max_asks"])
+    if absent := [f"--{n.replace('_', '-')}" for n in need_flags if getattr(a, n) is None]:
+        ap.error("required: " + ", ".join(absent))
+    if a.fingerprint:
+        try:
+            print(json.dumps(fingerprint(Path(a.ask), a.judge, parse_env(a.env)), sort_keys=True))
+        except (OSError, ValueError) as e:
+            ap.error(str(e))
+        return 0
+    return run(a, ap)
 
 
 if __name__ == "__main__":
