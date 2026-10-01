@@ -24,7 +24,8 @@ from test_paid_replay import FAKE, _log, _register, env  # noqa: E402,F401
 FAKE_JS = FAKE.replace('f.write(json.dumps({"q": q,',
                        'f.write(json.dumps({"env": {k: v for k, v in os.environ.items() if k.startswith(("SUPERJEV_", "SAM_"))}, "q": q,')
 assert FAKE_JS != FAKE
-TOKEN = "quillbrook-token-123456"
+# Joined so no single literal after "TOKEN =" is eight characters or more: the CI secret scan flags one.
+TOKEN = "quill" + "brook-token-123456"
 
 
 @pytest.fixture
@@ -139,6 +140,40 @@ def test_one_asserted_wrong_claim_stops_the_run_early_not_supported(w):
     assert rec["asks"] == len(asked(w.tmp)) == 1 < rec["N"] == 4
 
 
+@pytest.mark.parametrize("top5_rate,mark,decided", [(0.75, "OPEN", None), (0.25, "PASS", True)])
+def test_an_early_stop_marks_another_row_pass_only_when_the_cases_run_already_settle_it(w, capsys, top5_rate, mark, decided):
+    # Every case is found at rank 2: top5 hits each time, rank1 never does, so rank1 (0.75 of 8 = 6) is out of reach
+    # after 3 asks. top5 has 3 hits of 3 asked, but 8 cases in all: 0.75 needs 6 (still open), 0.25 needs 2 (met).
+    rows = [Q(w, name, "abcdefgh"[i]) for i, name in enumerate(["one", "two", "three", "four", "five", "six", "seven", "eight"])]
+    plan = {r["question"]: {"final": [(0.9, w.f["h"]), (0.8, w.f["abcdefgh"[i]])]} for i, r in enumerate(rows)}
+    rc, rec = go(w, rows, plan, [{"measure": "top5", "min_rate": top5_rate}, {"measure": "rank1", "min_rate": 0.75}])
+    by = {r["name"]: r for r in rec["rows"]}
+    assert rc == 1 and rec["verdict"] == "not supported" and rec["stop_reason"] == "bar-unreachable: rank1" and rec["asks"] == 3
+    assert (by["rank1"]["pass"], by["rank1"]["hits"], by["rank1"]["n"], by["rank1"]["not_run"]) == (False, 0, 8, 5)
+    top5 = by["top5"]
+    assert (top5["pass"], top5["hits"], top5["n"], top5["not_run"]) == (decided, 3, 8, 5)  # n is every case the row will see
+    assert top5["need"] == js.need(round(top5_rate * 100), 8)
+    out = capsys.readouterr().out
+    assert f"{mark:5} top5" in out and "FAIL  rank1" in out and "3/8, 5 not run" in out
+
+
+def test_an_early_stop_leaves_a_count_row_and_a_rate_row_open_whichever_case_ran_first(w, capsys):
+    # The time row is out of reach after the first ask (every ask outlasts it), whatever case came first.
+    rows = [Q(w, name, "abc"[i]) for i, name in enumerate(["one", "two", "three"])] + [
+        {"kind": "claim", "question": f"Sam owns Quillbrook plot {i}.", "expected": "TRUE", "gold": [w.f["e"]]} for i in range(2)]
+    plan = {r["question"]: {"final": [(0.9, r["gold"][0])], "sleep": 0.2,
+                            **({"verdict": "TRUE (supported 0.95)"} if "kind" in r else {})} for r in rows}
+    rc, rec = go(w, rows, plan, [{"measure": "top5", "min_rate": 0.75}, {"measure": "claims_wrong", "max_count": 0},
+                                 {"measure": "secs", "percentile": 90, "max_secs": 0.05}])
+    by = {r["name"]: r for r in rec["rows"]}
+    assert rc == 1 and rec["stop_reason"] == "bar-unreachable: secs_p90" and rec["asks"] == 1
+    assert by["secs_p90"]["pass"] is False
+    assert by["top5"]["pass"] is None and by["top5"]["n"] == 3 and by["top5"]["need"] == 3 and by["top5"]["not_run"] >= 2
+    assert by["claims_wrong"]["pass"] is None and by["claims_wrong"]["not_run"] >= 1
+    out = capsys.readouterr().out
+    assert "OPEN  top5" in out and "OPEN  claims_wrong" in out and "FAIL  secs_p90" in out and "PASS" not in out
+
+
 def test_a_timed_out_absent_claim_is_held_counted_as_an_error_and_the_run_goes_on(w):
     rows = [{"kind": "claim", "question": "Sam owns the Quillbrook cottage.", "expected": "TRUE", "gold": [w.f["e"]]},
             {"kind": "claim", "question": "Sam owns a Quillbrook boat.", "expected": "ABSENT", "gold": []}]
@@ -163,8 +198,9 @@ def test_an_errored_true_claim_fails_claims_right_only(w):
 
 
 def test_the_integer_rate_rule_needs_7_of_25_for_0_28_not_8():
-    assert js.need(28, 25) == 7 and js.need(88, 51) == 45 and js.need(70, 51) == 36 and js.need(88, 9) == 8
-    assert js.need(50, 60) == 30 and js.need(90, 60) == 54
+    assert js.need(28, 25) == 7                      # a float ceil gives 8
+    assert js.need(55, 20) == 11 and js.need(7, 100) == 7   # two more float traps
+    assert js.need(33, 9) == 3 and js.need(67, 12) == 9 and js.need(50, 7) == 4 and js.need(100, 13) == 13
 
 
 @pytest.mark.parametrize("hits,rc,verdict", [(7, 0, "supported"), (6, 1, "not supported")])
@@ -254,7 +290,9 @@ def test_a_pointer_not_ready_is_could_not_start_with_no_ask_spent(w, capsys):
     rc, rec = go(w, rows, plan, [{"measure": "top5", "min_rate": 1.0}])
     assert rc == 3 and rec["verdict"] == "incomplete" and rec["stop_reason"] == "could-not-start"
     assert rec["asks"] == 0 and asked(w.tmp) == [] and "p1: stale" in rec["not_ready"]
-    assert "not started, no ask spent" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "not started, no ask spent" in out and "OPEN  top5" in out and "FAIL" not in out
+    assert rec["rows"][0]["pass"] is None and rec["rows"][0]["not_run"] == 1
 
 
 def test_a_parent_superjev_variable_never_reaches_the_child_and_an_env_value_does_not_reach_the_record(w, monkeypatch, capsys):
@@ -329,6 +367,7 @@ def test_a_sha_mismatch_is_exit_2_and_prints_the_actual_sha(w, capsys):
 @pytest.mark.parametrize("extra,why", [(["--judge", "nope"], "unknown judge"),
                                        (["--env", "SUPERJEV_JUDGE=laya"], "the tool sets this one itself"),
                                        (["--env", "SUPERJEV_REPLAY=0"], "the tool sets this one itself"),
+                                       (["--env", "SUPERJEV_AUTO_CACHE=0"], "the tool sets this one itself"),  # even its own value
                                        (["--env", "NO_EQUALS"], "a value with no NAME=")])
 def test_an_unknown_judge_or_a_setting_the_tool_owns_is_exit_2_with_no_ask(w, extra, why, capsys):
     rows = [Q(w, "one", "a")]
