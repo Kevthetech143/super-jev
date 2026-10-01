@@ -1706,7 +1706,7 @@ def run(a) -> int:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
     if not files and not held:
-        fail(roots[0], "no .md notes found (empty, hidden or excluded files are skipped)")
+        fail(roots[0], "no .md file left to connect")
         print(f"ERROR: no .md file left to connect under {', '.join(str(r) for r in roots)}; nothing to connect "
               "(the SKIP lines above, if any, say what was left out)"); return 1
 
