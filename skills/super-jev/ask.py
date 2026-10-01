@@ -1667,9 +1667,10 @@ def refresh_hint(ptr: str, principal: str, kind: str) -> str:
         return ""
     if "-manual-" in ptr:
         return "; its source changed: re-add it with ask.py --add ... --replace-entry"
-    # The printed command must run as-is from any folder: the absolute script path plus the
-    # pointer's recorded roots/excludes and every principal it serves (a bare --refresh with
-    # no report is refused for want of --root; one principal short is refused as a scope change).
+    # The printed command must run as-is from any folder: the absolute script path plus the pointer
+    # and every principal it serves (--refresh replays the recorded recipe, so no --root or writer
+    # here; a bare --refresh with no report is refused for want of --root, and one principal short
+    # is refused as a scope change).
     script = skill_dir_for_display() / "prepare_bulk.py"  # stable across releases
     # A split part (<pointer>-N) has no report of its own: it refreshes through its parent's.
     report = auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0]

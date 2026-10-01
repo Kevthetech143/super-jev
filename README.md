@@ -53,7 +53,7 @@ LIVE = proven in daily use. MEASURED = exercised by live bench scripts. EXPERIME
 
 - Answer unattended — an agent stays in the seat for the final call.
 - Match paraphrases from cache — cache hits are exact wording only.
-- Sync automatically — data gets in through connectors you run.
+- Sync automatically — data gets in through connectors you run. Nothing watches your folders. An ask that meets a changed set starts a bounded, best-effort background refresh; refreshing stays your step.
 - Browse the web — doors work on connected local data only.
 - Rewrite history — the scrub covers current files; history is untouched by design.
 
@@ -70,7 +70,7 @@ Tested on macOS and Linux. Windows is untested.
 | Scope | Detail |
 |---|---|
 | Reads | Your connected folders and configured skill roots. |
-| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/`, `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` in the checkout. The chat CLI (`install.sh`) also writes its config, which holds your API key, to `~/.config/superjev/config.json` (or `$XDG_CONFIG_HOME/superjev/`) and a launcher at `~/.local/bin/superjev`. |
+| Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/`, `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (background-refresh locks, cooldowns and logs that name your sets and files) in the checkout. The chat CLI (`install.sh`) also writes its config, which holds your API key, to `~/.config/superjev/config.json` (or `$XDG_CONFIG_HOME/superjev/`) and a launcher at `~/.local/bin/superjev`. |
 | Leaves the machine | Sent to the TypeSafe provider: connected file text (to check each description), descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. |
 | Provider receives | The above; never files the secret scan holds — those stay local. |
 | Never leaves | Files the secret scan holds, and vault-style folders the inventory skips. |
