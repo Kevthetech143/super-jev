@@ -464,7 +464,7 @@ def test_approve_with_no_answer_needs_an_earlier_search(world, monkeypatch):
     assert approve_list(monkeypatch) == 1 and not world["cache"]
 
 
-def test_approve_with_no_answer_refuses_a_list_holding_a_possible_tier_file(world, tmp_path, monkeypatch):
+def test_approve_with_no_answer_refuses_a_list_holding_a_possible_tier_file(world, tmp_path, monkeypatch, capsys):
     _three_files(world, tmp_path)
     ask_once(world)
     log = world["sdir"] / "lookups.jsonl"
@@ -472,6 +472,7 @@ def test_approve_with_no_answer_refuses_a_list_holding_a_possible_tier_file(worl
     recs[-1]["top"][1]["possible"] = True
     log.write_text("".join(json.dumps(r) + "\n" for r in recs))
     assert approve_list(monkeypatch) == 1 and not world["cache"]
+    assert "pick one file" not in capsys.readouterr().out
 
 
 def test_approve_with_no_answer_refuses_a_listed_file_other_than_the_first_changed_since_connect(world, tmp_path, monkeypatch):

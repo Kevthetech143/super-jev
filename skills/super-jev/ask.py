@@ -3366,10 +3366,10 @@ def approve(principal: str, question: str, answer, sdir: Path, rank=None, file=N
     extra = {}
     if answer is None:
         rec = last_lookup(sdir, question)
-        rows = [chosen] + [r for r in rec["top"][:5] if r["path"] != chosen["path"]]
+        rows = ([chosen] + [r for r in rec["top"][:5] if r["path"] != chosen["path"]])[:5]
         if any(r.get("possible") for r in rec["top"][:5]):
             return not_saved(sdir, norm_q(question), "the list has a possible-tier file nobody checked; "
-                             "give the answer text so the claim check runs, or pick one file with --rank N")
+                             "give the answer text so the claim check runs (--rank N then picks the file)")
         try:
             files = [{"score": r["score"], "path": r["path"], "pointer": r["pointer"], "sha": live_sha(r["path"])} for r in rows]
             why = secret_why(*(Path(f["path"]).read_text(errors="replace") for f in files))
