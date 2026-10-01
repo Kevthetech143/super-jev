@@ -180,8 +180,8 @@ def test_a_statement_holding_a_secret_is_refused_cleanly(tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize("case,code,line", [
-    ("empty", 2, "OUTCOME: not-supported - empty question"),
-    ("too-long", 2, "OUTCOME: not-supported - question too long"),
+    ("empty", 2, "OUTCOME: not-supported - empty statement"),
+    ("too-long", 2, "OUTCOME: not-supported - statement too long"),
     ("nothing-connected", 4, "OUTCOME: needs-setup - nothing is connected yet"),
     ("not-set-up", 4, "OUTCOME: needs-setup - Super Jev is not set up yet"),
 ])
@@ -195,6 +195,38 @@ def test_a_claim_that_ends_before_any_verdict_says_why(tmp_path, monkeypatch, ca
     text = {"empty": "   ", "too-long": "x " * ask.MAX_QUESTION}.get(case, STATEMENT)
     rc, out, err = claim(w, monkeypatch, capfd, text)
     assert out.startswith(line) and rc == code and "Traceback" not in err
+
+
+def test_a_claim_that_ends_before_any_verdict_starts_with_its_outcome_line(tmp_path, monkeypatch, capfd):
+    # Output printed on the way (here the "join a shared set" hint) must not come before the OUTCOME line:
+    # the first line of a claim's output is always the verdict word or the OUTCOME line.
+    import share_pointers
+    monkeypatch.setattr(share_pointers, "load_shared", lambda: ["team-notes"])
+    w = World(tmp_path, monkeypatch)
+    w.panel = {"pointers": []}
+    rc, out, _ = claim(w, monkeypatch, capfd)
+    lines = out.splitlines()
+    assert rc == 4 and lines[0].startswith("OUTCOME: needs-setup - nothing is connected yet")
+    assert any("shared set" in ln for ln in lines[1:])
+
+
+def test_a_claim_that_ends_before_any_verdict_points_the_next_step_at_claim(tmp_path, monkeypatch, capfd):
+    w = World(tmp_path, monkeypatch)
+    rc, out, _ = claim(w, monkeypatch, capfd, "   ")
+    assert rc == 2 and "--claim" in out.splitlines()[0] and "find the note about" not in out
+
+
+def test_a_crash_keeps_what_the_claim_already_printed(tmp_path, monkeypatch, capfd):  # guards the buffering
+    w = World(tmp_path, monkeypatch)
+    w.judge({w.new: ("supported", 0.98)})
+
+    def boom(*a, **k):
+        print("printed before the crash")
+        raise RuntimeError("boom")
+    monkeypatch.setattr(ask, "claim_verdict", boom)
+    rc, out, err = claim(w, monkeypatch, capfd)
+    assert rc == 3 and "could not be checked" in out
+    assert out.index("printed before the crash") < out.index("could not be checked")
 
 
 @pytest.mark.parametrize("second,code", [("contradicted", 5), ("not_stated", 1)])

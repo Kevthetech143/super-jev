@@ -36,11 +36,14 @@
       its proof file changes. --claims-file FILE checks one statement per line
       (blank lines and # comments skipped): a draft's facts, or a worker
       report's claims next to `dispatch.py verify REPORT` for its tests and git.
-      Exit codes, one table: only TRUE exits 0; FALSE 5; not settled (NOT FOUND,
-      UNSURE, PARTIAL, CONFLICT) 1; refused input (empty, too long, holds a secret) 2;
-      check failed 3; setup needed 4. Several statements exit with the highest code.
-      A statement that ends before any verdict prints the OUTCOME line an ordinary
-      ask prints. Only exit 0 passes.
+      Exit codes: only TRUE exits 0; FALSE 5; every other result is not a pass, and
+      its code says how the search went: 1 searched fully, nothing settles it (NOT
+      FOUND, UNSURE, PARTIAL, CONFLICT); 3 a set or the check failed (a NOT FOUND
+      after a failed set, or "UNSURE: the true/false check did not run"); 4 setup
+      needed (a NOT FOUND where a set is stale or files were skipped or held); 2
+      refused input (empty, too long, holds a secret). Several statements exit with
+      the highest code. A statement that ends before any verdict prints the OUTCOME
+      line an ordinary ask prints, first. Only exit 0 passes.
 
 SAVED ANSWERS (one promise). A repeat question saves itself; --approve and --add
 save by hand. All save through one function and run the secret scan. A repeat-question
@@ -208,7 +211,8 @@ def state_dir(principal: str) -> Path:
     return base / principal
 
 class SecretHeld(RuntimeError):
-    """A request carried a secret, so it was never sent. main() exits 1."""
+    """A request carried a secret, so it was never sent. A claim catches it in lookup() and exits 2
+    with an OUTCOME line; an ordinary ask lets it reach main(), which exits 1 (a known gap, a follow-up)."""
 
 
 def memory(req: dict) -> dict:
@@ -1828,7 +1832,7 @@ def question_people(question: str, folks: dict) -> set:
 # The one promise of an ordinary ask: its output starts with exactly one OUTCOME line, computed from
 # the whole search state, and the exit code is the outcome's. A claim check prints its verdict first and
 # exits by it (TRUE 0, FALSE 5, a check that did not run 3, else the outcome's code but never 0); a claim
-# that ends before any verdict prints the same OUTCOME line and exits by it.
+# that ends before any verdict prints the same OUTCOME line, first, and exits by it.
 OUTCOME_EXIT = {"found": 0, "not-found": 1, "not-supported": 2, "error": 3, "needs-setup": 4}
 CLAIM_EXIT = {"TRUE": 0, "FALSE": 5, "NOT RUN": 3}
 _OUTCOME = {}
@@ -1846,18 +1850,22 @@ def _outcome_line(o: dict) -> str:
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
     _OUTCOME.clear()
+    buf = io.StringIO()
     if _CLAIM["text"]:
         _CLAIM["word"] = None
         try:
-            rc = _lookup(question, principal, sdir)
+            with contextlib.redirect_stdout(buf):
+                rc = _lookup(question, principal, sdir)
         except SecretHeld:  # an expected refusal, not a crash
             rc = _done("not-supported", "the statement holds a secret, so it was not sent",
                        "remove the secret and check again")
-        if _CLAIM["word"] is None:  # ended before any verdict: say why, as an ordinary ask does
+        except Exception:  # a crash: keep what it printed, then let the caller report it
+            sys.stdout.write(buf.getvalue())
+            raise
+        if _CLAIM["word"] is None:  # ended before any verdict: its first line is the OUTCOME line
             print(_outcome_line(_OUTCOME))
-            return rc
-        return CLAIM_EXIT.get(_CLAIM["word"], max(1, rc))
-    buf = io.StringIO()
+        sys.stdout.write(buf.getvalue())
+        return rc if _CLAIM["word"] is None else CLAIM_EXIT.get(_CLAIM["word"], max(1, rc))
     try:
         with contextlib.redirect_stdout(buf):
             _lookup(question, principal, sdir)
@@ -1877,12 +1885,15 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # Relative route mass ranks candidates; it is not ordinary evidence confidence.
     route_floor = ROUTE_FLOOR if _CLAIM["text"] else 0
     status_cmd = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status"
+    claim = bool(_CLAIM["text"])  # a claim is told what to fix in a claim's words, not a question's
     if not question.strip():
-        return _done("not-supported", "empty question", "ask one focused question, e.g. "
-                     f'ask.py --principal {principal} "find the note about X"')
+        return _done("not-supported", "empty statement" if claim else "empty question",
+                     f'check one fact, e.g. ask.py --principal {principal} --claim "the lease ends in June"' if claim
+                     else f'ask one focused question, e.g. ask.py --principal {principal} "find the note about X"')
     if len(question) > MAX_QUESTION:
-        return _done("not-supported", f"question too long ({len(question):,} chars, max {MAX_QUESTION:,})",
-                     "ask one shorter, focused question")
+        return _done("not-supported", f"{'statement' if claim else 'question'} too long "
+                     f"({len(question):,} chars, max {MAX_QUESTION:,})",
+                     "check one shorter, focused statement" if claim else "ask one shorter, focused question")
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
