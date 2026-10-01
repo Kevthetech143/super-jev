@@ -178,8 +178,8 @@ set whose files changed starts this same refresh in the background and does not
 wait for it; the next ask finds the result. Only asks trigger it. It runs one
 refresh per set at a time, waits out a cooldown before touching a set again, and
 caps how many refreshes it starts per hour. If a background refresh fails, the
-ask says `auto-heal: last refresh FAILED: <reason>`; run the `next:` command it
-prints to see the error and refresh by hand. Auto-heal writes its locks,
+ask says `auto-heal: last refresh FAILED: <reason>`; run the refresh command
+printed on that line to see the error and refresh by hand. Auto-heal writes its locks,
 cooldowns and logs, which name your sets and files, to
 `skills/super-jev/autoheal-state/`. `SUPERJEV_NEW_FILE_SCAN=0` turns off the
 scan that looks for new notes in connected folders; refreshing a changed set has

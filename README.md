@@ -10,7 +10,7 @@ One judge (Jev) between your agent and your data: the agent asks in its own word
 - Agents burn whole LLM turns on lookups, re-hunt the same answers daily, and state things the files never said. Jev is a fast, cheap judge for yes/no and which-one questions; the LLM keeps the writing.
 - The daily loop: ask → read the top file → answer → approve / miss / add. Connectors are how your data gets in; the cache fills only from your own approvals — nothing is cached that you did not approve.
 - 1.0 promises the proven core: skill search, file navigate, connect + bulk prepare, check gate, permit gate, the harness loop. The core works well when it works; edges still want an agent in the seat — see KNOWN-QUIRKS.md and AGENTS.md.
-- 1.0 does not promise unattended answering, semantic cache matching, automatic sync (nothing watches your folders: an ask that meets a changed set starts a bounded, best-effort background refresh, and refreshing stays your step), or live browsing. Next: auto-catch, recipes, a Jev-decided browser driver — each ships only after its own live bench.
+- 1.0 does not promise unattended answering, semantic cache matching, automatic sync, or live browsing. Next: auto-catch, recipes, a Jev-decided browser driver — each ships only after its own live bench.
 
 ## Quick start
 
