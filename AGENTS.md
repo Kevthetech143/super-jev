@@ -86,7 +86,7 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 - Nothing found means say "Super Jev couldn't find it; it may still exist" and offer to search by hand, never a guess.
 - When their files change, run `python3 skills/super-jev/prepare_bulk.py --pointer NAME --principal me --refresh`:
   it replays how the folder was connected, writer included. An ask also starts that refresh in the
-  background; if it says `auto-heal: last refresh FAILED: <reason>`, run the `next:` command it prints.
+  background; if it says `auto-heal: last refresh FAILED: <reason>`, run the refresh command printed on that line.
 - A question you ask again saves itself: when the same file wins it N times
   (`SUPERJEV_SAVE_AFTER`, default 2) and passes the check, the next ask returns it at once,
   labelled saved (auto-save on by default; `--no-auto` or `SUPERJEV_AUTO_CACHE=0` to opt out).

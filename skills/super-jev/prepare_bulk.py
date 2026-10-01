@@ -20,7 +20,7 @@ Usage:
   recorded for later refreshes, so a refresh never widens or re-describes a pointer by accident. Run limits
   and gate settings (--max-files, --line, --batch, --findability, --no-connect) are never recorded.
   The writer flags (--writer, --writer-model, --writer-command) are one choice: give any one of them and
-  the recorded writer is replaced whole; --writer auto clears it. The SUPERJEV_WRITER_COMMAND env var is
+  the recorded writer is replaced whole; --writer auto switches back to auto. The SUPERJEV_WRITER_COMMAND env var is
   never recorded. A refresh may run from the skill folder (auto-heal, refresh_changed.py), so name a
   --writer-command on PATH or by absolute path, and keep keys out of it: it is stored in prepare-cache/
   and shown in the banner. A report from before the writer was recorded replays none: it keeps auto.
@@ -1178,7 +1178,7 @@ def replay_recipe(a) -> None:
     # Whoever named the principal here (auto_heal's asking agent) is only a stand-in: see keep_unrecorded.
     a.standin = not (rep.get("principals") or rep.get("principal"))
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
-    # refresh_changed.py re-passes the recorded roots/excludes/--no-recurse, which must not unpin it.
+    # a refresh that repeats the recorded roots/excludes (typed by hand or by an older script) must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
     if rep.get('extensions', list(CONNECTABLE_EXTENSIONS)) != list(CONNECTABLE_EXTENSIONS):
         raise ValueError(f"pointer {a.pointer} was connected with code/text suffixes; connect supports Markdown only. "
@@ -1203,8 +1203,10 @@ def replay_recipe(a) -> None:
         a.writer = a.writer if a.writer in WRITERS else None
         a.writer_model = a.writer_model if isinstance(a.writer_model, str) else None
         a.writer_command = a.writer_command if isinstance(a.writer_command, str) else None
+    # builtin outranks a command when the writer is chosen (main), so it is what the line names too.
+    shown = "builtin" if a.writer == "builtin" else a.writer_command or a.writer or "auto"
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, part size {a.limit or 50}, writer {a.writer_command or a.writer or 'auto'})")
+          f"no-recurse {a.no_recurse}, part size {a.limit or 50}, writer {shown})")
     # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
     # the whole (possibly grown) folder, so its recorded file list is the scope instead.
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
@@ -1378,7 +1380,7 @@ def main() -> int:
                     help="builtin: no model call, descriptions quoted from each file's headings (needs only the "
                          "TypeSafe key). auto (default): --writer-command if given, else the claude CLI if it is "
                          "installed, else builtin. The writer flags are recorded and replayed by --refresh as one "
-                         "choice (give any one and the recorded writer is replaced whole); --writer auto clears it")
+                         "choice (give any one and the recorded writer is replaced whole); --writer auto switches back to auto")
     ap.add_argument("--writer-model", default=None,
                     help="model passed to the default Claude writer (default haiku); recorded and replayed with --writer")
     ap.add_argument("--writer-command", metavar="COMMAND",
@@ -1694,7 +1696,7 @@ def main() -> int:
         print(f"  EXCEPTION  {relstr(p, roots)}  ({why})\n"
               f"      to include it: check the file says what it should, then run: {rerun}"
               + ("" if use_builtin else
-                 " --writer builtin\n      (later refreshes keep this writer; --writer auto switches back)"))
+                 " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)"))
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
         if "binary" not in why:

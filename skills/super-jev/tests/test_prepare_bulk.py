@@ -1019,12 +1019,12 @@ def test_refresh_of_legacy_report_keeps_recorded_file_set(tmp_path, monkeypatch,
     assert "inventory: 2 files to prepare" in out
     assert "REFUSED" not in out
     # The rewritten report now carries a recipe; the pinned list must survive into the next refresh,
-    # including refresh_changed.py's form that re-passes the recorded root.
+    # including a refresh typed by hand that repeats the recorded root.
     monkeypatch.setattr(sys, "argv", sys.argv + ["--root", str(root)])
     assert pb.main() == 0
     out = capsys.readouterr().out
     assert "inventory: 2 files to prepare" in out and "REFUSED" not in out
-    # refresh_changed.py also re-passes recorded excludes; an unchanged exclude list must not unpin.
+    # A hand refresh that repeats the recorded excludes: an unchanged exclude list must not unpin.
     rep = json.loads((cache_dir / "my-records-report.json").read_text())
     rep["excludes"] = ["INDEX.md"]
     (cache_dir / "my-records-report.json").write_text(json.dumps(rep))
@@ -1468,9 +1468,9 @@ def _prepare(monkeypatch, *argv):
     return pb.main()
 
 
-def _connect_notes(monkeypatch, root, *writer_flags):
+def _connect_notes(monkeypatch, root, *flags):
     return _prepare(monkeypatch, "--root", str(root), "--pointer", "notes", "--principal", "alice",
-                    *writer_flags, "--no-connect")
+                    *flags, "--no-connect")
 
 
 def _refresh_like_the_callers(monkeypatch, *given):
@@ -1525,6 +1525,48 @@ def test_a_rescoped_refresh_keeps_the_recorded_writer(tmp_path, monkeypatch, cap
     assert "writer: builtin" in capsys.readouterr().out
     report = json.loads((pb.CACHE_DIR / "notes-report.json").read_text())
     assert report["excludes"] == ["travel.md"] and report["writer"] == "builtin"
+
+
+def test_the_replay_line_names_the_writer_that_runs(tmp_path, monkeypatch, capsys):
+    # A --writer-command user who follows the EXCEPTION hint records builtin plus their command; builtin
+    # is what runs (main picks it first), so it is what the visibility line must say.
+    root = _writer_notes(tmp_path, monkeypatch)
+    _fake_model_writer(monkeypatch)
+    assert _connect_notes(monkeypatch, root, "--writer-command", "local-writer --small", "--writer", "builtin") == 0
+    (root / "parking.md").write_text("# Parking\nVisitors park in lot D.\n")
+    capsys.readouterr()
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    out = capsys.readouterr().out
+    assert "writer builtin)" in out and "local-writer" not in out
+    assert "writer: builtin" in out
+
+
+def test_a_refresh_keeps_the_recorded_name_filter_and_allow_target(tmp_path, monkeypatch):
+    # The replayed recipe, not the command line, carries --name and --allow-target. A refresh that lost
+    # them would widen a SKILL.md pointer to every note in the folder and drop the file its symlink reaches.
+    root = _writer_notes(tmp_path, monkeypatch)  # holds parking.md and travel.md: not skill entry files
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_text("# Skill B\nDoes B.\n")
+    (root / "a").mkdir()
+    (root / "a" / "SKILL.md").write_text("# Skill A\nDoes A.\n")
+    (root / "a" / "notes.md").write_text("# Notes\nScratch.\n")
+    (root / "b").mkdir()
+    (root / "b" / "SKILL.md").symlink_to(elsewhere / "SKILL.md")
+    _fake_model_writer(monkeypatch)
+
+    def approved():
+        report = json.loads((pb.CACHE_DIR / "notes-report.json").read_text())
+        return sorted(Path(p).parent.name for p in report["approved"]), report
+
+    assert _connect_notes(monkeypatch, root, "--name", "SKILL.md", "--allow-target", str(elsewhere)) == 0
+    connected, _ = approved()
+    assert connected == ["a", "b"]
+    (root / "a" / "SKILL.md").write_text("# Skill A\nDoes A better.\n")
+    assert _refresh_like_the_callers(monkeypatch) == 0
+    refreshed, report = approved()
+    assert refreshed == connected
+    assert report["names"] == ["SKILL.md"] and report["allowTargets"] == [str(elsewhere.resolve())]
 
 
 def test_a_report_with_no_recorded_writer_still_uses_the_default(tmp_path, monkeypatch):
