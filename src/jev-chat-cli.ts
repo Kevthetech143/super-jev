@@ -279,7 +279,9 @@ export async function run(io: IO): Promise<number> {
       return (await helper(t)).text;
     }
     /** /wrong: the engine forgets the saved answer for the last question; if it had one, that question is searched fresh at once. */
+    let afterCheck = false; // the last answered turn was a /check: its TRUE/FALSE saves itself
     async function wrong(): Promise<string> {
+      if (afterCheck) return 'Sure TRUE/FALSE results save themselves; edit the note if it is wrong.';
       if (!session.last) return NO_QUESTION;
       const r = await helper({ kind: 'wrong' });
       if (!r.data?.removed?.length) return r.text;
@@ -295,7 +297,7 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'version') text = TITLE;
         else if (t.kind === 'say') text = t.text;
         else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
-        else if (t.kind === 'ask' || t.kind === 'check') { if (t.kind === 'ask') session.last = t.text; text = await answer(t); }
+        else if (t.kind === 'ask' || t.kind === 'check') { afterCheck = t.kind === 'check'; if (t.kind === 'ask') session.last = t.text; text = await answer(t); }
         else if (t.kind === 'wrong') text = await wrong();
         else if (t.kind !== 'empty') text = (await helper(t)).text;
         if (text) stdout.write(text + '\n\n');

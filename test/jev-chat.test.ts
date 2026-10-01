@@ -2647,7 +2647,7 @@ test('W2 whole app: /wrong after a live result runs --miss Q only, and says it w
   await w.quit();
 });
 
-test('W2b whole app: /wrong with no earlier question says so and calls nothing; /check is not a question to forget', async () => {
+test('W2b whole app: /wrong with no earlier question says so and calls nothing', async () => {
   const r = rig([STATUS_EMPTY, { when: '--claim', out: { v: 1, outcome: 'found', next: 'none', claim: { verdict: 'TRUE', proof: { path: HB, line: 39, text: HANDBOOK_QUOTE } } } }]);
   const w = win(r);
   await w.ready();
@@ -2657,9 +2657,23 @@ test('W2b whole app: /wrong with no earlier question says so and calls nothing; 
   w.say('/check The canary holds 40 minutes at 5%.');
   await w.waitFor('TRUE');
   w.say('/wrong');
-  await w.waitFor(() => (w.text().match(/Ask a question first\./g) || []).length === 2);
+  await w.waitFor('Sure TRUE/FALSE results save themselves');
   assert.equal(missCalls(r).length, 0);
   assert.equal(r.calls().length, n + 1, 'only the claim was called');
+  await w.quit();
+});
+
+test('W2f whole app: ask, /check, /wrong prints the self-save note and calls no --miss', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--claim', out: { v: 1, outcome: 'found', next: 'none', claim: { verdict: 'TRUE', proof: { path: HB, line: 39, text: HANDBOOK_QUOTE } } } }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say('first question');
+  await w.waitFor('Found 1 note');
+  w.say('/check The canary holds 40 minutes at 5%.');
+  await w.waitFor('TRUE');
+  w.say('/wrong');
+  await w.waitFor('Sure TRUE/FALSE results save themselves; edit the note if it is wrong.');
+  assert.equal(missCalls(r).length, 0);
   await w.quit();
 });
 
