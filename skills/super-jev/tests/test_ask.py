@@ -214,7 +214,7 @@ def test_miss_report_says_what_was_searched_and_next_steps(tmp_path, monkeypatch
     assert ask.lookup("q", "alice", tmp_path) == 1  # not-found
     out = capsys.readouterr().out.strip().splitlines()
     assert "What was searched:" in out
-    assert "  - 2 connected sets; 2 searched after the topic filter, 0 had matches" in out
+    assert "  - 2 connected sets; 2 searched after the topic filter; descriptions matched in 0" in out
     assert any("ask.py --principal alice --add" in line for line in out)
     assert any("/prepare_bulk.py --root <folder> --pointer alice-<name>" in line for line in out)
     assert out[-1] == ask.VOICE_LINE  # the voice line stays last
@@ -223,8 +223,9 @@ def test_miss_report_says_what_was_searched_and_next_steps(tmp_path, monkeypatch
 def test_miss_report_names_closest_files_read_first():
     lines = ask.miss_report("bob", 5, {"p1": {"status": "candidates"}, "p2": {"status": "no-candidates"}},
                             {"/x/low.md": {"score": 0.2}, "/x/high.md": {"score": 0.5}})
-    assert lines[1] == "  - 5 connected sets; 2 searched after the topic filter, 1 had matches: p1"
-    assert lines[2] == "  - 2 file(s) read; no answer confirmed. Closest: x/high.md, x/low.md"
+    assert lines[1] == "  - 5 connected sets; 2 searched after the topic filter; descriptions matched in 1: p1"
+    assert lines[2] == ("  - 2 file(s) read (picked by description or by words in the file); no answer confirmed. "
+                        "Closest: x/high.md, x/low.md")
 
 
 def test_skill_dir_for_display_prefers_env_override(monkeypatch):

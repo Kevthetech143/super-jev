@@ -165,8 +165,8 @@ test('parseMissReport extracts the searched/next-step block from a true-miss ask
   const stdout = [
     'OUTCOME: not-found - searched 3 sets, no matching file',
     'What was searched:',
-    '  - 3 connected sets; 2 searched after the topic filter, 1 had matches: kelvin-notes',
-    '  - 2 file(s) read; none contained the answer. Closest: notes/pricing.md, notes/other.md',
+    '  - 3 connected sets; 2 searched after the topic filter; descriptions matched in 1: kelvin-notes',
+    '  - 2 file(s) read (picked by description or by words in the file); no answer confirmed. Closest: notes/pricing.md, notes/other.md',
     'Next step (pick one):',
     '  - The answer is in a file you have: it is probably not connected. Connect its folder:',
     '      python3 prepare_bulk.py --root <folder> --pointer kelvin-<name> --principal kelvin',

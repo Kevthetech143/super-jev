@@ -159,7 +159,7 @@ try {
     else if (flag === '--explain') explain = true;
     else throw new CliError(`Unknown argument ${flag}\n\n${usage}`);
   }
-  if (!snapshotPath) throw new CliError(usage);
+  if (!snapshotPath) throw new CliError(`Missing required argument: --snapshot SNAPSHOT.json (the file may hold {} when --action is given)\n\n${usage}`);
   if (minConfidence !== undefined && (minConfidence <= 0 || minConfidence > 1)) throw new CliError('--min-confidence must be greater than 0 and at most 1');
   if (moneyThreshold !== undefined && !(moneyThreshold >= 0)) throw new CliError('--money-threshold must be a non-negative number');
   if (!dryRun && !stub) requireKey('run live, or use --dry-run or --stub', m => new CliError(m));
