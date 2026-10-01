@@ -6,22 +6,63 @@ step has the exact command and what success looks like. Run from the repo root.
 
 ## 1. Prerequisites
 
-- **Node 24** — check: `node --version` → prints `v24.x.y`.
-- **Python 3.10+** — check: `python3 --version` → prints `3.10` or newer.
+- **Node 24 or newer** — check: `node --version` → prints `v24` or newer.
+- **Python 3.10 or newer** — check: `python3 --version` → prints `3.10` or newer.
 - **A TypeSafe API key** — connect, ask and check all call TypeSafe with it.
-  Do not commit it; keep it in a file only you can read.
+  Do not commit it; keep it in a file only you can read (step 2 makes it).
 
-Check the tests still pass before you touch anything:
+Missing or too old? Install it into your home folder (no admin rights needed).
+Python first:
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+uv python install 3.12 --default
+```
+
+Then Node (the `touch` line is for zsh, the Mac default; skip it on bash):
+
+```bash
+touch ~/.zshrc
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+\. "$HOME/.nvm/nvm.sh"
+nvm install 24
+```
+
+Already use Homebrew? Run `brew install node python` instead of the lines above.
+Then open a new terminal (or run the `source` and `\.` lines again) so the new
+versions are on your PATH. Setup (step 3) prints these same lines for whatever
+is missing.
+
+Check the tests still pass before you touch anything. The Python suite needs
+pytest, so give it its own environment first. If `venv` says `ensurepip is not
+available` (Debian and Ubuntu system Python), run the uv lines above first; no
+sudo needed.
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate && python -m pip install pytest
 npm test                              # node suite — success: every test passes, 0 fail (under a minute)
 python3 -m pytest skills/super-jev/tests -q   # python suite — success: "passed" with 0 failed (4 to 6 minutes; a few skips are normal)
 ```
+
+Both suites start from a clean environment: they clear every `SUPERJEV_*`
+setting (except `SUPERJEV_TEST_*`), the judge key and url variables and
+`SWEEP_BATCH` first, so what your shell exports cannot change the result.
 
 ## 2. Set the key — do not skip this
 
 Every connect, ask and check needs the key in the environment of the shell you
 run them from. **Super Jev never reads a `.env` file.**
+
+The key lives in one file only you can read, `~/.typesafe-api-key`. If it does
+not exist yet, make it in your own terminal (never paste a key into chat): run
+this, paste the key, press Enter, then Ctrl-D:
+
+```bash
+(umask 077; cat > ~/.typesafe-api-key)
+```
+
+Then load it into the shell:
 
 ```bash
 export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"

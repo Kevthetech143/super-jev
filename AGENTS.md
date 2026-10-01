@@ -8,13 +8,44 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
 ## Set yourself up (numbered path)
 
 1. **Check the tools.** `node --version` must print `v24` or newer, and
-   `python3 --version` must print `3.10` or newer.
-
-2. **Load the TypeSafe key into this shell. Do not skip this.** Every check and
-   every connect needs it. Ask your human where the key file is, then:
+   `python3 --version` must print `3.10` or newer. If either is missing or too
+   old, install it into your home folder (no admin rights needed). Python first:
 
    ```bash
-   export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   source "$HOME/.local/bin/env"
+   uv python install 3.12 --default
+   ```
+
+   Then Node (the `touch` line is for zsh, the Mac default; skip it on bash):
+
+   ```bash
+   touch ~/.zshrc
+   curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash
+   \. "$HOME/.nvm/nvm.sh"
+   nvm install 24
+   ```
+
+   Already use Homebrew? Run `brew install node python` instead of the lines above.
+   If your tool starts every command in a fresh shell and `node` or `python3`
+   still shows the old version, start each command with
+   `source "$HOME/.local/bin/env"; \. "$HOME/.nvm/nvm.sh";` until the session
+   restarts. Setup (step 3) prints these same lines for whatever is missing.
+
+2. **Load the TypeSafe key into this shell. Do not skip this.** Every check and
+   every connect needs it. The key lives in one file, `~/.typesafe-api-key`. If
+   that file does not exist yet, ask your human to make it in their own terminal
+   (the key never goes through chat). They run this, paste the key, press Enter,
+   then Ctrl-D:
+
+   ```bash
+   (umask 077; cat > ~/.typesafe-api-key)
+   ```
+
+   Then load it:
+
+   ```bash
+   export TYPESAFE_API_KEY="$(cat ~/.typesafe-api-key)"
    ```
 
    Never print the key, paste it into a command line, or write it into this repo.
@@ -181,4 +212,4 @@ ln -s "$(pwd)/skills/super-jev-connect" ~/.claude/skills/super-jev-connect
 
 Full reference, the exit-code table, and the `ask` routing keywords: [`skills/super-jev/SKILL.md`](skills/super-jev/SKILL.md).
 
-Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill`. Fully offline; every wrapped door is a fake in the test suite.
+Tests: `python3 -m pytest skills/super-jev/tests -q`, or `npm run test:skill` (pytest goes in a venv; see [GETTING-STARTED](docs/GETTING-STARTED.md) step 1). Fully offline; every wrapped door is a fake in the test suite.

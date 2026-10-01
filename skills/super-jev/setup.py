@@ -7,8 +7,14 @@
 Setup creates the state folder ($SUPERJEV_STATE_DIR, default
 ~/.local/state/super-jev) with owner-only permissions and a memory config
 inside it, checks Node, Python and the TypeSafe key, and prints the next
-step. It never overwrites an existing config and never reads or prints the
-key's value.
+step. For anything missing it prints the exact steps to get it, none needing
+admin rights (the docs repeat those lines word for word; a test keeps them
+identical). It never overwrites an existing config and never reads or prints
+the key's value.
+
+This file and what it imports (judges/, judge_profile.py) must stay runnable on
+Python 3.9, the interpreter a stock Mac has, because it is the one door that
+tells that Mac how to get Python 3.10 or newer.
 
 Uninstall removes what Super Jev wrote: the state folder (connected pointers,
 cached answers, logs, manual records), this skill's prepare-cache/, ledger/ and
@@ -53,6 +59,23 @@ OWNED = {
 # install.sh writes the chat launcher with this marker line and an exec of its checkout
 LAUNCHER_MARKER = "# super-jev-installer"
 
+MIN_NODE = 24
+MIN_PYTHON = (3, 10)
+# The exact lines for a machine that lacks one. No admin rights needed: uv and nvm install into
+# the home folder. AGENTS.md and docs/GETTING-STARTED.md repeat these lines word for word
+# (install.sh repeats the node ones); tests/test_setup_toolchain.py keeps them identical.
+INSTALL = {
+    "python": ('curl -LsSf https://astral.sh/uv/install.sh | sh',
+               'source "$HOME/.local/bin/env"',
+               'uv python install 3.12 --default'),
+    # nvm keeps itself on PATH only by editing a shell startup file that already exists
+    "node_zsh": ('touch ~/.zshrc',),
+    "node": ('curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash',
+             '\\. "$HOME/.nvm/nvm.sh"',
+             'nvm install 24'),
+}
+HOMEBREW = "Already use Homebrew? Run: brew install node python"
+
 
 def state_root() -> Path:
     root = os.environ.get("SUPERJEV_STATE_DIR")
@@ -71,14 +94,29 @@ def _node_major():
         return None
 
 
+def _python_version():
+    return tuple(sys.version_info[:3])
+
+
+def _block(*lines) -> str:
+    return "".join("\n        " + ln for ln in lines)
+
+
 def setup() -> int:
     problems = []
+    steps = False   # an install block was printed, so say how to pick it up in this shell
+    python = _python_version()
+    if python < MIN_PYTHON:
+        problems.append("Python %d.%d or newer is required (found: %s). Install it with uv (into your home folder, no admin rights needed):%s"
+                        % (MIN_PYTHON + (".".join(map(str, python)), _block(*INSTALL["python"]))))
+        steps = True
     node = _node_major()
-    if node is None or node < 24:
-        problems.append("Node 24 or newer is required (found: %s). Install it, then run setup again."
-                        % ("none" if node is None else f"v{node}"))
-    if sys.version_info < (3, 10):
-        problems.append("Python 3.10 or newer is required.")
+    if node is None or node < MIN_NODE:
+        zsh = "zsh" in os.environ.get("SHELL", "")
+        problems.append("Node %d or newer is required (found: %s). Install it with nvm (into your home folder, no admin rights needed):%s"
+                        % (MIN_NODE, "none" if node is None else f"v{node}",
+                           _block(*(INSTALL["node_zsh"] if zsh else ()), *INSTALL["node"])))
+        steps = True
 
     cfg = config_path()
     root = state_root()
@@ -102,10 +140,19 @@ def setup() -> int:
 
     key_env = judges.key_env()
     if judges.key_present():
-        print(f"ok    {key_env} is set")
+        if key_env:
+            print(f"ok    {key_env} is set")
     else:
-        problems.append(f"{key_env} is not set. Every check and connect needs it. Run:\n"
-                        f"        export {key_env}=\"$(cat /path/to/your/key-file)\"")
+        where = judges.key_file()
+        lines = [f'export {key_env}="$(cat {where})"']
+        note = ""
+        if not Path(where).expanduser().exists():   # existence only: setup never opens the key file
+            lines.insert(0, f"(umask 077; cat > {where})")
+            note = (" Make the key file first: run the first line, paste the key, press Enter, then Ctrl-D"
+                    " (your human does this in their own terminal; never paste a key into chat)."
+                    " Then load it:")
+        problems.append(f"{key_env} is not set. Every check and connect needs it.{note or ' Run:'}"
+                        + _block(*lines))
 
     if shutil.which("claude"):
         print("ok    description writer: claude CLI found (connect uses it only if it is logged in; "
@@ -118,7 +165,11 @@ def setup() -> int:
         print("\nNOT READY:")
         for p in problems:
             print("  - " + p)
-        print("\nFix the above, then run setup again.")
+        if steps:
+            print("\n  " + HOMEBREW)
+            print("\nRun the source lines above in this shell, or open a new terminal, then run setup again.")
+        else:
+            print("\nFix the above, then run setup again.")
         return 1
     print("\nREADY. Next step: connect a folder of .md files (AGENTS.md step 4):\n"
           "  python3 skills/super-jev/prepare_bulk.py --root /path/to/folder "
