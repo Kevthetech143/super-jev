@@ -428,7 +428,7 @@ test('missing API key is a clearly-marked local fallback', async () => {
   const root = await tempRoot(DEMO_SKILLS);
   const seen: Request[] = [];
   const { result } = await runSkillSearch({
-    roots: [root], request: 'merge my pdfs', apiKey: '', transport: tableTransport({}, seen)
+    roots: [root], request: 'merge my pdfs', transport: tableTransport({}, seen)
   });
   assert.equal(result.status, 'fallback');
   assert.equal(result.source, 'local');

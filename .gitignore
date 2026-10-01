@@ -9,6 +9,7 @@ bench/out/
 __pycache__/
 .pytest_cache/
 *.pyc
+.venv/
 
 skills/super-jev/ledger/
 skills/super-jev/prepare-cache/

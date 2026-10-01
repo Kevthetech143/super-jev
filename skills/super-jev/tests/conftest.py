@@ -1,5 +1,26 @@
+import json
+import os
+from pathlib import Path
+
 import pytest
 
+
+def _scrub_callers_settings():
+    """The suite gives the same result whatever the caller's shell exports. Before any test module
+    loads, clear the product's own settings: every SUPERJEV_* except SUPERJEV_TEST_* (developer test
+    knobs), every judge profile's key and url variable, and SWEEP_BATCH (the one product setting without
+    the prefix). The names come from judge_profiles.json, read directly: importing judge_profile first
+    would read SUPERJEV_JUDGE before it is cleared. test/clean-env.ts is the same rule for npm test."""
+    profiles = json.loads((Path(__file__).resolve().parent.parent / "judge_profiles.json").read_text())["profiles"]
+    names = {"SWEEP_BATCH"}
+    for profile in profiles.values():
+        names.update(v for v in (profile.get("key_env"), profile.get("api_url_env")) if v)
+    names.update(k for k in os.environ if k.startswith("SUPERJEV_") and not k.startswith("SUPERJEV_TEST_"))
+    for name in names:
+        os.environ.pop(name, None)
+
+
+_scrub_callers_settings()
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_code_ask: uses the real fleet jev lib; skips when the lib file is absent")

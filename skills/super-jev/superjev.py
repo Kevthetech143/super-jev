@@ -2497,7 +2497,7 @@ def resolve_npm():
 
 def _npm_missing_refusal(json_mode, door):
     msg = ("npm not found on PATH and no node under ~/.nvm/versions/node — "
-           "install Node.js or put npm on PATH")
+           f"run python3 {SKILL_DIR / 'setup.py'} for the steps that install Node, or put npm on PATH")
     if json_mode:
         emit_json(door, "REFUSED", 1, msg, {}, [])
     else:
@@ -10471,8 +10471,9 @@ def _print_gate_window_explain(evidence_source, window_meta, flags, claim_rows,
                 print(f"    current turn    : tail kept, {b['current_trimmed_chars']} "
                       "chars cut (facts + current turn alone exceeded the budget)")
         print(f"  total             : {m.get('total_bytes', 0)} bytes")
-        print(f"  current turn empty: {'YES — secondary NS/CONTRADICTED arm suppressed, '
-              'primary OVERCLAIMS arm unaffected' if m.get('current_turn_empty') else 'no'}")
+        turn_empty = ("YES — secondary NS/CONTRADICTED arm suppressed, "
+                      "primary OVERCLAIMS arm unaffected" if m.get("current_turn_empty") else "no")
+        print(f"  current turn empty: {turn_empty}")
     print(f"\n  rule              : {rule} "
           f"({'legacy — SUPERJEV_RULE=v2' if rule == 'v2' else 'default'})")
     if rule == "v3":
