@@ -36,6 +36,14 @@ Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
 yes and Esc is no; Ctrl+D leaves, which counts as no. While a search or
 connect runs, Esc or Ctrl+C stops it (`Stopped.`); other lines are dropped.
 
+A paste is one question. Paste several lines and nothing is sent yet; press
+Enter and the whole paste goes as one question, exactly as pasted. Type more
+before Enter and it joins the same question. Esc or Ctrl+C throws a paste
+away. A paste made while a search or connect runs is dropped, like any line
+typed then. This needs a terminal that marks pastes (bracketed paste, which
+the usual ones do); the window turns it on while it is open and off when it
+closes.
+
 ## One question from a shell
 
 `superjev <words>` handles the words as if typed in the window. The answer
