@@ -118,6 +118,11 @@ Every answer starts with one `OUTCOME:` line (`found`, `not-found`,
 is not `found`). Exit codes: found 0, not-found 1, not-supported 2, error 3,
 needs-setup 4.
 
+A program can put `--json` right after `--principal ME` to get the same result as
+one JSON line instead (`ask.py --principal ME --json "question"`; also one
+`--claim`, `--status`, `--approve` and `--miss`). The exit code is the same and
+there are no scores.
+
 - **`needs-setup`** (nothing connected, or a set is stale or unprepared): run the
   `next:` command (for nothing connected, go back to step 4), then ask again.
 - **`not-found`** (a complete search): `What was searched:` (sets searched,
