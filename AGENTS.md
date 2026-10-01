@@ -2,16 +2,19 @@
 
 You are an agent. Your human wants you to find facts in their own files and to
 check what you say before you say it. Follow the steps below in order, from the
-repo root. You need no private files and no help. Budget about 10 minutes; the
-connect step makes live TypeSafe calls (well under a cent for a small folder at the published input rate).
+repo root. You need no private files and no help. Budget about 10 minutes. Every
+`ask` and `check` makes live TypeSafe calls. A connect makes them only with a
+model writer (the default when the `claude` CLI is installed); a
+`--writer builtin` connect makes none.
 
 ## Set yourself up (numbered path)
 
 1. **Check the tools.** `node --version` must print `v24` or newer, and
    `python3 --version` must print `3.10` or newer.
 
-2. **Load the TypeSafe key into this shell. Do not skip this.** Every check and
-   every connect needs it. Ask your human where the key file is, then:
+2. **Load the TypeSafe key into this shell. Do not skip this.** Every ask and
+   every check needs it (a `--writer builtin` connect does not, but your next
+   steps do). Ask your human where the key file is, then:
 
    ```bash
    export TYPESAFE_API_KEY="$(cat /path/to/typesafe-key-file)"
@@ -37,11 +40,28 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
      --pointer my-notes --principal me --writer builtin
    ```
 
-   Success: `connect: registered pointer=my-notes` (add `--findability` for a
+   Success: `connect: registered pointer=my-notes`, then a last line
+   `CONNECTED n, HELD 0, FAILED 0`, and exit code 0 (add `--findability` for a
    `findability:` report; it costs one search per file).
-   `--writer builtin` writes each file's description from its own headings, so
-   the TypeSafe key is all you need. If the `claude` CLI is installed and logged
-   in, you can drop that flag to get model-written descriptions instead.
+   `--writer builtin` writes each file's description from its own headings and
+   checks it locally: no model call and no TypeSafe call while connecting. If the
+   `claude` CLI is installed and logged in, you can drop that flag to get
+   model-written descriptions instead (those are checked by TypeSafe).
+
+   Read the last line and the exit code, never just the word "registered":
+
+   - Exit 3: connected, but some files were held (a secret-like value, or a note
+     over 250,000 bytes). Read the `HELD` lines; those files are not searchable.
+   - Exit 1: a file failed its check or the run could not finish. Read the
+     `EXCEPTION` and `ERROR` lines.
+   - Exit 2: refused. A first connect refuses more than 250 files, even with
+     `--writer builtin` (`--max-files` raises it). It is a cost guard for model
+     writers, so narrow `--root` or `--exclude` first.
+   - `SKIP` lines: files a default rule left out, counted by reason, with folder
+     or extension names and never file names. Markdown in a skipped folder
+     (`documents/`, `profile/`, `node_modules/`, a hidden folder) is counted
+     there; connect that folder by itself with `--root` to include it. Only `.md`
+     files connect; other types are counted and never read.
 
 5. **Ask a question you know the answer to.**
 
@@ -70,6 +90,11 @@ connect step makes live TypeSafe calls (well under a cent for a small folder at 
    means do not send it: the file does not support the claim (`NOT_SUPPORTED`)
    or disproves it (`CONTRADICTED`). Any other exit means the check itself
    failed; treat it as blocked too.
+
+   Two doors, two jobs. `dispatch.py check` (above) checks a file you have in
+   hand. To check a statement against folders you already connected, use
+   `ask.py --principal me --claim "statement"` (see "Before real work" below);
+   it prints its own verdict word and proof line, not the codes above.
 
 8. **Uninstall when your human asks** (removes everything setup and connect made;
    their files are never touched):

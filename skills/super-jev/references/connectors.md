@@ -148,9 +148,16 @@ folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktr
 `.claude/worktrees/` folder, or a checkout whose `.git` file points into another repo's
 `.git/worktrees/`, even when that checkout is the `--root` itself), test/scratch output
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`; a file named
-exactly with `--name` is judged by its folder only) and vault-style
-subdirectories, and holds back any file that looks like it carries
-card/password text or sits over the 250,000-byte size ceiling (a bigger-than-one-call file is gated in parts), writing a
+exactly with `--name` is judged by its folder only) and the folders `profile/`,
+`documents/`, `__pycache__/`, `node_modules/` and `.git/`. Nothing is skipped silently:
+connect prints one `SKIP` line per reason (counts and folder or extension names, never
+file names or paths) for `.md` files in those folders (connect that folder by itself with
+`--root` to include them), files of other types, hidden `.md` files, backup or
+credential-style names, empty files, links pointing outside every `--root`
+(`--allow-target` admits them), prepared dataset copies, test/scratch output and worktree
+copies. Files your own `--exclude`, `--name` or `--no-recurse` leave out are not counted,
+and a skip never changes which files connect or the exit code. It holds back any file that looks like it carries
+card/password text or sits over the 250,000-byte size ceiling (a file under it but bigger than one call is gated in parts), writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
 secret-pattern case, the pattern type, line number and a digit-masked line so
 a human can review without opening the file. The card-number check ignores ISO
@@ -197,8 +204,8 @@ By default the writer is `claude -p --model haiku` when the `claude` CLI is
 installed (change the model with `--writer-model`) — a proven cheap default;
 bulk labeling should never run on a premium model. With no `claude` CLI, or
 with `--writer builtin`, a no-model writer quotes each file's own headings as
-its description and leaves the labels unknown, so the TypeSafe key alone is
-enough. Every run prints a `writer: <command>` banner naming
+its description and leaves the labels unknown; each description is checked locally
+(verdict `QUOTED`), so a builtin connect makes no model call and no Jev call. Every run prints a `writer: <command>` banner naming
 whichever command actually runs, and, when neither `--writer-command` nor the
 `SUPERJEV_WRITER_COMMAND` env var is set, a second line recommending a cheap
 writer and naming that default. Systems without Claude Code can supply
