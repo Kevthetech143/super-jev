@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # One-line installer for Super Jev's terminal chat CLI ("superjev").
 #
-#   curl -fsSL https://raw.githubusercontent.com/<org>/super-jev/main/install.sh | bash
+#   bash install.sh
 #
-# Safe and idempotent: re-running just re-installs deps and re-links the
-# binary. Never overwrites your config or API key. Requires Node >= 24 and
-# git; python3 is used by the cache lookup (skills/super-jev/ask.py) and is
-# optional at install time (checked at first chat run instead).
+# Safe and idempotent: re-running just updates the checkout and re-links the
+# binary. Never overwrites your API key. Requires Node >= 24 and git; the
+# helpers need python3, which the app checks when it starts, not here.
 set -euo pipefail
 
 REPO_URL="${SUPERJEV_REPO_URL:-https://github.com/Kevthetech143/super-jev.git}"
@@ -36,9 +35,6 @@ else
   mkdir -p "$(dirname "$INSTALL_DIR")"
   git clone --quiet "$REPO_URL" "$INSTALL_DIR"
 fi
-
-info "Installing dependencies"
-(cd "$INSTALL_DIR" && npm install --omit=dev --no-fund --no-audit --silent)
 
 info "Linking superjev to $BIN_DIR"
 if [ -e "$BIN_DIR/superjev" ] && ! grep -qE 'super-jev-installer|jev-chat-cli\.ts' "$BIN_DIR/superjev" 2>/dev/null; then

@@ -17,7 +17,7 @@ One judge (Jev) between your agent and your data: the agent asks in its own word
 People: [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) — the full operating manual.
 Agents: [AGENTS.md](AGENTS.md) — the numbered path and daily loop, plus
 [wire-into-claude-code](docs/wire-into-claude-code.md) for the retrieval rule card and Stop-hook claim gate.
-No key yet? `npm run demo` runs the loop once offline.
+At a terminal: `npm run jev` opens the app ([docs/jev-cli.md](docs/jev-cli.md)). No key yet? `npm run demo` runs the loop once offline.
 
 ## The loop
 

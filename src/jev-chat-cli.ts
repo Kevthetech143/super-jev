@@ -1,309 +1,256 @@
 #!/usr/bin/env node
-// `superjev` -- a terminal chat over the super-jev cache-first lookup harness.
-// Launch screen, first-run setup (API key + principal + folders), a chat loop
-// that hits skills/super-jev/ask.py first (instant, zero-API-call replies on
-// a cache hit) and shows ask.py's own report on a miss -- no live Jev call,
-// since a single-question evaluation can't answer anything.
-import { intro, outro, spinner, text, password, confirm, note, log, isCancel, cancel } from '@clack/prompts';
-import pc from 'picocolors';
-import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+// `superjev`: the terminal window and the one-shot door over the super-jev helpers.
+// This file only does input and output: it reads a line, runs the helper, and prints what the helper
+// reported (src/jev-chat-config.ts decides what each line means and how each reply is drawn).
+// Helpers print one JSON object plus an exit code; the app never reads helper text, except setup.py's
+// failure text, which it shows as it is.
+import { spawn, type ChildProcess } from 'node:child_process';
+import { chmodSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadJudgeProfile } from './judge-profile.ts';
 import {
-  loadConfig, saveConfig, configPath, hasApiKey,
-  cannedReply, parseSlashCommand, askLookupArgs, isKnownSlashCommand,
-  parseMissCandidate, formatMissCandidateReply, parseMissReport,
-  parseSetupMissing, parseErrorReport, parseAnyPointers,
-  detectDroppedPaths, buildDropPlan, formatDropConfirm, shouldConnect, dropConfirmDefault,
-  buildConnectArgs, parseConnectSummary, formatConnectSummary, pointerExists, parseReplaceWarning,
-  MISS_LINE, HELP_TEXT,
-  type SuperJevConfig,
+  COMMANDS, HELP, childEnv, confirmText, helperCall, keyAction, launchLine, pointerName, readLine, render, wrap,
+  type Session, type Turn,
 } from './jev-chat-config.ts';
 
-const VERSION = '0.1.0';
-const HERE = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(HERE, '..');
-const ASK_PY = join(REPO_ROOT, 'skills', 'super-jev', 'ask.py');
-const DISPATCH_PY = join(REPO_ROOT, 'skills', 'super-jev', 'dispatch.py');
-const PREPARE_BULK_PY = join(REPO_ROOT, 'skills', 'super-jev', 'prepare_bulk.py');
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SKILL = join(ROOT, 'skills', 'super-jev');
+const VERSION: string = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version;
+const NO_PYTHON = 'Super Jev needs Python 3.10 or newer, and python3 was not found. Install it (python.org/downloads), then run npm run jev again.';
+const ESC = Symbol('esc');
+const SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏';
 
-const BANNER = String.raw`
-   ____                       ____
-  / ___| _   _ _ __   ___ _ __|  _ \ ___ __   __
-  \___ \| | | | '_ \ / _ \ '__| | | |/ _ \\ \ / /
-   ___) | |_| | |_) |  __/ |  | |_| |  __/ \ V /
-  |____/ \__,_| .__/ \___|_|  |____/ \___|  \_/
-              |_|
-`;
+type IO = { argv: string[]; env: NodeJS.ProcessEnv; stdin: any; stdout: any; stderr: any };
+type Done = { code: number; out: string; err: string };
+const lastLine = (s: string) => s.trim().split('\n').pop()?.trim() ?? '';
 
-function printBanner(model: string) {
-  console.log(pc.cyan(BANNER));
-  console.log(pc.bold('  Super Jev') + pc.dim(` v${VERSION}`) + `  -- model: ${pc.green(model)}`);
-  console.log(pc.dim('  Tips: ask anything. /help for commands. /quit to leave.'));
-  console.log();
-}
+export async function run(io: IO): Promise<number> {
+  const { argv, env, stdin, stdout, stderr } = io;
+  const home = env.HOME ?? '';
+  const profile = loadJudgeProfile(undefined, undefined, env);
+  const { keyEnv, vendor } = profile;
+  const keyFile = join(home, '.typesafe-api-key');
+  const readKeyFile = () => { try { return readFileSync(keyFile, 'utf8').trim(); } catch { return ''; } };
+  let fileKey = readKeyFile();
+  const keySource = () => (keyEnv && env[keyEnv] ? 'env' : fileKey ? 'file' : 'none') as 'env' | 'file' | 'none';
+  const needsKey = () => profile.keyRequired && keySource() === 'none';
+  const session: Session = { principal: env.SUPERJEV_PRINCIPAL || 'me', skillDir: SKILL, connected: new Set() };
+  const look = () => ({ width: Math.min(stdout.columns || 80, 80), color: !!stdout.isTTY && !env.NO_COLOR, home, keyEnv, keySource: keySource(), vendor });
+  const out = (text: string) => stdout.write(text + '\n');
+  let child: ChildProcess | null = null;
+  let interrupted = false;
 
-function runAskPy(args: string[]): { code: number; stdout: string; stderr: string } {
-  const result = spawnSync('python3', [ASK_PY, ...args], { encoding: 'utf8' });
-  if (result.error) {
-    return { code: 1, stdout: '', stderr: `no network / python3 unavailable: ${result.error.message}` };
-  }
-  return { code: result.status ?? 1, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
-}
-
-function parseHit(stdout: string): { answer: string; topFile: string } | null {
-  if (!stdout.startsWith('CACHE HIT')) return null;
-  const lines = stdout.split('\n');
-  const answerLine = lines.find((l) => l.startsWith('answer:'));
-  const evidenceLine = lines.find((l) => l.trim().startsWith('evidence:'));
-  const answer = answerLine ? answerLine.slice('answer:'.length).trim() : '';
-  const topFile = evidenceLine ? evidenceLine.trim().slice('evidence:'.length).trim().split('|')[0].trim() : 'unknown';
-  return { answer, topFile };
-}
-
-/** Cheap, local, no-network check (panel action) for whether a principal has
- * any connected pointers -- run right after /setup so a typo'd or wrong-case
- * principal (pointers are matched exact-case) is caught immediately instead
- * of silently missing on every question. Returns null (skip the warning) if
- * the check itself fails for any reason -- this is a nice-to-have, never a
- * blocker on setup completing. */
-function checkPrincipalHasConnections(principal: string): boolean | null {
-  const result = spawnSync('python3', [DISPATCH_PY, 'memory', '--principal', principal], {
-    encoding: 'utf8', timeout: 5000,
+  // ------------------------------------------------------------ helpers
+  const exec = (args: string[]) => new Promise<Done>((done, fail) => {
+    const p = spawn('python3', args, { env: childEnv(env, keyEnv, fileKey), stdio: ['ignore', 'pipe', 'pipe'] });
+    child = p;
+    let o = '', e = '';
+    p.stdout.on('data', (d) => (o += d));
+    p.stderr.on('data', (d) => (e += d));
+    p.on('error', (err: any) => fail(err.code === 'ENOENT' ? Object.assign(new Error(NO_PYTHON), { noPython: true }) : err));
+    p.on('close', (code) => { child = null; done({ code: code ?? 1, out: o, err: e }); });
   });
-  if (result.error || result.status !== 0 || !result.stdout) return null;
-  return parseAnyPointers(result.stdout);
-}
 
-/** Same local panel check, but for whether one specific pointer name is
- * already registered for this principal -- run right before a drop confirm
- * so a name collision (two different drops slugifying to the same pointer)
- * is surfaced as "will be REPLACED" instead of silently overwriting. Returns
- * null (skip the warning, connect proceeds as usual) if the check itself
- * fails for any reason. */
-function checkPointerExists(principal: string, pointer: string): boolean | null {
-  const result = spawnSync('python3', [DISPATCH_PY, 'memory', '--principal', principal], {
-    encoding: 'utf8', timeout: 5000,
-  });
-  if (result.error || result.status !== 0 || !result.stdout) return null;
-  return pointerExists(result.stdout, pointer);
-}
-
-async function runSetup(existing: SuperJevConfig): Promise<SuperJevConfig> {
-  note('First-time setup. Your API key is stored locally, never printed or logged.', 'Setup');
-  const key = await password({
-    message: 'TypeSafe API key (hidden, press enter to keep existing)',
-    validate: () => undefined,
-  });
-  if (isCancel(key)) { cancel('Setup cancelled.'); process.exit(1); }
-
-  const principal = await text({
-    message: 'Principal name (who Super Jev looks things up for)',
-    placeholder: existing.principal || 'me',
-    defaultValue: existing.principal || 'me',
-  });
-  if (isCancel(principal)) { cancel('Setup cancelled.'); process.exit(1); }
-
-  const foldersRaw = await text({
-    message: 'Folders to search (comma-separated paths, optional)',
-    placeholder: (existing.folders || []).join(', '),
-    defaultValue: (existing.folders || []).join(', '),
-  });
-  if (isCancel(foldersRaw)) { cancel('Setup cancelled.'); process.exit(1); }
-
-  const folders = String(foldersRaw).split(',').map((s) => s.trim()).filter(Boolean);
-  // Pointers are matched exact-case, so a principal saved as "Primary" never
-  // matches connections made under "primary" -- normalize at the one place
-  // it's typed in, rather than leaving every future lookup to miss silently.
-  const next: SuperJevConfig = {
-    typesafeApiKey: (typeof key === 'string' && key.length > 0) ? key : existing.typesafeApiKey,
-    principal: String(principal || existing.principal || 'me').trim().toLowerCase(),
-    folders: folders.length ? folders : existing.folders,
-  };
-  saveConfig(next);
-  log.success(`Saved config to ${configPath()} (0600, key never echoed).`);
-
-  const connected = checkPrincipalHasConnections(next.principal!);
-  if (connected === false) {
-    log.warn(`No connected pointers found yet for principal '${next.principal}'. Lookups will miss until you connect a folder (see skills/super-jev/references/connectors.md), or the data was connected under a different principal name.`);
-  }
-  return next;
-}
-
-async function handleQuestion(question: string, principal: string) {
-  const s = spinner();
-  s.start('Super Jev is thinking');
-  const hit = runAskPy(askLookupArgs(principal, question));
-  const parsed = parseHit(hit.stdout);
-  if (parsed) {
-    s.stop('Found it.');
-    console.log(pc.bold('Top file: ') + parsed.topFile);
-    console.log(pc.bold('Answer: ') + (parsed.answer || '(no answer text)'));
-    return;
+  /** The working row goes to stderr, only on a terminal and only after 300 ms, so quick answers never flicker. */
+  function working(label: string): () => void {
+    if (!label || !stderr.isTTY) return () => {};
+    const t0 = Date.now();
+    let i = 0, shown = false, tick: NodeJS.Timeout | undefined;
+    const draw = () => { shown = true; stderr.write(`\r\x1b[2K${SPINNER[i++ % SPINNER.length]} ${label} · ${Math.floor((Date.now() - t0) / 1000)}s`); };
+    const start = setTimeout(() => { draw(); tick = setInterval(draw, 120); }, 300);
+    return () => { clearTimeout(start); clearInterval(tick); if (shown) stderr.write('\r\x1b[2K'); };
   }
 
-  // Setup problem, not a miss: this principal has no connected pointers at
-  // all yet. Show ask.py's own message and the exact connect command instead
-  // of the generic "I didn't have this" -- that line is misleading when the
-  // real issue is nothing is connected (or the principal name doesn't match
-  // what it was connected under -- pointers are matched exact-case).
-  const setupMissing = parseSetupMissing(hit.stdout);
-  if (setupMissing) {
-    s.stop('Not set up for this yet.');
-    console.log();
-    console.log(setupMissing.join('\n'));
-    return;
+  /** Runs one helper turn and draws its reply. data is null when the helper did not print one JSON object. */
+  async function helper(t: Turn, extra: { label?: string; refreshed?: boolean } = {}): Promise<{ text: string; code: number; data: any }> {
+    const stop = working({ ask: 'Searching your notes', check: 'Checking your notes', connect: 'Connecting' }[t.kind as string] ?? '');
+    const t0 = Date.now();
+    let res: Done;
+    try { res = await exec(helperCall(t, session)); }
+    catch (e: any) { if (e.noPython) throw e; res = { code: 3, out: '', err: String(e.message ?? e) }; }
+    finally { stop(); }
+    let data: any = null;
+    try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
+    const secs = t.kind === 'status' ? undefined : (Date.now() - t0) / 1000;
+    if (!data) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: lastLine(res.err) }, secs }, look()) };
+    for (const s of data.sets ?? []) session.connected.add(s.name);
+    return { data, code: res.code, text: render({ kind: t.kind as any, data, secs, ...extra }, look()) };
   }
 
-  // Miss, but ask.py still ranked candidate files (no approved answer yet):
-  // a real short reply -- top file + one-line why -- never the raw score/
-  // pointer line, and no live call needed since we already have a lead.
-  const candidate = parseMissCandidate(hit.stdout);
-  if (candidate) {
-    s.stop('No saved answer yet.');
-    console.log(pc.bold('Super Jev: ') + formatMissCandidateReply(candidate));
-    return;
+  const askedKey = (t: Turn) => (t.kind === 'ask' || t.kind === 'check') && needsKey();
+  const noKey = `No ${vendor} key: run superjev once to paste it, or set ${keyEnv}.`;
+
+  /** Connect or refresh a folder or note after a yes. askYes shows the question and returns the answer. */
+  async function connectFlow(t: Extract<Turn, { kind: 'connect' }>, askYes: (text: string) => Promise<boolean>) {
+    const name = pointerName(t.path), label = basename(t.path).replace(/\.md$/i, '');
+    const refresh = session.connected.has(name);
+    if (!(await askYes(confirmText(label, refresh, vendor, look().width)))) return { text: render({ kind: 'connect', data: {}, label }, look()), code: 1 };
+    const r = await helper(t, { label, refreshed: refresh });
+    if (r.data?.connected && !r.data.refused) session.connected.add(name);
+    return r;
   }
 
-  // True miss (no candidates at all, or ask.py/network unavailable): no live
-  // call -- a single-question evaluation can't answer anything and would
-  // just cost money. Show ask.py's own miss report (what was searched, and
-  // the next step to take) instead.
-  s.stop('No saved answer yet.');
-  const missReport = parseMissReport(hit.stdout);
-  console.log();
-  if (missReport) console.log(missReport.join('\n'));
-
-  // If every pointer actually errored out (auth failure, network, etc.) this
-  // is not an honest "we don't have it" -- surface the real reason instead of
-  // a silent, unexplained miss.
-  const errorReport = parseErrorReport(hit.stdout);
-  if (errorReport) console.log(pc.red(errorReport.join('\n')));
-
-  console.log(pc.yellow(MISS_LINE));
-  if (hit.stderr) console.log(pc.dim(hit.stderr.trim().split('\n').slice(0, 3).join('\n')));
-}
-
-/** Runs prepare_bulk.py for a confirmed drop plan and prints its plain-words
- * result. Held/exception files are always surfaced, never swallowed. */
-function runConnect(plan: ReturnType<typeof buildDropPlan>, principal: string) {
-  if ('error' in plan) return; // callers check for .error before calling this
-  const s = spinner();
-  s.start(`Connecting ${plan.label}`);
-  const args = buildConnectArgs(plan, principal);
-  const result = spawnSync('python3', [PREPARE_BULK_PY, ...args], { encoding: 'utf8' });
-  if (result.error) {
-    s.stop('Connect failed.');
-    console.log(pc.red(`Connect failed: ${result.error.message}`));
-    return;
-  }
-  const stdout = result.stdout || '';
-  // prepare_bulk.py's own reuse warning (connecting a pointer name that
-  // already exists rotates its approved answers) -- shown verbatim, never
-  // swallowed by the summary parsing below.
-  const replaceWarning = parseReplaceWarning(stdout);
-  if (replaceWarning) console.log(pc.yellow(replaceWarning));
-  const summary = parseConnectSummary(stdout);
-  if (summary) {
-    s.stop('Connect finished.');
-    console.log(formatConnectSummary(summary));
-    return;
-  }
-  s.stop('Connect did not finish cleanly.');
-  console.log(pc.red('Connect did not report a clean approved/held/exception summary.'));
-  if (stdout.trim()) console.log(pc.dim(stdout.trim().split('\n').slice(-10).join('\n')));
-  if (result.stderr && result.stderr.trim()) console.log(pc.dim(result.stderr.trim().split('\n').slice(0, 5).join('\n')));
-}
-
-/** Handles a line that detectDroppedPaths recognized as one or more existing
- * local paths: shows what would be connected, checks (local, no network)
- * whether the pointer name already exists so a reuse is called out plainly,
- * gets a one-key confirm (folder drops default No, file drops default Yes),
- * then runs the connector. Never connects without an explicit yes --
- * connecting can make paid judge calls. */
-async function handleDrop(line: string, principal: string) {
-  const dropped = detectDroppedPaths(line)!;
-  const plan = buildDropPlan(dropped, principal);
-  if ('error' in plan) {
-    console.log(pc.red(plan.error));
-    return;
-  }
-  console.log(pc.bold('Detected a drop: ') + plan.label);
-  const existing = checkPointerExists(principal, plan.pointer);
-  const proceed = await confirm({
-    message: formatDropConfirm(plan, principal, existing === true),
-    initialValue: dropConfirmDefault(plan),
-  });
-  if (isCancel(proceed) || !shouldConnect(proceed)) {
-    console.log(pc.dim('Not connected.'));
-    return;
-  }
-  runConnect(plan, principal);
-}
-
-async function main() {
-  console.clear?.();
-  let config = loadConfig();
-  printBanner(config.principal ? 'super-jev cache + live' : 'not configured');
-
-  // Non-interactive / non-TTY environments (CI, pipes): don't prompt at all.
-  if (!process.stdin.isTTY) {
-    console.log('No TTY detected. Run superjev in a terminal to set up and chat.');
-    return;
-  }
-
-  if (!hasApiKey(config) || !config.principal) {
-    config = await runSetup(config);
-  }
-
-  intro(pc.cyan('Super Jev chat'));
-  const principal = config.principal || 'me';
-
-  for (;;) {
-    const input = await text({ message: 'you' });
-    if (isCancel(input) || input === undefined) { outro('Bye.'); return; }
-    const line = String(input).trim();
-    if (!line) continue;
-
-    // Check drag-drop shape BEFORE slash commands: an absolute path like
-    // /Users/kelvin/notes.md also starts with '/' and must not be parsed as
-    // a slash command.
-    if (detectDroppedPaths(line)) {
-      await handleDrop(line, principal);
-      continue;
-    }
-
-    const slash = parseSlashCommand(line);
-    if (slash) {
-      if (!isKnownSlashCommand(slash.command)) {
-        console.log(pc.red(`Unknown command: /${slash.command}. Try /help.`));
-        continue;
-      }
-      if (slash.command === 'help') { console.log(HELP_TEXT); continue; }
-      if (slash.command === 'quit') { outro('Bye.'); return; }
-      if (slash.command === 'setup') { config = await runSetup(config); continue; }
-      if (slash.command === 'folders') {
-        if (slash.args.length === 0) {
-          console.log('Folders: ' + ((config.folders && config.folders.length) ? config.folders.join(', ') : '(none set -- run /setup)'));
-        } else {
-          config = { ...config, folders: slash.args.join(' ').split(',').map((s) => s.trim()).filter(Boolean) };
-          saveConfig(config);
-          console.log(pc.green('Folders updated.'));
+  // ------------------------------------------------------------ keyboard
+  /** The hidden key prompt: raw keys, shown as dots, never echoed or logged. Null means cancelled. */
+  function readKey(): Promise<string | null> {
+    const names: Record<string, string> = { '\r': 'enter', '\n': 'enter', '\x1b': 'escape', '\x03': 'ctrl-c', '\x04': 'ctrl-d' };
+    return new Promise((done) => {
+      let key = '';
+      const end = (v: string | null) => { stdin.off('data', onData); stdin.setRawMode?.(false); stdin.pause(); stdout.write('\n'); done(v); };
+      const onData = (chunk: Buffer | string) => {
+        const s = String(chunk).replace(/\x1b\[20[01]~/g, '');
+        if (s === '\x1b') return end(null);
+        for (const ch of s.replace(/\x1b\[[0-9;]*[A-Za-z~]/g, '')) {
+          const a = keyAction({ mode: 'secret', line: key, armed: false }, names[ch] ?? '');
+          if (a === 'cancel') return end(null);
+          if (a === 'send') { if (key.trim()) return end(key.trim()); }
+          else if (ch === '\x7f' || ch === '\b') { if (key) { key = key.slice(0, -1); stdout.write('\b \b'); } }
+          else if (ch >= ' ') { key += ch; stdout.write('•'); }
         }
-        continue;
-      }
-      continue;
+      };
+      stdin.setRawMode?.(true);
+      stdin.on('data', onData);
+      stdin.resume();
+    });
+  }
+
+  /** The line editor: lines go to a queue, so the loop (and the yes/no) read them in order. */
+  function terminal() {
+    const rl = createInterface({
+      input: stdin, output: stdout, terminal: true, prompt: '› ',
+      completer: (l: string): [string[], string] => [l.startsWith('/') ? COMMANDS.filter((c) => c.startsWith(l)) : [], l],
+    });
+    const queue: (string | symbol)[] = [];
+    let closed = false, wake: (() => void) | null = null, mode: 'prompt' | 'busy' | 'confirm' = 'prompt', armed = false;
+    const push = (x: string | symbol) => { queue.push(x); wake?.(); };
+    const clear = () => { rl.write(null as any, { ctrl: true, name: 'e' }); rl.write(null as any, { ctrl: true, name: 'u' }); };
+    const pull = async (): Promise<string | symbol | null> => {
+      while (!queue.length && !closed) await new Promise<void>((r) => (wake = r));
+      return queue.shift() ?? null;
+    };
+    rl.on('line', (l) => push(l));
+    rl.on('close', () => { closed = true; wake?.(); });
+    rl.on('SIGINT', () => {
+      if (mode === 'busy') { interrupted = true; child?.kill('SIGTERM'); rl.close(); return; }
+      const a = keyAction({ mode, line: rl.line, armed }, 'ctrl-c');
+      if (a === 'clear') clear();
+      else if (a === 'quit') rl.close();
+      else if (a === 'no') { clear(); push(ESC); }
+      else if (a === 'hint') { armed = true; setTimeout(() => (armed = false), 2000).unref(); stdout.write('\nPress Ctrl+C again to quit\n'); rl.prompt(); }
+    });
+    stdin.on('keypress', (_s: string, key: any) => {
+      if (!key || mode === 'busy') return;
+      const name = key.name === 'escape' ? 'escape' : key.ctrl && key.name === 'd' ? 'ctrl-d' : '';
+      const a = name && keyAction({ mode, line: rl.line, armed }, name);
+      if (a === 'clear') clear();
+      else if (a === 'quit') rl.close();
+      else if (a === 'no') { clear(); push(ESC); }
+    });
+    return {
+      /** The next line, or null once the window is closed. */
+      async next(): Promise<string | null> {
+        for (;;) {
+          mode = 'prompt';
+          if (closed) return null;
+          rl.prompt();
+          const x = await pull();
+          if (typeof x === 'string' || x === null) { mode = 'busy'; return x; }
+        }
+      },
+      async confirm(text: string): Promise<boolean> {
+        out(text);
+        mode = 'confirm';
+        const x = await pull();
+        mode = 'busy';
+        return typeof x === 'string' && keyAction({ mode: 'confirm', line: x, armed: false }, 'enter') === 'yes';
+      },
+      close: () => rl.close(),
+    };
+  }
+
+  // ------------------------------------------------------------ the window
+  async function window(): Promise<number> {
+    let r = await helper({ kind: 'status' });
+    if (!r.data) { out(r.text); return r.code; }
+    if (!(r.data.sets ?? []).length) out(`Super Jev ${VERSION}\nPoints you to the notes that answer your question.\n`);
+    if (needsKey()) {
+      out(wrap(`Paste your ${vendor} API key. It stays hidden and is saved only on this Mac.`, look().width).join('\n'));
+      stdout.write('key › ');
+      const key = await readKey();
+      if (!key) { out(`No key entered. Run superjev again to paste it, or set ${keyEnv}.`); return 1; }
+      writeFileSync(keyFile, key + '\n', { mode: 0o600 });
+      chmodSync(keyFile, 0o600);
+      fileKey = key;
     }
+    if (r.data.next === 'setup') {
+      const s = await exec([join(SKILL, 'setup.py')]);
+      if (s.code !== 0) { out([s.out, s.err].map((x) => x.trim()).filter(Boolean).join('\n')); return s.code || 1; }
+      r = await helper({ kind: 'status' });
+      if (!r.data) { out(r.text); return r.code; }
+    }
+    const sets: { state: string }[] = r.data.sets ?? [];
+    out(sets.length ? launchLine(VERSION, sets) : '• Ready. Nothing connected yet.\n  Drag a folder of Markdown notes in here.');
 
-    const canned = cannedReply(line);
-    if (canned) { console.log(pc.bold('Super Jev: ') + canned); continue; }
+    const term = terminal();
+    try {
+      for (let line = await term.next(); line !== null && !interrupted; line = await term.next()) {
+        const t = readLine(line, home);
+        if (t.kind === 'exit') break;
+        let text = '';
+        if (t.kind === 'help') text = HELP;
+        else if (t.kind === 'say') text = t.text;
+        else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
+        else if (t.kind !== 'empty') text = (await helper(t)).text;
+        if (text && !interrupted) stdout.write(text + '\n\n');
+      }
+    } finally { term.close(); }
+    stdout.write('\n');
+    return interrupted ? 130 : 0;
+  }
 
-    await handleQuestion(line, principal);
+  // ------------------------------------------------------------ the one-shot door
+  async function door(): Promise<number> {
+    const t = readLine(argv.join(' '), home);
+    if (t.kind === 'help') { out(HELP); return 0; }
+    if (t.kind === 'exit') return 0;
+    if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
+    if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
+    if (askedKey(t)) { stderr.write(noKey + '\n'); return 4; }
+    if (t.kind === 'connect') {
+      let r: { text: string; code: number };
+      if (stdin.isTTY) {
+        await helper({ kind: 'status' });
+        const term = terminal();
+        r = await connectFlow(t, term.confirm);
+        term.close();
+      } else {
+        r = await connectFlow(t, async () => false);
+        stderr.write('Connecting needs a keyboard to confirm. Run superjev, then drag the folder in.\n');
+      }
+      out(r.text);
+      return r.code;
+    }
+    const r = await helper(t);
+    out(r.text);
+    return r.code;
+  }
+
+  try {
+    if (argv.length) return await door();
+    if (stdin.isTTY) return await window();
+    stderr.write('Usage: superjev "your question"   (run it in a terminal, with no words, for the window)\n');
+    return 2;
+  } catch (e: any) {
+    if (!e.noPython) throw e;
+    (argv.length ? stderr : stdout).write(e.message + '\n');
+    return 1;
   }
 }
 
-main().catch((err) => {
-  console.error(pc.red('superjev: ' + (err && err.message ? err.message : String(err))));
-  process.exitCode = 1;
-});
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  run({ argv: process.argv.slice(2), env: process.env, stdin: process.stdin, stdout: process.stdout, stderr: process.stderr })
+    .then((code) => { process.exitCode = code; })
+    .catch((e) => { console.error(`Super Jev hit an error: ${e instanceof Error ? e.message : e}`); process.exitCode = 3; });
+}

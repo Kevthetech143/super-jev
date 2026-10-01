@@ -1,131 +1,47 @@
-# Super Jev chat CLI (`superjev`)
+# The terminal app (`superjev`)
 
-A terminal chat app over the super-jev cache-first lookup harness. Questions
-hit the local cache first (`skills/super-jev/ask.py`) — zero API calls on a
-hit — and fall back to a live TypeSafe lookup on a miss, caching the answer
-so the next ask of the same question is instant.
+A window in your terminal over the same helpers agents call. What you see
+is what the helpers report: each helper prints one JSON object and an exit
+code, and the app only draws it. It has no dependencies beyond Node 24 and
+Python 3.10.
 
-## Install
-
-One-liner (clones the repo, installs deps, links `superjev` onto your PATH):
+## Start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/super-jev/main/install.sh | bash
+npm run jev            # the window
+./install.sh           # optional: puts a `superjev` command on your PATH
+superjev "How long does the canary hold?"   # one question, then exit
 ```
 
-Safe to re-run any time — it just updates the checkout and re-links the
-binary. It never touches your config or stored API key.
+The first launch asks once for your TypeSafe key (hidden, saved only on
+this Mac in `~/.typesafe-api-key`, owner-only) and runs setup. Later
+launches print one line: the version, how many folders, and whether they
+are up to date. A key in `TYPESAFE_API_KEY` wins over the saved one.
 
-Manual/dev install from a checkout:
+## In the window
 
-```bash
-npm install
-npm run jev
-```
+| You type | What happens |
+|---|---|
+| a question | finds the notes that answer it |
+| `/check <statement>` | TRUE, FALSE or NOT FOUND, with the proof line |
+| a folder or `.md` note (drag it in) | asks, then connects it or refreshes it |
+| `/status` | what is connected and whether it is current |
+| `/help` or `?` | this list |
+| `/exit`, `exit`, `quit` or Ctrl+D | leave |
 
-Requires Node >= 24. `python3` is used for the cache lookup step and checked
-at first run, not install time.
+Keys: Esc clears the line, Ctrl+C clears it (twice on an empty line quits),
+Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
+yes and Esc is no.
 
-## First run
+## One question from a shell
 
-The first time you run `superjev`, it walks you through setup:
+`superjev <words>` handles the words exactly as if typed in the window.
+The answer goes to stdout (no colour when piped) and the progress row to
+stderr. The exit code is the helper's own: found 0, not found 1, not
+supported 2, error 3, needs setup 4. A line the app cannot use (a path that
+does not exist, an unknown command) exits 2. With no key, it says so and
+exits 4. A folder or note is never connected without a keyboard to confirm.
 
-1. **TypeSafe API key** — hidden input (never echoed to the terminal, never
-   logged). Stored in `~/.config/superjev/config.json` (or
-   `$XDG_CONFIG_HOME/superjev/config.json`), created with **mode 0600**
-   (owner read/write only).
-2. **Principal** — the name Super Jev looks things up under (matches the
-   `--principal` used by `skills/super-jev/ask.py`).
-3. **Folders** — comma-separated paths Super Jev should search (optional;
-   can be changed later with `/folders`).
+## Tests
 
-Re-run setup any time with `/setup`.
-
-## Chat loop
-
-Type a question and Super Jev:
-
-1. Shells out to `ask.py --principal <you> "<question>"`.
-2. **Cache hit** → prints the top file and the cached answer instantly, no
-   network call.
-3. **Cache miss** → tries one live TypeSafe lookup (needs
-   `TYPESAFE_API_KEY`/the stored key); if that also comes up empty, or there
-   is no network at all, it prints the Jev voice line:
-
-   > Super Jev: I didn't have this. Want me to find it by hand and save it
-   > for next time?
-
-   No crash either way — a missing network or missing `python3` prints a
-   short error and keeps the chat loop alive.
-4. A successful live answer is cached with `ask.py --add` so the same
-   question is a cache hit next time.
-
-Small talk (`hi`, `who are you`, `help`, `thanks`, `what can you do`) is
-answered from a small built-in list — no lookup, no network call — so the
-chat feels alive immediately.
-
-## Slash commands
-
-| Command    | Effect                                             |
-|------------|-----------------------------------------------------|
-| `/help`    | Show the command list                              |
-| `/setup`   | Re-run first-time setup                            |
-| `/folders` | Show configured folders, or set new ones (comma-separated args) |
-| `/quit`    | Exit the chat                                      |
-
-## Demo transcript
-
-Recorded with a fake API key and a stubbed lookup (`ask.py` mocked to
-return one hit and one miss) — no real key or real answers involved.
-
-```
-   ____                       ____
-  / ___| _   _ _ __   ___ _ __|  _ \ ___ __   __
-  \___ \| | | | '_ \ / _ \ '__| | | |/ _ \\ \ / /
-   ___) | |_| | |_) |  __/ |  | |_| |  __/ \ V /
-  |____/ \__,_| .__/ \___|_|  |____/ \___|  \_/
-              |_|
-
-  Super Jev v0.1.0  -- model: super-jev cache + live
-  Tips: ask anything. /help for commands. /quit to leave.
-
-┌  Super Jev chat
-│
-◇  you
-│  hi
-│
-Super Jev: Hey, I'm Super Jev. Ask me anything and I'll check what we already know first.
-│
-◇  you
-│  what's the breakeven on CLOV
-│
-◇  Super Jev is thinking... Found it.
-Top file: campaigns/CLOV/dashboard.md
-Answer: Breakeven is $8.12/share after premium collected.
-│
-◇  you
-│  what's the wifi password at the lake house
-│
-◇  Super Jev is thinking... Done.
-
-Super Jev: I didn't have this. Want me to find it by hand and save it for next time?
-│
-◇  you
-│  /quit
-│
-└  Bye.
-```
-
-## No-network behavior
-
-If `python3` or the network is unavailable, `superjev` never crashes: the
-cache-lookup shells out and any failure (missing interpreter, DNS failure,
-timeout) is caught, reported as a short diagnostic line, and the chat falls
-through to the same "I didn't have this" miss line above.
-
-## Testing
-
-```bash
-npm test                                  # includes test/jev-chat-config.test.ts
-python3 -m pytest skills/super-jev/tests -q
-```
+`node --test test/jev-chat.test.ts` uses made-up notes and a stand-in `python3`, so it needs no key.
