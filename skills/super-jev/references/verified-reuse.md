@@ -10,7 +10,7 @@ Cache metadata records whether a ticket/result was resolved by `retrieval` or `a
 
 ## Bounded agent-assisted recovery
 
-This is for useful growth of verified memory, not instant coverage of every new question. It is disabled by default. A trusted operator may set `allowAgentAssist: true` in the persistent experiment config for an authorized normal-search recovery; a principal label is still a local scope label, not authentication.
+This is for useful growth of verified memory, not instant coverage of every new question. Available on every install; a principal label is still a local scope label, not authentication.
 
 For a partial, `no-match`, or `refused` original result, inspect it with `attempt(attemptId, principal)`. Inspect registered reviewed preparation with `sources(pointer, principal, offset?, limit?)`; its default limit is 25 and maximum is 100. Independently investigate only within that authorized registered dataset. Select concrete reviewed lines, then call:
 
@@ -21,7 +21,7 @@ assist(attemptId, principal, reason,
 
 Assistance accepts only registered, reviewed preparation. It rechecks principal scope, pointer generation, source hashes and freshness, and returns a new `ready` ticket for explicit agent review. It neither retrieves raw files nor approves/trains on an answer. Verify every factual claim in the full answer and approve returned `evidenceId` values only when they support it. If original-source inspection reveals an extra fact absent from the returned passages, bring its reviewed lines into an assistance ticket before approving an answer that includes it. Absent or conflicting sources remain unresolved.
 
-When the file is already known (ask.py ranked it, or the lead picked it), ask.py skips retrieval: the `open` action (`pointer`, `question`, `principal`; needs `allowAgentAssist`) records an attempt with status `caller-ranked`, and `assist` cites that file's own reviewed lines. The evidence therefore comes from the same file ask() chose, never from the separate description-only search.
+When the file is already known (ask.py ranked it, or the lead picked it), ask.py skips retrieval: the `open` action (`pointer`, `question`, `principal`) records an attempt with status `caller-ranked`, and `assist` cites that file's own reviewed lines. The evidence therefore comes from the same file ask() chose, never from the separate description-only search.
 
 Use at most one assistance attempt per question. Then record the unresolved result unless there is a concrete, correctable input issue. An unregistered source needs reviewed onboarding, refresh and a new original attempt; it never bypasses the registry. The database keeps original attempt status/trace metadata across pointer replacement/removal; keep full raw responses and resolution receipts in your private work artifacts. Approved resolution metadata stays with the cache entry, which invalidation can remove. Old-generation attempts remain in the database for trusted audit but cannot be read through a newly registered pointer.
 
