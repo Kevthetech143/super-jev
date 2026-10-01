@@ -31,13 +31,16 @@ Pipeline per run:
      another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
      keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc.
-     Every file a DEFAULT rule leaves out is counted, never silent: one `  SKIP  N ...` line per reason, with counts and
-     folder or extension names (never file names or paths) and the way in where there is one -- .md files in a skipped
-     folder (profile/, documents/, node_modules/, __pycache__/, .git/ or any hidden folder; connect that folder by itself
-     with --root to include them), files of other types (only .md connects), hidden .md files, backup or credential-style
-     names, empty files, links pointing outside every --root (add --allow-target), prepared dataset copies, test/scratch
-     output and worktree copies. Files your own flags leave out (--exclude, --name, --no-recurse) are not counted. SKIP
-     lines never change which files connect or the exit code. Files matching
+     Connect says what a DEFAULT rule leaves out: one `  SKIP  N ...` line per reason, with counts and folder
+     or extension names (never file names or paths; only a known extension is named, anything else counts as
+     "other") and the way in where there is one. Counted: every .md file left out (in a skipped folder --
+     profile/, documents/, node_modules/, __pycache__/, .git/ or any hidden folder; connect that folder as its
+     own set, --root FOLDER --pointer NEW-NAME, since reusing a pointer replaces that set's files -- or hidden,
+     backup or credential-style named, empty, linked from outside every --root (add --allow-target), in a
+     prepared dataset copy, test/scratch output or a worktree copy), and every file of another type (only .md
+     connects) except hidden ones: a hidden file, or anything in a hidden folder such as .git/, is system
+     clutter and is not counted. Files your own flags leave out (--exclude, --name, --no-recurse) are not
+     counted. SKIP lines never change which files connect or the exit code. Files matching
      card/password-like patterns or over the size ceiling (250,000 bytes; a bigger note is held "too big, split it", never connected in sections) are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
@@ -711,24 +714,37 @@ def is_worktree_copy(path: Path) -> bool:
 
 def walk_md(root: Path, no_recurse: bool = False, others: list = None):
     """Markdown files under `root`, sorted, plus resolved folder symlink targets. When `others` is a list,
-    each file of another type is appended to it as (path, its path under root with / separators) unless it is hidden
-    or sits in a folder a default rule skips: that is decided once per folder, so a node_modules/ or .git/
-    full of files costs nothing per file. The caller reports them; none connect.
+    it also receives what connect reports about files of other types, ready to tally as
+    (key, path under root, reason, label, count): one entry per file outside the skipped folders, and one
+    per skipped folder (node_modules/, documents/) with its count. Nothing hidden is reported (a hidden file,
+    anything in a hidden folder). That is decided once per folder, so a folder of tens of thousands of files
+    costs no path work per file. The caller reports them; none connect.
     Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
     symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
     loop is walked once."""
-    def note_others(dirpath, rel_parts, names):
-        if others is None or skipped_folder(rel_parts):
+    def note_others(real_dir, rel_parts, real_parts, names):
+        # A folder is hidden or skipped by its path under the root or by its real path (a link into
+        # documents/ is still documents/), the same two views the .md rule in inventory() uses.
+        parts = rel_parts + real_parts
+        if others is None or any(x.startswith(".") for x in parts):
+            return
+        names = [n for n in names if not n.startswith(".") and not n.lower().endswith(CONNECTABLE_EXTENSIONS)]
+        if not names:
             return
         rel_dir = "/".join(rel_parts)
-        others.extend((os.path.join(dirpath, n), f"{rel_dir}/{n}" if rel_dir else n) for n in names
-                      if not n.startswith(".") and not n.lower().endswith(CONNECTABLE_EXTENSIONS))
+        folder = skipped_folder(parts)   # no hidden part is left, so this is a vault or generated folder
+        if folder:
+            others.append(((real_dir, ""), rel_dir, "folder_other", folder + "/", len(names)))
+        else:
+            others.extend(((real_dir, n), f"{rel_dir}/{n}" if rel_dir else n, "types", extension_label(n), 1)
+                          for n in names)
 
     if no_recurse:
         kids = sorted(p for p in root.iterdir() if p.is_file())
-        note_others(str(root), (), [p.name for p in kids])
+        note_others(os.path.realpath(root), (), (), [p.name for p in kids])
         return [p for p in kids if p.name.lower().endswith(CONNECTABLE_EXTENSIONS)], []
     out, linked, walked = [], [], set()
+    real_root = os.path.realpath(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in walked:
@@ -738,20 +754,24 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
         linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
                    if os.path.islink(os.path.join(dirpath, d))]
         out += [Path(dirpath) / n for n in filenames if n.lower().endswith(CONNECTABLE_EXTENSIONS)]
-        rel = os.path.relpath(dirpath, root)
-        note_others(dirpath, () if rel == "." else tuple(rel.split(os.sep)), filenames)
+        rel, real_rel = os.path.relpath(dirpath, root), os.path.relpath(real, real_root)
+        note_others(real, () if rel == "." else tuple(rel.split(os.sep)),
+                    () if real_rel == "." or real_rel.split(os.sep)[0] == ".." else tuple(real_rel.split(os.sep)),
+                    filenames)
     return sorted(out), linked
 
 
-# Every file a DEFAULT rule leaves out of a connect is counted under one of these reasons and
-# printed as one "  SKIP  ..." line (counts plus folder names and extensions, never file names or
-# paths), with the way in where there is one. Files the user's own flags leave out (--name,
-# --exclude, --no-recurse) are never counted. Dict order is print order.
+# Every .md file a DEFAULT rule leaves out of a connect, and every file of another type that is not
+# hidden, is counted under one of these reasons and printed as one "  SKIP  ..." line (counts plus
+# folder names and extensions, never file names or paths), with the way in where there is one. Files
+# the user's own flags leave out (--name, --exclude, --no-recurse) are never counted. Dict order is
+# print order.
 SKIP_REASONS = {
     "link": "{n} linked file(s) point outside every --root; add --allow-target FOLDER to admit them",
     "name": "{n} .md file(s) with backup or credential-style names (.bak, logins, *-secret); never connected",
     "folder": "{n} .md file(s) in folders skipped by default: {names}; "
-              "to connect one, connect that folder by itself (--root FOLDER)",
+              "to connect one, connect that folder as its own set (--root FOLDER --pointer NEW-NAME)",
+    "folder_other": "{n} file(s) of other types in folders skipped by default: {names}; only .md files connect",
     "hidden": "{n} hidden .md file(s); rename to connect",
     "dataset": "{n} file(s) in prepared dataset copies (.local/retrieval-datasets/); "
                "they connect through their own dataset pointer",
@@ -768,11 +788,20 @@ def skipped_folder(parts):
     return next((x for x in parts if x.casefold() in SKIP_PARTS or x.startswith(".")), None)
 
 
+# The only extensions a SKIP line names. What follows a file name's last dot can be part of the name
+# (a person, a client, an account number), and the line never prints names: any other suffix, and a
+# name with no dot, is counted as "other".
+KNOWN_EXTENSIONS = frozenset(
+    ".pdf .doc .docx .rtf .odt .txt .csv .tsv .xls .xlsx .ods .ppt .pptx .key .pages .numbers .epub "
+    ".json .jsonl .yaml .yml .toml .xml .html .htm .ini .log .ipynb .sql .sh "
+    ".py .js .ts .tsx .jsx .go .rs .rb .java .c .h .cpp .cs .php .swift .kt "
+    ".png .jpg .jpeg .gif .svg .webp .heic .mp3 .mp4 .mov .wav .zip .tar .gz".split())
+
+
 def extension_label(name: str) -> str:
-    """The file's extension when it looks like one (".py"), else "no extension". Whatever follows a
-    name's last dot can be part of the name (a token, a person), and the SKIP line never prints names."""
-    suffix = os.path.splitext(name)[1].lower()
-    return suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else "no extension"
+    """The file's extension when it is on KNOWN_EXTENSIONS (".py"), else "other"."""
+    ext = os.path.splitext(name)[1].lower()
+    return ext if ext in KNOWN_EXTENSIONS else "other"
 
 
 def print_skips(skips: dict) -> None:
@@ -782,7 +811,7 @@ def print_skips(skips: dict) -> None:
         if not counts:
             continue
         ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        fmt = "{} ({})" if reason == "folder" else "{} {}"
+        fmt = "{} ({})" if reason.startswith("folder") else "{} {}"
         names = ", ".join(fmt.format(k, n) for k, n in ranked[:SKIP_NAMES_SHOWN])
         if len(ranked) > SKIP_NAMES_SHOWN:
             names += f", +{len(ranked) - SKIP_NAMES_SHOWN} more"
@@ -802,18 +831,20 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
     files, held, seen = [], [], set()
     skips, counted = {}, set()
 
-    def skip(p, reason, key=""):
-        """Tally a file a default rule leaves out, once even when two roots reach it."""
-        if str(p) not in counted:
-            counted.add(str(p))
-            skips.setdefault(reason, {})[key] = skips.get(reason, {}).get(key, 0) + 1
+    def skip(key, reason, label="", n=1):
+        """Tally what a default rule leaves out, once per physical file even when a link or a second
+        root reaches it: `key` is the file's resolved path (a folder's, with a count, for a skipped folder)."""
+        if key not in counted:
+            counted.add(key)
+            tally = skips.setdefault(reason, {})
+            tally[label] = tally.get(label, 0) + n
 
     for root in roots:
         others = [] if not names else None  # other file types are reported only when nothing narrows by name
         glob_iter, linked = walk_md(root, no_recurse, others)
-        for path, rel in others or []:
+        for key, rel, reason, label, n in others or []:
             if not _excluded(rel, excludes):
-                skip(path, "types", extension_label(rel))
+                skip(key, reason, label, n)
         # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
         # skills into ~/.claude/skills), so its target is admitted like a root, unless it is a vault folder.
         bases += [t for t in linked if not SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
@@ -833,30 +864,30 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             # From here on a default rule decides; the first one that matches is the one counted.
             base = next((b for b in bases if rp.is_relative_to(b)), None)
             if base is None:
-                skip(p, "link")
+                skip(rp, "link")
                 continue
             if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret") for n in (p.name.casefold(), rp.name.casefold())):
-                skip(p, "name")
+                skip(rp, "name")
                 continue
             folder = skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(base).parts[:-1])
             if folder:
-                skip(p, "folder", folder + "/")
+                skip(rp, "folder", folder + "/")
                 continue
             if p.name.startswith(".") or rp.name.startswith("."):
-                skip(p, "hidden")
+                skip(rp, "hidden")
                 continue
             if is_bench_dataset(str(rp)):
-                skip(p, "dataset")
+                skip(rp, "dataset")
                 continue
             if is_test_material(rel, named_exactly(p.name, names)):
-                skip(p, "test")
+                skip(rp, "test")
                 continue
             if is_worktree_copy(p.absolute()) or is_worktree_copy(rp):
-                skip(p, "worktree")
+                skip(rp, "worktree")
                 continue
             b = p.read_bytes()
             if not b.strip():
-                skip(p, "empty")
+                skip(rp, "empty")
                 continue
             seen.add(rp)
             if len(b) > CEILING_BYTES:
@@ -1052,7 +1083,11 @@ def builtin_writer(items: list) -> dict:
 
 
 def navigate(pointer: str, principal: str, question: str) -> list:
+    """Paths of the ranked candidates. A search that failed (no key, an unreachable judge) raises, so a
+    failure is never read as "ranked absent"."""
     out = memory({"action": "navigate", "pointer": pointer, "principal": principal, "question": question})
+    if out.get("status") == "error":
+        raise RuntimeError(out.get("reason") or out.get("raw") or "the search returned an error")
     return [c.get("originalPath") for c in out.get("candidates", [])]
 
 
@@ -1583,8 +1618,8 @@ def main() -> int:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
     write_held_txt(a.pointer, held)
     if not files and not held:
-        print(f"ERROR: no .md files found under {', '.join(str(r) for r in roots)} "
-              "(empty, hidden or excluded files are skipped); nothing to connect"); return 1
+        print(f"ERROR: no .md file left to connect under {', '.join(str(r) for r in roots)}; nothing to connect "
+              "(the SKIP lines above, if any, say what was left out)"); return 1
 
     # First connect (no cache yet) has no way to know how many files would actually need a
     # writer call, so the guard is on the raw inventory. A refresh already has a cache: most
@@ -1791,7 +1826,7 @@ def main() -> int:
 
     all_connected = True
     connected_n = failed_n = 0
-    hits, total, misses = 0, 0, []
+    hits, total, misses, search_failed = 0, 0, [], ""
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
         result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable)
@@ -1801,13 +1836,17 @@ def main() -> int:
             failed_n += len(part_files)
             continue
         connected_n += len(part_files)
-        if not a.no_findability:
+        if not a.no_findability and not search_failed:
             for p in part_files:
                 q = cache[str(p)].get("question") or ""
                 total += 1
                 if not q:
                     misses.append((str(p), "no question")); continue
-                top = navigate(pname, a.principals[0], q)
+                try:
+                    top = navigate(pname, a.principals[0], q)
+                except RuntimeError as e:
+                    search_failed = str(e).strip()[:200]
+                    break
                 if top and top[0] == str(p):
                     hits += 1
                 else:
@@ -1826,7 +1865,10 @@ def main() -> int:
         from share_pointers import share_defaults
         share_defaults(a.principals, memory=memory)
 
-    if not a.no_findability:
+    if search_failed:
+        report["findability"] = {"notRun": search_failed}
+        print(f"findability: not completed ({search_failed}); no hit rate reported")
+    elif not a.no_findability:
         report["findability"] = {"hits": hits, "total": total, "misses": misses}
         print(f"findability: {hits}/{total} files rank first on their own question")
         for p, why in misses:

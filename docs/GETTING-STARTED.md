@@ -81,15 +81,17 @@ for `--writer builtin`). Pick the description writer:
 - `--writer-command "my-writer"` — any command that reads the prompt on stdin
   and prints a JSON array.
 
-- **Skipped by default:** a connect counts every file a default rule left out, in
-  `SKIP` lines with counts and folder or extension names (never file names): `.md` files
-  in `documents/`, `profile/`, `node_modules/` or a hidden folder (connect that folder by
-  itself with `--root` to include it; a folder under `documents/` or `profile/`,
-  `~/Documents` included, then does not pick up new files on its own, so run it again
-  with `--refresh` after adding files), files of other types (only `.md` connects), hidden,
-  backup-named and empty files, and links that point outside the roots (`--allow-target`
-  admits them). Your own `--exclude` and `--name` choices are not counted. Skips never
-  change the exit code.
+- **Skipped by default:** connect says what a default rule left out, in `SKIP` lines with
+  counts and folder or extension names (never file names). Every `.md` file left out is counted:
+  those in `documents/`, `profile/`, `node_modules/` or a hidden folder (counted per folder; to
+  connect one, connect that folder as its own set, `--root FOLDER --pointer NEW-NAME`, since
+  re-running with an existing pointer replaces that set's files; a folder under `documents/` or
+  `profile/`, `~/Documents` included, then does not pick up new files on its own, so run it again
+  with `--refresh` after adding files), plus hidden, backup-named and empty files and links that
+  point outside the roots (`--allow-target` admits them). Files of other types (only `.md`
+  connects) are counted too, except hidden ones: a hidden file, or anything inside a hidden folder
+  such as `.git/`, is not counted. Your own `--exclude` and `--name` choices are not counted.
+  Skips never change the exit code.
 - **Size guard:** a first connect refuses more than 250 files (`--max-files` raises it)
   and exits 2. It is a cost guard for model writers (a writer call and a TypeSafe check
   per file) but applies with `--writer builtin` too. A `--refresh` guards only the files
@@ -168,10 +170,7 @@ Jev reads the evidence files and answers, per claim, `SUPPORTED`,
 - Any other exit — the check itself failed (no key, network, unreadable
   output). Treat it as blocked.
 
-Add `--json` for machine-readable output. To check a statement against files you
-already connected, use `ask.py --principal ME --claim "statement"` instead; it
-prints a `TRUE`/`FALSE`/`CONFLICT`/`PARTIAL`/`UNSURE`/`NOT FOUND` word and the proof
-file and line. Set `SUPERJEV_GATE_CMD` to use your
+Add `--json` for machine-readable output. Set `SUPERJEV_GATE_CMD` to use your
 own claim-gate tool instead of the built-in client
 (`skills/super-jev/lib/jev_client.py`).
 

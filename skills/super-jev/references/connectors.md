@@ -149,14 +149,17 @@ folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktr
 `.git/worktrees/`, even when that checkout is the `--root` itself), test/scratch output
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`; a file named
 exactly with `--name` is judged by its folder only) and the folders `profile/`,
-`documents/`, `__pycache__/`, `node_modules/` and `.git/`. Nothing is skipped silently:
-connect prints one `SKIP` line per reason (counts and folder or extension names, never
-file names or paths) for `.md` files in those folders (connect that folder by itself with
-`--root` to include them), files of other types, hidden `.md` files, backup or
-credential-style names, empty files, links pointing outside every `--root`
+`documents/`, `__pycache__/`, `node_modules/` and `.git/`. Connect says what it left out:
+one `SKIP` line per reason (counts and folder or extension names, never file names or
+paths) for every `.md` file a default rule skipped (in those folders, counted per folder;
+to connect one, connect that folder as its own set with `--root FOLDER --pointer NEW-NAME`,
+since re-running with an existing pointer replaces that set's files; also hidden `.md`
+files, backup or credential-style names, empty files, links pointing outside every `--root`
 (`--allow-target` admits them), prepared dataset copies, test/scratch output and worktree
-copies. Files your own `--exclude`, `--name` or `--no-recurse` leave out are not counted,
-and a skip never changes which files connect or the exit code. It holds back any file that looks like it carries
+copies) and for files of other types, except hidden ones (a hidden file, or anything in a
+hidden folder such as `.git/`, is not counted). Files your own `--exclude`, `--name` or
+`--no-recurse` leave out are not counted, and a skip never changes which files connect or
+the exit code. It holds back any file that looks like it carries
 card/password text or sits over the 250,000-byte size ceiling (a file under it but bigger than one call is gated in parts), writing a
 `prepare-cache/<pointer>-held.txt` with each hold's reason and, for the
 secret-pattern case, the pattern type, line number and a digit-masked line so
