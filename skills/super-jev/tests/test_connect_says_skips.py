@@ -142,6 +142,43 @@ def test_skip_lines_never_name_a_skipped_file(tmp_path, capsys):
         assert name not in out, name
 
 
+def test_a_dotted_name_that_is_not_an_extension_is_never_printed(tmp_path, capsys):
+    """What follows a name's last dot can be part of the name (a token, a person, a client). Only a
+    suffix that looks like an extension is named; everything else is counted as "no extension"."""
+    root = tmp_path / "notes"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "note.md").write_text("# Note\n\ntext\n")
+    fragments = ["sk_live_51HxAbCdEfGh1234567890", " wren halloway", "2 for acme corp", "AKIAIOSFODNN7EXAMPLE"]
+    for i, frag in enumerate(fragments):
+        (root / "a" / f"file{i}.{frag}").write_text("x")
+    (root / "a" / "matcher.py").write_text("x")
+    (root / "a" / "Makefile").write_text("x")
+    pb.inventory([root])
+    out = "\n".join(_skip_lines(capsys.readouterr().out))
+    for frag in fragments:
+        assert frag.strip().split()[0].lower() not in out.lower(), (frag, out)
+    assert ".py 1" in out and "no extension 5" in out, out
+
+
+def test_walk_md_never_lists_files_of_skipped_or_hidden_folders_as_other_types(tmp_path):
+    """The other-types tally decides once per folder. A node_modules/ or .git/ with tens of thousands
+    of files must not cost one path operation per file (connect runs this on every refresh)."""
+    root = tmp_path / "notes"
+    for rel in ("src/app.py", "node_modules/pkg/index.js", ".git/objects/ab12", ".cache/x/y.py",
+                "documents/rates.csv", "profile/team.json", "src/.hidden.py", ".DS_Store"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("x")
+    others = []
+    pb.walk_md(root, others=others)
+    listed = repr(others).replace(str(root), "")   # names only, so a temp dir name cannot match
+    assert "app.py" in listed, listed
+    for name in ("index.js", "ab12", "y.py", "rates.csv", "team.json", ".hidden.py", ".DS_Store"):
+        assert name not in listed, (name, listed)
+    others = []
+    pb.walk_md(root, no_recurse=True, others=others)
+    assert others == [], others   # no top-level file here is of another type; hidden ones never count
+
+
 def test_the_printed_way_in_works(tmp_path, capsys):
     root = tmp_path / "notes"
     _tree(root)

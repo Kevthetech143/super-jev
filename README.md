@@ -71,7 +71,7 @@ Tested on macOS and Linux. Windows is untested.
 |---|---|
 | Reads | Your connected folders and configured skill roots. |
 | Writes | State dir under your home — `$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev/` (per-principal logs, the `_memory/` config and pointer store `setup.py` creates) — plus `skills/super-jev/prepare-cache/` and `skills/super-jev/ledger/` in the checkout. |
-| Leaves the machine | Sent to the TypeSafe provider: file text when `ask` reads a file to confirm an answer, descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. A connect sends file text only with a model writer (the default when the `claude` CLI is installed): the writer model reads an excerpt of each file and TypeSafe checks each description against its file. `--writer builtin` sends nothing while connecting. |
+| Leaves the machine | Sent to the TypeSafe provider: file text when `ask` reads a file to confirm an answer, descriptions and questions (to rank files), and the claim plus evidence files you pass to `check`. A connect sends file text only with a model writer (the default when the `claude` CLI is installed): the writer model reads an excerpt of each file and TypeSafe checks each description against its file. `--writer builtin` sends nothing while connecting, unless you add `--findability`: that runs one ranking search per file, which sends the descriptions and that file's sample question. |
 | Provider receives | The above; never files the secret scan holds — those stay local. |
 | Never leaves | Files the secret scan holds, and files connect skips by default (`profile/` and `documents/` folders, hidden and generated folders, other file types); connect prints a `SKIP` line for each kind. |
 

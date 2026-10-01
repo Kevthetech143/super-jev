@@ -8,7 +8,8 @@ step has the exact command and what success looks like. Run from the repo root.
 
 - **Node 24** — check: `node --version` → prints `v24.x.y`.
 - **Python 3.10+** — check: `python3 --version` → prints `3.10` or newer.
-- **A TypeSafe API key** — ask and check call TypeSafe with it (a `--writer builtin` connect does not).
+- **A TypeSafe API key** — ask and check call TypeSafe with it (a `--writer builtin` connect does not,
+  unless you add `--findability`).
   Do not commit it; keep it in a file only you can read.
 
 Check the tests still pass before you touch anything:
@@ -73,8 +74,8 @@ Each file gets a one-sentence description, and that description is checked
 against the file before it is connected (by Jev for a model-written one, locally
 for `--writer builtin`). Pick the description writer:
 
-- `--writer builtin` — no model and no TypeSafe call: the description quotes the
-  file's own headings and is checked locally.
+- `--writer builtin` — no model and no TypeSafe call (unless you add `--findability`):
+  the description quotes the file's own headings and is checked locally.
 - no flag — uses `claude -p --model haiku` when the `claude` CLI is installed
   (it must be logged in), and falls back to builtin when it is not.
 - `--writer-command "my-writer"` — any command that reads the prompt on stdin
@@ -83,7 +84,9 @@ for `--writer builtin`). Pick the description writer:
 - **Skipped by default:** a connect counts every file a default rule left out, in
   `SKIP` lines with counts and folder or extension names (never file names): `.md` files
   in `documents/`, `profile/`, `node_modules/` or a hidden folder (connect that folder by
-  itself with `--root` to include it), files of other types (only `.md` connects), hidden,
+  itself with `--root` to include it; a folder under `documents/` or `profile/`,
+  `~/Documents` included, then does not pick up new files on its own, so run it again
+  with `--refresh` after adding files), files of other types (only `.md` connects), hidden,
   backup-named and empty files, and links that point outside the roots (`--allow-target`
   admits them). Your own `--exclude` and `--name` choices are not counted. Skips never
   change the exit code.

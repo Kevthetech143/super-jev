@@ -129,7 +129,7 @@ async function runValidate(args: string[]): Promise<number> {
   const positional: string[] = [];
   for (const a of args) { if (a === '--json') json = true; else if (a.startsWith('--')) throw new CliError(`Unknown argument ${a}`); else positional.push(a); }
   if (!positional.length) throw new CliError(`Missing required argument: <catalog.json>\n\n${usage}`);
-  if (positional.length !== 1) throw new CliError(usage);
+  if (positional.length !== 1) throw new CliError(`Too many arguments: validate takes one <catalog.json>, got ${positional.length}\n\n${usage}`);
   const path = resolve(positional[0]);
   const text = await readSmallFile(path, 'catalog');
   let records;
@@ -152,7 +152,7 @@ async function runLearn(args: string[]): Promise<number> {
     else positional.push(a);
   }
   if (positional.length < 2) throw new CliError(`Missing required argument: ${['<ledger.jsonl>', '<catalog.json>'][positional.length]}\n\n${usage}`);
-  if (positional.length !== 2) throw new CliError(usage);
+  if (positional.length !== 2) throw new CliError(`Too many arguments: learn takes <ledger.jsonl> <catalog.json>, got ${positional.length}\n\n${usage}`);
   const [ledgerPath, catalogPath] = positional.map(p => resolve(p));
   const ledgerText = await readSmallFile(ledgerPath, 'ledger');
   const catalogText = await readSmallFile(catalogPath, 'catalog');

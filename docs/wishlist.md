@@ -155,6 +155,8 @@ provider's preview terms restrict publishing performance numbers here.
 12. **ENFORCED PERMIT** — make a risky action (delete, pay, email) actually
     block until it is approved, instead of only advising. Item 5's `permit`
     door answers the question; nothing stops a caller that ignores the answer.
+    Closes: an irreversible action taken by an agent that never asked, or
+    ignored a "needs approval" answer.
     Plan: ship a hook that refuses the action unless a permit verdict allows
     it, so the rule holds even when the agent forgets to ask.
     Added 2026-09-30.
@@ -163,8 +165,11 @@ provider's preview terms restrict publishing performance numbers here.
 13. **SECRET GUARD** — catch secrets in unusual formats that carry no key word
     (an entropy-style check on long random-looking strings), and mask the
     held-file report fully, so a held value is never readable from the report.
-    Today the scan holds card numbers and key-word values; a bare token with no
-    key word next to it can pass.
+    Closes: a secret of a format the scan does not know reaching a provider, and
+    a held value being readable from its own report.
+    Today the scan holds card numbers, key-word values and known token formats
+    (sk-, ghp_, AKIA, JWT and others); a bare random value in an unknown format
+    with no key word next to it can pass.
     Added 2026-09-30.
     Status: later.
 
