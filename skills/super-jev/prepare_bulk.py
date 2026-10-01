@@ -711,14 +711,22 @@ def is_worktree_copy(path: Path) -> bool:
 
 def walk_md(root: Path, no_recurse: bool = False, others: list = None):
     """Markdown files under `root`, sorted, plus resolved folder symlink targets. When `others` is a list,
-    every file of another type the walk passes is appended to it (the caller reports them; none connect).
+    each file of another type is appended to it as (path, its path under root with / separators) unless it is hidden
+    or sits in a folder a default rule skips: that is decided once per folder, so a node_modules/ or .git/
+    full of files costs nothing per file. The caller reports them; none connect.
     Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
     symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
     loop is walked once."""
+    def note_others(dirpath, rel_parts, names):
+        if others is None or skipped_folder(rel_parts):
+            return
+        rel_dir = "/".join(rel_parts)
+        others.extend((os.path.join(dirpath, n), f"{rel_dir}/{n}" if rel_dir else n) for n in names
+                      if not n.startswith(".") and not n.lower().endswith(CONNECTABLE_EXTENSIONS))
+
     if no_recurse:
         kids = sorted(p for p in root.iterdir() if p.is_file())
-        if others is not None:
-            others += [p for p in kids if not p.name.lower().endswith(CONNECTABLE_EXTENSIONS)]
+        note_others(str(root), (), [p.name for p in kids])
         return [p for p in kids if p.name.lower().endswith(CONNECTABLE_EXTENSIONS)], []
     out, linked, walked = [], [], set()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
@@ -730,13 +738,13 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
         linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
                    if os.path.islink(os.path.join(dirpath, d))]
         out += [Path(dirpath) / n for n in filenames if n.lower().endswith(CONNECTABLE_EXTENSIONS)]
-        if others is not None:
-            others += [Path(dirpath) / n for n in filenames if not n.lower().endswith(CONNECTABLE_EXTENSIONS)]
+        rel = os.path.relpath(dirpath, root)
+        note_others(dirpath, () if rel == "." else tuple(rel.split(os.sep)), filenames)
     return sorted(out), linked
 
 
 # Every file a DEFAULT rule leaves out of a connect is counted under one of these reasons and
-# printed as one "  SKIP  ..." line (counts plus folder or extension names, never file names or
+# printed as one "  SKIP  ..." line (counts plus folder names and extensions, never file names or
 # paths), with the way in where there is one. Files the user's own flags leave out (--name,
 # --exclude, --no-recurse) are never counted. Dict order is print order.
 SKIP_REASONS = {
@@ -758,6 +766,13 @@ SKIP_NAMES_SHOWN = 5  # folders or extensions named per line; the rest is "+K mo
 def skipped_folder(parts):
     """The first folder name in `parts` that a default rule skips (a vault, generated or hidden folder), else None."""
     return next((x for x in parts if x.casefold() in SKIP_PARTS or x.startswith(".")), None)
+
+
+def extension_label(name: str) -> str:
+    """The file's extension when it looks like one (".py"), else "no extension". Whatever follows a
+    name's last dot can be part of the name (a token, a person), and the SKIP line never prints names."""
+    suffix = os.path.splitext(name)[1].lower()
+    return suffix if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix) else "no extension"
 
 
 def print_skips(skips: dict) -> None:
@@ -796,10 +811,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
     for root in roots:
         others = [] if not names else None  # other file types are reported only when nothing narrows by name
         glob_iter, linked = walk_md(root, no_recurse, others)
-        for p in others or []:
-            rel = p.relative_to(root)
-            if not p.name.startswith(".") and not skipped_folder(rel.parts[:-1]) and not _excluded(rel.as_posix(), excludes):
-                skip(p, "types", p.suffix.lower() or "no extension")
+        for path, rel in others or []:
+            if not _excluded(rel, excludes):
+                skip(path, "types", extension_label(rel))
         # A folder symlinked inside a root was placed there on purpose (install.sh links the Super Jev
         # skills into ~/.claude/skills), so its target is admitted like a root, unless it is a vault folder.
         bases += [t for t in linked if not SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
@@ -1010,7 +1024,7 @@ def builtin_writer(items: list) -> dict:
     """No-model writer: a description quoted from the file's own headings and first words.
 
     Used when no claude CLI is installed or with --writer builtin: connecting then makes no model
-    call and no judge call (no TypeSafe key is used). Labels are left unknown; each description is
+    call and no judge call (no TypeSafe key is used), except the searches --findability adds. Labels are left unknown; each description is
     checked locally, rebuilt from the file and compared (verdict QUOTED)."""
     out = {}
     for it in items:
@@ -1432,7 +1446,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None); ap.add_argument("--max-files", type=int, default=MAX_FILES)
     ap.add_argument("--batch", type=int, default=10); ap.add_argument("--line", type=float, default=JUDGE_PROFILE.confidence_line)
     ap.add_argument("--writer", choices=["auto", "claude", "builtin"], default="auto",
-                    help="builtin: no model call and no judge call (no TypeSafe key is used to connect); "
+                    help="builtin: no model call and no judge call (no TypeSafe key is used to connect, unless --findability adds its searches); "
                          "descriptions are quoted from each file's headings and checked locally. auto (default): --writer-command if given, else the claude CLI if it is "
                          "installed, else builtin")
     ap.add_argument("--writer-model", default="haiku",
@@ -1633,7 +1647,7 @@ def main() -> int:
             print(f"ERROR: description writer failed: {e}")
             if not writer_command:
                 print("  The claude CLI must be installed and logged in for this writer. Or re-run with "
-                      "--writer builtin (no model call and no judge call).")
+                      "--writer builtin (no model call).")
             return 1
         drafts.update(got)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")

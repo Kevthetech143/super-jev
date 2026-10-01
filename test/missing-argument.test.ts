@@ -42,3 +42,13 @@ test('permit-cli.ts: no arguments still prints the usage and exits 0', () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout.split('\n')[0], /^super-jev permit/);
 });
+
+test('catalog-cli.ts: an extra argument is named, not just the usage', () => {
+  for (const [args, what] of [[['validate', 'a.json', 'b.json'], /validate takes one/], [['learn', 'a.jsonl', 'b.json', 'c.json'], /learn takes/]] as const) {
+    const r = spawnSync(process.execPath, [src('catalog-cli.ts'), ...args], { encoding: 'utf8', timeout: 10_000 });
+    assert.equal(r.status, 1);
+    const first = r.stderr.split('\n')[0];
+    assert.match(first, /too many arguments/i, `first stderr line: ${first}`);
+    assert.match(first, what, `first stderr line: ${first}`);
+  }
+});
