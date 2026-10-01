@@ -94,6 +94,9 @@ export const NONE_LEVEL = 'none';
 /** Relevance level -> the score it contributes. Evenly spaced across [0, 1]. */
 const LEVEL_SCORE: Record<string, number> = { high: 1, medium: 2 / 3, low: 1 / 3, none: 0 };
 
+/** The lowest score that still means "this would actually help" (medium). The rubric says low would not. */
+export const HELPING_SCORE = LEVEL_SCORE.medium;
+
 /**
  * A record beats "none of these" when the judge picked a real level for it
  * AND, when a distribution came back, gave that level more mass than

@@ -410,6 +410,64 @@ test('below the confidence floor the gate clarifies with the closest candidates'
   assert.ok(result.error && result.error.length > 0);
 });
 
+// A candidate is a skill the judge says helps (medium or high). "low" means it would not actually help.
+
+test('only a low-rated skill is no_match, never a "did you mean" over skills that would not help', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const { result } = await runSkillSearch({
+    roots: [root],
+    request: 'convert this spreadsheet into a PDF report',
+    apiKey: 'dummy',
+    transport: tableTransport({ 'pdf-editor': { level: 'low', confidence: 0.45 } })
+  });
+  assert.equal(result.status, 'no_match');
+  assert.equal(result.source, 'jev');
+  assert.deepEqual(result.candidates, []);
+  assert.equal(result.error, undefined);
+  assertCleanShape(result);
+});
+
+test('a clarify offers only skills the judge says help, not none-rated filler', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const { result } = await runSkillSearch({
+    roots: [root],
+    request: 'maybe something with documents',
+    apiKey: 'dummy',
+    transport: tableTransport({ 'pdf-editor': { level: 'high', confidence: 0.5 } })
+  });
+  assert.equal(result.status, 'clarify');
+  assert.deepEqual(result.candidates.map(c => c.id), ['pdf-editor']);
+  assert.match(result.error ?? '', /pdf-editor/);
+  assert.doesNotMatch(result.error ?? '', /image-resize|web-search/);
+});
+
+test('a low-rated skill close behind a high one is not a rival: suggestions, not clarify', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const { result } = await runSkillSearch({
+    roots: [root],
+    request: 'I need to merge several PDF documents',
+    apiKey: 'dummy',
+    transport: tableTransport({
+      'pdf-editor': { level: 'high', confidence: 0.95 },
+      'image-resize': { level: 'low', confidence: 0.90 }
+    })
+  });
+  assert.equal(result.status, 'suggestions');
+  assert.deepEqual(result.candidates.map(c => c.id), ['pdf-editor']);
+});
+
+test('a medium-rated skill is still a candidate', async () => {
+  const root = await tempRoot(DEMO_SKILLS);
+  const { result } = await runSkillSearch({
+    roots: [root],
+    request: 'tidy up the text of a document',
+    apiKey: 'dummy',
+    transport: tableTransport({ 'pdf-editor': { level: 'medium', confidence: 0.9 } })
+  });
+  assert.equal(result.status, 'suggestions');
+  assert.deepEqual(result.candidates.map(c => c.id), ['pdf-editor']);
+});
+
 test('empty catalog is a local no_match with no judge call', async () => {
   const root = await tempRoot([]);
   const seen: Request[] = [];
