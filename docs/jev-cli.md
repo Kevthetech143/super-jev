@@ -33,18 +33,19 @@ folder count, up to date or not. `TYPESAFE_API_KEY` wins over the saved key.
 
 Keys: Esc clears the line, Ctrl+C clears it (twice on an empty line quits),
 Up recalls earlier lines, Tab completes a `/command`. At a yes/no, Enter is
-yes and Esc is no; Ctrl+D leaves, which counts as no. Lines typed while a
-search or connect runs are dropped.
+yes and Esc is no; Ctrl+D leaves, which counts as no. While a search or
+connect runs, Esc or Ctrl+C stops it (`Stopped.`); other lines are dropped.
 
 ## One question from a shell
 
 `superjev <words>` handles the words as if typed in the window. The answer
 goes to stdout (no colour when piped) and the progress row to stderr. The
 exit code is the helper's own: found 0, not found 1, not supported 2, error
-3, needs setup 4 (`/check` keeps the claim check's own codes). `--help` and
-`--version` print and exit 0. A line the app cannot use (no such path,
-unknown command, or a first word starting with `-`, never a question)
-exits 2. No key: it says so, exit 4. Nothing connects without a keyboard.
+3, needs setup 4 (`/check` keeps the claim check's own codes). A stop
+(Ctrl+C) exits 130. `--help` and `--version` print and exit 0. A line the app
+cannot use (no such path, unknown command, or a first word starting with `-`,
+never a question) exits 2. No key: it says so, exit 4. Nothing connects
+without a keyboard.
 
 Tests: `node --test test/jev-chat.test.ts` uses made-up notes and a stand-in
 `python3`, so it needs no key.
