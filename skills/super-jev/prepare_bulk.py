@@ -103,10 +103,19 @@ Every run ends with one line, `CONNECTED n, HELD m, FAILED k`, and exits 0 only 
 (1 if anything failed, 3 if anything was held), so a run that left files out never reads as a complete connect.
 Exit 1 also means nothing was left to connect (every file failed or was held), and exit 2 means it refused.
 --json prints exactly one JSON object instead of the text (the same run, the same exit code): v 1 and
-{connected, held [{path, why}], failed [{path, why}], skipped [{what, count, way_in}], refused {why}}. A field with
-nothing in it is left out; connected is always there; a refused run carries only refused. No scores and no note
-text, only paths and plain reasons. The skipped rows are the SKIP lines. It covers a connect only: --list with
---json is refused (exit 2).
+{connected, held [{path, why}], failed [{path, why}], skipped [{kind, what, count, way_in}], refused {kind, why}}.
+A field with nothing in it is left out; connected is always there; a refused run carries only refused. No scores
+and no note text, only paths and plain reasons. The skipped rows are the SKIP lines. It covers a connect only:
+--list with --json is refused (exit 2).
+Every skipped row and every refusal carries a stable `kind`, a short fixed word, so a program words it from the
+kind and never from the text; it shows `what` or `why` for a kind it does not know (a later version may add
+one; v stays 1). Skipped kinds, one per default reason: `link` (a link points outside every --root), `name`
+(backup or credential-style name), `folder` (.md in a skipped folder), `folder_other` (other types in a skipped
+folder), `hidden`, `dataset` (a prepared dataset copy), `test` (test or scratch output), `worktree` (a git
+worktree copy), `empty`, `types` (files of other types). Refusal kinds: `too_many` (more files than one connect
+takes; it also carries whole numbers `count`, how many files it would draft, and `max`, the limit, so a program words
+"count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder),
+`not_markdown` (a refresh of a set connected with code files) and `usage` (the arguments are wrong).
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
@@ -784,7 +793,8 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
 # Every .md file a DEFAULT rule leaves out of a connect, and every file of another type that is not
 # hidden, is counted under one of these reasons: (what, way in), the way in empty where there is none.
 # One reason is one "  SKIP  N what; way in" line (counts plus folder names and extensions, never file
-# names or paths) and one {what, count, way_in} row of --json. Files the user's own flags leave out
+# names or paths) and one {kind, what, count, way_in} row of --json, where the kind is the reason's key
+# (the list in the docstring). Files the user's own flags leave out
 # (--name, --exclude, --no-recurse) are never counted. Dict order is print order.
 SKIP_REASONS = {
     "link": ("linked file(s) point outside every --root", "add --allow-target FOLDER to admit them"),
@@ -825,7 +835,7 @@ def extension_label(name: str) -> str:
 
 
 def skip_rows(skips: dict) -> list:
-    """One {what, count, way_in} row per reason in `skips` ({reason: {folder or extension: count}}), in print
+    """One {kind, what, count, way_in} row per reason in `skips` ({reason: {folder or extension: count}}), in print
     order; way_in is left out where the reason has none."""
     rows = []
     for reason, (what, way_in) in SKIP_REASONS.items():
@@ -837,7 +847,8 @@ def skip_rows(skips: dict) -> list:
         names = ", ".join(fmt.format(k, n) for k, n in ranked[:SKIP_NAMES_SHOWN])
         if len(ranked) > SKIP_NAMES_SHOWN:
             names += f", +{len(ranked) - SKIP_NAMES_SHOWN} more"
-        rows.append({"what": what.format(names=names), "count": sum(counts.values()), **({"way_in": way_in} if way_in else {})})
+        rows.append({"kind": reason, "what": what.format(names=names), "count": sum(counts.values()),
+                     **({"way_in": way_in} if way_in else {})})
     return rows
 
 
@@ -1314,6 +1325,10 @@ def keep_unrecorded(report: dict, a) -> None:
         report.pop("principal", None); report.pop("principals", None)
 
 
+class NotMarkdown(ValueError):
+    """A refresh of a set that was connected with code or text suffixes: the refusal kind `not_markdown`."""
+
+
 def replay_recipe(a) -> None:
     """--refresh replays the pointer's recorded recipe for anything not given on the command line,
     so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
@@ -1329,8 +1344,8 @@ def replay_recipe(a) -> None:
     # a refresh that repeats the recorded roots/excludes (typed by hand or by an older script) must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
     if rep.get('extensions', list(CONNECTABLE_EXTENSIONS)) != list(CONNECTABLE_EXTENSIONS):
-        raise ValueError(f"pointer {a.pointer} was connected with code/text suffixes; connect supports Markdown only. "
-                         "Reconnect it from its .md notes, or leave the last snapshot as it is")
+        raise NotMarkdown(f"pointer {a.pointer} was connected with code/text suffixes; connect supports Markdown only. "
+                          "Reconnect it from its .md notes, or leave the last snapshot as it is")
     rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
                     or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
@@ -1506,9 +1521,10 @@ def principal_name(name: str) -> str:
     return name
 
 
-def refuse(why: str) -> int:
-    """A run that did nothing: print REFUSED and return exit code 2. --json reads the same reason."""
-    _RESULT["refused"] = why
+def refuse(kind: str, why: str, **numbers: int) -> int:
+    """A run that did nothing: print REFUSED and return exit code 2. --json reads the same reason, with
+    its kind (the refusal kinds in the docstring) and any numbers the kind carries; text mode shows neither."""
+    _RESULT["refused"] = {"kind": kind, "why": why, **numbers}
     print(f"REFUSED: {why}")
     return 2
 
@@ -1523,7 +1539,7 @@ def result_object() -> dict:
     there; every other field is left out when empty. Paths lose any secret-looking name part. A refused
     run did nothing, so it reports only why it refused."""
     if _RESULT.get("refused"):
-        return {"v": 1, "connected": 0, "refused": {"why": _RESULT["refused"]}}
+        return {"v": 1, "connected": 0, "refused": _RESULT["refused"]}
 
     def rows(key):
         return [{"path": redact_path_secrets(str(p)), "why": why} for p, why in _RESULT.get(key, [])]
@@ -1537,7 +1553,7 @@ class _Parser(argparse.ArgumentParser):
         """Under --json an argument error is one more refusal: the same object, exit 2."""
         if "--json" in sys.argv[1:]:
             _RESULT.clear()
-            _RESULT["refused"] = message
+            _RESULT["refused"] = {"kind": "usage", "why": message}
             print(json.dumps(result_object()))
             raise SystemExit(2)
         super().error(message)
@@ -1616,10 +1632,10 @@ def main() -> int:
 def run(a) -> int:
     """One connect (or --list) as text mode prints it; --json reads the same rows."""
     if a.json and a.list:
-        return refuse("--json covers a connect only; --list prints its own table")
+        return refuse("usage", "--json covers a connect only; --list prints its own table")
     if a.list:
         if not a.pointer and not a.principals:
-            return refuse("--list needs --pointer and/or --principal")
+            return refuse("usage", "--list needs --pointer and/or --principal")
         rows, excluded = [], 0
         if a.pointer:
             r, e = list_cmd(a.pointer, a.status, a.kind, a.within_days, a.subject)
@@ -1638,8 +1654,8 @@ def run(a) -> int:
     if a.refresh and a.pointer:
         try:
             replay_recipe(a)
-        except (ValueError, argparse.ArgumentTypeError) as e:
-            return refuse(str(e))
+        except NotMarkdown as e:
+            return refuse("not_markdown", str(e))
     if a.limit is None:
         a.limit = 50
     # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
@@ -1651,16 +1667,16 @@ def run(a) -> int:
     if a.writer_model is None:
         a.writer_model = "haiku"
     if not a.roots or not a.principals or not a.pointer:
-        return refuse("--root, --pointer and --principal are required unless --list is given")
+        return refuse("usage", "--root, --pointer and --principal are required unless --list is given")
     if a.limit > 50:
-        return refuse("connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)")
+        return refuse("usage", "connect accepts at most 50 files per pointer part; use --limit <= 50 (parts split automatically)")
     writer_command_str = a.writer_command or os.environ.get("SUPERJEV_WRITER_COMMAND")
     try:
         writer_command = shlex.split(writer_command_str) if writer_command_str else None
     except ValueError as e:
-        return refuse(f"invalid --writer-command: {e}")
+        return refuse("usage", f"invalid --writer-command: {e}")
     if writer_command_str and not writer_command:
-        return refuse("--writer-command must name a command")
+        return refuse("usage", "--writer-command must name a command")
 
     use_builtin = a.writer == "builtin" or (a.writer == "auto" and not writer_command
                                               and not shutil.which("claude"))
@@ -1683,7 +1699,7 @@ def run(a) -> int:
 
     missing = [str(r) for r in roots if not r.is_dir()]
     if missing:
-        return refuse(f"--root is not a folder: {', '.join(missing)}")
+        return refuse("not_a_folder", f"--root is not a folder: {', '.join(missing)}")
     walked_at = time.time()  # a growth snapshot counts as "since" only what the walk below could miss
     files, held = inventory(roots, a.excludes, a.no_recurse, a.names, a.allow_targets)
     scope = getattr(a, "legacy_scope", None)
@@ -1748,7 +1764,8 @@ def run(a) -> int:
     # files that would actually need a writer call (below), and total size is reported, not refused.
     if not (a.refresh and cache):
         if len(files) > a.max_files:
-            return refuse(f"{len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files")
+            return refuse("too_many", f"{len(files)} files exceed --max-files {a.max_files}; narrow --root/--exclude/--no-recurse or raise --max-files",
+                          count=len(files), max=a.max_files)
 
     removed = []
     if a.refresh:
@@ -1783,8 +1800,9 @@ def run(a) -> int:
         print(f"refresh: {len(files)} files total (over --max-files {a.max_files}), "
               f"but only {len(todo)} need a writer call this run (cost); the rest are unchanged and reused for free")
         if len(todo) > a.max_files:
-            return refuse(f"{len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
-                          "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first")
+            return refuse("too_many", f"{len(todo)} files need drafting, which itself exceeds --max-files {a.max_files}; "
+                          "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first",
+                          count=len(todo), max=a.max_files)
 
     drafts = {}
     for i in range(0, len(todo), a.batch):
