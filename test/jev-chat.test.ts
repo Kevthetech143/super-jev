@@ -1,5 +1,6 @@
 // Frozen contract tests (2026-10-01), PR 3: the terminal app shows exactly what the helpers report.
 // PR 4 adds the stop tests (K1 to K2b, K10, K10b, K11, S18, R6, R7): Esc and Ctrl+C stop a search or a connect, and so does whatever ends the app.
+// PR 5 adds the paste tests (I14 to I14k): a paste is one question, sent by the next Enter.
 //
 // Layers (no Jev, no network):
 //   pure        render, readLine, helperCall, childEnv, keyAction, pointerName on fixtures
@@ -704,7 +705,7 @@ test('I13 a first word that starts with - is never a question: --help and -h pri
   assert.equal(cfg.readLine('-h').kind, 'help');
   assert.equal(cfg.readLine('--help me').kind, 'help');
   assert.equal(cfg.readLine('--version').kind, 'version');
-  for (const line of ['--bogus', '-x what is this', '-5 degrees in fahrenheit', '--principal evil']) {
+  for (const line of ['--bogus', '-x what is this', '--principal evil']) {
     const t: any = cfg.readLine(line);
     assert.equal(t.kind, 'say', line);
     assert.match(t.text, new RegExp(`^Unknown option ${line.split(' ')[0]}\\.`), line);
@@ -712,6 +713,7 @@ test('I13 a first word that starts with - is never a question: --help and -h pri
     assert.ok(!t.text.includes('\n'), 'one line');
   }
   assert.equal(cfg.readLine('what is -h?').kind, 'ask', 'a dash after the first word is part of the question');
+  for (const line of ['- the refund window\n- the restocking fee', '-5 degrees in fahrenheit']) assert.equal(cfg.readLine(line).kind, 'ask', line);
 });
 
 test('I13 whole app: --help and -h print the usage, --version the version, exit 0, no helper; an unknown option exits 2, no helper', async () => {
@@ -1870,6 +1872,238 @@ test('S18 stopped: a search says Stopped. alone; a connect adds that some notes 
   assert.ok(lines(at('connect', true, 60)).every((l) => l.length <= 60), at('connect', true, 60));
 });
 
+// ---------------------------------------------------------------- PR 5: a paste is one question
+// The window asks the terminal to mark a paste (ESC[200~ ... ESC[201~). Node's readline still ends a line at every newline inside the marks
+// (verified on Node 24.11.1), so the app holds those lines and sends them together, as one question, on the next Enter.
+const PASTE = ['How long does the canary hold', 'before it is promoted?', 'Answer in one line, please.'];
+const MARKED = (s: string) => `\x1b[200~${s}\x1b[201~`;
+const asked = (r: Rig) => r.asks().map((c: any) => c.args[c.args.indexOf('--') + 1] as string);
+const quiet = (ms = 250) => new Promise((x) => setTimeout(x, ms));
+const ANY_ASK: Rule = { when: '--json -- ', out: FOUND() };
+
+test('I14 a 3-line paste is one question: nothing is sent until Enter, then exactly one ask holds every line', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.send(MARKED(PASTE.join('\r')));
+  await quiet();
+  assert.equal(r.asks().length, 0, 'a paste sent itself before Enter');
+  w.send('\r');
+  await w.waitFor(/Found 1 note/);
+  await quiet();
+  assert.equal(r.asks().length, 1, `${r.asks().length} asks for one paste`);
+  assert.deepEqual(asked(r), [PASTE.join('\n')]);
+  w.all();
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14b a paste that ends in a newline, with a blank line inside it, is still one question; the blank line stays', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  const text = ['Release notes:', '', 'How long does the canary hold?'];
+  w.send(MARKED(text.join('\n') + '\n')); // the paste ends in a newline, then the closing mark
+  await quiet();
+  assert.equal(r.asks().length, 0);
+  w.send('\r');
+  await w.waitFor(/Found 1 note/);
+  await quiet();
+  assert.deepEqual(asked(r), [text.join('\n')]);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14c a paste that arrives in pieces, even with a mark cut in two, is one question', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  for (const piece of ['\x1b[200~How long does the canary hold\rbefo', 're it is promoted?\r', 'Answer in one line, please.\x1b[20', '1~']) {
+    w.send(piece);
+    await quiet(40);
+  }
+  await quiet();
+  assert.equal(r.asks().length, 0, 'a piece of the paste was sent on its own');
+  w.send('\r');
+  await w.waitFor(/Found 1 note/);
+  await quiet();
+  assert.deepEqual(asked(r), [PASTE.join('\n')]);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14d text typed after a paste is part of the same question', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.send(MARKED(PASTE.join('\r')) + ' Thanks.\r');
+  await w.waitFor(/Found 1 note/);
+  assert.deepEqual(asked(r), [PASTE.join('\n') + ' Thanks.']);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14e Esc and Ctrl+C throw a paste away, whether or not it ended in a newline; the next question is only itself', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.send(MARKED(PASTE.join('\r')));      // the last line is still being edited
+  await quiet(60);
+  w.send('\x1b');
+  await quiet(700);                      // readline waits for a lone Esc
+  w.send(MARKED(PASTE.join('\r') + '\r')); // every line ended: nothing left on the edited line
+  await quiet(60);
+  w.send('\x03');
+  await quiet(100);
+  assert.ok(!/Press Ctrl\+C again/.test(w.text()), 'Ctrl+C on a pending paste only hinted: ' + w.text());
+  w.say('What is the freeze window?');
+  await w.waitFor(/Found 1 note/);
+  assert.deepEqual(asked(r), ['What is the freeze window?'], 'a thrown-away paste came back');
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14f a paste while a search runs is dropped like any line typed then: no second ask, and the next question is only itself', async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 600, out: FOUND() }, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.say('slow question');
+  await w.waitFor(() => r.asks().length === 1);
+  w.send(MARKED(PASTE.join('\r')) + '\r');
+  await w.waitFor(/Found 1 note/);
+  await quiet(300);
+  assert.equal(r.asks().length, 1, 'a paste made while it searched was sent as a second ask');
+  w.say('again');
+  await w.waitFor(() => r.asks().length === 2);
+  assert.deepEqual(asked(r), ['slow question', 'again']);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14g a one-line paste is the same as typing it, and a dropped folder inside the marks still connects', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK, { when: 'prepare_bulk.py', out: { v: 1, connected: 3 } }]);
+  const w = win(r);
+  await w.ready();
+  w.send(MARKED('How long does the canary hold?') + '\r');
+  await w.waitFor(/Found 1 note/);
+  assert.deepEqual(asked(r), ['How long does the canary hold?']);
+  w.send(MARKED(FOLDER.replace(/ /g, '\\ ')) + '\r');
+  await w.waitFor(/Connect Team Notes\?/);
+  w.send('\r');
+  await w.waitFor('Connected Team Notes: 3 notes');
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14h the window asks the terminal to mark a paste while it is open and gives that back when it closes', async () => {
+  const r = rig([STATUS_EMPTY]);
+  const w = win(r);
+  await w.ready();
+  const on = (s: string) => (s.match(/\x1b\[\?2004h/g) ?? []).length, off = (s: string) => (s.match(/\x1b\[\?2004l/g) ?? []).length;
+  assert.equal(on(w.raw()), 1, 'the window did not ask for marked pastes: ' + JSON.stringify(w.raw()));
+  assert.equal(off(w.raw()), 0);
+  assert.equal(await w.quit(), 0);
+  assert.equal(on(w.raw()), 1);
+  assert.equal(off(w.raw()), 1, 'the terminal was left marking pastes');
+  assert.ok(w.raw().lastIndexOf('\x1b[?2004l') > w.raw().lastIndexOf('\x1b[?2004h'));
+});
+
+/** A real terminal (a pty): a 40-line paste (several reads long), marked, then Enter, then Ctrl+D. Prints the screen and the exit code as JSON. */
+const PASTE_IN_PTY = `
+import json, os, pty, select, sys, time
+a = json.loads(sys.argv[1])
+pid, fd = pty.fork()
+if pid == 0: os.execve(a['node'], [a['node'], a['cli']], a['env'])
+buf = b''
+def pump(ok, secs):
+    global buf
+    end = time.time() + secs
+    while time.time() < end:
+        if select.select([fd], [], [], 0.02)[0]:
+            try: d = os.read(fd, 65536)
+            except OSError: return ok()
+            if not d: return ok()
+            buf += d
+        if ok(): return True
+    return ok()
+pump(lambda: b'? for help' in buf or b'Ready.' in buf, 10)
+data = a['paste'].encode()
+for i in range(0, len(data), 300):
+    os.write(fd, data[i:i + 300]); pump(lambda: False, 0.01)
+pump(lambda: False, 0.4)
+before = os.path.exists(a['calls']) and open(a['calls']).read().count('--json -- ')
+os.write(fd, b'\\r')
+pump(lambda: b'Found 1 note' in buf, 10)
+os.write(fd, b'\\x04')
+code = -1
+end = time.time() + 8
+while time.time() < end:
+    pump(lambda: False, 0.05)
+    done, st = os.waitpid(pid, os.WNOHANG)
+    if done: code = os.WEXITSTATUS(st) if os.WIFEXITED(st) else -os.WTERMSIG(st); break
+else: os.kill(pid, 9)
+print(json.dumps({'screen': buf.decode('utf8', 'replace'), 'code': code, 'asks_before_enter': before}))
+`;
+test('I14i in a real terminal a long marked paste is one question, sent by Enter, and the terminal is given back', { timeout: 40000 }, () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const lines = Array.from({ length: 40 }, (_, i) => `Line ${i + 1}: the canary holds at 5 percent of traffic for 40 minutes before promotion.`);
+  const env = { ...r.env, TYPESAFE_API_KEY: KEY };
+  const res = spawnSync('python3', ['-c', PASTE_IN_PTY, JSON.stringify({ node: process.execPath, cli: CLI, env, calls: join(r.dir, 'calls.jsonl'), paste: MARKED(lines.join('\r')) })],
+    { encoding: 'utf8', timeout: 35000 });
+  const o = JSON.parse(res.stdout || '{}');
+  assert.ok(o.screen, `the terminal run printed nothing: ${res.stderr}`);
+  assert.equal(o.asks_before_enter, 0, 'the paste sent itself before Enter');
+  assert.deepEqual(asked(r), [lines.join('\n')], `${r.asks().length} asks for one paste`);
+  assert.equal(o.code, 0, o.screen);
+  assert.ok(o.screen.includes('\x1b[?2004h') && o.screen.lastIndexOf('\x1b[?2004l') > o.screen.lastIndexOf('\x1b[?2004h'), 'the terminal was not asked, or not given back');
+});
+
+test('I14j a paste whose closing mark never comes does not wedge the window: Esc gives the prompt back', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.send('\x1b[200~How long does the canary hold\r'); // the terminal went away mid-paste: no closing mark
+  w.send('before it is promoted?\r');
+  await quiet();
+  assert.equal(r.asks().length, 0);
+  w.send('\x1b');
+  await quiet(700);
+  w.say('What is the freeze window?');
+  await w.waitFor(/Found 1 note/);
+  assert.deepEqual(asked(r), ['What is the freeze window?']);
+  assert.equal(await w.quit(), 0);
+});
+
+/** The window open at its prompt in a real terminal, then the app is killed (SIGTERM). Prints the screen and the exit code. */
+const KILL_IN_PTY = `
+import json, os, pty, select, signal, sys, time
+a = json.loads(sys.argv[1])
+pid, fd = pty.fork()
+if pid == 0: os.execve(a['node'], [a['node'], a['cli']], a['env'])
+buf = b''
+def pump(secs, ok=lambda: False):
+    global buf
+    end = time.time() + secs
+    while time.time() < end and not ok():
+        if select.select([fd], [], [], 0.02)[0]:
+            try: d = os.read(fd, 65536)
+            except OSError: return
+            if not d: return
+            buf += d
+pump(10, lambda: b'\\x1b[?2004h' in buf)
+pump(0.3)
+os.kill(pid, signal.SIGTERM)
+code = 'hung'
+end = time.time() + 8
+while time.time() < end:
+    pump(0.05)
+    done, st = os.waitpid(pid, os.WNOHANG)
+    if done: code = os.WEXITSTATUS(st) if os.WIFEXITED(st) else -os.WTERMSIG(st); break
+else: os.kill(pid, 9)
+print(json.dumps({'screen': buf.decode('utf8', 'replace'), 'code': code}))
+`;
+test('I14k the app is killed at its prompt: exit 143, and the terminal is told to stop marking pastes', { timeout: 30000 }, () => {
+  const r = rig([STATUS_EMPTY]);
+  const env = { ...r.env, TYPESAFE_API_KEY: KEY };
+  const res = spawnSync('python3', ['-c', KILL_IN_PTY, JSON.stringify({ node: process.execPath, cli: CLI, env })], { encoding: 'utf8', timeout: 25000 });
+  const o = JSON.parse(res.stdout || '{}');
+  assert.equal(o.code, 143, `${res.stderr}\n${o.screen}`);
+  assert.ok(o.screen.includes('\x1b[?2004h') && o.screen.lastIndexOf('\x1b[?2004l') > o.screen.lastIndexOf('\x1b[?2004h'), 'the terminal was left marking pastes: ' + JSON.stringify(o.screen));
+});
+
 // ---------------------------------------------------------------- the docs say where the key lives
 const DOC = (f: string) => readFileSync(join(ROOT, f), 'utf8');
 const between = (text: string, from: RegExp, to: RegExp) => { const i = text.search(from); assert.ok(i >= 0, `${from} not found`); const rest = text.slice(i + 1); const j = rest.search(to); return text.slice(i, j < 0 ? undefined : i + 1 + j); };
@@ -2128,5 +2362,66 @@ test('R7 real connect stopped partway: the state is still readable, and dragging
   await w.waitFor('Connected Big Notes: 240 notes');
   w.say('/status');
   await w.waitFor(/240 notes/);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14l a paste made during a search, with no newline at its end, is dropped whole: the next question is only itself', async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 600, out: FOUND() }, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.say('slow question');
+  await w.waitFor(() => r.asks().length === 1);
+  w.send(MARKED(PASTE.join('\r')));      // its last line stays on the edited line
+  await w.waitFor(/Found 1 note/);
+  await quiet(200);
+  w.send('\r');
+  await quiet(200);
+  assert.equal(r.asks().length, 1, 'Enter asked what was left of a dropped paste: ' + JSON.stringify(asked(r)));
+  w.say('Why?');
+  await w.waitFor(() => r.asks().length === 2);
+  assert.deepEqual(asked(r), ['slow question', 'Why?']);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14m a paste still arriving when the search ends is dropped to its closing mark: no ask without Enter', async () => {
+  const r = rig([STATUS_EMPTY, { when: '-- slow', sleep: 600, out: FOUND() }, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.say('slow question');
+  await w.waitFor(() => r.asks().length === 1);
+  w.send('\x1b[200~Line A\rLine B\r');
+  await w.waitFor(/Found 1 note/);
+  w.send('Line C\rLine D\x1b[201~');
+  await quiet(300);
+  assert.equal(r.asks().length, 1, 'the rest of a dropped paste was asked: ' + JSON.stringify(asked(r)));
+  w.say('Why?');
+  await w.waitFor(() => r.asks().length === 2);
+  assert.deepEqual(asked(r), ['slow question', 'Why?']);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I14n Up after a paste recalls the whole question, not its last line', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  const found = () => w.text().split('Found 1 note').length - 1;
+  w.send(MARKED(PASTE.join('\r')));
+  w.send('\r');
+  await w.waitFor(() => found() === 1);
+  w.send('\x1b[A');
+  w.send('\r');
+  await w.waitFor(() => found() === 2);
+  assert.deepEqual(asked(r), [PASTE.join('\n'), PASTE.join(' ')]);
+  assert.equal(await w.quit(), 0);
+});
+
+test('I13b a pasted bullet list is a question, not an option', async () => {
+  const r = rig([STATUS_EMPTY, ANY_ASK]);
+  const w = win(r);
+  await w.ready();
+  w.send(MARKED('- the refund window\r- the restocking fee') + '\r');
+  await w.waitFor(/Found 1 note/);
+  assert.deepEqual(asked(r), ['- the refund window\n- the restocking fee']);
+  assert.ok(!/Unknown option/.test(w.text()));
   assert.equal(await w.quit(), 0);
 });

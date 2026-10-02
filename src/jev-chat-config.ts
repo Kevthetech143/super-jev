@@ -57,7 +57,7 @@ function distance(a: string, b: string): number {
   return row[b.length];
 }
 
-/** A first word that starts with `-` is an option, never a question: --help and -h, --version, else unknown. */
+/** A first word shaped like an option (`-x`, `--name`) is never a question: --help and -h, --version, else unknown. A bullet (`- item`) or a number (`-5`) is text. */
 const option = (w: string): Turn => w === '--help' || w === '-h' ? { kind: 'help' } : w === '--version' ? { kind: 'version' }
   : { kind: 'say', text: `Unknown option ${w}. Try --help.` };
 
@@ -67,7 +67,7 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (!t) return { kind: 'empty' };
   if (t === '?') return { kind: 'help' };
   if (t === 'exit' || t === 'quit') return { kind: 'exit' };
-  if (t.startsWith('-')) return option(t.split(/\s+/)[0]);
+  if (/^--?[A-Za-z]/.test(t)) return option(t.split(/\s+/)[0]);
   const ws = /^\/[a-z]+(\s|$)/i.test(t) ? [] : words(t);
   const typed = ws.length > 0 && pathy(ws[0]);
   if (typed && ws.length > 1 && ws.every(pathy)) return { kind: 'say', text: 'One at a time: drag in one folder or note, then the next.' };
