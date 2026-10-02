@@ -2,6 +2,7 @@
 // PR 4 adds the stop tests (K1 to K2b, K10, K10b, K11, S18, R6, R7): Esc and Ctrl+C stop a search or a connect, and so does whatever ends the app.
 // PR 5 adds the paste tests (I14 to I14k): a paste is one question, sent by the next Enter.
 // PR 7 adds the /wrong tests (W1 to W2d): /wrong forgets a saved answer, and a forgotten saved answer is searched fresh at once.
+// PR 9 adds the /right tests (RT0 to RT5): /right [n] saves the last answer now.
 //
 // Layers (no Jev, no network):
 //   pure        render, readLine, helperCall, childEnv, keyAction, pointerName on fixtures
@@ -274,16 +275,16 @@ test('S14b two sets with the same folder are told apart by their name; a folder 
 
 test('S15 help lists exactly the commands that exist, and ? is the same help', () => {
   const s = clean(cfg.render({ kind: 'help', data: {} }, OPTS));
-  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/status', '/wrong']);
+  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/right', '/status', '/wrong']);
   assert.match(s, /\?/);
   assert.equal(cfg.readLine('?').kind, 'help');
   assert.equal(cfg.readLine('/help').kind, 'help');
-  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
+  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/right', '/right 2']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
 });
 
 test('S15b help rows line up: every description starts in the same column, and a row fits 60 columns', () => {
   const rows = cfg.HELP.split('\n').slice(1);
-  assert.equal(rows.length, 6, 'the drag row and the five commands');
+  assert.equal(rows.length, 7, 'the drag row and the six commands');
   const col = rows.map((l) => { const m = /^( {2}.+?\S)( {2,})(\S.*)$/.exec(l); assert.ok(m, `no description column in ${JSON.stringify(l)}`); return m![1].length + m![2].length; });
   assert.equal(new Set(col).size, 1, `descriptions start in columns ${col.join(', ')}:\n${cfg.HELP}`);
   for (const l of rows) assert.ok(l.length <= 60, l);
@@ -2708,6 +2709,135 @@ test('W2d whole app: a miss the engine could not do is shown as an error, never 
 test('W2e the door: /wrong has no earlier question there, so it says so on stderr, exits 2 and calls nothing', async () => {
   const r = rig([]);
   const d = await door(r, ['/wrong']);
+  assert.equal(d.code, 2);
+  assert.match(d.err, /Ask a question first\./);
+  assert.equal(r.calls().length, 0);
+});
+
+// ---------------------------------------------------------------- PR 9: /right
+const APPROVED = { v: 1, done: true, why: 'saved' };
+const approveCalls = (r: Rig) => r.calls().filter((c: any) => c.args.includes('--approve'));
+
+test('RT0 pure: /right and /right N are commands, the helper call is --approve Q --rank N, a bad number is a usage line', () => {
+  assert.deepEqual(cfg.readLine('/right'), { kind: 'right', rank: 1 });
+  assert.deepEqual(cfg.readLine('/RIGHT 2'), { kind: 'right', rank: 2 });
+  for (const bad of ['/right 0', '/right 6', '/right x', '/right 1 2']) assert.match((cfg.readLine(bad) as any).text, /^Usage: \/right/, bad);
+  const argv = cfg.helperCall({ kind: 'right', rank: 2 }, { ...session, last: '--help me' } as any);
+  assert.deepEqual(argv.slice(1), ['--principal', 'me', '--json', '--approve', '--help me', '--rank', '2']);
+  assert.match((cfg.readLine('/rihgt') as any).text, /Did you mean \/right\?/);
+});
+
+test('RT0b pure: the screens', () => {
+  assert.equal(R('right', APPROVED, { secs: undefined }), '• Saved. Ask it again and it comes back at once.');
+  const no = R('right', { done: false, why: 'one of the notes is only a possible match' }, { secs: undefined });
+  assert.match(no, /^• Not saved\.$/m);
+  assert.ok(no.includes('one of the notes is only a possible match'));
+});
+
+test('RT1 whole app: /right runs --approve Q --rank 1, then /right 2 runs --rank 2, each says Saved', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--approve', out: APPROVED }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Found 1 note');
+  w.say('/right');
+  await w.waitFor('Saved. Ask it again');
+  w.say('/right 2');
+  await w.waitFor(() => (w.text().match(/Saved\. Ask it again/g) || []).length === 2);
+  assert.deepEqual(approveCalls(r).map((c: any) => c.args), [
+    ['--principal', 'me', '--json', '--approve', Q, '--rank', '1'], ['--principal', 'me', '--json', '--approve', Q, '--rank', '2']]);
+  assert.equal(r.asks().length, 1, 'no second search');
+  await w.quit();
+});
+
+test('RT2 whole app: /right with no earlier question says so and calls nothing; after /check it shows the self-save note', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--claim', out: { v: 1, outcome: 'found', next: 'none', claim: { verdict: 'TRUE', proof: { path: HB, line: 39, text: HANDBOOK_QUOTE } } } }]);
+  const w = win(r);
+  await w.ready();
+  const n = r.calls().length;
+  w.say('/right');
+  await w.waitFor('Ask a question first.');
+  w.say('/check The canary holds 40 minutes at 5%.');
+  await w.waitFor('TRUE');
+  w.say('/right');
+  await w.waitFor('Sure TRUE/FALSE results save themselves');
+  assert.equal(approveCalls(r).length, 0);
+  assert.equal(r.calls().length, n + 1, 'only the claim was called');
+  await w.quit();
+});
+
+test('RT3 whole app: a save the engine refused is shown with its reason, never as Saved', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, done: false, why: 'one of the notes is only a possible match' }, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Found 1 note');
+  w.say('/right');
+  await w.waitFor('Not saved');
+  assert.match(w.text(), /only a possible match/);
+  assert.ok(!/Saved\. Ask/.test(w.text()));
+  await w.quit();
+});
+
+test('RT3b whole app: the engine\'s real possible-tier refusal becomes one plain line with no flag; found answers hint at /right; a crash on /right is an error', async () => {
+  const why = 'the list has a possible-tier file nobody checked; give the answer text so the claim check runs (--rank N then picks the file)';
+  const r = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, done: false, why }, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Found 1 note');
+  assert.match(w.text(), /Open them to check\. \/right saves this answer\./);
+  w.say('/right');
+  await w.waitFor('Not saved.');
+  assert.match(w.text(), /Use \/check/);
+  assert.ok(!/--rank|answer text/.test(w.text()));
+  await w.quit();
+  for (const [reason, line] of [['--rank 5 is out of range: the last lookup listed 3 candidate(s)', 'no note with that number'],
+    ['no confirmed top candidate for that question; run ask first, pick a listed file with --rank N or --file PATH, or use --add', 'nothing to save']]) {
+    const e = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, done: false, why: reason }, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+    const y = win(e);
+    await y.ready();
+    y.say(Q);
+    await y.waitFor('Found 1 note');
+    y.say('/right');
+    await y.waitFor('Not saved.');
+    assert.match(y.text(), new RegExp(line));
+    assert.ok(!/--|not checked|Use \/check/.test(y.text().split('Not saved.')[1]), reason);
+    await y.quit();
+  }
+  const pf = rig([STATUS_EMPTY, { when: '--json -- ', out: FOUND({ files: [{ ...FOUND().files[0], tier: 'possible' }] }) }]);
+  const pw = win(pf);
+  await pw.ready();
+  pw.say(Q);
+  await pw.waitFor('Found 1 note');
+  assert.ok(!/saves this answer/.test(pw.text()));
+  await pw.quit();
+  const c = rig([STATUS_EMPTY, { when: '--approve', out: { v: 1, outcome: 'error', why: 'engine broke' }, code: 2 }, { when: '--json -- ', out: FOUND() }]);
+  const x = win(c);
+  await x.ready();
+  x.say(Q);
+  await x.waitFor('Found 1 note');
+  x.say('/right');
+  await x.waitFor('engine broke');
+  assert.ok(!/Not saved/.test(x.text()));
+  await x.quit();
+});
+
+test('RT4 whole app: /right with a bad number calls nothing', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Found 1 note');
+  w.say('/right 9');
+  await w.waitFor('Usage: /right');
+  assert.equal(approveCalls(r).length, 0);
+  await w.quit();
+});
+
+test('RT5 the door: /right has no earlier question there, so it says so on stderr, exits 2 and calls nothing', async () => {
+  const r = rig([]);
+  const d = await door(r, ['/right']);
   assert.equal(d.code, 2);
   assert.match(d.err, /Ask a question first\./);
   assert.equal(r.calls().length, 0);

@@ -5,20 +5,21 @@ import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { styleText, stripVTControlCharacters } from 'node:util';
 
-export const COMMANDS = ['/check', '/wrong', '/status', '/help', '/exit'];
+export const COMMANDS = ['/check', '/right', '/wrong', '/status', '/help', '/exit'];
 /** How a user gets back to the window: the one wording every screen and message uses. */
 export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
 export type Turn =
   | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' | 'wrong' }
+  | { kind: 'right'; rank: number }
   | { kind: 'ask' | 'check' | 'say'; text: string }
   | { kind: 'connect'; path: string; dir: boolean; pointer?: string /* the engine's own name for a set to refresh */ };
 export type Session = { principal: string; skillDir: string; connected: Set<string>; last?: string /* the last question asked in this session */ };
 export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
   door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: no Next line: the turn was a status (a next step would only point back at it), or the window is about to do the fix itself.
-export type Shown = { kind: 'ask' | 'check' | 'wrong' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
-  refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean };
+export type Shown = { kind: 'ask' | 'check' | 'right' | 'wrong' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
+  refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean; hint?: boolean };
 
 // ---------------------------------------------------------------- reading a line
 /** Shell-style words: single quotes literal, double quotes allow \" \\ \$ \`, a backslash escapes one character. */
@@ -87,6 +88,10 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (cmd === '/exit') return { kind: 'exit' };
   if (cmd === '/status') return { kind: 'status' };
   if (cmd === '/wrong') return { kind: 'wrong' };
+  if (cmd === '/right') {
+    const n = rest === '' ? 1 : /^\d$/.test(rest) ? Number(rest) : 0;
+    return n >= 1 && n <= 5 ? { kind: 'right', rank: n } : { kind: 'say', text: 'Usage: /right [n]   n is the note number, 1 to 5' };
+  }
   if (cmd === '/check') return rest ? { kind: 'check', text: rest } : { kind: 'say', text: 'Usage: /check <a statement to check against your notes>' };
   const [far, near] = COMMANDS.map((c) => [distance(cmd, c), c] as const).sort((a, b) => a[0] - b[0])[0];
   return { kind: 'say', text: `Unknown command ${cmd}.` + (far <= 2 ? ` Did you mean ${near}?` : '') };
@@ -108,6 +113,7 @@ export function helperCall(turn: Turn, s: Session): string[] {
   if (turn.kind === 'ask') return [...ask, '--', turn.text];
   if (turn.kind === 'check') return [...ask, '--claim', turn.text];
   if (turn.kind === 'status') return [...ask, '--status'];
+  if (turn.kind === 'right') return [...ask, '--approve', s.last ?? '', '--rank', String(turn.rank)];
   if (turn.kind === 'wrong') return [...ask, '--miss', s.last ?? ''];
   if (turn.kind !== 'connect') throw new Error(`no helper call for ${turn.kind}`);
   const name = turn.pointer ?? pointerName(turn.path);
@@ -167,6 +173,7 @@ export const HELP = [
   'Ask a question in plain words, or:',
   '  drag a folder in    connect its Markdown notes',
   '  /check <statement>  check it against your notes',
+  '  /right [n]          the last answer was right: save it now',
   '  /wrong              the last answer was wrong: forget it',
   '  /status             show what is connected',
   '  /help or ?          show this list',
@@ -272,7 +279,18 @@ export function render(shown: Shown, look: Look): string {
       said(d.failed, () => 'Failed:');
       leftOut(d.skipped);
     }
-  } else if (shown.kind === 'wrong') head(d.removed?.length ? 'Forgotten. Searching fresh…' : "Noted. It won't be saved.");
+  } else if (shown.kind === 'right') {
+    if (d.done) head('Saved. Ask it again and it comes back at once.', 'green');
+    else {
+      head('Not saved.', 'red');
+      const why = d.why ?? '';
+      if (/possible-tier/.test(why)) body('One of these notes is only a possible match. Use /check to test a claim against them.');
+      else if (/out of range/.test(why)) body('There is no note with that number.');
+      else if (/no (prior lookup|confirmed top)/.test(why)) body('There is nothing to save. Ask a question first.');
+      else if (!/--/.test(why)) body(sentence(why));
+    }
+  }
+  else if (shown.kind === 'wrong') head(d.removed?.length ? 'Forgotten. Searching fresh…' : "Noted. It won't be saved.");
   else if (o === 'error') {
     const why: Record<string, string> = { 'auth-rejected': `${vendor} rejected the key`, 'no-key': `no ${vendor} key was found`,
       unreachable: `${vendor} can't be reached`, overloaded: `${vendor} is busy` };
@@ -325,6 +343,7 @@ export function render(shown: Shown, look: Look): string {
     });
     if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
     if (d.saved_now) body('Saved for next time.');
+    else if (shown.hint && files.length && !d.saved && !files.some((f) => f.tier === 'possible')) body('Open them to check. /right saves this answer.');
     leftOut(d.left_out);
   } else if (o === 'not-found') {
     head('Not in your notes');
