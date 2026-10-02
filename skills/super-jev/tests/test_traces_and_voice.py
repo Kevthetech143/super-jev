@@ -445,11 +445,11 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
                     "trace": [{"path": ["root"], "choices": [{"nodeId": "root", "none": 0.2}]}]}
         raise AssertionError(req)
 
-    def fake_word_search(q, ptrs, skip=()):
+    def fake_word_search(q, ptrs, skip=(), full=False):
         ranked = [(9.0, "/a.md", "p1"), (8.0, "/w.md", "p1"), (7.0, "/x.md", "p1"), (6.0, "/y.md", "p1"),
-                  (5.0, "/z.md", "p1")]
-        ask._STAGE["word"] = {"terms": ["knee"], "files_searched": 5, "passed_coverage": 5, "ranked": ranked}
-        return [r for r in ranked if r[1] not in skip][:3]
+                  (5.0, "/z.md", "p1"), (4.0, "/q.md", "p1")]
+        ask._STAGE["word"] = {"terms": ["knee"], "files_searched": 6, "passed_coverage": 6, "ranked": ranked}
+        return ranked if full else [r for r in ranked if r[1] not in skip][:3]
 
     def fake_confirm(q, paths):
         ask._STAGE["checks"] = {"/a.md": {"chunks": 11, "read": [0, 1, 2, 9], "wording": "exact-value",
@@ -468,13 +468,13 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
     assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, True]
     fates = [f["fate"] for f in st["word_search"]["top"]]
     assert fates and fates[0] == "already routed"
-    assert st["read_list"] == ["/a.md", "/b.md", "/w.md", "/x.md", "/y.md"]
+    assert st["read_list"] == ["/a.md", "/b.md", "/w.md", "/x.md", "/y.md", "/z.md"]
     assert st["content_check"]["/a.md"]["read"] == [0, 1, 2, 9]
     assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"] == "evidence-selected"
 
     assert ask.trace_show(tmp_path, "last") == 0
     out = capsys.readouterr().out
-    assert "/z.md  -> not read: past top 5" in out
+    assert "/q.md  -> not read: past top 5" in out
     assert "b.md 0.02" in out and "under floor" not in out
     assert "chunks [0, 1, 2, 9] of 11" in out
     assert ask.trace_show(tmp_path, "nope") == 1
