@@ -43,7 +43,7 @@ python3 dispatch.py memory --principal NAME
 - Markdown only: code and other text files are not supported (connect counts them in a `SKIP` line unless hidden). A note over 250,000 bytes is held "too big, split it"; split it into smaller .md files and reconnect. A first connect refuses more than 250 files (`--max-files`).
 - A GitHub repo's history (PRs with reviews, issues, commit messages, release notes) → `python3 connect_github.py OWNER/REPO --pointer NAME --principal NAME` (or `superjev connect-github ...`); add `--refresh` after each merge to fetch only what changed. Uses your signed-in `gh`; secret-looking lines are dropped. See [connectors.md](../super-jev/references/connectors.md#github-repo-history).
 - A fact with no backing file → `python3 ask.py --principal NAME --add "question" "answer"`
-- A human at the `superjev` terminal chat → drag the file or folder into the window: it shows what will connect and asks first (a folder defaults to No), then runs `prepare_bulk.py` for them.
+- A human at the `superjev` terminal app → drag the folder or `.md` note into the window: it asks once (Enter yes, Esc no), then connects it with the free builtin writer, or refreshes it if it is already connected.
 
 Cost: with a model writer, each connected file gets its description and labels checked by Jev (a `--writer builtin` connect checks descriptions locally and makes no Jev call); small files are checked several to one call (`SUPERJEV_BATCH_JEV=0` checks one file per call). The findability report (each file's own sample question searched after connecting) is off by default; add `--findability` for it, one paid search per file.
 

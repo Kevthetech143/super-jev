@@ -156,6 +156,16 @@ def test_an_unrelated_file_next_to_the_chat_config_stays(env):
     assert (env / "xdg" / "superjev" / "other.txt").read_text() == "mine"
 
 
+def test_the_key_file_in_home_stays(env, capsys):
+    """The terminal app saves a pasted key in ~/.typesafe-api-key; hooks and agents read it too.
+    The docs (README, AGENTS, GETTING-STARTED) say uninstall keeps it, so it must."""
+    made_state(env)
+    key = touch(env / "home" / ".typesafe-api-key", "sk-made-up")
+    assert setup.main(["--uninstall"]) == 0
+    assert key.read_text() == "sk-made-up"
+    assert ".typesafe-api-key" not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("kind", ["another-checkout", "no-marker", "marker-but-not-an-exec"])
 def test_a_launcher_that_is_not_ours_stays(env, kind):
     text = {
