@@ -52,8 +52,9 @@ def world(tmp_path, monkeypatch):
             paths = [state["routed"]] + state["also"]
             return {"status": "candidates", "candidates": [{"score": 0.9 - 0.05 * i, "originalPath": p} for i, p in enumerate(paths)]}
         if act == "sources":
-            return {"status": "ok", "sources": [{"sourceId": "s1", "originalPath": state["routed"],
-                                                  "contentSHA": state["sha"]}]}
+            return {"status": "ok", "sources": [
+                {"sourceId": "s1", "originalPath": p, "contentSHA": state["sha"] if p == state["routed"] else state.setdefault("shas", {}).setdefault(p, sha(p))}
+                for p in [state["routed"]] + state["also"]]}
         if act == "open":
             return {"status": "ok", "attemptId": "att|" + req["question"]}
         if act == "assist":
@@ -284,6 +285,7 @@ def _three_files(world, tmp_path):
         f.write_text(f"Acme {name} refund window notes.\n")
         extra.append(str(f))
     world["state"]["also"] = extra
+    world["state"]["shas"] = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in extra}  # as at connect
     return extra
 
 
@@ -418,3 +420,69 @@ def test_wins_by_another_judge_do_not_count_and_the_saved_record_names_the_judge
     assert world["cache"]
     rec = _lines(world["sdir"] / "approvals.jsonl")[-1]
     assert rec["judge"] == "typesafe-jev"
+
+
+# SAVE BY HAND, NO ANSWER TEXT: --approve Q [--rank N] saves the last ranked list, like a repeat win
+def approve_list(monkeypatch, *args, question=Q):
+    monkeypatch.setattr(sys, "argv", ["ask.py", "--principal", "ann", "--approve", question, *args])
+    return ask._main()
+
+
+def test_approve_with_no_answer_saves_the_ranked_list_with_the_chosen_file_first(world, tmp_path, monkeypatch):
+    extra = _three_files(world, tmp_path)
+    ask_once(world)
+    assert approve_list(monkeypatch, "--rank", "2") == 0
+    assert world["gates"] == [] and list(world["cache"].values()) == [f"Saved file: {extra[0]}"]
+    rec = ask.saved_record(world["sdir"], Q)
+    assert rec["approved_by"] == "principal:ann" and [f["path"] for f in rec["files"]] == [extra[0], str(world["note"]), extra[1]]
+    hit, n = ask_once(world)
+    assert n == 0 and "CACHE HIT" in hit and _rank_lines(hit) == [extra[0], str(world["note"]), extra[1]]
+
+
+def test_approve_with_no_answer_and_no_rank_saves_the_list_as_ranked(world, tmp_path, monkeypatch):
+    extra = _three_files(world, tmp_path)
+    live, _ = ask_once(world)
+    assert approve_list(monkeypatch) == 0
+    hit, n = ask_once(world)
+    assert n == 0 and _rank_lines(hit) == _rank_lines(live)
+
+
+def test_approve_with_no_answer_still_runs_the_secret_scan(world, tmp_path, monkeypatch):
+    extra = _three_files(world, tmp_path)
+    ask_once(world)
+    Path(extra[1]).write_text("password: hunter2hunter2\n")
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_no_answer_still_refuses_a_file_changed_since_connect(world, monkeypatch):
+    ask_once(world)
+    world["note"].write_text(ACME + "Edited after connect.\n")
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_no_answer_needs_an_earlier_search(world, monkeypatch):
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_no_answer_refuses_a_list_holding_a_possible_tier_file(world, tmp_path, monkeypatch, capsys):
+    _three_files(world, tmp_path)
+    ask_once(world)
+    log = world["sdir"] / "lookups.jsonl"
+    recs = _lines(log)
+    recs[-1]["top"][1]["possible"] = True
+    log.write_text("".join(json.dumps(r) + "\n" for r in recs))
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+    assert "pick one file" not in capsys.readouterr().out
+
+
+def test_approve_with_no_answer_refuses_a_listed_file_other_than_the_first_changed_since_connect(world, tmp_path, monkeypatch):
+    extra = _three_files(world, tmp_path)
+    ask_once(world)
+    Path(extra[1]).write_text(Path(extra[1]).read_text() + "Edited after connect.\n")
+    assert approve_list(monkeypatch) == 1 and not world["cache"]
+
+
+def test_approve_with_an_empty_answer_takes_the_no_text_path(world, monkeypatch):
+    ask_once(world)
+    assert approve_list(monkeypatch, "  ") == 0
+    assert world["gates"] == [] and list(world["cache"].values()) == [f"Saved file: {world['note']}"]
