@@ -12,11 +12,11 @@ export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 export type Turn =
   | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' }
   | { kind: 'ask' | 'check' | 'say'; text: string }
-  | { kind: 'connect'; path: string; dir: boolean };
+  | { kind: 'connect'; path: string; dir: boolean; pointer?: string /* the engine's own name for a set to refresh */ };
 export type Session = { principal: string; skillDir: string; connected: Set<string> };
 export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
   door?: boolean /* the one-shot door: no window is open yet */ };
-// noNext: the turn was a status, so a next step would only point back at it.
+// noNext: no Next line: the turn was a status (a next step would only point back at it), or the window is about to do the fix itself.
 export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
   refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean };
 
@@ -108,11 +108,11 @@ export function helperCall(turn: Turn, s: Session): string[] {
   if (turn.kind === 'check') return [...ask, '--claim', turn.text];
   if (turn.kind === 'status') return [...ask, '--status'];
   if (turn.kind !== 'connect') throw new Error(`no helper call for ${turn.kind}`);
-  const name = pointerName(turn.path);
+  const name = turn.pointer ?? pointerName(turn.path);
   return [join(s.skillDir, 'prepare_bulk.py'), '--root', turn.dir ? turn.path : dirname(turn.path), '--pointer', name,
     '--principal', s.principal, '--writer', 'builtin', '--json',
     ...(turn.dir ? [] : ['--no-recurse', '--name', literalName(basename(turn.path))]),
-    ...(s.connected.has(name) ? ['--refresh'] : [])];
+    ...(turn.pointer || s.connected.has(name) ? ['--refresh'] : [])];
 }
 
 /** The environment a helper gets: the key from the shell wins over the key file. */
@@ -126,6 +126,14 @@ export function keyAction(s: { mode: 'prompt' | 'confirm' | 'secret'; line: stri
   if (s.mode === 'secret') return key === 'enter' ? 'send' : key === 'escape' || key === 'ctrl-c' || key === 'ctrl-d' ? 'cancel' : 'none';
   if (key === 'escape') return 'clear';
   return key === 'ctrl-c' ? (s.line ? 'clear' : s.armed ? 'quit' : 'hint') : 'none'; // Ctrl+D at the prompt is readline's own close
+}
+
+/** The one fix the window can offer for an answer (the fix table, DESIGN 4.3), or null when there is nothing the app can do:
+ *  a rejected key from the key file gets a new key; a stale folder that nobody is refreshing gets a refresh. */
+export function fixOf(d: any, keySource: string): { kind: 'key' } | { kind: 'refresh'; rows: any[] } | null {
+  if (d?.outcome === 'error' && keySource === 'file' && (d.errors ?? []).some((e: any) => e.kind === 'auth-rejected')) return { kind: 'key' };
+  const rows = (d?.unsearched ?? []).filter((u: any) => !u.healing && u.set && u.root);
+  return d?.outcome === 'needs-setup' && d.next === 'refresh' && rows.length ? { kind: 'refresh', rows } : null;
 }
 
 // ---------------------------------------------------------------- drawing a reply
@@ -323,5 +331,5 @@ export function render(shown: Shown, look: Look): string {
   if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off).replace(/^./, (c) => c.toUpperCase()));
   const time = shown.secs === undefined ? [] : [paint('dim', `· ${shown.secs.toFixed(1)}s`)];
   return [...pack([...title.map((w) => paint(tone, w)), ...time], look.width, paint(tone, '• '), '  '), ...out,
-    ...(nextLine ? lay('Next: ' + nextLine, 'dim') : [])].join('\n');
+    ...(nextLine && !shown.noNext ? lay('Next: ' + nextLine, 'dim') : [])].join('\n');
 }
