@@ -1,475 +1,323 @@
-// Config + pure-logic helpers for the `superjev` chat CLI. Kept dependency-free
-// (no clack, no child_process) so it is cheap to unit test in isolation from the
-// interactive TUI in jev-chat-cli.ts.
-import { mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, dirname, basename } from 'node:path';
+// The pure core of the terminal app: read a typed line, build the helper call, draw the helper's reply.
+// Nothing here talks to a helper or a terminal. readLine only stats a path on disk, read-only.
+import { statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { basename, dirname, join, resolve } from 'node:path';
+import { styleText, stripVTControlCharacters } from 'node:util';
 
-export type SuperJevConfig = {
-  typesafeApiKey?: string;
-  principal?: string;
-  folders?: string[];
-};
+export const COMMANDS = ['/check', '/status', '/help', '/exit'];
+/** How a user gets back to the window: the one wording every screen and message uses. */
+export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
-/** XDG-respecting config dir: $XDG_CONFIG_HOME/superjev or ~/.config/superjev. */
-export function configDir(): string {
-  const base = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
-  return join(base, 'superjev');
-}
+export type Turn =
+  | { kind: 'empty' | 'help' | 'version' | 'exit' | 'status' }
+  | { kind: 'ask' | 'check' | 'say'; text: string }
+  | { kind: 'connect'; path: string; dir: boolean };
+export type Session = { principal: string; skillDir: string; connected: Set<string> };
+export type Look = { width: number; color: boolean; home: string; keyEnv?: string; keySource?: 'env' | 'file' | 'none'; vendor?: string;
+  door?: boolean /* the one-shot door: no window is open yet */ };
+// noNext: the turn was a status, so a next step would only point back at it.
+export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
+  refreshed?: boolean; declined?: boolean; noNext?: boolean };
 
-export function configPath(): string {
-  return join(configDir(), 'config.json');
-}
-
-/** Loads the config, or {} if none exists yet / it fails to parse. Never throws. */
-export function loadConfig(path: string = configPath()): SuperJevConfig {
-  try {
-    if (!existsSync(path)) return {};
-    const raw = readFileSync(path, 'utf8');
-    const parsed = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-/** Writes the config as 0600 (owner read/write only), creating the parent dir
- * (also locked to 0700) if needed. The API key never touches stdout/stderr. */
-export function saveConfig(config: SuperJevConfig, path: string = configPath()): void {
-  const dir = join(path, '..');
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  // mkdir's mode only applies on create; lock a pre-existing dir too.
-  chmodSync(dir, 0o700);
-  // writeFileSync's mode only applies on create; lock an existing file BEFORE
-  // the key is written into it, not after.
-  if (existsSync(path)) chmodSync(path, 0o600);
-  writeFileSync(path, JSON.stringify(config, null, 2), { mode: 0o600 });
-  chmodSync(path, 0o600);
-}
-
-export function configFileMode(path: string = configPath()): number {
-  return statSync(path).mode & 0o777;
-}
-
-export function hasApiKey(config: SuperJevConfig): boolean {
-  return typeof config.typesafeApiKey === 'string' && config.typesafeApiKey.length > 0;
-}
-
-// ---------------------------------------------------------------------------
-// Canned small-talk replies -- pre-installed answers so the chat feels alive
-// with zero lookups/API calls for the common openers.
-// ---------------------------------------------------------------------------
-const CANNED: Array<{ patterns: RegExp[]; reply: string }> = [
-  { patterns: [/^hi$/i, /^hey$/i, /^hello$/i, /^yo$/i], reply: 'Hey, I\'m Super Jev. Ask me anything and I\'ll check what we already know first.' },
-  { patterns: [/^who are you$/i, /^what are you$/i], reply: 'I\'m Super Jev -- a cache-first lookup chat over your connected notes and files. Fast answers when we\'ve seen the question before, honest misses when we haven\'t.' },
-  { patterns: [/^help$/i, /^what can you do$/i], reply: 'Ask a question and I\'ll look it up. Slash commands: /help /setup /folders /quit.' },
-  { patterns: [/^thanks$/i, /^thank you$/i, /^thx$/i], reply: 'Anytime.' },
-];
-
-/** Returns a canned reply for common small talk, or null if the input should
- * go to a real lookup. Case-insensitive, tolerant of trailing punctuation. */
-export function cannedReply(input: string): string | null {
-  const trimmed = input.trim().replace(/[!.?]+$/, '');
-  if (!trimmed) return null;
-  for (const { patterns, reply } of CANNED) {
-    if (patterns.some((p) => p.test(trimmed))) return reply;
-  }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Slash command parsing
-// ---------------------------------------------------------------------------
-export type SlashCommand = { command: 'help' | 'setup' | 'folders' | 'quit'; args: string[] };
-
-const SLASH_COMMANDS: SlashCommand['command'][] = ['help', 'setup', 'folders', 'quit'];
-
-/** Parses a leading-slash command line, or null if the input is not a slash
- * command (plain chat, or an unrecognized slash word -- caller decides how to
- * report that). Returns { command: null-like } via throwing is avoided: an
- * unrecognized `/word` still parses, callers check membership themselves. */
-export function parseSlashCommand(input: string): { command: string; args: string[] } | null {
-  const trimmed = input.trim();
-  if (!trimmed.startsWith('/')) return null;
-  const parts = trimmed.slice(1).split(/\s+/).filter(Boolean);
-  const command = (parts[0] || '').toLowerCase();
-  return { command, args: parts.slice(1) };
-}
-
-export function isKnownSlashCommand(command: string): command is SlashCommand['command'] {
-  return (SLASH_COMMANDS as string[]).includes(command);
-}
-
-/** argv for an ask.py lookup. ask.py dispatches on a leading `--miss`/`--add`/
- * `--approve`/`--principal`/`--no-auto` token, so user text that starts with a
- * dash is stripped of its leading dashes to stay a plain question. */
-export function askLookupArgs(principal: string, question: string): string[] {
-  const q = question.replace(/^[\s-]+/, '') || '?';
-  return ['--principal', principal, q];
-}
-
-export const MISS_LINE = "Super Jev: I didn't have this. Want me to find it by hand and save it for next time?";
-
-// ---------------------------------------------------------------------------
-// Miss-with-candidates parsing -- ask.py's `cached` action can miss (no
-// approved answer) while still surfacing ranked candidate files, printed as
-// lines like " 0.85  /path/to/file.md  [pointer-name]  possible-note". The
-// chat CLI must not dump that raw line to the user: it turns it into a real
-// short reply (top file name + one-line why).
-// ---------------------------------------------------------------------------
-export type MissCandidate = { score: number; path: string; pointer: string };
-
-const CANDIDATE_LINE = /^\s*([\d.]+)\s+(\S+)\s+\[([^\]]+)\]/;
-
-/** Top ranked candidate from a miss (no CACHE HIT) ask.py run, or null when
- * there truly are none (OUTCOME not-found, needs-setup or error). Never
- * called on a cache hit -- callers check parseHit first. */
-export function parseMissCandidate(stdout: string): MissCandidate | null {
-  if (stdout.startsWith('CACHE HIT')) return null;
-  for (const line of stdout.split('\n')) {
-    const m = line.match(CANDIDATE_LINE);
-    if (m) return { score: Number(m[1]), path: m[2], pointer: m[3] };
-  }
-  return null;
-}
-
-/** Short human reply for a miss-with-candidates: top file name + one-line why
- * -- never the raw score/pointer line. */
-export function formatMissCandidateReply(candidate: MissCandidate): string {
-  return `Top file: ${candidate.path} -- closest match we found (score ${candidate.score.toFixed(2)}), but no approved answer is saved for this yet.`;
-}
-
-// ---------------------------------------------------------------------------
-// Setup-missing parsing -- when a principal has no connected pointers at all,
-// ask.py's lookup() starts with "OUTCOME: needs-setup - ...; next: <command>"
-// (exit 4), before it ever reaches the "not-found" miss report. Show that block instead of
-// the generic MISS_LINE so the user knows this is a setup problem, not a
-// real miss.
-// ---------------------------------------------------------------------------
-export function parseSetupMissing(stdout: string): string[] | null {
-  const lines = stdout.split('\n');
-  const idx = lines.findIndex((l) => l.trim().startsWith('OUTCOME: needs-setup'));
-  return idx === -1 ? null : [lines[idx].trim()];
-}
-
-// ---------------------------------------------------------------------------
-// Pointer-error parsing -- when ask.py's providers themselves fail (auth
-// errors, network errors, etc.) every pointer can error out with no
-// candidates and no "no-candidates" miss report either; ask.py prints
-// an "OUTCOME: error - ..." line first, then the "[pointer] error: ..." lines. Surface that instead of
-// letting the chat CLI look like a silent, unexplained miss.
-// ---------------------------------------------------------------------------
-const POINTER_ERROR_LINE = /^\[[^\]]+\]\s+error:/;
-
-export function parseErrorReport(stdout: string): string[] | null {
-  const lines = stdout.split('\n');
-  const errorLines = lines.filter((l) => POINTER_ERROR_LINE.test(l.trim())).slice(0, 3);
-  const outcome = lines.find((l) => l.trim().startsWith('OUTCOME: error'));
-  if (!errorLines.length && !outcome) return null;
-  return outcome ? [outcome.trim(), ...errorLines] : errorLines;
-}
-
-// ---------------------------------------------------------------------------
-// Panel-check parsing -- after /setup saves a principal, the chat CLI runs a
-// cheap local `dispatch.py memory --principal X` (panel action, no network)
-// to warn right away if that principal has no connected pointers yet (e.g. a
-// principal name typo or case mismatch -- pointers are matched exact-case).
-// ---------------------------------------------------------------------------
-export function parseAnyPointers(stdout: string): boolean | null {
-  try {
-    const parsed = JSON.parse(stdout);
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.pointers)) return null;
-    return parsed.pointers.length > 0;
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// True-miss report parsing -- ask.py's `OUTCOME: not-found` miss (exit 1) prints a
-// "What was searched:" / "Next step (pick one):" block (see ask.py's
-// miss_report()) before its closing voice line. The chat CLI shows that
-// block to the user instead of making a paid live call that cannot answer
-// anything on a true miss. Returns null if ask.py's output predates that
-// block (older ask.py) so callers can fall back cleanly.
-// ---------------------------------------------------------------------------
-export function parseMissReport(stdout: string): string[] | null {
-  const lines = stdout.split('\n');
-  const startIdx = lines.findIndex((l) => l.trim() === 'What was searched:');
-  if (startIdx === -1) return null;
-  const report = lines.slice(startIdx).filter((l) => l.trim() !== MISS_LINE.trim());
-  while (report.length && report[report.length - 1].trim() === '') report.pop();
-  return report.length ? report : null;
-}
-
-// ---------------------------------------------------------------------------
-// Drag-and-drop onboarding -- macOS terminals paste a dropped file/folder's
-// path as plain text: shell-escaped ("My\ Folder/x.md"), quoted
-// ("My Folder/x.md"), or several paths separated by spaces for a multi-
-// select drop. Detect that shape before treating a line as a question, then
-// connect it through the existing prepare_bulk.py bulk connector.
-// ---------------------------------------------------------------------------
-
-/** Splits a line into shell-style tokens: backslash escapes the next char,
- * single quotes are fully literal, double quotes allow \" \\ \$ \` escapes,
- * unescaped whitespace separates tokens. Good enough for what macOS
- * terminals paste on a drop -- not a full shell parser. */
-export function splitPathTokens(input: string): string[] {
-  const tokens: string[] = [];
-  let cur = '';
-  let inSingle = false;
-  let inDouble = false;
-  let i = 0;
-  while (i < input.length) {
+// ---------------------------------------------------------------- reading a line
+/** Shell-style words: single quotes literal, double quotes allow \" \\ \$ \`, a backslash escapes one character. */
+function words(input: string): string[] {
+  const out: string[] = [];
+  let cur = '', quote = '', has = false;
+  for (let i = 0; i < input.length; i++) {
     const c = input[i];
-    if (inSingle) {
-      if (c === "'") inSingle = false; else cur += c;
-      i++; continue;
-    }
-    if (inDouble) {
-      if (c === '"') inDouble = false;
-      else if (c === '\\' && i + 1 < input.length && '"\\$`'.includes(input[i + 1])) { cur += input[i + 1]; i += 2; continue; }
+    if (quote === "'") { if (c === "'") quote = ''; else cur += c; continue; }
+    if (quote === '"') {
+      if (c === '"') quote = '';
+      else if (c === '\\' && '"\\$`'.includes(input[i + 1] ?? '')) cur += input[++i];
       else cur += c;
-      i++; continue;
+      continue;
     }
-    if (c === "'") { inSingle = true; i++; continue; }
-    if (c === '"') { inDouble = true; i++; continue; }
-    if (c === '\\' && i + 1 < input.length) { cur += input[i + 1]; i += 2; continue; }
-    if (/\s/.test(c)) {
-      if (cur.length) { tokens.push(cur); cur = ''; }
-      i++; continue;
-    }
-    cur += c; i++;
+    if (c === "'" || c === '"') { quote = c; has = true; }
+    else if (c === '\\' && i + 1 < input.length) { cur += input[++i]; has = true; }
+    else if (/\s/.test(c)) { if (has || cur) out.push(cur); cur = ''; has = false; }
+    else { cur += c; has = true; }
   }
-  if (cur.length) tokens.push(cur);
-  return tokens;
+  if (has || cur) out.push(cur);
+  return out;
 }
 
-function expandTilde(p: string): string {
-  if (p === '~') return homedir();
-  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
-  return p;
+const pathy = (w: string) => /^(\/|~|\.\.?\/)/.test(w);
+const tilde = (p: string, home: string) => (home && (p === home || p.startsWith(home + '/')) ? '~' + p.slice(home.length) : p);
+const absolute = (w: string, home: string) => (w === '~' || w.startsWith('~/') ? join(home, w.slice(1)) : resolve(w));
+
+function distance(a: string, b: string): number {
+  let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    row = next;
+  }
+  return row[b.length];
 }
 
-/** A dropped-path token must be unambiguously a path, not a word that merely
- * happens to name something in the cwd: an absolute path (`/...`, more than
- * just `/`) or a `~/...` home-relative path. Bare `~`, `.`, `..`, `/`, and
- * plain relative words like "docs" are never treated as a drop, even if they
- * exist on disk. */
-function looksLikeDropPathToken(raw: string): boolean {
-  if (raw === '/' || raw === '~' || raw === '.' || raw === '..') return false;
-  if (raw.startsWith('~/')) return true;
-  return raw.startsWith('/') && raw.length > 1;
+/** A first word that starts with `-` is an option, never a question: --help and -h, --version, else unknown. */
+const option = (w: string): Turn => w === '--help' || w === '-h' ? { kind: 'help' } : w === '--version' ? { kind: 'version' }
+  : { kind: 'say', text: `Unknown option ${w}. Try --help.` };
+
+/** A line is `?`, `exit`/`quit`, an option, a path, a /command, or a question, in that order. */
+export function readLine(line: string, home: string = process.env.HOME ?? ''): Turn {
+  const t = line.trim();
+  if (!t) return { kind: 'empty' };
+  if (t === '?') return { kind: 'help' };
+  if (t === 'exit' || t === 'quit') return { kind: 'exit' };
+  if (t.startsWith('-')) return option(t.split(/\s+/)[0]);
+  const ws = /^\/[a-z]+(\s|$)/i.test(t) ? [] : words(t);
+  const typed = ws.length > 0 && pathy(ws[0]);
+  if (typed && ws.length > 1 && ws.every(pathy)) return { kind: 'say', text: 'One at a time: drag in one folder or note, then the next.' };
+  // The words as parsed first, then the line as typed: a path can hold an apostrophe, or be a one-segment folder like /notes.
+  const tries = [...(typed ? [ws.length === 1 ? ws[0] : t] : []), ...(pathy(t) ? [t] : [])].map((w) => absolute(w, home));
+  const hit = tries.map((p) => [p, statSync(p, { throwIfNoEntry: false })] as const).find(([, st]) => st);
+  if (hit || typed) {
+    const [p, st] = hit ?? [tries[0], undefined];
+    if (!st) return { kind: 'say', text: `Can't find ${tilde(p, home)}. Drag the folder in, or check the path.` };
+    if (st.isDirectory() || /\.md$/i.test(p)) return { kind: 'connect', path: p, dir: st.isDirectory() };
+    return { kind: 'say', text: `${tilde(p, home)} is not a folder or a Markdown note, so it can't be connected.` };
+  }
+  const m = /^\/([a-z]+)(?:\s+([\s\S]*))?$/i.exec(t);
+  if (!m) return { kind: 'ask', text: t };
+  const cmd = '/' + m[1].toLowerCase(), rest = (m[2] ?? '').trim();
+  if (cmd === '/help') return { kind: 'help' };
+  if (cmd === '/exit') return { kind: 'exit' };
+  if (cmd === '/status') return { kind: 'status' };
+  if (cmd === '/check') return rest ? { kind: 'check', text: rest } : { kind: 'say', text: 'Usage: /check <a statement to check against your notes>' };
+  const [far, near] = COMMANDS.map((c) => [distance(cmd, c), c] as const).sort((a, b) => a[0] - b[0])[0];
+  return { kind: 'say', text: `Unknown command ${cmd}.` + (far <= 2 ? ` Did you mean ${near}?` : '') };
 }
 
-export type DroppedPath = { raw: string; path: string; isDirectory: boolean };
-
-/** Detects whether the WHOLE input is one or more existing local paths
- * (after unescaping/unquoting/tilde-expansion) -- the shape a terminal
- * drag-drop pastes. Returns null (treat as a normal question) unless every
- * token is shaped like an absolute or ~/-prefixed path AND actually exists
- * on disk -- a single non-path-shaped or non-existent token anywhere in the
- * line means it's not a clean drop. `existsFn`/`statFn` are injectable for
- * tests. */
-export function detectDroppedPaths(
-  input: string,
-  existsFn: (p: string) => boolean = existsSync,
-  statFn: (p: string) => { isDirectory(): boolean } = statSync,
-): DroppedPath[] | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-  const tokens = splitPathTokens(trimmed);
-  if (!tokens.length) return null;
-  if (!tokens.every(looksLikeDropPathToken)) return null;
-  const resolved = tokens.map((raw) => ({ raw, path: expandTilde(raw) }));
-  const allExist = resolved.every(({ path }) => {
-    try { return existsFn(path); } catch { return false; }
-  });
-  if (!allExist) return null;
-  return resolved.map(({ raw, path }) => {
-    let isDirectory = false;
-    try { isDirectory = statFn(path).isDirectory(); } catch { isDirectory = false; }
-    return { raw, path, isDirectory };
-  });
+// ---------------------------------------------------------------- helper calls
+/** Stable per path: <folder-slug>-<first 6 hex of sha1(absolute path)>. */
+export function pointerName(abs: string): string {
+  const slug = basename(abs).replace(/\.md$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return `${slug || 'notes'}-${createHash('sha1').update(abs).digest('hex').slice(0, 6)}`;
 }
 
-/** Slug for one pointer-name component: lowercase, alnum and dashes only. */
-export function slugify(name: string): string {
-  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-  return slug || 'drop';
+/** Escapes [ ] * ? so --name matches exactly one file. */
+const literalName = (n: string) => n.replace(/[[\]*?]/g, (c) => `[${c}]`);
+
+/** The helper's argv, script path first. Never run through a shell. */
+export function helperCall(turn: Turn, s: Session): string[] {
+  const ask = [join(s.skillDir, 'ask.py'), '--principal', s.principal, '--json'];
+  if (turn.kind === 'ask') return [...ask, '--', turn.text];
+  if (turn.kind === 'check') return [...ask, '--claim', turn.text];
+  if (turn.kind === 'status') return [...ask, '--status'];
+  if (turn.kind !== 'connect') throw new Error(`no helper call for ${turn.kind}`);
+  const name = pointerName(turn.path);
+  return [join(s.skillDir, 'prepare_bulk.py'), '--root', turn.dir ? turn.path : dirname(turn.path), '--pointer', name,
+    '--principal', s.principal, '--writer', 'builtin', '--json',
+    ...(turn.dir ? [] : ['--no-recurse', '--name', literalName(basename(turn.path))]),
+    ...(s.connected.has(name) ? ['--refresh'] : [])];
 }
 
-/** `<principal>-drop-<slug>-<6hex>` pointer name for a dropped file or
- * folder. The trailing 6 hex chars are a short sha256 of the absolute
- * location being connected, so two different folders/files that happen to
- * share a basename (e.g. two "notes.md") never collide on the same pointer
- * name and silently overwrite each other. */
-export function buildDropPointerName(principal: string, label: string, location: string): string {
-  const hash = createHash('sha256').update(location).digest('hex').slice(0, 6);
-  return `${slugify(principal)}-drop-${slugify(label)}-${hash}`;
+/** The environment a helper gets: the key from the shell wins over the key file. */
+export function childEnv(env: NodeJS.ProcessEnv, keyEnv: string, fileKey: string): NodeJS.ProcessEnv {
+  return !keyEnv || env[keyEnv] || !fileKey ? env : { ...env, [keyEnv]: fileKey };
 }
 
-/** Escapes fnmatch-magic characters (`[ ] * ?`) in a filename so
- * prepare_bulk.py's `--name GLOB` matches only that literal file -- not an
- * unintended glob, and not a same-named file in a different subfolder (paired
- * with --no-recurse, which keeps the scan out of subfolders in the first
- * place). Same escaping Python's own glob.escape uses. */
-export function escapeNameGlob(name: string): string {
-  return name.replace(/[[\]*?]/g, (c) => {
-    if (c === '[') return '[[]';
-    if (c === ']') return '[]]';
-    if (c === '*') return '[*]';
-    return '[?]';
-  });
+/** What a key press does in each mode (prompt, yes/no, hidden key). */
+export function keyAction(s: { mode: 'prompt' | 'confirm' | 'secret'; line: string; armed: boolean }, key: string): string {
+  if (s.mode === 'confirm') return key === 'enter' ? (/^(y|yes)?$/i.test(s.line.trim()) ? 'yes' : 'no') : key === 'escape' || key === 'ctrl-c' ? 'no' : 'none';
+  if (s.mode === 'secret') return key === 'enter' ? 'send' : key === 'escape' || key === 'ctrl-c' || key === 'ctrl-d' ? 'cancel' : 'none';
+  if (key === 'escape') return 'clear';
+  return key === 'ctrl-c' ? (s.line ? 'clear' : s.armed ? 'quit' : 'hint') : 'none'; // Ctrl+D at the prompt is readline's own close
 }
 
-export type DropPlan = {
-  root: string;
-  names: string[] | null; // --name filters for prepare_bulk.py, null = whole folder
-  pointer: string;
-  fileCount: number; // known file count for the confirm message (0 = folder, counted at connect time)
-  label: string; // human label for the confirm message
+// ---------------------------------------------------------------- drawing a reply
+/** The one layout rule. A row is a list of pieces that never break (a path with its :line, a date, a tag; in prose, each word).
+ *  They fill lines of at most `width` visible columns, so a line breaks only between pieces and a piece wider than the
+ *  window stays whole. A piece that starts with a space asks for a wider gap, dropped when it starts a line. */
+export function pack(pieces: string[], width: number, first = '  ', hang = '    '): string[] {
+  const rows: string[] = [];
+  let cur = '';
+  for (const p of pieces) {
+    const indent = rows.length ? hang : first;
+    if (cur && stripVTControlCharacters(indent + cur + ' ' + p).length > width) { rows.push(indent + cur); cur = p.trimStart(); }
+    else cur = cur ? cur + ' ' + p : p.trimStart();
+  }
+  return cur ? [...rows, (rows.length ? hang : first) + cur] : rows;
+}
+/** Prose: every word is a piece. */
+export const prose = (s: string) => s.split(/\s+/).filter(Boolean);
+const parts = (x: string | string[]) => (typeof x === 'string' ? prose(x) : x);
+/** Text that follows a dot (` · says X`): the dot stays with its first word. */
+const after = (s: string) => { const [w, ...rest] = prose(s); return [`· ${w}`, ...rest]; };
+const gap = (s: string) => ' ' + s;
+
+export const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const sentence = (s: string) => (/[.!?]$/.test(s) ? s : s + '.');
+const uniq = (xs: string[]) => [...new Set(xs)];
+
+export const HELP = [
+  'Ask a question in plain words, or:',
+  '  drag a folder in    connect its Markdown notes',
+  '  /check <statement>  check it against your notes',
+  '  /status             show what is connected',
+  '  /help or ?          show this list',
+  '  /exit               leave (Ctrl+D works too)'].join('\n');
+/** What `superjev --help` leads with, before the list. */
+export const USAGE = 'Usage: superjev "your question"\n       superjev            open the window';
+
+export function confirmText(label: string, refresh: boolean, vendor: string, width: number): string {
+  const text = `${refresh ? 'Refresh' : 'Connect'} ${label}? It's free and stays on this Mac. When you ask, your question and matching passages go to ${vendor}.`;
+  return pack([...prose(text), gap('enter yes · esc no')], width, '  ', '  ').join('\n');
+}
+
+export function launchLine(version: string, sets: { state: string }[], width: number): string {
+  const by = new Map<string, number>();
+  for (const s of sets) if (s.state !== 'ready') by.set(s.state, (by.get(s.state) ?? 0) + 1);
+  const state = by.size ? [...by].map(([k, n]) => `${n} ${k}`).join(', ') : 'up to date';
+  return pack([`Super Jev ${version}`, `· ${plural(sets.length, 'folder')}`, `· ${state}`, '· ? for help'], width, '', '').join('\n');
+}
+
+// What the engine left out and why it refused, worded from its stable `kind` (PR 2c). A kind not listed shows the engine's own words.
+const LEFT: Record<string, (n: number) => string> = {
+  link: (n) => `${plural(n, 'linked note')} pointing outside this folder`,
+  name: (n) => `${plural(n, 'note')} with backup or key-style names; they are never connected`,
+  folder: (n) => `${plural(n, 'note')} in folders skipped by default; drag a folder in on its own to connect it`,
+  folder_other: (n) => `${plural(n, 'file')} of other types in folders skipped by default`,
+  hidden: (n) => `${plural(n, 'hidden note')}; rename one to connect it`,
+  dataset: (n) => `${plural(n, 'file')} in prepared dataset copies`,
+  test: (n) => plural(n, 'test or scratch file'),
+  worktree: (n) => `${plural(n, 'file')} in git worktree copies`,
+  empty: (n) => plural(n, 'empty note'),
+  types: (n) => `${plural(n, 'file')} of other types; only .md notes connect`,
+};
+const num = (n: number) => n.toLocaleString('en-US');
+const REFUSED: Record<string, (r: any) => string | undefined> = {
+  too_many: (r) => Number.isInteger(r.count) && Number.isInteger(r.max) ? `${num(r.count)} notes is more than one connect takes (${num(r.max)}).` : undefined,
+  not_a_folder: () => 'That is not a folder.',
+  not_markdown: () => "This folder was connected with other file types, so it can't be refreshed here.",
+  usage: () => 'That request was not accepted.',
 };
 
-/** Turns detected dropped paths into a prepare_bulk.py connect plan, or an
- * error message when the drop is not something we can connect in one shot
- * (paths spanning different folders, or a folder mixed with loose files). */
-export function buildDropPlan(paths: DroppedPath[], principal: string): DropPlan | { error: string } {
-  if (!paths.length) return { error: 'Nothing to connect.' };
+/** The outcome decides the screen; a connect has none. Whatever the helper reports is drawn, never a calmer screen. */
+export function render(shown: Shown, look: Look): string {
+  const d = shown.data ?? {}, o: string = d.outcome ?? '';
+  const paint = (fmt: string, s: string) => (look.color && fmt ? styleText(fmt as any, s, { validateStream: false }) : s);
+  const vendor = look.vendor ?? 'TypeSafe';
+  const path = (p: string) => tilde(p, look.home);
+  const tag = (s: string) => gap(paint('dim', s));
+  const out: string[] = [];
+  let title: string[] = [], tone = '', nextLine = '';
+  const head = (text: string | string[], color = '') => { title = parts(text); tone = color; };
+  // Every row goes through pack: prose as words, a path row as its parts. A row that fits stays as it is.
+  const lay = (s: string | string[], fmt = '', first = '  ', hang = typeof s === 'string' ? '  ' : '    ') => pack(parts(s), look.width, first, hang).map((l) => paint(fmt, l));
+  const body = (s: string | string[]) => out.push(...lay(s));
+  const next = (s: string) => { nextLine = s; };
+  // A step that is a drag: at the one-shot door there is no window yet, so the way in comes first.
+  const drag = (s: string) => next(look.door ? `${OPEN}, then ${s}` : s);
+  const quote = (text: string) => out.push(...lay(`"${text}"`, 'dim', '    ', '    '));
+  const place = (f: { path: string; line?: number; date?: string; says?: string }, lead = '') =>
+    [lead + path(f.path) + (f.line ? ':' + f.line : ''), ...(f.date ? [`· ${f.date}`] : []), ...(f.says ? [`· says ${f.says}`] : [])];
+  const keyNext = () => next(look.keySource === 'env' ? `fix ${look.keyEnv ?? 'the key variable'} in your shell, then restart.`
+    : look.keySource === 'file' ? `delete ~/.typesafe-api-key, then ${OPEN} to paste a new key.` : `${OPEN} to paste your key.`);
+  // A saved answer as its writer laid it out: a blank line stays blank, each line keeps its own indent and wraps under itself.
+  const saved = (answer: string) => answer.replace(/^\s*\n/, '').trimEnd().split('\n').flatMap((l) => {
+    const at = '  ' + /^[ \t]*/.exec(l)![0].replace(/\t/g, '    ');
+    return l.trim() ? lay(l, '', at, at) : [''];
+  });
+  // Notes that share a reason are said once: the reason, then each path whole on its own line.
+  const said = (rows: any[], lead: (n: number) => string) => {
+    const by = new Map<string, string[]>();
+    for (const r of rows ?? []) by.set(r.why, [...(by.get(r.why) ?? []), path(r.path)]);
+    for (const [why, paths] of by) { body(`${lead(paths.length)} ${why}`); for (const p of paths) out.push(...lay([p], '', '    ', '    ')); }
+  };
+  const leftOut = (rows: any[]) => uniq((rows ?? []).map((r) => LEFT[r.kind] && Number.isInteger(r.count) ? `Left out ${LEFT[r.kind](r.count)}.`
+    : `Left out ${r.count} ${r.what}${r.way_in ? `; ${r.way_in}` : ''}.`)).forEach((l) => body(l));
+  const empty = (setup: boolean) => {
+    head(setup ? 'Not set up yet' : 'Nothing connected yet');
+    if (setup) next(`${OPEN}; setup runs there.`); else drag('drag a folder of Markdown notes in here.');
+  };
+  const retry = () => { if (!shown.noNext && shown.kind !== 'status') next('/status, or ask again.'); };
+  const crash = (why: string) => { head('Super Jev hit an error', 'red'); if (why) body(why); retry(); };
+  // Folders the helper did not search, said once and added to every headline, so a partial search never reads as complete.
+  const rows: any[] = d.unsearched ?? [];
+  const lost = uniq([...rows.map((u) => `${u.root ? basename(u.root) : u.set} not searched (${u.healing ? 'refreshing' : u.state})`),
+    ...(d.errors ?? []).filter((e: any) => !rows.some((u) => u.set === e.set)).map((e: any) => `${e.set} not searched (failed)`)]);
+  const headline = (text: string | string[]) => [...parts(text), ...lost.flatMap(after)];
 
-  if (paths.length === 1) {
-    const [p] = paths;
-    if (p.isDirectory) {
-      const label = basename(p.path) || p.path;
-      return { root: p.path, names: null, pointer: buildDropPointerName(principal, label, p.path), fileCount: 0, label: `folder ${p.path}` };
+  if (shown.kind === 'help') return HELP;
+  if (shown.kind === 'crash') crash(d.line ?? '');
+  else if (shown.kind === 'connect') {
+    const word = shown.refreshed ? 'Refreshed' : 'Connected', none = shown.refreshed ? 'Not refreshed' : 'Not connected'; // a refresh leaves the folder connected
+    if (shown.declined) head(none);
+    else if (d.refused) {
+      head(none, 'red');
+      body(REFUSED[d.refused.kind]?.(d.refused) ?? d.refused.why ?? '');
+      if (d.refused.kind === 'too_many') drag('drag in a smaller folder inside it.');
+    } else {
+      head(d.connected ? `${word} ${shown.label}: ${plural(d.connected, 'note')}` : none, d.connected ? 'green' : 'red');
+      said(d.held, (n) => `Held back ${plural(n, 'note')}:`);
+      said(d.failed, () => 'Failed:');
+      leftOut(d.skipped);
     }
-    const root = dirname(p.path);
-    const name = basename(p.path);
-    return { root, names: [name], pointer: buildDropPointerName(principal, name, p.path), fileCount: 1, label: `file ${p.path}` };
-  }
-
-  // Multiple paths: only a flat multi-file drop from the same folder (a
-  // Finder multi-select) is supported in one shot -- mixed folders/files or
-  // paths from different parents need one drop at a time.
-  const dirsOf = paths.map((p) => (p.isDirectory ? p.path : dirname(p.path)));
-  const uniqueDirs = [...new Set(dirsOf)];
-  if (uniqueDirs.length !== 1 || paths.some((p) => p.isDirectory)) {
-    return { error: `${paths.length} items span different folders or include a folder alongside files -- drop one file, or one folder, at a time.` };
-  }
-  const root = uniqueDirs[0];
-  const names = paths.map((p) => basename(p.path));
-  return { root, names, pointer: buildDropPointerName(principal, basename(root), root), fileCount: names.length, label: `${paths.length} files in ${root}` };
+  } else if (o === 'error') {
+    const why: Record<string, string> = { 'auth-rejected': `${vendor} rejected the key`, 'no-key': `no ${vendor} key was found`,
+      unreachable: `${vendor} can't be reached`, overloaded: `${vendor} is busy` };
+    const kind = Object.keys(why).find((k) => (d.errors ?? []).some((e: any) => e.kind === k)) ?? (d.next === 'key' ? 'auth-rejected' : '');
+    if (kind) head(`Couldn't search: ${why[kind]}`, 'red');
+    if (kind === 'auth-rejected' || kind === 'no-key') keyNext();
+    else if (kind) body('Saved answers still work. Try again, or /status.');
+    else if (lost.length) { head("Couldn't search", 'red'); lost.forEach((l) => body(sentence(l))); retry(); }
+    else crash(d.why ?? '');
+  } else if (o === 'needs-setup') {
+    if (d.next === 'connect' || d.next === 'setup') empty(d.next === 'setup');
+    else {
+      head('Not sure yet');
+      for (const u of rows) body(`${u.root ? basename(u.root) : u.set} ${u.healing ? 'changed; it is refreshing now. Ask again in a moment.' : 'was not refreshed, so it was not searched.'}`);
+      leftOut(d.left_out);
+      if (!rows.length && !(d.left_out ?? []).length && d.why) body(d.why);
+      if (d.next === 'include') next('use the way in above, then ask again.');
+      else if (rows.some((u) => !u.healing)) drag('drag the folder in again to refresh it.');
+    }
+  } else if (o === 'not-supported') {
+    head('Not answered'); body(d.why ?? '');
+    if (shown.kind !== 'status' && d.next === 'rephrase') next('ask one focused question.');
+  } else if (shown.kind === 'status') {
+    const sets: any[] = d.sets ?? [];
+    if (d.next === 'setup' || !sets.length) empty(d.next === 'setup');
+    else {
+      head(`${plural(sets.length, 'folder')} connected`);
+      const at = (s: any) => (s.roots ?? []).map(path).join(', ') || s.name;
+      // Two sets with the same folder (a folder, then one note in it) are told apart by their name.
+      for (const s of sets) body([at(s), gap(plural(s.notes ?? 0, 'note')), gap(s.state), ...(sets.filter((x) => at(x) === at(s)).length > 1 ? [tag(s.name)] : [])]);
+    }
+  } else if (d.claim) {
+    const c = d.claim;
+    if (c.verdict === 'NOT FOUND') { head(headline(`NOT FOUND in the ${plural(c.read ?? 0, 'note')} read`)); body('It may be in a note not read or not connected.'); }
+    else {
+      head(headline([c.verdict, ...(d.saved ? after('saved, proof file unchanged') : [])]), c.verdict === 'TRUE' ? 'green' : c.verdict === 'FALSE' ? 'red' : '');
+      if (c.proof) { body(place(c.proof)); if (c.proof.text) quote(c.proof.text); }
+      for (const f of c.files ?? []) body(place(f));
+      if (c.verdict === 'CONFLICT') body('Read both before relying on either.');
+    }
+  } else if (o === 'found') {
+    const files: any[] = d.files ?? [], skills: any[] = d.skills ?? [];
+    const found = [skills.length && plural(skills.length, 'skill'), files.length && plural(files.length, 'note')].filter(Boolean).join(' and ') || '0 notes';
+    head(d.saved ? ['Saved answer', ...after('notes unchanged')] : headline(`Found ${found}`), d.saved ? 'green' : '');
+    if (d.saved?.by === 'you' && d.saved.answer) out.push(...saved(String(d.saved.answer)));
+    for (const s of skills) body([s.name, gap(path(s.path)), ...(s.guess ? [tag('guess')] : [])]);
+    files.forEach((f, i) => {
+      body([...place(f, `${i + 1} `), ...(f.tier === 'possible' ? [tag('possible')] : f.tier === 'unchecked' ? [tag('not checked')] : [])]);
+      if (i === 0 && f.text) quote(f.text);
+    });
+    if (d.leans_none) body('Jev leans toward none of these; the answer may not be here.');
+    if (d.saved_now) body('Saved for next time.');
+    leftOut(d.left_out);
+  } else if (o === 'not-found') {
+    head('Not in your notes');
+    if (d.searched) body(`Searched ${plural(d.searched.sets, 'folder')} (${plural(d.searched.notes, 'note')}); nothing matched.`);
+    body("That doesn't prove it's nowhere: it may be in a folder you haven't connected.");
+    drag('drag in the folder that has it.');
+  } else crash(d.why ?? '');
+  if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off).replace(/^./, (c) => c.toUpperCase()));
+  const time = shown.secs === undefined ? [] : [paint('dim', `· ${shown.secs.toFixed(1)}s`)];
+  return [...pack([...title.map((w) => paint(tone, w)), ...time], look.width, paint(tone, '• '), '  '), ...out,
+    ...(nextLine ? lay('Next: ' + nextLine, 'dim') : [])].join('\n');
 }
-
-/** Whole-folder drops default the confirm to No (Enter = no) since they can
- * pull in far more than intended; single-file (and same-folder multi-file)
- * drops default to Yes (Enter = yes). */
-export function dropConfirmDefault(plan: DropPlan): boolean {
-  return plan.names !== null;
-}
-
-/** One-key confirm message. Connecting can make paid judge calls, so the chat
- * must never connect without an explicit yes. `pointerAlreadyExists` (from a
- * pre-confirm local panel check) adds a plain warning that connecting will
- * replace that pointer's existing approved answers. */
-export function formatDropConfirm(plan: DropPlan, principal: string, pointerAlreadyExists: boolean = false): string {
-  const what = plan.names ? `${plan.fileCount} file${plan.fileCount === 1 ? '' : 's'}` : 'the whole folder';
-  let msg = `Connect ${what} from ${plan.root} as pointer "${plan.pointer}" for ${principal}? This can make paid judge calls.`;
-  if (pointerAlreadyExists) msg += ` Pointer "${plan.pointer}" already exists and will be REPLACED.`;
-  return msg;
-}
-
-/** The confirm gate itself: only an explicit `true` proceeds. A cancel
- * (symbol) or an explicit `false` must never connect. */
-export function shouldConnect(confirmed: unknown): boolean {
-  return confirmed === true;
-}
-
-/** argv (after the script path) for running prepare_bulk.py on a drop plan.
- * `--no-recurse` accompanies any `--name` filter so a same-named file in a
- * subfolder is never picked up alongside the intended one. */
-export function buildConnectArgs(plan: DropPlan, principal: string): string[] {
-  const args = ['--root', plan.root, '--pointer', plan.pointer, '--principal', principal];
-  if (plan.names) {
-    args.push('--no-recurse');
-    for (const n of plan.names) args.push('--name', escapeNameGlob(n));
-  }
-  return args;
-}
-
-/** Pointer names for a principal from `dispatch.py memory --principal X`'s
- * panel JSON (`{"pointers": [{"pointer": "name", ...}, ...]}`), or null if
- * the output isn't that shape. No network -- a local panel action. */
-export function parsePointerNames(stdout: string): string[] | null {
-  try {
-    const parsed = JSON.parse(stdout);
-    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.pointers)) return null;
-    return parsed.pointers
-      .map((p: unknown) => (p && typeof p === 'object' ? (p as { pointer?: unknown }).pointer : p))
-      .filter((n: unknown): n is string => typeof n === 'string');
-  } catch {
-    return null;
-  }
-}
-
-/** Whether a specific pointer name is already registered for this
- * principal, per the local panel check above. */
-export function pointerExists(stdout: string, pointerName: string): boolean {
-  const names = parsePointerNames(stdout);
-  return !!names && names.includes(pointerName);
-}
-
-/** prepare_bulk.py's own `WARNING: replace:true on pointer ...` line, printed
- * when connecting reuses an existing pointer name -- surfaced verbatim
- * instead of being swallowed by the summary parsing below. */
-export function parseReplaceWarning(stdout: string): string | null {
-  const line = stdout.split('\n').find((l) => l.trim().startsWith('WARNING: replace:true'));
-  return line ? line.trim() : null;
-}
-
-export type ConnectSummary = {
-  approved: number; exceptions: number; held: number;
-  heldLines: string[]; exceptionLines: string[]; skipLines: string[];
-};
-
-const SUMMARY_LINE = /^approved:\s*(\d+)\s+exceptions:\s*(\d+)\s+held:\s*(\d+)/;
-
-/** Parses prepare_bulk.py's closing `approved: N  exceptions: N  held: N`
- * line (plus any HELD/EXCEPTION/SKIP detail lines above it) out of its stdout. */
-export function parseConnectSummary(stdout: string): ConnectSummary | null {
-  const lines = stdout.split('\n');
-  const summaryLine = lines.find((l) => SUMMARY_LINE.test(l.trim()));
-  if (!summaryLine) return null;
-  const m = summaryLine.trim().match(SUMMARY_LINE)!;
-  // prepare_bulk.py prints a HELD line once during inventory and again in
-  // its closing report for the same file -- dedupe so the chat doesn't list
-  // it twice.
-  const heldLines = [...new Set(lines.filter((l) => l.trim().startsWith('HELD')).map((l) => l.trim()))];
-  const exceptionLines = [...new Set(lines.filter((l) => l.trim().startsWith('EXCEPTION')).map((l) => l.trim()))];
-  // SKIP lines say what a default rule left out (counts and folder or extension names, with the way in).
-  const skipLines = [...new Set(lines.filter((l) => l.trim().startsWith('SKIP')).map((l) => l.trim()))];
-  return { approved: Number(m[1]), exceptions: Number(m[2]), held: Number(m[3]), heldLines, exceptionLines, skipLines };
-}
-
-/** Plain-words final report -- held/exception files and everything a default
- * rule left out are surfaced, never hidden, alongside the required
- * "Connected N file(s)." line. */
-export function formatConnectSummary(summary: ConnectSummary): string {
-  const lines = [`Connected ${summary.approved} file${summary.approved === 1 ? '' : 's'}. Ask me about them.`];
-  if (summary.held > 0) {
-    lines.push(`${summary.held} file${summary.held === 1 ? '' : 's'} held for review: ${summary.heldLines.map((l) => l.replace(/^HELD\s+/, '')).join(', ')}`);
-  }
-  if (summary.exceptions > 0) {
-    lines.push(`${summary.exceptions} file${summary.exceptions === 1 ? '' : 's'} failed the check: ${summary.exceptionLines.map((l) => l.replace(/^EXCEPTION\s+/, '')).join(', ')}`);
-  }
-  for (const l of summary.skipLines) lines.push(`Left out: ${l.replace(/^SKIP\s+/, '')}`);
-  return lines.join('\n');
-}
-
-export const HELP_TEXT = `Super Jev commands:
-  /help     show this help
-  /setup    re-run first-time setup (API key, principal, folders)
-  /folders  show or change the folders Super Jev searches
-  /quit     exit the chat
-Anything else is treated as a question.`;
