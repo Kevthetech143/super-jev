@@ -44,7 +44,9 @@ export async function run(io: IO): Promise<number> {
     door: argv.length > 0 });
   const out = (text: string) => stdout.write(text + '\n');
   stdout.on('error', (e: NodeJS.ErrnoException) => { if (e.code !== 'EPIPE') throw e; }); // a reader that went away (superjev "q" | head) is not a crash
-  let child: ChildProcess | null = null, stopped: ChildProcess | null = null, escStops = false;
+  let child: ChildProcess | null = null, stopped: ChildProcess | null = null, escStops = false, marking = false;
+  /** While the window is open the terminal marks a paste (ESC[200~ ... ESC[201~), so the app can tell a paste from typing. */
+  const marks = (on: boolean) => { if (on !== marking && stdout.isTTY) { marking = on; stdout.write(`\x1b[?2004${on ? 'h' : 'l'}`); } };
 
   // ------------------------------------------------------------ helpers
   // Each helper runs in its own process group, so one stop reaches everything it started.
@@ -72,6 +74,7 @@ export async function run(io: IO): Promise<number> {
   /** The app ends on a signal (the terminal closed, a kill): its helper's group ends first, so nothing is left spending. */
   function end(sig: NodeJS.Signals) {
     const p = child, code = 128 + constants.signals[sig];
+    if (sig !== 'SIGHUP') marks(false); // a terminal that hung up has nothing to give back
     stopRun();
     if (p?.pid) p.once('close', () => process.exit(code)); else process.exit(code);
   }
@@ -154,25 +157,42 @@ export async function run(io: IO): Promise<number> {
     });
     const queue: (string | symbol)[] = [];
     escStops = true;
+    // readline still ends a line at every newline inside a paste's marks, so those lines are held and go out together with the line
+    // the next Enter ends: a paste is one input.
+    const held: string[] = [];
+    let pasting = false, dropping = false; // dropping: a paste that began while a helper ran, thrown away whole when its closing mark comes
+    const forget = () => { held.length = 0; pasting = false; dropping = false; }; // a paste that was not sent, or one whose closing mark never came
+    const wipe = () => { rl.write(null as any, { ctrl: true, name: 'e' }); rl.write(null as any, { ctrl: true, name: 'u' }); }; // the half-typed line
     // busy until a prompt or a question is shown, so a key typed before that is never an answer
     let closed = false, wake: (() => void) | null = null, mode: 'prompt' | 'busy' | 'confirm' = 'busy', armed = false;
     const push = (x: string | symbol) => { queue.push(x); wake?.(); };
-    const clear = () => { rl.write(null as any, { ctrl: true, name: 'e' }); rl.write(null as any, { ctrl: true, name: 'u' }); };
+    const clear = () => { forget(); wipe(); };
     const pull = async (): Promise<string | symbol | null> => {
-      queue.length = 0; // a line typed before the question was asked (while a helper ran) is not its answer
+      // one rule: all that arrived while a helper ran is dropped (queued lines, held paste lines, the half-typed line, and the rest of a paste still arriving)
+      queue.length = 0; held.length = 0; dropping = pasting; wipe();
       while (!queue.length && !closed) await new Promise<void>((r) => (wake = r));
       return queue.shift() ?? null;
     };
-    rl.on('line', (l) => push(l));
+    marks(true);
+    // Up recalls a paste whole: readline's own entries for its lines are replaced by the one question (joined by spaces so it redraws cleanly)
+    rl.on('history', (h: string[]) => { if (pasting) h.shift(); });
+    rl.on('line', (l) => {
+      if (dropping) return;
+      if (pasting) return void held.push(l);
+      if (held.length) { const h = (rl as any).history as string[]; if (l.trim()) h.shift(); h.unshift([...held, l].join(' ')); }
+      push([...held.splice(0), l].join('\n'));
+    });
     rl.on('close', () => { closed = true; wake?.(); }); // Ctrl+D closes the window; a pending yes/no then counts as no
     const act = (a: string) => { if (a === 'clear') clear(); else if (a === 'quit') rl.close(); else if (a === 'no') { clear(); push(ESC); } };
     rl.on('SIGINT', () => {
       if (mode === 'busy') return stopRun();
-      const a = keyAction({ mode, line: rl.line, armed }, 'ctrl-c');
+      const a = keyAction({ mode, line: [...held, rl.line].join('\n'), armed }, 'ctrl-c'); // a pending paste is a line to clear, not an empty prompt
       if (a === 'hint') { armed = true; setTimeout(() => (armed = false), 2000).unref(); stdout.write('\nPress Ctrl+C again to quit\n'); rl.prompt(); }
       else act(a);
     });
     stdin.on('keypress', (_s: string, key: any) => {
+      if (key?.name === 'paste-start') pasting = true;
+      if (key?.name === 'paste-end') { pasting = false; if (dropping) { dropping = false; wipe(); } }
       if (key?.name !== 'escape') return;
       if (mode === 'busy') stopRun(); else act(keyAction({ mode, line: rl.line, armed }, 'escape'));
     });
@@ -196,7 +216,7 @@ export async function run(io: IO): Promise<number> {
         mode = 'busy';
         return typeof x === 'string' && keyAction({ mode: 'confirm', line: x, armed: false }, 'enter') === 'yes';
       },
-      close: () => { escStops = false; rl.close(); },
+      close: () => { escStops = false; marks(false); rl.close(); },
     };
   }
 
