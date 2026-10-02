@@ -584,9 +584,9 @@ def test_approve_refused_by_the_claim_check_says_so_without_a_score(tmp_path, mo
     assert not re.search(r"\d\.\d\d", raw)  # no score anywhere in the JSON
 
 
-def test_approve_without_an_answer_says_its_usage(tmp_path, monkeypatch, capsys, notes):
+def test_approve_with_two_answers_says_its_usage(tmp_path, monkeypatch, capsys, notes):
     world(tmp_path, monkeypatch, navigate=lambda p: {"status": "no-candidates"})
-    rc, raw = run(monkeypatch, capsys, "--json", "--approve", Q)  # no answer text
+    rc, raw = run(monkeypatch, capsys, "--json", "--approve", Q, "one", "two")
     obj = json.loads(raw)
     assert rc == 2 and obj["done"] is False and obj["why"].startswith("usage: --approve")
 
