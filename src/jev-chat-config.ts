@@ -18,7 +18,7 @@ export type Look = { width: number; color: boolean; home: string; keyEnv?: strin
   door?: boolean /* the one-shot door: no window is open yet */ };
 // noNext: the turn was a status, so a next step would only point back at it.
 export type Shown = { kind: 'ask' | 'check' | 'status' | 'connect' | 'crash' | 'help'; data: any; secs?: number; label?: string;
-  refreshed?: boolean; declined?: boolean; noNext?: boolean };
+  refreshed?: boolean; declined?: boolean; noNext?: boolean; stopped?: boolean };
 
 // ---------------------------------------------------------------- reading a line
 /** Shell-style words: single quotes literal, double quotes allow \" \\ \$ \`, a backslash escapes one character. */
@@ -243,6 +243,10 @@ export function render(shown: Shown, look: Look): string {
   const headline = (text: string | string[]) => [...parts(text), ...lost.flatMap(after)];
 
   if (shown.kind === 'help') return HELP;
+  if (shown.stopped) { // Esc or Ctrl+C while a helper ran: a connect may have written some of its notes
+    const finish = shown.kind === 'connect' ? ` Some notes may be connected; ${look.door ? OPEN + ', then ' : ''}drag the folder in again to finish.` : '';
+    return pack(prose('Stopped.' + finish), look.width, '', '').join('\n');
+  }
   if (shown.kind === 'crash') crash(d.line ?? '');
   else if (shown.kind === 'connect') {
     const word = shown.refreshed ? 'Refreshed' : 'Connected', none = shown.refreshed ? 'Not refreshed' : 'Not connected'; // a refresh leaves the folder connected
