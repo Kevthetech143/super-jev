@@ -26,6 +26,7 @@ folder count, up to date or not. `TYPESAFE_API_KEY` wins over the saved key.
 |---|---|
 | a question | finds the notes that answer it |
 | `/check <statement>` | TRUE, FALSE or NOT FOUND, with the proof line (the separate claim judge, not the notes-retrieval contract) |
+| `/wrong` | the last answer was wrong. A saved answer is forgotten and the question is searched fresh at once; a live answer just won't be saved |
 | a folder or `.md` note (drag it in) | asks, then connects it or refreshes it |
 | `/status` | what is connected and whether it is current |
 | `/help` or `?` | this list |

@@ -1,6 +1,7 @@
 // Frozen contract tests (2026-10-01), PR 3: the terminal app shows exactly what the helpers report.
 // PR 4 adds the stop tests (K1 to K2b, K10, K10b, K11, S18, R6, R7): Esc and Ctrl+C stop a search or a connect, and so does whatever ends the app.
 // PR 5 adds the paste tests (I14 to I14k): a paste is one question, sent by the next Enter.
+// PR 7 adds the /wrong tests (W1 to W2d): /wrong forgets a saved answer, and a forgotten saved answer is searched fresh at once.
 //
 // Layers (no Jev, no network):
 //   pure        render, readLine, helperCall, childEnv, keyAction, pointerName on fixtures
@@ -273,16 +274,16 @@ test('S14b two sets with the same folder are told apart by their name; a folder 
 
 test('S15 help lists exactly the commands that exist, and ? is the same help', () => {
   const s = clean(cfg.render({ kind: 'help', data: {} }, OPTS));
-  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/status']);
+  assert.deepEqual([...new Set(s.match(/\/[a-z]+/g))].sort(), ['/check', '/exit', '/help', '/status', '/wrong']);
   assert.match(s, /\?/);
   assert.equal(cfg.readLine('?').kind, 'help');
   assert.equal(cfg.readLine('/help').kind, 'help');
-  for (const c of ['/check x', '/status', '/help', '/exit']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
+  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
 });
 
 test('S15b help rows line up: every description starts in the same column, and a row fits 60 columns', () => {
   const rows = cfg.HELP.split('\n').slice(1);
-  assert.equal(rows.length, 5, 'the drag row and the four commands');
+  assert.equal(rows.length, 6, 'the drag row and the five commands');
   const col = rows.map((l) => { const m = /^( {2}.+?\S)( {2,})(\S.*)$/.exec(l); assert.ok(m, `no description column in ${JSON.stringify(l)}`); return m![1].length + m![2].length; });
   assert.equal(new Set(col).size, 1, `descriptions start in columns ${col.join(', ')}:\n${cfg.HELP}`);
   for (const l of rows) assert.ok(l.length <= 60, l);
@@ -2588,4 +2589,126 @@ test('I2h fixOf names the one fix: key for a rejected file key, refresh for stal
   assert.equal(cfg.fixOf({ outcome: 'needs-setup', next: 'connect' }, 'env'), null);
   assert.equal(cfg.fixOf({ outcome: 'needs-setup', next: 'include', left_out: [] }, 'env'), null);
   assert.equal(cfg.fixOf(FOUND(), 'file'), null);
+});
+
+// ---------------------------------------------------------------- PR 7: /wrong
+const SAVED = (by = 'auto') => FOUND({ saved: { by, date: '12 Sep 2026' }, why: 'saved answer' });
+const MISS_OK = { v: 1, done: true, why: 'removed', removed: ['team-notes-3fa9c1'] };
+const MISS_NONE = { v: 1, done: false, why: 'no saved answer for that question' };
+const missCalls = (r: Rig) => r.calls().filter((c: any) => c.args.includes('--miss'));
+
+test('W0 pure: /wrong is a command, its helper call is --miss with the last question, and a typo still gets Did you mean', () => {
+  assert.deepEqual(cfg.readLine('/wrong'), { kind: 'wrong' });
+  assert.deepEqual(cfg.readLine('/WRONG'), { kind: 'wrong' });
+  const argv = cfg.helperCall({ kind: 'wrong' }, { ...session, last: '--help me' } as any);
+  assert.deepEqual(argv.slice(1), ['--principal', 'me', '--json', '--miss', '--help me']);
+  assert.match((cfg.readLine('/wrnog') as any).text, /Did you mean \/wrong\?/);
+});
+
+test('W0b pure: the two screens', () => {
+  const gone = R('wrong', { done: true, removed: ['team-notes-3fa9c1'] }, { secs: undefined });
+  assert.equal(gone, '• Forgotten. Searching fresh…');
+  const kept = R('wrong', { done: false, why: 'no saved answer for that question' }, { secs: undefined });
+  assert.equal(kept, "• Noted. It won't be saved.");
+});
+
+test('W1 whole app: /wrong after a saved answer runs --miss Q, then asks Q fresh, and shows the fresh result', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--miss', out: MISS_OK },
+    { when: '--json -- ', replies: [{ when: '', out: SAVED() }, { when: '', out: FOUND({ files: [{ path: RC, tier: 'confirmed', line: 12 }] }) }] }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Saved answer');
+  w.say('/wrong');
+  await w.waitFor('Forgotten. Searching fresh…');
+  await w.waitFor('Found 1 note');
+  const text = w.text();
+  assert.ok(text.indexOf('Forgotten.') < text.lastIndexOf('Found 1 note'), 'the notice comes before the fresh result');
+  const order = r.calls().filter((c: any) => c.script === 'ask.py' && !c.args.includes('--status'));
+  assert.equal(order.length, 3, 'ask, miss, ask');
+  assert.deepEqual(order[1].args, ['--principal', 'me', '--json', '--miss', Q]);
+  assert.deepEqual(order[2].args, order[0].args, 'the same question, searched fresh');
+  assert.ok(text.includes('release-checklist.md'), 'the fresh files are drawn');
+  await w.quit();
+});
+
+test('W2 whole app: /wrong after a live result runs --miss Q only, and says it will not be saved', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--miss', out: MISS_NONE, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Found 1 note');
+  w.say('/wrong');
+  await w.waitFor("Noted. It won't be saved.");
+  await quiet();
+  assert.equal(missCalls(r).length, 1);
+  assert.equal(r.asks().length, 1, 'no second search');
+  assert.ok(!/Forgotten/.test(w.text()));
+  await w.quit();
+});
+
+test('W2b whole app: /wrong with no earlier question says so and calls nothing', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--claim', out: { v: 1, outcome: 'found', next: 'none', claim: { verdict: 'TRUE', proof: { path: HB, line: 39, text: HANDBOOK_QUOTE } } } }]);
+  const w = win(r);
+  await w.ready();
+  const n = r.calls().length;
+  w.say('/wrong');
+  await w.waitFor('Ask a question first.');
+  w.say('/check The canary holds 40 minutes at 5%.');
+  await w.waitFor('TRUE');
+  w.say('/wrong');
+  await w.waitFor('Sure TRUE/FALSE results save themselves');
+  assert.equal(missCalls(r).length, 0);
+  assert.equal(r.calls().length, n + 1, 'only the claim was called');
+  await w.quit();
+});
+
+test('W2f whole app: ask, /check, /wrong prints the self-save note and calls no --miss', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--claim', out: { v: 1, outcome: 'found', next: 'none', claim: { verdict: 'TRUE', proof: { path: HB, line: 39, text: HANDBOOK_QUOTE } } } }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say('first question');
+  await w.waitFor('Found 1 note');
+  w.say('/check The canary holds 40 minutes at 5%.');
+  await w.waitFor('TRUE');
+  w.say('/wrong');
+  await w.waitFor('Sure TRUE/FALSE results save themselves; edit the note if it is wrong.');
+  assert.equal(missCalls(r).length, 0);
+  await w.quit();
+});
+
+test('W2c whole app: the question that is forgotten is the last one asked, as typed', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--miss', out: MISS_NONE, code: 1 }, { when: '--json -- ', out: FOUND() }]);
+  const w = win(r);
+  await w.ready();
+  w.say('first question');
+  await w.waitFor('Found 1 note');
+  w.say('Second  question?');
+  await w.waitFor(() => (w.text().match(/Found 1 note/g) || []).length === 2);
+  w.say('/wrong');
+  await w.waitFor("Noted. It won't be saved.");
+  assert.equal(missCalls(r)[0].args.at(-1), 'Second  question?');
+  await w.quit();
+});
+
+test('W2d whole app: a miss the engine could not do is shown as an error, never as Forgotten, and searches nothing', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--miss', out: { v: 1, done: false, why: 'the memory store is locked' }, code: 3 }, { when: '--json -- ', out: SAVED() }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('Saved answer');
+  w.say('/wrong');
+  await w.waitFor('Super Jev hit an error');
+  assert.match(w.text(), /memory store is locked/);
+  assert.ok(!/Forgotten|Noted/.test(w.text()));
+  assert.equal(r.asks().length, 1);
+  await w.quit();
+});
+
+test('W2e the door: /wrong has no earlier question there, so it says so on stderr, exits 2 and calls nothing', async () => {
+  const r = rig([]);
+  const d = await door(r, ['/wrong']);
+  assert.equal(d.code, 2);
+  assert.match(d.err, /Ask a question first\./);
+  assert.equal(r.calls().length, 0);
 });

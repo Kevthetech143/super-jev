@@ -102,8 +102,9 @@ export async function run(io: IO): Promise<number> {
     if (res.stopped) return { data: null, code: 130, stopped: true, text: render({ kind: t.kind as any, data: {}, stopped: true }, look()) };
     let data: any = null;
     try { const j = JSON.parse(res.out); if (j && typeof j === 'object') data = j; } catch { /* not JSON */ }
-    const secs = t.kind === 'status' ? undefined : (Date.now() - t0) / 1000;
-    if (!data) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
+    const secs = t.kind === 'status' || t.kind === 'wrong' ? undefined : (Date.now() - t0) / 1000;
+    // a miss that failed (exit 2 or more) is an error whatever it printed; exit 1 only means there was no saved answer to remove
+    if (!data || (t.kind === 'wrong' && res.code > 1)) return { data, code: res.code || 3, text: render({ kind: 'crash', data: { line: data?.why || lastLine(res.err) }, secs, noNext: t.kind === 'status' }, look()) };
     for (const s of data.sets ?? []) session.connected.add(s.name);
     const fix = extra.offer ? fixOf(data, keySource()) : null;
     return { data, code: res.code, fix, text: render({ kind: t.kind as any, data, secs, label: extra.label, refreshed: extra.refreshed, noNext: !!fix }, look()) };
@@ -162,6 +163,7 @@ export async function run(io: IO): Promise<number> {
     fileKey = key;
     return true;
   }
+  const NO_QUESTION = 'Ask a question first.';
   const NO_KEY = `No key entered. Open the window again to paste it, or set ${keyEnv}.`;
 
   /** The line editor: lines go to a queue, so the loop (and the yes/no) read them in order. Its history carries over when it is reopened. */
@@ -276,6 +278,16 @@ export async function run(io: IO): Promise<number> {
       }
       return (await helper(t)).text;
     }
+    /** /wrong: the engine forgets the saved answer for the last question; if it had one, that question is searched fresh at once. */
+    let afterCheck = false; // the last answered turn was a /check: its TRUE/FALSE saves itself
+    async function wrong(): Promise<string> {
+      if (afterCheck) return 'Sure TRUE/FALSE results save themselves; edit the note if it is wrong.';
+      if (!session.last) return NO_QUESTION;
+      const r = await helper({ kind: 'wrong' });
+      if (!r.data?.removed?.length) return r.text;
+      stdout.write(r.text + '\n');
+      return answer({ kind: 'ask', text: session.last });
+    }
     try {
       for (let line = await term.next(); line !== null; line = await term.next()) {
         const t = readLine(line, home);
@@ -285,7 +297,8 @@ export async function run(io: IO): Promise<number> {
         else if (t.kind === 'version') text = TITLE;
         else if (t.kind === 'say') text = t.text;
         else if (t.kind === 'connect') text = (await connectFlow(t, term.confirm)).text;
-        else if (t.kind === 'ask' || t.kind === 'check') text = await answer(t);
+        else if (t.kind === 'ask' || t.kind === 'check') { afterCheck = t.kind === 'check'; if (t.kind === 'ask') session.last = t.text; text = await answer(t); }
+        else if (t.kind === 'wrong') text = await wrong();
         else if (t.kind !== 'empty') text = (await helper(t)).text;
         if (text) stdout.write(text + '\n\n');
       }
@@ -300,6 +313,7 @@ export async function run(io: IO): Promise<number> {
     if (t.kind === 'help' || t.kind === 'version') { out(t.kind === 'help' ? `${USAGE}\n\n${HELP}` : TITLE); return 0; }
     if (t.kind === 'exit') return 0;
     if (t.kind === 'say') { stderr.write(t.text + '\n'); return 2; }
+    if (t.kind === 'wrong') { stderr.write(NO_QUESTION + '\n'); return 2; } // a one-shot line has no earlier question
     if (t.kind === 'empty') { stderr.write('Usage: superjev "your question"\n'); return 2; }
     if (askedKey(t)) { stderr.write(noKey + '\n'); return 4; }
     if (t.kind === 'connect') {
