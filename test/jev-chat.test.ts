@@ -2425,3 +2425,167 @@ test('I13b a pasted bullet list is a question, not an option', async () => {
   assert.ok(!/Unknown option/.test(w.text()));
   assert.equal(await w.quit(), 0);
 });
+
+// ---------------------------------------------------------------- PR 6: a needs-setup result offers its one fix, then asks again once
+const REJECTED = { v: 1, outcome: 'error', why: 'x', next: 'key', errors: [{ set: 'a', kind: 'auth-rejected' }] };
+const STALE = (healing: boolean) => ({ v: 1, outcome: 'needs-setup', why: 'no match, but the search was incomplete', next: 'refresh',
+  unsearched: [{ set: 'team-notes-3fa9c1', root: FOLDER, state: 'stale', healing }] });
+const NEW_KEY = 'quillbrook-new-key-0003';
+const Q = 'How long does the canary hold?';
+
+test('E1 whole app: a rejected file key says so, shows the key prompt, overwrites the file, and asks the same question once more', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', replies: [{ when: '', out: REJECTED, code: 3 }, { when: '', out: FOUND() }] }]);
+  writeFileSync(r.keyFile(), FILE_KEY + '\n', { mode: 0o600 });
+  const w = win(r, { key: false });
+  await w.ready();
+  assert.ok(!w.text().includes('key ›'), 'a file key is not asked for at launch');
+  w.say(Q);
+  await w.waitFor('key ›');
+  assert.match(w.text(), /TypeSafe rejected the key/);
+  assert.ok(!/delete ~\/\.typesafe-api-key/.test(w.text()), 'the app does the fix itself, so no Next line tells you to');
+  w.send(NEW_KEY + '\r');
+  await w.waitFor('Found 1 note');
+  assert.equal(readFileSync(r.keyFile(), 'utf8').trim(), NEW_KEY);
+  assert.equal(statSync(r.keyFile()).mode & 0o777, 0o600);
+  const asks = r.asks();
+  assert.equal(asks.length, 2, 'exactly one more ask');
+  assert.deepEqual(asks[1].args, asks[0].args, 'the same question');
+  assert.equal(asks[0].key_sha, sha(FILE_KEY));
+  assert.equal(asks[1].key_sha, sha(NEW_KEY), 'the second ask carries the new key');
+  assert.ok(!JSON.stringify(r.calls()).includes(NEW_KEY) && !w.raw().includes(NEW_KEY), 'the key is in no argv and no output');
+  w.say('/status'); // the window is still usable and the line editor was given back
+  await w.waitFor(/Nothing connected yet/);
+  await w.quit();
+});
+
+test('E1b whole app: Esc at the new-key prompt writes nothing and asks nothing more; the window stays open', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', out: REJECTED, code: 3 }]);
+  writeFileSync(r.keyFile(), FILE_KEY + '\n', { mode: 0o600 });
+  const w = win(r, { key: false });
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('key ›');
+  w.send('\x1b');
+  await w.waitFor(/No key entered/);
+  assert.equal(readFileSync(r.keyFile(), 'utf8').trim(), FILE_KEY);
+  assert.equal(r.asks().length, 1);
+  await new Promise((x) => setTimeout(x, 700)); // readline holds a lone Esc for 500 ms before it knows it is not the start of a key sequence
+  w.say('/help');
+  await w.waitFor('/exit');
+  await w.quit();
+});
+
+test('E1c whole app: a second rejection never loops: two asks at most, then the plain Next line', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', out: REJECTED, code: 3 }]);
+  writeFileSync(r.keyFile(), FILE_KEY + '\n', { mode: 0o600 });
+  const w = win(r, { key: false });
+  await w.ready();
+  w.say(Q);
+  await w.waitFor('key ›');
+  w.send(NEW_KEY + '\r');
+  await w.waitFor(/Next: delete ~\/\.typesafe-api-key/);
+  assert.equal(r.asks().length, 2);
+  assert.equal(w.text().split('key ›').length - 1, 1, 'the key was asked for once');
+  await w.quit();
+});
+
+test('E1d the door never prompts: a rejected file key keeps its Next line and asks once', async () => {
+  const r = rig([{ when: '--json -- ', out: REJECTED, code: 3 }]);
+  writeFileSync(r.keyFile(), FILE_KEY + '\n', { mode: 0o600 });
+  const d = await door(r, ['canary?'], { key: false });
+  assert.equal(d.code, 3);
+  assert.match(d.out, /Next: delete ~\/\.typesafe-api-key/);
+  assert.equal(r.asks().length, 1);
+});
+
+test('I2b whole app: refresh failed, Enter runs --refresh --writer builtin on that set, then the same question exactly once more', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', replies: [{ when: '', out: STALE(false), code: 4 }, { when: '', out: FOUND() }] },
+    { when: 'prepare_bulk.py', out: { v: 1, connected: 29 } }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor(/Refresh Team Notes\?/);
+  assert.ok(!/Next: drag the folder in again/.test(w.text()), 'the app offers the fix, so no Next line tells you to do it');
+  assert.equal(r.asks().length, 1, 'nothing is asked again before the yes');
+  w.send('\r');
+  await w.waitFor('Found 1 note');
+  const bulk = r.calls().filter((x: any) => x.script === 'prepare_bulk.py');
+  assert.equal(bulk.length, 1);
+  const a = bulk[0].args as string[];
+  assert.equal(a[a.indexOf('--root') + 1], FOLDER);
+  assert.equal(a[a.indexOf('--pointer') + 1], 'team-notes-3fa9c1', 'the engine\'s own set name, not one the app invents');
+  for (const f of ['--refresh', '--json']) assert.ok(a.includes(f), f);
+  assert.equal(a[a.indexOf('--writer') + 1], 'builtin');
+  assert.match(w.text(), /Refreshed Team Notes: 29 notes/);
+  const asks = r.asks();
+  assert.equal(asks.length, 2);
+  assert.deepEqual(asks[1].args, asks[0].args);
+  await w.quit();
+});
+
+test('I2c whole app: Esc at the refresh question runs nothing and asks nothing more', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', out: STALE(false), code: 4 }, { when: 'prepare_bulk.py', out: { v: 1, connected: 29 } }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor(/Refresh Team Notes\?/);
+  w.send('\x1b');
+  await w.waitFor('Not refreshed');
+  assert.equal(r.calls().filter((x: any) => x.script === 'prepare_bulk.py').length, 0);
+  assert.equal(r.asks().length, 1);
+  await w.quit();
+});
+
+test('I2d whole app: a refresh that fails says so and does not ask again', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', out: STALE(false), code: 4 }, { when: 'prepare_bulk.py', out: { v: 1, connected: 0, failed: [{ path: FOLDER + '/a.md', why: 'unreadable' }] }, code: 1 }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor(/Refresh Team Notes\?/);
+  w.send('\r');
+  await w.waitFor('Not refreshed');
+  assert.equal(r.asks().length, 1);
+  await w.quit();
+});
+
+test('I2e whole app: a folder that is refreshing on its own offers no fix; it says to ask again in a moment', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--json -- ', out: STALE(true), code: 4 }]);
+  const w = win(r);
+  await w.ready();
+  w.say(Q);
+  await w.waitFor(/refreshing now/);
+  assert.ok(!/Refresh Team Notes\?/.test(w.text()));
+  assert.equal(r.calls().filter((x: any) => x.script === 'prepare_bulk.py').length, 0);
+  await w.quit();
+});
+
+test('I2f whole app: a refresh offered on /check is followed by the same claim once more', async () => {
+  const r = rig([STATUS_EMPTY, { when: '--claim', replies: [{ when: '', out: STALE(false), code: 4 }, { when: '', out: { v: 1, outcome: 'found', next: 'none',
+    claim: { verdict: 'TRUE', proof: { path: HB, line: 39, text: HANDBOOK_QUOTE } } } }] }, { when: 'prepare_bulk.py', out: { v: 1, connected: 29 } }]);
+  const w = win(r);
+  await w.ready();
+  w.say('/check The canary holds 40 minutes at 5%.');
+  await w.waitFor(/Refresh Team Notes\?/);
+  w.send('\r');
+  await w.waitFor('TRUE');
+  assert.equal(r.calls().filter((x: any) => x.args.includes('--claim')).length, 2);
+  await w.quit();
+});
+
+test('I2g the door keeps its Next line for a stale folder: it never offers a fix, it has no window', async () => {
+  const r = rig([{ when: '--json -- ', out: STALE(false), code: 4 }]);
+  const d = await door(r, ['canary?']);
+  assert.equal(d.code, 4);
+  assert.match(flat(d.out), /Next: .*drag the folder in again to refresh it/);
+});
+
+test('I2h fixOf names the one fix: key for a rejected file key, refresh for stale sets nobody is healing, nothing else', () => {
+  assert.deepEqual(cfg.fixOf(REJECTED, 'file'), { kind: 'key' });
+  assert.equal(cfg.fixOf(REJECTED, 'env'), null, 'an env key is fixed in the shell');
+  const rows = (STALE(false).unsearched);
+  assert.deepEqual(cfg.fixOf(STALE(false), 'env'), { kind: 'refresh', rows });
+  assert.equal(cfg.fixOf(STALE(true), 'env'), null);
+  assert.equal(cfg.fixOf({ outcome: 'needs-setup', next: 'connect' }, 'env'), null);
+  assert.equal(cfg.fixOf({ outcome: 'needs-setup', next: 'include', left_out: [] }, 'env'), null);
+  assert.equal(cfg.fixOf(FOUND(), 'file'), null);
+});
