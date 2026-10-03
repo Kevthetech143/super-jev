@@ -342,9 +342,18 @@ test('I2 needs refresh while healing: refreshing now, Ask again', () => {
   assert.match(s, /Ask again/);
 });
 
-test('I3 needs include: ask.py\'s left-out rows have no kind, so they show the engine\'s own words and way in', () => {
-  const s = R('ask', { outcome: 'needs-setup', why: 'no match, but the search was incomplete: 2 files skipped at setup', next: 'include',
+test('I3 needs include: a file held for a secret at query time shows the engine\'s own words and way in', () => {
+  const s = R('ask', { outcome: 'needs-setup', why: 'no match, but the search was incomplete: 1 file held (contains a secret; not sent)', next: 'include',
+    left_out: [{ what: 'held back: it looks like it holds a password, key or card number', count: 1, where: '/Users/sam/Team Notes/ops', way_in: 'remove or move the flagged value, then re-run setup' }] });
+  assert.ok(s.includes('held back'));
+  assert.ok(s.replace(/\s+/g, ' ').includes('remove or move the flagged value, then re-run setup'));
+});
+
+test('I3b not-found with files skipped at setup still names them, with their way in', () => {
+  const s = R('ask', { outcome: 'not-found', why: 'searched 2 sets, no matching file (it may still exist); 2 files skipped at setup (see ask.py --status)', next: 'connect',
+    searched: { sets: 2, notes: 40 },
     left_out: [{ what: 'file(s) in folders skipped by default: documents (2)', count: 2, where: '/Users/sam/Team Notes/documents', way_in: 'drag documents/ in on its own' }] });
+  assert.match(s, /Not in your notes/);
   assert.ok(s.includes('documents'));
   assert.ok(s.includes('drag documents/ in on its own'));
 });

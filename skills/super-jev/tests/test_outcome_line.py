@@ -101,13 +101,14 @@ def test_found_but_a_pointer_errored_names_what_was_not_searched(tmp_path, monke
     assert not any(ln.startswith("unresolved:") for ln in lines)  # replaced by the OUTCOME line
 
 
-def test_found_from_a_stale_set_is_partial(tmp_path, monkeypatch):
+def test_found_from_a_stale_set_is_searched_from_the_older_catalog(tmp_path, monkeypatch):
     stale = {"status": "preparation-required", "changed": ["/x.md"], "missing": []}
     nav = lambda p: {**_cands(), "stale": stale} if p == "old" else _cands()
     monkeypatch.setattr(ask, "edited_readable", lambda *a, **k: True)
     _setup(tmp_path, monkeypatch, ["old", "notes"], nav, {OK: 0.95})
     rc, lines = _ask(tmp_path)
-    assert rc == 0 and lines[0].startswith("OUTCOME: found") and "partial: 1 set not searched" in lines[0]
+    assert rc == 0 and lines[0].startswith("OUTCOME: found") and "partial" not in lines[0]
+    assert "served from older catalog: 1 set" in lines  # searched from its last refresh, not left out
 
 
 def test_not_found_is_a_complete_search_with_one_next_command(tmp_path, monkeypatch):
