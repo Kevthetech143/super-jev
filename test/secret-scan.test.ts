@@ -29,6 +29,13 @@ test('Node scan matches the Python has_secret cases from the shared pattern file
   assert.equal(payloadHasSecret({ a: ['fine'] }), false);
 });
 
+test('a connection string password and a Slack webhook are secrets', () => {
+  assert.equal(hasSecret("DB = 'postgres://appuser:hunter22x@db.example.test/main'"), true);
+  assert.equal(hasSecret('redis://:s3cretpw9@cache.example.test:6379'), true);
+  assert.equal(hasSecret('https://hooks.slack.com/services/T0AAAAAAA/B0BBBBBBB/abcDEF123456'), true);
+  assert.equal(hasSecret('postgres://appuser@db.example.test/main and http://localhost:3000/a'), false);
+});
+
 test('2000 random sha256 digests never trip the scan; real cards and keys still held', async () => {
   const { createHash, randomBytes } = await import('node:crypto');
   const digests = Array.from({ length: 2000 }, () => createHash('sha256').update(randomBytes(32)).digest('hex'));

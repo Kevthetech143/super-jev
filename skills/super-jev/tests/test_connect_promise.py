@@ -162,3 +162,43 @@ def test_a_secret_named_code_file_is_held_by_name(tmp_path, go):
     root = _folder(tmp_path, **{"a.md": "alpha\n", "deploy-secret.py": "x = 1\n"})
     code, text = go(root, "--ext", "py")
     assert code == 3 and "HELD" in text and "deploy-secret.py" in text
+
+
+@pytest.mark.parametrize("flag", ["", ",", "py,,ts"])
+def test_an_empty_ext_suffix_is_refused_by_name(tmp_path, go, flag):
+    code, text = go(_folder(tmp_path, **{"a.md": "alpha\n"}), "--ext", flag)
+    assert code == 2 and "REFUSED" in text and "--ext" in text
+
+
+def test_ext_pem_with_json_prints_a_usage_refusal_object(tmp_path, go):
+    code, text = go(_folder(tmp_path, **{"a.md": "alpha\n"}), "--ext", "pem", "--json")
+    obj = json.loads(text.strip().splitlines()[-1])
+    assert code == 2 and obj["refused"]["kind"] == "usage" and ".pem" in obj["refused"]["why"]
+
+
+@pytest.mark.parametrize("recorded", [[".md", ""], ".py", [".md", ".pem"], [".py", 3]])
+def test_a_recorded_bad_extension_list_is_refused_not_widened(tmp_path, go, monkeypatch, recorded):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", "tool_one.py": "x = 1\n"})
+    assert go(root)[0] == 0
+    rp = tmp_path / "cache" / "p-report.json"
+    rep = json.loads(rp.read_text()); rep["extensions"] = recorded; rp.write_text(json.dumps(rep))
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "p", "--principal", "alice", "--refresh"])
+    assert pb.main() == 2
+    assert json.loads(rp.read_text())["extensions"] == recorded
+
+
+def test_the_refresh_line_and_skip_wording_show_the_suffixes(tmp_path, go):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", "b.py": "x = 1\n", "c.txt": "t\n"})
+    code, text = go(root, "--ext", "py")
+    assert "only .md, .py files connect" in text and "only .md files connect" not in text
+
+
+@pytest.mark.parametrize("line", ["DB = 'postgres://appuser:hunter22x@db.example.test/main'",
+                                  "url: redis://:s3cretpw9@cache.example.test:6379",
+                                  "WEBHOOK = 'https://hooks.slack.com/services/T0AAAAAAA/B0BBBBBBB/abcDEF123456'"])
+@pytest.mark.parametrize("name", ["conf.py", "conf.md"])
+def test_connection_string_and_webhook_secrets_are_held(tmp_path, go, name, line):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", name: line + "\n"})
+    code, text = go(root, "--ext", "py")
+    assert code == 3 and f"HELD {name}" in text.replace(str(root) + "/", "") or name in text
+    assert "hunter22x" not in text and "s3cretpw9" not in text
