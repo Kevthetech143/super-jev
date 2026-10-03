@@ -1675,27 +1675,41 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
             and not has_secret(text) and refresh_would_admit(path, ptr))
 
 
-def edited_held(pointers: list, served: dict) -> list:
-    """The one count of files left out because they were edited since their set's last refresh and a
-    refresh would not admit them (never reviewed, secret, too big, out of scope). Worked out per searched set
-    from the set's own files, whichever search path (routing, word search, a later one) skips them."""
-    held = []
+def candidate_files(pointers: list, exclude=()):
+    """(pointer, path, cache entry) of every file a word search would open: reviewed (`pass`), not test
+    material, not in `exclude` (another person's files), each path once. The one list that word search and the
+    edited-file count both start from."""
+    seen = set()
     for ptr in pointers:
-        files = load_cache_files(ptr)
         names = connector_names(ptr)
-        for path in dict.fromkeys([*files, *((served.get(ptr) or {}).get("changed") or [])]):
-            entry = files.get(path)
-            if entry is not None and (not isinstance(entry, dict) or not entry.get("pass") or prepare_bulk.is_test_material(
-                    path, prepare_bulk.named_exactly(Path(path).name, names))):
+        for path, entry in load_cache_files(ptr).items():
+            if (path in seen or path in exclude or not isinstance(entry, dict) or not entry.get("pass")
+                    or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names))):
                 continue
-            try:
-                raw = Path(path).read_bytes()
-            except OSError:
-                continue  # removed: not an edited file
-            if (entry is None or hashlib.sha256(raw).hexdigest() != entry.get("sha256")) and not edited_readable(
-                    path, ptr, entry, raw, raw.decode("utf-8", "replace")):
-                held.append(path)
-    return list(dict.fromkeys(held))
+            seen.add(path)
+            yield ptr, path, entry
+
+
+def edited_held(pointers: list, exclude=()) -> dict:
+    """The one count of files left out because they were edited since their set's last refresh and a
+    refresh would not admit them. Worked out once per searched set from the files a search would open,
+    whichever search path (routing, word search, a later one) skips them. Split by what would help:
+    {"secret": its current text holds a secret (held: the value must go), "stuck": too big or out of the
+    set's scope (a refresh would hold it again), "refresh": a refresh will review it}."""
+    out = {"secret": [], "stuck": [], "refresh": []}
+    for ptr, path, entry in candidate_files(pointers, exclude):
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            continue  # removed: not an edited file
+        if hashlib.sha256(raw).hexdigest() == entry.get("sha256"):
+            continue
+        text = raw.decode("utf-8", "replace")
+        if edited_readable(path, ptr, entry, raw, text):
+            continue
+        out["secret" if has_secret(text) else "stuck" if (
+            len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh"].append(path)
+    return out
 
 
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
@@ -1719,32 +1733,27 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     qpairs = list(dict.fromkeys((a, b) for a, b in zip(qwords, qwords[1:])
                                 if a != b and a in terms and b in terms))  # "step by step" is no phrase
     qkeys = {(a[:4], b[:4]) for a, b in qpairs}
-    for ptr in pointers:
-        names = connector_names(ptr)
-        for path, entry in load_cache_files(ptr).items():
-            if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
-                    or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names))):
-                continue
-            try:
-                raw = Path(path).read_bytes()
-            except OSError:
-                continue
-            text = raw.decode("utf-8", "replace")
-            if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
-                # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
-                # search its current text, held back only as a refresh would hold it.
-                if not edited_readable(path, ptr, entry, raw, text):
-                    continue  # never reviewed at a known version, or a refresh would hold it
-                changed.append(path)
-            heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
-            head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
-                             str(entry.get("description") or ""), str(entry.get("question") or "")])
-            head_words = Counter(w for w in words(head) for _ in range(3))
-            chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
-            passages = [passage_words(c) + head_words for c in chunks]
-            docs[path] = (ptr, sum(passages, Counter()),
-                          [(c, sum(c.values()), word_pairs(t) & qkeys if qkeys else set())
-                           for c, t in zip(passages, chunks)])
+    for ptr, path, entry in candidate_files(pointers):
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            continue
+        text = raw.decode("utf-8", "replace")
+        if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+            # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
+            # search its current text, held back only as a refresh would hold it.
+            if not edited_readable(path, ptr, entry, raw, text):
+                continue  # never reviewed at a known version, or a refresh would hold it
+            changed.append(path)
+        heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
+        head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
+                         str(entry.get("description") or ""), str(entry.get("question") or "")])
+        head_words = Counter(w for w in words(head) for _ in range(3))
+        chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+        passages = [passage_words(c) + head_words for c in chunks]
+        docs[path] = (ptr, sum(passages, Counter()),
+                      [(c, sum(c.values()), word_pairs(t) & qkeys if qkeys else set())
+                       for c, t in zip(passages, chunks)])
     if not docs:
         return []
     _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
@@ -2538,7 +2547,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     log(sdir, "lookup", question=question, judge=judges.profile().name, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
         **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
-    edited_paths = edited_held(search_pointers, stale_served)  # once per searched set, not per search path
+    edited = edited_held(search_pointers, {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
+    edited_paths = [p for kind in edited.values() for p in kind]  # once per searched set, not per search path
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
     content_check = {p: {"score": scores.get(p) if type(scores.get(p)) in (int, float) and 0 <= scores[p] <= 1 else None,
@@ -2624,7 +2634,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     file_list = [file_row(sc, p, ptr, "unchecked" if notes.get(p) == INCONCLUSIVE
                           else "possible" if p in possible else "confirmed") for sc, p, ptr in top]
     skill_list = skill_rows(skills)
-    held = [p for p, note in notes.items() if note == HELD_SECRET]
+    # A file picked for this question and withheld for a secret, or edited and now holding one: never read.
+    held = list(dict.fromkeys([p for p, note in notes.items() if note == HELD_SECRET] + edited["secret"]))
     leans = bool(top and (_STAGE.get("listwise") or {}).get("leans_none"))
     for sk in skill_list:
         show_skill(sk)
@@ -2638,7 +2649,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         print(line)
     # One outcome from the whole search state. A set that failed, is stale or is unprepared was not
     # fully searched, so it never reads as a complete not-found.
-    edited_out = [(p, EDITED_WHAT, EDITED_FIX) for p in edited_paths]
+    edited_out = ([(p, EDITED_WHAT, EDITED_FIX) for p in edited["refresh"]]
+                  + [(p, EDITED_STUCK_WHAT, EDITED_STUCK_FIX) for p in edited["stuck"]])
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
@@ -2677,16 +2689,16 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     elif stale_ptrs or held:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
-            x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared",
+            x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
-                        f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read until refreshed" if edited_out else "",
+                        f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
     else:
         # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
         gone = "; ".join(x for x in (
             f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
-            f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read until refreshed" if edited_out else "") if x)
+            f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "") if x)
         gone = f"; {gone} (see {ask_py} --status)" if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",
@@ -2735,6 +2747,8 @@ SECRET_WHAT = "held back: it looks like it holds a password, key or card number"
 SECRET_FIX = "remove or move the flagged value, then re-run setup"
 EDITED_WHAT = "edited since its last refresh and not readable until a refresh admits it"
 EDITED_FIX = "run the refresh command shown above (auto-heal also retries it)"
+EDITED_STUCK_WHAT = "edited since its last refresh, and too big or outside the set's scope for a refresh to admit"
+EDITED_STUCK_FIX = "make it smaller, or connect its folder as its own set"
 PART_RE = re.compile(r"^(.+)-\d+$")
 
 
