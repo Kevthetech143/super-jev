@@ -316,3 +316,69 @@ def test_a_held_edited_file_the_question_matches_is_needs_setup(tmp_path, monkey
     lines = capsys.readouterr().out.splitlines()
     assert rc == 4 and lines[0].startswith("OUTCOME: needs-setup") and "1 file held" in lines[0]
     assert ask._RESULT["next"] == "include"
+
+
+def _two_notes(tmp_path, monkeypatch, held_text, nav=None):
+    """A clean reviewed note plus one edited note holding a made-up secret, in one set."""
+    import hashlib
+    good = tmp_path / "acme-warranty.md"
+    good.write_text("# Acme warranty period\nthe warranty period for Acme is 3 years\n")
+    held = tmp_path / "vendor-log.md"
+    held.write_text(held_text + "password: hunter2abcXYZ\n")
+    _setup(tmp_path, monkeypatch, ["notes"], nav or (lambda p, n: {"status": "no-candidates"}))
+    files = {str(good): {"pass": True, "sha256": hashlib.sha256(good.read_bytes()).hexdigest()},
+             str(held): {"pass": True, "sha256": "0" * 64}}
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: files)
+    monkeypatch.setattr(ask, "refresh_would_admit", lambda path, ptr: True)
+    return good, held
+
+
+def test_one_word_search_pass_even_on_a_found_ask(tmp_path, monkeypatch, capsys):
+    good, held = _two_notes(tmp_path, monkeypatch, "# Vendor log\nshipping dates\n")
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(good): 0.95}, set(), None, {}))
+    calls = []
+    real = ask.word_search
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: calls.append(1) or real(*a, **k))
+    rc = ask.lookup("what is the Acme warranty period", "primary", tmp_path / "s")
+    assert rc == 0 and capsys.readouterr().out.startswith("OUTCOME: found")
+    assert len(calls) == 1
+
+
+def test_a_held_file_covering_every_question_word_matches_whatever_the_best_score(tmp_path, monkeypatch, capsys):
+    # the relative floor (0.55 x best score) must not decide this: only the file's own coverage does
+    good, held = _two_notes(tmp_path, monkeypatch, "# Vendor log\n" + "filler words about other topics. " * 60
+                            + "\nAcme warranty period: see contract\n")
+    cover = {}
+    ask.word_search("what is the Acme warranty period", ["notes"], extra={str(held)}, held_cover=cover)
+    assert cover[str(held)] >= ask.FALLBACK_MIN_COVERAGE
+    rc = ask.lookup("what is the Acme warranty period", "primary", tmp_path / "s")
+    lines = capsys.readouterr().out.splitlines()
+    assert rc == 4 and lines[0].startswith("OUTCOME: needs-setup")
+
+
+def test_a_held_file_never_enters_the_ranking_or_the_stage(tmp_path, monkeypatch):
+    good, held = _two_notes(tmp_path, monkeypatch, "# Vendor log\nAcme warranty period\n")
+    cover = {}
+    found = ask.word_search("what is the Acme warranty period", ["notes"], extra={str(held)}, held_cover=cover)
+    assert str(held) not in [p for _s, p, _ptr in found]
+    assert str(held) not in [p for _s, p, _ptr in ask._STAGE["word"]["ranked"]]
+    assert str(held) not in ask._STAGE["word_changed"]
+    plain = ask.word_search("what is the Acme warranty period", ["notes"])
+    assert plain == found  # ranking is the same with or without the held file
+
+
+@pytest.mark.parametrize("score,code", [(0.05, 1), (0.9, 4)])
+def test_a_claim_routing_pick_counts_for_a_held_file_only_at_or_above_the_route_floor(
+        tmp_path, monkeypatch, capsys, score, code):
+    held = tmp_path / "vendor-log.md"
+    held.write_text("# Vendor log\nshipping dates\npassword: hunter2abcXYZ\n")
+    stale = {"status": "preparation-required", "changed": [str(held)], "missing": []}
+    nav = lambda p, n: {"status": "candidates", "candidates": [{"score": score, "originalPath": str(held)}], "stale": stale}
+    _setup(tmp_path, monkeypatch, ["notes"], nav)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(held): {"pass": True, "sha256": "0" * 64}})
+    monkeypatch.setattr(ask, "refresh_would_admit", lambda path, ptr: True)
+    monkeypatch.setattr(ask, "ROUTE_FLOOR", 0.5)
+    monkeypatch.setitem(ask._CLAIM, "text", "The quarterly tax filing is due in April.")
+    monkeypatch.setitem(ask._CLAIM, "word", "")
+    rc = ask.lookup("The quarterly tax filing is due in April.", "primary", tmp_path / "s")
+    assert rc == code, capsys.readouterr().out
