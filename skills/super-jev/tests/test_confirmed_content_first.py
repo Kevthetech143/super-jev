@@ -27,6 +27,12 @@ def _run(tmp_path, question, files, candidates, scores):
         Path(p).write_text(text)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
     monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
+    # The TOC search now picks the read list (routing asks Jev nothing): stub it with the candidates
+    # in the order the old routing ranked them, so what is tested is how confirmed files are ranked.
+    listed = [c["originalPath"] for c in sorted(candidates, key=lambda c: -c["score"])]
+    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
+        ("p1", p_, {"sha256": ask.sha256_file(Path(p_))}) for p_ in files])
+    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (listed, [], {}))
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
                         {"pointers": ["p1"]} if r["action"] == "panel" else
                         {"status": "candidates", "candidates": candidates})
@@ -62,7 +68,7 @@ def test_confirmed_content_score_beats_higher_routed_confirmed_file_wide_gap(tmp
     assert top.index(higher) < top.index(lower)
 
 
-def test_confirmed_near_tie_broken_by_routing(tmp_path):
+def test_confirmed_near_tie_broken_by_read_list_order(tmp_path):
     a = str(tmp_path / "a.md")
     b = str(tmp_path / "b.md")
     top = _run(

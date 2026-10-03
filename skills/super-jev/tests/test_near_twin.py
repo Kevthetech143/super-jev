@@ -80,7 +80,8 @@ def test_judge_near_twin_skips_a_file_with_a_secret(tmp_path, monkeypatch):
     a, b = tmp_path / "notes.md", tmp_path / "notes-summary.md"
     a.write_text("looks fine but is flagged below")
     b.write_text("a short summary")
-    monkeypatch.setattr(ask, "has_secret", lambda text: text.startswith("looks fine"))
+    # the file the secret check cannot make clean (clean_text returns None) is the one skipped
+    monkeypatch.setattr(ask, "clean_text", lambda text, path: None if text.startswith("looks fine") else text)
     monkeypatch.setattr(ask.subprocess, "run", lambda *a2, **k: FakeRun(_judge_result(str(b))))
     # Only one file is left to send once the secret-bearing one is dropped, so
     # no judge call is made and it returns None (not enough files to judge).

@@ -1058,7 +1058,7 @@ def excerpt(p: Path) -> dict:
     oldest versions) and was refused. The first 15 headings and the start stay exactly as before,
     so builtin_writer's quote rebuilds identically; the added part is bounded (at most 10 headings,
     8 x 350 characters) whatever the file's size."""
-    text = clean_text(p.read_text(errors="replace"), p) or ""
+    text = p.read_text(errors="replace")
     all_heads = [l.strip() for l in text.splitlines()
                  if l.startswith("#")]
     heads = all_heads[:EXCERPT_HEADS]

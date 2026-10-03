@@ -57,31 +57,46 @@ def test_cache_hit_prints_answer_and_never_navigates(tmp_path, monkeypatch, caps
     assert "one" in out
 
 
+def _toc_read_list(monkeypatch, tmp_path, files, scores=None):
+    """The TOC search picks the read list now (routing asks Jev nothing): stub it to list `files`
+    ({name: pointer}) in order, with `scores` as the content check's verdicts."""
+    paths = {}
+    for name, ptr in files.items():
+        f = tmp_path / "notes" / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("the answer is here\n")
+        paths[str(f)] = ptr
+    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
+        (ptr, p, {"sha256": ask.sha256_file(Path(p))}) for p, ptr in paths.items()])
+    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (list(paths), [], {}))
+    by_name = {str(tmp_path / "notes" / n): v for n, v in (scores or {}).items()}
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: (dict(by_name), set(), None, {}))
+    return list(paths)
+
+
 def test_miss_fans_out_over_panel_pointers_merged_by_score_and_logs(tmp_path, monkeypatch, capsys):
     def fake_memory(req):
         if req["action"] == "cached":
             return {"status": "cache-miss", "checked": []}
         if req["action"] == "panel":
             return {"pointers": [{"pointer": "p1"}, {"pointer": "p2"}]}
-        if req["action"] == "navigate" and req["pointer"] == "p1":
-            return {"status": "candidates", "candidates": [{"score": 0.4, "originalPath": "/low.md"}]}
-        if req["action"] == "navigate" and req["pointer"] == "p2":
-            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": "/high.md"}]}
-        raise AssertionError(req)
+        raise AssertionError(req)  # routing asks Jev nothing
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.lookup("where is it?", "alice", tmp_path)
+    low, high = _toc_read_list(monkeypatch, tmp_path, {"low.md": "p1", "high.md": "p2"},
+                               {"low.md": 0.4, "high.md": 0.9})
+    rc = ask.lookup("where is it?", "alice", tmp_path / "state")
 
     assert rc == 0
     out = capsys.readouterr().out
     lines = [l for l in out.splitlines() if l.strip() and l.strip()[0].isdigit()]
-    assert lines[0].strip().startswith("0.90") and "/high.md" in lines[0] and "[p2]" in lines[0]
-    log_path = tmp_path / "lookups.jsonl"
+    assert lines[0].strip().startswith("0.90") and high in lines[0] and "[p2]" in lines[0]
+    log_path = tmp_path / "state" / "lookups.jsonl"
     assert log_path.is_file()
     rec = json.loads(log_path.read_text().splitlines()[-1])
     assert rec["kind"] == "lookup"
     assert rec["pointers"] == 2
-    assert rec["statuses"] == {"p1": "candidates", "p2": "candidates"}
+    assert rec["statuses"] == {"p1": "no-candidates", "p2": "no-candidates"}
 
 
 def test_pointer_error_prints_status_line_and_is_not_folded_into_no_candidates(tmp_path, monkeypatch, capsys):
@@ -89,21 +104,19 @@ def test_pointer_error_prints_status_line_and_is_not_folded_into_no_candidates(t
         if req["action"] == "cached":
             return {"status": "cache-miss", "checked": []}
         if req["action"] == "panel":
-            return {"pointers": ["p1", "p2"]}
-        if req["action"] == "navigate" and req["pointer"] == "p1":
-            return {"status": "refresh-required"}
-        if req["action"] == "navigate" and req["pointer"] == "p2":
-            return {"status": "no-candidates", "candidates": []}
+            return {"pointers": [{"pointer": "p1", "snapshotStatus": "refresh-required"}, {"pointer": "p2"}]}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [])
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc == 4  # needs-setup: p1 was not searched, so this is never a complete not-found
+    # routing now reads each set's status from the registry: a stale set is still searched and named
+    # (as of its last refresh), never folded into a plain no-candidates
     out = capsys.readouterr().out
-    assert out.startswith("OUTCOME: needs-setup")
-    assert "[p1] refresh-required" in out
+    assert "[p1] stale: searched as of its last refresh" in out
     assert "no-candidates across" not in out
+    assert rc == 1 and out.startswith("OUTCOME: not-found")
 
 
 def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path, monkeypatch, capsys):
@@ -111,28 +124,22 @@ def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path
         if req["action"] == "cached":
             return {"status": "cache-miss", "checked": []}
         if req["action"] == "panel":
-            return {"pointers": ["p1", "p2"]}
-        if req["action"] == "navigate" and req["pointer"] == "p1":
-            return {"status": "refresh-required"}
-        if req["action"] == "navigate" and req["pointer"] == "p2":
-            return {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": "/hit.md"}]}
+            return {"pointers": [{"pointer": "p1", "snapshotStatus": "refresh-required"}, {"pointer": "p2"}]}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.lookup("q", "alice", tmp_path)
+    (hit,) = _toc_read_list(monkeypatch, tmp_path, {"hit.md": "p2"}, {"hit.md": 0.8})
+    rc = ask.lookup("q", "alice", tmp_path / "state")
 
     # A healthy pointer answering the question is a real result: the sibling
-    # pointer's error stays visible (below), but no longer fails the whole lookup.
+    # pointer's note stays visible (below), but does not fail the whole lookup.
     assert rc == 0
     out = capsys.readouterr().out
-    assert "/hit.md" in out
+    assert hit in out
     assert "[p2]" in out
-    assert "[p1] refresh-required" in out
-    assert out.startswith("OUTCOME: found - 1 file; partial: 1 set not searched")
-    # the hit must appear before the error line
-    hit_pos = out.index("/hit.md")
-    error_pos = out.index("[p1] refresh-required")
-    assert hit_pos < error_pos
+    assert "[p1] stale" in out
+    # the hit must appear before the note line
+    assert out.index(hit) < out.index("[p1] stale")
 
 
 def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache(tmp_path, monkeypatch, capsys):
@@ -150,14 +157,13 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
         if req["action"] == "cached":
             return {"status": "cache-miss", "checked": []}
         if req["action"] == "panel":
-            return {"pointers": ["broken", "healthy"]}
-        if req["action"] == "navigate" and req["pointer"] == "broken":
-            return {"status": "preparation-required", "reason": "scope-change"}
-        if req["action"] == "navigate" and req["pointer"] == "healthy":
-            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(note)}]}
+            return {"pointers": [{"pointer": "broken", "snapshotStatus": "preparation-required"}, {"pointer": "healthy"}]}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [("healthy", str(note), {"sha256": ask.sha256_file(note)})])
+    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([str(note)], [], {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(note): 0.9}, set(), None, {}))
     sdir = tmp_path / "state"
     rc = ask.lookup("what color is the car?", "alice", sdir)
 
@@ -791,11 +797,12 @@ def test_nav_concurrency_falls_back_on_non_positive_value(monkeypatch):
 
 
 def test_lookup_caps_navigate_fanout_at_nav_concurrency(tmp_path, monkeypatch):
-    """A lookup with more pointers than SUPERJEV_NAV_CONCURRENCY never runs more
-    navigate calls concurrently than the cap, even though every pointer is still
-    attempted."""
+    """A claim lookup (the only path that still routes through navigate) with more pointers than
+    SUPERJEV_NAV_CONCURRENCY never runs more navigate calls concurrently than the cap, even though
+    every pointer is still attempted."""
     import threading
 
+    monkeypatch.setitem(ask._CLAIM, "text", "a claim")
     monkeypatch.setattr(ask, "NAV_CONCURRENCY", 2)
     in_flight = []
     peak = []
@@ -814,10 +821,27 @@ def test_lookup_caps_navigate_fanout_at_nav_concurrency(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ask, "memory", fake_memory)
 
+    ask.lookup("q", "alice", tmp_path)  # completes without raising
+
+    assert peak and max(peak) <= 2
+
+
+@pytest.mark.real_toc
+def test_lookup_asks_jev_nothing_at_routing_however_many_pointers(tmp_path, monkeypatch):
+    """Routing no longer fans navigate calls out to Jev (the TOC search picks the read list): a lookup
+    over many pointers makes no navigate call, but still completes and names every set searched."""
+    actions = []
+
+    def fake_memory(req):
+        actions.append(req.get("action"))
+        return {"pointers": ["p1", "p2", "p3", "p4"]} if req.get("action") == "panel" else {}
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+
     rc = ask.lookup("q", "alice", tmp_path)
 
-    assert rc != 0 or rc == 0  # lookup completes without raising
-    assert max(peak) <= 2
+    assert rc == 1  # not-found: every set was searched
+    assert "navigate" not in actions
 
 
 if __name__ == "__main__":
@@ -970,27 +994,32 @@ def test_approve_hand_picked_file_changed_since_connect_is_refused(tmp_path, mon
 
 def test_reviewed_dataset_copy_from_its_own_pointer_is_kept(tmp_path, monkeypatch, capsys):
     """A reviewed dataset's pointer answers with its prepared copy under
-    .local/retrieval-datasets/. That copy is the answer; routing must not drop it
+    .local/retrieval-datasets/. That copy is the answer; the read list must not drop it
     for where it lives (it used to vanish, leaving only weaker hits)."""
-    copy = "/Users/x/super-jev/.local/retrieval-datasets/brain-reviewed/operations-08.txt"
+    copy = tmp_path / ".local" / "retrieval-datasets" / "brain-reviewed" / "operations-08.txt"
+    copy.parent.mkdir(parents=True)
+    copy.write_text("enqueue returning nothing means it was not sent\n")
+    other = tmp_path / "other.md"
+    other.write_text("something else\n")
 
     def fake_memory(req):
         if req["action"] == "cached":
             return {"status": "cache-miss", "checked": []}
         if req["action"] == "panel":
             return {"pointers": [{"pointer": "brain-reviewed"}, {"pointer": "skills"}]}
-        if req["action"] == "navigate" and req["pointer"] == "brain-reviewed":
-            return {"status": "candidates", "candidates": [{"score": 0.99, "originalPath": copy}]}
-        if req["action"] == "navigate" and req["pointer"] == "skills":
-            return {"status": "candidates", "candidates": [{"score": 0.5, "originalPath": "/other.md"}]}
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    rc = ask.lookup("when enqueue returns nothing was it sent?", "alice", tmp_path)
+    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
+        ("skills", str(other), {"sha256": ask.sha256_file(other)}),
+        ("brain-reviewed", str(copy), {"sha256": ask.sha256_file(copy)})])
+    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([str(other), str(copy)], [], {}))
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(copy): 0.99, str(other): 0.5}, set(), None, {}))
+    rc = ask.lookup("when enqueue returns nothing was it sent?", "alice", tmp_path / "state")
 
     assert rc == 0
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip() and l.strip()[0].isdigit()]
-    assert copy in lines[0] and "[brain-reviewed]" in lines[0]
+    assert str(copy) in lines[0] and "[brain-reviewed]" in lines[0]
 
 
 def test_a_malformed_principal_is_refused_before_any_state_is_touched(monkeypatch, tmp_path, capsys):
