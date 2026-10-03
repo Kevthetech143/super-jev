@@ -198,7 +198,7 @@ def gate_pack(items: list) -> dict:
     parts, claims, slots = [], [], []
     for i, (p, desc, label_claim) in enumerate(items, 1):
         tag = f"F{i}"
-        parts.append(f"===== FILE {tag} =====\n" + Path(p).read_text(errors="replace"))
+        parts.append(f"===== FILE {tag} =====\n" + (clean_text(Path(p).read_text(errors="replace"), p) or ""))
         claims.append(f"File {tag}: {desc}"); slots.append((str(p), 0))
         if label_claim:
             claims.append(f"File {tag}: {label_claim}"); slots.append((str(p), 1))
@@ -505,6 +505,22 @@ def has_secret(text: str) -> bool:
     text = normalize_for_scan(text)
     return (card_hit(text, luhn) or bool(WORD_RE.search(text))
             or _token_hit(text))
+
+
+def secret_spans(text: str, path):
+    """[(start, end)] lines withheld when only parts of the file hold secret-shaped text, else None (hold it whole)."""
+    import toc_search
+    clean, spans = toc_search.withhold_secret_sections(text, str(path), has_secret)
+    return spans if clean is not None else None
+
+
+def clean_text(text: str, path: str):
+    """The text that may leave this machine: the file with each secret-shaped section withheld (line numbers kept),
+    or None when the file must be held whole (see toc_search.withhold_secret_sections)."""
+    if not has_secret(text):
+        return text
+    import toc_search
+    return toc_search.withhold_secret_sections(text, str(path), has_secret)[0]
 
 
 # Evidence that is judged (a worktree diff, a file a claim is checked against) may carry
@@ -965,8 +981,12 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
                 held.append((str(p), "not UTF-8 text; re-save it as UTF-8 to connect it")); continue
             if any(ord(c) < 32 and c not in '\n\r\t' for c in text):
                 held.append((str(p), "binary/control-character content, not text; skipped")); continue
-            if has_secret(b.decode("utf-8", "replace")):
-                held.append((str(p), f"card/password-like text; {SECRET_NOT_APPROVABLE}")); continue
+            if has_secret(text):
+                # Whole-file hold: the connect backend re-reads and stores the raw file, so a
+                # section hold here could not keep the secret lines out of it.
+                spans = secret_spans(text, p)
+                where = (" (lines " + ", ".join(f"{a}-{b}" for a, b in spans) + ")") if spans else ""
+                held.append((str(p), f"card/password-like text{where}; {SECRET_NOT_APPROVABLE}")); continue
             if path_has_secret(p.name) or path_has_secret(rp.name):
                 held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
             files.append(p)
@@ -1038,7 +1058,7 @@ def excerpt(p: Path) -> dict:
     oldest versions) and was refused. The first 15 headings and the start stay exactly as before,
     so builtin_writer's quote rebuilds identically; the added part is bounded (at most 10 headings,
     8 x 350 characters) whatever the file's size."""
-    text = p.read_text(errors="replace")
+    text = clean_text(p.read_text(errors="replace"), p) or ""
     all_heads = [l.strip() for l in text.splitlines()
                  if l.startswith("#")]
     heads = all_heads[:EXCERPT_HEADS]
