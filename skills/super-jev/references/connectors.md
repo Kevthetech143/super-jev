@@ -280,6 +280,10 @@ true as the file or record it came from; `as_of` shows staleness, not
 currency — live truth for anything time-sensitive still needs a gated
 roll-up read fresh, not a cached label.
 
+### Watched folders
+
+`prepare_bulk.py --watch|--unwatch --pointer NAME --principal AGENT` marks a connected pointer watched (the engine's `watch`/`unwatch` actions plus `"watched": true` in its report), so new files, subfolders and changed files under its folders are taken in on a later ask. The engine holds one rule on every connect and register: a file whose real path lies under a watched folder may only be registered to a pointer whose agents are a subset of the watched pointer's; otherwise it answers `reason: watched-refused` with a `message` that names the watched pointer and the clearing command, and the `files` refused. `watched-check` (`pointer`, `principals`, `paths`) is the read-only dry run of the same rule, so a caller can leave those files out and register the rest. See the connect skill for what a person sees.
+
 ### Share a connected pointer
 
 `python3 share_pointers.py --principal AGENT --pointer NAME` (repeat either;

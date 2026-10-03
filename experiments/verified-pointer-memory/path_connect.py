@@ -343,6 +343,9 @@ def _connect(request, config):
         with service.connect() as db:
             rows = {name: json.loads(body) for name, body in db.execute('SELECT name, body FROM pointers')}
         old = rows.get(pointer)
+        refusal = service.watched_refusal(pointer, principals, [s['realPath'] for s in sources], rows)
+        if refusal:  # before anything is written: a refused connect leaves nothing behind
+            return refusal.answer()
         if (old or dataset in data['datasets']) and request.get('replace') is not True:
             return _problem('already-connected', 'This pointer or dataset exists. Review its scope and explicitly set replace:true to refresh it.')
         if old and (old['dataset'] != dataset or sorted(old['principals']) != sorted(principals)):
