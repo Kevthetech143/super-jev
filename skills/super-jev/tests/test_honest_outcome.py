@@ -186,8 +186,33 @@ def test_an_edited_file_a_refresh_would_not_admit_is_named_not_silently_dropped(
     stale = {"status": "preparation-required", "changed": [str(edited)], "missing": []}
     nav = lambda p, n: {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(edited)}], "stale": stale}
     _setup(tmp_path, monkeypatch, ["old"], nav)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(edited): {"pass": True, "sha256": "0" * 64}})
     monkeypatch.setattr(ask, "edited_readable", lambda *a, **k: False)
     rc, lines = _ask(tmp_path, capsys)
     assert rc == 1 and lines[0].startswith("OUTCOME: not-found")
     assert "1 edited file not read until refreshed" in lines[0] and "--status" in lines[0]
     assert ask._RESULT["left_out"] == [{"what": ask.EDITED_WHAT, "count": 1, "where": str(tmp_path), "way_in": ask.EDITED_FIX}]
+
+
+def test_a_file_only_word_search_would_skip_is_counted_once_like_any_other(tmp_path, monkeypatch, capsys):
+    # routing finds nothing, so only word search meets the edited note holding a made-up secret
+    note = tmp_path / "acme-warranty.md"
+    note.write_text("# Acme warranty period\nthe warranty period for Acme is 3 years\npassword: hunter2abcXYZ\n")
+    stale = {"status": "preparation-required", "changed": [str(note)], "missing": []}
+    _setup(tmp_path, monkeypatch, ["old"], lambda p, n: {"status": "no-candidates", "stale": stale})
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {
+        "pass": True, "sha256": "0" * 64, "description": "Acme warranty"}})
+    rc, lines = _ask(tmp_path, capsys)
+    assert rc == 1 and lines[0].startswith("OUTCOME: not-found")
+    assert "1 edited file not read until refreshed" in lines[0]  # once, not once per search path
+    assert [r["count"] for r in ask._RESULT["left_out"]] == [1]
+
+
+def test_edited_files_show_in_the_needs_setup_reason_too(tmp_path, monkeypatch, capsys):
+    note = tmp_path / "acme-warranty.md"
+    note.write_text("# Acme\npassword: hunter2abcXYZ\n")
+    nav = lambda p, n: {"status": "preparation-required"} if p == "bench" else {"status": "no-candidates"}
+    _setup(tmp_path, monkeypatch, ["bench", "notes"], nav)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True, "sha256": "0" * 64}})
+    rc, lines = _ask(tmp_path, capsys)
+    assert rc == 4 and "edited file not read until refreshed" in lines[0]
