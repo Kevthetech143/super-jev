@@ -224,7 +224,7 @@ CARD_RE = re.compile(_PAT["card"], re.A)
 CARD_IIN_RE = re.compile(_PAT["card_iin"], re.A)
 AMEX_RE = re.compile(_PAT["amex"], re.A)
 WORD_RE = re.compile(_PAT["word"].replace("{PH}", _PAT["placeholder"]).replace("{STOP}", _PAT["stop"]), re.I | re.A)
-TOKEN_RE = re.compile(_PAT["token"], re.I | re.A)
+TOKEN_RE = re.compile(_PAT["token"].replace("{PH}", _PAT["placeholder"]), re.I | re.A)
 GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
@@ -937,8 +937,9 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             seen.add(rp)
             if len(b) > CEILING_BYTES:
                 held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
-                                     "too big, split it into smaller " + ("files" if tuple(extensions) != CONNECTABLE_EXTENSIONS else ".md files")
-                                     + ", e.g. one per ## section")); continue
+                                     "too big, split it into smaller "
+                                     + ("files" if tuple(extensions) != CONNECTABLE_EXTENSIONS
+                                        else ".md files, e.g. one per ## section"))); continue
             if b"\x00" in b:
                 held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
             try:
@@ -1962,7 +1963,7 @@ def run(a) -> int:
                  " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)"))
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
-        if "binary" not in why:
+        if "binary" not in why and "backup or credential-style" not in why:
             print(f"      then run: {rerun}")
 
     # The recipe: what --refresh replays (replay_recipe), so every later refresh runs it as connected.

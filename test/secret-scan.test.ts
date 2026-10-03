@@ -34,6 +34,11 @@ test('a connection string password and a Slack webhook are secrets', () => {
   assert.equal(hasSecret('redis://:s3cretpw9@cache.example.test:6379'), true);
   assert.equal(hasSecret('https://hooks.slack.com/services/T0AAAAAAA/B0BBBBBBB/abcDEF123456'), true);
   assert.equal(hasSecret('postgres://appuser@db.example.test/main and http://localhost:3000/a'), false);
+  assert.equal(hasSecret('postgres://user:password@localhost:5432/app'), false);
+  assert.equal(hasSecret('postgresql://USER:PASS@HOST:5432/DB'), false);
+  assert.equal(hasSecret('amqp://guest:guest@localhost:5672'), false);
+  assert.equal(hasSecret('http://localhost:3000?email=foo@bar.com'), false);
+  assert.equal(hasSecret('https://example.com:8443?to=a@b.com'), false);
 });
 
 test('2000 random sha256 digests never trip the scan; real cards and keys still held', async () => {
