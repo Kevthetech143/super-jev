@@ -15,6 +15,7 @@ When to use it:
 Where it searches (one rule: your own skill folders):
 - Inside Claude Code it searches `~/.claude/skills`. `roots.json` is ignored there; to search other folders pass `--config FILE` (a JSON array of folders).
 - Any other agent uses `roots.json` next to `search.sh`: copy `roots.example.json` to `roots.json` (gitignored, yours alone) and list your skill folders, absolute or starting with `~/`.
+- Extra folders of your own (a project's skills, for example): list them in `~/.local/state/super-jev/skill-roots.json` (a JSON array of absolute or `~/` folders; override the path with `SKILL_SEARCH_EXTRA_ROOTS`). They are added after the defaults, outside any release, so an upgrade keeps them. A folder that does not exist is skipped quietly (`SKILL_SEARCH_DEBUG=1` names it on stderr); a file that is not a JSON array is ignored with one stderr line. Not used with `--config` or `--roots-file`.
 - With neither, the launcher prints one setup line (`status: error`, exit 2) and nothing runs.
 
 How to call it:
