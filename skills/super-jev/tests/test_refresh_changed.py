@@ -304,3 +304,14 @@ def test_an_unreadable_pinned_folder_does_not_stop_other_refreshes(tmp_path, mon
     monkeypatch.setattr(rc.os, "scandir", deny)
     assert rc.main([]) == 0
     assert any("--pointer" in c and c[c.index("--pointer") + 1] == "steady" for c in calls)
+
+
+def test_a_new_py_file_in_a_pointer_recorded_with_py_is_new(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    brain = tmp_path / "brain"
+    (brain / "new_tool.py").write_text("def run_tool():\n    return 1\n")
+    rep = {"pointer": "code", "roots": [str(brain)], "excludes": [], "noRecurse": False, "principals": ["agent"],
+           "extensions": [".md", ".py"]}
+    assert [Path(p).name for p in rc.new_files(rep, set()) if p.endswith(".py")] == ["new_tool.py"]
+    assert not any(p.endswith(".py") for p in rc.new_files({**rep, "extensions": [".md"]}, set()))
+    assert not any(p.endswith(".py") for p in rc.new_files({**rep, "extensions": [".md", ".pem"]}, set()))

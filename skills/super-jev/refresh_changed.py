@@ -127,13 +127,17 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     pointers' files."""
     if not report.get("roots"):
         return []
-    from prepare_bulk import (CONNECTABLE_EXTENSIONS, MAX_FILES, UNCONNECTED_TRIES, born_after, growth,
+    from prepare_bulk import (CONNECTABLE_EXTENSIONS, MAX_FILES, BadExtensions, checked_suffixes, UNCONNECTED_TRIES, born_after, growth,
                               inventory, pinned_folders, read_snapshot, take_snapshot, vault_folder)
     # New files a refresh admitted but could not connect: the service never saw them, so nothing
     # else marks the pointer stale; they stay new for a few refreshes, until a connect succeeds.
     retry = [p for p in report.get("unconnectedNew") or [] if os.path.isfile(p)
              and (report.get("unconnectedTries") or 1) < UNCONNECTED_TRIES]
-    extensions = tuple(CONNECTABLE_EXTENSIONS)
+    try:  # the recorded suffixes, checked as a refresh checks them; a bad recipe sees nothing new
+        extensions = tuple(checked_suffixes(report["extensions"]) if report.get("extensions") is not None
+                           else CONNECTABLE_EXTENSIONS)
+    except BadExtensions:
+        return retry
     # A vault folder (documents/, profile/ ...) never takes in new files on its own, so it is never
     # listed or walked for them: a root inside one (documents/<person>/medical, a recipe or a pinned
     # report alike) has nothing new here; a person refreshes it by hand.
@@ -158,7 +162,7 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     walked_at = time.time()
     with contextlib.redirect_stdout(io.StringIO()):
         files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"),
-                                report.get("names"), report.get("allowTargets"))
+                                report.get("names"), report.get("allowTargets"), extensions)
     found = [str(p) for p in files + [h[0] for h in held]]
     if folders is not None:
         others = _others(report, _reports(reports))

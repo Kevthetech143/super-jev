@@ -834,7 +834,7 @@ def extension_label(name: str) -> str:
     return ext if ext in KNOWN_EXTENSIONS else "other"
 
 
-def skip_rows(skips: dict) -> list:
+def skip_rows(skips: dict, extensions=CONNECTABLE_EXTENSIONS) -> list:
     """One {kind, what, count, way_in} row per reason in `skips` ({reason: {folder or extension: count}}), in print
     order; way_in is left out where the reason has none."""
     rows = []
@@ -847,6 +847,8 @@ def skip_rows(skips: dict) -> list:
         names = ", ".join(fmt.format(k, n) for k, n in ranked[:SKIP_NAMES_SHOWN])
         if len(ranked) > SKIP_NAMES_SHOWN:
             names += f", +{len(ranked) - SKIP_NAMES_SHOWN} more"
+        if tuple(extensions) != CONNECTABLE_EXTENSIONS:
+            way_in = way_in.replace("only .md files connect", f"only {', '.join(extensions)} files connect")
         rows.append({"kind": reason, "what": what.format(names=names), "count": sum(counts.values()),
                      **({"way_in": way_in} if way_in else {})})
     return rows
@@ -910,7 +912,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
                 if p.suffix.lower() in CONNECTABLE_EXTENSIONS:
                     skip(rp, "name")
                 else:  # a file the person asked for by suffix is named, never silently skipped
-                    held.append((str(p), "credential-style file name; cannot be overridden"))
+                    held.append((str(p), "backup or credential-style file name; cannot be overridden"))
                 continue
             folder = skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(base).parts[:-1])
             if folder:
@@ -935,7 +937,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             seen.add(rp)
             if len(b) > CEILING_BYTES:
                 held.append((str(p), f"over size ceiling ({len(b):,} bytes, max {CEILING_BYTES:,}); "
-                                     "too big, split it into smaller .md files, e.g. one per ## section")); continue
+                                     "too big, split it into smaller " + ("files" if tuple(extensions) != CONNECTABLE_EXTENSIONS else ".md files")
+                                     + ", e.g. one per ## section")); continue
             if b"\x00" in b:
                 held.append((str(p), "binary file (contains null bytes), not text; skipped")); continue
             try:
@@ -949,7 +952,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             if path_has_secret(p.name) or path_has_secret(rp.name):
                 held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
             files.append(p)
-    _RESULT["skipped"] = skip_rows(skips)
+    _RESULT["skipped"] = skip_rows(skips, extensions)
     print_skips(_RESULT["skipped"])
     return files, held
 
@@ -1328,6 +1331,24 @@ def keep_unrecorded(report: dict, a) -> None:
         report.pop("principal", None); report.pop("principals", None)
 
 
+class BadExtensions(ValueError):
+    """--ext, or an extension list recorded in a recipe, that is not a list of literal non-credential suffixes."""
+
+
+def checked_suffixes(items) -> list:
+    """The suffixes a connect takes: .md plus `items` (lower case, dotted). The one check for --ext and for a
+    recorded recipe: a non-list, an empty suffix, a non-literal one or a credential or key suffix is refused by name."""
+    if not isinstance(items, (list, tuple)):
+        raise BadExtensions(f"extensions {items!r} is not a list of suffixes")
+    sfx = [e.strip().lower().lstrip('.') if isinstance(e, str) else e for e in items]
+    bad = [repr(e) if not isinstance(e, str) or not e else '.' + e for e in sfx
+           if not isinstance(e, str) or not re.fullmatch(r'[a-z0-9]+(?:[.-][a-z0-9]+)*', e) or credential_suffix('.' + e)]
+    if bad:
+        raise BadExtensions(f"extensions {', '.join(bad) or items!r}: only literal suffixes such as py,ts,sh connect; "
+                            "credential and key suffixes never do")
+    return list(dict.fromkeys((*CONNECTABLE_EXTENSIONS, *('.' + e for e in sfx))))
+
+
 def replay_recipe(a) -> None:
     """--refresh replays the pointer's recorded recipe for anything not given on the command line,
     so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
@@ -1343,7 +1364,7 @@ def replay_recipe(a) -> None:
     # a refresh that repeats the recorded roots/excludes (typed by hand or by an older script) must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
     if a.extensions is None:
-        a.extensions = list(rep.get('extensions') or CONNECTABLE_EXTENSIONS)
+        a.extensions = checked_suffixes(rep["extensions"]) if rep.get("extensions") is not None else list(CONNECTABLE_EXTENSIONS)
     rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
                     or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
@@ -1367,7 +1388,7 @@ def replay_recipe(a) -> None:
     # builtin outranks a command when the writer is chosen (main), so it is what the line names too.
     shown = "builtin" if a.writer == "builtin" else a.writer_command or a.writer or "auto"
     print(f"refresh: replaying recorded recipe (roots {len(a.roots or [])}, excludes {a.excludes}, "
-          f"no-recurse {a.no_recurse}, part size {a.limit or 50}, writer {shown})")
+          f"extensions {', '.join(a.extensions)}, no-recurse {a.no_recurse}, part size {a.limit or 50}, writer {shown})")
     # A report from before recipes were recorded has no noRecurse key: its root alone would re-inventory
     # the whole (possibly grown) folder, so its recorded file list is the scope instead.
     # The pinned list is re-recorded as scopeFiles so later refreshes stay pinned too.
@@ -1624,13 +1645,6 @@ def main() -> int:
     ap.add_argument("--within-days", type=int, default=None)
     a = ap.parse_args()
     a.extensions = None
-    if a.ext:
-        sfx = ['.' + e.strip().lower().lstrip('.') for g in a.ext for e in g.split(',') if e.strip()]
-        bad = [e for e in sfx if not re.fullmatch(r'\.[a-z0-9]+(?:[.-][a-z0-9]+)*', e) or credential_suffix(e)]
-        if bad:
-            print(f"REFUSED: --ext {', '.join(bad)}: only literal suffixes such as py,ts,sh connect; "
-                  "credential and key suffixes never do"); return 2
-        a.extensions = list(dict.fromkeys((*CONNECTABLE_EXTENSIONS, *sfx)))
     a.no_findability = a.no_findability or not a.findability
     _RESULT.clear()
     return run_json(a) if a.json else run(a)
@@ -1658,8 +1672,14 @@ def run(a) -> int:
             print(f"\n{excluded} excluded (as_of unknown)")
         return 0
 
-    if a.refresh and a.pointer:
-        replay_recipe(a)
+    try:
+        ext = getattr(a, "ext", None)
+        if ext:
+            a.extensions = checked_suffixes([e for g in ext for e in g.split(',')])
+        if a.refresh and a.pointer:
+            replay_recipe(a)
+    except BadExtensions as e:
+        return refuse("usage", str(e).replace("extensions", "--ext" if getattr(a, "ext", None) else "recorded extensions", 1))
     if a.extensions is None:
         a.extensions = list(CONNECTABLE_EXTENSIONS)
     if a.limit is None:
