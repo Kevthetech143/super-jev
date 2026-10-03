@@ -102,7 +102,9 @@ def test_an_edited_file_a_refresh_would_hold_is_not_read(tmp_path, monkeypatch, 
     # never read or ranked; it is named as held (path only, never its text) so the gap is not silent
     assert str(log_md) not in confirmed and f"HELD  {log_md}  (contains a secret; not sent)" in out
     assert "a1B2c3D4e5" not in out
-    assert not any(l.startswith(("0.", "1.")) and str(log_md) in l for l in out.splitlines())
+    ranked = lambda text: [l for l in text.splitlines() if l.lstrip()[:1].isdigit() and str(log_md) in l]
+    assert not ranked(out)
+    assert ranked(f" 0.91  {log_md}  [notes]\n")  # the check can fail: a ranked line is seen
 
 
 def test_a_lookup_starts_the_new_file_scan_for_every_visible_set(tmp_path, monkeypatch, capsys):
