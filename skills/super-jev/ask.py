@@ -894,6 +894,10 @@ INCONCLUSIVE = "inconclusive"
 # navigation-cli's reason when a provider call ran past its timeout (src/enhance/navigation.ts)
 NAV_TIMED_OUT = "Navigation provider timed out"
 
+def is_network_error(text, kind=None) -> bool:
+    """A TypeSafe call that never got an answer (navigation-cli words it "could not reach TypeSafe (network)")."""
+    return kind == "unreachable" or "(network)" in str(text or "")
+
 def navigation_command() -> list:
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
     return ["node", str(repo / "src" / "navigation-cli.ts")]
@@ -1770,7 +1774,7 @@ def confirm(question: str, paths: list):
     paths = paths[:CONFIRM_FILES + FALLBACK_FILES]
     if not batch_jev():
         results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
-        return confirm_results(paths, results)
+        return confirm_results(paths, retry_network(question, paths, results))
     # Every file's check rides in one navigation-cli run: their Jev questions share
     # calls, split under the input ceiling, and each is still judged on its own.
     started = [confirm_start(question, p) for p in paths]
@@ -1781,7 +1785,7 @@ def confirm(question: str, paths: list):
         # The batched run itself failed: check each file on its own instead of
         # marking every file inconclusive.
         results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
-        return confirm_results(paths, results)
+        return confirm_results(paths, retry_network(question, paths, results))
     outs = iter(rows or [])
     results = [done or confirm_finish(question, ctx, next(outs), None) for done, ctx in started]
     # The run's one shared call has one fixed timeout (SUPERJEV_NAV_TIMEOUT_MS) however
@@ -1796,7 +1800,18 @@ def confirm(question: str, paths: list):
             results[i] = r
         if again:
             _STAGE["timeout_rechecks"] = len(again)
-    return confirm_results(paths, results)
+    return confirm_results(paths, retry_network(question, paths, results))
+
+def retry_network(question: str, paths: list, results: list) -> list:
+    """A file whose content check hit a TypeSafe network error is checked once more on its own
+    before it counts as unchecked. A second failure stays an error."""
+    again = [i for i, (_, _, e, _) in enumerate(results) if is_network_error(e)]
+    for i, r in zip(again, ThreadPoolExecutor(max_workers=max(1, min(len(again), NAV_CONCURRENCY))).map(
+            lambda i: confirm_one(question, paths[i]), again) if again else []):
+        results[i] = r
+    if again:
+        _STAGE["network_rechecks"] = len(again)
+    return results
 
 def confirm_results(paths: list, results: list):
     errors = [e for _, _, e, _ in results if e]
@@ -2163,6 +2178,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     skill_job = (ThreadPoolExecutor(max_workers=1).submit(skill_catalog, question)
                  if skill_question(question) else None)
     active_pointers, error_lines, failed, stale_ptrs, hints = [], [], [], [], {}
+    older = []  # stale sets served from their last catalog: searched, so not counted as left out
     for ptr in original_pointers:
         benched, remaining, fails = pointer_benched(health, ptr, principal)
         if benched:
@@ -2262,6 +2278,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     else:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
+    # A set whose routing hit a TypeSafe network error is asked once more before it counts as not searched.
+    again = [i for i, (ptr, kind, *_r) in enumerate(results) if not replay and is_network_error(kind, nav_kinds.get(ptr))]
+    for i in again:
+        results[i] = nav(results[i][0])
+    if again:
+        _STAGE["network_retries"] = len(again)
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
     # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup. A replay
@@ -2322,7 +2344,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             if auto_heal.is_stale_kind(kind):
                 state_of[ptr] = "unprepared" if kind.startswith("preparation-required") else "stale"
         if served:
-            stale_ptrs.append(ptr)
+            # It answered from its last refresh (classify serves only routed sets): searched, not left out.
+            older.append(ptr)
             state_of[ptr] = "stale"
             statuses[ptr] += " (stale: last refresh)"
         if served or kind not in ("candidates", "no-candidates"):
@@ -2595,6 +2618,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
+    if older:  # searched, from the catalog of their last refresh: say so, but it is not a gap
+        _RESULT["older_catalog"] = list(older)
+        print(f"served from older catalog: {len(older)} set{'s' if len(older) != 1 else ''}")
     errors = error_rows(failed, nav_kinds)
     _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
                    unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows([], held))
@@ -2624,7 +2650,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                else "no match, and the content check failed")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
-    elif stale_ptrs or skipped or held:
+    elif stale_ptrs or held:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
@@ -2632,8 +2658,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
     else:
+        # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
+        gone = (f"; {len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup "
+                f"(see {ask_py} --status)" if skipped else "")
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
-                   "no matching file (it may still exist)", f"{ask_py} --trace-show last",
+                   f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",
                    "none" if _CLAIM["text"] else "connect")
         _RESULT["searched"] = {"sets": len(original_pointers),
                                "notes": sum(len(load_cache_files(ptr)) for ptr in original_pointers)}

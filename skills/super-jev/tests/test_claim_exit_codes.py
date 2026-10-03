@@ -219,8 +219,8 @@ def test_a_settled_claim_keeps_its_own_code_on_a_partial_search(tmp_path, monkey
     assert out.startswith(("TRUE", "FALSE")) and rc == code
 
 
-@pytest.mark.parametrize("verdict,code", [("contradicted", 4), ("supported", 0)])
-def test_files_skipped_at_setup_make_an_unsettled_claim_exit_4_not_a_settled_one(
+@pytest.mark.parametrize("verdict,code", [("contradicted", 1), ("supported", 0)])
+def test_files_skipped_at_setup_leave_an_unsettled_claim_unsure_not_needs_setup(
         tmp_path, monkeypatch, capfd, verdict, code):
     w = World(tmp_path, monkeypatch)
     w.judge({w.new: (verdict, 0.55 if verdict == "contradicted" else 0.98)})
