@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from service import Service, invalidate_registry, valid_principal
+from service import Service, WatchedRefused, invalidate_registry, valid_principal
 from cli import has_secret
 from reviewed_view import derive
 import prepare_bulk
@@ -407,7 +407,15 @@ def _connect(request, config):
                                    for s in sources]}}
         _atomic(registry, data)
         # Publication changes the fingerprint first, so interruption cannot reuse an old cache.
-        service.register(pointer, dataset, principals)
+        try:
+            service.register(pointer, dataset, principals)
+        except WatchedRefused as refusal:  # a mark landed since the check above: put the dataset back as it was
+            if previous:
+                data['datasets'][dataset] = previous
+            else:
+                data['datasets'].pop(dataset, None)
+            _atomic(registry, data)
+            return refusal.answer()
         _, error = service.pointer(pointer, principals[0])
         if error:
             return _problem('source-changed', 'A source changed during connection. Review it and reconnect with replace:true.')

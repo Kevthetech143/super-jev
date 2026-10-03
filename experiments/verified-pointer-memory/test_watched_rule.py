@@ -132,6 +132,54 @@ class WatchedRuleTests(unittest.TestCase):
         refused = self.connect('rook-link', ['rook'], [elsewhere / 'link.md'])
         self.assertEqual(refused['reason'], 'watched-refused')
 
+    # r5: "inside" is folder identity, not spelling.
+    def watched_cafe(self):
+        import unicodedata
+        cafe = self.root / unicodedata.normalize('NFC', 'caf\u00e9')
+        cafe.mkdir()
+        (cafe / 'menu.md').write_text('# Menu\nQuill lists the teas.\n')
+        self.assertEqual(self.connect('quill-cafe', ['quill'], [cafe / 'menu.md'])['status'], 'registered')
+        self.assertEqual(self.watch('quill-cafe', ['quill'], cafe)['status'], 'ok')
+        return cafe
+
+    def test_unicode_form_of_the_path_does_not_escape_the_mark(self):
+        import unicodedata
+        cafe = self.watched_cafe()
+        (cafe / 'new.md').write_text('# New\nRook note.\n')
+        nfd = str(cafe).replace(unicodedata.normalize('NFC', 'caf\u00e9'), unicodedata.normalize('NFD', 'caf\u00e9'))
+        refused = self.connect('rook-cafe', ['rook'], [Path(nfd) / 'new.md'])
+        self.assertEqual(refused.get('reason'), 'watched-refused', refused)
+
+    def test_firmlink_spelling_does_not_escape_the_mark(self):
+        firm = Path('/System/Volumes/Data') / str(self.garden).lstrip('/')
+        if not firm.exists():
+            self.skipTest('no firmlink spelling on this system')
+        self.watched_quill()
+        refused = self.connect('rook-firm', ['rook'], [firm / 'beds' / 'kale.md'])
+        self.assertEqual(refused.get('reason'), 'watched-refused', refused)
+
+    def test_case_spelling_does_not_escape_the_mark(self):
+        if not (self.root / 'GARDEN').exists():
+            self.skipTest('case-sensitive file system')
+        self.watched_quill()
+        refused = self.connect('rook-case', ['rook'], [self.root / 'GARDEN' / 'beds' / 'kale.md'])
+        self.assertEqual(refused.get('reason'), 'watched-refused', refused)
+
+    def test_watched_pointer_agents_may_only_shrink(self):
+        self.watched_quill()
+        for agents in (['quill', 'rook'], ['rook']):
+            refused = self.call({'action': 'register', 'pointer': 'quill-garden', 'dataset': 'quill-garden', 'principals': agents})
+            self.assertEqual(refused.get('reason'), 'watched-refused', refused)
+            self.assertIn('--unwatch --pointer quill-garden', refused['message'])
+        self.assertEqual(self.pointers('rook'), [])
+
+    def test_mark_needs_a_folder_that_holds_the_pointers_own_file(self):
+        self.assertEqual(self.connect('quill-garden', ['quill'], [self.garden / 'shed.md'])['status'], 'registered')
+        other = self.root / 'elsewhere'
+        other.mkdir()
+        self.assertEqual(self.watch('quill-garden', ['quill'], other)['status'], 'error')
+        self.assertEqual(self.watch('quill-garden', ['quill'], self.root)['status'], 'ok')  # an enclosing folder holds it
+
 
 if __name__ == '__main__':
     unittest.main()
