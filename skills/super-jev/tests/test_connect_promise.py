@@ -200,5 +200,21 @@ def test_the_refresh_line_and_skip_wording_show_the_suffixes(tmp_path, go):
 def test_connection_string_and_webhook_secrets_are_held(tmp_path, go, name, line):
     root = _folder(tmp_path, **{"a.md": "alpha\n", name: line + "\n"})
     code, text = go(root, "--ext", "py")
-    assert code == 3 and f"HELD {name}" in text.replace(str(root) + "/", "") or name in text
+    assert code == 3 and re.search(rf"HELD\s+{re.escape(name)}\s", text) and len(set(re.findall(r"^  HELD\s+(\S+)", text, re.M))) == 1
+    assert "CONNECTED 1, HELD 1, FAILED 0" in text
     assert "hunter22x" not in text and "s3cretpw9" not in text
+
+
+@pytest.mark.parametrize("line", ["postgres://user:password@localhost:5432/app", "postgresql://USER:PASS@HOST:5432/DB",
+                                  "amqp://guest:guest@localhost:5672", "http://localhost:3000?email=foo@bar.com",
+                                  "https://example.com:8443?to=a@b.com"])
+def test_placeholder_connection_strings_are_not_held(tmp_path, go, line):
+    code, text = go(_folder(tmp_path, **{"a.md": "alpha\n", "n.md": line + "\n"}))
+    assert code == 0 and "CONNECTED 2, HELD 0" in text
+
+
+def test_a_backup_named_code_file_has_no_rerun_line_and_a_big_one_no_section_hint(tmp_path, go):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", "x.bak.py": "x = 1\n", "big_tool.py": "x = 1\n" * 60000})
+    code, text = go(root, "--ext", "py")
+    assert code == 3 and "x.bak.py" in text and "big_tool.py" in text
+    assert "then run" not in text.split("x.bak.py")[1].split("\n")[1] and "## section" not in text
