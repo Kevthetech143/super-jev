@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import time
@@ -150,6 +151,51 @@ PRINCIPAL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 def valid_principal(name) -> bool:
     return isinstance(name, str) and PRINCIPAL_RE.fullmatch(name) is not None
+
+class WatchedRefused(ValueError):
+    """The one watched-folder rule said no. `files` are the caller's own paths; `message` names the watched pointer
+    and the exact way to clear it, never another pointer's agents or contents."""
+
+    def __init__(self, message: str, files: list[str] | None = None):
+        super().__init__(message)
+        self.message, self.files = message, files or []
+
+    def answer(self) -> dict[str, Any]:
+        return {'status': 'error', 'reason': 'watched-refused', 'message': self.message, 'files': self.files}
+
+
+def _ids(folders) -> set:
+    """(device, inode) of each folder that exists. Identity, not spelling: Unicode forms, case and firmlink paths
+    (/System/Volumes/Data/...) of one folder all give the same pair. (A hard link to a file is a known limit.)"""
+    out = set()
+    for f in folders:
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue  # a folder that is gone holds nothing
+        out.add((st.st_dev, st.st_ino))
+    return out
+
+
+def _inside(path: str, ids: set) -> bool:
+    """Whether `path` is, or lies under, one of the folders `ids` names: each parent is compared by identity."""
+    cur = os.path.realpath(path)
+    while True:
+        try:
+            st = os.stat(cur)
+            if (st.st_dev, st.st_ino) in ids:
+                return True
+        except OSError:
+            pass  # not there (yet): its parents still decide
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def _originals(entry) -> list[str]:
+    return [o['path'] for o in (entry or {}).get('originals', []) if isinstance(o, dict) and o.get('path')]
+
 
 class Service:
     """Store verified dataset pointers, review tickets, and approved results."""
@@ -314,10 +360,113 @@ class Service:
         }
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
+            rows = self._rows(c)
+            self.require_allowed(name, principals, _originals(snapshot['entry']), rows)
+            kept = (rows.get(name) or {}).get('watched')
+            if kept:  # a refresh keeps the mark
+                row['watched'] = kept
             c.execute('DELETE FROM cache WHERE pointer=?', (name, ))
             c.execute('DELETE FROM pending WHERE pointer=?', (name, ))
             c.execute('INSERT OR REPLACE INTO pointers VALUES (?,?)',
                       (name, pack(row)))
+
+    # --- watched folders: ONE rule, enforced here, where every connect and register ends ---------------------
+    # A pointer may be marked watched (its folders are stored on its row). A file whose REAL path lies under a
+    # watched pointer's folders may only be registered to a pointer whose agents are a SUBSET of the watched
+    # pointer's agents. Judged on real paths and agent sets only: never on names or on any report.
+
+    @staticmethod
+    def _rows(c: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        return {n: json.loads(b) for n, b in c.execute('SELECT name, body FROM pointers ORDER BY name')}
+
+    @staticmethod
+    def watched_refusal(name: str, principals: list[str], paths: list[str], rows: dict[str, dict[str, Any]]):
+        """None when allowed, else a WatchedRefused. `rows` are the registered pointers."""
+        mine = set(principals)
+        for other, row in rows.items():
+            folders = row.get('watched')
+            if other == name or not folders or mine <= set(row['principals']):
+                continue
+            ids = _ids(folders)
+            files = [p for p in paths if _inside(p, ids)]
+            if files:
+                return WatchedRefused(
+                    f'cannot register {name}: {len(files)} of its files lie inside the watched folder of {other}, '
+                    f'which serves other agents. Refused. To clear it: connect {name} for agents within those of '
+                    f'{other}, or run: python3 prepare_bulk.py --unwatch --pointer {other} --principal AGENT '
+                    f'(its own agents)', files)
+        mine_row = rows.get(name) or {}
+        if mine_row.get('watched') and not mine <= set(mine_row['principals']):
+            return WatchedRefused(
+                f'cannot change the agents of {name}, a watched folder, to ones it does not already serve. Refused. '
+                f'To clear it: python3 prepare_bulk.py --unwatch --pointer {name} --principal AGENT (its own agents) '
+                f'first, change them, then watch it again')
+        if mine_row.get('watched'):  # a subset: pointers holding files inside it for agents it would drop are refused
+            held = Service._outside_holders(name, principals, mine_row['watched'], rows)
+            if held:
+                return WatchedRefused(
+                    f'cannot change the agents of {name}, a watched folder: {", ".join(held)} hold files inside it '
+                    f'for agents it would no longer serve. Refused. To clear it: python3 prepare_bulk.py --unwatch '
+                    f'--pointer {name} --principal AGENT (its own agents) first')
+        return None
+
+    @staticmethod
+    def _outside_holders(name: str, principals: list[str], folders, rows: dict[str, dict[str, Any]]) -> list[str]:
+        mine, ids = set(principals), _ids(folders)
+        return [n for n, row in rows.items()
+                if n != name and not set(row['principals']) <= mine
+                and any(_inside(p, ids) for p in _originals(row.get('snapshot', {}).get('entry')))]
+
+    def require_allowed(self, name: str, principals: list[str], paths: list[str], rows: dict[str, dict[str, Any]]) -> None:
+        refusal = self.watched_refusal(name, principals, paths, rows)
+        if refusal:
+            raise refusal
+
+    def check_watched(self, name: str, principals: list[str], paths: list[str]) -> dict[str, Any]:
+        """Read-only dry run of the same rule, for a caller that wants to leave out the files it may not register."""
+        if not isinstance(principals, list) or not principals or not all(valid_principal(p) for p in principals):
+            raise ValueError('principals must be a non-empty list of agent names')
+        if not isinstance(paths, list) or not all(isinstance(p, str) and p for p in paths):
+            raise ValueError('paths must be a list of file paths')
+        with self.connect() as c:
+            rows = self._rows(c)
+        refusal = self.watched_refusal(name, principals, paths, rows)
+        if refusal is None:
+            return {'status': 'ok', 'refused': []}
+        return {'status': 'ok', 'refused': [{'path': p} for p in refusal.files], 'message': refusal.message}
+
+    def watch(self, name: str, principals: list[str], folders: list[str], on: bool = True) -> dict[str, Any]:
+        """Mark (or clear the mark of) a registered pointer. A mark is refused when another pointer holds a file
+        under the folders for agents the watched pointer does not serve; the answer names pointers only."""
+        require_text('pointer', name)
+        real: list[str] = []
+        if on:
+            real = [os.path.realpath(f) for f in folders] if isinstance(folders, list) and folders else []
+            if not real or any(r == os.sep or not os.path.isdir(r) for r in real):
+                raise ValueError('folders must be real folders, not the filesystem root')
+
+        with self.connect() as c:
+            c.execute('BEGIN IMMEDIATE')
+            rows = self._rows(c)
+            row = rows.get(name)
+            if row is None:
+                return {'status': 'error', 'reason': 'unknown-pointer'}
+            if set(principals) != set(row['principals']):
+                return {'status': 'error', 'reason': 'principals must be the agents this pointer serves'}
+            if on:
+                own = _originals(row.get('snapshot', {}).get('entry'))
+                if any(not any(_inside(o, _ids([r])) for o in own) for r in real):
+                    return {'status': 'error', 'reason': 'each folder must hold one of this pointer\'s own files'}
+                held = self._outside_holders(name, row['principals'], real, rows)
+                if held:
+                    return {'status': 'error', 'reason': 'watched-refused', 'pointers': held,
+                            'message': f'cannot mark {name} watched: pointers inside its folders hold files for '
+                                       f'agents it does not serve ({", ".join(held)}). Not marked.'}
+                row['watched'] = sorted(set(real))
+            else:
+                row.pop('watched', None)
+            c.execute('UPDATE pointers SET body=? WHERE name=?', (pack(row), name))
+        return {'status': 'ok', 'watched': on}
 
     def remove(self, name: str) -> None:
         """Remove a pointer and all of its pending and cached data."""

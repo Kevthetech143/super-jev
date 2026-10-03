@@ -25,6 +25,19 @@ Usage:
   --writer-command on PATH or by absolute path, and keep keys out of it: it is stored in prepare-cache/
   and shown in the banner. A report from before the writer was recorded replays none: it keeps auto.
 
+  python3 prepare_bulk.py --watch|--unwatch --pointer NAME --principal AGENT [--principal AGENT2 ...]
+    --watch marks a connected pointer watched, once: every new file, new subfolder (at any depth) and changed file
+    under its roots is taken in on a later ask (auto_heal.py --scan, refresh_changed.py), through the same holds
+    (secret-like, too big, vault folders stay held; a vault folder is reported as its folder and a count only).
+    The rule that protects other agents lives in the ENGINE and meets every connect and register: a file whose real
+    path lies under a watched folder may only be registered to a pointer whose agents are a subset of the watched
+    pointer's. A pointer that is not a subset is refused for those files only (they are held with the clearing
+    command; its other files, and the pointer, carry on). --watch is refused (exit 2, REFUSED line naming each
+    pointer) when a pointer inside the roots serves agents the watched one does not, records no agent, or has an
+    unreadable report. --principal names the pointer's own agents (as for --refresh). --unwatch clears the mark.
+    The mark is the engine's and the report's "watched": true, kept across refreshes; a refresh with a new
+    --root/--exclude/--name drops it.
+
   python3 prepare_bulk.py --list [--pointer NAME] [--principal AGENT] [--status active] [--kind dashboard]
                           [--within-days 30] [--subject CLOV]
     No-judge local list: with --pointer, reads the already-gated labels back out of prepare-cache/<pointer>.json
@@ -114,8 +127,9 @@ one; v stays 1). Skipped kinds, one per default reason: `link` (a link points ou
 folder), `hidden`, `dataset` (a prepared dataset copy), `test` (test or scratch output), `worktree` (a git
 worktree copy), `empty`, `types` (files of other types). Refusal kinds: `too_many` (more files than one connect
 takes; it also carries whole numbers `count`, how many files it would draft, and `max`, the limit, so a program words
-"count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder)
-and `usage` (the arguments are wrong).
+"count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder),
+`watched` (a --watch/--unwatch, or a connect whose files all lie inside a watched folder of other agents, was
+refused) and `usage` (the arguments are wrong).
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
@@ -147,7 +161,9 @@ def given_path(value) -> Path:
 
 
 sys.path.insert(0, str(HERE))
-from connect_checked import gate, gate_many, memory  # noqa: E402
+from connect_checked import gate, gate_many, memory, watched_refusals  # noqa: E402
+import watched  # noqa: E402
+from watched import read_report_file, report_principals  # noqa: E402
 from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
 
 # Gate packing: TypeSafe's docs batch independent questions into one call (parallel
@@ -269,6 +285,7 @@ def normalize_for_scan(text: str) -> str:
     s = text.casefold() if text.isascii() else unicodedata.normalize("NFKC", text).casefold()
     return _CTRL_RE.sub(" ", _NON_ASCII_RE.sub(_fold_run, s))
 SKIP_PARTS = {"profile", "documents", "__pycache__", "node_modules", ".git"}
+VAULT_NAMES = {"profile", "documents"}  # the SKIP_PARTS folders that hold a person's private records
 # One file's size limit. The label gate splits evidence over Jev's input ceiling into parts and
 # merges the verdicts (lib/jev_client.check; the fleet door does the same), and the writer reads an
 # excerpt, so a big file needs no hand split. The old 90,000-byte hold left every notes log, dead-ends
@@ -953,6 +970,8 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             if path_has_secret(p.name) or path_has_secret(rp.name):
                 held.append((str(p), f"secret-keyword-like file name; {SECRET_NOT_APPROVABLE}")); continue
             files.append(p)
+    # What a vault folder (profile/, documents/) holds back, as folder -> count: a watched pointer says it.
+    _RESULT["vault"] = {k: n for k, n in skips.get("folder", {}).items() if k.rstrip("/").casefold() in VAULT_NAMES}
     _RESULT["skipped"] = skip_rows(skips, extensions)
     print_skips(_RESULT["skipped"])
     return files, held
@@ -1151,6 +1170,12 @@ def _engine_word(answer) -> str:
     return str((answer or {}).get("reason") or (answer or {}).get("status") or "no answer")[:80]
 
 
+def refused_line(answer: dict) -> None:
+    """The engine's watched-folder refusal, in its own words (it names the pointer and the way to clear it)."""
+    if answer.get("reason") == "watched-refused":
+        print(f"REFUSED: {answer.get('message')}")
+
+
 def connect_part(pointer: str, principals: list, part_files: list, cache: dict, shareable: bool = False) -> dict:
     """Preview -> confirm connect for one pointer (a whole pointer or one split part of one).
     Labels ride in the bracketed description only for a file whose stage-2 label gate passed
@@ -1196,6 +1221,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
             widen_to = list(principals)
             req["principals"] = seen_by
     prev = memory(req)
+    refused_line(prev)
     if prev.get("status") != "preparation-required":
         print(f"connect preview failed for {pointer}:", json.dumps(prev)[:300])
         return {"connected": False, "why": f"connect preview failed ({_engine_word(prev)})"}
@@ -1221,6 +1247,7 @@ def connect_part(pointer: str, principals: list, part_files: list, cache: dict, 
         reg = {**reg, **memory({"action": "register", "pointer": pointer,
                                 "dataset": reg.get("dataset") or pointer, "principals": scope})}
     connected = reg.get("status") == "registered"
+    refused_line(reg)
     print(f"connect: {reg.get('status')} pointer={reg.get('pointer')} sources={len(reg.get('sources', []))}")
     if not connected:
         print(json.dumps(reg)[:300])
@@ -1353,14 +1380,12 @@ def checked_suffixes(items) -> list:
 def replay_recipe(a) -> None:
     """--refresh replays the pointer's recorded recipe for anything not given on the command line,
     so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
-    try:
-        rep = json.loads((CACHE_DIR / f"{a.pointer}-report.json").read_text())
-    except (OSError, ValueError):
-        return
-    if not isinstance(rep, dict):
+    rep = read_report_file(CACHE_DIR / f"{a.pointer}-report.json")
+    if rep is None:
         return
     # Whoever named the principal here (auto_heal's asking agent) is only a stand-in: see keep_unrecorded.
     a.standin = not (rep.get("principals") or rep.get("principal"))
+    a.watched = rep.get("watched") is True  # a mark is kept across refreshes
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # a refresh that repeats the recorded roots/excludes (typed by hand or by an older script) must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
@@ -1370,6 +1395,8 @@ def replay_recipe(a) -> None:
                     or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
                     or new_roots)
+    if rescoped:
+        a.watched = False  # the mark was checked against the old folders, not these
     a.roots = a.roots or rep.get("roots") or None
     a.principals = a.principals or rep.get("principals") or ([rep["principal"]] if rep.get("principal") else [])
     a.excludes = a.excludes or rep.get("excludes") or []
@@ -1532,6 +1559,110 @@ def growth(scope, paths, snap: dict, others, admit=()) -> list:
     return grown
 
 
+# --- watched folders ---------------------------------------------------------------------------------------
+# A person marks a connected pointer watched once (--watch). The rule that protects other agents is the engine's
+# (experiments/verified-pointer-memory, Service.watched_refusal), met on every connect and register; this file keeps
+# the mark in the report, checks it at the mark, and leaves out of a run the files the engine would refuse.
+
+ENGINE_OLD = ("nsupported action", "Unknown action")  # an engine from before the rule has no such actions
+
+
+def engine_mark(on: bool, pointer: str, principals: list, folders=()) -> tuple:
+    """Set or clear the engine's mark. (True, "") done; (True, "old") an engine from before the rule (nothing to
+    set); (False, why) refused or not asked."""
+    got = memory({"action": "watch" if on else "unwatch", "pointer": pointer, "principals": list(principals),
+                  "folders": [str(f) for f in folders]})
+    if got.get("status") == "ok" or (not on and got.get("reason") == "unknown-pointer"):
+        return True, ""
+    if any(w in str(got) for w in ENGINE_OLD):
+        return True, "old"
+    return False, got.get("message") or got.get("reason") or "the engine could not be asked; retry in a moment"
+
+
+def write_report(pointer: str, report: dict, announce: bool = True) -> None:
+    """Write a report in one step. A write that drops a watched mark says so, clears the engine's mark too, and
+    says how to mark it again."""
+    target = CACHE_DIR / f"{pointer}-report.json"
+    old = read_report_file(target)
+    if announce and old and old.get("watched") is True and report.get("watched") is not True:
+        ok, why = engine_mark(False, pointer, report_principals(report))
+        print(f"WATCH REMOVED: {pointer} is no longer watched (its folders or filters changed, so the mark was not "
+              f"kept). To watch it again: python3 prepare_bulk.py --watch --pointer {pointer} "
+              + " ".join(f"--principal {x}" for x in report_principals(report))
+              + ("" if ok else f"\n  the engine's mark was not cleared: {why}"))
+    watched.save_report(pointer, report, CACHE_DIR)
+    _record_written(target)
+
+
+def vault_line(pointer: str, folder: str, n: int) -> str:
+    """What a watched pointer says about a vault folder: the folder and a count, never a file name or path."""
+    return (f"HELD  {pointer}: {folder} {n} file(s) in a vault folder are never taken in on their own; "
+            "connect it as its own set")
+
+
+def watch_cmd(a) -> int:
+    """--watch / --unwatch: set or clear the mark in the engine and in the pointer's own report."""
+    if a.watch and a.unwatch:
+        return refuse("usage", "give --watch or --unwatch, not both")
+    if not a.pointer or not a.principals:
+        return refuse("usage", "--watch and --unwatch need --pointer and --principal (the pointer's own)")
+    path = CACHE_DIR / f"{a.pointer}-report.json"
+    rep = read_report_file(path)
+    again = (f"To watch it again: python3 prepare_bulk.py --watch --pointer {a.pointer} "
+             + " ".join(f"--principal {x}" for x in a.principals))
+    if a.unwatch:  # the engine's mark goes first: it is the one that protects, and it does not need the report
+        ok, why = engine_mark(False, a.pointer, a.principals)
+        if not ok:
+            return refuse("watched", f"cannot clear the mark of {a.pointer}: {why}. Not changed")
+        if rep is not None:
+            rep.pop("watched", None)
+            write_report(a.pointer, rep, announce=False)
+        elif path.exists():
+            print(f"NOTE: the report of {a.pointer} cannot be read; {watched.recovery(a.pointer, path)}")
+        print(f"{a.pointer} is not watched now; it takes in new files as it did before. {again}")
+        return 0
+    if rep is None:
+        return refuse("watched", f"cannot mark {a.pointer} watched: its report is missing or cannot be read. Not marked. "
+                                 + watched.recovery(a.pointer, path))
+    if set(a.principals) != set(report_principals(rep)):
+        return refuse("watched", f"cannot change {a.pointer}: --principal must name the agents it serves "
+                                 f"(recorded: {', '.join(report_principals(rep)) or 'none'}). Not changed")
+    if not rep.get("roots"):
+        return refuse("watched", f"cannot mark {a.pointer} watched: its report records no folders. Not marked")
+    bad = watched.mark_problems(a.pointer, rep, CACHE_DIR)
+    if bad:
+        lines = "\n".join(f"  {n}: {why}" for n, why in bad)
+        return refuse("watched", f"cannot mark {a.pointer} watched: pointers inside its folders do not fit its "
+                                 f"agents:\n{lines}\nNot marked watched.")
+    ok, why = engine_mark(True, a.pointer, a.principals, rep["roots"])
+    if why == "old":
+        return refuse("watched", f"cannot mark {a.pointer} watched: the engine is older than the watched-folder rule "
+                                 "(it has no watch action), so nothing would protect other agents. Update Super Jev. Not marked")
+    if not ok:
+        return refuse("watched", why)
+    rep["watched"] = True
+    write_report(a.pointer, rep)
+    print(f"{a.pointer} is watched: every new or changed file under its folders is taken in on a later ask "
+          "(secret-like, too-big and vault files stay held)")
+    return 0
+
+
+def leave_out_refused(a, files: list, held: list):
+    """Ask the engine's watched rule about every file this run would register and leave out the ones it would
+    refuse: they are held, named, with the way to clear it; the rest carries on, so an enclosing pointer of other
+    agents keeps refreshing. (files, held, None); or (None, None, why) when nothing is left to register."""
+    gone, why = watched_refusals(a.pointer, a.principals, [str(p) for p in [*files, *(h[0] for h in held)]])
+    if not gone:
+        return files, held, None
+    out = set(gone)
+    files = [p for p in files if str(p) not in out]
+    kept = [h for h in held if str(h[0]) not in out]
+    if not files and not kept:
+        return None, None, why
+    print(f"REFUSED: {why}")
+    return files, kept + [(p, "inside a watched folder that serves other agents; see REFUSED above") for p in sorted(out)], None
+
+
 def principal_name(name: str) -> str:
     """argparse type for --principal: the memory runtime's agent-name rule, checked before any
     state path is built from it (letters, digits, ".", "_", "-"; starts with a letter or digit)."""
@@ -1634,6 +1765,10 @@ def main() -> int:
                     help="after connecting, search each file's own sample question (one search per file, "
                          "paid judge calls) and report the misses; off by default")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--watch", action="store_true",
+                    help="mark the pointer watched: every new file and subfolder under its folders is taken in on later "
+                         "asks. Refused when a pointer inside serves agents it does not (--principal: its own)")
+    ap.add_argument("--unwatch", action="store_true", help="clear the watched mark (--principal: the pointer's own)")
     ap.add_argument("--shareable", action="store_true",
                     help="mark this connection shareable with other agents (default private); a person's decision")
     ap.add_argument("--no-shared", action="store_true",
@@ -1673,6 +1808,8 @@ def run(a) -> int:
             print(f"\n{excluded} excluded (as_of unknown)")
         return 0
 
+    if a.watch or a.unwatch:
+        return watch_cmd(a)
     try:
         ext = getattr(a, "ext", None)
         if ext:
@@ -1729,6 +1866,19 @@ def run(a) -> int:
         return refuse("not_a_folder", f"--root is not a folder: {', '.join(missing)}")
     walked_at = time.time()  # a growth snapshot counts as "since" only what the walk below could miss
     files, held = inventory(roots, a.excludes, a.no_recurse, a.names, a.allow_targets, a.extensions)
+    if getattr(a, "watched", False):
+        # A watched pointer takes a new file only if its real path lies inside its real roots; a link that leads
+        # out is held (named, not what is behind it). Files it already connected stay as they were.
+        new = [p for p in [*files, *(h[0] for h in held)] if str(p) not in cache]
+        _, links = watched.split_out(new, [str(r) for r in roots])
+        outside = {str(p) for p in new if not watched.inside_roots(p, [str(r) for r in roots])}
+        files = [p for p in files if str(p) not in outside]
+        held = [h for h in held if str(h[0]) not in outside]
+        for link in links:
+            print(watched.link_line(a.pointer, link))
+    files, held, why = leave_out_refused(a, files, held)
+    if why:
+        return refuse("watched", why)
     scope = getattr(a, "legacy_scope", None)
     if a.admit and scope is None:
         print("  --admit applies only to a --refresh of a legacy pinned pointer; nothing admitted "
@@ -1736,6 +1886,21 @@ def run(a) -> int:
     if scope is not None and any(vault_folder(r) for r in roots):
         print("refresh: this pointer's root sits inside a vault folder (profile/, documents/ ...); "
               "it never takes in new files on its own")
+    elif scope is not None and getattr(a, "watched", False):
+        # Watched: every file under the roots that no other pointer connects joins, at any depth.
+        from refresh_changed import known_across
+        others = known_across(CACHE_DIR, skip=a.pointer)
+        grown = [str(p) for p in [*files, *(h[0] for h in held)]
+                 if str(p) not in scope and str(p) not in others and os.path.realpath(p) not in others]
+        if len(grown) > a.max_files:
+            print(f"refresh: {len(grown)} new files in a watched folder exceed --max-files "
+                  f"{a.max_files}; not added (raise --max-files to take them in)")
+        elif grown:
+            print(f"refresh: {len(grown)} new file(s) in a watched folder join the pinned list")
+            scope = a.legacy_scope = scope | set(grown)
+            a.grown = grown
+        files = [p for p in files if str(p) in scope]
+        held = [(p, why) for p, why in held if str(p) in scope]
     elif scope is not None:
         # A note written later into a folder the pinned list already connects joins the scope
         # (same holds, review and connect gate as every file); files in other folders stay out.
@@ -1775,6 +1940,9 @@ def run(a) -> int:
         files = [p for p in files if str(p) in scope]
         held = [(p, why) for p, why in held if str(p) in scope]
     _RESULT["held"] = held
+    if getattr(a, "watched", False):
+        for folder, n in sorted((_RESULT.get("vault") or {}).items()):
+            print(vault_line(a.pointer, folder, n))
     print(f"inventory: {len(files)} files to prepare, {len(held)} held")
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
@@ -1976,11 +2144,12 @@ def run(a) -> int:
               "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
               "connected": False, "parts": []}
+    if getattr(a, "watched", False):
+        report["watched"] = True
     held_n = len(held)
     if a.no_connect or not connect_set:
         keep_unrecorded(report, a)
-        (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
-        _record_written(CACHE_DIR / f"{a.pointer}-report.json")
+        write_report(a.pointer, report)
         print(f"no connect ({'--no-connect' if a.no_connect else 'nothing approved'}); {time.time() - t0:.0f}s")
         if a.no_connect:
             return connect_outcome(0, held_n, len(exceptions), f"--no-connect: {len(connect_set)} ready, none sent")
@@ -2051,8 +2220,7 @@ def run(a) -> int:
             print(f"  MISS  {relstr(p, roots)}  ({why})")
 
     keep_unrecorded(report, a)
-    (CACHE_DIR / f"{a.pointer}-report.json").write_text(json.dumps(report, indent=1))
-    _record_written(CACHE_DIR / f"{a.pointer}-report.json")
+    write_report(a.pointer, report)
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
     return connect_outcome(connected_n, held_n, len(exceptions) + failed_n)
 

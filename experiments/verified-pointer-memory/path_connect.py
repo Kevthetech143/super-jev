@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from service import Service, invalidate_registry, valid_principal
+from service import Service, WatchedRefused, invalidate_registry, valid_principal
 from cli import has_secret
 from reviewed_view import derive
 import prepare_bulk
@@ -343,6 +343,9 @@ def _connect(request, config):
         with service.connect() as db:
             rows = {name: json.loads(body) for name, body in db.execute('SELECT name, body FROM pointers')}
         old = rows.get(pointer)
+        refusal = service.watched_refusal(pointer, principals, [s['realPath'] for s in sources], rows)
+        if refusal:  # before anything is written: a refused connect leaves nothing behind
+            return refusal.answer()
         if (old or dataset in data['datasets']) and request.get('replace') is not True:
             return _problem('already-connected', 'This pointer or dataset exists. Review its scope and explicitly set replace:true to refresh it.')
         if old and (old['dataset'] != dataset or sorted(old['principals']) != sorted(principals)):
@@ -404,7 +407,16 @@ def _connect(request, config):
                                    for s in sources]}}
         _atomic(registry, data)
         # Publication changes the fingerprint first, so interruption cannot reuse an old cache.
-        service.register(pointer, dataset, principals)
+        try:
+            service.register(pointer, dataset, principals)
+        except WatchedRefused as refusal:  # a mark landed since the check above: put the dataset back as it was
+            if previous:
+                data['datasets'][dataset] = previous
+            else:
+                data['datasets'].pop(dataset, None)
+            _atomic(registry, data)
+            shutil.rmtree(folder, ignore_errors=True)  # it holds a copy of the refused file's text
+            return refusal.answer()
         _, error = service.pointer(pointer, principals[0])
         if error:
             return _problem('source-changed', 'A source changed during connection. Review it and reconnect with replace:true.')
