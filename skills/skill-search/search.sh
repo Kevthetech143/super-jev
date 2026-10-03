@@ -18,11 +18,17 @@ if [ "${CLAUDECODE:-}" = 1 ]; then BASE="$DIR/roots-claude.json"; fi
 if [ "$HAS_ROOTS" -eq 0 ] && [ -r "$EXTRA" ] && [ -r "$BASE" ]; then
   MERGED="$(mktemp /tmp/skill-search-merged.XXXXXX)"
   trap 'rm -f "$MERGED"' EXIT
-  python3 - "$BASE" "$EXTRA" "$MERGED" <<'PYEOF'
+  # A base file that is not a JSON list is left alone: the launcher reports it as before.
+  if python3 - "$BASE" "$EXTRA" "$MERGED" <<'PYEOF'
 import json, os, sys
 base, extra, dst = sys.argv[1:4]
 debug = os.environ.get("SKILL_SEARCH_DEBUG") == "1"
-roots = json.load(open(base))
+try:
+    roots = json.load(open(base))
+    if not isinstance(roots, list):
+        raise ValueError("not a JSON array")
+except Exception:
+    sys.exit(1)
 try:
     more = json.load(open(extra))
     if not isinstance(more, list):
@@ -33,7 +39,8 @@ except Exception as e:
 have = {os.path.expanduser(r) for r in roots if isinstance(r, str)}
 for entry in more:
     path = os.path.expanduser(entry.strip()) if isinstance(entry, str) else ""
-    if not path or not os.path.isabs(path) or not os.path.isdir(path):
+    if not path or not os.path.isabs(path) or not os.path.isdir(path) \
+            or not os.access(path, os.R_OK | os.X_OK):
         if debug:
             sys.stderr.write("skill-search: extra root skipped: %r\n" % (entry,))
         continue
@@ -42,8 +49,10 @@ for entry in more:
         have.add(path)
 json.dump(roots, open(dst, "w"))
 PYEOF
-  set -- "$@" --config "$MERGED"
-  HAS_ROOTS=1
+  then
+    set -- "$@" --config "$MERGED"
+    HAS_ROOTS=1
+  fi
 fi
 if [ "$HAS_ROOTS" -eq 0 ]; then
   if [ "${CLAUDECODE:-}" = 1 ]; then set -- "$@" --config "$DIR/roots-claude.json"; fi

@@ -61,7 +61,7 @@ def release(tmp_path):
     env = {**os.environ, "HOME": str(home), "SKILL_SEARCH_NODE_BIN": str(node), "FAKE_LOG": str(log)}
     # CLAUDECODE is set in every shell Claude Code spawns, so a contributor running pytest there has it
     for k in ("CLAUDECODE", "CLAW4MAC_AI_MODEL", "SKILL_SEARCH_AI_MODEL", "FAKE_MODE",
-              "SKILL_SEARCH_PROVIDER_CMD"):
+              "SKILL_SEARCH_PROVIDER_CMD", "SKILL_SEARCH_EXTRA_ROOTS", "SKILL_SEARCH_DEBUG"):
         env.pop(k, None)
     return rel, env, log
 
@@ -286,3 +286,27 @@ def test_extra_roots_file_is_ignored_when_it_is_not_a_list_or_when_config_is_giv
     own.write_text(json.dumps([str(tmp_path)]))
     rc, out, _ = dispatch(rel, env, "--local-only", "--config", str(own), "--request", "x")
     assert json.loads((log / "roots.json").read_text()) == [str(tmp_path)]
+
+
+def test_a_bad_base_roots_file_still_fails_as_before_and_an_unlistable_extra_is_skipped(release, tmp_path):
+    rel, env, log = release
+    proj = tmp_path / "acme-app/skills"
+    locked = tmp_path / "locked-skills"
+    proj.mkdir(parents=True)
+    locked.mkdir()
+    extra = tmp_path / "extra-roots.json"
+    extra.write_text(json.dumps([str(locked), str(proj)]))
+    env = {**env, "SKILL_SEARCH_EXTRA_ROOTS": str(extra), "SKILL_SEARCH_DEBUG": "1"}
+    base = rel / "skills/skill-search/roots.json"
+    base.write_text('{"not": "a list"}')
+    rc, out, _ = dispatch(rel, env, "--local-only", "--request", "x")
+    assert rc == 2 and "roots config malformed" in one_json(out)["error"]
+    base.write_text('["~/.codex/skills"]')
+    locked.chmod(0)
+    try:
+        rc, out, err = dispatch(rel, env, "--local-only", "--request", "x")
+    finally:
+        locked.chmod(0o755)
+    assert rc == 0, out
+    assert json.loads((log / "roots.json").read_text()) == [str(Path(env["HOME"]) / ".codex/skills"), str(proj)]
+    assert "locked-skills" in err
