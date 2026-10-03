@@ -1675,18 +1675,17 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
             and not has_secret(text) and refresh_would_admit(path, ptr))
 
 
-def candidate_files(pointers: list, exclude=()):
+def candidate_files(pointers: list, exclude=(), done=()):
     """(pointer, path, cache entry) of every file a word search would open: reviewed (`pass`), not test
-    material, not in `exclude` (another person's files), each path once. The one list that word search and the
-    edited-file count both start from."""
-    seen = set()
+    material, not in `exclude` (another person's files). A path is skipped only once the caller has indexed it
+    (`done`, which the caller fills), so a set that cannot read its copy never hides a good copy in another set.
+    The one list that word search and the edited-file count both start from."""
     for ptr in pointers:
         names = connector_names(ptr)
         for path, entry in load_cache_files(ptr).items():
-            if (path in seen or path in exclude or not isinstance(entry, dict) or not entry.get("pass")
+            if (path in done or path in exclude or not isinstance(entry, dict) or not entry.get("pass")
                     or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names))):
                 continue
-            seen.add(path)
             yield ptr, path, entry
 
 
@@ -1696,19 +1695,22 @@ def edited_held(pointers: list, exclude=()) -> dict:
     whichever search path (routing, word search, a later one) skips them. Split by what would help:
     {"secret": its current text holds a secret (held: the value must go), "stuck": too big or out of the
     set's scope (a refresh would hold it again), "refresh": a refresh will review it}."""
-    out = {"secret": [], "stuck": [], "refresh": []}
-    for ptr, path, entry in candidate_files(pointers, exclude):
+    done, why = set(), {}  # done: some set reads the file; why: the first set's reason it cannot
+    for ptr, path, entry in candidate_files(pointers, exclude, done):
         try:
             raw = Path(path).read_bytes()
         except OSError:
             continue  # removed: not an edited file
-        if hashlib.sha256(raw).hexdigest() == entry.get("sha256"):
-            continue
         text = raw.decode("utf-8", "replace")
-        if edited_readable(path, ptr, entry, raw, text):
+        if hashlib.sha256(raw).hexdigest() == entry.get("sha256") or edited_readable(path, ptr, entry, raw, text):
+            done.add(path)  # a file is out only if no searched set reads it
             continue
-        out["secret" if has_secret(text) else "stuck" if (
-            len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh"].append(path)
+        why.setdefault(path, "secret" if has_secret(text) else "stuck" if (
+            len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh")
+    out = {"secret": [], "stuck": [], "refresh": []}
+    for path, kind in why.items():
+        if path not in done:
+            out[kind].append(path)
     return out
 
 
@@ -1733,7 +1735,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     qpairs = list(dict.fromkeys((a, b) for a, b in zip(qwords, qwords[1:])
                                 if a != b and a in terms and b in terms))  # "step by step" is no phrase
     qkeys = {(a[:4], b[:4]) for a, b in qpairs}
-    for ptr, path, entry in candidate_files(pointers):
+    for ptr, path, entry in candidate_files(pointers, done=docs):
         try:
             raw = Path(path).read_bytes()
         except OSError:

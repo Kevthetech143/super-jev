@@ -276,3 +276,18 @@ def test_edited_files_show_in_the_needs_setup_reason_too(tmp_path, monkeypatch, 
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True}})
     rc, lines = _ask(tmp_path, capsys)
     assert rc == 4 and "1 set stale or unprepared" in lines[0] and "1 edited file not read" in lines[0]
+
+
+def test_a_file_one_set_cannot_read_is_still_found_in_another_set_that_can(tmp_path, monkeypatch):
+    import hashlib
+    note = tmp_path / "acme-warranty.md"
+    body = b"# Acme warranty period\nthe warranty period for Acme is 3 years\n"
+    note.write_bytes(body)
+    caches = {"a": {str(note): {"pass": True, "sha256": "0" * 64}},  # an older copy of the record: not admitted
+              "b": {str(note): {"pass": True, "sha256": hashlib.sha256(body).hexdigest()}}}
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: caches[ptr])
+    monkeypatch.setattr(ask, "connector_names", lambda ptr: [])
+    monkeypatch.setattr(ask, "refresh_would_admit", lambda path, ptr: False)
+    assert [p for _, p, _ in ask.word_search("acme warranty period", ["a", "b"])] == [str(note)]
+    assert ask.edited_held(["a", "b"]) == {"secret": [], "stuck": [], "refresh": []}  # b reads it: not out
+    assert ask.edited_held(["a"])["stuck"] == [str(note)]  # but with only a, it is
