@@ -86,6 +86,19 @@ def memory(req: dict) -> dict:
         return {"status": "error", "raw": (r.stdout + r.stderr)[-400:]}
 
 
+def watched_refusals(pointer: str, principals: list, paths: list) -> tuple:
+    """(the paths the watched rule would refuse for this pointer, why). The rule lives in the engine, which also
+    enforces it on every connect and register; prepare_bulk asks it first (action watched-check) so nothing is drafted
+    or judged for a file that will be refused. Decides nothing itself."""
+    if not principals or not paths:
+        return [], ""
+    got = memory({"action": "watched-check", "pointer": pointer, "principals": list(principals),
+                  "paths": [str(p) for p in paths]})
+    if got.get("status") == "ok" and isinstance(got.get("refused"), list):
+        return [r["path"] for r in got["refused"] if isinstance(r, dict) and r.get("path")], got.get("message", "")
+    return [], ""  # the engine could not answer (or has no such rule): it still decides at the connect itself
+
+
 def main() -> int:
     from prepare_bulk import has_secret
     args = sys.argv[1:]
@@ -175,6 +188,8 @@ def main() -> int:
         req["navigationSHA"] = preview["navigationSHA"]
     req["reviewed"] = True
     reg = memory(req)
+    if reg.get("reason") == "watched-refused":
+        print("REFUSED:", reg.get("message"))
     print("connect:", reg.get("status"), "pointer:", reg.get("pointer"), "sources:", len(reg.get("sources", [])))
     for warning in reg.get("cleanupWarnings", []):
         print("retention review:", warning)
