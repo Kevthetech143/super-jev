@@ -147,6 +147,8 @@ class WatchedRuleTests(unittest.TestCase):
         cafe = self.watched_cafe()
         (cafe / 'new.md').write_text('# New\nRook note.\n')
         nfd = str(cafe).replace(unicodedata.normalize('NFC', 'caf\u00e9'), unicodedata.normalize('NFD', 'caf\u00e9'))
+        if not (Path(nfd) / 'new.md').exists():
+            self.skipTest('file system does not treat the NFD spelling as the same folder')
         refused = self.connect('rook-cafe', ['rook'], [Path(nfd) / 'new.md'])
         self.assertEqual(refused.get('reason'), 'watched-refused', refused)
 
