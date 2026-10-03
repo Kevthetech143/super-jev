@@ -164,13 +164,33 @@ class WatchedRefused(ValueError):
         return {'status': 'error', 'reason': 'watched-refused', 'message': self.message, 'files': self.files}
 
 
-def _folder(path: str) -> str:
-    return os.path.realpath(path).casefold().rstrip(os.sep)
+def _ids(folders) -> set:
+    """(device, inode) of each folder that exists. Identity, not spelling: Unicode forms, case and firmlink paths
+    (/System/Volumes/Data/...) of one folder all give the same pair. (A hard link to a file is a known limit.)"""
+    out = set()
+    for f in folders:
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue  # a folder that is gone holds nothing
+        out.add((st.st_dev, st.st_ino))
+    return out
 
 
-def _inside(path: str, folders) -> bool:
-    real = os.path.realpath(path).casefold()
-    return any(real == f or real.startswith(f + os.sep) for f in map(_folder, folders))
+def _inside(path: str, ids: set) -> bool:
+    """Whether `path` is, or lies under, one of the folders `ids` names: each parent is compared by identity."""
+    cur = os.path.realpath(path)
+    while True:
+        try:
+            st = os.stat(cur)
+            if (st.st_dev, st.st_ino) in ids:
+                return True
+        except OSError:
+            pass  # not there (yet): its parents still decide
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
 
 
 def _originals(entry) -> list[str]:
@@ -367,16 +387,22 @@ class Service:
             folders = row.get('watched')
             if other == name or not folders or mine <= set(row['principals']):
                 continue
-            files = [p for p in paths if _inside(p, folders)]
+            ids = _ids(folders)
+            files = [p for p in paths if _inside(p, ids)]
             if files:
                 return WatchedRefused(
                     f'cannot register {name}: {len(files)} of its files lie inside the watched folder of {other}, '
                     f'which serves other agents. Refused. To clear it: connect {name} for agents within those of '
                     f'{other}, or run: python3 prepare_bulk.py --unwatch --pointer {other} --principal AGENT '
                     f'(its own agents)', files)
-        own = (rows.get(name) or {}).get('watched')
-        if own:  # a watched pointer's own agents may not move away from a pointer holding files inside its folders
-            held = Service._outside_holders(name, principals, own, rows)
+        mine_row = rows.get(name) or {}
+        if mine_row.get('watched') and not mine <= set(mine_row['principals']):
+            return WatchedRefused(
+                f'cannot change the agents of {name}, a watched folder, to ones it does not already serve. Refused. '
+                f'To clear it: python3 prepare_bulk.py --unwatch --pointer {name} --principal AGENT (its own agents) '
+                f'first, change them, then watch it again')
+        if mine_row.get('watched'):  # a subset: pointers holding files inside it for agents it would drop are refused
+            held = Service._outside_holders(name, principals, mine_row['watched'], rows)
             if held:
                 return WatchedRefused(
                     f'cannot change the agents of {name}, a watched folder: {", ".join(held)} hold files inside it '
@@ -386,10 +412,10 @@ class Service:
 
     @staticmethod
     def _outside_holders(name: str, principals: list[str], folders, rows: dict[str, dict[str, Any]]) -> list[str]:
-        mine = set(principals)
+        mine, ids = set(principals), _ids(folders)
         return [n for n, row in rows.items()
                 if n != name and not set(row['principals']) <= mine
-                and any(_inside(p, folders) for p in _originals(row.get('snapshot', {}).get('entry')))]
+                and any(_inside(p, ids) for p in _originals(row.get('snapshot', {}).get('entry')))]
 
     def require_allowed(self, name: str, principals: list[str], paths: list[str], rows: dict[str, dict[str, Any]]) -> None:
         refusal = self.watched_refusal(name, principals, paths, rows)
@@ -418,6 +444,7 @@ class Service:
             real = [os.path.realpath(f) for f in folders] if isinstance(folders, list) and folders else []
             if not real or any(r == os.sep or not os.path.isdir(r) for r in real):
                 raise ValueError('folders must be real folders, not the filesystem root')
+
         with self.connect() as c:
             c.execute('BEGIN IMMEDIATE')
             rows = self._rows(c)
@@ -427,6 +454,9 @@ class Service:
             if set(principals) != set(row['principals']):
                 return {'status': 'error', 'reason': 'principals must be the agents this pointer serves'}
             if on:
+                own = _originals(row.get('snapshot', {}).get('entry'))
+                if any(not any(_inside(o, _ids([r])) for o in own) for r in real):
+                    return {'status': 'error', 'reason': 'each folder must hold one of this pointer\'s own files'}
                 held = self._outside_holders(name, row['principals'], real, rows)
                 if held:
                     return {'status': 'error', 'reason': 'watched-refused', 'pointers': held,

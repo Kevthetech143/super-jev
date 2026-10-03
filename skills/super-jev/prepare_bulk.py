@@ -1635,15 +1635,15 @@ def watch_cmd(a) -> int:
         return refuse("watched", f"cannot mark {a.pointer} watched: pointers inside its folders do not fit its "
                                  f"agents:\n{lines}\nNot marked watched.")
     ok, why = engine_mark(True, a.pointer, a.principals, rep["roots"])
+    if why == "old":
+        return refuse("watched", f"cannot mark {a.pointer} watched: the engine is older than the watched-folder rule "
+                                 "(it has no watch action), so nothing would protect other agents. Update Super Jev. Not marked")
     if not ok:
         return refuse("watched", why)
     rep["watched"] = True
     write_report(a.pointer, rep)
     print(f"{a.pointer} is watched: every new or changed file under its folders is taken in on a later ask "
           "(secret-like, too-big and vault files stay held)")
-    if why == "old":
-        print("NOTE: the engine is older than the watched-folder rule, so it does not enforce it; update Super Jev. "
-              "Until then only this tool's connect refuses other agents' files here.")
     return 0
 
 

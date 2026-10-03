@@ -29,13 +29,26 @@ def report_principals(rep: dict) -> list:
             if isinstance(x, str) and x]
 
 
-def _real(path) -> str:
-    return os.path.realpath(path).casefold()
-
-
 def within(path, folder) -> bool:
-    p, f = _real(path), _real(folder).rstrip(os.sep)
-    return p == f or p.startswith(f + os.sep)
+    """Whether `path` is, or lies under, `folder`: each parent of the real path is compared with the folder by
+    (device, inode), so Unicode forms, case and firmlink spellings of one folder all match."""
+    try:
+        st = os.stat(folder)
+    except OSError:
+        return False
+    want = (st.st_dev, st.st_ino)
+    cur = os.path.realpath(path)
+    while True:
+        try:
+            s = os.stat(cur)
+            if (s.st_dev, s.st_ino) == want:
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
 
 
 def _raw(path) -> tuple:
@@ -74,7 +87,8 @@ def reports(cache_dir: Path = None):
 
 
 def mark_problems(pointer: str, rep: dict, cache_dir: Path = None) -> list:
-    """[(name, why)] for each other pointer inside `rep`'s folders (by its recorded folders or files) whose report
+    """MARK-TIME check on the reports on disk, not the rule (the rule is the engine's and runs on every connect and
+    register): [(name, why)] for each other pointer inside `rep`'s folders (by its recorded folders or files) whose report
     records no agent, serves an agent `rep` does not, or cannot be read (an unreadable one counts when its folders
     cannot be told). The engine checks the same on what it has registered; this reads the reports."""
     mine = set(report_principals(rep))
