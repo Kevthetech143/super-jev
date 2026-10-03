@@ -894,6 +894,10 @@ INCONCLUSIVE = "inconclusive"
 # navigation-cli's reason when a provider call ran past its timeout (src/enhance/navigation.ts)
 NAV_TIMED_OUT = "Navigation provider timed out"
 
+def is_network_error(text, kind=None) -> bool:
+    """A TypeSafe call that never got an answer (navigation-cli words it "could not reach TypeSafe (network)")."""
+    return kind == "unreachable" or "(network)" in str(text or "")
+
 def navigation_command() -> list:
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else Path(__file__).resolve().parents[2]
     return ["node", str(repo / "src" / "navigation-cli.ts")]
@@ -1671,6 +1675,45 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
             and not has_secret(text) and refresh_would_admit(path, ptr))
 
 
+def candidate_files(pointers: list, exclude=(), done=()):
+    """(pointer, path, cache entry) of every file a word search would open: reviewed (`pass`), not test
+    material, not in `exclude` (another person's files). A path is skipped only once the caller has indexed it
+    (`done`, which the caller fills), so a set that cannot read its copy never hides a good copy in another set.
+    The one list that word search and the edited-file count both start from."""
+    for ptr in pointers:
+        names = connector_names(ptr)
+        for path, entry in load_cache_files(ptr).items():
+            if (path in done or path in exclude or not isinstance(entry, dict) or not entry.get("pass")
+                    or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names))):
+                continue
+            yield ptr, path, entry
+
+
+def edited_held(pointers: list, exclude=()) -> dict:
+    """The one count of files left out because they were edited since their set's last refresh and a
+    refresh would not admit them. Worked out once per searched set from the files a search would open,
+    whichever search path (routing, word search, a later one) skips them. Split by what would help:
+    {"secret": its current text holds a secret (held: the value must go), "stuck": too big or out of the
+    set's scope (a refresh would hold it again), "refresh": a refresh will review it}."""
+    done, why = set(), {}  # done: some set reads the file; why: the first set's reason it cannot
+    for ptr, path, entry in candidate_files(pointers, exclude, done):
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            continue  # removed: not an edited file
+        text = raw.decode("utf-8", "replace")
+        if hashlib.sha256(raw).hexdigest() == entry.get("sha256") or edited_readable(path, ptr, entry, raw, text):
+            done.add(path)  # a file is out only if no searched set reads it
+            continue
+        why.setdefault(path, "secret" if has_secret(text) else "stuck" if (
+            len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh")
+    out = {"secret": [], "stuck": [], "refresh": []}
+    for path, kind in why.items():
+        if path not in done:
+            out[kind].append(path)
+    return out
+
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -1692,32 +1735,27 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     qpairs = list(dict.fromkeys((a, b) for a, b in zip(qwords, qwords[1:])
                                 if a != b and a in terms and b in terms))  # "step by step" is no phrase
     qkeys = {(a[:4], b[:4]) for a, b in qpairs}
-    for ptr in pointers:
-        names = connector_names(ptr)
-        for path, entry in load_cache_files(ptr).items():
-            if (path in docs or not isinstance(entry, dict) or not entry.get("pass")
-                    or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names))):
-                continue
-            try:
-                raw = Path(path).read_bytes()
-            except OSError:
-                continue
-            text = raw.decode("utf-8", "replace")
-            if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
-                # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
-                # search its current text, held back only as a refresh would hold it.
-                if not edited_readable(path, ptr, entry, raw, text):
-                    continue  # never reviewed at a known version, or a refresh would hold it
-                changed.append(path)
-            heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
-            head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
-                             str(entry.get("description") or ""), str(entry.get("question") or "")])
-            head_words = Counter(w for w in words(head) for _ in range(3))
-            chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
-            passages = [passage_words(c) + head_words for c in chunks]
-            docs[path] = (ptr, sum(passages, Counter()),
-                          [(c, sum(c.values()), word_pairs(t) & qkeys if qkeys else set())
-                           for c, t in zip(passages, chunks)])
+    for ptr, path, entry in candidate_files(pointers, done=docs):
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            continue
+        text = raw.decode("utf-8", "replace")
+        if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+            # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
+            # search its current text, held back only as a refresh would hold it.
+            if not edited_readable(path, ptr, entry, raw, text):
+                continue  # never reviewed at a known version, or a refresh would hold it
+            changed.append(path)
+        heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
+        head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
+                         str(entry.get("description") or ""), str(entry.get("question") or "")])
+        head_words = Counter(w for w in words(head) for _ in range(3))
+        chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+        passages = [passage_words(c) + head_words for c in chunks]
+        docs[path] = (ptr, sum(passages, Counter()),
+                      [(c, sum(c.values()), word_pairs(t) & qkeys if qkeys else set())
+                       for c, t in zip(passages, chunks)])
     if not docs:
         return []
     _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
@@ -1770,7 +1808,7 @@ def confirm(question: str, paths: list):
     paths = paths[:CONFIRM_FILES + FALLBACK_FILES]
     if not batch_jev():
         results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
-        return confirm_results(paths, results)
+        return confirm_results(paths, retry_network(question, paths, results))
     # Every file's check rides in one navigation-cli run: their Jev questions share
     # calls, split under the input ceiling, and each is still judged on its own.
     started = [confirm_start(question, p) for p in paths]
@@ -1781,7 +1819,7 @@ def confirm(question: str, paths: list):
         # The batched run itself failed: check each file on its own instead of
         # marking every file inconclusive.
         results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
-        return confirm_results(paths, results)
+        return confirm_results(paths, retry_network(question, paths, results))
     outs = iter(rows or [])
     results = [done or confirm_finish(question, ctx, next(outs), None) for done, ctx in started]
     # The run's one shared call has one fixed timeout (SUPERJEV_NAV_TIMEOUT_MS) however
@@ -1796,7 +1834,18 @@ def confirm(question: str, paths: list):
             results[i] = r
         if again:
             _STAGE["timeout_rechecks"] = len(again)
-    return confirm_results(paths, results)
+    return confirm_results(paths, retry_network(question, paths, results))
+
+def retry_network(question: str, paths: list, results: list) -> list:
+    """A file whose content check hit a TypeSafe network error is checked once more on its own
+    before it counts as unchecked. A second failure stays an error."""
+    again = [i for i, (_, _, e, _) in enumerate(results) if is_network_error(e)]
+    for i, r in zip(again, ThreadPoolExecutor(max_workers=max(1, min(len(again), NAV_CONCURRENCY))).map(
+            lambda i: confirm_one(question, paths[i]), again) if again else []):
+        results[i] = r
+    if again:
+        _STAGE["network_rechecks"] = len(again)
+    return results
 
 def confirm_results(paths: list, results: list):
     errors = [e for _, _, e, _ in results if e]
@@ -2163,6 +2212,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     skill_job = (ThreadPoolExecutor(max_workers=1).submit(skill_catalog, question)
                  if skill_question(question) else None)
     active_pointers, error_lines, failed, stale_ptrs, hints = [], [], [], [], {}
+    older = []  # stale sets served from their last catalog: searched, so not counted as left out
     for ptr in original_pointers:
         benched, remaining, fails = pointer_benched(health, ptr, principal)
         if benched:
@@ -2240,8 +2290,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         t_start = time.time()
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
                       "lastGood": True, **routing_limits})
-        # No retry here: the judge's one retry rule already ran inside the call (an
-        # overloaded judge is retried there), so a failure that reaches us is final.
+        # An overloaded judge was already retried inside the call; a network error gets
+        # its one retry below, after routing (is_network_error).
         return classify(ptr, out, time.time() - t_start)
 
     def nav_many(ptrs):
@@ -2262,6 +2312,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     else:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
+    # A set whose routing hit a TypeSafe network error is asked once more before it counts as not searched.
+    again = [i for i, (ptr, kind, *_r) in enumerate(results) if not replay and is_network_error(kind, nav_kinds.get(ptr))]
+    for i in again:
+        results[i] = nav(results[i][0])
+    if again:
+        _STAGE["network_retries"] = len(again)
     # A stale pointer whose files are all already reviewed at their current bytes needs no
     # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
     # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup. A replay
@@ -2287,7 +2343,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # and refresh their pointers, so a later lookup finds them without a hand reconnect.
     if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
         _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
-    merged, statuses, stale_held = [], {}, []
+    merged, statuses = [], {}
     state_of, healing = {}, set()  # --json: why each unsearched set was left out, and whether it is being refreshed
     _STAGE["stale_changed"] = []
     for ptr, kind, rows, elapsed, ok in results:
@@ -2306,8 +2362,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     except OSError:
                         continue
                     if not edited_readable(path, ptr, files.get(path), raw, raw.decode("utf-8", "replace")):
-                        stale_held.append(path)
-                        continue
+                        continue  # counted once, per set, by edited_held
                     _STAGE["stale_changed"].append(path)
                 kept.append(c)
             rows = kept
@@ -2322,7 +2377,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             if auto_heal.is_stale_kind(kind):
                 state_of[ptr] = "unprepared" if kind.startswith("preparation-required") else "stale"
         if served:
-            stale_ptrs.append(ptr)
+            # It answered from its last refresh (classify serves only routed sets): searched, not left out.
+            older.append(ptr)
             state_of[ptr] = "stale"
             statuses[ptr] += " (stale: last refresh)"
         if served or kind not in ("candidates", "no-candidates"):
@@ -2493,6 +2549,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     log(sdir, "lookup", question=question, judge=judges.profile().name, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
         **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
+    edited = edited_held(search_pointers, {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)})
+    edited_paths = [p for kind in edited.values() for p in kind]  # once per searched set, not per search path
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
     content_check = {p: {"score": scores.get(p) if type(scores.get(p)) in (int, float) and 0 <= scores[p] <= 1 else None,
@@ -2517,7 +2575,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                          "kept": c.get("score", 0) >= route_floor} for c in rows][:STAGE_LIST_CAP]}
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
-            "stale_held": stale_held[:STAGE_LIST_CAP],
+            "stale_held": edited_paths[:STAGE_LIST_CAP],
             "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
                             "changed_since_connect": sorted(set(_STAGE.get("word_changed") or [])
                                                             | set(_STAGE.get("stale_changed") or [])),
@@ -2578,7 +2636,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     file_list = [file_row(sc, p, ptr, "unchecked" if notes.get(p) == INCONCLUSIVE
                           else "possible" if p in possible else "confirmed") for sc, p, ptr in top]
     skill_list = skill_rows(skills)
-    held = [p for p, note in notes.items() if note == HELD_SECRET]
+    # A file picked for this question and withheld for a secret, or edited and now holding one: never read.
+    held = list(dict.fromkeys([p for p, note in notes.items() if note == HELD_SECRET] + edited["secret"]))
     leans = bool(top and (_STAGE.get("listwise") or {}).get("leans_none"))
     for sk in skill_list:
         show_skill(sk)
@@ -2592,12 +2651,17 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         print(line)
     # One outcome from the whole search state. A set that failed, is stale or is unprepared was not
     # fully searched, so it never reads as a complete not-found.
+    edited_out = ([(p, EDITED_WHAT, EDITED_FIX) for p in edited["refresh"]]
+                  + [(p, EDITED_STUCK_WHAT, EDITED_STUCK_FIX) for p in edited["stuck"]])
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
+    if older:  # searched, from the catalog of their last refresh: say so, but it is not a gap
+        _RESULT["older_catalog"] = list(older)
+        print(f"served from older catalog: {len(older)} set{'s' if len(older) != 1 else ''}")
     errors = error_rows(failed, nav_kinds)
     _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
-                   unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows([], held))
+                   unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows(edited_out, held))
     if why := SKILL_FAILED.pop(question, "") if skill_job else (
             "skill search is off (SUPERJEV_SKILLS=0)" if SKILL_Q_RE.search(question) else ""):
         _RESULT["skills_off"] = _redact(f"no skill catalog was searched: {why}")
@@ -2617,23 +2681,29 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if dropped and not listed:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
     skipped = skipped_for_question(question, original_pointers, principal)
-    _RESULT["left_out"] = left_out_rows(skipped, held)
+    _RESULT["left_out"] = left_out_rows(skipped + edited_out, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
     if failed or check_error:
         why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
-    elif stale_ptrs or skipped or held:
+    elif stale_ptrs or held:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
+                        f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
     else:
+        # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
+        gone = "; ".join(x for x in (
+            f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
+            f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "") if x)
+        gone = f"; {gone} (see {ask_py} --status)" if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
-                   "no matching file (it may still exist)", f"{ask_py} --trace-show last",
+                   f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",
                    "none" if _CLAIM["text"] else "connect")
         _RESULT["searched"] = {"sets": len(original_pointers),
                                "notes": sum(len(load_cache_files(ptr)) for ptr in original_pointers)}
@@ -2677,6 +2747,10 @@ SKIPPED_TEXT_COVERAGE = 0.75
 SECRET_HELD = ("card/password", "secret-keyword")
 SECRET_WHAT = "held back: it looks like it holds a password, key or card number"
 SECRET_FIX = "remove or move the flagged value, then re-run setup"
+EDITED_WHAT = "edited since its last refresh and not readable until a refresh admits it"
+EDITED_FIX = "run the refresh command shown above (auto-heal also retries it)"
+EDITED_STUCK_WHAT = "edited since its last refresh, and too big or outside the set's scope for a refresh to admit"
+EDITED_STUCK_FIX = "make it smaller, or connect its folder as its own set"
 PART_RE = re.compile(r"^(.+)-\d+$")
 
 
