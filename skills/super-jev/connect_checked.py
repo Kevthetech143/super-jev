@@ -86,6 +86,33 @@ def memory(req: dict) -> dict:
         return {"status": "error", "raw": (r.stdout + r.stderr)[-400:]}
 
 
+def watched_refusals(pointer: str, principals: list, paths: list) -> tuple:
+    """(the paths the watched rule would refuse for this pointer, why). The rule lives in the engine, which also
+    enforces it on every connect and register; prepare_bulk asks it first (action watched-check) so nothing is drafted
+    or judged for a file that will be refused. An engine without that action (older than the rule) is answered from the
+    reports: the same subset rule on the recorded folders and agents of each watched pointer."""
+    if not principals or not paths:
+        return [], ""
+    got = memory({"action": "watched-check", "pointer": pointer, "principals": list(principals),
+                  "paths": [str(p) for p in paths]})
+    if got.get("status") == "ok" and isinstance(got.get("refused"), list):
+        return [r["path"] for r in got["refused"] if isinstance(r, dict) and r.get("path")], got.get("message", "")
+    if "nsupported action" not in str(got) and "Unknown action" not in str(got):
+        return [], ""  # the engine could not answer: it still decides at the connect itself
+    import watched
+    for name, rep, _ in watched.reports():
+        if name == pointer or not rep or rep.get("watched") is not True \
+                or set(principals) <= set(watched.report_principals(rep)):
+            continue
+        hit = [str(p) for p in paths if watched.inside_roots(p, rep.get("roots") or [])]
+        if hit:
+            return hit, (f"cannot register {pointer}: {len(hit)} of its files lie inside the watched folder of {name}, "
+                         f"which serves other agents. Refused. To clear it: connect {pointer} for agents within those "
+                         f"of {name}, or run: python3 prepare_bulk.py --unwatch --pointer {name} --principal AGENT "
+                         "(its own agents)")
+    return [], ""
+
+
 def main() -> int:
     from prepare_bulk import has_secret
     args = sys.argv[1:]
@@ -175,6 +202,8 @@ def main() -> int:
         req["navigationSHA"] = preview["navigationSHA"]
     req["reviewed"] = True
     reg = memory(req)
+    if reg.get("reason") == "watched-refused":
+        print("REFUSED:", reg.get("message"))
     print("connect:", reg.get("status"), "pointer:", reg.get("pointer"), "sources:", len(reg.get("sources", [])))
     for warning in reg.get("cleanupWarnings", []):
         print("retention review:", warning)

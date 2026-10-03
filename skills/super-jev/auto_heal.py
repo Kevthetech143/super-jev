@@ -676,17 +676,40 @@ def scan(principal: str, pointers: list, cache_dir: Path = None) -> dict:
     out = {}
     for ptr in pointers:
         report, owner = _report_for(ptr, cache_dir)
-        if not isinstance(report, dict) or owner in out:
+        if not isinstance(report, dict):
+            import watched
+            if (cache_dir / f"{ptr}-report.json").exists() and watched.says_watched(cache_dir / f"{ptr}-report.json"):
+                # a torn report that says watched: nothing can join it (an unwatched one stays silent, as before)
+                line = (f"HELD  {ptr}: its report cannot be read, so nothing new joins it; "
+                        + watched.recovery(ptr, cache_dir / f"{ptr}-report.json"))
+                print(line)
+                _log(principal=principal, pointer=ptr, action="scan-held", reason="report-unreadable", note=line)
             continue
+        if owner in out:
+            continue
+        notes = []
         try:
-            added = rc.new_files(report, known, reports)
+            added = rc.new_files(report, known, reports, notes=notes)
         except Exception:
             continue
+        for line in notes:  # a detached scan has no stdout: the log is where the person finds them
+            print(line)
+            _log(principal=principal, pointer=owner, action="scan-held", note=line)
         if added:
             out[owner] = maybe_heal(owner, principal, cache_dir=cache_dir, new=True)
             _log(principal=principal, pointer=owner, action="scan-new", new=len(added),
                  first=Path(added[0]).name, result=out[owner])
     return out
+
+
+def _log_refusal(principal: str, pointer: str) -> None:
+    """A refresh that was refused (exit 2) says why in its last-refresh log; the shared log carries it too."""
+    try:
+        for ln in (STATE_DIR / f"{principal}-{pointer}-last-refresh.log").read_text(errors="replace").splitlines():
+            if ln.startswith(("REFUSED", "WATCH REMOVED", "  HELD")):
+                _log(principal=principal, pointer=pointer, action="refresh-refused", note=ln[:400])
+    except OSError:
+        pass
 
 
 def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
@@ -729,6 +752,8 @@ def _drain_prepare(pointer: str, principal: str, kind: str) -> str:
     finally:
         _release_lock(principal, owner, token)
     _settle(principal, owner, code in (0, 3))  # 3 = connected, with some files held: the pointer itself was refreshed
+    if code == 2:
+        _log_refusal(principal, owner)
     if code not in (0, 3):
         return "failed"
     return "refreshed" if changed else "reconnected"
@@ -745,6 +770,8 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
         return 0  # the lock is no longer this refresh's: touch nothing
     if rc is not None:
         _settle(principal, pointer, rc in (0, 3))
+        if rc == 2:
+            _log_refusal(principal, pointer)
     _DRAINING.add(principal)
     _OWNED[(principal, pointer)] = token
     try:

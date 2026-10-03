@@ -8,7 +8,7 @@ import shlex
 import sys
 import subprocess
 from pathlib import Path
-from service import Service, load_registry
+from service import Service, WatchedRefused, load_registry
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'skills' / 'super-jev'))
 from prepare_bulk import has_secret, payload_has_secret  # noqa: E402
@@ -46,6 +46,8 @@ ACTIONS = {
     'open': ['pointer', 'question', 'principal'],
     'sources': ['pointer', 'principal'],
     'recipe': ['pointer', 'principal'],
+    'watch': ['pointer', 'principals', 'folders'], 'unwatch': ['pointer', 'principals'],
+    'watched-check': ['pointer', 'principals', 'paths'],
 }
 
 
@@ -340,8 +342,17 @@ def run(request, config):
     if action == 'forget':
         return service.forget(request['principal'], request['question'], request.get('context', ''))
     if action == 'register':
-        service.register(request['pointer'], request['dataset'], request['principals'])
+        try:
+            service.register(request['pointer'], request['dataset'], request['principals'])
+        except WatchedRefused as refused:
+            return refused.answer()
         return {'status': 'registered'}
+    if action == 'watch':
+        return service.watch(request['pointer'], request['principals'], request['folders'])
+    if action == 'unwatch':
+        return service.watch(request['pointer'], request['principals'], [], on=False)
+    if action == 'watched-check':
+        return service.check_watched(request['pointer'], request['principals'], request['paths'])
     if action == 'remove':
         service.remove(request['pointer'])
         return {'status': 'removed'}

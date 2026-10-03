@@ -116,7 +116,7 @@ def _others(report: dict, reports: list) -> set:
                          if isinstance(r, dict) and r.get("pointer") != report.get("pointer")))
 
 
-def new_files(report: dict, known: set, reports: list = None, snapshot: bool = True) -> list[str]:
+def new_files(report: dict, known: set, reports: list = None, snapshot: bool = True, notes: list = None) -> list[str]:
     """In-scope files on disk that no pointer has seen: a note added to a connected folder after
     its connect (or a folder the old walk missed) stayed unfindable until someone reconnected by
     hand. Uses the recorded recipe. A legacy report pinned to its file list gains only what
@@ -124,9 +124,13 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     unless `snapshot` is False) in a folder that held nothing outside the list then and that no
     other pointer shares. `known` spans every report, so a file another pointer already connects is
     not new; `reports` (every report, loaded from CACHE_DIR when not given) names the other
-    pointers' files."""
+    pointers' files. A watched pointer (report "watched": true) is not pinned and compares no pointers: every
+    in-scope file under its roots, at any depth, that no report accounts for is new. `notes`, when given, receives
+    the HELD lines a watched pointer owes (a vault folder: folder and count only; a missing folder; a link out)."""
     if not report.get("roots"):
         return []
+    import prepare_bulk
+    import watched
     from prepare_bulk import (CONNECTABLE_EXTENSIONS, MAX_FILES, BadExtensions, checked_suffixes, UNCONNECTED_TRIES, born_after, growth,
                               inventory, pinned_folders, read_snapshot, take_snapshot, vault_folder)
     # New files a refresh admitted but could not connect: the service never saw them, so nothing
@@ -143,6 +147,24 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     # report alike) has nothing new here; a person refreshes it by hand.
     if any(vault_folder(r) for r in report["roots"]):
         return retry
+    if report.get("watched") is True:
+        name = report.get("pointer")
+        gone = [r for r in report["roots"] if not os.path.isdir(r)]
+        if gone:  # a folder that is missing (unmounted, deleted) takes in nothing
+            if notes is not None:
+                notes += [f"HELD  {name}: watched folder {Path(r).name} is missing; restore it or run "
+                          f"prepare_bulk.py --unwatch --pointer {name} --principal AGENT" for r in gone]
+            return retry
+        with contextlib.redirect_stdout(io.StringIO()):
+            files, held = inventory([Path(r) for r in report["roots"]], report.get("excludes"),
+                                    report.get("noRecurse"), report.get("names"), report.get("allowTargets"), extensions)
+        if notes is not None:
+            notes += [prepare_bulk.vault_line(name, folder, n)
+                      for folder, n in sorted((prepare_bulk._RESULT.get("vault") or {}).items())]
+        found, links = watched.split_out([str(p) for p in files + [h[0] for h in held]], report["roots"])
+        if notes is not None:
+            notes += [watched.link_line(name, link) for link in links]  # a link out of the folder takes nothing in
+        return retry + [p for p in found if p not in known and os.path.realpath(p) not in known and p not in retry]
     pinned = pinned_list(report)
     folders = pinned_folders(pinned) if pinned is not None else None
     if folders is not None:
@@ -179,6 +201,8 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
 def waiting(report: dict) -> list[str]:
     """Files a legacy pinned pointer's snapshot found outside its list that are still outside it."""
     from prepare_bulk import read_snapshot, vault_folder, waiting_files
+    if report.get("watched") is True:
+        return []  # it takes in every new file, so nothing waits on a person
     if any(vault_folder(r) for r in report.get("roots") or []):
         return []  # never grows on its own, so nothing waits on a person either
     pinned = pinned_list(report)
@@ -231,11 +255,13 @@ def main(argv=None) -> int:
         cp = CACHE_DIR / f"{name}.json"
         cache = json.loads(cp.read_text()) if cp.is_file() else {}
         changed = changed_files(report, cache)
+        notes = []
         try:
-            added = new_files(report, known, [r for r, _ in reports], snapshot=not a.dry_run)
+            added = new_files(report, known, [r for r, _ in reports], snapshot=not a.dry_run, notes=notes)
         except OSError as e:  # one unreadable folder must not stop the other pointers' refreshes
             lines.append(f"NOTE  {name}: could not look for new files ({e.__class__.__name__}); changed files still count")
             added = []
+        lines += notes
         for w in waiting(report)[:1]:
             n = len(waiting(report))
             lines.append(f"WAITING {name}: {n} file(s) were in its folders before new-file pickup started and are "
