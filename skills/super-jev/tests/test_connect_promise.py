@@ -1,4 +1,4 @@
-"""The connect promise, offline: Markdown only, notes up to 250,000 bytes connect whole, bigger ones are held
+"""The connect promise, offline: Markdown by default (code files only with --ext), notes up to 250,000 bytes connect whole, bigger ones are held
 "too big, split it", and every run ends with CONNECTED/HELD/FAILED counts and an exit code that matches
 (0 all connected, 3 something held, 1 something failed)."""
 import importlib.util
@@ -60,7 +60,7 @@ def test_size_rule_has_one_number_no_sections_no_size_approval():
     assert pb.CEILING_BYTES == 250_000 and pb.CONNECTABLE_EXTENSIONS == (".md",)
 
 
-@pytest.mark.parametrize("flag", [["--ext", "py"], ["--approve-held", "x.md"]])
+@pytest.mark.parametrize("flag", [["--approve-held", "x.md"]])
 def test_removed_flags_are_refused(tmp_path, monkeypatch, flag):
     monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--root", str(tmp_path), "--pointer", "p", "--principal", "a", *flag])
     with pytest.raises(SystemExit) as exc:
@@ -134,13 +134,31 @@ def test_every_file_held_still_ends_with_counts_and_is_nonzero(tmp_path, go):
     assert code != 0 and out.strip().splitlines()[-1].startswith("CONNECTED 0, HELD 1, FAILED 0")
 
 
-def test_refresh_of_a_pointer_connected_with_code_types_is_refused(tmp_path, go, monkeypatch):
-    root = _folder(tmp_path, **{"a.md": "alpha\n"})
-    code, _ = go(root)
-    assert code == 0
+def test_a_recipe_with_py_refreshes_and_replays_its_extensions(tmp_path, go, monkeypatch):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", "parse_totals.py": "def parse_totals():\n    return 1\n"})
+    code, text = go(root, "--ext", "py")
+    assert code == 0 and "CONNECTED 2" in text
     rp = tmp_path / "cache" / "p-report.json"
-    rep = json.loads(rp.read_text())
-    rep["extensions"] = [".md", ".py"]
-    rp.write_text(json.dumps(rep))
-    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "p", "--principal", "alice", "--refresh"])
-    assert pb.main() == 2
+    assert json.loads(rp.read_text())["extensions"] == [".md", ".py"]
+    monkeypatch.setattr(sys, "argv", ["prepare_bulk.py", "--pointer", "p", "--principal", "alice", "--refresh",
+                                      "--no-findability", "--no-shared", "--writer", "claude"])
+    assert pb.main() == 0
+    assert json.loads(rp.read_text())["extensions"] == [".md", ".py"]
+
+
+def test_without_ext_code_files_stay_out(tmp_path, go):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", "parse_totals.py": "x = 1\n"})
+    code, text = go(root)
+    assert code == 0 and "CONNECTED 1" in text
+
+
+def test_ext_naming_a_credential_suffix_is_refused_by_name(tmp_path, go):
+    root = _folder(tmp_path, **{"a.md": "alpha\n"})
+    code, text = go(root, "--ext", "py,PEM")
+    assert code == 2 and "REFUSED" in text and ".pem" in text
+
+
+def test_a_secret_named_code_file_is_held_by_name(tmp_path, go):
+    root = _folder(tmp_path, **{"a.md": "alpha\n", "deploy-secret.py": "x = 1\n"})
+    code, text = go(root, "--ext", "py")
+    assert code == 3 and "HELD" in text and "deploy-secret.py" in text

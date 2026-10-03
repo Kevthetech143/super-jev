@@ -35,7 +35,7 @@ Usage:
     Never calls the writer, the gate, or memory.
 
 Pipeline per run:
-  1. Inventory *.md (Markdown only) under the union of one or more --root directories, in the order given (repeat --root for
+  1. Inventory *.md (plus any --ext suffixes) under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
      hidden directories, git worktree copies (any .claude/worktrees/ folder, or a checkout whose .git file points into
      another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
@@ -114,8 +114,8 @@ one; v stays 1). Skipped kinds, one per default reason: `link` (a link points ou
 folder), `hidden`, `dataset` (a prepared dataset copy), `test` (test or scratch output), `worktree` (a git
 worktree copy), `empty`, `types` (files of other types). Refusal kinds: `too_many` (more files than one connect
 takes; it also carries whole numbers `count`, how many files it would draft, and `max`, the limit, so a program words
-"count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder),
-`not_markdown` (a refresh of a set connected with code files) and `usage` (the arguments are wrong).
+"count is more than one connect takes (max)" without parsing `why`), `not_a_folder` (a --root is not a folder)
+and `usage` (the arguments are wrong).
 Nothing here edits original files. Cache and report land under prepare-cache/ next to this script.
 
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
@@ -741,7 +741,7 @@ def is_worktree_copy(path: Path) -> bool:
     return _worktree_dir(str(path.parent))
 
 
-def walk_md(root: Path, no_recurse: bool = False, others: list = None):
+def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS):
     """Markdown files under `root`, sorted, plus resolved folder symlink targets. When `others` is a list,
     it also receives what connect reports about files of other types, ready to tally as
     (key, path under root, reason, label, count): one entry per file outside the skipped folders, and one
@@ -757,7 +757,7 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
         parts = rel_parts + real_parts
         if others is None or any(x.startswith(".") for x in parts):
             return
-        names = [n for n in names if not n.startswith(".") and not n.lower().endswith(CONNECTABLE_EXTENSIONS)]
+        names = [n for n in names if not n.startswith(".") and not n.lower().endswith(tuple(extensions))]
         if not names:
             return
         rel_dir = "/".join(rel_parts)
@@ -771,7 +771,7 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
     if no_recurse:
         kids = sorted(p for p in root.iterdir() if p.is_file())
         note_others(os.path.realpath(root), (), (), [p.name for p in kids])
-        return [p for p in kids if p.name.lower().endswith(CONNECTABLE_EXTENSIONS)], []
+        return [p for p in kids if p.name.lower().endswith(tuple(extensions))], []
     out, linked, walked = [], [], set()
     real_root = os.path.realpath(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
@@ -782,7 +782,7 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None):
         walked.add(real)
         linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
                    if os.path.islink(os.path.join(dirpath, d))]
-        out += [Path(dirpath) / n for n in filenames if n.lower().endswith(CONNECTABLE_EXTENSIONS)]
+        out += [Path(dirpath) / n for n in filenames if n.lower().endswith(tuple(extensions))]
         rel, real_rel = os.path.relpath(dirpath, root), os.path.relpath(real, real_root)
         note_others(real, () if rel == "." else tuple(rel.split(os.sep)),
                     () if real_rel == "." or real_rel.split(os.sep)[0] == ".." else tuple(real_rel.split(os.sep)),
@@ -859,7 +859,7 @@ def print_skips(rows: list) -> None:
 
 
 def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
-              names: list = None, allow_targets: list = None):
+              names: list = None, allow_targets: list = None, extensions=CONNECTABLE_EXTENSIONS):
     """Union of Markdown files under `roots`, in root order then sorted-per-root order. Each file is counted once
     even if reachable through more than one root. A file the secret scan holds, or one over CEILING_BYTES
     ("too big, split it"), is listed in `held` and never connected: there is no override.
@@ -881,7 +881,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
 
     for root in roots:
         others = [] if not names else None  # other file types are reported only when nothing narrows by name
-        glob_iter, linked = walk_md(root, no_recurse, others)
+        glob_iter, linked = walk_md(root, no_recurse, others, extensions)
         for key, rel, reason, label, n in others or []:
             if not _excluded(rel, excludes):
                 skip(key, reason, label, n)
@@ -907,7 +907,10 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
                 skip(rp, "link")
                 continue
             if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret") for n in (p.name.casefold(), rp.name.casefold())):
-                skip(rp, "name")
+                if p.suffix.lower() in CONNECTABLE_EXTENSIONS:
+                    skip(rp, "name")
+                else:  # a file the person asked for by suffix is named, never silently skipped
+                    held.append((str(p), "credential-style file name; cannot be overridden"))
                 continue
             folder = skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(base).parts[:-1])
             if folder:
@@ -1325,10 +1328,6 @@ def keep_unrecorded(report: dict, a) -> None:
         report.pop("principal", None); report.pop("principals", None)
 
 
-class NotMarkdown(ValueError):
-    """A refresh of a set that was connected with code or text suffixes: the refusal kind `not_markdown`."""
-
-
 def replay_recipe(a) -> None:
     """--refresh replays the pointer's recorded recipe for anything not given on the command line,
     so a refresh never widens a pointer (a missing --no-recurse once grew tools/ to 634 files)."""
@@ -1343,9 +1342,8 @@ def replay_recipe(a) -> None:
     # Only a new root set, --exclude or --no-recurse on the command line rescopes a pinned pointer;
     # a refresh that repeats the recorded roots/excludes (typed by hand or by an older script) must not unpin it.
     new_roots = bool(a.roots and sorted(str(given_path(r)) for r in a.roots) != sorted(rep.get("roots") or []))
-    if rep.get('extensions', list(CONNECTABLE_EXTENSIONS)) != list(CONNECTABLE_EXTENSIONS):
-        raise NotMarkdown(f"pointer {a.pointer} was connected with code/text suffixes; connect supports Markdown only. "
-                          "Reconnect it from its .md notes, or leave the last snapshot as it is")
+    if a.extensions is None:
+        a.extensions = list(rep.get('extensions') or CONNECTABLE_EXTENSIONS)
     rescoped = bool((a.excludes and sorted(a.excludes) != sorted(rep.get("excludes") or []))
                     or (a.names and sorted(a.names) != sorted(rep.get("names") or []))
                     or (a.no_recurse and not rep.get("noRecurse"))
@@ -1584,6 +1582,7 @@ def main() -> int:
                          "still serves, or the harness refuses the refresh with scope-change")
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
+    ap.add_argument("--ext", action="append", default=None, help="extra text suffixes, comma-separated (default: md only)")
     ap.add_argument("--admit", action="append", default=[],
                     help="repeatable; on --refresh of a legacy pinned pointer, add this WAITING file (only those) "
                          "after checking it, through the usual holds, review and gate")
@@ -1624,6 +1623,14 @@ def main() -> int:
     ap.add_argument("--subject", default=None)
     ap.add_argument("--within-days", type=int, default=None)
     a = ap.parse_args()
+    a.extensions = None
+    if a.ext:
+        sfx = ['.' + e.strip().lower().lstrip('.') for g in a.ext for e in g.split(',') if e.strip()]
+        bad = [e for e in sfx if not re.fullmatch(r'\.[a-z0-9]+(?:[.-][a-z0-9]+)*', e) or credential_suffix(e)]
+        if bad:
+            print(f"REFUSED: --ext {', '.join(bad)}: only literal suffixes such as py,ts,sh connect; "
+                  "credential and key suffixes never do"); return 2
+        a.extensions = list(dict.fromkeys((*CONNECTABLE_EXTENSIONS, *sfx)))
     a.no_findability = a.no_findability or not a.findability
     _RESULT.clear()
     return run_json(a) if a.json else run(a)
@@ -1652,10 +1659,9 @@ def run(a) -> int:
         return 0
 
     if a.refresh and a.pointer:
-        try:
-            replay_recipe(a)
-        except NotMarkdown as e:
-            return refuse("not_markdown", str(e))
+        replay_recipe(a)
+    if a.extensions is None:
+        a.extensions = list(CONNECTABLE_EXTENSIONS)
     if a.limit is None:
         a.limit = 50
     # What was chosen about the writer (given, or replayed) goes in the report; the defaults are applied
@@ -1701,7 +1707,7 @@ def run(a) -> int:
     if missing:
         return refuse("not_a_folder", f"--root is not a folder: {', '.join(missing)}")
     walked_at = time.time()  # a growth snapshot counts as "since" only what the walk below could miss
-    files, held = inventory(roots, a.excludes, a.no_recurse, a.names, a.allow_targets)
+    files, held = inventory(roots, a.excludes, a.no_recurse, a.names, a.allow_targets, a.extensions)
     scope = getattr(a, "legacy_scope", None)
     if a.admit and scope is None:
         print("  --admit applies only to a --refresh of a legacy pinned pointer; nothing admitted "
@@ -1942,7 +1948,7 @@ def run(a) -> int:
     # The recipe: what --refresh replays (replay_recipe), so every later refresh runs it as connected.
     report = {"pointer": a.pointer, "roots": [str(r) for r in roots], "principal": a.principals[0],
               "principals": a.principals,
-              "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
+              "extensions": a.extensions, "excludes": a.excludes, "noRecurse": a.no_recurse, "names": a.names, "allowTargets": [str(Path(t).expanduser().resolve()) for t in a.allow_targets], "limit": a.limit,
               **writer_recipe,
               **({"scopeFiles": sorted(a.legacy_scope)} if getattr(a, "legacy_scope", None) is not None else {}),
 
