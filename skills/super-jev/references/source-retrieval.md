@@ -56,10 +56,10 @@ search state, and its exit code matches:
 | Outcome | Meaning | Exit |
 |---|---|---|
 | `found` | at least one file or skill suggestion; the file count is ranked files only (skill suggestions have their own label, e.g. `5 files; 2 skill suggestions`); `partial: N sets not searched` if a set failed or is unprepared (a stale set served from its last refresh was searched: a separate `served from older catalog: N sets` line prints, not part of the OUTCOME line); `(unconfirmed: content check failed)` if the check failed and the files are routed but unread (still 0: read them) | 0 |
-| `not-found` | complete search, no file (files skipped at setup, or edited and not yet readable, add a note with their count and `--status`) | 1 |
+| `not-found` | complete search, no file (files skipped at setup, or edited and not read, add a note with their count and `--status`) | 1 |
 | `not-supported` | input outside the contract (empty or over-long question) | 2 |
 | `error` | no file, and execution failed | 3 |
-| `needs-setup` | no file, and a set was unprepared (its refresh command will run) or a file picked for this question was held for a secret | 4 |
+| `needs-setup` | no file, and a set was unprepared (its refresh command will run) or a file was held for a secret (picked for this question, or edited and now holding one) | 4 |
 
 A partial search is never a complete `not-found`. Every outcome except `found` names the one next command.
 
