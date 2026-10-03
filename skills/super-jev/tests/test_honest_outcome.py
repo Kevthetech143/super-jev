@@ -171,10 +171,23 @@ def test_content_check_network_error_twice_stays_an_error(monkeypatch):
     assert seen == [OK, OK] and scores == {} and "network" in error
 
 
-def test_held_files_alone_leave_a_searched_not_found_with_a_note(tmp_path, monkeypatch, capsys):
+def test_a_file_held_for_a_secret_at_query_time_stays_needs_setup(tmp_path, monkeypatch, capsys):
+    # picked for THIS question and never read: not a setup-time skip
     _setup(tmp_path, monkeypatch, ["a"], lambda p, n: {"status": "no-candidates"})
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {OK: ask.HELD_SECRET}))
     monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(1.0, OK, "a")])
     rc, lines = _ask(tmp_path, capsys)
+    assert rc == 4 and lines[0].startswith("OUTCOME: needs-setup") and "1 file held" in lines[0]
+
+
+def test_an_edited_file_a_refresh_would_not_admit_is_named_not_silently_dropped(tmp_path, monkeypatch, capsys):
+    edited = tmp_path / "edited.md"
+    edited.write_text("# Warranty\nchanged since the last refresh\n")
+    stale = {"status": "preparation-required", "changed": [str(edited)], "missing": []}
+    nav = lambda p, n: {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(edited)}], "stale": stale}
+    _setup(tmp_path, monkeypatch, ["old"], nav)
+    monkeypatch.setattr(ask, "edited_readable", lambda *a, **k: False)
+    rc, lines = _ask(tmp_path, capsys)
     assert rc == 1 and lines[0].startswith("OUTCOME: not-found")
-    assert "1 file held" in lines[0] and "--status" in lines[0]
+    assert "1 edited file not read until refreshed" in lines[0] and "--status" in lines[0]
+    assert ask._RESULT["left_out"] == [{"what": ask.EDITED_WHAT, "count": 1, "where": str(tmp_path), "way_in": ask.EDITED_FIX}]

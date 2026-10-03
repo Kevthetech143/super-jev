@@ -2256,8 +2256,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         t_start = time.time()
         out = memory({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
                       "lastGood": True, **routing_limits})
-        # No retry here: the judge's one retry rule already ran inside the call (an
-        # overloaded judge is retried there), so a failure that reaches us is final.
+        # An overloaded judge was already retried inside the call; a network error gets
+        # its one retry below, after routing (is_network_error).
         return classify(ptr, out, time.time() - t_start)
 
     def nav_many(ptrs):
@@ -2615,6 +2615,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         print(line)
     # One outcome from the whole search state. A set that failed, is stale or is unprepared was not
     # fully searched, so it never reads as a complete not-found.
+    edited_out = [(p, EDITED_WHAT, EDITED_FIX) for p in dict.fromkeys(stale_held)]
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
@@ -2623,7 +2624,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         print(f"served from older catalog: {len(older)} set{'s' if len(older) != 1 else ''}")
     errors = error_rows(failed, nav_kinds)
     _RESULT.update(files=file_list, skills=skill_list, leans_none=leans, errors=errors,
-                   unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows([], held))
+                   unsearched=unsearched_rows(unsearched, state_of, healing), left_out=left_out_rows(edited_out, held))
     if why := SKILL_FAILED.pop(question, "") if skill_job else (
             "skill search is off (SUPERJEV_SKILLS=0)" if SKILL_Q_RE.search(question) else ""):
         _RESULT["skills_off"] = _redact(f"no skill catalog was searched: {why}")
@@ -2643,25 +2644,25 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if dropped and not listed:
         print(f"({dropped} file(s) matched the topic but no answer was confirmed on reading)")
     skipped = skipped_for_question(question, original_pointers, principal)
-    _RESULT["left_out"] = left_out_rows(skipped, held)
+    _RESULT["left_out"] = left_out_rows(skipped + edited_out, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
     if failed or check_error:
         why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
-    elif stale_ptrs:
+    elif stale_ptrs or held:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
-        rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh")
+        rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
     else:
         # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
         gone = "; ".join(x for x in (
             f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
-            f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
+            f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read until refreshed" if edited_out else "") if x)
         gone = f"; {gone} (see {ask_py} --status)" if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",
@@ -2708,6 +2709,8 @@ SKIPPED_TEXT_COVERAGE = 0.75
 SECRET_HELD = ("card/password", "secret-keyword")
 SECRET_WHAT = "held back: it looks like it holds a password, key or card number"
 SECRET_FIX = "remove or move the flagged value, then re-run setup"
+EDITED_WHAT = "edited since its last refresh and not readable until a refresh admits it"
+EDITED_FIX = "run the refresh command shown above (auto-heal also retries it)"
 PART_RE = re.compile(r"^(.+)-\d+$")
 
 
