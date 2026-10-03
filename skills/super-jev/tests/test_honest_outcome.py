@@ -169,3 +169,12 @@ def test_content_check_network_error_twice_stays_an_error(monkeypatch):
     monkeypatch.setattr(ask, "confirm_one", one)
     scores, _, error, _ = ask.confirm("q", [OK])
     assert seen == [OK, OK] and scores == {} and "network" in error
+
+
+def test_held_files_alone_leave_a_searched_not_found_with_a_note(tmp_path, monkeypatch, capsys):
+    _setup(tmp_path, monkeypatch, ["a"], lambda p, n: {"status": "no-candidates"})
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {OK: ask.HELD_SECRET}))
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(1.0, OK, "a")])
+    rc, lines = _ask(tmp_path, capsys)
+    assert rc == 1 and lines[0].startswith("OUTCOME: not-found")
+    assert "1 file held" in lines[0] and "--status" in lines[0]

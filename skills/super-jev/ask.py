@@ -2650,17 +2650,19 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                else "no match, and the content check failed")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
-    elif stale_ptrs or held:
+    elif stale_ptrs:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
-            x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
+            x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
-        rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
+        rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh")
     else:
         # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
-        gone = (f"; {len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup "
-                f"(see {ask_py} --status)" if skipped else "")
+        gone = "; ".join(x for x in (
+            f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
+            f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
+        gone = f"; {gone} (see {ask_py} --status)" if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",
                    "none" if _CLAIM["text"] else "connect")

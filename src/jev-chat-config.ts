@@ -349,6 +349,7 @@ export function render(shown: Shown, look: Look): string {
     head('Not in your notes');
     if (d.searched) body(`Searched ${plural(d.searched.sets, 'folder')} (${plural(d.searched.notes, 'note')}); nothing matched.`);
     body("That doesn't prove it's nowhere: it may be in a folder you haven't connected.");
+    leftOut(d.left_out);
     drag('drag in the folder that has it.');
   } else crash(d.why ?? '');
   if (d.skills_off && shown.kind !== 'status') body(sentence(d.skills_off).replace(/^./, (c) => c.toUpperCase()));

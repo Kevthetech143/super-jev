@@ -59,7 +59,7 @@ search state, and its exit code matches:
 | `not-found` | complete search, no file (files skipped at setup add a note with their count and `--status`) | 1 |
 | `not-supported` | input outside the contract (empty or over-long question) | 2 |
 | `error` | no file, and execution failed | 3 |
-| `needs-setup` | no file, and a set was unprepared or a file held for a secret | 4 |
+| `needs-setup` | no file, and a set was unprepared (its refresh command will run) | 4 |
 
 A partial search is never a complete `not-found`. Every outcome except `found` names the one next command.
 
