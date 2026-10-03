@@ -180,6 +180,24 @@ class WatchedRuleTests(unittest.TestCase):
         self.assertEqual(self.watch('quill-garden', ['quill'], other)['status'], 'error')
         self.assertEqual(self.watch('quill-garden', ['quill'], self.root)['status'], 'ok')  # an enclosing folder holds it
 
+    def test_refusal_at_register_leaves_no_prepared_copy_and_restores_the_registry(self):
+        import json as _json, unittest.mock as mock
+        import path_connect
+        from service import Service, WatchedRefused
+        self.assertEqual(self.connect('rook-beds', ['rook'], [self.garden / 'beds' / 'kale.md'])['status'], 'registered')
+        before = (self.root / 'registry.json').read_text()
+        config = _json.loads(self.config.read_text())
+        prepared = lambda: sorted(p.name for p in self.root.glob('.prepared-*'))
+        kept = prepared()
+        body = {'action': 'connect', 'pointer': 'rook-beds', 'principals': ['rook'], 'replace': True, 'reviewed': True,
+                'sources': [{'path': str(self.garden / 'beds' / 'kale.md')}]}
+        body['sources'] = path_connect.connect({**body, 'reviewed': False}, config)['sources']
+        with mock.patch.object(Service, 'register', side_effect=WatchedRefused('cannot register: test')):
+            got = path_connect.connect(body, config)
+        self.assertEqual(got['reason'], 'watched-refused')
+        self.assertEqual(prepared(), kept)  # no new .prepared-* folder
+        self.assertEqual((self.root / 'registry.json').read_text(), before)
+
 
 if __name__ == '__main__':
     unittest.main()

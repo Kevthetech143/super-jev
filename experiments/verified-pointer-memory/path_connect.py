@@ -415,6 +415,7 @@ def _connect(request, config):
             else:
                 data['datasets'].pop(dataset, None)
             _atomic(registry, data)
+            shutil.rmtree(folder, ignore_errors=True)  # it holds a copy of the refused file's text
             return refusal.answer()
         _, error = service.pointer(pointer, principals[0])
         if error:
