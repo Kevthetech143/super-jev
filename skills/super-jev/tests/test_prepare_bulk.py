@@ -1764,7 +1764,7 @@ def test_refresh_with_a_new_root_drops_the_old_no_recurse(tmp_path, monkeypatch)
 
     def args(roots):
         return argparse.Namespace(pointer="my-records", roots=roots, principals=[], excludes=[], names=[],
-                                  no_recurse=False, allow_targets=[], limit=None,
+                                  no_recurse=False, allow_targets=[], limit=None, extensions=None,
                                   writer=None, writer_model=None, writer_command=None)
 
     fresh = args([str(tmp_path / "skills")])

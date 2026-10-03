@@ -378,7 +378,7 @@ SKIP_KINDS = {
     "empty": "empty .md file(s)",
     "types": "file(s) of other types (",
 }
-REFUSAL_KINDS = {"too_many", "not_a_folder", "not_markdown", "usage"}
+REFUSAL_KINDS = {"too_many", "not_a_folder", "usage"}
 
 
 def every_reason_folder(tmp_path):
@@ -494,7 +494,7 @@ def test_too_many_carries_its_numbers_as_whole_numbers_the_app_can_show_without_
 
 def test_an_unexpected_error_while_replaying_a_recipe_is_an_internal_failure_not_a_usage_refusal(
         tmp_path, monkeypatch, fake, capfd):
-    """Only a recipe of code files is refused (not_markdown). Any other error is the engine's own fault, so it is
+    """Any error while replaying a recipe is the engine's own fault, so it is
     a failure (exit 1, as in text mode), never blamed on the user's arguments."""
     def boom(a):
         raise ValueError("recipe unreadable")
@@ -503,15 +503,6 @@ def test_an_unexpected_error_while_replaying_a_recipe_is_an_internal_failure_not
     code, obj = run_main(monkeypatch, capfd, tmp_path / "cache", "--root", str(root), "--pointer", "qb", "--refresh")
     assert code == 1 and "refused" not in obj
     assert obj["failed"][0]["why"] == "internal error: ValueError: recipe unreadable"
-
-
-def test_a_refresh_of_a_set_connected_with_code_files_is_the_not_markdown_kind(tmp_path, monkeypatch, fake, capfd):
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    (cache / "qb-report.json").write_text(json.dumps({"extensions": [".py"], "principals": ["sam"]}))
-    code, obj = run_main(monkeypatch, capfd, cache, "--root", str(folder(tmp_path, **{"a.md": "# A\n\nText.\n"})),
-                         "--pointer", "qb", "--refresh")
-    assert code == 2 and obj["refused"]["kind"] == "not_markdown" and "Markdown only" in obj["refused"]["why"]
 
 
 def test_text_mode_keeps_its_refused_line_with_no_kind(tmp_path, fake, go):
