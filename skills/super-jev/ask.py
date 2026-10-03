@@ -1675,6 +1675,29 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
             and not has_secret(text) and refresh_would_admit(path, ptr))
 
 
+def edited_held(pointers: list, served: dict) -> list:
+    """The one count of files left out because they were edited since their set's last refresh and a
+    refresh would not admit them (never reviewed, secret, too big, out of scope). Worked out per searched set
+    from the set's own files, whichever search path (routing, word search, a later one) skips them."""
+    held = []
+    for ptr in pointers:
+        files = load_cache_files(ptr)
+        names = connector_names(ptr)
+        for path in dict.fromkeys([*files, *((served.get(ptr) or {}).get("changed") or [])]):
+            entry = files.get(path)
+            if entry is not None and (not isinstance(entry, dict) or not entry.get("pass") or prepare_bulk.is_test_material(
+                    path, prepare_bulk.named_exactly(Path(path).name, names))):
+                continue
+            try:
+                raw = Path(path).read_bytes()
+            except OSError:
+                continue  # removed: not an edited file
+            if (entry is None or hashlib.sha256(raw).hexdigest() != entry.get("sha256")) and not edited_readable(
+                    path, ptr, entry, raw, raw.decode("utf-8", "replace")):
+                held.append(path)
+    return list(dict.fromkeys(held))
+
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -2309,7 +2332,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # and refresh their pointers, so a later lookup finds them without a hand reconnect.
     if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
         _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
-    merged, statuses, stale_held = [], {}, []
+    merged, statuses = [], {}
     state_of, healing = {}, set()  # --json: why each unsearched set was left out, and whether it is being refreshed
     _STAGE["stale_changed"] = []
     for ptr, kind, rows, elapsed, ok in results:
@@ -2328,8 +2351,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     except OSError:
                         continue
                     if not edited_readable(path, ptr, files.get(path), raw, raw.decode("utf-8", "replace")):
-                        stale_held.append(path)
-                        continue
+                        continue  # counted once, per set, by edited_held
                     _STAGE["stale_changed"].append(path)
                 kept.append(c)
             rows = kept
@@ -2516,6 +2538,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     log(sdir, "lookup", question=question, judge=judges.profile().name, pointers=len(pointers), statuses=statuses, secs=round(time.time() - t0, 1),
         top=[{"score": s, "path": p, "pointer": ptr, "possible": p in possible} for s, p, ptr in top],
         **({"win": win} if win else {}), **({"partial": True} if incomplete else {}))
+    edited_paths = edited_held(search_pointers, stale_served)  # once per searched set, not per search path
     routing = {ptr: {"status": kind, "candidates": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)} for c in rows]}
               for ptr, kind, rows, _elapsed, _ok in results}
     content_check = {p: {"score": scores.get(p) if type(scores.get(p)) in (int, float) and 0 <= scores[p] <= 1 else None,
@@ -2540,7 +2563,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                          "kept": c.get("score", 0) >= route_floor} for c in rows][:STAGE_LIST_CAP]}
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
-            "stale_held": stale_held[:STAGE_LIST_CAP],
+            "stale_held": edited_paths[:STAGE_LIST_CAP],
             "word_search": {"terms": wsearch.get("terms"), "files_searched": wsearch.get("files_searched"),
                             "changed_since_connect": sorted(set(_STAGE.get("word_changed") or [])
                                                             | set(_STAGE.get("stale_changed") or [])),
@@ -2615,7 +2638,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         print(line)
     # One outcome from the whole search state. A set that failed, is stale or is unprepared was not
     # fully searched, so it never reads as a complete not-found.
-    edited_out = [(p, EDITED_WHAT, EDITED_FIX) for p in dict.fromkeys(stale_held)]
+    edited_out = [(p, EDITED_WHAT, EDITED_FIX) for p in edited_paths]
     unsearched = list(dict.fromkeys(failed + stale_ptrs))
     n = len(unsearched)
     sets = f"{n} set{'s' if n != 1 else ''}"
@@ -2656,6 +2679,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
+                        f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read until refreshed" if edited_out else "",
                         f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
     else:
