@@ -1714,7 +1714,7 @@ def edited_held(pointers: list, exclude=()) -> dict:
     return out
 
 
-def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=()) -> list:
+def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
@@ -1723,7 +1723,9 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     output is never searched; `skip` paths (already routed) are dropped before the top `limit`.
     A reviewed file edited since connect stays searchable at its current text while its
     pointer waits on the refresh (routing cannot see a stale pointer), if that text passes
-    the same secret scan and size ceiling connect applies; it is listed in the trace."""
+    the same secret scan and size ceiling connect applies; it is listed in the trace.
+    `extra` names edited files a refresh would hold: they are scored too (locally; nothing is sent) so the
+    caller can ask whether such a file matches the question by this same test."""
     terms = query_terms(question)
     if not terms:
         return []
@@ -1745,8 +1747,10 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
             # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
             # search its current text, held back only as a refresh would hold it.
             if not edited_readable(path, ptr, entry, raw, text):
-                continue  # never reviewed at a known version, or a refresh would hold it
-            changed.append(path)
+                if path not in extra:
+                    continue  # never reviewed at a known version, or a refresh would hold it
+            else:
+                changed.append(path)
         heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
         head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
                          str(entry.get("description") or ""), str(entry.get("question") or "")])
@@ -2343,7 +2347,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # and refresh their pointers, so a later lookup finds them without a hand reconnect.
     if not replay and search_pointers and os.environ.get("SUPERJEV_NEW_FILE_SCAN", "1") != "0":
         _STAGE["new_file_scan"] = auto_heal.maybe_scan(principal, search_pointers)
-    merged, statuses = [], {}
+    merged, statuses, routing_picked = [], {}, set()
     state_of, healing = {}, set()  # --json: why each unsearched set was left out, and whether it is being refreshed
     _STAGE["stale_changed"] = []
     for ptr, kind, rows, elapsed, ok in results:
@@ -2362,7 +2366,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     except OSError:
                         continue
                     if not edited_readable(path, ptr, files.get(path), raw, raw.decode("utf-8", "replace")):
-                        continue  # counted once, per set, by edited_held
+                        routing_picked.add(path)  # picked for this question; counted once, per set, by edited_held
+                        continue
                     _STAGE["stale_changed"].append(path)
                 kept.append(c)
             rows = kept
@@ -2638,6 +2643,17 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     skill_list = skill_rows(skills)
     # A file picked for this question and withheld for a secret, or edited and now holding one: never read.
     held = list(dict.fromkeys([p for p, note in notes.items() if note == HELD_SECRET] + edited["secret"]))
+    # Only a held file that matches THIS question makes the ask needs-setup: one picked by the content check, by
+    # routing, or that word search scores above its threshold. The rest are named in left_out but change nothing.
+    probe = set(edited["secret"])
+    if probe:
+        stage_word = {k: _STAGE.get(k) for k in ("word", "word_changed")}
+        matched = {p for _s, p, _ptr in word_search(question, search_pointers, limit=10 ** 6, extra=probe)} & probe
+        for k, v in stage_word.items():
+            _STAGE.pop(k, None) if v is None else _STAGE.__setitem__(k, v)
+    else:
+        matched = set()
+    held_hit = [p for p in held if p not in probe or p in matched or p in routing_picked]
     leans = bool(top and (_STAGE.get("listwise") or {}).get("leans_none"))
     for sk in skill_list:
         show_skill(sk)
@@ -2688,19 +2704,20 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                else "no match, and the content check failed")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
-    elif stale_ptrs or held:
+    elif stale_ptrs or held_hit:
         first = next((m.group(1) for h in hints.values() if (m := re.search(r"Run: (.+)$", h))), "")
         why = "no match, but the search was incomplete: " + "; ".join(
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
                         f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "",
-                        f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
+                        f"{len(held_hit)} file{'s' if len(held_hit) != 1 else ''} held (contains a secret; not sent)" if held_hit else "") if x)
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh" if stale_ptrs else "include")
     else:
         # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
         gone = "; ".join(x for x in (
             f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
-            f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "") if x)
+            f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "",
+            f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
         gone = f"; {gone} (see {ask_py} --status)" if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
                    f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",

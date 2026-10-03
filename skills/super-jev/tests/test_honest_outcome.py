@@ -291,3 +291,28 @@ def test_a_file_one_set_cannot_read_is_still_found_in_another_set_that_can(tmp_p
     assert [p for _, p, _ in ask.word_search("acme warranty period", ["a", "b"])] == [str(note)]
     assert ask.edited_held(["a", "b"]) == {"secret": [], "stuck": [], "refresh": []}  # b reads it: not out
     assert ask.edited_held(["a"])["stuck"] == [str(note)]  # but with only a, it is
+
+
+def _held_set(tmp_path, monkeypatch):
+    """One set whose only note was edited since its refresh and now holds a made-up secret."""
+    note = _edited_note(tmp_path, "# Acme warranty period\nthe period is 3 years\npassword: hunter2abcXYZ\n")
+    _setup(tmp_path, monkeypatch, ["notes"], lambda p, n: {"status": "no-candidates"})
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True, "sha256": "0" * 64}})
+    return note
+
+
+def test_a_held_edited_file_the_question_does_not_match_stays_not_found(tmp_path, monkeypatch, capsys):
+    note = _held_set(tmp_path, monkeypatch)
+    rc = ask.lookup("what is the boiling point of the Zorblax nebula soup recipe", "primary", tmp_path / "s")
+    lines = capsys.readouterr().out.splitlines()
+    assert rc == 1 and lines[0].startswith("OUTCOME: not-found")
+    assert "1 file held (contains a secret; not sent)" in lines[0] and "--status" in lines[0]
+    assert ask._RESULT["left_out"] == [{"what": ask.SECRET_WHAT, "count": 1, "where": str(tmp_path), "way_in": ask.SECRET_FIX}]
+
+
+def test_a_held_edited_file_the_question_matches_is_needs_setup(tmp_path, monkeypatch, capsys):
+    _held_set(tmp_path, monkeypatch)
+    rc = ask.lookup("what is the Acme warranty period", "primary", tmp_path / "s")
+    lines = capsys.readouterr().out.splitlines()
+    assert rc == 4 and lines[0].startswith("OUTCOME: needs-setup") and "1 file held" in lines[0]
+    assert ask._RESULT["next"] == "include"
