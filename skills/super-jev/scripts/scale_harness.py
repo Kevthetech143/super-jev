@@ -129,7 +129,7 @@ def connect(root: Path, state: Path, tmp: Path, env: dict) -> float:
     try:
         for folder in sorted(root.iterdir()):
             sys.argv = ["prepare_bulk.py", "--root", str(folder), "--pointer", folder.name, "--principal", "scale",
-                        "--writer", "builtin", "--ext", "py,sh,json", "--max-files", str(FILES_PER_POINTER + 10)]
+                        "--writer", "builtin", "--ext", "py,sh,json", "--max-files", str(2 * FILES_PER_POINTER)]
             devnull = open(os.devnull, "w")
             old = sys.stdout
             sys.stdout = devnull
@@ -161,7 +161,9 @@ def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=pri
         shim.mkdir()
         (shim / "sitecustomize.py").write_text(SITECUSTOMIZE)
         stub_count, count_out = tmp / "stub-calls.txt", tmp / "counts.jsonl"
-        env = {"SUPERJEV_STATE_DIR": str(state), "TYPESAFE_API_KEY": "fake-not-real", "SUPERJEV_AUTO_CACHE": "0",
+        profiles = json.loads((SKILL / "judge_profiles.json").read_text())
+        key_env = profiles["profiles"][profiles["default"]]["key_env"]  # the default judge's key name, from its profile
+        env = {"SUPERJEV_STATE_DIR": str(state), key_env: "fake-not-real", "SUPERJEV_AUTO_CACHE": "0",
                "SUPERJEV_NEW_FILE_SCAN": "0", "SUPERJEV_SKILLS": "0", "SUPERJEV_REPO": str(REPO),
                "SUPERJEV_SHARED_POINTERS": str(tmp / "no-shared.json"), "XDG_CONFIG_HOME": str(tmp / "xdg"),
                "NODE_OPTIONS": f"--require={tmp / 'stub.cjs'}", "SJ_STUB_COUNT": str(stub_count)}
