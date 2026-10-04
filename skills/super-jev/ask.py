@@ -182,6 +182,7 @@ import json
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import tempfile
 import sys
@@ -233,10 +234,86 @@ class SecretHeld(RuntimeError):
     with an OUTCOME line; an ordinary ask lets it reach main(), which exits 1 (a known gap, a follow-up)."""
 
 
+ENGINE_PATHS: Counter = Counter()  # which way memory() ran: "inprocess" or "subprocess" (shown in the trace)
+_ENGINE_LOCK = threading.Lock()  # guards only the one-time import, never a call
+_ENGINE_MODULES: dict = {}  # engine dir -> cli module (imported once per process)
+
+
+def _engine_target():
+    """(repo, config path) the subprocess chain would end up running cli.py with, or None when
+    that cannot be worked out here. Same resolution as dispatch.command: the installed memory.sh
+    wrapper (fixed repo = two levels up, one fixed --config) unless SUPERJEV_REPO is set."""
+    skill_dir = Path(__file__).resolve().parent
+    wrapper = skill_dir / "memory.sh"
+    if not os.environ.get("SUPERJEV_REPO") and not os.environ.get("SUPERJEV_MEMORY_WRAPPER_ACTIVE") and wrapper.is_file():
+        found = re.search(r"--config\s+(\S+)", wrapper.read_text())
+        if not found:
+            return None
+        return skill_dir.parents[1], Path(found.group(1).strip("\"'"))
+    repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else skill_dir.parents[1]
+    return repo, Path(os.environ["SUPERJEV_STATE_DIR"]).expanduser() / "_memory" / "config.json" \
+        if os.environ.get("SUPERJEV_STATE_DIR") else Path.home() / ".local/state/super-jev/_memory/config.json"
+
+
+def _engine_module(repo: Path):
+    exp = repo / "experiments" / "verified-pointer-memory"
+    cli = exp / "cli.py"
+    if not cli.is_file():
+        return None
+    key = str(exp)
+    if key not in _ENGINE_MODULES:
+        with _ENGINE_LOCK:  # one-time import only; never held across a call
+            if key not in _ENGINE_MODULES:
+                import importlib.util
+                if key not in sys.path:
+                    sys.path.insert(0, key)  # cli.py does "from service import ..."
+                spec = importlib.util.spec_from_file_location("superjev_engine_cli", cli)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                os.umask(0o077)  # what cli.main sets; set once here, process-wide, no per-call swap
+                _ENGINE_MODULES[key] = mod
+    return _ENGINE_MODULES[key]
+
+
+def _memory_inprocess(req: dict):
+    """The engine's answer to req, run in this process: the same steps cli.main takes for
+    --input (load config, run, hints, nextAction), no interpreter chain. None when it cannot be
+    used (not importable, no config, a connect) so the caller falls back to the subprocess."""
+    if req.get("action") == "connect":
+        return None
+    target = _engine_target()
+    if not target or not target[1].is_file():
+        return None
+    try:
+        cli = _engine_module(target[0])
+    except Exception:
+        return None
+    if cli is None:
+        return None
+    request = json.loads(json.dumps(req))  # what the subprocess would read from stdin
+    try:
+        result = cli.run(request, cli.load_config(target[1]))
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        result = {"status": "error", "reason": str(error) if isinstance(error, ValueError)
+                  and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
+    except Exception as error:  # the subprocess would print a traceback and ask.py reads "error"
+        return {"status": "error", "raw": f"{type(error).__name__}: {error}"[-300:]}
+    cli.add_hints(result)
+    result.setdefault("nextAction", cli.NEXT.get(result["status"], "record-unresolved"))
+    if "message" in result:
+        result = {"message": result.pop("message"), **result}
+    return json.loads(json.dumps(result))
+
+
 def memory(req: dict) -> dict:
     # Every memory request (navigate, search, cached, add ...) goes through here: one scan.
     if payload_has_secret(req):
         raise SecretHeld("memory request contains a secret; not sent")
+    out = _memory_inprocess(req)
+    if out is not None:
+        ENGINE_PATHS["inprocess"] += 1
+        return out
+    ENGINE_PATHS["subprocess"] += 1
     r = subprocess.run([sys.executable, str(SKILL), "memory", "--input", "/dev/stdin"], input=json.dumps(req), capture_output=True, text=True)
     try:
         return json.loads(r.stdout)
@@ -304,6 +381,8 @@ def write_trace(sdir: Path, **fields) -> None:
     path = sdir / "traces.jsonl"
     try:
         _rotate_if_needed(path)
+        if fields.get("kind") == "trace" and ENGINE_PATHS:
+            fields = {**fields, "engine": dict(ENGINE_PATHS)}  # which engine path ran: inprocess / subprocess
         entry = _redact({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), **fields})
         with path.open("a") as f:
             f.write(json.dumps(entry) + "\n")
