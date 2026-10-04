@@ -88,6 +88,16 @@ CLEAN = [
     "password: <your password here>",
     "Part 123-45-6789x ships on Friday",
     "red green blue and yellow are colors, the end",
+    "pass: 12",
+    "pass = 0",
+    "pass: 10/12",
+    "pass: 00:00",
+    "pass: $0",
+    "Pass: 2 of 3 checks",
+    "pwd -- x",
+    "Use pwd -- to print the working directory.",
+    'cmd = "password=" + value',
+    'q = "password=" +',
 ]
 
 
