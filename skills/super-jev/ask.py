@@ -312,7 +312,11 @@ def memory(req: dict) -> dict:
     # Every memory request (navigate, search, cached, add ...) goes through here: one scan.
     if payload_has_secret(req):
         raise SecretHeld("memory request contains a secret; not sent")
+    if req.get("principal") and req.get("action") == "panel":
+        use_stat_memo(str(req["principal"]))
     out = _memory_inprocess(req)
+    if req.get("action") == "panel":
+        flush_stat_memo()
     if out is not None:
         ENGINE_PATHS["inprocess"] += 1
         return out
@@ -1906,19 +1910,99 @@ def candidate_files(pointers: list, exclude=(), done=()):
             yield ptr, path, entry
 
 
+STAT_MEMO_FILE = "stat-sha.sqlite"  # not index.sqlite: a flag-off ask never creates an index
+_STAT_MEMOS: dict = {}  # memo file path -> StatSha (one per file, shared by every ask in this process)
+_ACTIVE_MEMO = [None]
+
+
+def use_stat_memo(principal: str):
+    """Point the stat-keyed sha memo (file_index.StatSha, stat-sha.sqlite in this principal's state dir) at `principal`:
+    read_sha, edited_held, the TOC corpus build and the engine's panel snapshot all share it. Works with the
+    index flag off. SUPERJEV_STAT_MEMO=0 turns it off (every file is read, as before)."""
+    if os.environ.get("SUPERJEV_STAT_MEMO", "1").strip().lower() in ("0", "off", "false", "no"):
+        _ACTIVE_MEMO[0] = None
+        _engine_sha_hook(None)
+        return None
+    from file_index import StatSha
+    path = str(state_dir(principal) / STAT_MEMO_FILE)
+    memo = _STAT_MEMOS.get(path) or _STAT_MEMOS.setdefault(path, StatSha(path))
+    _ACTIVE_MEMO[0] = memo
+    _engine_sha_hook(memo)
+    return memo
+
+
+def _engine_sha_hook(memo):
+    """The engine's snapshot hashes every original and manifest source: hand it the same memo."""
+    svc = sys.modules.get("service")
+    if svc is not None and hasattr(svc, "set_sha_memo"):
+        svc.set_sha_memo(memo)
+
+
+def flush_stat_memo() -> None:
+    if _ACTIVE_MEMO[0] is not None:
+        _ACTIVE_MEMO[0].flush()
+
+
 def read_sha(path: str, reads):
     """(raw bytes, sha256 hex) of the file as it is now, or None when unreadable. `reads`, when given, is
-    the one read+sha pass an ask shares between edited_held and word_search."""
+    the one read+sha pass an ask shares between edited_held and word_search. The bytes are always read; the
+    hash is reused when the file's stat key (size, mtime_ns, ctime_ns, inode) matches the memo."""
     if reads is not None and path in reads:
         return reads[path]
+    memo = _ACTIVE_MEMO[0]
     try:
+        key, known = memo.get(path) if memo else (None, None)  # stat before the read: a later change shows next time
         raw = Path(path).read_bytes()
-        got = (raw, hashlib.sha256(raw).hexdigest())
+        sha = known or hashlib.sha256(raw).hexdigest()
+        if memo and not known:
+            memo.put(path, key, sha)
+        got = (raw, sha)
     except OSError:
         got = None
     if reads is not None:
         reads[path] = got
     return got
+
+
+def sha_of(path: str, reads):
+    """sha256 hex of the file as it is now (None when unreadable), without reading its bytes when the stat key
+    matches the memo. A changed or unmemoized file is read once and shared through `reads` (read_sha)."""
+    if reads is not None and path in reads:
+        got = reads[path]
+        return got[1] if got else None
+    memo = _ACTIVE_MEMO[0]
+    if memo:
+        try:
+            known = memo.get(path)[1]
+        except OSError:
+            return None
+        if known:
+            return known
+    got = read_sha(path, reads)
+    return got[1] if got else None
+
+
+def toc_corpus(cands, reads, fb_paths=None) -> dict:
+    """{path: (pointer, entry)} the TOC search may open. A file whose current sha equals its reviewed sha is in
+    (sha from the ask's shared pass / the stat memo, bytes not re-read); one edited since connect is in only as a
+    refresh would admit it (word_search's rule). `fb_paths` set: a path outside it is vouched for by the index."""
+    corpus = {}
+    for tptr, tpath, tentry in cands:
+        if tpath in corpus:
+            continue
+        if fb_paths is not None and tpath not in fb_paths:
+            corpus[tpath] = (tptr, tentry)  # vouched for by the index; sha-checked below if served
+            continue
+        tsha = sha_of(tpath, reads)
+        if tsha is None:
+            continue
+        if tsha == tentry.get("sha256"):
+            corpus[tpath] = (tptr, tentry)
+            continue
+        tgot = read_sha(tpath, reads)
+        if tgot and edited_readable(tpath, tptr, tentry, tgot[0], tgot[0].decode("utf-8", "replace")):
+            corpus[tpath] = (tptr, tentry)
+    return corpus
 
 
 def edited_held(pointers: list, exclude=(), reads=None) -> dict:
@@ -1929,19 +2013,23 @@ def edited_held(pointers: list, exclude=(), reads=None) -> dict:
     set's scope (a refresh would hold it again), "refresh": a refresh will review it}."""
     done, why = set(), {}  # done: some set reads the file; why: the first set's reason it cannot
     for ptr, path, entry in candidate_files(pointers, exclude, done):
-        got = read_sha(path, reads)
-        if got is None:
+        sha = sha_of(path, reads)
+        if sha is None:
             continue  # removed: not an edited file
-        raw, sha = got
         if sha == entry.get("sha256"):
             done.add(path)  # a file is out only if no searched set reads it
             continue
+        got = read_sha(path, reads)  # edited: its text is needed to judge it
+        if got is None:
+            continue
+        raw = got[0]
         text = raw.decode("utf-8", "replace")
         if edited_readable(path, ptr, entry, raw, text):
             done.add(path)
             continue
         why.setdefault(path, "secret" if clean_text(text, path) is None else "stuck" if (
             len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh")
+    flush_stat_memo()
     out = {"secret": [], "stuck": [], "refresh": []}
     for path, kind in why.items():
         if path not in done:
@@ -3177,6 +3265,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # note that states the answer. Word search adds the files whose text matches the
     # question; the content check still decides what is kept.
     reads = {}  # one read+sha pass shared by edited_held and word_search
+    use_stat_memo(principal)  # ...and a stat-keyed memo across asks: an unchanged file is not re-read
     icands, fitems, ftocs, fts_nums, fb_paths = None, None, None, None, set()
     if idx_read:
         try:
@@ -3227,20 +3316,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         # Jev's pick of files from their TOC pages, then the parts of those files. The word search's
         # own hits ride along at every step. If it fails, the word search's list is read and the
         # failure is named in the trace.
-        corpus = {}
-        for tptr, tpath, tentry in (icands if idx_read else candidate_files(search_pointers, out_of_scope)):
-            if tpath in corpus:
-                continue
-            if idx_read and tpath not in fb_paths:
-                corpus[tpath] = (tptr, tentry)  # vouched for by the index; sha-checked below if served
-                continue
-            try:  # a file edited since connect is searched only as a refresh would admit it (word_search's rule)
-                traw = Path(tpath).read_bytes()
-            except OSError:
-                continue
-            if hashlib.sha256(traw).hexdigest() == tentry.get("sha256") or edited_readable(
-                    tpath, tptr, tentry, traw, traw.decode("utf-8", "replace")):
-                corpus[tpath] = (tptr, tentry)
+        corpus = toc_corpus(icands if idx_read else candidate_files(search_pointers, out_of_scope), reads,
+                            fb_paths if idx_read else None)
+        flush_stat_memo()
         tt0 = time.time()
         try:
             tfiles, tparts, ttrace = toc_search.run(question, corpus, found, {
