@@ -108,3 +108,59 @@ def test_trace_line_names_the_engine_path(state, tmp_path):
     ask.write_trace(tmp_path / "t", kind="trace", question="q")
     line = json.loads((tmp_path / "t" / "traces.jsonl").read_text().splitlines()[-1])
     assert line["engine"] == {"inprocess": 1}
+
+
+def test_concurrent_engine_calls_overlap_and_match_subprocess(state, monkeypatch):
+    import threading
+    import time
+    ask, note = state
+    n, nap = 4, 0.8
+    req = {"action": "navigate", "pointer": "nope", "principal": "ann", "question": Q}
+    with monkeypatch.context() as m:
+        m.setattr(ask, "_memory_inprocess", lambda r: None)
+        expected = ask.memory(req)
+    # real in-process calls from threads return the same as the subprocess path
+    outs = [None] * n
+
+    def go(i):
+        outs[i] = ask.memory(req)
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert all(json.dumps(o, sort_keys=True) == json.dumps(expected, sort_keys=True) for o in outs)
+    # a slow provider: calls must overlap, not queue
+    target = ask._engine_target()
+    cli = ask._engine_module(target[0])
+    real = cli.run
+
+    def slow(request, config):
+        time.sleep(nap)
+        return real(request, config)
+    monkeypatch.setattr(cli, "run", slow)
+    t0 = time.time()
+    threads = [threading.Thread(target=go, args=(i,)) for i in range(n)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    wall = time.time() - t0
+    assert wall < n * nap * 0.6, wall
+    assert all(json.dumps(o, sort_keys=True) == json.dumps(expected, sort_keys=True) for o in outs)
+
+
+def test_engine_target_installed_wrapper_and_bypasses(tmp_path, monkeypatch):
+    for name in ("SUPERJEV_REPO", "SUPERJEV_MEMORY_WRAPPER_ACTIVE", "SUPERJEV_STATE_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    spec = importlib.util.spec_from_file_location("ask_target", SKILL / "ask.py")
+    ask = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ask)
+    skill_dir = tmp_path / "root" / "skills" / "super-jev"
+    skill_dir.mkdir(parents=True)
+    cfg = tmp_path / "fixed" / "config.json"
+    (skill_dir / "memory.sh").write_text(f'#!/bin/sh\nexec python3 x/cli.py --config {cfg} "$@"\n')
+    monkeypatch.setattr(ask, "__file__", str(skill_dir / "ask.py"))
+    assert ask._engine_target() == (skill_dir.parents[1], cfg)
+    monkeypatch.setenv("SUPERJEV_MEMORY_WRAPPER_ACTIVE", "1")
+    repo, conf = ask._engine_target()
+    assert repo == skill_dir.parents[1] and conf != cfg
+    monkeypatch.delenv("SUPERJEV_MEMORY_WRAPPER_ACTIVE")
+    monkeypatch.setenv("SUPERJEV_REPO", str(tmp_path / "other"))
+    assert ask._engine_target()[0] == tmp_path / "other" and ask._engine_target()[1] != cfg
