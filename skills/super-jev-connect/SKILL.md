@@ -77,6 +77,6 @@ Every agent should see the fleet's shared sets (shared knowledge folder, skills 
 
 List the shared sets once in `~/.local/state/super-jev/shared-pointers.json` (`{"pointers": ["fleet-knowledge", "main-skills-catalog"]}`, exact names). Every fully connected `prepare_bulk.py` run then shares them with its `--principal`s (`--no-shared` to skip); for an agent already connected run `share_pointers.py --principal NAME --shared`. Never connect a per-agent copy of a shared folder; share the one pointer.
 
-Git worktree copies (`.claude/worktrees/`, or any checkout whose `.git` file points into `.git/worktrees/`) are never inventoried, even as a `--root`: they are stale copies of a brain or repo.
+Git worktree copies (`.claude/worktrees/`, or any checkout whose `.git` file points into `.git/worktrees/`) are never inventoried, even as a `--root`: they are stale copies of a brain or repo, so code inside worktree folders is not searched.
 
 Deeper reference: [connector setup](../super-jev/references/connectors.md). Daily use of an already-connected pointer: [`super-jev/SKILL.md`](../super-jev/SKILL.md).

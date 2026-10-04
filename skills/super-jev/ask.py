@@ -196,9 +196,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prepare_bulk  # noqa: E402
 from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, label_bracket, has_secret,  # noqa: E402
-                          payload_has_secret, path_has_secret, redact_path_secrets)
+                          payload_has_secret, path_has_secret, redact_path_secrets, clean_text)
 import auto_heal  # noqa: E402
 import judges  # noqa: E402
+import toc_search  # noqa: E402
 import judge_profile  # noqa: E402
 import refresh_changed  # noqa: E402
 
@@ -594,7 +595,7 @@ def line_text(path: str, n: int):
     """File line n (1-based) cut to 160 characters, or None when it cannot be read or looks like a
     secret: a line that looks like a secret is never quoted."""
     try:
-        line = Path(path).read_text(errors="replace").splitlines()[n - 1].strip()
+        line = (clean_text(Path(path).read_text(errors="replace"), Path(path)) or "").splitlines()[n - 1].strip()
     except (OSError, IndexError):
         return None
     return line[:160] if line and not has_secret(line) else None
@@ -604,6 +605,9 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
     """One ranked file (tier: confirmed, possible or unchecked). `line` is the file line the content check
     judged best and `text` that line; text mode prints neither."""
     row = {"path": path, "tier": tier, "score": score, "pointer": pointer}
+    loc = ((_STAGE.get("checks") or {}).get(path) or {}).get("location")
+    if loc:
+        row["location"] = loc
     n = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
     if isinstance(n, int) and n > 0:
         row["line"] = n
@@ -615,7 +619,9 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
 def show_file(f: dict) -> None:
     note = {"possible": POSSIBLE_NOTE, "unchecked": UNCHECKED_NOTE}.get(f["tier"], "")
     score = f"{f['score']:5.2f}" if isinstance(f.get("score"), (int, float)) else "saved"
-    print(f"{score}  {f['path']}  [{f['pointer']}]{note}")
+    loc = f.get("location") or {}
+    where = f"{f['path']}:{loc['start']}-{loc['end']}" if loc.get("unit") == "lines" else f['path']
+    print(f"{score}  {where}  [{f['pointer']}]{note}")
 
 
 def unsearched_rows(ptrs, state_of: dict, healing: set) -> list:
@@ -952,20 +958,29 @@ def confirm_start(question: str, path: str):
         text = Path(path).read_text(errors="replace")
     except OSError as e:
         return (None, False, f"cannot read {path}: {e.strerror or e}", None), None
-    # The file may have changed since connect scanned it; never ship a secret to Jev.
-    if has_secret(text):
+    # The file may have changed since connect scanned it; never ship a secret to Jev. A secret-shaped
+    # section is withheld (its lines blanked, line numbers kept); a file that cannot be made clean is held.
+    text = clean_text(text, path)
+    if text is None:
         return (None, False, None, HELD_SECRET), None
-    if len(text) <= WHOLE_FILE_CHARS:
-        chunks = [text]
-    else:
-        chunks = split_passages(text)
+    tparts = (_STAGE.get("toc_parts") or {}).get(path) or []
+    # A short file is read whole; a long one as the passages the word overlap picks. Either way the named
+    # parts the TOC search chose ride along, each with its line range, so the best one carries a location
+    # (a whole file alone could only point at its first lines).
+    chunks = [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
+    tlines = text.split("\n")
+    extra = [toc_search.part_text(tlines, s_, e_) for _n, s_, e_ in tparts]
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
-    picked = pick_chunks(question, chunks)
+    base = len(chunks)
+    picked = pick_chunks(question, chunks) + list(range(base, base + len(extra)))
+    chunks = chunks + extra
     detail = _STAGE.setdefault("checks", {})[path] = {
         "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
         "wording": "claim-evidence" if _CLAIM["text"] else "source-evidence"}
-    leaves = [{"id": f"c{i}", "label": label.format(n=i + 1), "description": with_subject(chunks, i),
+    leaves = [{"id": f"c{i}", "label": label.format(n=i + 1),
+               "description": (f"{tparts[i - base][0]} (lines {tparts[i - base][1]}-{tparts[i - base][2]} of "
+                               f"{Path(path).name})\n{chunks[i]}" if i >= base else with_subject(chunks, i)),
                "sourceId": str(i)} for i in picked]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
                "catalog": {"version": 1, "structure": "flat-files", "rootId": "root",
@@ -977,7 +992,26 @@ def confirm_start(question: str, path: str):
     if payload_has_secret(payload):  # the question rides in the payload too
         return (None, partial, None, HELD_SECRET), None
     return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked,
-                  "detail": detail, "partial": partial}
+                  "detail": detail, "partial": partial, "tparts": tparts, "base": base}
+
+TIE_MARGIN = 0.02  # candidate scores this close to the top are a tie
+
+
+def tightest_near_top(top_c, candidates, chunks: list, tparts: list, base: int):
+    """The candidate to locate the answer: among those scoring within TIE_MARGIN of the top one, the one
+    spanning the fewest lines (a named part, not the header passage that merely describes it). The judge
+    scores a file's opening passage and the function it describes alike, and the first listed won the tie."""
+    def span(c):
+        i = int(c["sourceId"])
+        if base <= i < base + len(tparts):
+            return tparts[i - base][2] - tparts[i - base][1] + 1
+        return chunks[i].count("\n") + 1 if i < len(chunks) else 10 ** 9
+    if top_c is None:
+        return None
+    near = [c for c in candidates if isinstance(c, dict) and isinstance(c.get("score"), (int, float))
+            and str(c.get("sourceId", "")).isdigit() and c["score"] >= top_c["score"] - TIE_MARGIN]
+    return min(near, key=lambda c: (span(c), -c["score"])) if near else top_c
+
 
 def confirm_finish(question: str, ctx: dict, body, error):
     """confirm_one's result from one navigation-cli output (or its error)."""
@@ -994,10 +1028,23 @@ def confirm_finish(question: str, ctx: dict, body, error):
     detail.update(best=round(best, 3), none=_root_none(body), status=body.get("status"))
     top_c = max((c for c in body.get("candidates") or [] if isinstance(c, dict)
                  and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"], default=None)
+    top_c = tightest_near_top(top_c, body.get("candidates"), ctx.get("chunks") or [], ctx.get("tparts") or [],
+                              ctx.get("base", len(chunks)))
     if top_c and str(top_c.get("sourceId", "")).isdigit():
         detail["best_chunk"] = int(top_c["sourceId"])
-        if int(top_c["sourceId"]) < len(chunks):
-            detail["best_line"] = best_line(question, chunks, int(top_c["sourceId"]))
+        i_ = int(top_c["sourceId"])
+        tp_, base_ = ctx.get("tparts") or [], ctx.get("base", len(chunks))
+        if base_ <= i_ < base_ + len(tp_):
+            name_, s_, e_ = tp_[i_ - base_]
+            detail["location"] = {"unit": "lines", "start": s_, "end": e_, "part": name_}
+            detail["best_line"] = s_ + best_line(question, [chunks[i_]], 0) - 1
+        elif i_ < len(chunks):
+            detail["best_line"] = best_line(question, chunks, i_)
+            # name the TOC part the best line sits in, when the TOC search listed one
+            home = [(n_, s_, e_) for n_, s_, e_ in tp_ if s_ <= detail["best_line"] <= e_]
+            if home:
+                n_, s_, e_ = min(home, key=lambda x: x[2] - x[1])
+                detail["location"] = {"unit": "lines", "start": s_, "end": e_, "part": n_}
     if not _CLAIM["text"]:
         # Evidence mode scores each passage as requested property or required component.
         # The shared source floor admits leads, not proven answers; unlike the
@@ -1050,7 +1097,8 @@ def judge_near_twin(question: str, candidates: list):
             text = Path(p).read_text(errors="replace")
         except OSError:
             continue
-        if has_secret(text):
+        text = clean_text(text, p)
+        if text is None:
             continue
         texts[p] = text[:NEAR_TWIN_SNIPPET]
     if len(texts) < 2:
@@ -1358,7 +1406,8 @@ def best_passage(path: str):
         text = Path(path).read_text(errors="replace")
     except OSError:
         return None
-    if has_secret(text):
+    text = clean_text(text, path)
+    if text is None:
         return None
     if len(text) <= WHOLE_FILE_CHARS:  # judged whole, so shown whole
         return text
@@ -1672,7 +1721,7 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
     the pointer's recorded scope."""
     return (isinstance(entry, dict) and bool(entry.get("pass")) and bool(entry.get("sha256"))
             and len(raw) <= prepare_bulk.CEILING_BYTES
-            and not has_secret(text) and refresh_would_admit(path, ptr))
+            and clean_text(text, path) is not None and refresh_would_admit(path, ptr))
 
 
 def candidate_files(pointers: list, exclude=(), done=()):
@@ -1705,7 +1754,7 @@ def edited_held(pointers: list, exclude=()) -> dict:
         if hashlib.sha256(raw).hexdigest() == entry.get("sha256") or edited_readable(path, ptr, entry, raw, text):
             done.add(path)  # a file is out only if no searched set reads it
             continue
-        why.setdefault(path, "secret" if has_secret(text) else "stuck" if (
+        why.setdefault(path, "secret" if clean_text(text, path) is None else "stuck" if (
             len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh")
     out = {"secret": [], "stuck": [], "refresh": []}
     for path, kind in why.items():
@@ -2325,8 +2374,29 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # Routing asks Jev about every pointer at once: their questions ride in shared
     # calls (split under the input ceiling) instead of one navigate call per pointer.
     t_start = time.time()
-    outs = nav_many(pointers) if pointers and batch_jev() else None
-    if outs is None:  # one navigate call per pointer, as before batching
+    if not _CLAIM["text"]:
+        # The TOC search picks the read list, so routing asks Jev nothing: each set's status comes from
+        # the registry (no Jev call), which keeps stale sets searched, named and auto-healed.
+        outs = {ptr: {"status": "no-candidates"} for ptr in pointers}
+        panel = memory({"action": "panel", "principal": principal}) if pointers else {}
+        for row in (panel.get("pointers") or []) if isinstance(panel, dict) else []:
+            if isinstance(row, dict) and row.get("pointer") in outs and str(
+                    row.get("snapshotStatus") or row.get("status") or "").startswith(("preparation-required", "refresh-required")):
+                outs[row["pointer"]] = {"status": "no-candidates", "stale": {"from_registry": True}}
+    else:
+        outs = nav_many(pointers) if pointers and batch_jev() else None
+    if not _CLAIM["text"]:
+        # A set with no prepare-cache (a reviewed view, a path-connected or recipe set) has no files for the TOC
+        # search to list, so it is still routed by Jev's navigate, as before: no quiet shrink of what a question reaches.
+        nav_ptrs = [p for p in pointers if not load_cache_files(p)]
+        bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
+        if bm is not None:
+            navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
+        else:
+            navd = dict(zip(nav_ptrs, ThreadPoolExecutor(max_workers=min(len(nav_ptrs), NAV_CONCURRENCY)).map(nav, nav_ptrs))) if nav_ptrs else {}
+        _STAGE["nav_fallback"] = nav_ptrs
+        results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
+    elif outs is None:  # one navigate call per pointer, as before batching
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     else:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
@@ -2437,8 +2507,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 # Not an error: this set answered from its last refresh. Say so, and how much is newer.
                 gone = len(served.get("missing") or [])
                 error_lines.append(f"[{ptr}] stale: searched as of its last refresh "
-                                   f"({len(served.get('changed') or [])} file(s) changed since"
-                                   + (f", {gone} removed" if gone else "") + ")"
+                                   + ("(files changed since)" if served.get("from_registry") else
+                                      f"({len(served.get('changed') or [])} file(s) changed since"
+                                      + (f", {gone} removed" if gone else "") + ")")
                                    + hint + heal_note + " [STALE]")
                 continue
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
@@ -2467,10 +2538,45 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     out_of_scope = {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)}
     edited = edited_held(search_pointers, out_of_scope)  # once per searched set, not per search path
     held_cover = {}  # a held file's word coverage of the question, from the same word-search pass
-    found = word_search(question, search_pointers, skip=set(routed[:CONFIRM_FILES]) | out_of_scope,
+    toc_on = not _CLAIM["text"]
+    found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
                         **({"extra": set(edited["secret"]), "held_cover": held_cover} if edited["secret"] else {}))
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
+    if toc_on:
+        # The TOC search picks the read list: a free shortlist from every file's table of contents,
+        # Jev's pick of files from their TOC pages, then the parts of those files. The word search's
+        # own hits ride along at every step. If it fails, the word search's list is read and the
+        # failure is named in the trace.
+        corpus = {}
+        for tptr, tpath, tentry in candidate_files(search_pointers, out_of_scope):
+            if tpath in corpus:
+                continue
+            try:  # a file edited since connect is searched only as a refresh would admit it (word_search's rule)
+                traw = Path(tpath).read_bytes()
+            except OSError:
+                continue
+            if hashlib.sha256(traw).hexdigest() == tentry.get("sha256") or edited_readable(
+                    tpath, tptr, tentry, traw, traw.decode("utf-8", "replace")):
+                corpus[tpath] = (tptr, tentry)
+        tt0 = time.time()
+        try:
+            tfiles, tparts, ttrace = toc_search.run(question, corpus, found, {
+                "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
+                    (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
+                "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits},
+                cache_path=sdir / "toc-cache.json")
+            _STAGE["toc_parts"] = tparts
+            # the files Jev's navigate routed (sets with no prepare-cache) ride along after the TOC pick
+            tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
+            wpaths = {p: (corpus[p][0] if p in corpus else next(m[2] for m in merged if m[1] == p)) for p in tfiles}
+            to_check = list(tfiles)
+            for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties like routing's did
+                route.setdefault(tp_, ts_)
+        except Exception as e:  # noqa: BLE001 -- any failure reads the word search's list instead
+            ttrace = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+        ttrace["secs"] = round(time.time() - tt0, 1)
+        _STAGE["toc"] = ttrace
     checked = set(to_check)
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
@@ -2606,6 +2712,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                      "fate": fates.get(p) or ("already routed" if p in routed[:CONFIRM_FILES]
                                                               else "not read: past top %d" % FALLBACK_FILES)}
                                     for sc, p, _ptr in wsearch.get("ranked", [])]},
+            "toc": _STAGE.get("toc"),
             "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
             "cover_gate": _STAGE.get("cover_gate"),
             "timeout_rechecks": _STAGE.get("timeout_rechecks"),

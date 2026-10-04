@@ -23,6 +23,7 @@ def _scrub_callers_settings():
 _scrub_callers_settings()
 
 def pytest_configure(config):
+    config.addinivalue_line("markers", "real_toc: keeps the real TOC search (no replay of faked navigate candidates)")
     config.addinivalue_line("markers", "real_code_ask: uses the real fleet jev lib; skips when the lib file is absent")
 
 
@@ -60,3 +61,51 @@ def _no_live_chat_config_or_launcher(monkeypatch, tmp_path):
     No test may reach the real ones: both folders point into tmp unless a test sets its own."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-xdg-config"))
     monkeypatch.setenv("SUPERJEV_BIN_DIR", str(tmp_path / "no-bin"))
+
+
+@pytest.fixture(autouse=True)
+def _toc_read_list_replays_old_routing(request, monkeypatch):
+    """The TOC search now picks the read list (routing asks Jev nothing). These suites were written when
+    the read list came from each pointer's navigate candidates, which they fake: stand in for the TOC
+    search by listing those faked candidates (best first), so what they test (ranking, merging, filters
+    and messages after the read list) is unchanged. test_toc_search.py and test_zoom_to_part.py
+    exercise the real TOC search and are left alone."""
+    if request.module.__name__.split(".")[-1] in ("test_toc_search", "test_zoom_to_part") or request.node.get_closest_marker("real_toc"):
+        return
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import toc_search
+
+    def replay(question, corpus, hits, ask_hooks, cache_path=None):
+        caller = sys._getframe(1)
+        mem, principal = caller.f_globals["memory"], caller.f_locals.get("principal")
+        rows = []
+        for ptr in {p_ for p_, _e in corpus.values()}:
+            try:
+                out = mem({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
+                           "lastGood": True})
+            except Exception:  # noqa: BLE001 -- a suite that fakes no navigate has no routed candidates
+                continue
+            if isinstance(out, dict) and out.get("status") == "candidates":
+                rows += [(c["score"], c["originalPath"]) for c in out.get("candidates") or []
+                         if isinstance(c, dict) and c.get("originalPath") in corpus]
+        routed = [p for _s, p in sorted(rows, key=lambda r: -r[0])]
+        files = list(dict.fromkeys(routed + [p for _s, p, _ptr in hits if p in corpus]))
+        top = [(p, sc) for sc, p in sorted(rows, key=lambda r: -r[0])]
+        return files, [], {"pick": {"top": top}}
+
+    monkeypatch.setattr(toc_search, "run", replay)
+
+# Tests that guard routing calls a question no longer makes. Skipped with the reason, never deleted.
+_DROPPED = "dropped on purpose: no routing calls on question path"
+_OLD_ROUTING = {
+    "test_content_cost.py::test_pointer_without_any_question_word_is_not_routed": _DROPPED,
+    "test_content_cost.py::test_synonym_keeps_the_pointer": _DROPPED,
+}
+
+
+def pytest_collection_modifyitems(items):
+    for item in items:
+        reason = _OLD_ROUTING.get(item.nodeid.split("tests/")[-1])
+        if reason:
+            item.add_marker(pytest.mark.skip(reason=reason))
