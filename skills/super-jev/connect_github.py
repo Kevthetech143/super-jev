@@ -26,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from prepare_bulk import principal_name  # noqa: E402
+from prepare_bulk import CACHE_DIR, principal_name  # noqa: E402
 
 SYNC_FILE = ".github-sync.json"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -219,7 +219,7 @@ def main(argv=None) -> int:
         return 0
     cmd = [sys.executable, str(HERE / "prepare_bulk.py"), "--root", str(out), "--pointer", a.pointer,
            "--principal", a.principal, "--max-files", str(max(250, total + 10))]
-    if (HERE / "prepare-cache" / f"{a.pointer}.json").is_file():
+    if (CACHE_DIR / f"{a.pointer}.json").is_file():
         cmd.append("--refresh")
     for flag in ("writer", "writer_model", "writer_command"):
         if getattr(a, flag):
