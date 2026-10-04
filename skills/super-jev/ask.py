@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Front door for the super-jev harness: one cache-first lookup loop, any agent.
 
+  ask.py --version
+      Print the release (read from package.json, the one version source).
+
   ask.py --principal AGENT --status
       Show this principal's connected snapshots and next steps, without a lookup.
 
@@ -4705,6 +4708,13 @@ def main() -> int:
         print(f"ask: {e}", file=sys.stderr)
         return 1
 
+def version() -> str:
+    """The release, from the repo's package.json: the one version source the terminal app also reads."""
+    try:
+        return json.loads((Path(__file__).resolve().parents[2] / "package.json").read_text())["version"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return "unknown"
+
 JSON_REQUESTS = ("--", "--status", "--miss", "--approve", "--claim")
 
 def json_refusal(a: list) -> str:
@@ -4755,6 +4765,9 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
     if not sys.argv[1:] or sys.argv[1:] == ["--help"]:  # asking for the usage, not missing anything
         print(__doc__)
         return 2
+    if a == ["--version"]:  # no principal needed
+        print(f"Super Jev {version()}")
+        return 0
     if not principal:
         return need("--principal AGENT (or the SUPERJEV_PRINCIPAL environment variable)")
     if not a:
