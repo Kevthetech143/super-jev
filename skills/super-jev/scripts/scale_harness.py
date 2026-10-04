@@ -63,11 +63,12 @@ OUT = os.environ.get("SJ_COUNT_OUT")
 if ROOT and OUT:
     opened, hashed, net = [], [0], [0]
     _open = io.open
-    def counting_open(file, mode="r", *a, **k):
-        if isinstance(file, (str, os.PathLike)) and "r" in mode and str(file).startswith(ROOT):
-            opened.append(str(file))
-        return _open(file, mode, *a, **k)
-    io.open = builtins.open = counting_open
+    class counting_open:  # a class, not a function: Python 3.10 pathlib keeps io.open as a class attribute, and a function would bind as a method
+        def __call__(self, file, mode="r", *a, **k):
+            if isinstance(file, (str, os.PathLike)) and "r" in mode and str(file).startswith(ROOT):
+                opened.append(str(file))
+            return _open(file, mode, *a, **k)
+    io.open = builtins.open = counting_open()
     _sha = hashlib.sha256
     def counting_sha(*a, **k):
         hashed[0] += 1
