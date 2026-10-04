@@ -1,4 +1,4 @@
-"""Per-principal file index (stdlib sqlite3, no FTS5).
+"""Per-principal file index (stdlib sqlite3; FTS5 passages, contentless, for the flag-on ask).
 
 One rule: a file's bytes are hashed only when its stat (size, mtime_ns) changes, or at serve time (not here).
 Only a file with a passing review whose current sha equals the reviewed sha, and with no secret-shaped text,
@@ -20,13 +20,28 @@ CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, s
     sha256 TEXT, pass INTEGER, reviewed_sha TEXT);
 CREATE TABLE IF NOT EXISTS toc(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFAULT 0, roots TEXT, checked_at REAL,
-    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0);
+    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0, entries INTEGER);
 -- stat memo for files seen but never ingested (held, edited, new, unreviewed): so they are not re-hashed
 CREATE TABLE IF NOT EXISTS seen(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
     sha256 TEXT, reason TEXT, reviewed_sha TEXT);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE INDEX IF NOT EXISTS files_pointer ON files(pointer);
 CREATE INDEX IF NOT EXISTS seen_pointer ON seen(pointer);
+"""
+
+# S3b: passages as a contentless FTS5 table plus the rows the ask re-scores from (all built by the updater only).
+# Only files of the `files` table (reviewed, no secret-shaped text) are ever put here; held / edited ones never.
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(body, toc, content='', contentless_delete=1);
+CREATE TABLE IF NOT EXISTS fts_map(rid INTEGER PRIMARY KEY, path TEXT UNIQUE, pointer TEXT NOT NULL, person TEXT NOT NULL DEFAULT '',
+    sha TEXT, lab TEXT, npass INTEGER, psize REAL, words TEXT);
+-- the vocabulary (reference-counted by file) and its bigrams: the ask finds close spellings without scanning every word
+CREATE TABLE IF NOT EXISTS fvocab(word TEXT PRIMARY KEY, n INTEGER) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS vbigram(bg TEXT, word TEXT, PRIMARY KEY(bg, word)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS fts_map_pointer ON fts_map(pointer, person);
+CREATE TABLE IF NOT EXISTS fts_stats(pointer TEXT, person TEXT, n INTEGER, passages INTEGER, psize REAL, PRIMARY KEY(pointer, person));
+CREATE TABLE IF NOT EXISTS witems(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
+CREATE TABLE IF NOT EXISTS tocpage(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 """
 
 
@@ -48,8 +63,13 @@ class FileIndex:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.path))
         self.db.executescript(SCHEMA)
+        try:
+            self.db.executescript(FTS_SCHEMA)
+            self.fts_error = None
+        except sqlite3.Error as e:  # no FTS5 / no contentless delete in this sqlite: the ask runs the S3a path
+            self.fts_error = f"{type(e).__name__}: {str(e)[:80]}"
         have = {r[1] for r in self.db.execute("PRAGMA table_info(pointers)")}
-        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0")):
+        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0"), ("entries", "INTEGER")):
             if col not in have:  # an index made by the first version: add the read-path columns
                 self.db.execute(f"ALTER TABLE pointers ADD COLUMN {col} {typ}")
 
@@ -90,6 +110,9 @@ class FileIndex:
                 yield str(p)
 
     def _drop(self, path):
+        if not self.fts_error and self.db.execute("SELECT 1 FROM fts_map WHERE path=?", (path,)).fetchone():
+            self.fts_drop(path)  # its passages go with it; the updater's FTS pass re-adds a file that still qualifies
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','0')")
         for t in ("files", "toc", "seen"):
             self.db.execute(f"DELETE FROM {t} WHERE path=?", (path,))
 
@@ -166,9 +189,10 @@ class FileIndex:
         first = row is None  # the seeding pass is not a change
         out["stale"] = bool(out["changed"] or out["new"] or out["gone"]) and not first
         stale = 1 if out["stale"] else (self.db.execute("SELECT stale FROM pointers WHERE pointer=?", (pointer,)).fetchone() or (0,))[0]
-        self.db.execute("INSERT INTO pointers(pointer,stale,roots,checked_at) VALUES(?,?,?,strftime('%s','now')) "
-                        "ON CONFLICT(pointer) DO UPDATE SET stale=excluded.stale, roots=excluded.roots, checked_at=excluded.checked_at",
-                        (pointer, stale, json.dumps(list(roots)) if roots else None))
+        self.db.execute("INSERT INTO pointers(pointer,stale,roots,checked_at,entries) VALUES(?,?,?,strftime('%s','now'),?) "
+                        "ON CONFLICT(pointer) DO UPDATE SET stale=excluded.stale, roots=excluded.roots, checked_at=excluded.checked_at, "
+                        "entries=excluded.entries",
+                        (pointer, stale, json.dumps(list(roots)) if roots else None, len(entries)))
         self.db.commit()
         return out
 
@@ -242,12 +266,175 @@ class FileIndex:
                 out.append((ptr, path, {"pass": True, "sha256": sha}))
         return out
 
+    # ---- S3b: FTS5 passages (updater writes; the ask only reads) ----
+
+    def fts_have(self) -> dict:
+        """{path: (sha, pointer, labels)} of what the FTS table holds now."""
+        return {p: (sha, ptr, lab) for p, ptr, sha, lab in self.db.execute("SELECT path,pointer,sha,lab FROM fts_map")}
+
+    def fts_begin(self) -> None:
+        """An unfinished pass (crash) leaves the table marked not-ok, so the ask runs the S3a path."""
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','0')")
+        self.db.commit()
+
+    def _vocab_add(self, words, d: int) -> None:
+        for w in words:
+            if d > 0:
+                new = self.db.execute("INSERT INTO fvocab VALUES(?,1) ON CONFLICT(word) DO UPDATE SET n=n+1 RETURNING n", (w,)).fetchone()[0] == 1
+                if new:
+                    self.db.executemany("INSERT OR IGNORE INTO vbigram VALUES(?,?)", [(g, w) for g in {w[i:i + 2] for i in range(len(w) - 1)}])
+            else:
+                if self.db.execute("UPDATE fvocab SET n=n-1 WHERE word=? RETURNING n", (w,)).fetchone()[0] <= 0:
+                    self.db.execute("DELETE FROM fvocab WHERE word=?", (w,))
+                    self.db.execute("DELETE FROM vbigram WHERE word=?", (w,))
+
+    def fts_drop(self, path: str) -> None:
+        r = self.db.execute("SELECT rid,words FROM fts_map WHERE path=?", (path,)).fetchone()
+        if r:
+            self._vocab_add((r[1] or "").split(), -1)
+            self.db.execute("DELETE FROM fts WHERE rowid=?", (r[0],))
+            self.db.execute("DELETE FROM fts_map WHERE rid=?", (r[0],))
+        self.db.execute("DELETE FROM witems WHERE path=?", (path,))
+        self.db.execute("DELETE FROM tocpage WHERE path=?", (path,))
+
+    def fts_put(self, path, pointer, person, sha, lab, body, toc, npass, psize, item_json, toc_json) -> None:
+        """Replace one file's rows (and only that file's)."""
+        self.fts_drop(path)
+        cur = self.db.execute("INSERT INTO fts_map(path,pointer,person,sha,lab,npass,psize,words) VALUES(?,?,?,?,?,?,?,?)",
+                              (path, pointer, person or "", sha, lab, npass, psize, " ".join(sorted(set(body.split())))))
+        self._vocab_add(set(body.split()), 1)
+        self.db.execute("INSERT INTO fts(rowid,body,toc) VALUES(?,?,?)", (cur.lastrowid, body, toc))
+        self.db.execute("INSERT INTO witems VALUES(?,?,?)", (path, sha, item_json))
+        if toc_json is not None:
+            self.db.execute("INSERT INTO tocpage VALUES(?,?,?)", (path, sha, toc_json))
+
+    def fts_finish(self, version: str) -> None:
+        self.db.execute("DELETE FROM fts_stats")
+        self.db.execute("INSERT INTO fts_stats SELECT pointer,person,COUNT(*),SUM(npass),SUM(psize) FROM fts_map GROUP BY pointer,person")
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_version',?)", (version,))
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','1')")
+        self.db.commit()
+
+    def fts_usable(self, version: str):
+        """(True, "") or (False, why): the table exists, was fully built, and by this tokenizer version."""
+        if self.fts_error:
+            return False, f"fts unavailable ({self.fts_error})"
+        m = dict(self.db.execute("SELECT k,v FROM meta WHERE k IN ('fts_ok','fts_version')"))
+        if m.get("fts_ok") != "1":
+            return False, "fts not built" if "fts_ok" not in m else "fts stale (update unfinished)"
+        if m.get("fts_version") != version:
+            return False, "fts stale (tokenizer version changed)"
+        return True, ""
+
+    def fts_vocab(self) -> list:
+        return [r[0] for r in self.db.execute("SELECT word FROM fvocab")]
+
+    def fts_variants(self, terms, synonyms) -> dict:
+        """ask.term_variants() over the stored vocabulary, without scanning it: close spellings are looked up by shared
+        bigram (a ratio >= 0.8 spelling always shares one), stem forms by key range."""
+        import difflib
+        out = {}
+        for t in terms:
+            near = set()
+            if len(t) > 3:
+                grams = list({t[i:i + 2] for i in range(len(t) - 1)})
+                pool = [r[0] for r in self.db.execute(
+                    f"SELECT DISTINCT word FROM vbigram WHERE bg IN ({','.join('?' * len(grams))})", grams)]
+                near = set(difflib.get_close_matches(t, pool, n=3, cutoff=0.8))
+            stem = t[:5] if len(t) > 5 else t
+            lim = 99 if len(t) > 5 else 2
+            out[t] = near | {w for (w,) in self.db.execute("SELECT word FROM fvocab WHERE word>=? AND word<?", (stem, stem + "\U0010ffff"))
+                             if len(w) - len(t) <= lim}
+            out[t] |= {x for x in synonyms.get(t, []) if self.db.execute("SELECT 1 FROM fvocab WHERE word=?", (x,)).fetchone()}
+        return out
+
+    @staticmethod
+    def _scope(pointers, who):
+        sql, a = f" AND m.pointer IN ({','.join('?' * len(pointers))})", list(pointers)
+        if who:
+            sql += f" AND (m.person='' OR m.person IN ({','.join('?' * len(who))}))"
+            a += list(who)
+        return sql, a
+
+    def fts_stats_for(self, pointers, who=()) -> dict:
+        """Global counts over the searched pointers (and the resolved person's folders): files, passages, passage size."""
+        sql = f"SELECT COALESCE(SUM(n),0),COALESCE(SUM(passages),0),COALESCE(SUM(psize),0) FROM fts_stats m WHERE 1=1"
+        s, a = self._scope(pointers, who)
+        n, passages, size = self.db.execute(sql + s, a).fetchone()
+        return {"n": n, "passages": passages, "size": size}
+
+    def fts_df(self, match: str, pointers, who=()) -> int:
+        s, a = self._scope(pointers, who)
+        return self.db.execute("SELECT COUNT(*) FROM fts JOIN fts_map m ON m.rid=fts.rowid WHERE fts MATCH ?" + s, [match, *a]).fetchone()[0]
+
+    def fts_top(self, match: str, pointers, k: int, who=()) -> list:
+        """The k best paths by bm25 for an FTS match (column filters are in the match string)."""
+        s, a = self._scope(pointers, who)
+        return [r[0] for r in self.db.execute(
+            "SELECT m.path FROM fts JOIN fts_map m ON m.rid=fts.rowid WHERE fts MATCH ?" + s + " ORDER BY bm25(fts), m.path LIMIT ?",
+            [match, *a, k])]
+
+    def fts_first_paths(self, pointers, k: int, who=()) -> list:
+        """The k first indexed paths in path order: the TOC shortlist's tie-break, for a question that hits few files."""
+        s, a = self._scope(pointers, who)
+        s = s.replace("m.pointer IN", "m.pointer||'' IN").replace("m.person=''", "m.person||''=''").replace("m.person IN", "m.person||'' IN")
+        # (the || keeps the planner on the path index: first k in path order, not a sort of every row)
+        return [r[0] for r in self.db.execute("SELECT m.path FROM fts_map m WHERE 1=1" + s + " ORDER BY m.path LIMIT ?", [*a, k])]
+
+    def has_entries(self, pointer: str) -> bool:
+        """Does the pointer have a prepare-cache with entries (as the updater last saw it)? An index made before this
+        was recorded answers from the cache file instead."""
+        r = self.db.execute("SELECT entries FROM pointers WHERE pointer=?", (pointer,)).fetchone()
+        if r and r[0] is not None:
+            return r[0] > 0
+        from prepare_bulk import load_cache_files
+        return bool(load_cache_files(pointer))
+
+    def person_paths(self, pointers) -> list:
+        """One path per person folder per pointer plus the PROFILE files, from the stored per-person groups: no
+        prepare-cache is parsed and no scan of every file. Held / edited / unreviewed files count too (`seen`, small)."""
+        q = ",".join("?" * len(pointers))
+        out = [r[0] for r in self.db.execute(
+            f"SELECT path FROM seen WHERE pointer IN ({q}) AND path LIKE '%/agents/global/documents/%'", list(pointers))]
+        for ptr, who in self.db.execute(f"SELECT pointer,person FROM fts_stats WHERE pointer IN ({q}) AND person!=''", list(pointers)).fetchall():
+            out += [r[0] for r in self.db.execute("SELECT path FROM fts_map WHERE pointer=? AND person=? LIMIT 1", (ptr, who))]
+            out += [r[0] for r in self.db.execute("SELECT path FROM fts_map WHERE pointer=? AND person=? AND path LIKE '%/profile.%'", (ptr, who))]
+        return out
+
+    def fts_rows(self, paths) -> list:
+        """[(pointer, path, entry, item, tocrow)] for these indexed paths: entry shaped like candidates()'s."""
+        out = []
+        paths = list(paths)
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            q = ",".join("?" * len(chunk))
+            for ptr, path, sha, tj, ij, pj in self.db.execute(
+                    f"SELECT f.pointer,f.path,f.reviewed_sha,t.json,w.json,c.json FROM files f LEFT JOIN toc t ON t.path=f.path "
+                    f"LEFT JOIN witems w ON w.path=f.path AND w.sha=f.sha256 LEFT JOIN tocpage c ON c.path=f.path AND c.sha=f.sha256 "
+                    f"WHERE f.path IN ({q})", chunk):
+                out.append((ptr, path, {**(json.loads(tj) if tj else {}), "pass": True, "sha256": sha},
+                            json.loads(ij) if ij else None, json.loads(pj) if pj else None))
+        return out
+
+    def edited_candidates(self, pointers) -> list:
+        """[(pointer, path, entry)] of files edited since review (the few `seen` rows), searched at read time."""
+        out = []
+        for ptr in pointers:
+            for path, sha in self.db.execute(
+                    "SELECT path,reviewed_sha FROM seen WHERE pointer=? AND reason='edited' AND reviewed_sha IS NOT NULL ORDER BY path", (ptr,)):
+                out.append((ptr, path, {"pass": True, "sha256": sha}))
+        return out
+
     def mark_stale(self, pointer: str) -> None:
         self.db.execute("UPDATE pointers SET stale=1 WHERE pointer=?", (pointer,))
         self.db.commit()
 
     def purge(self, pointer: str) -> None:
         """Unshare / refresh: DELETE every row of the pointer (files, toc, seen, pointers)."""
+        if not self.fts_error:
+            for (p,) in self.db.execute("SELECT path FROM fts_map WHERE pointer=?", (pointer,)).fetchall():
+                self.fts_drop(p)
+            self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','0')")
         self.db.execute("DELETE FROM toc WHERE path IN (SELECT path FROM files WHERE pointer=?)", (pointer,))
         for t in ("files", "seen", "pointers"):
             self.db.execute(f"DELETE FROM {t} WHERE pointer=?", (pointer,))
