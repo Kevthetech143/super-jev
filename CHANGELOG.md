@@ -6,7 +6,7 @@
 - The word index drops the entries of a file that left its pointer, and its version stamp now covers the stop-word list and the tokenizer, so a change to either rebuilds it.
 - A per-principal file index (a small sqlite file, updated by comparing file stats) records each file's reviewed hash and metadata. It is the base for the index read path below. The updater runs detached after an ask, and at connect and refresh.
 - An optional index read path, off by default (`SUPERJEV_INDEX=1`, or `indexRead: true` in the engine config). When on, the pointer list, status and word-search and table-of-contents corpus come from the file index, only the files served are checked against their hash, and an ask falls back to the normal path with the reason in the trace. A second optional step shortlists passages through an FTS5 index so the local part of an ask stays flat as the number of files grows. Leave both off until the fallback for pointers that are not fully indexed lands.
-- `scripts/scale_harness.py` builds a synthetic corpus of any size with a stub judge, to measure how an ask's local time grows with the number of files. It also runs on Python 3.10.
+- `skills/super-jev/scripts/scale_harness.py` builds a synthetic corpus of any size with a stub judge, to measure how an ask's local time grows with the number of files. It also runs on Python 3.10.
 
 ## Unreleased
 
