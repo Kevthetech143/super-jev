@@ -1878,6 +1878,17 @@ def index_enabled() -> bool:
     except Exception:
         return False
 
+def engine_visible(principal: str):
+    """Names of the pointers the engine says this principal is authorized on right now (one SELECT, no snapshot,
+    no hashing), or None when the engine DB cannot be read (the caller then runs today's path)."""
+    try:
+        target = _engine_target()
+        db = _engine_module(target[0]).load_config(target[1])["db"]
+        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)) as c:
+            return {n for n, b in c.execute("SELECT name, body FROM pointers") if principal in json.loads(b).get("principals", [])}
+    except Exception:  # noqa: BLE001
+        return None
+
 def index_panel(principal: str, sdir: Path):
     """(FileIndex, panel dict, None), or (None, None, why it cannot be used: missing / corrupt / empty / stale)."""
     path = sdir / INDEX_FILE
@@ -1895,9 +1906,19 @@ def index_panel(principal: str, sdir: Path):
         return None, None, f"index corrupt ({type(e).__name__})"
     why = ("index empty (never synced)" if not rows or synced is None else
            f"index stale (synced {int((time.time() - synced) / 3600)}h ago)" if time.time() - synced > INDEX_MAX_AGE_SECS else "")
+    allowed = None if why else engine_visible(principal)
+    if not why and allowed is None:
+        why = "engine pointer list unreadable"
     if why:
         idx.close()
         return None, None, why
+    # An unshare must show at once: a pointer the engine no longer lists for this principal is dropped, so
+    # neither its files nor its status are used. A pointer new to the engine (not yet indexed) means a stale index.
+    indexed = {r.get("pointer") for r in rows}
+    rows = [r for r in rows if r.get("pointer") in allowed]
+    if allowed - indexed:
+        idx.close()
+        return None, None, "index stale (pointer list differs from the engine's)"
     return idx, {"pointers": rows}, None
 
 def index_candidates(idx, pointers, exclude=()):
@@ -4429,6 +4450,8 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
         return preflight(principal, a[1:])
     if a[0] == "--index-update":
         return index_sync(principal, state_dir(principal))
+    if a[0] == "--index-update-if-on":  # connect/refresh: the flag decides, so flag off writes nothing
+        return index_sync(principal, state_dir(principal)) if index_enabled() else 0
     if a[0] == "--status":
         if len(a) != 1:
             print("usage: --principal AGENT --status")
