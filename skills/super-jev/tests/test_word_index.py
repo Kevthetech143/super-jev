@@ -88,3 +88,33 @@ def test_corrupt_or_old_version_rebuilt(tmp_path, monkeypatch):
     saved["files"][str(a)]["passages"] = "bad"
     idx.write_text(json.dumps(saved))
     assert _search(idx) == want
+
+
+def test_prune_drops_left_and_deleted_files():
+    widx = {"/a": {"sha": "1"}, "/b": {"sha": "2"}, "/gone": {"sha": "3"}}
+    assert ask._prune_word_index(widx, {"/a", "/b"}) is True
+    assert set(widx) == {"/a", "/b"}
+    assert ask._prune_word_index(widx, {"/a", "/b"}) is False
+
+
+def test_prune_saved_file_roundtrip(tmp_path, monkeypatch):
+    a, b, idx = _setup(tmp_path, monkeypatch)
+    _search(idx)
+    saved = json.loads(idx.read_text())
+    saved["files"]["/deleted.md"] = saved["files"][str(a)]
+    idx.write_text(json.dumps(saved))
+    widx = ask._load_word_index(idx)
+    ask._prune_word_index(widx, {str(a), str(b)})
+    ask._save_word_index(idx, widx)
+    assert "/deleted.md" not in json.loads(idx.read_text())["files"]
+    assert str(a) in json.loads(idx.read_text())["files"]
+
+
+def test_version_covers_stopwords(monkeypatch):
+    base = ask._word_index_version()
+    assert base == ask.WORD_INDEX_VERSION
+    monkeypatch.setattr(ask, "QUERY_STOPWORDS", ask.QUERY_STOPWORDS | {"zzword"})
+    assert ask._word_index_version() != base
+    monkeypatch.undo()
+    monkeypatch.setattr(ask, "WORD_RE", ask.re.compile(r"\w+"))
+    assert ask._word_index_version() != base
