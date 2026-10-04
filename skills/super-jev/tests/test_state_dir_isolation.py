@@ -108,3 +108,22 @@ def test_prepare_bulk_run_leaves_fake_home_alone(tmp_path):
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0 and "alice-manual-1" in r.stdout, r.stdout + r.stderr
     assert not (home / ".local").exists()
+
+
+def test_prepare_cache_follows_state_dir(tmp_path):
+    """Dry inventory with SUPERJEV_STATE_DIR set writes its cache only under it; default location is unchanged."""
+    home, state, folder = tmp_path / "home", tmp_path / "state", tmp_path / "docs"
+    home.mkdir(); folder.mkdir()
+    (folder / "a.md").write_text("hello\n")
+    live = SKILL / "prepare-cache"
+    before = sorted(p.name for p in live.glob("*")) if live.is_dir() else None
+    env = {**os.environ, "HOME": str(home), "SUPERJEV_STATE_DIR": str(state)}
+    r = subprocess.run([sys.executable, str(SKILL / "prepare_bulk.py"), "--root", str(folder), "--pointer", "isoprobe",
+                        "--principal", "alice", "--limit", "0", "--no-connect"], env=env, capture_output=True, text=True, timeout=120)
+    after = sorted(p.name for p in live.glob("*")) if live.is_dir() else None
+    assert before == after, r.stderr
+    assert (state / "prepare-cache").is_dir(), r.stdout + r.stderr
+    code = "import prepare_bulk as p;print(p.CACHE_DIR)"
+    out = subprocess.run([sys.executable, "-c", code], cwd=SKILL, capture_output=True, text=True,
+                         env={k: v for k, v in os.environ.items() if k != "SUPERJEV_STATE_DIR"}).stdout.strip()
+    assert out == str(live)

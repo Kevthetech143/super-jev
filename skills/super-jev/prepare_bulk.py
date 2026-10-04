@@ -216,7 +216,9 @@ def gate_pack(items: list) -> dict:
         out[p][k] = v
     return {p: tuple(v) for p, v in out.items()}
 
-CACHE_DIR = HERE / "prepare-cache"
+from dispatch import state_root  # noqa: E402
+# An isolated run (SUPERJEV_STATE_DIR set) keeps its cache under that state root; default location unchanged.
+CACHE_DIR = state_root() / "prepare-cache" if os.environ.get("SUPERJEV_STATE_DIR") else HERE / "prepare-cache"
 # What one run found, for both printers: the text lines and --json read the same rows
 # (skipped, held, failed, refused, connected). main() clears it at the start of a run.
 _RESULT = {}
@@ -1955,7 +1957,7 @@ def run(a) -> int:
               "SUPERJEV_WRITER_COMMAND for another adapter that reads the prompt on stdin and prints JSON")
 
     roots = [given_path(r) for r in a.roots]
-    CACHE_DIR.mkdir(exist_ok=True)
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_path = CACHE_DIR / f"{a.pointer}.json"
     cache = json.loads(cache_path.read_text()) if cache_path.is_file() else {}
     t0 = time.time()
