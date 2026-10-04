@@ -2009,7 +2009,9 @@ def index_sync(principal: str, sdir: Path) -> int:
     idx.set_panel(rows)
     wpath = sdir / WORD_INDEX_FILE
     widx, dirty = _load_word_index(wpath), False
-    for ptr, path, entry in idx.candidates([r["pointer"] for r in rows]):
+    cands = list(idx.candidates([r["pointer"] for r in rows]))
+    dirty = _prune_word_index(widx, {p for _ptr, p, _e in cands})
+    for ptr, path, entry in cands:
         if _valid_item(widx.get(path), entry.get("sha256")):
             continue
         got = read_sha(path, None)
@@ -2037,7 +2039,20 @@ def index_sync(principal: str, sdir: Path) -> int:
 # pointer entry and are added at ask time), passage sizes and 4-letter pair keys, kept per path and
 # valid only for the sha it was built from. Only text that passed word_search's gate is ever indexed.
 WORD_INDEX_FILE = "word-index.json"
-WORD_INDEX_VERSION = f"{WORDS_VERSION}.1.{CONFIRM_CHUNK}"
+# The stamp covers everything that decides a stored token: tokenizer version and pattern, stopwords
+# (they shape the pair keys), passage size. Any change makes old entries invalid.
+def _word_index_version() -> str:
+    return "{}.1.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
+        json.dumps([WORD_RE.pattern, sorted(QUERY_STOPWORDS)]).encode()).hexdigest()[:12])
+
+WORD_INDEX_VERSION = _word_index_version()
+
+def _prune_word_index(widx: dict, keep) -> bool:
+    """Drop entries for paths no longer in `keep` (left every pointer, or deleted). True when any went."""
+    gone = [p for p in widx if p not in keep]
+    for p in gone:
+        del widx[p]
+    return bool(gone)
 
 def _load_word_index(path) -> dict:
     try:
