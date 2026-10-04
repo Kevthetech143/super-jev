@@ -445,7 +445,7 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
                     "trace": [{"path": ["root"], "choices": [{"nodeId": "root", "none": 0.2}]}]}
         raise AssertionError(req)
 
-    def fake_word_search(q, ptrs, skip=()):
+    def fake_word_search(q, ptrs, skip=(), **_):
         ranked = [(9.0, "/a.md", "p1"), (8.0, "/w.md", "p1"), (7.0, "/x.md", "p1"), (6.0, "/y.md", "p1"),
                   (5.0, "/z.md", "p1")]
         ask._STAGE["word"] = {"terms": ["knee"], "files_searched": 5, "passed_coverage": 5, "ranked": ranked}
