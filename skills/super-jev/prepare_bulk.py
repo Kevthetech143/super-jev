@@ -243,6 +243,20 @@ AMEX_RE = re.compile(_PAT["amex"], re.A)
 WORD_RE = re.compile(_PAT["word"].replace("{PH}", _PAT["placeholder"]).replace("{STOP}", _PAT["stop"]), re.I | re.A)
 TOKEN_RE = re.compile(_PAT["token"].replace("{PH}", _PAT["placeholder"]), re.I | re.A)
 GENERIC_RE = re.compile(_PAT["generic"], re.I | re.A)
+# PRIV-1 shapes (all Python-side, on normalized text): a credential label then a value on one line, a
+# credential column in a pipe table, 12-24 seed words, a US SSN, and a card whose groups are split by . or /.
+def _shape(key: str) -> str:
+    return (_PAT[key].replace("{PH}", _PAT["placeholder"]).replace("{STOP}", _PAT["stop"])
+            .replace("{PROSE}", _PAT["cred_prose"]).replace("{SEEDSTOP}", _PAT["seed_stop"]))
+
+
+CRED_RE = re.compile(_shape("cred_label"), re.I | re.A | re.M)
+SEED_LABEL_RE, SEED_BARE_RE = (re.compile(_shape(k), re.I | re.A | re.M) for k in ("seed_label", "seed_bare"))
+SSN_RES = [re.compile(_PAT[k], re.I | re.A) for k in ("ssn", "ssn_label")]
+DIGIT_RE = re.compile("[0-9]")
+CARD_SEP_RE = re.compile(_PAT["card_sep"], re.A)
+TABLE_LABEL_RE = re.compile(_PAT["table_label"], re.I | re.A)
+TABLE_NONVALUE_RE = re.compile(_PAT["table_nonvalue"], re.I | re.A)
 # An ISO date or a URL can contain a run of digits that coincidentally matches the
 # card-number pattern (a long numeric id in a query string, a table of dates on one
 # line). Both are scrubbed out before the card check only; the keyword rule below
@@ -490,7 +504,7 @@ def card_hit(text: str, luhn: bool = True) -> bool:
     _near_ok) that passes Luhn and starts with a card-network prefix; the later window is read with every
     check-digit-valid USPS run removed. luhn=False when the raw text had non-ASCII digits: normalizing folds them
     to 0, so their true value is lost, any card-shaped run is held and no run is exempted as a tracking number."""
-    text = _scrub_dates_and_urls(text)
+    text = CARD_SEP_RE.sub(" ", _scrub_dates_and_urls(text))
     if not luhn:
         return bool(CARD_RE.search(text) or AMEX_RE.search(text))
     plain = TRACKING_RE.sub(lambda m: " " if _usps_check_ok(m.group()) else m.group(), text)
@@ -504,13 +518,54 @@ def card_hit(text: str, luhn: bool = True) -> bool:
     return False
 
 
+def _table_hit(text: str) -> bool:
+    """A pipe table with a password/PIN column and a real value under it (a placeholder, a dash or a word
+    like 'required' is not a value). Header, separator row and value rows are read from the same text."""
+    cells_of = lambda ln: [c.strip().strip("*_`") for c in ln.strip().strip("|").split("|")]
+    idx = None
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if not s.startswith("|"):
+            idx = None
+            continue
+        cells = cells_of(s)
+        if idx is None:
+            idx = [i for i, c in enumerate(cells) if TABLE_LABEL_RE.match(c)]
+        elif idx and not re.fullmatch(r"[\s|:-]+", s):
+            for i in idx:
+                v = cells[i] if i < len(cells) else ""
+                if v and not TABLE_NONVALUE_RE.match(v) and not re.fullmatch(_PAT["placeholder"], v, re.I | re.A):
+                    return True
+    return False
+
+
+def _bare_seed(text: str) -> bool:
+    """A whole line of 12-24 short lowercase words, almost all different (a repeated word, as in a chopped
+    passage of filler, is not a seed phrase)."""
+    for m in SEED_BARE_RE.finditer(text):
+        w = re.findall(r"[a-z]+", m.group())
+        if len(set(w)) >= len(w) - 1:
+            return True
+    return False
+
+
+def shape_hit(text: str) -> bool:
+    """The PRIV-1 shapes on already-normalized text: see CRED_RE, _table_hit, the seed rules, SSN_RES."""
+    # cheap substring tests first: a long line with none of the words or digits never reaches a regex
+    has_digit = DIGIT_RE.search(text) is not None
+    return ((("pw" in text or "pin" in text or "pass" in text) and bool(CRED_RE.search(text)))
+            or ("|" in text and _table_hit(text))
+            or bool(SEED_LABEL_RE.search(text)) or _bare_seed(text)
+            or (has_digit and any(r.search(text) for r in SSN_RES)))
+
+
 def has_secret(text: str) -> bool:
     """Scans normalize_for_scan(text). Card-number check runs on the scrubbed text
     (dates/URLs removed); the keyword and token checks run on the unscrubbed text."""
     luhn = not NON_ASCII_DIGIT_RE.search(text)
     text = normalize_for_scan(text)
     return (card_hit(text, luhn) or bool(WORD_RE.search(text))
-            or _token_hit(text))
+            or _token_hit(text) or shape_hit(text))
 
 
 def secret_spans(text: str, path):
