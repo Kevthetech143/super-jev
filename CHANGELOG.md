@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.123 — 2026-10-04
+
+- Jev calls on a plain question no longer grow with the number of connected sets. Routing never asks Jev about a set: every set is found through local rows (its own cache, its split parent's cache, or rows built from its reviewed sources for a reviewed view or a manual note, kept per generation in `set-rows.json`). Only a set with no local rows at all is still asked, in one batched call of at most 10 sets, named in the trace as `routing_fallback`. The claim path is unchanged. Test: `tests/test_routing_fixed_calls.py`.
+- The secret scan holds more shapes: a password or PIN value after its label (also in a table), a seed phrase, a US Social Security number, and a card number split by spaces or dashes. One rule in `secret_patterns.json` is read everywhere a file's text is packaged (word search passages, table-of-contents parts, content check, claim check, saved answers), so every path holds the same lines. Short plain values, count-like values and placeholders stay unheld.
+- `SUPERJEV_STATE_DIR` is honored by every state writer: `memory`, `prepare_bulk.py`, the file index, GitHub connect and pointer sharing resolve the state folder through one shared resolver, so a run with its own state folder never writes into the default one. Test: `tests/test_state_dir_isolation.py`.
+- `auto_heal.py --scan` runs once per principal at a time: a second scan that finds the scan lock held exits 0 with a one-line note instead of starting a parallel refresh. The lock is released when the process ends, and `--uninstall` removes the lock file. Test: `tests/test_auto_heal_scan_single_flight.py`.
+- One version source: `package.json`. `superjev --version` (now listed in `superjev --help`) and the new `ask.py --version` both print `Super Jev 1.0.123`.
+
 ## 1.0.122 — 2026-10-04
 
 - Faster asks on large sets of files. A word's tokens are computed once per file version, not on every ask; the first panel fetched for a question is reused instead of fetched twice; an ask no longer takes a snapshot of pointers that have no saved answer; and the engine actions an ask needs run in the same process instead of a chain of four interpreters per call. Answers and rankings are unchanged.
@@ -9,8 +17,6 @@
 - `skills/super-jev/scripts/scale_harness.py` builds a synthetic corpus of any size with a stub judge, to measure how an ask's local time grows with the number of files. It also runs on Python 3.10.
 
 ## Unreleased
-
-- Jev calls on a plain question no longer grow with the number of connected sets. Routing never asks Jev about a set: every set is found through local rows (its own cache, its split parent's cache, or rows built from its reviewed sources for a reviewed view or a manual note, kept per generation in `set-rows.json`). Only a set with no local rows at all is still asked, in one batched call of at most 10 sets, named in the trace as `routing_fallback`. The claim path is unchanged. Test: `tests/test_routing_fixed_calls.py`.
 
 - Index read path (`SUPERJEV_INDEX=1`) no longer loses an answer: it answers only for a pointer it holds completely and currently (same generation as the registry, files held, not stale); every other pointer is served by today's path in the same ask, named in the trace as `index.fallback.pointers`. A walk of a folder by one pointer no longer takes file rows away from another pointer that reviewed them, and an ask that meets the updater's lock on the index reads today's path instead of failing.
 
