@@ -35,8 +35,8 @@ export async function run(io: IO): Promise<number> {
   const home = env.HOME || homedir();
   const profile = loadJudgeProfile(undefined, undefined, env);
   const { keyEnv, vendor } = profile;
-  // the same file rule as judges.key_file() in skills/super-jev/judges/__init__.py: ~/. + the key variable's name, lowercased, dashes
-  const keyFile = join(home, keyEnv ? '.' + keyEnv.toLowerCase().replace(/_/g, '-') : '.no-key-file');
+  // the same file rule as judges.key_file_path() in skills/super-jev/judges/__init__.py: $<KEY_ENV>_FILE, else ~/. + the key variable's name, lowercased, dashes
+  const keyFile = !keyEnv ? join(home, '.no-key-file') : env[keyEnv + '_FILE']?.trim() || join(home, '.' + keyEnv.toLowerCase().replace(/_/g, '-'));
   const readKeyFile = () => { try { return readFileSync(keyFile, 'utf8').trim(); } catch { return ''; } };
   let fileKey = readKeyFile();
   const keySource = () => (keyEnv && env[keyEnv] ? 'env' : fileKey ? 'file' : 'none') as 'env' | 'file' | 'none';
