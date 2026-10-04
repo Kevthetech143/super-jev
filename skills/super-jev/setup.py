@@ -53,7 +53,7 @@ OWNED = {
                   "scorecard-cases.jsonl", "scorecard-cases.tmp", "manual", "github"),
     "ledger": ("calls.jsonl", "catches.jsonl", "catches.jsonl.lock", "catches.jsonl.tmp", "catch-cases.json",
                "catch-cases.json.tmp", "signals.jsonl", "payloads", "state", "last", "calibration"),
-    "autoheal-state": ("autoheal.log", "*.json", ".*.json.*", ".*.state-lock", ".*.lock-control", "*.lock",
+    "autoheal-state": ("autoheal.log", "*.json", ".*.json.*", ".*.state-lock", ".*.lock-control", ".*.scan-lock", "*.lock",
                        ".*.lock.tmp.*", "*-last-refresh.log"),
 }
 # install.sh writes the chat launcher with this marker line and an exec of its checkout
