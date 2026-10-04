@@ -54,9 +54,26 @@ def pack(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+_SHA_MEMO: Any = None  # optional stat-keyed memo (get(path) -> (key, sha|None), put(path, key, sha)); set by the host
+
+
+def set_sha_memo(memo: Any) -> None:
+    """Let the host share a stat-keyed sha memo: a file is re-read only when its stat key changed."""
+    global _SHA_MEMO
+    _SHA_MEMO = memo
+
+
 def sha(path: str | Path) -> str:
     """Return the SHA-256 digest of a file's bytes."""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    memo = _SHA_MEMO
+    if memo is None:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    key, known = memo.get(str(path))  # stat first, as the read would fail the same way
+    if known:
+        return known
+    digest_ = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    memo.put(str(path), key, digest_)
+    return digest_
 
 
 def digest(value: Any) -> str:
