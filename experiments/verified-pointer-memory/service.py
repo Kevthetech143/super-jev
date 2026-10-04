@@ -1197,7 +1197,14 @@ class Service:
         now = time.time()
         names = [pointer] if pointer else self._visible_pointers(principal)
         checked = []
+        with self.connect() as c:
+            with_rows = {r[0] for r in c.execute('SELECT DISTINCT pointer FROM cache')}
         for name in names:
+            if name not in with_rows:
+                # No cache row for this pointer: a hit is impossible, so skip
+                # the snapshot/re-hash in self.pointer().
+                checked.append(name)
+                continue
             bound, error = self.pointer(name, principal)
             if error:
                 checked.append(name)
