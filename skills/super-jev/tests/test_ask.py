@@ -68,6 +68,9 @@ def _toc_read_list(monkeypatch, tmp_path, files, scores=None):
         paths[str(f)] = ptr
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
         (ptr, p, {"sha256": ask.sha256_file(Path(p))}) for p, ptr in paths.items()])
+    # a set with a prepare-cache is searched through the TOC list; one without is routed by navigate
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {
+        p: {"pass": True, "sha256": ask.sha256_file(Path(p))} for p, q in paths.items() if q == ptr})
     monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (list(paths), [], {}))
     by_name = {str(tmp_path / "notes" / n): v for n, v in (scores or {}).items()}
     monkeypatch.setattr(ask, "confirm", lambda q, ps: (dict(by_name), set(), None, {}))
@@ -108,8 +111,8 @@ def test_pointer_error_prints_status_line_and_is_not_folded_into_no_candidates(t
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [])
-    rc = ask.lookup("q", "alice", tmp_path)
+    _toc_read_list(monkeypatch, tmp_path, {"a.md": "p1", "b.md": "p2"})
+    rc = ask.lookup("q", "alice", tmp_path / "state")
 
     # routing now reads each set's status from the registry: a stale set is still searched and named
     # (as of its last refresh), never folded into a plain no-candidates
@@ -128,7 +131,7 @@ def test_hit_from_healthy_pointer_prints_before_a_sibling_pointer_error(tmp_path
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
-    (hit,) = _toc_read_list(monkeypatch, tmp_path, {"hit.md": "p2"}, {"hit.md": 0.8})
+    _stale, hit = _toc_read_list(monkeypatch, tmp_path, {"stale.md": "p1", "hit.md": "p2"}, {"hit.md": 0.8})
     rc = ask.lookup("q", "alice", tmp_path / "state")
 
     # A healthy pointer answering the question is a real result: the sibling
@@ -162,6 +165,7 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
 
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [("healthy", str(note), {"sha256": ask.sha256_file(note)})])
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True, "sha256": ask.sha256_file(note)}} if ptr == "healthy" else {"/x": {}})
     monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([str(note)], [], {}))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(note): 0.9}, set(), None, {}))
     sdir = tmp_path / "state"
@@ -827,21 +831,52 @@ def test_lookup_caps_navigate_fanout_at_nav_concurrency(tmp_path, monkeypatch):
 
 
 @pytest.mark.real_toc
-def test_lookup_asks_jev_nothing_at_routing_however_many_pointers(tmp_path, monkeypatch):
-    """Routing no longer fans navigate calls out to Jev (the TOC search picks the read list): a lookup
-    over many pointers makes no navigate call, but still completes and names every set searched."""
+def test_lookup_asks_jev_nothing_at_routing_for_sets_with_a_prepare_cache(tmp_path, monkeypatch):
+    """The TOC search picks the read list for a set that has a prepare-cache: no navigate call for it."""
     actions = []
 
     def fake_memory(req):
         actions.append(req.get("action"))
-        return {"pointers": ["p1", "p2", "p3", "p4"]} if req.get("action") == "panel" else {}
+        return {"pointers": ["p1", "p2"]} if req.get("action") == "panel" else {}
 
     monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
+    monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [])
+    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([], [], {}))
+    for ptr in ("p1", "p2"):
+        f = tmp_path / f"{ptr}.md"
+        f.write_text("made up note\n")
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(tmp_path / f"{ptr}.md"): {"pass": True}})
 
-    rc = ask.lookup("q", "alice", tmp_path)
-
-    assert rc == 1  # not-found: every set was searched
+    assert ask.lookup("q", "alice", tmp_path / "state") == 1
     assert "navigate" not in actions
+
+
+@pytest.mark.real_toc
+def test_a_set_without_a_prepare_cache_is_still_routed_by_navigate(tmp_path, monkeypatch, capsys):
+    """A reviewed view, path-connected or recipe set has no cache files for the TOC search to list, so a
+    question still reaches it through Jev's navigate: its candidate is read and shown."""
+    note = tmp_path / "view-note.md"
+    note.write_text("the made up answer is seven\n")
+    asked = []
+
+    def fake_memory(req):
+        asked.append((req["action"], req.get("pointer")))
+        if req["action"] == "cached":
+            return {"status": "cache-miss", "checked": []}
+        if req["action"] == "panel":
+            return {"pointers": [{"pointer": "viewset"}]}
+        if req["action"] == "navigate" and req["pointer"] == "viewset":
+            return {"status": "candidates", "candidates": [{"score": 0.9, "originalPath": str(note)}]}
+        raise AssertionError(req)
+
+    monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(note): 0.9}, set(), None, {}))
+
+    assert ask.lookup("what is the answer?", "alice", tmp_path / "state") == 0
+    assert ("navigate", "viewset") in asked
+    assert str(note) in capsys.readouterr().out
 
 
 if __name__ == "__main__":
@@ -1010,6 +1045,8 @@ def test_reviewed_dataset_copy_from_its_own_pointer_is_kept(tmp_path, monkeypatc
         raise AssertionError(req)
 
     monkeypatch.setattr(ask, "memory", fake_memory)
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {
+        str(other if ptr == "skills" else copy): {"pass": True, "sha256": ask.sha256_file(other if ptr == "skills" else copy)}})
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
         ("skills", str(other), {"sha256": ask.sha256_file(other)}),
         ("brain-reviewed", str(copy), {"sha256": ask.sha256_file(copy)})])

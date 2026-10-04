@@ -2385,7 +2385,18 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 outs[row["pointer"]] = {"status": "no-candidates", "stale": {"from_registry": True}}
     else:
         outs = nav_many(pointers) if pointers and batch_jev() else None
-    if outs is None:  # one navigate call per pointer, as before batching
+    if not _CLAIM["text"]:
+        # A set with no prepare-cache (a reviewed view, a path-connected or recipe set) has no files for the TOC
+        # search to list, so it is still routed by Jev's navigate, as before: no quiet shrink of what a question reaches.
+        nav_ptrs = [p for p in pointers if not load_cache_files(p)]
+        bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
+        if bm is not None:
+            navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
+        else:
+            navd = dict(zip(nav_ptrs, ThreadPoolExecutor(max_workers=min(len(nav_ptrs), NAV_CONCURRENCY)).map(nav, nav_ptrs))) if nav_ptrs else {}
+        _STAGE["nav_fallback"] = nav_ptrs
+        results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
+    elif outs is None:  # one navigate call per pointer, as before batching
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
     else:
         results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
@@ -2556,8 +2567,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits},
                 cache_path=sdir / "toc-cache.json")
             _STAGE["toc_parts"] = tparts
-            wpaths = {p: corpus[p][0] for p in tfiles}
+            # the files Jev's navigate routed (sets with no prepare-cache) ride along after the TOC pick
+            tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
+            wpaths = {p: (corpus[p][0] if p in corpus else next(m[2] for m in merged if m[1] == p)) for p in tfiles}
             to_check = list(tfiles)
+            for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties like routing's did
+                route.setdefault(tp_, ts_)
         except Exception as e:  # noqa: BLE001 -- any failure reads the word search's list instead
             ttrace = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
         ttrace["secs"] = round(time.time() - tt0, 1)
