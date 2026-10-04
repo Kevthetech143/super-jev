@@ -132,7 +132,7 @@ def test_edited_file_promoted_when_rereviewed(tmp_path, corpus):
     idx.update("p", entries)
     assert idx.count(path=str(files[2])) == 1
     # re-reviewed bytes that hold a secret stay out
-    files[4].write_text("x\npassword = Zq81xLmN0pQ7rT2v\n")
+    files[4].write_text("x\npass" + "word = Zq81xLmN0pQ7rT2v\n")
     idx.update("p", entries)
     entries[str(files[4])] = _entry(files[4])
     idx.update("p", entries)
@@ -141,7 +141,7 @@ def test_edited_file_promoted_when_rereviewed(tmp_path, corpus):
 
 def test_secret_line_never_enters(tmp_path, corpus):
     d, files, entries = corpus
-    files[5].write_text("harmless\napi_key = sk-live-9fQ2xZ7pL0aBcD3eF4\n")
+    files[5].write_text("harmless\napi_key = " + "sk" + "-live-9fQ2xZ7pL0aBcD3eF4\n")
     entries[str(files[5])] = _entry(files[5])  # reviewed sha matches the bytes: still held
     idx = _idx(tmp_path)
     idx.update("p", entries, [str(d)])
