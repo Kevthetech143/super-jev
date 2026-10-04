@@ -13,10 +13,14 @@ SKILL = Path(__file__).resolve().parent.parent
 ENGINE = SKILL.parent.parent / "experiments" / "verified-pointer-memory" / "cli.py"
 SHIM = f'''#!/usr/bin/env python3
 import os, sys
-a = sys.argv[1:]
-if a[:1] == ["memory"]:
-    os.execv(sys.executable, [sys.executable, {str(ENGINE)!r}, "--config", os.environ["TEST_ENGINE_CONFIG"], "--input", "/dev/stdin"])
-sys.exit(2)
+from pathlib import Path
+def state_root():
+    return Path(os.environ["SUPERJEV_STATE_DIR"]) if os.environ.get("SUPERJEV_STATE_DIR") else Path.home() / ".local/state/super-jev"
+if __name__ == "__main__":
+    a = sys.argv[1:]
+    if a[:1] == ["memory"]:
+        os.execv(sys.executable, [sys.executable, {str(ENGINE)!r}, "--config", os.environ["TEST_ENGINE_CONFIG"], "--input", "/dev/stdin"])
+    sys.exit(2)
 '''
 
 
