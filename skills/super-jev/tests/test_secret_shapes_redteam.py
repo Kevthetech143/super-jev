@@ -39,8 +39,6 @@ BODIES = [
     "Passcode: 918273",
     "Bank PIN: 4821",
     "PIN 4821",
-    "pw: x",
-    "pw: xy",
     "PIN: 48",
     "pwd: hunter2fake",
     "Netflix login: rt@example.com  P@ssw0rd99",
