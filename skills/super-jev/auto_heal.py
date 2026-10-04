@@ -808,6 +808,22 @@ def drain(principal: str, pointer: str, token: str, memory=None, rc: int = None)
 if __name__ == "__main__" and sys.argv[1:2] == ["--drain"] and len(sys.argv) in (5, 6):
     sys.exit(drain(sys.argv[2], sys.argv[3], sys.argv[4],
                    rc=int(sys.argv[5]) if len(sys.argv) == 6 and sys.argv[5].lstrip("-").isdigit() else None))
+
+
+def scan_single_flight(principal: str, pointers: list) -> int:
+    """One --scan per principal at a time: a non-blocking flock on a per-principal scan lock. If it
+    is held, say so in one line and return 0 at once. The kernel drops the lock when the process
+    dies, so a crashed scan leaves nothing stale."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(STATE_DIR / f".{principal}.scan-lock", "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print(f"scan already running for {principal}; skipping this one")
+            return 0
+        scan(principal, pointers)
+    return 0
+
+
 if __name__ == "__main__" and sys.argv[1:2] == ["--scan"] and len(sys.argv) >= 3:
-    scan(sys.argv[2], sys.argv[3:])
-    sys.exit(0)
+    sys.exit(scan_single_flight(sys.argv[2], sys.argv[3:]))
