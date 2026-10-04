@@ -68,16 +68,75 @@ def test_one_edit_one_sha_and_stale(tmp_path, corpus, opens):
     assert idx.count(pointer="p") == 19
 
 
-def test_new_file_found(tmp_path, corpus):
+def _body_opens(opens, *paths):
+    return [o for o in opens if any(str(p) == o for p in paths)]
+
+
+def test_new_file_found(tmp_path, corpus, opens):
     d, files, entries = corpus
     idx = _idx(tmp_path)
     idx.update("p", entries, [str(d)])
     new = d / "fresh.md"
     new.write_text("brand new\n")
+    opens.clear()
     r = idx.update("p", entries)  # roots remembered
     assert r["new"] == [str(new)] and idx.is_stale("p")
+    assert r["hashed"] == 0 and _body_opens(opens, new) == []
     assert idx.count(path=str(new)) == 0  # unreviewed: found, not ingested
     assert idx.update("p", entries)["hashed"] == 0
+
+
+def test_discovery_guards_never_open(tmp_path, opens):
+    d = tmp_path / "root"
+    (d / "profile").mkdir(parents=True)
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside the root\n")
+    bad = [d / ".env", d / "profile" / "logins.md", d / "link.md", d / "x-secret.md"]
+    bad[0].write_text("K=1\n")
+    bad[1].write_text("hunter2\n")
+    bad[2].symlink_to(outside)
+    bad[3].write_text("s\n")
+    (d / "ok.md").write_text("fine\n")
+    idx = _idx(tmp_path)
+    opens.clear()
+    r = idx.update("p", {}, [str(d)])
+    assert r["new"] == [str(d / "ok.md")] and r["hashed"] == 0
+    assert _body_opens(opens, *bad, outside) == []
+    for p in bad:
+        for t in ("files", "toc", "seen"):
+            assert idx.db.execute(f"SELECT COUNT(*) FROM {t} WHERE path=?", (str(p),)).fetchone()[0] == 0
+
+
+def test_new_file_promoted_when_reviewed(tmp_path, corpus):
+    d, files, entries = corpus
+    idx = _idx(tmp_path)
+    idx.update("p", entries, [str(d)])
+    new = d / "fresh.md"
+    new.write_text("brand new\n")
+    idx.update("p", entries)
+    assert idx.count(path=str(new)) == 0
+    entries[str(new)] = _entry(new)
+    r = idx.update("p", entries)
+    assert idx.count(path=str(new)) == 1 and r["hashed"] == 1
+    assert idx.update("p", entries)["hashed"] == 0
+
+
+def test_edited_file_promoted_when_rereviewed(tmp_path, corpus):
+    d, files, entries = corpus
+    idx = _idx(tmp_path)
+    idx.update("p", entries, [str(d)])
+    files[2].write_text("edited and then reviewed\n")
+    idx.update("p", entries)
+    assert idx.count(path=str(files[2])) == 0
+    entries[str(files[2])] = _entry(files[2])
+    idx.update("p", entries)
+    assert idx.count(path=str(files[2])) == 1
+    # re-reviewed bytes that hold a secret stay out
+    files[4].write_text("x\npassword = Zq81xLmN0pQ7rT2v\n")
+    idx.update("p", entries)
+    entries[str(files[4])] = _entry(files[4])
+    idx.update("p", entries)
+    assert idx.count(path=str(files[4])) == 0
 
 
 def test_secret_line_never_enters(tmp_path, corpus):
