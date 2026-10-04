@@ -51,9 +51,8 @@ def _has_secret(text: str) -> bool:
 
 
 def _state_dir(principal: str) -> Path:
-    root = os.environ.get("SUPERJEV_STATE_DIR")
-    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
-    return base / principal
+    from dispatch import state_root
+    return state_root() / principal
 
 
 class FileIndex:

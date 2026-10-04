@@ -78,6 +78,7 @@ HOMEBREW = "Already use Homebrew? Run: brew install node python"
 
 
 def state_root() -> Path:
+    """Bootstrap copy of dispatch.state_root, kept in step with it."""
     root = os.environ.get("SUPERJEV_STATE_DIR")
     return Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
 

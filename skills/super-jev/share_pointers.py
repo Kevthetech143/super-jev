@@ -44,9 +44,8 @@ PRIVATE_PARTS = {"documents", "profile"}
 def shared_config_path() -> Path:
     if os.environ.get("SUPERJEV_SHARED_POINTERS"):
         return Path(os.environ["SUPERJEV_SHARED_POINTERS"]).expanduser()
-    root = os.environ.get("SUPERJEV_STATE_DIR")
-    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
-    return base / "shared-pointers.json"
+    from dispatch import state_root
+    return state_root() / "shared-pointers.json"
 
 
 def load_shared(path: Path = None) -> list:

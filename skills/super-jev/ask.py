@@ -225,9 +225,8 @@ def derive_subject(question: str) -> str:
     return " ".join(meaningful[:4]) if meaningful else "unknown"
 
 def state_dir(principal: str) -> Path:
-    root = os.environ.get("SUPERJEV_STATE_DIR")
-    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
-    return base / principal
+    from dispatch import state_root
+    return state_root() / principal
 
 class SecretHeld(RuntimeError):
     """A request carried a secret, so it was never sent. A claim catches it in lookup() and exits 2
@@ -245,14 +244,15 @@ def _engine_target():
     wrapper (fixed repo = two levels up, one fixed --config) unless SUPERJEV_REPO is set."""
     skill_dir = Path(__file__).resolve().parent
     wrapper = skill_dir / "memory.sh"
-    if not os.environ.get("SUPERJEV_REPO") and not os.environ.get("SUPERJEV_MEMORY_WRAPPER_ACTIVE") and wrapper.is_file():
+    if (not os.environ.get("SUPERJEV_REPO") and not os.environ.get("SUPERJEV_STATE_DIR")
+            and not os.environ.get("SUPERJEV_MEMORY_WRAPPER_ACTIVE") and wrapper.is_file()):
         found = re.search(r"--config\s+(\S+)", wrapper.read_text())
         if not found:
             return None
         return skill_dir.parents[1], Path(found.group(1).strip("\"'"))
     repo = Path(os.environ["SUPERJEV_REPO"]) if os.environ.get("SUPERJEV_REPO") else skill_dir.parents[1]
-    return repo, Path(os.environ["SUPERJEV_STATE_DIR"]).expanduser() / "_memory" / "config.json" \
-        if os.environ.get("SUPERJEV_STATE_DIR") else Path.home() / ".local/state/super-jev/_memory/config.json"
+    import dispatch
+    return repo, dispatch.config_path()
 
 
 def _engine_module(repo: Path):
