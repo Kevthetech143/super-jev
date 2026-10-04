@@ -65,8 +65,11 @@ class Rig:
             {str(f): {"sha256": sha(f), "pass": True, "description": f.name, "question": ""} for f in files}))
         self.panel.append({"pointer": ptr, "snapshotStatus": "ready", "generation": f"g-{ptr}"})
 
-    def sources_set(self, ptr, files, view=False):
+    def sources_set(self, ptr, files, view=False, path_only=False):
         self.sources[ptr] = [{"originalPath": str(f), "contentSHA": sha(f), "path": str(f), "description": f.name} for f in files]
+        if path_only:  # the engine omits originalPath when a source has neither originalPath nor viewTransform
+            for r in self.sources[ptr]:
+                r.pop("originalPath")
         row = {"pointer": ptr, "snapshotStatus": "ready", "generation": f"g-{ptr}"}
         if view:
             row["viewOriginals"] = [str(f) for f in files]
@@ -167,6 +170,39 @@ def test_manual_note_set_still_yields_its_file(tmp_path, monkeypatch, capsys):
     out = rig.ask(capsys)
     assert note.name in out
     assert rig.navigate_many == [] and rig.navigate == []
+
+
+def test_path_only_set_yields_its_file_without_fallback(tmp_path, monkeypatch, capsys):
+    rig = Rig(monkeypatch, tmp_path)
+    note = rig.note("health", "zorblax.md", f"# zorblax\n{ANSWER}.\n")
+    rig.sources_set("health-set", [note], path_only=True)
+    rig.cached_set("plain", [rig.note("plain", "n.md", "# n\ncedar lamp ledger\n")])
+    assert note.name in rig.ask(capsys)
+    assert rig.navigate_many == [] and rig.navigate == []
+    assert rig.trace()["routing_fallback"] == []
+    assert ask.source_rows(PRINCIPAL, "health-set") == {
+        str(note): {"pass": True, "sha256": sha(note), "description": note.name, "local": True}}
+
+
+def test_original_path_rows_unchanged_and_view_never_raw(tmp_path, monkeypatch):
+    rig = Rig(monkeypatch, tmp_path)
+    f = rig.note("a", "x.md", "x\n")
+    view, raw = rig.note("views", "0.txt", "reviewed\n"), rig.note("raw", "r.md", "RAW\n")
+    rig.sources[("o")] = [{"originalPath": str(f), "path": str(tmp_path / "other"), "contentSHA": sha(f)}]
+    rig.sources["v"] = [{"originalPath": str(view), "upstreamPath": str(raw), "path": str(view), "contentSHA": sha(view)}]
+    assert list(ask.source_rows(PRINCIPAL, "o")) == [str(f)]
+    assert list(ask.source_rows(PRINCIPAL, "v")) == [str(view)]
+
+
+def test_preparation_required_set_is_honest_fallback(tmp_path, monkeypatch, capsys):
+    rig = Rig(monkeypatch, tmp_path)
+    rig.cached_set("plain", [rig.note("plain", "zorblax.md", f"# zorblax\n{ANSWER}.\n")])
+    rig.panel.append({"pointer": "missing", "snapshotStatus": "ready", "generation": "gm"})
+    real = rig.memory
+    monkeypatch.setattr(ask, "memory", lambda req: {"status": "preparation-required"} if req["action"] == "sources" else real(req))
+    assert ask.source_rows(PRINCIPAL, "missing") is None
+    rig.ask(capsys)
+    assert "missing: no local rows" in rig.trace()["routing_fallback"]
 
 
 def test_rows_are_kept_per_generation(tmp_path, monkeypatch, capsys):
