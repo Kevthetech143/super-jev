@@ -275,6 +275,7 @@ def _engine_module(repo: Path):
                 spec.loader.exec_module(mod)
                 os.umask(0o077)  # what cli.main sets; set once here, process-wide, no per-call swap
                 _ENGINE_MODULES[key] = mod
+                _engine_sha_hook(_ACTIVE_MEMO[0])  # service is now imported: give it the memo set before the import
     return _ENGINE_MODULES[key]
 
 
@@ -1953,6 +1954,9 @@ def read_sha(path: str, reads):
     try:
         key, known = memo.get(path) if memo else (None, None)  # stat before the read: a later change shows next time
         raw = Path(path).read_bytes()
+        if known and memo.key(path) != key:
+            known = None  # the file moved between stat and read: hash the bytes in hand, never the old sha
+            memo = None
         sha = known or hashlib.sha256(raw).hexdigest()
         if memo and not known:
             memo.put(path, key, sha)
