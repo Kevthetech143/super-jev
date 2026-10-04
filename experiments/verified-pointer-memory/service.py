@@ -1199,9 +1199,12 @@ class Service:
         checked = []
         with self.connect() as c:
             with_rows = {r[0] for r in c.execute('SELECT DISTINCT pointer FROM cache')}
+            for name in names:
+                if name in with_rows and not self._has_key_row(c, name, principal, question, context, policy):
+                    with_rows.discard(name)
         for name in names:
             if name not in with_rows:
-                # No cache row for this pointer: a hit is impossible, so skip
+                # No cache row for THIS question on this pointer: a hit is impossible, so skip
                 # the snapshot/re-hash in self.pointer().
                 checked.append(name)
                 continue
@@ -1214,6 +1217,16 @@ class Service:
                 return hit
             checked.append(name)
         return {'status': 'cache-miss', 'checked': checked}
+
+    def _has_key_row(self, c, name, principal, question, context, policy) -> bool:
+        """True when a cache row exists for this question under the pointer's stored generation (the key
+        pointer() would use). An unreadable stored body says yes, so the full path decides."""
+        row = c.execute('SELECT body FROM pointers WHERE name=?', (name,)).fetchone()
+        try:
+            key = self.key(json.loads(row[0]), question, principal, context, policy)
+        except (TypeError, ValueError, KeyError):
+            return True
+        return c.execute('SELECT 1 FROM cache WHERE k=?', (key,)).fetchone() is not None
 
     def forget(self, principal: str, question: str, context: str = '') -> dict[str, Any]:
         """Un-save this principal's approved answer for this exact question, on every
