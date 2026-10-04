@@ -153,6 +153,8 @@ test('source evidence asks whether the passage states the answer to the question
   await navigate(flat, 'What is the requested property?', { transport, mode: 'source-evidence' });
   const q = seen[0]!.questions.branch_0!;
   assert.match(q.instructions!, /^Does this passage state the answer to the question\?/);
+  assert.match(q.instructions!, /only when the question asks for a computed or combined value or a list/);
+  assert.match(q.instructions!, /subject and its event together/);
   assert.match(q.criteria.o_0!, /^States the answer/);
   assert.match(q.criteria.o_none!, /same subject or topic/);
   assert.match(q.criteria.o_none!, /neither the requested property nor a necessary input/);
