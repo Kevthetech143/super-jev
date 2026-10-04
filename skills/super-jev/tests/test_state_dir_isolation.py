@@ -11,16 +11,13 @@ sys.path.insert(0, str(SKILL))
 import dispatch  # noqa: E402
 import prepare_bulk as pb  # noqa: E402
 
-PINNED = "/Users/admin/super-jev/.local/pointer-memory/config.json"
-
-
 def _sha(p):
     return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 
 def _setup(tmp_path):
     home, state = tmp_path / "home", tmp_path / "state"
-    home.mkdir()
+    home.mkdir(parents=True)
     (state / "_memory").mkdir(parents=True)
     src = tmp_path / "reviewed.txt"
     src.write_text("The synthetic launch policy is blue.\n")
@@ -45,30 +42,51 @@ def _setup(tmp_path):
     return home, state, env
 
 
-def _mem(env, req):
-    # The same command ask.py/dispatch build; with SUPERJEV_STATE_DIR set it never goes through an installed memory.sh.
-    cmd = dispatch.command(SKILL, "memory", ["--input", "/dev/stdin"])
+def _wrapper_copy(tmp_path, repo):
+    """A copy of dispatch.py next to a planted memory.sh that pins a fake 'live' config (the deployment wrapper)."""
+    import importlib.util
+    skill = tmp_path / "skills" / "super-jev"
+    skill.mkdir(parents=True)
+    for name in ("dispatch.py", "ask.py"):
+        (skill / name).write_text((SKILL / name).read_text())
+    (tmp_path / "experiments").symlink_to(repo / "experiments")
+    live = tmp_path / "live"
+    live.mkdir()
+    (live / "config.json").write_text(json.dumps({"db": str(live / "answers.sqlite"), "registry": str(live / "registry.json"),
+                                                  "sentinel": "LIVE"}))
+    before = (live / "config.json").read_bytes()
+    (skill / "memory.sh").write_text('#!/bin/sh\nexec "%s" "%s/experiments/verified-pointer-memory/cli.py" --config "%s" "$@"\n'
+                                     % (sys.executable, repo, live / "config.json"))
+    spec = importlib.util.spec_from_file_location("dispatch_copy", skill / "dispatch.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return skill, live, before, mod
+
+
+def _mem(mod, skill, env, req):
+    cmd = mod.command(skill, "memory", ["--input", "/dev/stdin"])
     r = subprocess.run(cmd, input=json.dumps(req), capture_output=True, text=True, env=env)
     return json.loads(r.stdout)
 
 
 def test_memory_sh_add_approve_stays_in_temp(tmp_path, monkeypatch):
-    home, state, env = _setup(tmp_path)
+    home, state, env = _setup(tmp_path / "t")
+    skill, live, before, mod = _wrapper_copy(tmp_path / "w", SKILL.parents[1])
     monkeypatch.setenv("SUPERJEV_STATE_DIR", str(state))
     monkeypatch.delenv("SUPERJEV_REPO", raising=False)
     monkeypatch.delenv("SUPERJEV_MEMORY_WRAPPER_ACTIVE", raising=False)
-    # Guard before any write: neither resolver may point at the pinned live config.
-    assert PINNED not in " ".join(dispatch.command(SKILL, "memory", ["--input", "/dev/stdin"]))
-    import ask
-    assert ask._engine_target()[1] == state / "_memory" / "config.json"
+    # The planted wrapper must be bypassed when SUPERJEV_STATE_DIR is set.
+    assert str(skill / "memory.sh") not in mod.command(skill, "memory", ["--input", "/dev/stdin"])
 
-    assert _mem(env, {"action": "register", "pointer": "p", "dataset": "ds", "principals": ["alice"]})["status"] == "registered"
-    ready = _mem(env, {"pointer": "p", "question": "What is the launch policy?", "principal": "alice"})
+    assert _mem(mod, skill, env, {"action": "register", "pointer": "p", "dataset": "ds", "principals": ["alice"]})["status"] == "registered"
+    ready = _mem(mod, skill, env, {"pointer": "p", "question": "What is the launch policy?", "principal": "alice"})
     assert ready["status"] == "ready"
-    saved = _mem(env, {"action": "approve", "ticket": ready["approvalTicket"], "principal": "alice", "approved": True,
+    saved = _mem(mod, skill, env, {"action": "approve", "ticket": ready["approvalTicket"], "principal": "alice", "approved": True,
                        "answer": "Blue.", "evidence": [{"sourceId": "policy", "quote": "blue"}]})
     assert saved["status"] == "saved"
     assert (state / "_memory" / "answers.sqlite").stat().st_size > 0
+    assert sorted(p.name for p in live.iterdir()) == ["config.json"]  # fake live db/registry never created
+    assert (live / "config.json").read_bytes() == before
     assert not (home / ".local").exists()  # the default path for the fake HOME was never created
 
 
