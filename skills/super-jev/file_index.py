@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, s
     sha256 TEXT, pass INTEGER, reviewed_sha TEXT);
 CREATE TABLE IF NOT EXISTS toc(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFAULT 0, roots TEXT, checked_at REAL,
-    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0, entries INTEGER);
+    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0, entries INTEGER, complete INTEGER);
 -- stat memo for files seen but never ingested (held, edited, new, unreviewed): so they are not re-hashed
 CREATE TABLE IF NOT EXISTS seen(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
     sha256 TEXT, reason TEXT, reviewed_sha TEXT);
@@ -69,7 +69,7 @@ class FileIndex:
         except sqlite3.Error as e:  # no FTS5 / no contentless delete in this sqlite: the ask runs the S3a path
             self.fts_error = f"{type(e).__name__}: {str(e)[:80]}"
         have = {r[1] for r in self.db.execute("PRAGMA table_info(pointers)")}
-        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0"), ("entries", "INTEGER")):
+        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0"), ("entries", "INTEGER"), ("complete", "INTEGER")):
             if col not in have:  # an index made by the first version: add the read-path columns
                 self.db.execute(f"ALTER TABLE pointers ADD COLUMN {col} {typ}")
 
@@ -147,6 +147,8 @@ class FileIndex:
                     continue
                 if p not in known and roots is None:
                     continue
+                if p not in known and self.owner_of(p, any_row=True) not in (None, pointer):
+                    continue  # another pointer holds this path (reviewed or edited): a walk never takes it away
                 # no passing review: never read. Record it from stat alone.
                 was_known = p in known
                 self._drop(p)
@@ -194,6 +196,39 @@ class FileIndex:
                         "entries=excluded.entries",
                         (pointer, stale, json.dumps(list(roots)) if roots else None, len(entries)))
         self.db.commit()
+        return out
+
+    def owner_of(self, path: str, any_row: bool = False):
+        """The pointer whose row holds this path (`files`, or `seen` as an edited file; any_row: any `seen` row), or None.
+        A path has one row, so a file two pointers list belongs to the one that was updated last."""
+        r = self.db.execute("SELECT pointer FROM files WHERE path=?", (path,)).fetchone()
+        if r:
+            return r[0]
+        r = self.db.execute("SELECT pointer FROM seen WHERE path=?" + ("" if any_row else " AND reason='edited'"), (path,)).fetchone()
+        return r[0] if r else None
+
+    def set_complete(self, expected: dict) -> None:
+        """Updater: per pointer, 1 when every reviewed file of its prepare-cache that still exists is held by the index
+        under THIS pointer (a `files` row, or `seen` as edited / held), else 0. `expected`: {pointer: [paths]}."""
+        for ptr, paths in expected.items():
+            have = {r[0] for r in self.db.execute("SELECT path FROM files WHERE pointer=?", (ptr,))}
+            have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE pointer=? AND reason IN ('edited','held')", (ptr,))}
+            self.db.execute("UPDATE pointers SET complete=? WHERE pointer=?", (1 if all(p in have for p in paths) else 0, ptr))
+        self.db.commit()
+
+    def coverage(self) -> dict:
+        """{pointer: {"stale", "status", "generation", "entries", "files", "complete"}} for every listed pointer:
+        what the ask needs to decide, pointer by pointer, whether the index holds it completely and currently."""
+        out = {}
+        for name, stale, status, gen, entries, complete in self.db.execute(
+                "SELECT pointer,stale,status,generation,entries,complete FROM pointers WHERE listed=1"):
+            out[name] = {"stale": bool(stale), "status": status or "", "generation": json.loads(gen) if gen else None,
+                         "entries": entries, "complete": complete}
+        for name, n in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer"):
+            if name in out:
+                out[name]["files"] = n
+        for v in out.values():
+            v.setdefault("files", 0)
         return out
 
     def is_stale(self, pointer: str) -> bool:
@@ -384,7 +419,10 @@ class FileIndex:
     def has_entries(self, pointer: str) -> bool:
         """Does the pointer have a prepare-cache with entries (as the updater last saw it)? An index made before this
         was recorded answers from the cache file instead."""
-        r = self.db.execute("SELECT entries FROM pointers WHERE pointer=?", (pointer,)).fetchone()
+        try:
+            r = self.db.execute("SELECT entries FROM pointers WHERE pointer=?", (pointer,)).fetchone()
+        except sqlite3.Error:  # locked by the updater: the cache file says it too
+            r = None
         if r and r[0] is not None:
             return r[0] > 0
         from prepare_bulk import load_cache_files
