@@ -50,8 +50,8 @@ Usage:
 Pipeline per run:
   1. Inventory *.md (plus any --ext suffixes) under the union of one or more --root directories, in the order given (repeat --root for
      a whole agent brain spanning several folders). Skips .bak*, profile/, documents/, logins.md, *-secret.md,
-     hidden directories, git worktree copies (any .claude/worktrees/ folder, or a checkout whose .git file points into
-     another repo's .git/worktrees/ -- even when it is the --root itself) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
+     hidden directories, git worktree copies found below the root (any .claude/worktrees/ folder, or a checkout whose .git file points into
+     another repo's .git/worktrees/; a --root that is itself a worktree is connected, since you pointed at it) and test/scratch output (ops/sj*/ except ops/sj-manual/, *superjev-test*, *-hand-test-*); --exclude SUBPATH (repeatable) also skips any file whose path relative to its
      root starts with that subpath; --no-recurse limits each root to its direct children only; --name GLOB (repeatable, e.g. SKILL.md)
      keeps only files whose name matches, so a skills folder connects its entry files and not every reference doc.
      Connect says what a DEFAULT rule leaves out: one `  SKIP  N ...` line per reason, with counts and folder
@@ -747,31 +747,27 @@ def payload_has_secret(obj) -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=None)
-def _worktree_dir(d: str) -> bool:
-    """True when folder `d` (or a parent) is a git worktree checkout: its `.git` is a file whose
-    gitdir points into another repo's .git/worktrees/. A submodule's .git file (.git/modules/)
-    and a real repo root (.git folder) end the climb."""
-    g = Path(d) / ".git"
-    if g.is_file():
-        try:
-            return "/worktrees/" in g.read_text(errors="replace")
-        except OSError:
-            return False
-    if g.is_dir() or Path(d).parent == Path(d):
+def is_worktree_copy(path: Path, root: Path) -> bool:
+    """A file inside a git worktree copy found UNDER `root` (a `.claude/worktrees/` folder, or a
+    folder whose `.git` is a file pointing into another repo's .git/worktrees/) is a stale duplicate
+    of a repo or brain met by a broad sweep: one agent once carried 23 pointers of a Claude
+    worktree's copy of its own brain. Only folders below `root` count: a root that is itself a
+    worktree (or sits inside one) was pointed at on purpose, so its files connect. A submodule's
+    .git file (.git/modules/) is not a worktree."""
+    try:
+        parts = path.relative_to(root).parts[:-1]
+    except ValueError:
         return False
-    return _worktree_dir(str(Path(d).parent))
-
-
-def is_worktree_copy(path: Path) -> bool:
-    """A file inside a git worktree copy (a `.claude/worktrees/` folder, or any worktree checkout)
-    is a stale snapshot of a brain or repo, never its live notes: one agent once carried 23
-    pointers of a Claude worktree's copy of its own brain. Checked on the absolute path, so a
-    --root that is itself a worktree is refused too."""
-    parts = path.parts
     if any(a == ".claude" and b == "worktrees" for a, b in zip(parts, parts[1:])):
         return True
-    return _worktree_dir(str(path.parent))
+    for i in range(1, len(parts) + 1):
+        g = root.joinpath(*parts[:i]) / ".git"
+        try:
+            if g.is_file() and "/worktrees/" in g.read_text(errors="replace"):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS):
@@ -960,7 +956,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
             if is_test_material(rel, named_exactly(p.name, names)):
                 skip(rp, "test")
                 continue
-            if is_worktree_copy(p.absolute()) or is_worktree_copy(rp):
+            if is_worktree_copy(p.absolute(), root.absolute()) or is_worktree_copy(rp, base):
                 skip(rp, "worktree")
                 continue
             b = p.read_bytes()
