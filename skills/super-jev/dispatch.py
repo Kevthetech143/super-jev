@@ -23,11 +23,15 @@ class MissingDependency(FileNotFoundError):
     """Raised when an optional dispatcher backend is unavailable."""
 
 
+def state_root() -> Path:
+    """The one state-dir resolver: SUPERJEV_STATE_DIR, else ~/.local/state/super-jev."""
+    root = os.environ.get("SUPERJEV_STATE_DIR")
+    return Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
+
+
 def config_path() -> Path:
     """The memory config setup.py writes (kept in step with setup.config_path)."""
-    root = os.environ.get("SUPERJEV_STATE_DIR")
-    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
-    return base / "_memory" / "config.json"
+    return state_root() / "_memory" / "config.json"
 
 
 class NotSetUp(FileNotFoundError):
@@ -46,7 +50,8 @@ def command(skill_dir: Path, tool: str, args: list[str]) -> list[str]:
         wrapper = skill_dir / "memory.sh"
         # The installed wrapper supplies deployment-local repo/config, then re-enters
         # this dispatcher. Explicit repo/config choices must not be overwritten.
-        if (not os.environ.get("SUPERJEV_REPO") and "--config" not in args
+        # An explicit SUPERJEV_STATE_DIR means isolation: skip the wrapper's pinned config.
+        if (not os.environ.get("SUPERJEV_REPO") and not os.environ.get("SUPERJEV_STATE_DIR") and "--config" not in args
                 and not any(arg.startswith("--config=") for arg in args)
                 and not os.environ.get("SUPERJEV_MEMORY_WRAPPER_ACTIVE") and wrapper.is_file()):
             return ["sh", str(wrapper), *args]

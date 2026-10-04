@@ -1396,11 +1396,9 @@ def list_cmd(pointer: str, status: str = None, kind: str = None,
 
 
 def _state_dir(principal: str) -> Path:
-    """Same state-dir resolution as ask.py's state_dir; kept local to avoid a circular
-    import (ask.py imports the label enums/helpers from this module)."""
-    root = os.environ.get("SUPERJEV_STATE_DIR")
-    base = Path(root).expanduser() if root else Path.home() / ".local/state/super-jev"
-    return base / principal
+    """The shared resolver (dispatch.state_root), the same one ask.py's state_dir uses."""
+    from dispatch import state_root
+    return state_root() / principal
 
 
 def manual_label_rows(principal: str, status: str = None, kind: str = None,
