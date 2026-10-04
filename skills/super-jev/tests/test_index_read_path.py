@@ -218,6 +218,62 @@ def test_updater_is_detached_not_inline(tmp_path, monkeypatch, capsys):
     assert spawned == [PRINCIPAL]
 
 
+def test_edited_file_after_sync_is_still_served_and_few_files_opened(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 40)
+    rig = Rig(monkeypatch, notes, names)
+    sync(sdir)
+    target = next(notes.rglob("zorblax.md"))
+    target.write_text("# zorblax\nzorblax quenth shipment arrives on the ninth of June.\n")
+    sync(sdir)  # the updater has now seen the edit: the file sits in `seen`, not `files`
+    from file_index import FileIndex
+    i = FileIndex(PRINCIPAL, sdir / "index.sqlite")
+    assert i.count(path=str(target)) == 0
+    assert any(p == str(target) for _ptr, p, _e in i.candidates(names))  # still a candidate (reason edited)
+    i.close()
+    flag(monkeypatch, True)
+    rig.opened.clear()
+    _rc, out = ask_it(PLANTED[0][0], sdir, capsys)
+    assert "zorblax.md" in out
+    assert len(rig.opened) <= 20, len(rig.opened)
+
+
+def test_saved_answer_check_hashes_nothing_on_a_miss(tmp_path, monkeypatch):
+    """Real in-process engine (not stubbed): saved rows exist for other questions, this one misses."""
+    import subprocess
+    repo = SKILL.parent.parent
+    exp = repo / "experiments" / "verified-pointer-memory"
+    for name in ("SUPERJEV_REPO", "SUPERJEV_JUDGE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
+    subprocess.run([sys.executable, str(SKILL / "setup.py")], capture_output=True, text=True, cwd=str(tmp_path), timeout=60)
+    note = tmp_path / "notes" / "acme.md"
+    note.parent.mkdir()
+    note.write_text("# Acme refund window\nAcme customers can return an order within 30 days.\n")
+    monkeypatch.syspath_prepend(str(exp))
+    from cli import load_config
+    from path_connect import connect
+    import service as svc
+    config = load_config(tmp_path / "state" / "_memory" / "config.json")
+    draft = connect({"pointer": "acme", "principals": ["ann"], "sources": [{"path": str(note)}]}, config)
+    done = connect({"pointer": "acme", "principals": ["ann"], "reviewed": True, "navigationSHA": draft["navigationSHA"],
+                    "sources": [{"path": x["path"], "sha256": x["sha256"]} for x in draft["sources"]]}, config)
+    assert done.get("status") == "registered", done
+    service = svc.Service(config["db"], config["registry"], lambda *_: {"status": "no-match"})
+    pointer, err = service.pointer("acme", "ann")
+    assert err is None
+    with service.connect() as c:  # a saved row for ANOTHER question on this pointer
+        c.execute("INSERT INTO cache(k,pointer,generation,fingerprint,body) VALUES(?,?,?,?,?)",
+                  (service.key(pointer, "some other question", "ann", "", svc.normalize_freshness(None)),
+                   "acme", pointer["generation"], pointer["fingerprint"], "{}"))
+    hashed = []
+    real = svc.sha
+    monkeypatch.setattr(svc, "sha", lambda p: (hashed.append(str(p)), real(p))[1])
+    assert service.cached("ann", "what is the acme refund window")["status"] == "cache-miss"
+    assert hashed == []  # a miss hashes nothing
+    service.cached("ann", "some other question")
+    assert hashed  # a row for this question: only then is the pointer snapshotted
+
+
 def measure(tmp, sizes=(300, 3000), reps=3):
     """Local ask time (warm index, stub judge, no network): prints one row per corpus size."""
     class MP:  # tiny monkeypatch stand-in for the script run

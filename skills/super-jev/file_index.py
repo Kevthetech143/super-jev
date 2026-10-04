@@ -227,7 +227,7 @@ class FileIndex:
         return out
 
     def candidates(self, pointers) -> list:
-        """[(pointer, path, entry)] of every indexed file of these pointers, entry shaped like a prepare-cache
+        """[(pointer, path, entry)] of every indexed file (and every edited one) of these pointers, entry shaped like a prepare-cache
         record (pass, sha256 = the reviewed sha, and the labels the TOC search reads)."""
         out = []
         for ptr in pointers:
@@ -235,6 +235,11 @@ class FileIndex:
                     "SELECT f.path,f.reviewed_sha,t.json FROM files f LEFT JOIN toc t ON t.path=f.path WHERE f.pointer=? ORDER BY f.path",
                     (ptr,)):
                 out.append((ptr, path, {**(json.loads(tj) if tj else {}), "pass": True, "sha256": sha}))
+            # edited since review (a few files): listed like today's candidate_files does, with the reviewed sha,
+            # so the caller's read_sha / edited_readable rule decides whether the current text is searched
+            for path, sha in self.db.execute(
+                    "SELECT path,reviewed_sha FROM seen WHERE pointer=? AND reason='edited' AND reviewed_sha IS NOT NULL ORDER BY path", (ptr,)):
+                out.append((ptr, path, {"pass": True, "sha256": sha}))
         return out
 
     def mark_stale(self, pointer: str) -> None:
