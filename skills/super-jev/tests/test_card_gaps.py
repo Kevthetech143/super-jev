@@ -1,11 +1,11 @@
 """Two card layouts the scan missed are held; ordinary numbers still are not.
 
-1. A card right after another digit group ("order 1234 4111 1111 1111 1111"): the card pattern never
+1. A card right after another digit group ("order 1234 4000 0566 5566 5556"): the card pattern never
    overlaps, so only the first 16-digit window of the run was tested. Later windows are now tested too, with a
    card-network prefix required on top of Luhn, and only with at most 2 groups of 4+ digits before and 2 after
    them in the run (short groups such as a phone number, date, expiry or CVV are allowed, up to 4 groups a side),
    so a long row of 4-digit numbers is not held for its many windows by chance.
-2. A 15-digit American Express number ("3782 822463 10005", 4-6-5, 4-4-4-3 or compact): only 16 digits were
+2. A 15-digit American Express number ("3400 000000 00009", 4-6-5, 4-4-4-3 or compact): only 16 digits were
    a card.
 
 Known limits (see CHANGELOG): 19-digit cards, cards written with dots, networks outside card_iin after another
@@ -58,7 +58,7 @@ def _old_card(text: str) -> bool:
     return any(_luhn_ok(re.sub(r"\D", "", m.group())) for m in CARD_RE.finditer(text))
 
 
-REPORTED = ["order 1234 4111 1111 1111 1111", "3782 822463 10005"]
+REPORTED = ["order 1234 4000 0566 5566 5556", "3400 000000 00009"]
 
 
 def test_reported_lines_held():
@@ -89,12 +89,12 @@ def test_amex_held_in_usual_layouts():
         for line in [f"amex {_amex(c)}", f"amex {_amex(c, '-')}", f"amex {c}", f"card: {_amex(c)} exp 09/28",
                      f"order 1234 {_amex(c)}", f"amex {_spaced(c)}", f"amex {_spaced(c, '-')}"]:
             assert has_secret(line), line
-    assert has_secret("3782 822463 10005 ١")  # non-ASCII digit: held without Luhn
+    assert has_secret("3400 000000 00009 ١")  # non-ASCII digit: held without Luhn
 
 
 def test_amex_shape_needs_luhn_prefix_and_standing_alone():
-    for line in ["3782 822463 10006", "3882 822463 10005", "x3782 822463 10005", "3782 822463 10005x",
-                 "13782 822463 10005", "3782 822463 100051", "3782 822463-10005", "3782-8224 6310-005",
+    for line in ["3782 822463 10006", "3882 822463 10005", "x3400 000000 00009", "3400 000000 00009x",
+                 "13400 000000 00009", "3400 000000 000091", "3782 822463-10005", "3782-8224 6310-005",
                  "3782 8224 6310 006", "3782 82246 310005"]:
         assert not has_secret(line), line
 
@@ -112,9 +112,9 @@ def test_never_releases_what_the_old_scan_held():
 
 
 def test_card_after_phone_or_date_or_before_expiry_and_cvv_held():
-    for line in ["call 555-867-5309 4012 8888 8888 1881", "call +1 555 867 5309 4012 8888 8888 1881",
-                 "28-09-2026 4012 8888 8888 1881", "order 1234 4111 1111 1111 1111 12 27 123",
-                 "order 1234 4111 1111 1111 1111 12-27 123", "order 5678 9012 4111 1111 1111 1111 09 2028 123"]:
+    for line in ["call 555-867-5309 4290 4974 6228 7854", "call +1 555 867 5309 4290 4974 6228 7854",
+                 "28-09-2026 4290 4974 6228 7854", "order 1234 4000 0566 5566 5556 12 27 123",
+                 "order 1234 4000 0566 5566 5556 12-27 123", "order 5678 9012 4000 0566 5566 5556 09 2028 123"]:
         assert not _old_card(line), line
         assert has_secret(line), line
 
@@ -122,9 +122,9 @@ def test_card_after_phone_or_date_or_before_expiry_and_cvv_held():
 def test_card_after_three_long_groups_is_a_known_limit():
     # A later window with 3 or more groups of 4+ digits before (or after) it is not tested: a long row of
     # 4-digit numbers would otherwise be held about 3 more times in 100 for each extra window.
-    assert not has_secret("order 1234 5678 9012 4111 1111 1111 1111")
-    assert not has_secret("order 1234 4111 1111 1111 1111 5678 9012 3456")
-    assert not has_secret("1 2 3 4 5 1234 4111 1111 1111 1111")  # 6 groups before
+    assert not has_secret("order 1234 5678 9012 4000 0566 5566 5556")
+    assert not has_secret("order 1234 4000 0566 5566 5556 5678 9012 3456")
+    assert not has_secret("1 2 3 4 5 1234 4000 0566 5566 5556")  # 6 groups before
 
 
 def test_long_grouped_numbers_rarely_held_more_than_before():
@@ -159,9 +159,9 @@ def test_compact_15_digit_numbers_rarely_held():
 
 def test_notes_file_with_card_after_order_number_is_held(tmp_path):
     f = tmp_path / "orders.md"
-    f.write_text("# Orders\n" + "- a fact about the order\n" * 30 + "- order 1234 4111 1111 1111 1111\n")
+    f.write_text("# Orders\n" + "- a fact about the order\n" * 30 + "- order 1234 4000 0566 5566 5556\n")
     detail = secret_detail(f)
-    assert detail and detail["line"] == 32 and "4111" not in detail["masked"]
+    assert detail and detail["line"] == 32 and "4000" not in detail["masked"]
 
 
 def _node(inputs):
@@ -176,11 +176,11 @@ def _node(inputs):
 @pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")
 def test_python_and_node_agree():
     rng = random.Random(42)
-    inputs = REPORTED + ["3782 822463 10005 ١", "3782-822463-10005", "378282246310005", "x3782 822463 10005",
-                         "3782 8224 6310 005", "3782-8224-6310-005", "order 1234 5678 9012 4111 1111 1111 1111",
-                         "order 1234 4111 1111 1111 1111 12 27", "order 1234 4111 1111 1111 1111 12 27 1",
-                         "call 555-867-5309 4012 8888 8888 1881", "28-09-2026 4012 8888 8888 1881",
-                         "1 2 3 4 5 1234 4111 1111 1111 1111", "1 2 3 4111 1111 1111 1111 1 2 3 4 5", "9 4111 1111 1111 1111"]
+    inputs = REPORTED + ["3400 000000 00009 ١", "3400-000000-00009", "340000000000009", "x3400 000000 00009",
+                         "3400 0000 0000 009", "3400-0000-0000-009", "order 1234 5678 9012 4000 0566 5566 5556",
+                         "order 1234 4000 0566 5566 5556 12 27", "order 1234 4000 0566 5566 5556 12 27 1",
+                         "call 555-867-5309 4290 4974 6228 7854", "28-09-2026 4290 4974 6228 7854",
+                         "1 2 3 4 5 1234 4000 0566 5566 5556", "1 2 3 4000 0566 5566 5556 1 2 3 4 5", "9 4000 0566 5566 5556"]
     for _ in range(400):
         sep = rng.choice([" ", "-"])
         card = _card(rng, rng.choice(["4", "51", "9", "37"]))
@@ -194,4 +194,4 @@ def test_python_and_node_agree():
     py, js = [has_secret(s) for s in inputs], _node(inputs)
     assert [s for s, a, b in zip(inputs, py, js) if a != b] == []
     # a hit must not leave state behind in Node (a global regex's lastIndex once did)
-    assert _node(["order 1234 4111 1111 1111 1111", "card 4111 1111 1111 1111"]) == [True, True]
+    assert _node(["order 1234 4000 0566 5566 5556", "card 4000 0566 5566 5556"]) == [True, True]

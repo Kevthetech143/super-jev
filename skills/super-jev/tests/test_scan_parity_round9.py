@@ -29,14 +29,14 @@ CASES = json.loads((Path(__file__).parent / "data" / "unicode_scan_cases.json").
 # Not secrets: prose, the 1Password app name, a card-like id inside a URL, and homoglyph
 # spellings (Cyrillic or accented letters become the placeholder x, so they no longer spell
 # the keyword - both sides agree they pass).
-NOT_SECRET = {"The box is blue.", "1password", "١password", "https://x.com/4111111111111111",
+NOT_SECRET = {"The box is blue.", "1password", "١password", "https://x.com/4000056655665556",
               "сk_live_9fQ2xZ7pL0aB3cD8eF", "pаssword", "PÄSSWORD",
               "PASSWORD"}  # a bare keyword is prose; only a keyword with a value is held
 
 # Secret shapes, built by concatenation so this file never holds one, and Unicode disguises
 # that normalizing must see through.
 SHAPES = ["sk" + "_live_9fQ2xZ7pL0aB3cD8eF", "gh" + "p_" + "a1" * 18, "pass" + "word: hunter2",
-          "token=Ab3dEf9GhIjK1mNoPqRsTu", "4111 1111 1111 1111", "AK" + "IA1234567890ABCDEF"]
+          "token=Ab3dEf9GhIjK1mNoPqRsTu", "4000 0566 5566 5556", "AK" + "IA1234567890ABCDEF"]
 DISGUISE = [" ", "　", "﻿", " ", "\x1c", "​"]
 
 

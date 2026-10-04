@@ -39,7 +39,7 @@ pb = load("prepare_bulk_mask", SKILL / "prepare_bulk.py")
 jc = load("jev_client_mask", SKILL / "lib" / "jev_client.py")
 sj = load("superjev_mask", SKILL / "superjev.py")
 
-CARD = "4111 " + "1111 1111 1111"
+CARD = "4000 " + "0566 5566 5556"
 PW = "password=" + "hunter2" + "hunter2"
 STRIPE = "sk_" + "live_" + "abcdefghij1234567890"
 AWS_ID = "AKIA" + "ABCDEFGHIJKLMNOP"
@@ -93,7 +93,7 @@ def test_the_reported_case_is_judged_without_its_fixtures():
     assert out is not None and not pb.has_secret(out) and withheld == ["tests/test_scan.py"]
     assert out.startswith(PRODUCT)  # the product file is sent as it is
     assert out.endswith("+++ b/tests/test_scan.py\n" + pb.SECRET_WITHHELD.format(n=5) + "\n")
-    assert "hunter2" not in out and "4111" not in out and "card_is_held" not in out
+    assert "hunter2" not in out and "4000" not in out and "card_is_held" not in out
 
 
 # Every part of each secret below reached the judge under some masking-inside-a-file rule.
@@ -306,7 +306,7 @@ def test_gate_evidence_mode_names_what_it_withheld(tmp_path):
     other.write_text("scan returns card_hit(text)\n")
     p, sent = run_cli(tmp_path, [str(SKILL / "superjev.py"), "gate", str(notes), str(other),
                                  "--claim", "scan returns card_hit(text)"])
-    assert "4111" not in sent and "card_hit" in sent
+    assert "4000" not in sent and "card_hit" in sent
     assert "withheld 1 file(s)" in p.stdout and str(notes) in p.stdout
 
 
@@ -359,7 +359,7 @@ def test_non_ascii_digit_in_one_file_keeps_the_others_judged():
 
 
 def test_clean_text_is_returned_unchanged():
-    text = "commit 5f2a9c1e0b\n2026-09-28 run 1234 5678 took 12s\nhttps://x.test/?id=4111111111111111\n"
+    text = "commit 5f2a9c1e0b\n2026-09-28 run 1234 5678 took 12s\nhttps://x.test/?id=4000056655665556\n"
     assert pb.mask_secrets(text) == (text, [])
 
 
@@ -386,7 +386,7 @@ def test_code_gate_judges_the_diff_without_the_withheld_file():
                                   ask_fn=judge, mask_info=info)
     (state, _q), = judge.calls
     assert not pb.has_secret(state) and "return card_hit(text)" in state
-    assert "4111" not in state and "hunter2" not in state and code == 0
+    assert "4000" not in state and "hunter2" not in state and code == 0
     assert info["withheld"] == ["tests/test_scan.py"]
 
 
@@ -477,7 +477,7 @@ def test_cli_sends_the_diff_without_its_secret_files(tmp_path, entry):
     for body in sent.strip().split("\n"):
         state = json.loads(body)["state"]
         assert "return card_hit(text)" in state and not pb.has_secret(state)
-        assert "4111" not in state and "hunter2" not in state
+        assert "4000" not in state and "hunter2" not in state
         for _body, parts in LEAKS.values():
             assert not any(part in state for part in parts)
     assert "contains a secret; not sent" not in p.stdout + p.stderr

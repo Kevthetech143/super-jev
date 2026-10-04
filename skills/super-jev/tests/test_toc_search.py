@@ -180,12 +180,12 @@ def test_a_small_files_page_is_unchanged():
 
 
 def _scan(text):
-    return "4111 1111 1111 1111" in text
+    return "4000 0566 5566 5556" in text
 
 
 def test_a_secret_shaped_comment_holds_its_section_not_the_file():
     text = ("def add(a, b):\n    return a + b\n\n" + "\n".join(f"# pad {i}" for i in range(10)) + "\n\n"
-            "def scan(x):\n    # fake sample: 4111 1111 1111 1111\n    return x\n\n"
+            "def scan(x):\n    # fake sample: 4000 0566 5566 5556\n    return x\n\n"
             + "\n".join(f"# more {i}" for i in range(10)) + "\n\ndef sub(a, b):\n    return a - b\n")
     clean, spans = toc_search.withhold_secret_sections(text, "m.py", _scan)
     assert clean is not None and not _scan(clean)
@@ -200,9 +200,9 @@ def test_a_file_with_nothing_secret_is_returned_as_is():
 
 
 def test_a_file_that_is_mostly_secret_or_unsectioned_is_held_whole():
-    one_part = "Notes\n" + "\n".join(f"line {i}" for i in range(20)) + "\ncard 4111 1111 1111 1111\n"
+    one_part = "Notes\n" + "\n".join(f"line {i}" for i in range(20)) + "\ncard 4000 0566 5566 5556\n"
     assert toc_search.withhold_secret_sections(one_part, "n.txt", _scan) == (None, [])
-    secret_def = "def a():\n    return '4111 1111 1111 1111'\n"
+    secret_def = "def a():\n    return '4000 0566 5566 5556'\n"
     assert toc_search.withhold_secret_sections(secret_def, "a.py", _scan) == (None, [])
 
 
