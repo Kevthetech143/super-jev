@@ -58,7 +58,7 @@ from judges.errors import (JudgeError, NoKey, AuthRejected, Unreachable,   # noq
                            Overloaded, BadReply, TooBig, SecretBlocked, ERROR_KINDS)
 
 __all__ = ["JudgeResult", "Judge", "ProfileJudge", "FakeJudge", "get_judge", "JUDGE_ENV",
-           "ask", "profile", "key_env", "key_file", "key_present", "require_key", "door_script", "with_retry",
+           "ask", "profile", "key_env", "key_file", "key_file_path", "key_present", "require_key", "door_script", "with_retry",
            "JudgeError", "NoKey", "AuthRejected", "Unreachable", "Overloaded", "BadReply", "TooBig",
            "SecretBlocked", "ERROR_KINDS"]
 
@@ -86,6 +86,16 @@ def key_file():
     NoKey message both name this one file; nothing reads it for you."""
     env = key_env()
     return "~/." + env.lower().replace("_", "-") if env else ""
+
+
+def key_file_path():
+    """The key file to read, as a full path: the file named by $<KEY_ENV>_FILE when that is set
+    (<KEY_ENV>_FILE), else key_file() with ~ expanded. "" for a keyless
+    judge. The one file-path rule: the terminal app and the key provider follow it too."""
+    env = key_env()
+    if not env:
+        return ""
+    return os.environ.get(env + "_FILE", "").strip() or os.path.expanduser(key_file())
 
 
 def key_present():
