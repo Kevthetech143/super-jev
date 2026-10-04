@@ -1747,6 +1747,19 @@ def run_json(a) -> int:
     return rc
 
 
+def kick_index_updater(principals) -> None:
+    """After a connect or refresh: start the file-index updater detached, one per principal (ask.py does nothing
+    unless the index flag is on). Never on the caller's clock, never a failure. Not under pytest."""
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        return
+    for principal in principals:
+        try:
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "ask.py"), "--principal", principal,
+                              "--index-update-if-on"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except Exception:  # noqa: BLE001
+            pass
+
 def main() -> int:
     ap = _Parser()
     ap.add_argument("--root", dest="roots", action="append")
@@ -2244,6 +2257,7 @@ def run(a) -> int:
     keep_unrecorded(report, a)
     write_report(a.pointer, report)
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
+    kick_index_updater(a.principals)
     return connect_outcome(connected_n, held_n, len(exceptions) + failed_n)
 
 

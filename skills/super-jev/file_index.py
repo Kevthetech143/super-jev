@@ -19,10 +19,12 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
     sha256 TEXT, pass INTEGER, reviewed_sha TEXT);
 CREATE TABLE IF NOT EXISTS toc(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
-CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFAULT 0, roots TEXT, checked_at REAL);
+CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFAULT 0, roots TEXT, checked_at REAL,
+    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0);
 -- stat memo for files seen but never ingested (held, edited, new, unreviewed): so they are not re-hashed
 CREATE TABLE IF NOT EXISTS seen(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
     sha256 TEXT, reason TEXT, reviewed_sha TEXT);
+CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE INDEX IF NOT EXISTS files_pointer ON files(pointer);
 CREATE INDEX IF NOT EXISTS seen_pointer ON seen(pointer);
 """
@@ -46,6 +48,10 @@ class FileIndex:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.path))
         self.db.executescript(SCHEMA)
+        have = {r[1] for r in self.db.execute("PRAGMA table_info(pointers)")}
+        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0")):
+            if col not in have:  # an index made by the first version: add the read-path columns
+                self.db.execute(f"ALTER TABLE pointers ADD COLUMN {col} {typ}")
 
     def close(self):
         self.db.close()
@@ -160,7 +166,8 @@ class FileIndex:
         first = row is None  # the seeding pass is not a change
         out["stale"] = bool(out["changed"] or out["new"] or out["gone"]) and not first
         stale = 1 if out["stale"] else (self.db.execute("SELECT stale FROM pointers WHERE pointer=?", (pointer,)).fetchone() or (0,))[0]
-        self.db.execute("INSERT OR REPLACE INTO pointers VALUES(?,?,?,strftime('%s','now'))",
+        self.db.execute("INSERT INTO pointers(pointer,stale,roots,checked_at) VALUES(?,?,?,strftime('%s','now')) "
+                        "ON CONFLICT(pointer) DO UPDATE SET stale=excluded.stale, roots=excluded.roots, checked_at=excluded.checked_at",
                         (pointer, stale, json.dumps(list(roots)) if roots else None))
         self.db.commit()
         return out
@@ -176,6 +183,68 @@ class FileIndex:
         elif pointer is not None:
             q += " WHERE pointer=?"; a = [pointer]
         return self.db.execute(q, a).fetchone()[0]
+
+    # ---- read path (ask.py, flag-gated): no file is opened here ----
+
+    def set_panel(self, rows: list) -> None:
+        """Record the principal's visible pointers as the registry panel listed them (updater only):
+        rows of {"pointer", "snapshotStatus"|"status", "generation", "viewOriginals"}. Pointers no longer listed go."""
+        self.db.execute("UPDATE pointers SET listed=0")
+        for r in rows:
+            name = r.get("pointer")
+            if not name:
+                continue
+            self.db.execute(
+                "INSERT INTO pointers(pointer,stale,status,generation,views,listed,checked_at) VALUES(?,0,?,?,?,1,strftime('%s','now')) "
+                "ON CONFLICT(pointer) DO UPDATE SET status=excluded.status, generation=excluded.generation, "
+                "views=excluded.views, listed=1",
+                (name, str(r.get("snapshotStatus") or r.get("status") or ""),
+                 json.dumps(r.get("generation")), json.dumps(r.get("viewOriginals") or [])))
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES('synced_at', strftime('%s','now'))")
+        self.db.commit()
+
+    def synced_at(self):
+        r = self.db.execute("SELECT v FROM meta WHERE k='synced_at'").fetchone()
+        return float(r[0]) if r else None
+
+    def generation_of(self, pointer: str):
+        r = self.db.execute("SELECT generation FROM pointers WHERE pointer=?", (pointer,)).fetchone()
+        return json.loads(r[0]) if r and r[0] else None
+
+    def panel_rows(self) -> list:
+        """The panel shape ask.py reads, from the pointers table. A pointer the updater saw changed on disk
+        is reported refresh-required, like a stale registry row."""
+        out = []
+        for name, stale, status, gen, views in self.db.execute(
+                "SELECT pointer,stale,status,generation,views FROM pointers WHERE listed=1 ORDER BY pointer"):
+            row = {"pointer": name, "snapshotStatus": "refresh-required" if stale else (status or "ready")}
+            if gen is not None and json.loads(gen) is not None:
+                row["generation"] = json.loads(gen)
+            v = json.loads(views) if views else []
+            if v:
+                row["viewOriginals"] = v
+            out.append(row)
+        return out
+
+    def candidates(self, pointers) -> list:
+        """[(pointer, path, entry)] of every indexed file (and every edited one) of these pointers, entry shaped like a prepare-cache
+        record (pass, sha256 = the reviewed sha, and the labels the TOC search reads)."""
+        out = []
+        for ptr in pointers:
+            for path, sha, tj in self.db.execute(
+                    "SELECT f.path,f.reviewed_sha,t.json FROM files f LEFT JOIN toc t ON t.path=f.path WHERE f.pointer=? ORDER BY f.path",
+                    (ptr,)):
+                out.append((ptr, path, {**(json.loads(tj) if tj else {}), "pass": True, "sha256": sha}))
+            # edited since review (a few files): listed like today's candidate_files does, with the reviewed sha,
+            # so the caller's read_sha / edited_readable rule decides whether the current text is searched
+            for path, sha in self.db.execute(
+                    "SELECT path,reviewed_sha FROM seen WHERE pointer=? AND reason='edited' AND reviewed_sha IS NOT NULL ORDER BY path", (ptr,)):
+                out.append((ptr, path, {"pass": True, "sha256": sha}))
+        return out
+
+    def mark_stale(self, pointer: str) -> None:
+        self.db.execute("UPDATE pointers SET stale=1 WHERE pointer=?", (pointer,))
+        self.db.commit()
 
     def purge(self, pointer: str) -> None:
         """Unshare / refresh: DELETE every row of the pointer (files, toc, seen, pointers)."""
