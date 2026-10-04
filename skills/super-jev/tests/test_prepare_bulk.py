@@ -100,7 +100,7 @@ def test_inventory_skips_hidden_backup_and_vault_dirs_and_holds_password_and_ove
     assert "password" in held_by_name["pw.md"]
 
 
-def test_inventory_never_picks_up_git_worktree_copies(tmp_path):
+def test_inventory_skips_worktree_copies_below_a_root_but_connects_a_pointed_at_worktree(tmp_path):
     # One agent carried 23 pointers of a Claude worktree's stale copy of its own brain.
     brain = tmp_path / "brain"
     (brain / ".git").mkdir(parents=True)
@@ -122,10 +122,10 @@ def test_inventory_never_picks_up_git_worktree_copies(tmp_path):
 
     files, _ = pb.inventory([brain])
     assert sorted(p.relative_to(brain).as_posix() for p in files) == ["live.md", "vendor/notes.md"]
-    # A --root that is itself the worktree copy is refused too, so no per-folder pointer is born.
-    assert pb.inventory([claude_wt]) == ([], [])
-    assert pb.inventory([other_wt]) == ([], [])
-    assert pb.inventory([other_wt / "docs"]) == ([], [])
+    # A --root that is itself a worktree (or inside one) was pointed at on purpose: it connects.
+    assert [p.name for p in pb.inventory([claude_wt])[0]] == ["copy.md"]
+    assert [p.name for p in pb.inventory([other_wt])[0]] == ["spec.md"]
+    assert [p.name for p in pb.inventory([other_wt / "docs"])[0]] == ["spec.md"]
 
 
 def test_a_connect_shares_the_fleet_shared_list_unless_no_shared(tmp_path, monkeypatch):
