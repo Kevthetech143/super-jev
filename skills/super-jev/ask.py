@@ -2454,7 +2454,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         # The TOC search picks the read list, so routing asks Jev nothing: each set's status comes from
         # the registry (no Jev call), which keeps stale sets searched, named and auto-healed.
         outs = {ptr: {"status": "no-candidates"} for ptr in pointers}
-        panel = memory({"action": "panel", "principal": principal}) if pointers else {}
+        # Reuse the panel fetched above: nothing writes the registry between the two reads.
+        panel = panel if pointers else {}
         for row in (panel.get("pointers") or []) if isinstance(panel, dict) else []:
             if isinstance(row, dict) and row.get("pointer") in outs and str(
                     row.get("snapshotStatus") or row.get("status") or "").startswith(("preparation-required", "refresh-required")):
