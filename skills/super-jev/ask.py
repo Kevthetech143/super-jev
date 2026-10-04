@@ -1705,7 +1705,8 @@ def source_rows(principal: str, pointer: str):
         if not isinstance(out, dict) or out.get("status") != "ok":
             return None
         for src in out.get("sources") or []:
-            path, sha = (src.get("originalPath"), src.get("contentSHA")) if isinstance(src, dict) else (None, None)
+            # originalPath when present (a reviewed view lists its view there); else the source's own listed path
+            path, sha = (src.get("originalPath") or src.get("path"), src.get("contentSHA")) if isinstance(src, dict) else (None, None)
             if isinstance(path, str) and path and isinstance(sha, str) and sha:
                 rows[path] = {"pass": True, "sha256": sha, "description": str(src.get("description") or ""), "local": True}
         nxt = out.get("nextOffset")
