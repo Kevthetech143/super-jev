@@ -1,4 +1,4 @@
-"""With SUPERJEV_STATE_DIR and HOME in temp dirs, memory.sh and prepare_bulk write only under them."""
+"""With SUPERJEV_STATE_DIR and HOME in temp dirs, the memory path (memory.sh bypassed) and prepare_bulk write only under them."""
 import hashlib
 import json
 import os
@@ -46,8 +46,9 @@ def _setup(tmp_path):
 
 
 def _mem(env, req):
-    r = subprocess.run(["sh", str(SKILL / "memory.sh"), "--input", "/dev/stdin"], input=json.dumps(req),
-                       capture_output=True, text=True, env=env)
+    # The same command ask.py/dispatch build; with SUPERJEV_STATE_DIR set it never goes through an installed memory.sh.
+    cmd = dispatch.command(SKILL, "memory", ["--input", "/dev/stdin"])
+    r = subprocess.run(cmd, input=json.dumps(req), capture_output=True, text=True, env=env)
     return json.loads(r.stdout)
 
 
