@@ -86,6 +86,7 @@ class Rig:
             return real(p)
         monkeypatch.setattr(Path, "read_bytes", counting)
         monkeypatch.setattr(ask, "spawn_index_updater", lambda principal: None)
+        monkeypatch.setattr(ask, "engine_visible", lambda principal: set(self.names))  # the engine's authorized list
 
     def memory(self, req):
         if req["action"] == "cached":
@@ -235,6 +236,31 @@ def test_edited_file_after_sync_is_still_served_and_few_files_opened(tmp_path, m
     _rc, out = ask_it(PLANTED[0][0], sdir, capsys)
     assert "zorblax.md" in out
     assert len(rig.opened) <= 20, len(rig.opened)
+
+
+def test_unshared_pointer_is_not_served_with_flag_on(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 30)
+    rig = Rig(monkeypatch, notes, names)
+    sync(sdir)
+    rig.names = [n for n in names if n != "p0"]  # the engine drops p0 for this principal after the sync
+    served = {}
+    for on in (False, True):
+        flag(monkeypatch, on)
+        rc, out = ask_it(PLANTED[0][0], sdir, capsys)  # zorblax.md lives in p0
+        served[on] = out
+        assert "zorblax.md" not in out and "/p0/" not in out
+    assert top5(served[True]) == top5(served[False])
+
+
+def test_engine_list_unreadable_falls_back(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 30)
+    Rig(monkeypatch, notes, names)
+    sync(sdir)
+    monkeypatch.setattr(ask, "engine_visible", lambda principal: None)
+    flag(monkeypatch, True)
+    ask_it(PLANTED[0][0], sdir, capsys)
+    stage = json.loads(Path(sdir / "traces.jsonl").read_text().splitlines()[-1])["stages"]["index"]
+    assert stage["used"] is False and stage["fallback"] == "engine pointer list unreadable"
 
 
 def test_saved_answer_check_hashes_nothing_on_a_miss(tmp_path, monkeypatch):
