@@ -252,6 +252,8 @@ def _second_set_down(world, monkeypatch, down):
     def memory(req):
         if req["action"] == "panel" and req.get("principal") == "ann":
             return {"pointers": [{"pointer": "acme"}, {"pointer": "acme2"}]}
+        if req["action"] == "sources" and req.get("pointer") == "acme2":
+            return {"status": "error"}  # no local rows for this set, so it is routed (and can fail) as before
         if req["action"] == "navigate" and req.get("pointer") == "acme2":
             return {"status": "error", "reason": "provider failed"} if world["down"] else {"status": "no-candidates"}
         return real(req)
