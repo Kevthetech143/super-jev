@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 
 const PAT = JSON.parse(readFileSync(new URL('../skills/super-jev/secret_patterns.json', import.meta.url), 'utf8'));
 // No 'u' flag: \w, \d and \b stay ASCII-only, the twin of Python's re.ASCII. The text is ASCII after normalizing.
+const TEST_CARDS = new Set<string>(PAT.test_cards);
 const CARD = new RegExp(PAT.card, 'g');
 const CARD_IIN = new RegExp(PAT.card_iin);
 const AMEX = new RegExp(PAT.amex, 'g');
@@ -41,6 +42,8 @@ export function normalizeForScan(text: string): string {
   return text.normalize('NFKC').toLowerCase().replace(NON_ASCII, foldChar).replace(CTRL, ' ');
 }
 
+/** Twin of Python _real_card: Luhn-valid and not a published processor test number. */
+function realCard(d: string): boolean { return luhn(d) && !TEST_CARDS.has(d); }
 function luhn(digits: string): boolean {
   let total = 0;
   for (let i = 0; i < digits.length; i++) {
@@ -111,10 +114,10 @@ function cardHit(text: string, checkLuhn: boolean): boolean {
   if (!checkLuhn) return text.search(CARD) >= 0 || text.search(AMEX) >= 0;
   const plain = text.replace(TRACKING, (m) => uspsCheckOk(m) ? ' ' : m);
   text = text.replace(TRACKING, (m) => uspsTracking(m) ? ' ' : m);
-  for (const m of [...text.matchAll(CARD), ...text.matchAll(AMEX)]) if (luhn(m[0].replace(/\D/g, ''))) return true;
+  for (const m of [...text.matchAll(CARD), ...text.matchAll(AMEX)]) if (realCard(m[0].replace(/\D/g, ''))) return true;
   for (const m of overlapping(CARD, plain)) {
     const d = m[0].replace(/\D/g, '');
-    if (CARD_IIN.test(d) && luhn(d) && nearOk(groupsNear(plain, m.index, m.index + m[0].length))) return true;
+    if (CARD_IIN.test(d) && realCard(d) && nearOk(groupsNear(plain, m.index, m.index + m[0].length))) return true;
   }
   return false;
 }

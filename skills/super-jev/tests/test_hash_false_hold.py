@@ -18,7 +18,7 @@ def test_random_sha256_never_held():
 
 
 def test_real_cards_and_keys_still_held():
-    for text in ["card 4111 1111 1111 1111", "4111111111111111", "5500-0000-0000-0004",
+    for text in ["card 4000 0566 5566 5556", "4000056655665556", "5500-0000-0000-0004",
                  "api_key = sk-live-9fQ2xZ7pL0aBcD3eF4", "ghp_" + "a1" * 18]:
         assert has_secret(text), text
-    assert payload_has_secret({"sources": [{"description": "card 4111111111111111", "sha256": "ab"}]})
+    assert payload_has_secret({"sources": [{"description": "card 4000056655665556", "sha256": "ab"}]})

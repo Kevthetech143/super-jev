@@ -104,10 +104,10 @@ def test_card_near_or_inside_a_digit_run_still_held():
 
 
 def test_short_91_95_number_before_a_card_never_hides_it():
-    # Found in review: a loose run rule read "9100000001 4111 1111 1111 1111" (26 digits) as a tracking
+    # Found in review: a loose run rule read "9100000001 4000 0566 5566 5556" (26 digits) as a tracking
     # number whenever the card's last digit happened to be a valid check digit. Only USPS layout counts.
     rng = random.Random(26)
-    for line in ["call 9100000001 4111 1111 1111 1111 thanks", "ref 920000 4111 1111 1111 1111"]:
+    for line in ["call 9100000001 4000 0566 5566 5556 thanks", "ref 920000 4000 0566 5566 5556"]:
         assert has_secret(line), line
     lines = []
     for _ in range(3000):
@@ -120,7 +120,7 @@ def test_short_91_95_number_before_a_card_never_hides_it():
 
 
 def test_card_behind_a_4_or_8_digit_91_95_group():
-    # Found in the second review: "9100 4111 1111 1111 1111 01" is a USPS-layout run with a card at its
+    # Found in the second review: "9100 4000 0566 5566 5556 06" is a USPS-layout run with a card at its
     # 2nd group. A run with a Luhn-valid window after its first group is never exempt. A run whose USPS check
     # digit is valid gets exactly the old first-window answer (so real tracking numbers are held no more often);
     # any other run is held, since its later card window passes Luhn and has a card-network prefix.
@@ -139,9 +139,9 @@ def test_card_behind_a_4_or_8_digit_91_95_group():
     # Known limit, kept on purpose: this line is also a check-digit-valid USPS number, judged as before. Holding
     # every such run with a card-prefixed Luhn window would hold about 4 in 100 real 22-digit tracking numbers
     # (7 in 100 for 26 digits) instead of 1 (2).
-    assert _usps_check_ok("9100 4111 1111 1111 1111 01")
-    assert has_secret("9100 4111 1111 1111 1111 01") == _old_card("9100 4111 1111 1111 1111 01")
-    assert has_secret("9100 4111 1111 1111 1111 02")  # wrong check digit: not a tracking number, held
+    assert _usps_check_ok("9100 4000 0566 5566 5556 06")
+    assert has_secret("9100 4000 0566 5566 5556 06") == _old_card("9100 4000 0566 5566 5556 06")
+    assert has_secret("9100 4000 0566 5566 5556 02")  # wrong check digit: not a tracking number, held
 
 
 def test_valid_tracking_numbers_mostly_exempt():
@@ -204,7 +204,7 @@ def _node(inputs):
 def test_python_and_node_agree():
     rng = random.Random(99)
     inputs = [EXAMPLE, EXAMPLE.replace(" ", "-"), f"{EXAMPLE} ١", f"{EXAMPLE} 5",
-              "call 9100000001 4111 1111 1111 1111 thanks", "ref 920000 4111 1111 1111 1111"]
+              "call 9100000001 4000 0566 5566 5556 thanks", "ref 920000 4000 0566 5566 5556"]
     for _ in range(300):
         trk, card = _tracking(rng, rng.choice([20, 22, 26])), _card(rng)
         pre = trk[:rng.choice([6, 10])]

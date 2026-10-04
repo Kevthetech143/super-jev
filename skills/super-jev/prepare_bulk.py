@@ -236,6 +236,7 @@ def _record_written(path: Path, cache_dir: Path = None) -> None:
 # Token shapes are adapted from gitleaks' default rules; "1Password" (the app) is not
 # a password (digit lookbehind); a keyword holds only a literal value, never a placeholder or a call ({PH}). GENERIC keywords start a word and their tail is capped.
 _PAT = json.loads((Path(__file__).resolve().parent / "secret_patterns.json").read_text())
+TEST_CARDS = frozenset(_PAT["test_cards"])
 CARD_RE = re.compile(_PAT["card"], re.A)
 CARD_IIN_RE = re.compile(_PAT["card_iin"], re.A)
 AMEX_RE = re.compile(_PAT["amex"], re.A)
@@ -430,6 +431,11 @@ def _luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
+def _real_card(digits: str) -> bool:
+    """Luhn-valid and not one of the published processor test numbers (TEST_CARDS: fake, no real account)."""
+    return _luhn(digits) and digits not in TEST_CARDS
+
+
 def _usps_check_ok(run: str) -> bool:
     """A TRACKING_RE run (prefix and layout already checked) of 22 or 26 digits with a valid GS1 mod-10 check digit."""
     d = re.sub(r"\D", "", run)
@@ -489,11 +495,11 @@ def card_hit(text: str, luhn: bool = True) -> bool:
         return bool(CARD_RE.search(text) or AMEX_RE.search(text))
     plain = TRACKING_RE.sub(lambda m: " " if _usps_check_ok(m.group()) else m.group(), text)
     text = TRACKING_RE.sub(lambda m: " " if _usps_tracking(m.group()) else m.group(), text)
-    if any(_luhn(re.sub(r"\D", "", m.group())) for m in (*CARD_RE.finditer(text), *AMEX_RE.finditer(text))):
+    if any(_real_card(re.sub(r"\D", "", m.group())) for m in (*CARD_RE.finditer(text), *AMEX_RE.finditer(text))):
         return True
     for m in _overlapping(CARD_RE, plain):
         d = re.sub(r"\D", "", m.group())
-        if CARD_IIN_RE.match(d) and _luhn(d) and _near_ok(*_groups_near(plain, m.start(), m.end())):
+        if CARD_IIN_RE.match(d) and _real_card(d) and _near_ok(*_groups_near(plain, m.start(), m.end())):
             return True
     return False
 

@@ -33,7 +33,7 @@ HELD = [
     "aws_secret_access_key=" + "wJalrXUtnFEMI/K7MDENG" + "/bPxRfiCYEXAMPLEKEY",
     "password is " + "hunter" + "2!", "password=$3cret" + "Pass9", "password=<Literal" + "Secret9",
     "sk" + "_live_9fQ2xZ7pL0aB3cD8eF", "gh" + "p_" + "a1" * 18, "AK" + "IA1234567890ABCDEF",
-    "8" * 9 + ":AA" + "Zx9Qp2Lm8" * 4, "-----BEGIN RSA PRIV" + "ATE KEY-----", "4111 1111 " + "1111 1111",
+    "8" * 9 + ":AA" + "Zx9Qp2Lm8" * 4, "-----BEGIN RSA PRIV" + "ATE KEY-----", "4000 0566 " + "5566 5556",
     "Authorization: Basic " + "dXNlcjpwYXNzd29yZA==",
     # Letters-only values: a quoted one, or a single word of 4+ letters ending the line.
     "password: marvin", 'password = "hunter"', "Password: Sunshine", "api_key: abcdefgh\nnext line",
