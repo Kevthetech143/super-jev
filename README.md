@@ -65,6 +65,8 @@ Maintainer: Kevthetech143 — issues welcome via the miss template (`.github/ISS
 
 Tested on macOS and Linux. Windows is untested.
 
+Version: `superjev --version` or `python3 skills/super-jev/ask.py --version` prints the release; `package.json` is the one version source.
+
 ## What this tool touches
 
 | Scope | Detail |

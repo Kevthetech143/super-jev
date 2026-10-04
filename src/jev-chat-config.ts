@@ -179,7 +179,7 @@ export const HELP = [
   '  /help or ?          show this list',
   '  /exit               leave (Ctrl+D works too)'].join('\n');
 /** What `superjev --help` leads with, before the list. */
-export const USAGE = 'Usage: superjev "your question"\n       superjev            open the window';
+export const USAGE = 'Usage: superjev "your question"\n       superjev            open the window\n       superjev --version  print the version';
 
 export function confirmText(label: string, refresh: boolean, vendor: string, width: number): string {
   const text = `${refresh ? 'Refresh' : 'Connect'} ${label}? It's free and stays on this Mac. When you ask, your question and matching passages go to ${vendor}.`;
