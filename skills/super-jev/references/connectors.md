@@ -144,9 +144,9 @@ relative to its root starts with that subpath, and `--no-recurse` limits each
 root to its direct children. `--name GLOB` (repeatable) keeps only files whose
 name matches (case-insensitive; a symlinked file's target must sit under a root or an `--allow-target DIR` and pass the same checks), e.g. `--root ~/.claude/skills --name SKILL.md` connects each skill's
 entry file in place; files that share a name are shown to routing with their
-folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktree copies (any
+folder (`ebay-return-label/SKILL.md`). It skips hidden dirs, backups, git worktree copies found below the root (any
 `.claude/worktrees/` folder, or a checkout whose `.git` file points into another repo's
-`.git/worktrees/`, even when that checkout is the `--root` itself), test/scratch output
+`.git/worktrees/`; a `--root` that is itself a worktree is connected, since you pointed at it), test/scratch output
 (`ops/sj*/` except `ops/sj-manual/`, `*superjev-test*`, `*-hand-test-*`; a file named
 exactly with `--name` is judged by its folder only) and the folders `profile/`,
 `documents/`, `__pycache__/`, `node_modules/` and `.git/`. Connect says what it left out:
