@@ -127,3 +127,20 @@ def test_prepare_cache_follows_state_dir(tmp_path):
     out = subprocess.run([sys.executable, "-c", code], cwd=SKILL, capture_output=True, text=True,
                          env={k: v for k, v in os.environ.items() if k != "SUPERJEV_STATE_DIR"}).stdout.strip()
     assert out == str(live)
+
+
+def test_refresh_changed_follows_state_dir(tmp_path):
+    """Non-dry refresh_changed with SUPERJEV_STATE_DIR set writes its snapshot under it, nothing under the skill folder."""
+    home, state, folder = tmp_path / "home", tmp_path / "state", tmp_path / "docs"
+    home.mkdir(); folder.mkdir(); (state / "prepare-cache").mkdir(parents=True)
+    note = folder / "a.md"
+    note.write_text("hello\n")
+    report = {"pointer": "isoprobe", "roots": [str(folder)], "approved": [str(note)]}  # legacy pinned report
+    (state / "prepare-cache" / "isoprobe-report.json").write_text(json.dumps(report))
+    live = SKILL / "prepare-cache"
+    before = sorted(str(p) for p in live.rglob("*")) if live.is_dir() else None
+    env = {**os.environ, "HOME": str(home), "SUPERJEV_STATE_DIR": str(state)}
+    r = subprocess.run([sys.executable, str(SKILL / "refresh_changed.py")], env=env, capture_output=True, text=True, timeout=120)
+    after = sorted(str(p) for p in live.rglob("*")) if live.is_dir() else None
+    assert before == after, r.stdout + r.stderr
+    assert (state / "prepare-cache" / "growth" / "isoprobe.json").is_file(), r.stdout + r.stderr
