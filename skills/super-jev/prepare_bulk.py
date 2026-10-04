@@ -253,6 +253,9 @@ def _shape(key: str) -> str:
 CRED_RE = re.compile(_shape("cred_label"), re.I | re.A | re.M)
 SEED_LABEL_RE, SEED_BARE_RE = (re.compile(_shape(k), re.I | re.A | re.M) for k in ("seed_label", "seed_bare"))
 SSN_RES = [re.compile(_PAT[k], re.I | re.A) for k in ("ssn", "ssn_label")]
+PEM_BLOB_RE = re.compile(_PAT["pem_blob"], re.I | re.A)
+LOGIN_RE = re.compile(_PAT["login_value"], re.I | re.A)
+ZERO_WIDTH_RE = re.compile("[\u200b-\u200d\u2060\ufeff\u00ad]")  # hidden chars that split a key in two
 DIGIT_RE = re.compile("[0-9]")
 CARD_SEP_RE = re.compile(_PAT["card_sep"], re.A)
 TABLE_LABEL_RE = re.compile(_PAT["table_label"], re.I | re.A)
@@ -556,6 +559,8 @@ def shape_hit(text: str) -> bool:
     return ((("pw" in text or "pin" in text or "pass" in text) and bool(CRED_RE.search(text)))
             or ("|" in text and _table_hit(text))
             or bool(SEED_LABEL_RE.search(text)) or _bare_seed(text)
+            or ("mii" in text and bool(PEM_BLOB_RE.search(text)))
+            or ("login" in text and bool(LOGIN_RE.search(text)))
             or (has_digit and any(r.search(text) for r in SSN_RES)))
 
 
@@ -563,9 +568,11 @@ def has_secret(text: str) -> bool:
     """Scans normalize_for_scan(text). Card-number check runs on the scrubbed text
     (dates/URLs removed); the keyword and token checks run on the unscrubbed text."""
     luhn = not NON_ASCII_DIGIT_RE.search(text)
+    bare = normalize_for_scan(ZERO_WIDTH_RE.sub("", text)) if not text.isascii() else None
     text = normalize_for_scan(text)
     return (card_hit(text, luhn) or bool(WORD_RE.search(text))
-            or _token_hit(text) or shape_hit(text))
+            or _token_hit(text) or shape_hit(text)
+            or (bare is not None and bare != text and (_token_hit(bare) or bool(WORD_RE.search(bare)))))
 
 
 def secret_spans(text: str, path):
