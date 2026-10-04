@@ -90,7 +90,7 @@ checkout, an older app's config (`~/.config/superjev/config.json`, which held th
 `~/.local/bin/superjev` if `install.sh` made it for this checkout, and any
 `~/.claude/skills` links that point into this checkout. It deletes only the names Super Jev
 writes in each folder; a file of yours in the same folder stays, and the output lists it.
-It keeps `~/.typesafe-api-key`, your key file (hooks and agents read it too): delete it
+It keeps your key file (`$TYPESAFE_API_KEY_FILE`, else `~/.typesafe-api-key`; hooks, agents and the terminal app read it too): delete it
 yourself if you want the key gone. Your own files are never touched. Delete the checkout
 folder to remove the code.
 

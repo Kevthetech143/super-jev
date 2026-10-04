@@ -807,6 +807,23 @@ test('S12 door: the child gets the env key when the file holds another; the file
   assert.equal(readFileSync(r.keyFile(), 'utf8'), FILE_KEY + '\n');
 });
 
+test('S12c door: TYPESAFE_API_KEY_FILE names the key file; with no env key it is found and the ask proceeds', async () => {
+  const r = rig([{ when: '--json', out: FOUND() }]);
+  const elsewhere = join(r.dir, 'elsewhere-key');
+  writeFileSync(elsewhere, FILE_KEY + '\n', { mode: 0o600 });
+  const d = await door(r, ['canary?'], { key: false, env: { TYPESAFE_API_KEY_FILE: elsewhere } });
+  assert.notEqual(d.code, 4);
+  assert.equal(r.asks()[0].key_sha, sha(FILE_KEY));
+  assert.ok(!existsSync(r.keyFile()));
+});
+
+test('S11c door: TYPESAFE_API_KEY_FILE naming a missing file and no env key still exits 4', async () => {
+  const r = rig([{ when: '--json', out: FOUND() }]);
+  const d = await door(r, ['canary?'], { key: false, env: { TYPESAFE_API_KEY_FILE: join(r.dir, 'none') } });
+  assert.equal(d.code, 4);
+  assert.equal(r.calls().length, 0);
+});
+
 test('S12b door: with no env key, the file key reaches the child', async () => {
   const r = rig([{ when: '--json', out: FOUND() }]);
   writeFileSync(r.keyFile(), FILE_KEY + '\n', { mode: 0o600 });
