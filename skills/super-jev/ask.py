@@ -1889,11 +1889,43 @@ def engine_visible(principal: str):
     except Exception:  # noqa: BLE001
         return None
 
+def engine_generations():
+    """{pointer name: generation} as the registry holds them right now (one SELECT), or None when unreadable."""
+    try:
+        target = _engine_target()
+        db = _engine_module(target[0]).load_config(target[1])["db"]
+        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=30)) as c:
+            return {n: json.loads(b).get("generation") for n, b in c.execute("SELECT name, body FROM pointers")}
+    except Exception:  # noqa: BLE001
+        return None
+
+def pointer_fallbacks(idx, allowed, gens) -> dict:
+    """{pointer: reason} for every pointer the engine lists that the index does not hold completely and currently.
+    The one rule: the index answers only for a pointer whose indexed generation equals the registry's, that is not
+    stale, whose files it holds (count > 0 when the pointer has files) and all of them; every other pointer is
+    served by today's path for that pointer."""
+    cov, out = idx.coverage(), {}
+    for name in sorted(allowed):
+        c = cov.get(name)
+        if c is None:
+            out[name] = "not indexed"
+        elif c["stale"]:
+            out[name] = "stale (files changed since its last refresh)"
+        elif gens is not None and name in gens and c["generation"] != gens[name]:
+            out[name] = "generation mismatch (index holds an older refresh)"
+        elif c["entries"] and not c["files"]:
+            out[name] = f"0 files indexed ({c['entries']} in its catalog)"
+        elif c["entries"] and c["complete"] != 1:
+            out[name] = "files missing from the index"
+    return out
+
 def index_panel(principal: str, sdir: Path):
-    """(FileIndex, panel dict, None), or (None, None, why it cannot be used: missing / corrupt / empty / stale)."""
+    """(FileIndex, panel dict, None, fallbacks), or (None, None, why it cannot be used: missing / corrupt / empty / stale, {}).
+    fallbacks {pointer: reason}: pointers served by today's path inside an ask that uses the index; the panel is then
+    None, so the caller reads the registry's rows (today's statuses) for every pointer."""
     path = sdir / INDEX_FILE
     if not path.is_file():
-        return None, None, "index missing"
+        return None, None, "index missing", {}
     from file_index import FileIndex
     idx = None
     try:
@@ -1903,7 +1935,7 @@ def index_panel(principal: str, sdir: Path):
     except Exception as e:  # noqa: BLE001 -- sqlite3.DatabaseError and friends: today's path runs
         if idx:
             idx.close()
-        return None, None, f"index corrupt ({type(e).__name__})"
+        return None, None, f"index corrupt ({type(e).__name__})", {}
     why = ("index empty (never synced)" if not rows or synced is None else
            f"index stale (synced {int((time.time() - synced) / 3600)}h ago)" if time.time() - synced > INDEX_MAX_AGE_SECS else "")
     allowed = None if why else engine_visible(principal)
@@ -1911,21 +1943,45 @@ def index_panel(principal: str, sdir: Path):
         why = "engine pointer list unreadable"
     if why:
         idx.close()
-        return None, None, why
+        return None, None, why, {}
     # An unshare must show at once: a pointer the engine no longer lists for this principal is dropped, so
-    # neither its files nor its status are used. A pointer new to the engine (not yet indexed) means a stale index.
-    indexed = {r.get("pointer") for r in rows}
+    # neither its files nor its status are used. A pointer new to the engine (not yet indexed) is served by today's path.
     rows = [r for r in rows if r.get("pointer") in allowed]
-    if allowed - indexed:
+    try:
+        fb = pointer_fallbacks(idx, allowed, engine_generations())
+    except Exception as e:  # noqa: BLE001 -- an index that cannot say what it holds is not used
         idx.close()
-        return None, None, "index stale (pointer list differs from the engine's)"
-    return idx, {"pointers": rows}, None
+        return None, None, f"index corrupt ({type(e).__name__})", {}
+    return idx, (None if fb else {"pointers": rows}), None, fb
 
 def index_candidates(idx, pointers, exclude=()):
     """candidate_files() from the index rows: same filters, no prepare-cache parse, no file opened."""
     names = {p: connector_names(p) for p in pointers}
     return [(ptr, path, entry) for ptr, path, entry in idx.candidates(pointers)
             if path not in exclude and not prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names[ptr]))]
+
+def index_failed(idx, error):
+    """The index could not be read mid-ask (locked by the updater, damaged): close it and let today's path answer, the
+    same ask. Never a lost answer. Returns None (the new idx_read)."""
+    try:
+        idx.close()
+    except Exception:  # noqa: BLE001
+        pass
+    _STAGE["index"].update({"used": False, "fallback": f"index read failed ({type(error).__name__}: {str(error)[:60]})"})
+    return None
+
+def fallback_candidates(idx, ptrs, ix_ptrs, exclude=()):
+    """candidate_files() for the pointers the index does not hold (today's path, from their prepare-cache), minus the files
+    the index already serves under a pointer it does hold. Returns [(pointer, path, entry)]."""
+    ix = set(ix_ptrs)
+    return [(ptr, path, entry) for ptr, path, entry in candidate_files(ptrs, exclude)
+            if idx.owner_of(path) not in ix]
+
+def _mark_stale(idx, ptr) -> None:
+    try:
+        idx.mark_stale(ptr)
+    except sqlite3.Error:  # the updater holds the file: the next ask marks it; the answer is not lost
+        pass
 
 def index_verify(idx, paths, entries, edited) -> tuple:
     """Verify-at-read: sha-check only the files about to be served. A match is served as indexed. A mismatch
@@ -1941,13 +1997,13 @@ def index_verify(idx, paths, entries, edited) -> tuple:
         got = read_sha(path, None)
         info["verified"] += 1
         if got is None:
-            info["gone"].append(path); idx.mark_stale(ptr)
+            info["gone"].append(path); _mark_stale(idx, ptr)
             continue
         raw, sha = got
         if sha == entry.get("sha256"):
             keep.append(path)
             continue
-        info["mismatch"].append(path); idx.mark_stale(ptr)
+        info["mismatch"].append(path); _mark_stale(idx, ptr)
         text = raw.decode("utf-8", "replace")
         if edited_readable(path, ptr, entry, raw, text):
             keep.append(path)
@@ -2087,18 +2143,20 @@ def index_sync(principal: str, sdir: Path) -> int:
         say(f"index update skipped: no pointer list ({panel.get('reason') or panel.get('status') or 'empty'})" if isinstance(panel, dict) else "index update skipped")
         return 1
     idx = FileIndex(principal, sdir / INDEX_FILE)
-    hashed = 0
+    hashed, expected = 0, {}
     for r in rows:
         ptr = r["pointer"]
         entries = load_cache_files(ptr)
         if not entries:
             continue
+        expected[ptr] = [p for p, e in entries.items() if isinstance(e, dict) and e.get("pass") and os.path.isfile(p)]
         fresh = not str(r.get("snapshotStatus") or r.get("status") or "").startswith(("preparation-required", "refresh-required"))
         if fresh and r.get("generation") is not None and idx.generation_of(ptr) not in (None, r.get("generation")):
             idx.purge(ptr)  # the pointer was refreshed since: re-seed it from its new prepare-cache
         roots = (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("roots")
         hashed += idx.update(ptr, entries=entries, roots=roots)["hashed"]
     idx.set_panel(rows)
+    idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by the last one
     wpath = sdir / WORD_INDEX_FILE
     widx, dirty = _load_word_index(wpath), False
     cands = list(idx.candidates([r["pointer"] for r in rows]))
@@ -2196,7 +2254,7 @@ def term_variants(terms: list, vocab) -> dict:
     return out
 
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=(), held_cover=None,
-                reads=None, index_path=None, candidates=None, items=None, fts=None) -> list:
+                reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=()) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
@@ -2225,7 +2283,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     for ptr, path, entry in (candidate_files(pointers, done=docs) if candidates is None else candidates):
         if path in docs:
             continue
-        if candidates is not None and _valid_item(index.get(path), entry.get("sha256")):
+        if candidates is not None and path not in read_paths and _valid_item(index.get(path), entry.get("sha256")):
             item = index[path]  # index read path: the file index vouches for these bytes; sha-checked when served
         else:
             got = read_sha(path, reads)
@@ -2696,10 +2754,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         # Its manual pointer's record text IS the stale answer, so keep it out of the live search.
         withheld = {manual_pointer_name(principal, norm_q(question)), manual_pointer_name(principal, question)}
         print("Searching live instead...")
-    idx_read = None  # the file index, when the flag is on and it is usable; else today's path
+    idx_read, index_fb = None, {}  # the file index, when the flag is on and it is usable; else today's path
     if panel is None and index_enabled():
-        idx_read, ipanel, why = index_panel(principal, sdir)
+        idx_read, ipanel, why, index_fb = index_panel(principal, sdir)
         _STAGE["index"] = {"on": True, "used": idx_read is not None, **({"fallback": why} if why else {})}
+        if index_fb:  # some pointers are served by today's path, in this same ask
+            _STAGE["index"]["fallback"] = {"pointers": [f"{n}: {r}" for n, r in list(index_fb.items())[:STAGE_LIST_CAP]]}
         panel = ipanel
     panel = panel if panel is not None else memory({"action": "panel", "principal": principal})
     view_pointers = {row["pointer"] for row in panel.get("pointers", [])
@@ -2759,8 +2819,13 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     pointers = active_pointers
     # Person resolution: a question about one person never reads (or confirms)
     # another person's records, and a pointer holding only theirs is not asked.
-    fts_ready = bool(idx_read and idx_read.fts_usable(WORD_INDEX_VERSION)[0])
-    folks = people(pointers, idx_read.person_paths(pointers)) if fts_ready else people(pointers)
+    try:
+        fts_ready = bool(idx_read and idx_read.fts_usable(WORD_INDEX_VERSION)[0])
+        folks = people(pointers, idx_read.person_paths([p for p in pointers if p not in index_fb])
+                       + [p for ptr in pointers if ptr in index_fb for p in load_cache_files(ptr)]) if fts_ready else people(pointers)
+    except sqlite3.Error as e:
+        idx_read, index_fb, fts_ready = index_failed(idx_read, e), {}, False
+        folks = people(pointers)
     who = question_people(question, folks)
     def other_person(path: str) -> bool:
         return bool(who) and person_of(path) not in (None, *who)
@@ -2859,7 +2924,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if not _CLAIM["text"]:
         # A set with no prepare-cache (a reviewed view, a path-connected or recipe set) has no files for the TOC
         # search to list, so it is still routed by Jev's navigate, as before: no quiet shrink of what a question reaches.
-        nav_ptrs = [p for p in pointers if not (idx_read.has_entries(p) if fts_ready else load_cache_files(p))]
+        nav_ptrs = [p for p in pointers if not (idx_read.has_entries(p) if fts_ready and p not in index_fb else load_cache_files(p))]
         bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
         if bm is not None:
             navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
@@ -3007,29 +3072,47 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # note that states the answer. Word search adds the files whose text matches the
     # question; the content check still decides what is kept.
     reads = {}  # one read+sha pass shared by edited_held and word_search
-    icands, fitems, ftocs, fts_nums = None, None, None, None
+    icands, fitems, ftocs, fts_nums, fb_paths = None, None, None, None, set()
     if idx_read:
-        # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
-        # are found by the updater, or at read below for the files actually served.
-        picked, fwhy = fts_pick(idx_read, question, search_pointers, who, other_person)
-        if picked:
-            icands, fitems, ftocs, fts_nums, ftrace = picked
-            out_of_scope = set()  # the FTS scope already left out other people's files
-            _STAGE["index"]["fts"] = ftrace
-        else:
-            _STAGE["index"]["fts"] = {"used": False, "fallback": fwhy}
-            icands = idx_read.candidates(search_pointers)
-            out_of_scope = {p for _ptr, p, _e in icands if other_person(p)}
-            icands = index_candidates(idx_read, search_pointers, out_of_scope)
-        edited = {"secret": [], "stuck": [], "refresh": []}
-    else:
+        try:
+            # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
+            # are found by the updater, or at read below for the files actually served.
+            ix_ptrs = [p for p in search_pointers if p not in index_fb]
+            fb_ptrs = [p for p in search_pointers if p in index_fb]
+            picked, fwhy = fts_pick(idx_read, question, ix_ptrs, who, other_person) if ix_ptrs else (None, "the index holds none of the searched pointers")
+            if picked:
+                icands, fitems, ftocs, fts_nums, ftrace = picked
+                out_of_scope = set()  # the FTS scope already left out other people's files
+                _STAGE["index"]["fts"] = ftrace
+            else:
+                _STAGE["index"]["fts"] = {"used": False, "fallback": fwhy}
+                icands = idx_read.candidates(ix_ptrs)
+                out_of_scope = {p for _ptr, p, _e in icands if other_person(p)}
+                icands = index_candidates(idx_read, ix_ptrs, out_of_scope)
+            edited = {"secret": [], "stuck": [], "refresh": []}
+            if fb_ptrs:
+                # Pointers the index does not hold completely and currently: today's path, here, for each of them. Their
+                # files are read and sha-checked as today (word search and TOC corpus), not vouched for by the index.
+                fb_out = {p for ptr in fb_ptrs for p in load_cache_files(ptr) if other_person(p)}
+                out_of_scope |= fb_out
+                fb_cands = fallback_candidates(idx_read, fb_ptrs, ix_ptrs, fb_out)
+                fb_paths = {c[1] for c in fb_cands}
+                icands = (icands or []) + fb_cands
+                if fts_nums:
+                    fts_nums["local"] = set(fts_nums["local"]) | fb_paths  # scored with the shortlist, like the edited files
+                edited = edited_held(fb_ptrs, fb_out, reads)
+        except sqlite3.Error as e:  # locked by the updater, damaged: today's path answers this ask
+            idx_read, index_fb = index_failed(idx_read, e), {}
+            icands = fitems = ftocs = fts_nums = None
+            fb_paths = set()
+    if not idx_read:
         out_of_scope = {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)}
         edited = edited_held(search_pointers, out_of_scope, reads)  # once per searched set, not per search path
     held_cover = {}  # a held file's word coverage of the question, from the same word-search pass
     toc_on = not _CLAIM["text"]
     found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
                         reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
-                        **({"candidates": icands} if idx_read else {}),
+                        **({"candidates": icands, "read_paths": fb_paths} if idx_read else {}),
                         **({"items": fitems, "fts": fts_nums} if fts_nums else {}),
                         **({"extra": set(edited["secret"]), "held_cover": held_cover} if edited["secret"] else {}))
     wpaths = {p: ptr for _, p, ptr in found}
@@ -3043,7 +3126,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         for tptr, tpath, tentry in (icands if idx_read else candidate_files(search_pointers, out_of_scope)):
             if tpath in corpus:
                 continue
-            if idx_read:
+            if idx_read and tpath not in fb_paths:
                 corpus[tpath] = (tptr, tentry)  # vouched for by the index; sha-checked below if served
                 continue
             try:  # a file edited since connect is searched only as a refresh would admit it (word_search's rule)
@@ -3073,7 +3156,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         _STAGE["toc"] = ttrace
     if idx_read:
         # Verify-at-read: only the files about to be served are hashed, whatever the corpus size.
-        by_path = {p: (ptr_, e) for ptr_, p, e in icands}
+        by_path = {p: (ptr_, e) for ptr_, p, e in icands if p not in fb_paths}
         to_check, vinfo = index_verify(idx_read, to_check, by_path, edited)
         _STAGE["index"].update({"verified": vinfo["verified"], "mismatch": vinfo["mismatch"][:STAGE_LIST_CAP],
                                 "gone": vinfo["gone"][:STAGE_LIST_CAP]})
