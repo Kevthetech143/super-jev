@@ -52,6 +52,8 @@ def _setup(tmp_path, monkeypatch, pointers, navigate, scores=None):
             return {"pointers": [{"pointer": p} for p in pointers]}
         if req["action"] == "recipe":
             return {"status": "no-recipe"}
+        if req["action"] == "sources":  # no reviewed sources to list: the set has no local rows, so it is still routed
+            return {"status": "error"}
         calls.append(req["pointer"])
         return navigate(req["pointer"], calls.count(req["pointer"]))
     monkeypatch.setattr(ask, "memory", fake)

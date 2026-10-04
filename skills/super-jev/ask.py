@@ -1662,15 +1662,99 @@ def pick_chunks(question: str, chunks: list) -> list:
 def load_cache_files(pointer: str) -> dict:
     """Only prepare-cache/<pointer>.json. Part caches are registered as their own
     pointers (<pointer>-N) and arrive in the principal's pointer list when owned, so
-    matching <pointer>-N.json here could read another principal's pointer."""
+    matching <pointer>-N.json here could read another principal's pointer.
+    A set with no prepare-cache (a reviewed view, a manual note, a path-connected set) gets its rows
+    from its reviewed sources instead (load_local_rows), so word search, the TOC and the index see it."""
     if pointer in _STAGE.get("view_pointers", ()):
-        return {}  # A leftover bulk cache names raw originals, never reviewed views.
+        return dict(_LOCAL_ROWS.get(pointer) or {})  # A leftover bulk cache names raw originals, never reviewed views.
     p = prepare_bulk.CACHE_DIR / f"{pointer}.json"
     try:
         data = json.loads(p.read_text())
     except Exception:
-        return {}
+        return dict(_LOCAL_ROWS.get(pointer) or {})
     return data if isinstance(data, dict) else {}
+
+# S4: routing never asks Jev per set. Every set must be discoverable from local rows: its prepare-cache,
+# its split parent's cache (a part <pointer>-N holds files the parent's cache already lists), or, for a set
+# with no cache (reviewed view, manual note), rows built from the engine's reviewed sources (path, reviewed
+# sha, description). Rows are kept per generation in set-rows.json, so an ask rebuilds only a changed set.
+SET_ROWS_FILE = "set-rows.json"
+SET_ROWS_RETRY_SECS = 600  # a set whose sources could not be listed is tried again after this long
+NAV_FALLBACK_MAX = 10  # a set with no local rows at all is asked in ONE batched navigate, at most this many sets
+_LOCAL_ROWS = {}  # {pointer: {path: cache-shaped entry}} for the sets of the current ask / index update
+
+def _has_own_cache(pointer: str) -> bool:
+    try:
+        return (prepare_bulk.CACHE_DIR / f"{pointer}.json").stat().st_size > 2
+    except OSError:
+        return False
+
+def covered_by_parent(pointer: str, all_pointers) -> bool:
+    """A split part (<pointer>-N) whose parent set is visible and has a cache: the parent's rows hold its files."""
+    base, _, n = pointer.rpartition("-")
+    return bool(base and n.isdigit() and base in all_pointers and _has_own_cache(base))
+
+def source_rows(principal: str, pointer: str):
+    """{path: entry} from the pointer's reviewed sources (local engine call, no judge), or None when unreadable."""
+    rows, offset = {}, 0
+    while True:
+        out = memory({"action": "sources", "pointer": pointer, "principal": principal, "offset": offset, "limit": 100})
+        if not isinstance(out, dict) or out.get("status") != "ok":
+            return None
+        for src in out.get("sources") or []:
+            path, sha = (src.get("originalPath"), src.get("contentSHA")) if isinstance(src, dict) else (None, None)
+            if isinstance(path, str) and path and isinstance(sha, str) and sha:
+                rows[path] = {"pass": True, "sha256": sha, "description": str(src.get("description") or ""), "local": True}
+        nxt = out.get("nextOffset")
+        if not isinstance(nxt, int) or nxt <= offset:
+            return rows
+        offset = nxt
+
+def load_local_rows(sdir: Path, principal: str, pointers: list, generations: dict, view_pointers=()) -> dict:
+    """Fill _LOCAL_ROWS for the sets that have neither their own cache nor a covering parent. Returns {pointer: n rows}."""
+    _LOCAL_ROWS.clear()
+    need = [p for p in pointers if p in view_pointers or (not _has_own_cache(p) and not covered_by_parent(p, pointers))]
+    if not need:
+        return {}
+    path = sdir / SET_ROWS_FILE
+    try:
+        saved = json.loads(path.read_text())
+    except Exception:
+        saved = {}
+    if not isinstance(saved, dict):
+        saved = {}
+    dirty = False
+    for ptr in need:
+        gen, hit = generations.get(ptr), saved.get(ptr)
+        if gen and isinstance(hit, dict) and hit.get("generation") == gen:
+            if isinstance(hit.get("rows"), dict):
+                _LOCAL_ROWS[ptr] = hit["rows"]
+                continue
+            if time.time() - (hit.get("failed_at") or 0) < SET_ROWS_RETRY_SECS:
+                continue  # its sources could not be listed a moment ago: not listed again every ask
+        try:
+            got = source_rows(principal, ptr)
+        except Exception:  # noqa: BLE001 -- a set whose sources cannot be listed has no local rows: the capped fallback asks
+            got = None
+        if got is None:
+            if gen:
+                saved[ptr], dirty = {"generation": gen, "rows": None, "failed_at": time.time()}, True
+            continue
+        _LOCAL_ROWS[ptr] = got
+        if gen:
+            saved[ptr], dirty = {"generation": gen, "rows": got}, True
+    for ptr in [k for k in saved if k not in pointers]:
+        saved.pop(ptr)
+        dirty = True
+    if dirty:
+        try:
+            tmp = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(saved))
+            tmp.replace(path)
+        except OSError:
+            pass  # best effort: the rows are rebuilt next ask
+    return {p: len(r) for p, r in _LOCAL_ROWS.items()}
 
 # A written phone number ("212-555-0100") counts as the words "phone" and "number": a note lists
 # the number without ever saying "phone" (a clinic line in a timeline note).
@@ -1797,10 +1881,11 @@ def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
     """May a reviewed file edited since connect be read at its current text while its pointer
     waits on the refresh? Only as a refresh would admit it: reviewed at a known version and not
     failed by its last review, under the size ceiling, no secret-looking line, and still inside
-    the pointer's recorded scope."""
+    the pointer's recorded scope (a set built from reviewed sources, not a folder, is scoped by its listed files)."""
     return (isinstance(entry, dict) and bool(entry.get("pass")) and bool(entry.get("sha256"))
             and len(raw) <= prepare_bulk.CEILING_BYTES
-            and clean_text(text, path) is not None and refresh_would_admit(path, ptr))
+            and clean_text(text, path) is not None
+            and (bool(entry.get("local")) or refresh_would_admit(path, ptr)))  # a local row's scope is the set's listed files
 
 
 def candidate_files(pointers: list, exclude=(), done=()):
@@ -2144,6 +2229,9 @@ def index_sync(principal: str, sdir: Path) -> int:
         return 1
     idx = FileIndex(principal, sdir / INDEX_FILE)
     hashed, expected = 0, {}
+    views = {r["pointer"] for r in rows if r.get("viewOriginals")}
+    _STAGE["view_pointers"] = sorted(views)
+    load_local_rows(sdir, principal, [r["pointer"] for r in rows], {r["pointer"]: r.get("generation") for r in rows}, views)
     for r in rows:
         ptr = r["pointer"]
         entries = load_cache_files(ptr)
@@ -2770,6 +2858,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                      "setup")
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
                             for p in panel.get("pointers", [])) if n and n not in withheld]
+    if not _CLAIM["text"]:  # the claim path is unchanged: it keeps its own routing
+        gens_all = {row.get("pointer"): row.get("generation") for row in panel.get("pointers", []) if isinstance(row, dict)}
+        _STAGE["local_rows"] = load_local_rows(sdir, principal, pointers, gens_all, view_pointers)
+    else:
+        _LOCAL_ROWS.clear()
     # A saved note whose source file changed after it was recorded is not a current answer.
     stale_notes = {n: changed_source(sdir / "manual" / f"{n}.md") for n in pointers
                    if n.startswith(f"{principal}-manual-")}
@@ -2924,13 +3017,21 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if not _CLAIM["text"]:
         # A set with no prepare-cache (a reviewed view, a path-connected or recipe set) has no files for the TOC
         # search to list, so it is still routed by Jev's navigate, as before: no quiet shrink of what a question reaches.
-        nav_ptrs = [p for p in pointers if not (idx_read.has_entries(p) if fts_ready and p not in index_fb else load_cache_files(p))]
+        # S4: a set is routed by Jev only when it has no local rows at all (no cache, no covering parent, no reviewed
+        # sources); one batched call, at most NAV_FALLBACK_MAX sets, named in the trace as routing.fallback.
+        def has_local(p):
+            own = (idx_read.has_entries(p) if fts_ready and p not in index_fb and p not in view_pointers else bool(load_cache_files(p)))
+            return own or bool(_LOCAL_ROWS.get(p)) or (p not in view_pointers and covered_by_parent(p, original_pointers))
+        nav_ptrs = [p for p in pointers if not has_local(p)]
+        _STAGE["routing_fallback"] = [f"{p}: no local rows" for p in nav_ptrs[:min(NAV_FALLBACK_MAX, STAGE_LIST_CAP)]]
+        if len(nav_ptrs) > NAV_FALLBACK_MAX:
+            _STAGE["routing_fallback"].append(f"{len(nav_ptrs) - NAV_FALLBACK_MAX} more sets: no local rows, over the cap, not asked")
+        nav_ptrs = nav_ptrs[:NAV_FALLBACK_MAX]
         bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
         if bm is not None:
             navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
         else:
             navd = dict(zip(nav_ptrs, ThreadPoolExecutor(max_workers=min(len(nav_ptrs), NAV_CONCURRENCY)).map(nav, nav_ptrs))) if nav_ptrs else {}
-        _STAGE["nav_fallback"] = nav_ptrs
         results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     elif outs is None:  # one navigate call per pointer, as before batching
         results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
@@ -3280,6 +3381,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         stages = {
             "cache": cache_stage,
             "routing_floor": route_floor,
+            "routing_fallback": _STAGE.get("routing_fallback") or [],
+            "local_rows": _STAGE.get("local_rows") or {},
             "routing": {ptr: {"status": kind + (" (stale: last refresh)" if ptr in stale_served else ""),
                               "none": nav_none.get(ptr, (None,))[0],
                               "secs": nav_none.get(ptr, (None, None))[1],
