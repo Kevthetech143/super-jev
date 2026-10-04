@@ -76,7 +76,7 @@ if ROOT and OUT:
     hashlib.sha256 = counting_sha
     _connect = socket.socket.connect
     def no_net(self, address):
-        if self.family != getattr(socket, "AF_UNIX", None):
+        if self.family != getattr(socket, "AF_UNIX", None) and not (isinstance(address, tuple) and address[0] == "127.0.0.1"):
             net[0] += 1
             raise OSError("scale harness: network is blocked")
         return _connect(self, address)
@@ -86,6 +86,36 @@ if ROOT and OUT:
             f.write(json.dumps({"opened": len(opened), "distinct": len(set(opened)), "hashed": hashed[0], "net": net[0]}) + "\\n")
     atexit.register(dump)
 """
+
+
+def stub_server(count_file: Path):
+    """The same offline judge for the Python side (table-of-contents pick, content check), on loopback; every call is counted."""
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            with open(count_file, "a") as f:
+                f.write("1\n")
+            answers = {}
+            for qid, q in (payload.get("questions") or {}).items():
+                keys = list(q["criteria"])
+                choice = next((k for k in keys if k.endswith("o_0")), keys[0])
+                answers[qid] = {"type": "choice", "choice": choice, "confidence": 0.95,
+                                "probabilities": {k: 0.95 if k == choice else 0.05 / (len(keys) - 1 or 1) for k in keys}}
+            body = json.dumps({"model": "offline-stub", "answers": answers}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def make_corpus(root: Path, files: int, seed: int = 7) -> int:
@@ -149,6 +179,7 @@ def connect(root: Path, state: Path, tmp: Path, env: dict) -> float:
 
 def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=print) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="sj-scale-"))
+    server = None
     try:
         corpus, state = tmp / "corpus", tmp / "state"
         (state / "_memory").mkdir(parents=True)
@@ -168,6 +199,8 @@ def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=pri
                "SUPERJEV_NEW_FILE_SCAN": "0", "SUPERJEV_SKILLS": "0", "SUPERJEV_REPO": str(REPO),
                "SUPERJEV_SHARED_POINTERS": str(tmp / "no-shared.json"), "XDG_CONFIG_HOME": str(tmp / "xdg"),
                "NODE_OPTIONS": f"--require={tmp / 'stub.cjs'}", "SJ_STUB_COUNT": str(stub_count)}
+        server = stub_server(stub_count)
+        env["SUPERJEV_JEV_URL"] = f"http://127.0.0.1:{server.server_address[1]}/v1/systemone"
         t = time.time()
         made = make_corpus(corpus, files)
         say(f"generate: {made} files in {time.time() - t:.1f}s")
@@ -197,6 +230,8 @@ def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=pri
                 "stub_calls": sum(r["stub_calls"] for r in rows),
                 "network_attempts": sum(r["network_attempts"] for r in rows)}
     finally:
+        if server:
+            server.shutdown()
         if keep:
             say(f"kept {tmp}")
         else:
