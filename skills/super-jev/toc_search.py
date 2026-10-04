@@ -377,7 +377,7 @@ def score_items(question: str, items: dict, instruction: str, purpose: str) -> d
 
 
 # --- the search -------------------------------------------------------------------------------
-def run(question: str, corpus: dict, hits: list, ask: dict, cache_path=None):
+def run(question: str, corpus: dict, hits: list, ask: dict, cache_path=None, rows=None):
     """corpus: {path: (pointer, entry)}; hits: the word search's [(score, path, pointer)];
     ask: {read, has_secret, query_terms, term_hits}.
     Returns (files to read in order, {path: [(name, start, end)]} parts the content check reads, trace)."""
@@ -386,6 +386,8 @@ def run(question: str, corpus: dict, hits: list, ask: dict, cache_path=None):
     entries = {p: e for p, (_ptr, e) in corpus.items()}
     hit_paths = [p for _s, p, _ptr in hits if p in corpus]
     cache = TocCache(cache_path)
+    if rows is not None:  # the file index's stored pages for this (small) corpus: no cache file is loaded
+        cache.rows = rows
     tocs = {p: cache.get(p, entries[p].get("sha256"), ask["read"]) or {} for p in corpus}
     cache.save(set(corpus))
     # 1. shortlist (free)
