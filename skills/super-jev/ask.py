@@ -235,7 +235,7 @@ class SecretHeld(RuntimeError):
 
 
 ENGINE_PATHS: Counter = Counter()  # which way memory() ran: "inprocess" or "subprocess" (shown in the trace)
-_ENGINE_LOCK = threading.RLock()
+_ENGINE_LOCK = threading.Lock()  # guards only the one-time import, never a call
 _ENGINE_MODULES: dict = {}  # engine dir -> cli module (imported once per process)
 
 
@@ -262,13 +262,16 @@ def _engine_module(repo: Path):
         return None
     key = str(exp)
     if key not in _ENGINE_MODULES:
-        import importlib.util
-        if key not in sys.path:
-            sys.path.insert(0, key)  # cli.py does "from service import ..."
-        spec = importlib.util.spec_from_file_location("superjev_engine_cli", cli)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _ENGINE_MODULES[key] = mod
+        with _ENGINE_LOCK:  # one-time import only; never held across a call
+            if key not in _ENGINE_MODULES:
+                import importlib.util
+                if key not in sys.path:
+                    sys.path.insert(0, key)  # cli.py does "from service import ..."
+                spec = importlib.util.spec_from_file_location("superjev_engine_cli", cli)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                os.umask(0o077)  # what cli.main sets; set once here, process-wide, no per-call swap
+                _ENGINE_MODULES[key] = mod
     return _ENGINE_MODULES[key]
 
 
@@ -288,18 +291,13 @@ def _memory_inprocess(req: dict):
     if cli is None:
         return None
     request = json.loads(json.dumps(req))  # what the subprocess would read from stdin
-    with _ENGINE_LOCK:  # cli.main sets umask 077; hold it only for this call
-        old_umask = os.umask(0o077)
-        try:
-            try:
-                result = cli.run(request, cli.load_config(target[1]))
-            except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
-                result = {"status": "error", "reason": str(error) if isinstance(error, ValueError)
-                          and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
-            except Exception as error:  # the subprocess would print a traceback and ask.py reads "error"
-                return {"status": "error", "raw": f"{type(error).__name__}: {error}"[-300:]}
-        finally:
-            os.umask(old_umask)
+    try:
+        result = cli.run(request, cli.load_config(target[1]))
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        result = {"status": "error", "reason": str(error) if isinstance(error, ValueError)
+                  and not isinstance(error, json.JSONDecodeError) else type(error).__name__}
+    except Exception as error:  # the subprocess would print a traceback and ask.py reads "error"
+        return {"status": "error", "raw": f"{type(error).__name__}: {error}"[-300:]}
     cli.add_hints(result)
     result.setdefault("nextAction", cli.NEXT.get(result["status"], "record-unresolved"))
     if "message" in result:
