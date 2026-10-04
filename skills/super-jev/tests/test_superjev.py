@@ -8557,7 +8557,7 @@ def test_catch_excerpt_redacts_phone_ssn_and_card_numbers(tmp_path, monkeypatch)
     # Fake test-card digits built at runtime, not as a literal, so the plugin
     # security scan does not read this fixture as a hardcoded card number
     # (same pattern as PR #241's runtime-built token fixture).
-    visa = "4111 1111" + " 1111 1111"
+    visa = "4000 0566" + " 5566 5556"
     _, catch_path = _set_catch_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(sj.subprocess, "run", FakeDoor(0))
     evidence = tmp_path / "notes.md"
