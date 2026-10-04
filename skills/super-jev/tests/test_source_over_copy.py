@@ -27,6 +27,8 @@ def _run(tmp_path, question, files, candidates, scores, caches=None):
             return {"status": "miss"}
         if r["action"] == "panel":
             return {"pointers": list(caches)}
+        if r["action"] == "sources":  # local listing of a set's reviewed sources: not a navigation
+            return {"status": "ok", "sources": []}
         navigated.append(r["pointer"])
         rows = [c for c in candidates if c["originalPath"] in caches[r["pointer"]] or r["pointer"] == "p1"]
         return {"status": "candidates", "candidates": rows}
