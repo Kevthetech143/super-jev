@@ -174,8 +174,12 @@ def test_content_check_network_error_twice_stays_an_error(monkeypatch):
 def test_a_file_held_for_a_secret_at_query_time_stays_needs_setup(tmp_path, monkeypatch, capsys):
     # picked for THIS question and never read: not a setup-time skip
     _setup(tmp_path, monkeypatch, ["a"], lambda p, n: {"status": "no-candidates"})
-    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {OK: ask.HELD_SECRET}))
-    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(1.0, OK, "a")])
+    note = tmp_path / "warranty.md"
+    note.write_text("# Acme warranty period\nthe warranty period for Acme is 3 years\n")
+    entry = {"pass": True, "sha256": ask.sha256_file(note)}
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): entry})  # in the set's file list: in the corpus
+    monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {str(note): ask.HELD_SECRET}))
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(1.0, str(note), "a")])
     rc, lines = _ask(tmp_path, capsys)
     assert rc == 4 and lines[0].startswith("OUTCOME: needs-setup") and "1 file held" in lines[0]
 
@@ -273,7 +277,8 @@ def test_edited_files_show_in_the_needs_setup_reason_too(tmp_path, monkeypatch, 
     note = _edited_note(tmp_path)
     nav = lambda p, n: {"status": "preparation-required"} if p == "bench" else {"status": "no-candidates"}
     _setup(tmp_path, monkeypatch, ["bench", "notes"], nav)
-    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True}})
+    # bench has no prepare-cache (routed by navigate, unprepared); notes holds the edited file
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True}} if ptr == "notes" else {})
     rc, lines = _ask(tmp_path, capsys)
     assert rc == 4 and "1 set stale or unprepared" in lines[0] and "1 edited file not read" in lines[0]
 

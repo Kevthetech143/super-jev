@@ -16,12 +16,15 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SKILL = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL))
 spec = importlib.util.spec_from_file_location("ask_stale_set", SKILL / "ask.py")
 ask = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ask)
 ah = ask.auto_heal
+pytestmark = pytest.mark.real_toc  # _setup stubs the TOC read list itself (every cached file, in order)
 
 
 def _setup(tmp_path, monkeypatch, changed=(), heal="cooldown"):
@@ -59,7 +62,8 @@ def _setup(tmp_path, monkeypatch, changed=(), heal="cooldown"):
         if req["action"] == "cached":
             return {"status": "miss"}
         if req["action"] == "panel":
-            return {"pointers": [{"pointer": "notes"}]}
+            # a stale set is known from the registry's snapshot status, with no routing call
+            return {"pointers": [{"pointer": "notes", **({"snapshotStatus": "preparation-required"} if changed else {})}]}
         if req["action"] == "navigate-many":
             return {"status": "ok", "results": {p: nav_out(req) for p in req["pointers"]}}
         if req["action"] == "navigate":
@@ -67,6 +71,7 @@ def _setup(tmp_path, monkeypatch, changed=(), heal="cooldown"):
         return {"status": "error"}
     monkeypatch.setattr(ask, "memory", fake)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache if ptr == "notes" else {})
+    monkeypatch.setattr(ask.toc_search, "run", lambda q, corpus, hits, hooks, cache_path=None: (list(corpus), [], {}))
     monkeypatch.setattr(ah, "reconnect_now", lambda ptr, principal, timeout=None: "changed")
     heals = []
     monkeypatch.setattr(ah, "maybe_heal", lambda *a, **k: heals.append(a) or heal)
@@ -83,11 +88,11 @@ def test_a_cooling_down_set_still_answers_from_its_last_refresh(tmp_path, monkey
                                                changed=[(lambda t, l: l, new)])
     rc = ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
     out = capsys.readouterr().out
-    assert all(r.get("lastGood") is True for r in requests if r["action"].startswith("navigate"))
+    assert not [r for r in requests if r["action"].startswith("navigate")]  # a set with a cache is routed by the registry
     assert str(tried) in out  # unchanged note: found
     assert str(log_md) in out  # the note edited minutes ago: found at its current text
     line = next(ln for ln in out.splitlines() if ln.startswith("[notes]"))
-    assert "searched as of its last refresh" in line and "1 file(s) changed since" in line
+    assert "searched as of its last refresh" in line and "files changed since" in line
     assert "cooling down" in line and "[STALE]" in line
     assert "unresolved" not in out and rc == 0
     assert len(heals) == 1  # the bounded auto-heal still runs once; the cooldown is kept
@@ -174,6 +179,9 @@ def test_an_edited_file_its_last_review_failed_is_not_read(tmp_path, monkeypatch
 
 def test_an_older_runtime_without_last_good_still_reports_the_stale_set(tmp_path, monkeypatch, capsys):
     tried, _, _, _, _ = _setup(tmp_path, monkeypatch, changed=[(lambda t, l: l, "# Log\nnew\n")])
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})  # no prepare-cache: routed by navigate
+    monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(0.9, str(tried), "notes")])  # the word search still reads its index
+    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no toc")))  # its list is read
     real = ask.memory
     monkeypatch.setattr(ask, "memory", lambda req: real({k: v for k, v in req.items() if k != "lastGood"}))
     ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
@@ -184,6 +192,7 @@ def test_an_older_runtime_without_last_good_still_reports_the_stale_set(tmp_path
 
 def test_a_refresh_landing_mid_routing_is_asked_again_not_an_error(tmp_path, monkeypatch, capsys):
     tried, _, requests, _, _ = _setup(tmp_path, monkeypatch, changed=[(lambda t, l: l, "# Log\nnew\n")])
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})  # no prepare-cache: routed by navigate
     real, calls = ask.memory, []
 
     def racing(req):

@@ -166,7 +166,8 @@ def test_ordinary_lookup_checks_routed_and_word_matched_candidates(tmp_path, mon
     routed, fb = tmp_path / "routed.md", tmp_path / "feedback.md"
     routed.write_text("unrelated")
     fb.write_text("verify information before using it: read the source")
-    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([fb]))
+    # the TOC read list covers the set's cached files: the routed-style pick (routed.md) and the word match
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache([routed, fb]))
     monkeypatch.setattr(ask, "memory", _memory([{"score": 0.9, "originalPath": str(routed)}]))
     checked = []
     monkeypatch.setattr(ask, "confirm", lambda q, ps: checked.extend(ps) or ({str(fb): 0.9}, set(), None, {}))

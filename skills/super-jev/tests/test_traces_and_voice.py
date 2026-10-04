@@ -467,8 +467,11 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
     assert st["routing"]["p1"]["none"] == 0.2
     assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, True]
     fates = [f["fate"] for f in st["word_search"]["top"]]
-    assert fates and fates[0] == "already routed"
-    assert st["read_list"] == ["/a.md", "/b.md", "/w.md", "/x.md", "/y.md"]
+    # the read list is the TOC search's plus the files Jev's navigate routed for a set with no prepare-cache;
+    # word hits outside the set's file list are not read. /a.md is a word hit too, so it is simply read.
+    assert fates and fates[0] == "read"
+    assert isinstance(st["toc"], dict) and "secs" in st["toc"]  # the TOC stage is traced
+    assert st["read_list"] == ["/a.md", "/b.md"]
     assert st["content_check"]["/a.md"]["read"] == [0, 1, 2, 9]
     assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"] == "evidence-selected"
 

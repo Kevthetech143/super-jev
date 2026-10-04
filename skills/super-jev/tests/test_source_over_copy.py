@@ -124,11 +124,11 @@ def test_no_person_named_filters_nothing(tmp_path):
     files, caches = _family(tmp_path)
     mine = str(tmp_path / "agents/global/documents/marvin/medical/medications/current.md")
     dads = str(tmp_path / "agents/global/documents/gustavo/medical/medications/current.md")
-    top, _, navigated = _run(tmp_path, "list the medications on file", files,
+    top, checked, _ = _run(tmp_path, "list the medications on file", files,
                              [{"score": 0.9, "originalPath": mine}, {"score": 0.8, "originalPath": dads}],
                              {mine: 0.90, dads: 0.88}, caches)
     assert {t["path"] for t in top} == {mine, dads}
-    assert set(navigated) == set(caches)
+    assert {mine, dads} <= set(checked)  # no person named: every person's file is read (routing calls are gone)
 
 
 def test_question_people():

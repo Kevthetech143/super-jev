@@ -68,5 +68,6 @@ def test_file_holding_the_questions_words_still_confirms(tmp_path):
 
 def test_routed_file_outside_word_index_can_supply_evidence(tmp_path):
     recall, clov, others = _files(tmp_path)
-    top = _lookup(tmp_path, [recall], {str(recall): 0.87}, [clov, *others])
+    # the pick (what routing used to supply) is in the set's file list but shares no words with the question
+    top = _lookup(tmp_path, [recall], {str(recall): 0.87}, [recall, clov, *others])
     assert top[0]["path"] == str(recall) and top[0]["score"] >= ask.CONFIRM_FLOOR
