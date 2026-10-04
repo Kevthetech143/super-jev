@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS toc(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFAULT 0, roots TEXT, checked_at REAL);
 -- stat memo for files seen but never ingested (held, edited, new, unreviewed): so they are not re-hashed
 CREATE TABLE IF NOT EXISTS seen(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
-    sha256 TEXT, reason TEXT);
+    sha256 TEXT, reason TEXT, reviewed_sha TEXT);
 CREATE INDEX IF NOT EXISTS files_pointer ON files(pointer);
 CREATE INDEX IF NOT EXISTS seen_pointer ON seen(pointer);
 """
@@ -51,10 +51,37 @@ class FileIndex:
         self.db.close()
 
     def _walk(self, roots):
+        """New-file discovery by stat only, with the same guards connect's inventory() applies (credential
+        suffix, logins / -secret / .bak names, vault and hidden folders, hidden files, links leaving the root,
+        extension, size ceiling). No file body is opened."""
+        import prepare_bulk as pb
         for root in roots or []:
-            for dirpath, _dirs, names in os.walk(root):
-                for n in names:
-                    yield os.path.join(dirpath, n)
+            root = Path(root)
+            base = root.resolve()
+            files, linked = pb.walk_md(root)
+            bases = [base] + [t for t in linked if not pb.SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
+            for p in files:
+                rp = p.resolve()
+                if pb.credential_suffix(p.name) or pb.credential_suffix(rp.name):
+                    continue
+                if not any(rp.is_relative_to(b) for b in bases):
+                    continue
+                if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret")
+                       for n in (p.name.casefold(), rp.name.casefold())):
+                    continue
+                b = next(b for b in bases if rp.is_relative_to(b))
+                if pb.skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(b).parts[:-1]):
+                    continue
+                if p.name.startswith(".") or rp.name.startswith("."):
+                    continue
+                if pb.path_has_secret(p.name) or pb.path_has_secret(rp.name):
+                    continue
+                try:
+                    if rp.stat().st_size > pb.CEILING_BYTES:
+                        continue
+                except OSError:
+                    continue
+                yield str(p)
 
     def _drop(self, path):
         for t in ("files", "toc", "seen"):
@@ -68,8 +95,8 @@ class FileIndex:
         if entries is None:
             from prepare_bulk import load_cache_files
             entries = load_cache_files(pointer)
-        known = {r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns FROM files WHERE pointer=?", (pointer,))}
-        known.update({r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns FROM seen WHERE pointer=?", (pointer,))})
+        known = {r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns,reviewed_sha FROM files WHERE pointer=?", (pointer,))}
+        known.update({r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns,reviewed_sha FROM seen WHERE pointer=?", (pointer,))})
         out = {"hashed": 0, "changed": [], "new": [], "gone": [], "stale": False}
         row = self.db.execute("SELECT roots FROM pointers WHERE pointer=?", (pointer,)).fetchone()
         if roots is None and row and row[0]:
@@ -86,29 +113,44 @@ class FileIndex:
                 continue
             if not os.path.isfile(p):
                 continue
-            if ent is None and p not in known and roots is None:
+            if ent is None:
+                if p in known and known[p][:2] == (st.st_size, st.st_mtime_ns):
+                    continue
+                if p not in known and roots is None:
+                    continue
+                # no passing review: never read. Record it from stat alone.
+                was_known = p in known
+                self._drop(p)
+                self.db.execute("INSERT INTO seen VALUES(?,?,?,?,NULL,'new',NULL)", (p, pointer, st.st_size, st.st_mtime_ns))
+                if not was_known:
+                    out["new"].append(p)
+                else:
+                    out["changed"].append(p)
                 continue
-            if known.get(p) == (st.st_size, st.st_mtime_ns):
-                continue
-            if ent is not None and not ent.get("pass"):
+            if not ent.get("pass"):
+                if p in known:
+                    self._drop(p)  # review no longer passes: its rows go
                 continue  # not reviewed as passing: never read, never indexed
+            reviewed = ent.get("sha256")
+            # unchanged stat AND the same review as when it was last judged: nothing to do. A changed or
+            # newly appeared review (promotion) re-evaluates, so a seen file can become indexed.
+            if p in known and known[p] == (st.st_size, st.st_mtime_ns, reviewed):
+                continue
             with open(p, "rb") as f:
                 raw = f.read()
             out["hashed"] += 1
             sha = hashlib.sha256(raw).hexdigest()
             was_known = p in known
-            reviewed = (ent or {}).get("sha256")
             self._drop(p)
             reason = None
-            if ent is None:
-                reason = "new"
-            elif sha != reviewed:
+            if not reviewed or sha != reviewed:
                 reason = "edited"
             elif _has_secret(raw.decode("utf-8", "replace")):
                 reason = "held"
             if reason:
-                self.db.execute("INSERT INTO seen VALUES(?,?,?,?,?,?)", (p, pointer, st.st_size, st.st_mtime_ns, sha, reason))
-                (out["new"] if reason == "new" else out["changed"]).append(p)
+                self.db.execute("INSERT INTO seen VALUES(?,?,?,?,?,?,?)",
+                                (p, pointer, st.st_size, st.st_mtime_ns, sha, reason, reviewed))
+                out["changed"].append(p)
             else:
                 self.db.execute("INSERT INTO files VALUES(?,?,?,?,?,1,?)", (p, pointer, st.st_size, st.st_mtime_ns, sha, reviewed))
                 toc = {k: ent.get(k) for k in ("description", "question", "kind", "status", "as_of", "subject")}
