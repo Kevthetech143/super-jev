@@ -1985,6 +1985,98 @@ def index_after_ask(principal: str, sdir: Path) -> None:
         return
     spawn_index_updater(principal)
 
+FTS_TF_CAP = 4  # most times a word is repeated in a file's FTS body (bm25 saturates anyway)
+FTS_K = 200  # files per shortlist (word bm25, TOC): a constant, so the re-score is O(K) at any corpus size
+
+def _label_key(entry: dict) -> str:
+    return hashlib.sha256(f"{entry.get('description') or ''}\0{entry.get('question') or ''}".encode()).hexdigest()[:16]
+
+def index_fts_pass(idx, pointers: list, widx: dict, toc) -> int:
+    """Updater only: keep the FTS5 table in step with the `files` rows. Only a file that is new, whose sha, pointer or
+    labels changed, is written; one that left the index is dropped. Marked ok only when every file got its rows.
+    Returns the number of files written."""
+    if idx.fts_error:
+        return 0
+    idx.fts_begin()
+    have, keep, wrote, complete = idx.fts_have(), set(), 0, True
+    edited = {p for _ptr, p, _e in idx.edited_candidates(pointers)}
+    for ptr, path, entry in index_candidates(idx, pointers):
+        if path in edited:
+            continue
+        keep.add(path)
+        sha, item = entry.get("sha256"), widx.get(path)
+        if not _valid_item(item, sha):
+            complete = False  # bytes changed under the updater: the next run builds it
+            continue
+        lab = _label_key(entry)
+        if have.get(path) == (sha, ptr, lab):
+            continue
+        row = toc.rows.get(path)
+        trow = row if row and row.get("sha256") == sha else None
+        head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), item["heading"],
+                         str(entry.get("description") or ""), str(entry.get("question") or "")])
+        hw = Counter(w for w in words(head) for _ in range(3))
+        htotal = sum(hw.values())
+        tf = Counter(item["whole"]) + hw  # head words count triple, as the scorer counts them
+        body = " ".join(w for w, c in sorted(tf.items()) for _ in range(min(c, FTS_TF_CAP)))  # repeats so bm25 sees term frequency
+        tocw = " ".join(sorted(set(words(toc_search.toc_words(path, entry, (trow or {}).get("toc") or {})))))
+        idx.fts_put(path, ptr, person_of(path), sha, lab, body, tocw, len(item["passages"]),
+                    sum(c[1] + htotal for c in item["passages"]), json.dumps(item), json.dumps(trow) if trow else None)
+        wrote += 1
+    for path in set(have) - keep:
+        idx.fts_drop(path)
+        wrote += 1
+    if complete:
+        idx.fts_finish(WORD_INDEX_VERSION)
+    else:
+        idx.db.commit()
+    return wrote
+
+def _fts_q(tokens) -> str:
+    return " OR ".join(f'"{t}"' for t in sorted(tokens))
+
+def fts_pick(idx, question: str, pointers: list, who, out_of_scope_fn):
+    """The O(K) read path: (candidates [(ptr, path, entry)], items {path: word item}, toc rows, fts numbers for
+    word_search, trace), or (None, why) to run the S3a path. Takes the top FTS_K files by bm25 on the question's
+    words and the top FTS_K by bm25 on the TOC words, plus the few edited files; nothing else is touched."""
+    ok, why = idx.fts_usable(WORD_INDEX_VERSION)
+    if not ok:
+        return None, why
+    terms = query_terms(question)
+    if not terms:
+        return None, "no question words"
+    try:
+        who = sorted(who)
+        variants = idx.fts_variants(terms, SYNONYMS)
+        df = {t: idx.fts_df("body : (" + _fts_q(v) + ")", pointers, who) if v else 0 for t, v in variants.items()}
+        allv = set().union(*variants.values())
+        wtop = idx.fts_top("body : (" + _fts_q(allv) + ")", pointers, FTS_K, who) if allv else []
+        tq = {f"{t[:5] if len(t) > 5 else t}*" for t in terms}
+        ttop = idx.fts_top("toc : (" + " OR ".join(f'"{q[:-1]}"*' for q in sorted(tq)) + ")", pointers, FTS_K, who)
+        if len(ttop) < FTS_K:  # the TOC shortlist ties fall back to path order: pad with the first paths, as it does
+            ttop += [p for p in idx.fts_first_paths(pointers, FTS_K, who) if p not in set(ttop)][:FTS_K - len(ttop)]
+        stats = idx.fts_stats_for(pointers, who)
+        rows = idx.fts_rows(list(dict.fromkeys(wtop + ttop)))
+    except sqlite3.Error as e:
+        return None, f"fts query failed ({type(e).__name__})"
+    names = {p: connector_names(p) for p in pointers}
+    cands, items, trows = [], {}, {}
+    for ptr, path, entry, item, trow in rows:
+        if out_of_scope_fn(path) or prepare_bulk.is_test_material(path, prepare_bulk.named_exactly(Path(path).name, names[ptr])):
+            continue
+        cands.append((ptr, path, entry))
+        if item:
+            items[path] = item
+        if trow:
+            trows[path] = trow
+    edited = [c for c in idx.edited_candidates(pointers) if not out_of_scope_fn(c[1])]
+    cands += edited
+    fts = {"n": stats["n"], "passages": stats["passages"], "size": stats["size"], "df": df, "variants": variants,
+           "local": {c[1] for c in edited}}
+    return (cands, items, trows, fts,
+            {"used": True, "k": FTS_K, "word_candidates": len(wtop), "toc_candidates": len(ttop), "edited": len(edited),
+             "corpus_files": stats["n"]}), None
+
 def index_sync(principal: str, sdir: Path) -> int:
     """The updater (connect, refresh, detached after an ask): list the pointers from the registry once, stat-diff
     every indexed file (sha only what changed), and build the word-index items for new bytes. The only O(files) work."""
@@ -2031,8 +2123,9 @@ def index_sync(principal: str, sdir: Path) -> int:
         if got and got[1] == entry.get("sha256"):
             toc.get(path, got[1], lambda _p, raw=got[0]: clean_text(raw.decode("utf-8", "replace"), path))
     toc.save({p for _ptr, p, _e in allc})
+    fts_changed = index_fts_pass(idx, [r["pointer"] for r in rows], widx, toc)
     idx.close()
-    print(f"index updated: {len(rows)} pointer(s), {hashed} file(s) hashed")
+    print(f"index updated: {len(rows)} pointer(s), {hashed} file(s) hashed, {fts_changed} fts file(s) written")
     return 0
 
 # Per-file word index: each file's passage word counts (without the head words, which depend on the
@@ -2091,8 +2184,19 @@ def _valid_item(item, sha) -> bool:
             and all(isinstance(p, list) and len(p) == 3 and isinstance(p[0], dict) and isinstance(p[1], int)
                     and isinstance(p[2], list) for p in item["passages"]))
 
+def term_variants(terms: list, vocab) -> dict:
+    """{term: the vocabulary words that count as that term} (close spellings, stem/ending forms, synonyms)."""
+    out = {}
+    for t in terms:
+        near = set(difflib.get_close_matches(t, vocab, n=3, cutoff=0.8)) if len(t) > 3 else set()
+        stem = t[:5] if len(t) > 5 else t  # long words by stem, short ones plus an ending (owe/owed)
+        out[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
+        # A synonym counts as a match for its source word, not as an extra word.
+        out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
+    return out
+
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=(), held_cover=None,
-                reads=None, index_path=None, candidates=None) -> list:
+                reads=None, index_path=None, candidates=None, items=None, fts=None) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
@@ -2116,7 +2220,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     qpairs = list(dict.fromkeys((a, b) for a, b in zip(qwords, qwords[1:])
                                 if a != b and a in terms and b in terms))  # "step by step" is no phrase
     qkeys_s = {f"{a[:4]} {b[:4]}" for a, b in qpairs}
-    index = _load_word_index(index_path) if index_path else {}
+    index = items if items is not None else _load_word_index(index_path) if index_path else {}
     dirty = False
     for ptr, path, entry in (candidate_files(pointers, done=docs) if candidates is None else candidates):
         if path in docs:
@@ -2158,14 +2262,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     if dirty and index_path:
         _save_word_index(index_path, index)
     def variants_of(vocab):
-        out = {}
-        for t in terms:
-            near = set(difflib.get_close_matches(t, vocab, n=3, cutoff=0.8)) if len(t) > 3 else set()
-            stem = t[:5] if len(t) > 5 else t  # long words by stem, short ones plus an ending (owe/owed)
-            out[t] = near | {v for v in vocab if v.startswith(stem) and len(v) - len(t) <= (99 if len(t) > 5 else 2)}
-            # A synonym counts as a match for its source word, not as an extra word.
-            out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
-        return out
+        return term_variants(terms, vocab)
     if aside and held_cover is not None:
         # Edited files a refresh would hold: coverage only, scored against the same corpus plus themselves.
         counts = [Counter(wc) + Counter({w: v * npass for w, v in hw.items()})
@@ -2180,19 +2277,34 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     if not docs:
         return []
     _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
-    vocab = sorted(set().union(*(set(wc) | set(hw) for _, wc, _, hw, _ in docs.values())))
-    variants = variants_of(vocab)
+    if fts:
+        # S3b: the corpus-wide numbers (word variants, document frequency, file count, average passage size) were
+        # stored by the updater; only the shortlisted files (and the few edited ones, counted here) are scored.
+        local = {p: d for p, d in docs.items() if p in fts["local"]}
+        variants = {t: set(v) for t, v in fts["variants"].items()}
+        if local:
+            for t, v in variants_of(sorted(set().union(*(set(wc) | set(hw) for _, wc, _, hw, _ in local.values())))).items():
+                variants[t] |= v
+    else:
+        vocab = sorted(set().union(*(set(wc) | set(hw) for _, wc, _, hw, _ in docs.values())))
+        variants = variants_of(vocab)
     def tf_of(c, h, k=1):
         return {t: sum(c.get(v, 0) + k * h.get(v, 0) for v in variants[t]) for t in terms}
     tf = {path: tf_of(wc, hw, npass) for path, (_, wc, npass, hw, _) in docs.items()}
-    n = len(docs)
-    sizes = [size for *_, parts in docs.values() for _, size, _ in parts]
-    avg = sum(sizes) / len(sizes) or 1
-    idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
-           for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
+    if fts:
+        lsizes = [size for p in local for _, size, _ in docs[p][4]]
+        n = fts["n"] + len(local)
+        avg = (fts["size"] + sum(lsizes)) / ((fts["passages"] + len(lsizes)) or 1) or 1
+        dfs = {t: fts["df"].get(t, 0) + sum(1 for p in local if tf[p][t]) for t in terms}
+    else:
+        n = len(docs)
+        sizes = [size for *_, parts in docs.values() for _, size, _ in parts]
+        avg = sum(sizes) / len(sizes) or 1
+        dfs = {t: sum(1 for f in tf.values() if f[t]) for t in terms}
+    idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5)) for t, df in dfs.items()}
     # Words no reviewed file contains (e.g. "time") cannot tell files apart; leave
     # them out of the coverage total so they do not sink every file.
-    total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
+    total = sum(idf[t] for t in terms if dfs[t]) or 1
     scored = []
     for path, (ptr, _, _, hw, parts) in docs.items():
         f = tf[path]
@@ -2432,11 +2544,12 @@ def person_of(path: str):
     m = PERSON_RE.search(path)
     return m.group(1).lower() if m else None
 
-def people(pointers: list) -> dict:
-    """{person folder name: relation words from its PROFILE's Relation line}."""
+def people(pointers: list, paths=None) -> dict:
+    """{person folder name: relation words from its PROFILE's Relation line}. `paths`: the person-folder files
+    already listed by the file index (the flag-on FTS path), instead of every connected file's prepare-cache."""
     out = {}
-    for ptr in pointers:
-        for path in load_cache_files(ptr):
+    for group in ([load_cache_files(p) for p in pointers] if paths is None else [paths]):
+        for path in group:
             who = person_of(path)
             if not who:
                 continue
@@ -2646,7 +2759,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     pointers = active_pointers
     # Person resolution: a question about one person never reads (or confirms)
     # another person's records, and a pointer holding only theirs is not asked.
-    folks = people(pointers)
+    fts_ready = bool(idx_read and idx_read.fts_usable(WORD_INDEX_VERSION)[0])
+    folks = people(pointers, idx_read.person_paths(pointers)) if fts_ready else people(pointers)
     who = question_people(question, folks)
     def other_person(path: str) -> bool:
         return bool(who) and person_of(path) not in (None, *who)
@@ -2745,7 +2859,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if not _CLAIM["text"]:
         # A set with no prepare-cache (a reviewed view, a path-connected or recipe set) has no files for the TOC
         # search to list, so it is still routed by Jev's navigate, as before: no quiet shrink of what a question reaches.
-        nav_ptrs = [p for p in pointers if not load_cache_files(p)]
+        nav_ptrs = [p for p in pointers if not (idx_read.has_entries(p) if fts_ready else load_cache_files(p))]
         bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
         if bm is not None:
             navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
@@ -2893,13 +3007,20 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # note that states the answer. Word search adds the files whose text matches the
     # question; the content check still decides what is kept.
     reads = {}  # one read+sha pass shared by edited_held and word_search
-    icands = None
+    icands, fitems, ftocs, fts_nums = None, None, None, None
     if idx_read:
         # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
         # are found by the updater, or at read below for the files actually served.
-        icands = idx_read.candidates(search_pointers)
-        out_of_scope = {p for _ptr, p, _e in icands if other_person(p)}
-        icands = index_candidates(idx_read, search_pointers, out_of_scope)
+        picked, fwhy = fts_pick(idx_read, question, search_pointers, who, other_person)
+        if picked:
+            icands, fitems, ftocs, fts_nums, ftrace = picked
+            out_of_scope = set()  # the FTS scope already left out other people's files
+            _STAGE["index"]["fts"] = ftrace
+        else:
+            _STAGE["index"]["fts"] = {"used": False, "fallback": fwhy}
+            icands = idx_read.candidates(search_pointers)
+            out_of_scope = {p for _ptr, p, _e in icands if other_person(p)}
+            icands = index_candidates(idx_read, search_pointers, out_of_scope)
         edited = {"secret": [], "stuck": [], "refresh": []}
     else:
         out_of_scope = {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)}
@@ -2907,7 +3028,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     held_cover = {}  # a held file's word coverage of the question, from the same word-search pass
     toc_on = not _CLAIM["text"]
     found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
-                        reads=reads, index_path=sdir / WORD_INDEX_FILE, **({"candidates": icands} if idx_read else {}),
+                        reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
+                        **({"candidates": icands} if idx_read else {}),
+                        **({"items": fitems, "fts": fts_nums} if fts_nums else {}),
                         **({"extra": set(edited["secret"]), "held_cover": held_cover} if edited["secret"] else {}))
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
@@ -2936,7 +3059,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
                     (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
                 "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits},
-                cache_path=sdir / "toc-cache.json")
+                cache_path=None if fts_nums else sdir / "toc-cache.json", **({"rows": ftocs} if fts_nums else {}))
             _STAGE["toc_parts"] = tparts
             # the files Jev's navigate routed (sets with no prepare-cache) ride along after the TOC pick
             tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
