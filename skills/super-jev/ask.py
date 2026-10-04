@@ -1738,7 +1738,22 @@ def candidate_files(pointers: list, exclude=(), done=()):
             yield ptr, path, entry
 
 
-def edited_held(pointers: list, exclude=()) -> dict:
+def read_sha(path: str, reads):
+    """(raw bytes, sha256 hex) of the file as it is now, or None when unreadable. `reads`, when given, is
+    the one read+sha pass an ask shares between edited_held and word_search."""
+    if reads is not None and path in reads:
+        return reads[path]
+    try:
+        raw = Path(path).read_bytes()
+        got = (raw, hashlib.sha256(raw).hexdigest())
+    except OSError:
+        got = None
+    if reads is not None:
+        reads[path] = got
+    return got
+
+
+def edited_held(pointers: list, exclude=(), reads=None) -> dict:
     """The one count of files left out because they were edited since their set's last refresh and a
     refresh would not admit them. Worked out once per searched set from the files a search would open,
     whichever search path (routing, word search, a later one) skips them. Split by what would help:
@@ -1746,13 +1761,16 @@ def edited_held(pointers: list, exclude=()) -> dict:
     set's scope (a refresh would hold it again), "refresh": a refresh will review it}."""
     done, why = set(), {}  # done: some set reads the file; why: the first set's reason it cannot
     for ptr, path, entry in candidate_files(pointers, exclude, done):
-        try:
-            raw = Path(path).read_bytes()
-        except OSError:
+        got = read_sha(path, reads)
+        if got is None:
             continue  # removed: not an edited file
-        text = raw.decode("utf-8", "replace")
-        if hashlib.sha256(raw).hexdigest() == entry.get("sha256") or edited_readable(path, ptr, entry, raw, text):
+        raw, sha = got
+        if sha == entry.get("sha256"):
             done.add(path)  # a file is out only if no searched set reads it
+            continue
+        text = raw.decode("utf-8", "replace")
+        if edited_readable(path, ptr, entry, raw, text):
+            done.add(path)
             continue
         why.setdefault(path, "secret" if clean_text(text, path) is None else "stuck" if (
             len(raw) > prepare_bulk.CEILING_BYTES or not refresh_would_admit(path, ptr)) else "refresh")
@@ -1763,7 +1781,51 @@ def edited_held(pointers: list, exclude=()) -> dict:
     return out
 
 
-def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=(), held_cover=None) -> list:
+# Per-file word index: each file's passage word counts (without the head words, which depend on the
+# pointer entry and are added at ask time), passage sizes and 4-letter pair keys, kept per path and
+# valid only for the sha it was built from. Only text that passed word_search's gate is ever indexed.
+WORD_INDEX_FILE = "word-index.json"
+WORD_INDEX_VERSION = f"{WORDS_VERSION}.1.{CONFIRM_CHUNK}"
+
+def _load_word_index(path) -> dict:
+    try:
+        saved = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(saved, dict) or saved.get("version") != WORD_INDEX_VERSION or not isinstance(saved.get("files"), dict):
+        return {}  # old tokenizer, or not ours: rebuild
+    return saved["files"]
+
+def _save_word_index(path, files: dict) -> None:
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"version": WORD_INDEX_VERSION, "files": files}))
+        tmp.replace(path)
+    except Exception:
+        pass  # best effort: an unsaved index is just rebuilt
+
+def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
+    heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
+    chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
+    parts = []
+    for c in chunks:
+        pw = passage_words(c)
+        parts.append([dict(pw), sum(pw.values()), sorted(f"{a} {b}" for a, b in word_pairs(c)) if pairs else []])
+    whole = Counter()
+    for p in parts:
+        whole.update(p[0])
+    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts}
+
+def _valid_item(item, sha) -> bool:
+    return (isinstance(item, dict) and item.get("sha") == sha and isinstance(item.get("heading"), str)
+            and isinstance(item.get("whole"), dict) and isinstance(item.get("passages"), list) and bool(item["passages"])
+            and all(isinstance(p, list) and len(p) == 3 and isinstance(p[0], dict) and isinstance(p[1], int)
+                    and isinstance(p[2], list) for p in item["passages"]))
+
+def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=(), held_cover=None,
+                reads=None, index_path=None) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
@@ -1786,30 +1848,43 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
               if len(w) > 2 and w not in QUERY_STOPWORDS]
     qpairs = list(dict.fromkeys((a, b) for a, b in zip(qwords, qwords[1:])
                                 if a != b and a in terms and b in terms))  # "step by step" is no phrase
-    qkeys = {(a[:4], b[:4]) for a, b in qpairs}
+    qkeys_s = {f"{a[:4]} {b[:4]}" for a, b in qpairs}
+    index = _load_word_index(index_path) if index_path else {}
+    dirty = False
     for ptr, path, entry in candidate_files(pointers, done=docs):
-        try:
-            raw = Path(path).read_bytes()
-        except OSError:
+        got = read_sha(path, reads)
+        if got is None:
             continue
-        text = raw.decode("utf-8", "replace")
-        if hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+        raw, sha = got
+        text = None
+        if sha != entry.get("sha256"):
+            text = raw.decode("utf-8", "replace")
             # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
             # search its current text, held back only as a refresh would hold it.
             if not edited_readable(path, ptr, entry, raw, text):
                 if path in extra:
                     aside[path] = text
+                if index.pop(path, None) is not None:
+                    dirty = True  # an old entry for a file now held or stale: gone
                 continue  # never reviewed at a known version, or a refresh would hold it
             changed.append(path)
-        heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
-        head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), heading,
+        item = index.get(path)
+        if not _valid_item(item, sha):
+            if text is None:
+                text = raw.decode("utf-8", "replace")
+            item = _index_item(text, sha, bool(index_path or qkeys_s))
+            if index_path:
+                index[path] = item
+                dirty = True
+        head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), item["heading"],
                          str(entry.get("description") or ""), str(entry.get("question") or "")])
         head_words = Counter(w for w in words(head) for _ in range(3))
-        chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
-        passages = [passage_words(c) + head_words for c in chunks]
-        docs[path] = (ptr, sum(passages, Counter()),
-                      [(c, sum(c.values()), word_pairs(t) & qkeys if qkeys else set())
-                       for c, t in zip(passages, chunks)])
+        htotal = sum(head_words.values())
+        parts = [(c, n + htotal, {k for k in pairs if k in qkeys_s} if qkeys_s else set())
+                 for c, n, pairs in item["passages"]]
+        docs[path] = (ptr, item["whole"], len(parts), head_words, parts)
+    if dirty and index_path:
+        _save_word_index(index_path, index)
     def variants_of(vocab):
         out = {}
         for t in terms:
@@ -1821,7 +1896,8 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         return out
     if aside and held_cover is not None:
         # Edited files a refresh would hold: coverage only, scored against the same corpus plus themselves.
-        counts = [c for _, c, _ in docs.values()] + [passage_words(t) for t in aside.values()]
+        counts = [Counter(wc) + Counter({w: v * npass for w, v in hw.items()})
+                  for _, wc, npass, hw, _ in docs.values()] + [passage_words(t) for t in aside.values()]
         var2 = variants_of(sorted(set().union(*(c.keys() for c in counts))))
         tf2 = [{t: sum(c.get(v, 0) for v in var2[t]) for t in terms} for c in counts]
         idf2 = {t: math.log(1 + (len(tf2) - df + 0.5) / (df + 0.5))
@@ -1832,13 +1908,13 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     if not docs:
         return []
     _STAGE["word_changed"] = changed[:STAGE_LIST_CAP]
-    vocab = sorted(set().union(*(c.keys() for _, c, _ in docs.values())))
+    vocab = sorted(set().union(*(set(wc) | set(hw) for _, wc, _, hw, _ in docs.values())))
     variants = variants_of(vocab)
-    def tf_of(c):
-        return {t: sum(c.get(v, 0) for v in variants[t]) for t in terms}
-    tf = {path: tf_of(c) for path, (_, c, _) in docs.items()}
+    def tf_of(c, h, k=1):
+        return {t: sum(c.get(v, 0) + k * h.get(v, 0) for v in variants[t]) for t in terms}
+    tf = {path: tf_of(wc, hw, npass) for path, (_, wc, npass, hw, _) in docs.items()}
     n = len(docs)
-    sizes = [size for _, _, parts in docs.values() for _, size, _ in parts]
+    sizes = [size for *_, parts in docs.values() for _, size, _ in parts]
     avg = sum(sizes) / len(sizes) or 1
     idf = {t: math.log(1 + (n - df + 0.5) / (df + 0.5))
            for t, df in ((t, sum(1 for f in tf.values() if f[t])) for t in terms)}
@@ -1846,7 +1922,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     # them out of the coverage total so they do not sink every file.
     total = sum(idf[t] for t in terms if any(f[t] for f in tf.values())) or 1
     scored = []
-    for path, (ptr, _, parts) in docs.items():
+    for path, (ptr, _, _, hw, parts) in docs.items():
         f = tf[path]
         if sum(idf[t] for t in terms if f[t]) / total < FALLBACK_MIN_COVERAGE:
             continue
@@ -1856,8 +1932,8 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         # "parent folder") add their weight once more: scattered matches tie often, and a
         # file stating the phrase was left one slot past the read list.
         bm25 = max(sum(idf[t] * pf[t] * 2.2 / (pf[t] + 1.2 * (0.25 + 0.75 * size / avg)) for t in terms)
-                   + PHRASE_WEIGHT * sum((idf[a] + idf[b]) / 2 for a, b in qpairs if (a[:4], b[:4]) in pairs)
-                   for pf, size, pairs in ((tf_of(c), size, pairs) for c, size, pairs in parts))
+                   + PHRASE_WEIGHT * sum((idf[a] + idf[b]) / 2 for a, b in qpairs if f"{a[:4]} {b[:4]}" in pairs)
+                   for pf, size, pairs in ((tf_of(c, hw), size, pairs) for c, size, pairs in parts))
         scored.append((round(bm25, 3), path, ptr))
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
@@ -2536,10 +2612,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # note that states the answer. Word search adds the files whose text matches the
     # question; the content check still decides what is kept.
     out_of_scope = {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)}
-    edited = edited_held(search_pointers, out_of_scope)  # once per searched set, not per search path
+    reads = {}  # one read+sha pass shared by edited_held and word_search
+    edited = edited_held(search_pointers, out_of_scope, reads)  # once per searched set, not per search path
     held_cover = {}  # a held file's word coverage of the question, from the same word-search pass
     toc_on = not _CLAIM["text"]
     found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
+                        reads=reads, index_path=sdir / WORD_INDEX_FILE,
                         **({"extra": set(edited["secret"]), "held_cover": held_cover} if edited["secret"] else {}))
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
