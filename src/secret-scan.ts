@@ -135,8 +135,8 @@ export function hasSecret(text: string): boolean {
   return false;
 }
 
-// Twin of Python MACHINE_KEYS: tool-built fields (hashes, ids, pointer names), never user text.
-const MACHINE_KEYS = new Set(['sha256', 'id', 'sourceId', 'rootId', 'children', 'pointer', 'principals']);
+// Twin of Python MACHINE_KEYS: tool-built fields (hashes, ids, pointer names, engine uuids), never user text.
+const MACHINE_KEYS = new Set(['sha256', 'id', 'sourceId', 'rootId', 'children', 'pointer', 'principals', 'ticket', 'attemptId']);
 
 /** hasSecret over every user-text string (keys and values) inside a request payload; MACHINE_KEYS values skipped. */
 export function payloadHasSecret(obj: unknown): boolean {
