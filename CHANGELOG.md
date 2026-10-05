@@ -8,8 +8,7 @@
 
 ## Unreleased
 
-- Fewer judge calls per ask. The content check of several files now shares calls: requests that differ only in their passages (same question and purpose) are packed into one judge call, each file's passage keys prefixed and its `Classify passages.<key>` reference rewritten to match, under the same token budget; batches are filled first-fit. Each passage is still its own question. Test: `test/enhance/coalesce.test.ts`.
-- The table-of-contents file pick and part pick size their batches by the judge's per-call budget (`call_tokens` from `judge_profiles.json`) and the pick pool (capped by `max_questions_per_call`), so a whole pick pool fits one call. Test: `tests/test_toc_search.py`.
+- Fewer judge calls per ask: the table-of-contents file pick and part pick size their batches by the judge's per-call budget (`call_tokens` from `judge_profiles.json`) and the pick pool (capped by `max_questions_per_call`), so a whole pick pool fits one call. Test: `tests/test_toc_search.py`.
 
 ## 1.0.128 — 2026-10-05
 
