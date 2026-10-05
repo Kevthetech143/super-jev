@@ -1713,11 +1713,20 @@ def source_rows(principal: str, pointer: str):
             # originalPath when present (a reviewed view lists its view there); else the source's own listed path
             path, sha = (src.get("originalPath") or src.get("path"), src.get("contentSHA")) if isinstance(src, dict) else (None, None)
             if isinstance(path, str) and path and isinstance(sha, str) and sha:
-                rows[path] = {"pass": True, "sha256": sha, "description": str(src.get("description") or ""), "local": True}
+                rows[path] = {"pass": True, "sha256": sha, "description": str(src.get("description") or ""), "local": True,
+                              "upstream": str(src.get("upstreamPath") or "")}  # a view copy's original, for raw_over_view
         nxt = out.get("nextOffset")
         if not isinstance(nxt, int) or nxt <= offset:
             return rows
         offset = nxt
+
+def raw_over_view(merged: list, view_pointers) -> list:
+    """Drop a reviewed-view copy when its original is also in `merged` through a raw (non-view) pointer: the
+    asker is answered from, and shown, the original. A view whose original is not there stays (it IS the answer)."""
+    up = {p: e.get("upstream") for ptr in view_pointers for p, e in (_LOCAL_ROWS.get(ptr) or {}).items() if isinstance(e, dict)}
+    raw = {os.path.realpath(p) for _s, p, ptr in merged if ptr not in view_pointers}
+    return [m for m in merged if not (m[2] in view_pointers and up.get(m[1]) and os.path.realpath(up[m[1]]) in raw)]
+
 
 def load_local_rows(sdir: Path, principal: str, pointers: list, generations: dict, view_pointers=()) -> dict:
     """Fill _LOCAL_ROWS for the sets that have neither their own cache nor a covering parent. Returns {pointer: n rows}."""
@@ -1736,7 +1745,8 @@ def load_local_rows(sdir: Path, principal: str, pointers: list, generations: dic
     for ptr in need:
         gen, hit = generations.get(ptr), saved.get(ptr)
         if gen and isinstance(hit, dict) and hit.get("generation") == gen:
-            if isinstance(hit.get("rows"), dict):
+            if isinstance(hit.get("rows"), dict) and (ptr not in view_pointers or all(
+                    isinstance(r, dict) and "upstream" in r for r in hit["rows"].values())):  # older view rows lack the original
                 _LOCAL_ROWS[ptr] = hit["rows"]
                 continue
             if time.time() - (hit.get("failed_at") or 0) < SET_ROWS_RETRY_SECS:
@@ -3433,6 +3443,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         # content-score ties; stable paths break the remaining ties.
         merged = sorted(keep.values(), key=lambda m: (
             notes.get(m[1]) != INCONCLUSIVE, m[0], route.get(m[1], 0), m[1]), reverse=True)
+    if view_pointers and not _CLAIM["text"]:
+        merged = raw_over_view(merged, view_pointers)
     if _CLAIM["text"] and to_check:
         # The answer filter is not a claim verdict. Let the bounded claim judge
         # inspect read evidence even when it does not affirm the statement.
