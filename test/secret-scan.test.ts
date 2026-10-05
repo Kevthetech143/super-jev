@@ -83,3 +83,11 @@ test('a spaced USPS tracking number is not a card; a card next to digits still i
     `4000 0566 5566 5556 ${trk}`, `tracking ${trk}, card 4000 0566 5566 5556`,
     'call 9100000001 4000 0566 5566 5556 thanks', 'ref 920000 4000 0566 5566 5556']) assert.equal(hasSecret(t), true, t);
 });
+
+test('engine uuids under ticket and attemptId are not scanned: a uuid4 ending in 12 digits reads as a card (R6 flake)', () => {
+  const u = 'd4b9227c-4460-444a-9183-059972976233';
+  assert.equal(hasSecret(u), true);
+  assert.equal(payloadHasSecret({ action: 'assist', attemptId: u, principal: 'me' }), false);
+  assert.equal(payloadHasSecret({ action: 'approve', ticket: u, principal: 'me' }), false);
+  assert.equal(payloadHasSecret({ action: 'approve', ticket: u, answer: 'card 4000056655665556' }), true);
+});

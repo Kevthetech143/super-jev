@@ -6,6 +6,10 @@
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
 - Heal state now survives a release. The auto-heal state (cooldowns, hourly limit, the per-principal scan lock, the per-set refresh locks and the log) lives in `<state root>/autoheal-state`, and the per-set prepare lock in `<state root>/locks`, where the state root is `SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`. They were inside the versioned release folder, so after every release the cooldowns started empty (a rescan storm) and the old release's still-running scan ran beside the new release's for the same principal. The prepare cache itself does not move. On the first run the old folder's cooldown files are copied over once (never a lock).
 
+## Unreleased
+
+- A saved answer or an assisted ask no longer fails at random with "memory request contains a secret; not sent". The engine's `ticket` and `attemptId` (uuid4) were scanned as user text, and about 1 uuid in 20,000 ends in 12 digits that read as a Luhn-valid card; both keys now count as tool-built fields (`MACHINE_KEYS`, Python and Node). This was the occasional CI failure of the R6 test. Tests: `skills/super-jev/tests/test_hash_false_hold.py`, `test/secret-scan.test.ts`.
+
 ## 1.0.128 — 2026-10-05
 
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.

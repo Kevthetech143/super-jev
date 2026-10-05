@@ -802,8 +802,8 @@ def redact_path_secrets(text: str) -> str:
     return PATH_SECRET_RE.sub(_sub, text or "")
 
 
-# Fields the tool builds itself (hashes, ids, pointer names); never user text, so never scanned.
-MACHINE_KEYS = frozenset({"sha256", "id", "sourceId", "rootId", "children", "pointer", "principals"})
+# Fields the tool builds itself (hashes, ids, pointer names, engine uuids); never user text, so never scanned.
+MACHINE_KEYS = frozenset({"sha256", "id", "sourceId", "rootId", "children", "pointer", "principals", "ticket", "attemptId"})
 
 
 def payload_has_secret(obj) -> bool:
