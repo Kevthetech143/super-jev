@@ -107,3 +107,81 @@ test('a 429/529 backoff ends when every caller has given up, with no further cal
   await new Promise(resolve => setTimeout(resolve, 1_300));
   assert.equal(sent, 1);
 });
+
+/** Answers a content check from the passage each question names: o_0 when its text holds the question word. */
+function reader(): Evaluator & { sent: Request[] } {
+  const sent: Request[] = [];
+  return {
+    sent,
+    async evaluate(request: Request) {
+      sent.push(request);
+      const state = request.state as { question: string; passages: Record<string, string> };
+      const answers = Object.fromEntries(Object.entries(request.questions).map(([key, q]) => {
+        const ref = /Classify passages\.([A-Za-z0-9_]+)\./.exec(q.instructions)![1]!;
+        const pick = state.passages[ref]!.includes(state.question) ? 'o_0' : 'o_none';
+        return [key, { type: 'choice', choice: pick, confidence: 0.9, probabilities: { o_0: pick === 'o_0' ? 0.9 : 0.1, o_none: pick === 'o_0' ? 0.1 : 0.9 } }];
+      }));
+      return { model: 'fake', answers } as never;
+    }
+  };
+}
+
+function file(name: string, texts: string[]) {
+  return {
+    version: 1 as const, structure: 'flat-files' as const, rootId: 'root' as const,
+    nodes: [{ id: 'root', label: name, description: name, children: texts.map((_, i) => `${name}_c${i}`) },
+      ...texts.map((text, i) => ({ id: `${name}_c${i}`, label: `${name} part ${i + 1}`, description: text, sourceId: `${name}:${i}` }))]
+  };
+}
+
+test('content checks of different files share one call, and each passage answers back to its own file', async () => {
+  const files = [file('one', ['nothing here', 'the gate code is alpha']), file('two', ['alpha is the gate code']), file('three', ['beta only', 'gamma only'])];
+  const alone = await Promise.all(files.map(f => navigate(f, 'alpha', { transport: reader(), mode: 'source-evidence' })));
+  const inner = reader();
+  const batched = new BatchingEvaluator(inner);
+  const together = await Promise.all(files.map(f => navigate(f, 'alpha', { transport: batched, mode: 'source-evidence' })));
+  const held = (r: { candidates: { sourceId: string; score: number }[] }) => r.candidates.filter(c => c.score > 0.5).map(c => c.sourceId);
+  assert.deepEqual(together.map(held), [['one:1'], ['two:0'], []]);
+  assert.deepEqual(together.map(r => r.candidates), alone.map(r => r.candidates));
+  assert.equal(inner.sent.length, 1);
+  const sent = inner.sent[0]!;
+  const state = sent.state as { question: string; passages: Record<string, string> };
+  assert.deepEqual(Object.keys(state.passages).sort(), ['b0_branch_0', 'b0_branch_1', 'b1_branch_0', 'b2_branch_0', 'b2_branch_1']);
+  assert.equal(state.question, 'alpha');
+  for (const [key, q] of Object.entries(sent.questions)) assert.ok(q.instructions.endsWith(`Classify passages.${key}.`), key);
+});
+
+test('a lone content check is sent unchanged', async () => {
+  const inner = reader();
+  await navigate(file('one', ['alpha']), 'alpha', { transport: new BatchingEvaluator(inner), mode: 'source-evidence' });
+  assert.deepEqual(Object.keys((inner.sent[0]!.state as { passages: object }).passages), ['branch_0']);
+  assert.match(inner.sent[0]!.questions.b0_branch_0!.instructions, /Classify passages\.branch_0\.$/);
+});
+
+test('packed passages are split under the token budget, and every file still answers', async () => {
+  const text = (w: string) => `${w} ${'filler words '.repeat(40)}`;
+  const files = Array.from({ length: 5 }, (_, i) => file(`f${i}`, [text(i % 2 ? 'alpha' : 'beta')]));
+  const solo = reader();
+  await navigate(files[0]!, 'alpha', { transport: solo, mode: 'source-evidence' });
+  const one = solo.sent[0]!;
+  // Room for two files' questions and passages in one call, not three.
+  const budget = estimateTokens(one.state) + 2 * (estimateTokens(one.questions.branch_0) + 20) + estimateTokens(one.state) + 10;
+  const inner = reader();
+  const batched = new BatchingEvaluator(inner, budget);
+  const out = await Promise.all(files.map(f => navigate(f, 'alpha', { transport: batched, mode: 'source-evidence' })));
+  assert.deepEqual(out.map(r => r.candidates.filter(c => c.score > 0.5).length), [0, 1, 0, 1, 0]);
+  assert.ok(inner.sent.length >= 2 && inner.sent.length < files.length, `sent ${inner.sent.length} calls`);
+  for (const r of inner.sent) {
+    const used = estimateTokens((({ passages: _p, ...rest }) => rest)(r.state as { passages: object })) + estimateTokens((r.state as { passages: object }).passages)
+      + Object.values(r.questions).reduce((sum, q) => sum + estimateTokens(q) + 20, 0);
+    assert.ok(Object.keys(r.questions).length === 1 || used <= budget + 10, `call of ${used} tokens over ${budget}`);
+  }
+});
+
+test('content checks for different questions are not packed together', async () => {
+  const inner = reader();
+  const batched = new BatchingEvaluator(inner);
+  await Promise.all([navigate(file('one', ['alpha']), 'alpha', { transport: batched, mode: 'source-evidence' }),
+    navigate(file('two', ['beta']), 'beta', { transport: batched, mode: 'source-evidence' })]);
+  assert.equal(inner.sent.length, 2);
+});
