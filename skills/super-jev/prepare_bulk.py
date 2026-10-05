@@ -161,7 +161,7 @@ def given_path(value) -> Path:
 
 
 sys.path.insert(0, str(HERE))
-from connect_checked import gate, gate_many, memory, watched_refusals  # noqa: E402
+from connect_checked import PaymentRequired, gate, gate_many, memory, watched_refusals  # noqa: E402
 import watched  # noqa: E402
 from watched import read_report_file, report_principals  # noqa: E402
 from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
@@ -193,7 +193,8 @@ def pack_groups(paths: list, sizes: dict) -> list:
 
 def gate_pack(items: list) -> dict:
     """items: [(path, description, label_claim or None)]. One judge call for the whole pack;
-    returns {path: (description verdict, label verdict or None)}, or {} when the call failed."""
+    returns {path: (description verdict, label verdict or None)}, or {} when the call failed. A failed
+    pack is retried as its two halves (a payment refusal is not retried: gate_many raises it)."""
     import tempfile
     parts, claims, slots = [], [], []
     for i, (p, desc, label_claim) in enumerate(items, 1):
@@ -210,6 +211,9 @@ def gate_pack(items: list) -> dict:
     finally:
         os.unlink(tmp)
     if not got:
+        if len(items) > 1:
+            half = (len(items) + 1) // 2
+            return {**gate_pack(items[:half]), **gate_pack(items[half:])}
         return {}
     out = {str(p): [None, None] for p, _d, _l in items}
     for (p, k), v in zip(slots, got):
@@ -1912,6 +1916,11 @@ def main() -> int:
             return 0
     try:
         return run_json(a) if a.json else run(a)
+    except PaymentRequired as e:
+        # nothing is written: the set stays as it was (stale) until the balance is topped up
+        fail(a.pointer or "refresh", str(e))
+        print(json.dumps(result_object()) if a.json else f"ERROR: {e}")
+        return 1
     finally:
         if lock:
             lock.close()
@@ -2234,7 +2243,14 @@ def run(a) -> int:
         elif packed.get(str(p)):
             v = packed[str(p)][0]
         else:
-            v = gate(desc, str(p))
+            # one call carries both claims; a failed call falls back to the description alone
+            lc = None if use_builtin else claim_sentence(validate_labels(d))
+            pair = gate_many([desc, lc], str(p)) if lc else None
+            if pair:
+                packed[str(p)] = (pair[0], pair[1])
+                v = pair[0]
+            else:
+                v = gate(desc, str(p))
         ok = v["state"] == "QUOTED" or (v["state"] == "SUPPORTED" and v.get("confidence", 0) >= a.line)
         if not ok:
             fb = {str(p): {"draft": desc, "verdict": v["state"], "confidence": v.get("confidence"), "reason": v.get("reason")}}
