@@ -40,6 +40,7 @@ MISS_SHAPE = 0.4     # score kept by a line without the kind of value the questi
 HAS_SHAPE = 1.25     # score boost for a line with it
 LENGTH_PULL = 0.25   # a paragraph longer than QUOTE_CHARS holds many words by chance: its score is
                      # divided by 1 + LENGTH_PULL * (its length - QUOTE_CHARS) / QUOTE_CHARS
+RANK_PULL = 0.1      # a passage from the search's file k (0 = first) has its score divided by 1 + RANK_PULL * k
 SECRET_MARGIN = 3    # lines either side of the quote scanned with it (toc_search.MARGIN)
 NOTE_SUFFIXES = (".md", ".markdown", ".txt")  # a quote is a sentence from a note, never a line of code
 MIN_PRESENT = 0.5    # share of the question's terms the files must hold somewhere, else none answers
@@ -61,15 +62,16 @@ _MONEY = r"[$€£]\s?\d[\d,.]*|\b\d[\d,.]*\s?(?:usd|dollars|eur|euros)\b"
 _CODE = r"`[^`]+`|\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9-]{4,}\b"
 
 # Question word -> the kind of value an answer holds. First match wins; no match asks for no shape.
+# when / who / where ask only when they lead the question ("what happens when X" asks for no date).
 SHAPES = (
     (re.compile(r"\b(?:price|cost|costs|fee|pay|paid|charge)\b"), _MONEY),
     (re.compile(r"\bphone\b|\bnumber to call\b|\bcall\b"), _PHONE),
-    (re.compile(r"\bwhen\b|\bwhat (?:date|day|year)\b"), _DATE + "|" + _TIME),
+    (re.compile(r"^\W*when\b|\bwhat (?:date|day|year)\b"), _DATE + "|" + _TIME),
     (re.compile(r"\bwhat time\b"), _TIME),
     (re.compile(r"\bhow (?:many|much|long|big|large|fast|old|often|far)\b|\b(?:what|which) (?:size|price|cost|port|version|percent)\b|"
                 r"\b(?:price|cost|size|limit|cap|count|length)\b"), _NUM),
-    (re.compile(r"\bwho\b|\bwhose\b|\bname\b"), _NAME),
-    (re.compile(r"\bwhere\b"), _PATH),
+    (re.compile(r"^\W*(?:who|whose)\b|\bname\b"), _NAME),
+    (re.compile(r"^\W*where\b"), _PATH),
     (re.compile(r"\b(?:part|model|serial) number\b|\bwhich (?:bulb|part|model|header|flag|file|command)\b|"
                 r"\bwhat (?:bulb|part|model|header|flag|file|command)\b"), _CODE + "|" + _NUM),
 )
@@ -83,7 +85,8 @@ _NOT_ANSWER = re.compile(r"^(?:see also\b|source:|sources:|<!--|---+$|```|\|?\s*
 # word. Not when "what" leads a verb ("what does", "what is"): those name no kind of thing.
 _FOCUS = re.compile(r"\b(?:which|what)\s+([a-z][a-z-]+)")
 _NOT_FOCUS = {"is", "are", "was", "were", "does", "do", "did", "can", "could", "should", "will", "would",
-              "has", "have", "had", "the", "a", "an", "of", "to", "in", "on", "it", "they", "we", "i", "you", "time"}
+              "has", "have", "had", "the", "a", "an", "of", "to", "in", "on", "it", "they", "we", "i", "you", "time",
+              "happens", "happened", "happen", "changed", "changes", "means", "made", "makes", "goes", "went"}
 
 
 def focus_of(question: str) -> str:
@@ -174,9 +177,17 @@ def lines_of(text: str):
     return keep
 
 
-def _values(text: str, shape) -> set:
-    """The values of the asked-for kind a line states ("x-api-key", "600 s"), lowercased."""
-    return {m.group(0).lower() for m in shape.finditer(text)} if shape else set()
+_VALUE = re.compile(r"`[^`]+`")
+
+
+def _values(text: str, shape, question: str) -> set:
+    """The answer-like values a line states, lowercased: the asked-for kind ("600 s") and any `code`
+    span. A value the question itself says is not an answer."""
+    found = {m.group(0).lower().strip("`") for m in _VALUE.finditer(text)}
+    if shape:
+        found |= {m.group(0).lower() for m in shape.finditer(text)}
+    q = question.lower()
+    return {v for v in found if v.strip() and v not in q}
 
 
 def pick(question: str, files: list, terms: list, read, secret=lambda s: False, trace=None) -> dict:
@@ -223,6 +234,7 @@ def pick(question: str, files: list, terms: list, read, secret=lambda s: False, 
     focus = focus_of(question)
     named = re.compile(rf"\b{re.escape(focus)}(?:s|es)?\b") if focus else None
     scored = []
+    rank = {f["path"]: i for i, f in reversed(list(enumerate(files)))}
     for path, n, t, low, ctx, has, near in cands:
         own = sum(weight[x] for x in has)
         near = sum(weight[x] for x in near)
@@ -232,6 +244,7 @@ def pick(question: str, files: list, terms: list, read, secret=lambda s: False, 
             continue
         score = cover * (HAS_SHAPE if shape and shape.search(t) else MISS_SHAPE if shape else 1.0)
         score /= 1 + LENGTH_PULL * max(0, len(t) - QUOTE_CHARS) / QUOTE_CHARS
+        score /= 1 + RANK_PULL * rank[path]  # the search's own order is evidence too
         scored.append((score, cover, path, n, t))
     if not scored:
         return {"found": False, "why": NOT_FOUND, "top": top}
@@ -244,7 +257,8 @@ def pick(question: str, files: list, terms: list, read, secret=lambda s: False, 
         return {"found": False, "why": NOT_FOUND, "top": top}
     if len(scored) > 1:
         second = scored[1]
-        same = bool(_values(best[4], shape) & _values(second[4], shape))
+        # the runner-up agrees when it is the same text (a copy of the note) or states the same value
+        same = best[4] == second[4] or bool(_values(best[4], shape, question) & _values(second[4], shape, question))
         if not same and best[0] - second[0] < MARGIN * best[0]:
             return {"found": False, "why": NOT_FOUND, "top": top}
     return {"found": True, "text": _window(best[4], terms, shape), "path": best[2], "line": best[3]}

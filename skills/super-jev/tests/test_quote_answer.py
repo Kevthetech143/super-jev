@@ -75,6 +75,35 @@ def test_two_files_stating_the_same_value_agree(tmp_path):
     assert q["found"] and "30 days" in q["text"]
 
 
+def test_a_copy_of_the_same_note_agrees_with_itself(tmp_path):
+    (tmp_path / "copy").mkdir()
+    text = "# Acme engine facts\n\n- License Apache-2.0 for the Acme engine.\n- Logs go to the engine folder.\n"
+    a, b = note(tmp_path, "facts.md", text), note(tmp_path, "copy/facts.md", text)
+    q = pick("which license does the Acme engine use?", a, b)
+    assert q["found"] and q["path"] == a and q["text"] == "License Apache-2.0 for the Acme engine."
+
+
+def test_lines_that_state_the_same_code_value_agree(tmp_path):
+    a = note(tmp_path, "a.md", "# Acme cli\n\n- The Acme cli user defaults to `guest` when ACME_USER is unset.\n")
+    b = note(tmp_path, "b.md", "# Acme cli errors\n\n- Wrong or unset ACME_USER means the cli user (default `guest`) sees nothing.\n")
+    q = pick("what user does the Acme cli use when ACME_USER is unset?", a, b)
+    assert q["found"] and "`guest`" in q["text"]
+
+
+def test_when_inside_a_question_asks_for_no_date(tmp_path):
+    p = note(tmp_path, "pump.md", "# Acme pump\n\n- When the Acme pump overheats it stops and blinks red.\n- Service it yearly.\n")
+    q = pick("what happens when the Acme pump overheats?", p)
+    assert q["found"] and q["text"] == "When the Acme pump overheats it stops and blinks red."
+
+
+def test_the_search_order_breaks_a_near_tie(tmp_path):
+    a = note(tmp_path, "audit.md", "# Acme audit\n\n- The Acme audit flags accounts nobody signed in to for a year.\n")
+    mid = note(tmp_path, "shop.md", "# Acme shop\n\n- The shop opens at nine.\n")
+    b = note(tmp_path, "ideas.md", "# Ideas\n\n- Acme audit idea: flags for stale accounts, tried once.\n")
+    q = pick("what does the Acme audit flag?", a, mid, b)  # the same words, a file two places lower
+    assert q["found"] and q["path"] == a
+
+
 def test_no_line_holds_the_asked_for_kind_of_value(tmp_path):
     p = note(tmp_path, "quirks.md", DAEMON)
     q = pick("who maintains the sync daemon?", p)  # no name anywhere: never quote a line without one
