@@ -8,7 +8,7 @@
 
 ## Unreleased
 
-- A saved answer or an assisted ask no longer fails at random with "memory request contains a secret; not sent". The engine's `ticket` and `attemptId` (uuid4) were scanned as user text, and about 1 uuid in 20,000 ends in 12 digits that read as a Luhn-valid card; both keys now count as tool-built fields (`MACHINE_KEYS`, Python and Node). This was the occasional CI failure of the R6 test. Tests: `skills/super-jev/tests/test_hash_false_hold.py`, `test/secret-scan.test.ts`.
+- A saved answer or an assisted ask no longer fails at random with "memory request contains a secret; not sent". The engine's `ticket` and `attemptId` (uuid4) were scanned as user text, and about 1 uuid in 7,700 (387 of 3,000,000 measured) ends in 12 digits that read as a Luhn-valid card; both keys now count as tool-built fields (`MACHINE_KEYS`, Python and Node). This was the occasional CI failure of the R6 test. Tests: `skills/super-jev/tests/test_hash_false_hold.py`, `test/secret-scan.test.ts`.
 
 ## 1.0.128 — 2026-10-05
 
