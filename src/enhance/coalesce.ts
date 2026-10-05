@@ -72,14 +72,14 @@ export class BatchingEvaluator implements Evaluator {
     }
     for (const items of groups.values()) {
       const stateTokens = estimateTokens(sharedState(items[0]!.request.state));
-      // First fit: each request joins the first batch it fits in, so one big request does not close a half-full batch.
-      const batches: { items: Pending[]; used: number }[] = [];
+      let batch: Pending[] = [];
+      let used = stateTokens;
       for (const item of items) {
-        const batch = batches.find(b => b.used + item.tokens <= this.budget);
-        if (batch) { batch.items.push(item); batch.used += item.tokens; }
-        else batches.push({ items: [item], used: stateTokens + item.tokens });
+        if (batch.length && used + item.tokens > this.budget) { void this.send(batch); batch = []; used = stateTokens; }
+        batch.push(item);
+        used += item.tokens;
       }
-      for (const batch of batches) void this.send(batch.items);
+      if (batch.length) void this.send(batch);
     }
   }
 
