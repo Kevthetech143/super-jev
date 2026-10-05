@@ -2045,6 +2045,7 @@ def edited_held(pointers: list, exclude=(), reads=None) -> dict:
 # per-principal file index (file_index.py) instead of hashing every file; only files it serves are sha-checked.
 INDEX_FILE = "index.sqlite"
 INDEX_STAMP = "index-sync.stamp"
+INDEX_LOCK = "index-update.lock"
 INDEX_MAX_AGE_SECS = 24 * 3600   # an index not synced for a day is stale: today's path runs
 INDEX_SPAWN_EVERY_SECS = 600     # detached updater after an ask, at most this often (sooner on a served mismatch)
 
@@ -2091,6 +2092,8 @@ def pointer_fallbacks(idx, allowed, gens) -> dict:
         c = cov.get(name)
         if c is None:
             out[name] = "not indexed"
+        elif c.get("fts_pending"):
+            out[name] = "index update running for it"
         elif c["stale"]:
             out[name] = "stale (files changed since its last refresh)"
         elif gens is not None and name in gens and c["generation"] != gens[name]:
@@ -2100,6 +2103,16 @@ def pointer_fallbacks(idx, allowed, gens) -> dict:
         elif c["entries"] and c["complete"] not in (1, 2):
             out[name] = "files missing from the index"
     return out
+
+def index_unusable(e) -> str:
+    """Why an index read failed, in the words the trace shows: a lock held by the updater is "busy" (the ask falls back
+    quietly), only a damaged file is "corrupt", anything else is named by its type."""
+    msg = str(e).lower()
+    if isinstance(e, sqlite3.OperationalError) and ("locked" in msg or "busy" in msg):
+        return "index busy (update running)"
+    if isinstance(e, sqlite3.DatabaseError) and ("malformed" in msg or "not a database" in msg):
+        return f"index corrupt ({type(e).__name__})"
+    return f"index unreadable ({type(e).__name__})"
 
 def index_panel(principal: str, sdir: Path):
     """(FileIndex, panel dict, None, fallbacks), or (None, None, why it cannot be used: missing / corrupt / empty / stale, {}).
@@ -2117,7 +2130,7 @@ def index_panel(principal: str, sdir: Path):
     except Exception as e:  # noqa: BLE001 -- sqlite3.DatabaseError and friends: today's path runs
         if idx:
             idx.close()
-        return None, None, f"index corrupt ({type(e).__name__})", {}
+        return None, None, index_unusable(e), {}
     why = ("index empty (never synced)" if not rows or synced is None else
            f"index stale (synced {int((time.time() - synced) / 3600)}h ago)" if time.time() - synced > INDEX_MAX_AGE_SECS else "")
     allowed = None if why else engine_visible(principal)
@@ -2133,7 +2146,7 @@ def index_panel(principal: str, sdir: Path):
         fb = pointer_fallbacks(idx, allowed, engine_generations())
     except Exception as e:  # noqa: BLE001 -- an index that cannot say what it holds is not used
         idx.close()
-        return None, None, f"index corrupt ({type(e).__name__})", {}
+        return None, None, index_unusable(e), {}
     return idx, (None if fb else {"pointers": rows}), None, fb
 
 def index_candidates(idx, pointers, exclude=()):
@@ -2234,6 +2247,7 @@ def index_after_ask(principal: str, sdir: Path) -> None:
     spawn_index_updater(principal)
 
 FTS_TF_CAP = 4  # most times a word is repeated in a file's FTS body (bm25 saturates anyway)
+FTS_COMMIT_EVERY = 200  # files the updater writes between commits (a stopped run keeps what it did; readers see it)
 FTS_K = 200  # files per shortlist (word bm25, TOC): a constant, so the re-score is O(K) at any corpus size
 
 def _label_key(entry: dict) -> str:
@@ -2241,12 +2255,12 @@ def _label_key(entry: dict) -> str:
 
 def index_fts_pass(idx, pointers: list, widx: dict, toc) -> int:
     """Updater only: keep the FTS5 table in step with the `files` rows. Only a file that is new, whose sha, pointer or
-    labels changed, is written; one that left the index is dropped. Marked ok only when every file got its rows.
+    labels changed, is written; one that left the index is dropped. Only the pointers being rewritten are marked
+    pending (the rest stay served), and the work is committed every FTS_COMMIT_EVERY files so a stopped run keeps it.
     Returns the number of files written."""
     if idx.fts_error:
         return 0
-    idx.fts_begin()
-    have, keep, wrote, complete = idx.fts_have(), set(), 0, True
+    have, keep, wrote, unfinished = idx.fts_have(), set(), 0, set()
     edited = {p for _ptr, p, _e in idx.edited_candidates(pointers)}
     for ptr, path, entry in index_candidates(idx, pointers):
         if path in edited:
@@ -2254,7 +2268,7 @@ def index_fts_pass(idx, pointers: list, widx: dict, toc) -> int:
         keep.add(path)
         sha, item = entry.get("sha256"), widx.get(path)
         if not _valid_item(item, sha):
-            complete = False  # bytes changed under the updater: the next run builds it
+            unfinished.add(ptr)  # bytes changed under the updater: the next run builds it
             continue
         lab = _label_key(entry)
         if have.get(path) == (sha, ptr, lab):
@@ -2271,13 +2285,12 @@ def index_fts_pass(idx, pointers: list, widx: dict, toc) -> int:
         idx.fts_put(path, ptr, person_of(path), sha, lab, body, tocw, len(item["passages"]),
                     sum(c[1] + htotal for c in item["passages"]), json.dumps(item), json.dumps(trow) if trow else None)
         wrote += 1
+        if wrote % FTS_COMMIT_EVERY == 0:
+            idx.db.commit()
     for path in set(have) - keep:
         idx.fts_drop(path)
         wrote += 1
-    if complete:
-        idx.fts_finish(WORD_INDEX_VERSION)
-    else:
-        idx.db.commit()
+    idx.fts_finish(WORD_INDEX_VERSION, unfinished)
     return wrote
 
 def _fts_q(tokens) -> str:
@@ -2327,7 +2340,25 @@ def fts_pick(idx, question: str, pointers: list, who, out_of_scope_fn):
 
 def index_sync(principal: str, sdir: Path) -> int:
     """The updater (connect, refresh, detached after an ask): list the pointers from the registry once, stat-diff
-    every indexed file (sha only what changed), and build the word-index items for new bytes. The only O(files) work."""
+    every indexed file (sha only what changed), and build the word-index items for new bytes. The only O(files) work.
+    One updater per principal: a second one finds the lock held and ends quietly (the running one does the work)."""
+    import fcntl
+    try:
+        sdir.mkdir(parents=True, exist_ok=True)
+        lock = open(sdir / INDEX_LOCK, "a")
+    except OSError:
+        return 0
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return 0
+    try:
+        return _index_sync(principal, sdir)
+    finally:
+        lock.close()  # closing the file releases the lock
+
+def _index_sync(principal: str, sdir: Path) -> int:
     from file_index import FileIndex
     panel = memory({"action": "panel", "principal": principal})
     rows = [r for r in panel.get("pointers", []) if isinstance(r, dict) and r.get("pointer")] if isinstance(panel, dict) else []
@@ -2335,50 +2366,53 @@ def index_sync(principal: str, sdir: Path) -> int:
         say(f"index update skipped: no pointer list ({panel.get('reason') or panel.get('status') or 'empty'})" if isinstance(panel, dict) else "index update skipped")
         return 1
     idx = FileIndex(principal, sdir / INDEX_FILE)
-    hashed, expected = 0, {}
-    idx.begin_round()  # sets sharing a root walk it once
-    views = {r["pointer"] for r in rows if r.get("viewOriginals")}
-    _STAGE["view_pointers"] = sorted(views)
-    load_local_rows(sdir, principal, [r["pointer"] for r in rows], {r["pointer"]: r.get("generation") for r in rows}, views)
-    for r in rows:
-        ptr = r["pointer"]
-        entries = load_cache_files(ptr)
-        if not entries:
-            continue
-        expected[ptr] = [p for p, e in entries.items() if isinstance(e, dict) and e.get("pass") and os.path.isfile(p)]
-        fresh = not str(r.get("snapshotStatus") or r.get("status") or "").startswith(("preparation-required", "refresh-required"))
-        if fresh and r.get("generation") is not None and idx.generation_of(ptr) not in (None, r.get("generation")):
-            idx.purge(ptr)  # the pointer was refreshed since: re-seed it from its new prepare-cache
-        roots = (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("roots")
-        hashed += idx.update(ptr, entries=entries, roots=roots)["hashed"]
-    idx.set_panel(rows)
-    idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by one and counts for both
-    wpath = sdir / WORD_INDEX_FILE
-    widx, dirty = _load_word_index(wpath), False
-    cands = list(idx.candidates([r["pointer"] for r in rows]))
-    dirty = _prune_word_index(widx, {p for _ptr, p, _e in cands})
-    for ptr, path, entry in cands:
-        if _valid_item(widx.get(path), entry.get("sha256")):
-            continue
-        got = read_sha(path, None)
-        if got and got[1] == entry.get("sha256"):
-            widx[path] = _index_item(got[0].decode("utf-8", "replace"), got[1], True)
-            dirty = True
-    if dirty:
-        _save_word_index(wpath, widx)
-    # TOC pages of new bytes, so the ask's TOC search finds them cached (it reads a file only on a miss).
-    toc = toc_search.TocCache(sdir / "toc-cache.json")
-    allc = idx.candidates([r["pointer"] for r in rows])
-    for ptr, path, entry in allc:
-        row = toc.rows.get(path)
-        if row and row.get("sha256") == entry.get("sha256"):
-            continue
-        got = read_sha(path, None)
-        if got and got[1] == entry.get("sha256"):
-            toc.get(path, got[1], lambda _p, raw=got[0]: clean_text(raw.decode("utf-8", "replace"), path))
-    toc.save({p for _ptr, p, _e in allc})
-    fts_changed = index_fts_pass(idx, [r["pointer"] for r in rows], widx, toc)
-    idx.close()
+    try:
+        hashed, expected = 0, {}
+        reports = {r["pointer"]: (auto_heal._report_for(r["pointer"], prepare_bulk.CACHE_DIR)[0] or {}).get("roots") for r in rows}
+        idx.begin_round([x for v in reports.values() for x in v or []])  # sets sharing a root walk it once; a root inside another is cut from its walk
+        views = {r["pointer"] for r in rows if r.get("viewOriginals")}
+        _STAGE["view_pointers"] = sorted(views)
+        load_local_rows(sdir, principal, [r["pointer"] for r in rows], {r["pointer"]: r.get("generation") for r in rows}, views)
+        for r in rows:
+            ptr = r["pointer"]
+            entries = load_cache_files(ptr)
+            if not entries:
+                continue
+            expected[ptr] = [p for p, e in entries.items() if isinstance(e, dict) and e.get("pass") and os.path.isfile(p)]
+            fresh = not str(r.get("snapshotStatus") or r.get("status") or "").startswith(("preparation-required", "refresh-required"))
+            if fresh and r.get("generation") is not None and idx.generation_of(ptr) not in (None, r.get("generation")):
+                idx.purge(ptr)  # the pointer was refreshed since: re-seed it from its new prepare-cache
+            roots = reports[ptr]
+            hashed += idx.update(ptr, entries=entries, roots=roots)["hashed"]
+        idx.set_panel(rows)
+        idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by one and counts for both
+        wpath = sdir / WORD_INDEX_FILE
+        widx, dirty = _load_word_index(wpath), False
+        cands = list(idx.candidates([r["pointer"] for r in rows]))
+        dirty = _prune_word_index(widx, {p for _ptr, p, _e in cands})
+        for ptr, path, entry in cands:
+            if _valid_item(widx.get(path), entry.get("sha256")):
+                continue
+            got = read_sha(path, None)
+            if got and got[1] == entry.get("sha256"):
+                widx[path] = _index_item(got[0].decode("utf-8", "replace"), got[1], True)
+                dirty = True
+        if dirty:
+            _save_word_index(wpath, widx)
+        # TOC pages of new bytes, so the ask's TOC search finds them cached (it reads a file only on a miss).
+        toc = toc_search.TocCache(sdir / "toc-cache.json")
+        allc = idx.candidates([r["pointer"] for r in rows])
+        for ptr, path, entry in allc:
+            row = toc.rows.get(path)
+            if row and row.get("sha256") == entry.get("sha256"):
+                continue
+            got = read_sha(path, None)
+            if got and got[1] == entry.get("sha256"):
+                toc.get(path, got[1], lambda _p, raw=got[0]: clean_text(raw.decode("utf-8", "replace"), path))
+        toc.save({p for _ptr, p, _e in allc})
+        fts_changed = index_fts_pass(idx, [r["pointer"] for r in rows], widx, toc)
+    finally:
+        idx.close()  # a stopped run drops its open transaction; what it committed stays
     print(f"index updated: {len(rows)} pointer(s), {hashed} file(s) hashed, {fts_changed} fts file(s) written")
     return 0
 

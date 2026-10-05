@@ -202,7 +202,7 @@ def _median_ask(tmp_path, monkeypatch, n, tag, reps=6):
         stale[str(f)] = {"sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "pass": True, "description": f.name, "question": ""}
     (cdir / "p9.json").write_text(json.dumps(stale))
     (cdir / "p9-report.json").write_text(json.dumps({"pointer": "p9", "principals": [PRINCIPAL], "roots": [str(notes / "p0")]}))
-    names = ["p9"] + names  # p9 is synced first: p0 keeps the shared rows
+    names = names + ["p9"]  # p9 is synced last: p0, first to reach the shared files, keeps their rows
     rig = Rig(monkeypatch, notes, names)
     sync(sdir)
     idx = FileIndex(PRINCIPAL, sdir / "index.sqlite")
@@ -288,7 +288,7 @@ def test_shared_file_with_owner_set_unsearched_is_still_a_candidate(tmp_path):
     sha = hashlib.sha256(f.read_bytes()).hexdigest()
     entries = {str(f): {"sha256": sha, "pass": True, "description": "d", "question": ""}}
     idx = FileIndex(PRINCIPAL, tmp_path / "index.sqlite")
-    for ptr in ("set-a", "set-b"):  # the row ends up owned by set-b
+    for ptr in ("set-b", "set-a"):  # the row stays with the set that reached it first: set-b
         idx.update(ptr, entries=entries)
     idx.set_panel([{"pointer": p, "snapshotStatus": "ready", "generation": 1} for p in ("set-a", "set-b")])
     idx.set_complete({"set-a": [str(f)], "set-b": [str(f)]})
@@ -311,7 +311,7 @@ def test_person_folders_of_a_pointer_borrowing_from_an_unsearched_set_come_from_
             shared[str(d / fname)] = cache[str(d / fname)] = {"sha256": hashlib.sha256((d / fname).read_bytes()).hexdigest(), "pass": True, "description": fname, "question": ""}
     (cdir / "p0.json").write_text(json.dumps(cache))
     (cdir / "p2.json").write_text(json.dumps(shared))  # p2 lists only the people files p0 owns
-    Rig(monkeypatch, notes, list(reversed(names)))  # p2 is synced before p0: p0 holds the rows
+    Rig(monkeypatch, notes, names)  # p0 is synced before p2: p0 holds the rows
     sync(sdir)
     idx = FileIndex(PRINCIPAL, sdir / "index.sqlite")
     cov = idx.coverage()
