@@ -3284,7 +3284,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # question; the content check still decides what is kept.
     reads = {}  # one read+sha pass shared by edited_held and word_search
     use_stat_memo(principal)  # ...and a stat-keyed memo across asks: an unchanged file is not re-read
-    icands, fitems, ftocs, fts_nums, fb_paths = None, None, None, None, set()
+    icands, fitems, ftocs, fts_nums, fb_paths, vouched = None, None, None, None, set(), set()
     if idx_read:
         try:
             # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
@@ -3311,13 +3311,29 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 fb_cands = fallback_candidates(idx_read, fb_ptrs, ix_ptrs, fb_out)
                 fb_paths = {c[1] for c in fb_cands}
                 icands = (icands or []) + fb_cands
+                if fts_nums and fb_cands:
+                    # A fallback file whose current sha still equals its reviewed sha and the index's stored sha uses the
+                    # stored word item and TOC page (no open, no rebuild). A changed or unindexed file is re-read as before.
+                    stored = {p: (it, tr) for _p, p, _e, it, tr in idx_read.fts_rows(fb_paths)}
+                    for _ptr, p, e in fb_cands:
+                        it, tr = stored.get(p, (None, None))
+                        if not (it or tr):
+                            continue
+                        sha = sha_of(p, reads)
+                        if sha is None or sha != e.get("sha256"):
+                            continue
+                        if _valid_item(it, sha):
+                            fitems[p] = it
+                            vouched.add(p)
+                        if isinstance(tr, dict) and tr.get("sha256") == sha:
+                            ftocs[p] = tr
                 if fts_nums:
                     fts_nums["local"] = set(fts_nums["local"]) | fb_paths  # scored with the shortlist, like the edited files
                 edited = edited_held(fb_ptrs, fb_out, reads)
         except sqlite3.Error as e:  # locked by the updater, damaged: today's path answers this ask
             idx_read, index_fb = index_failed(idx_read, e), {}
             icands = fitems = ftocs = fts_nums = None
-            fb_paths = set()
+            fb_paths, vouched = set(), set()
     if not idx_read:
         out_of_scope = {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)}
         edited = edited_held(search_pointers, out_of_scope, reads)  # once per searched set, not per search path
@@ -3325,7 +3341,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     toc_on = not _CLAIM["text"]
     found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
                         reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
-                        **({"candidates": icands, "read_paths": fb_paths} if idx_read else {}),
+                        **({"candidates": icands, "read_paths": fb_paths - vouched} if idx_read else {}),
                         **({"items": fitems, "fts": fts_nums} if fts_nums else {}),
                         **({"extra": set(edited["secret"]), "held_cover": held_cover} if edited["secret"] else {}))
     wpaths = {p: ptr for _, p, ptr in found}
