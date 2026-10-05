@@ -13,6 +13,8 @@ const TOKEN = new RegExp(PAT.token.replace('{PH}', PAT.placeholder), 'i');
 const GENERIC = new RegExp(PAT.generic, 'gi');
 const ISO_DATE = new RegExp(PAT.iso_date, 'g');
 const URL_RE = new RegExp(PAT.url, 'g');
+// Twin of Python UUID_RE: an RFC uuid (version 1-8, variant 8-b) is never a card.
+const UUID = new RegExp(PAT.uuid, 'g');
 const TRACKING = new RegExp(PAT.tracking, 'g');
 
 function entropy(s: string): number {
@@ -105,12 +107,12 @@ function* overlapping(source: RegExp, text: string): Generator<RegExpExecArray> 
   for (let m; (m = re.exec(text)); re.lastIndex = m.index + 1) yield m;
 }
 
-/** Twin of Python card_hit: a standalone 16-digit run or 15-digit Amex number (dates/URLs and whole USPS
+/** Twin of Python card_hit: a standalone 16-digit run or 15-digit Amex number (dates/URLs/uuids and whole USPS
  * tracking numbers scrubbed) that passes Luhn, or a 16-digit window after other digit groups (see nearOk) that
  * passes Luhn and starts with a card-network prefix, read with every check-digit-valid USPS run removed. Without Luhn
  * (non-ASCII digits folded to 0) any card-shaped run is held and no run is exempted as a tracking number. */
 function cardHit(text: string, checkLuhn: boolean): boolean {
-  text = text.replace(URL_RE, ' ').replace(ISO_DATE, ' ');
+  text = text.replace(URL_RE, ' ').replace(UUID, ' ').replace(ISO_DATE, ' ');
   if (!checkLuhn) return text.search(CARD) >= 0 || text.search(AMEX) >= 0;
   const plain = text.replace(TRACKING, (m) => uspsCheckOk(m) ? ' ' : m);
   text = text.replace(TRACKING, (m) => uspsTracking(m) ? ' ' : m);

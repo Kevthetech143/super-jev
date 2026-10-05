@@ -86,8 +86,34 @@ test('a spaced USPS tracking number is not a card; a card next to digits still i
 
 test('engine uuids under ticket and attemptId are not scanned: a uuid4 ending in 12 digits reads as a card (R6 flake)', () => {
   const u = 'd4b9227c-4460-444a-9183-059972976233';
-  assert.equal(hasSecret(u), true);
+  assert.equal(hasSecret(u), false); // the card check now scrubs uuids; the two keys stay skipped
   assert.equal(payloadHasSecret({ action: 'assist', attemptId: u, principal: 'me' }), false);
   assert.equal(payloadHasSecret({ action: 'approve', ticket: u, principal: 'me' }), false);
   assert.equal(payloadHasSecret({ action: 'approve', ticket: u, answer: 'card 4000056655665556' }), true);
+});
+
+test('a uuid is never a card; a card in uuid shape without the version/variant still is', async () => {
+  const { randomUUID, randomBytes } = await import('node:crypto');
+  // v7 (time-ordered): 48-bit ms timestamp from a fixed start, version 7, random bits, variant 10.
+  const v7 = (ms: number) => {
+    const b = randomBytes(16);
+    b.writeUIntBE(ms, 0, 6);
+    b[6] = 0x70 | (b[6] & 0x0f);
+    b[8] = 0x80 | (b[8] & 0x3f);
+    const h = b.toString('hex');
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  };
+  const v7s = Array.from({ length: 100_000 }, (_, i) => v7(1_759_600_000_000 + i * 37));
+  const fixed = ['d4b9227c-4460-444a-9183-059972976233', '81978559-1669-4329-9c4e-1b7f0a2d5e3c',
+    '80515908-3116-4877-a6c6-aa5f447edff1', '80515908-3116-4877-A6C6-AA5F447EDFF1'];
+  const uuids = Array.from({ length: 300_000 }, () => randomUUID());
+  assert.deepEqual([...fixed, ...uuids, ...v7s].filter(hasSecret), []);
+  const blob = JSON.stringify([...fixed, ...uuids.slice(0, 496)].map((id) => ({ id, status: 'ok' })), null, 1);
+  for (const t of [`what happened to job ${fixed[1]} yesterday?`, `/var/log/runs/${fixed[1]}/out.json`,
+    `runs/run-${fixed[0]}.log`, `attempt_${fixed[2]}_retry`, `what happened to job ${v7s[0]} yesterday?`,
+    `/var/log/runs/${v7s[1]}/out.json`, blob, JSON.stringify(v7s.slice(0, 500).map((id) => ({ id, status: 'ok' })), null, 1)]) assert.equal(hasSecret(t), false, t.slice(0, 80));
+  for (const t of ['4000056655665556', 'card 4000 0566 5566 5556', '5500-0000-0000-0004', 'order 1234 4000 0566 5566 5556',
+    'amex 3400-000000-00009 and card 4000 0566 5566 5556', 'amex 3400-000000-00009',
+    '40000566-5566-5556-0000-000000000000', '40000566-5566-0557-8000-000000000000',
+    `job ${fixed[1]} card 4000 0566 5566 5556`, `${fixed[0]} 4000056655665556`]) assert.equal(hasSecret(t), true, t);
 });

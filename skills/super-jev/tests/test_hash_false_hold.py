@@ -25,9 +25,10 @@ def test_real_cards_and_keys_still_held():
 
 
 def test_engine_uuids_in_ticket_and_attempt_id_never_held():
-    # A uuid4 whose last group is 12 digits reads as a card (4+12 digits, Luhn-valid): the R6 flake.
+    # A uuid4 whose last group is 12 digits read as a card (4+12 digits, Luhn-valid): the R6 flake. The card
+    # check now scrubs uuids (test_uuid_not_card.py); the two keys stay skipped as tool-built fields.
     u = "d4b9227c-4460-444a-9183-059972976233"
-    assert has_secret(u)  # the shape itself is what the card rule sees, so the two keys are skipped
+    assert not has_secret(u)
     assert not payload_has_secret({"action": "assist", "attemptId": u, "principal": "me"})
     assert not payload_has_secret({"action": "approve", "ticket": u, "principal": "me"})
     assert payload_has_secret({"action": "approve", "ticket": u, "answer": "card 4000056655665556"})
