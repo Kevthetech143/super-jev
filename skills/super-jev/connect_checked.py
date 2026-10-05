@@ -35,6 +35,16 @@ CEILING_MSG = f"exceeds {PROFILE.ceiling_text}"  # the gate's refusal text (the 
 KNOWN_VERDICTS = ("SUPPORTED", "NOT_SUPPORTED", "CONTRADICTED")
 
 
+class PaymentRequired(RuntimeError):
+    """The judge refused for payment (HTTP 402, e.g. an empty balance). Every retry would be refused
+    too, so callers stop the run rather than split, retry or fall back per file."""
+
+
+def _raise_if_unpaid(txt: str) -> None:
+    if re.search(r"\bHTTP 402\b", txt):
+        raise PaymentRequired("the judge refused the call for payment (HTTP 402); top up, then refresh again")
+
+
 def gate(description: str, path: str) -> dict:
     t = time.time()
     try:
@@ -43,6 +53,7 @@ def gate(description: str, path: str) -> dict:
     except ValueError as e:  # e.g. a null byte in the description; one bad file must not stop the rest
         return {"state": "ERROR", "reason": f"cannot check this file: {e}", "secs": round(time.time() - t, 1)}
     txt = r.stdout + r.stderr
+    _raise_if_unpaid(txt)
     secs = round(time.time() - t, 1)
     if CEILING_MSG in txt:
         return {"state": "UNCHECKED", "reason": f"over {PROFILE.window_tokens // 1000}k-token ceiling; split the file", "secs": secs}
@@ -67,6 +78,7 @@ def gate_many(claims: list, path: str):
     except ValueError:
         return None
     txt = r.stdout + r.stderr
+    _raise_if_unpaid(txt)
     secs = round(time.time() - t, 1)
     rows = {int(n): (v, float(c)) for n, v, c in re.findall(r"\bc(\d+)\s+(\S+)\s+([\d.]+)", txt)}
     out = []
