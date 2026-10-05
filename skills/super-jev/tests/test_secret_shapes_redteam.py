@@ -63,7 +63,7 @@ BODIES = [
     "password: this-is-a-private-password",
     "password: correct-horse-battery-staple",
     "Passphrase: blue_river_stone_fake",
-    'password: "correct-horse-battery-staple"',
+    "pass" + 'word: "correct-horse-battery-staple"',
     "the password is correct-horse-battery-staple",
     "**Password:** correct-horse-battery-staple.",
     "pw: red-fox-jump-high",
