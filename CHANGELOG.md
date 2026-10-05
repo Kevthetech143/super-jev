@@ -8,7 +8,12 @@
 
 ## Unreleased
 
+<<<<<<< HEAD
 - A background refresh no longer sends each file to the paid judge twice. When a combined content check (gate pack) fails it is retried as its two halves before any per-file call, and the per-file fallback sends the description and label claims in one call (11 files after a failed pack: 6 calls, was 24). A payment refusal (HTTP 402, an empty judge balance) stops the refresh at once with "top up, then refresh again": no split, no per-file retries, nothing written, so the set stays stale. Cause of the 2026-10-05 20:04 UTC pile-up: every judge call failed that hour (ledger exit 1 from 19:53 to 20:06, success from 20:07) while the balance was empty, and the per-file fallback then doubled each file. Test: `tests/test_gate_pack.py`.
+=======
+- A queued heal is no longer orphaned. A drain that stops on a queued set's cooldown or the hourly cap leaves it pending, and an ask whose own set only cools down started no drain, so nothing healed it. Such an ask now starts one drain for the principal's queue when no lock holder is left to drain it, for sets that are due and within the hourly cap only; a drain that cannot start puts the set on its retry timer, and a principal is reclaimed at most once per retry interval, so a drain that dies is not respawned by every ask. Each reclaim writes one `action: "reclaim"` line to `autoheal.log`. Test: `tests/test_auto_heal_reclaim.py`.
+- The test suite's session-end isolation check now compares the real `locks` and `autoheal-state` folders (names and mtimes) with a snapshot taken at session start, so a test that touches them fails the run even when the folders already exist; it only caught a newly created folder before.
+>>>>>>> origin/main
 
 ## 1.0.128 — 2026-10-05
 
