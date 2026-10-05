@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.124 — 2026-10-04
+
+- A file is hashed once per version: a stat-keyed memo shares one hash between the held-file check, the table-of-contents build and the engine snapshot, so repeated asks on a large set stop re-reading every file.
+- A reviewed view's sources are read from the source's own path when `originalPath` is absent, so local rows are built for those views too.
+- `prepare_bulk.py` saves drafts after every batch, resumes on retry, and falls back to the built-in writer for a batch whose reply is invalid JSON, so one bad batch no longer loses a large folder.
+- The terminal app finds the saved key file by the same rule as the key provider (`judges.key_file_path`, honoring `<KEY_ENV>_FILE`).
+- The prepare-cache follows `SUPERJEV_STATE_DIR`, including refresh and GitHub connect.
+
 ## 1.0.123 — 2026-10-04
 
 - Jev calls on a plain question no longer grow with the number of connected sets. Routing never asks Jev about a set: every set is found through local rows (its own cache, its split parent's cache, or rows built from its reviewed sources for a reviewed view or a manual note, kept per generation in `set-rows.json`). Only a set with no local rows at all is still asked, in one batched call of at most 10 sets, named in the trace as `routing_fallback`. The claim path is unchanged. Test: `tests/test_routing_fixed_calls.py`.
