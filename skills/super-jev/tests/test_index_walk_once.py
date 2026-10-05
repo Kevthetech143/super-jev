@@ -29,6 +29,7 @@ def _run(tmp_path, monkeypatch, n_sets, share):
         real = getattr(os, name)
         monkeypatch.setattr(os, name, (lambda r, n: lambda *a, **k: (calls.append(n), r(*a, **k))[1])(real, name))
     idx = FileIndex("t", tmp_path / "index.sqlite")
+    idx.begin_round()
     for ptr, ents in sets.items():
         idx.update(ptr, entries=ents, roots=[str(root)])
     idx.set_complete(expected)
