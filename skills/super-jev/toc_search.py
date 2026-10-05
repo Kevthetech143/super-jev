@@ -36,8 +36,8 @@ import judge_profile
 POOL_CAP = 150           # files shown to Jev at the pick step
 KEEP_FILES = 5           # files kept by Jev's pick
 KEEP_PARTS = 3           # parts per file kept by Jev
-BATCH_TOKENS = 20000     # one call's item text, under the judge window
-BATCH_ITEMS = 120
+BATCH_TOKENS = judge_profile.PROFILE.call_tokens  # one call's budget; the item text gets what the rest leaves
+BATCH_ITEMS = min(POOL_CAP, judge_profile.PROFILE.max_questions_per_call)  # a whole pick pool in one call
 PART_CHARS = 3500        # most text of one part the content check reads
 PAGE_CHARS = 500         # most text of one TOC page's detailed rows
 BIG_PAGE_CHARS = 1400    # a big file's page also names the parts that did not fit
@@ -342,10 +342,17 @@ def part_text(lines: list, s: int, e: int) -> str:
 def score_items(question: str, items: dict, instruction: str, purpose: str) -> dict:
     """{id: P(LIKELY)}: one Jev question per item, as few calls as fit the judge window.
     Raises on any failed batch: a step that did not finish is never read as "none"."""
+    # The judge refuses a call whose state plus longest question is over the budget, so the item
+    # text gets only what the question, purpose and instruction leave (as superjev.py _judge_room).
+    # Each text is counted as the judge client counts it: JSON-encoded, where a quote, backslash or
+    # newline is two bytes.
+    def sent(text):
+        return judge_profile.judge_tokens(json.dumps(text, ensure_ascii=False))
+    room = BATCH_TOKENS - sum(map(sent, (question, purpose, instruction))) - 200
     batches, cur, cost = [], [], 0
     for i in items:
-        t = judge_profile.judge_tokens(items[i]) + 40
-        if cur and (cost + t > BATCH_TOKENS or len(cur) >= BATCH_ITEMS):
+        t = sent(items[i]) + 40
+        if cur and (cost + t > room or len(cur) >= BATCH_ITEMS):
             batches.append(cur)
             cur, cost = [], 0
         cur.append(i)

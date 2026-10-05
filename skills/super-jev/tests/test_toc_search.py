@@ -164,6 +164,75 @@ def test_a_failed_judge_batch_raises_never_reads_as_none(monkeypatch):
         toc_search.score_items("q", {"a": "x"}, "i", "p")
 
 
+
+def test_a_whole_pick_pool_fits_one_call_and_each_item_is_judged_on_its_own(monkeypatch):
+    """The batch budget is the judge's per-call budget and the batch size the pick pool, read from the profile."""
+    assert toc_search.BATCH_TOKENS == toc_search.judge_profile.PROFILE.call_tokens
+    assert toc_search.BATCH_ITEMS == min(toc_search.POOL_CAP, toc_search.judge_profile.PROFILE.max_questions_per_call)
+    sent = []
+
+    def ask(state, qs, timeout=90):
+        sent.append(state)
+        return {"answers": {k: {"probabilities": {"LIKELY": 0.9 if "lantern" in state["items"][k] else 0.1}} for k in qs}}
+    monkeypatch.setattr(toc_search.judges, "ask", ask)
+    items = {f"f{i}": ("lantern page " if i % 3 == 0 else "kettle page ") + "row " * 40 for i in range(toc_search.POOL_CAP)}
+    got = toc_search.score_items("where is the lantern", items, "i", "p")
+    assert len(sent) == 1
+    assert got == {k: (0.9 if "lantern" in v else 0.1) for k, v in items.items()}
+
+
+def _judge_that_refuses_oversize(cap, sent):
+    """Answers like the judge, and refuses a call the way lib/jev_client.py does: state plus the
+    longest question over the per-call budget is TooBig."""
+    from judges.errors import TooBig
+
+    def ask(state, qs, timeout=90):
+        tokens = toc_search.judge_profile.judge_tokens
+        if tokens(state) + max(map(tokens, qs.values())) > cap:
+            raise TooBig("over the per-call budget")
+        sent.append(state)
+        return {"answers": {k: {"probabilities": {"LIKELY": 0.5}} for k in qs}}
+    return ask
+
+
+def _dense_pool():
+    head = lambda i: f"path/to/some/module_{i:03d}.py -- purpose: handles the thing number {i}\n"
+    rows = lambda i: "\n".join(f"  def part_{k:03d}_{i}(lines {k * 7 + 1}-{k * 7 + 6}) calls a,b,c called by d,e"
+                                for k in range(40))
+    return {f"f{i}": (head(i) + rows(i))[:1400 + len(head(i))] for i in range(toc_search.POOL_CAP)}
+
+
+def test_a_dense_pool_with_the_longest_question_never_goes_over_the_per_call_budget(monkeypatch):
+    sent = []
+    monkeypatch.setattr(toc_search.judges, "ask",
+                        _judge_that_refuses_oversize(toc_search.judge_profile.PROFILE.call_tokens, sent))
+    pool = _dense_pool()
+    got = toc_search.score_items("x" * 8000, pool, toc_search.L2, "choose the files that hold the answer")
+    assert set(got) == set(pool) and len(sent) > 1
+
+
+
+def test_quote_and_newline_heavy_pages_are_counted_as_sent_and_never_go_over(monkeypatch):
+    """The client counts the JSON-encoded state, where a quote or newline is two bytes."""
+    sent = []
+    monkeypatch.setattr(toc_search.judges, "ask",
+                        _judge_that_refuses_oversize(toc_search.judge_profile.PROFILE.call_tokens, sent))
+    pool = {f"f{i}": f"notes/page_{i:03d}.md\n" + "".join(f'## "Step {k}" of "{i}"\n"a" "b" "c" "d" "e" "f"\n'
+                                                           for k in range(40))[:1400] for i in range(toc_search.POOL_CAP)}
+    got = toc_search.score_items("x" * 8000, pool, toc_search.L2, "choose the files that hold the answer")
+    assert set(got) == set(pool)
+
+def test_on_a_small_window_judge_batches_shrink_to_fit(monkeypatch):
+    laya = toc_search.judge_profile.load("laya")
+    monkeypatch.setattr(toc_search, "BATCH_TOKENS", laya.call_tokens)
+    monkeypatch.setattr(toc_search, "BATCH_ITEMS", min(toc_search.POOL_CAP, laya.max_questions_per_call))
+    sent = []
+    monkeypatch.setattr(toc_search.judges, "ask", _judge_that_refuses_oversize(laya.call_tokens, sent))
+    pool = {f"f{i}": f"notes/page_{i:03d}.md -- purpose: page {i}\n" + "  a heading row\n" * 10 for i in range(12)}
+    got = toc_search.score_items("where is the lantern lit", pool, toc_search.L2, "choose the files that hold the answer")
+    assert set(got) == set(pool)
+    assert all(1 <= len(state["items"]) <= 2 for state in sent) and any(len(state["items"]) == 2 for state in sent)
+
 def test_a_big_files_page_names_every_part_that_did_not_fit():
     big = "\n".join(f"def part_{i:03d}():\n    return {i}\n" for i in range(160))
     toc = toc_search.build_toc("big.py", big)
