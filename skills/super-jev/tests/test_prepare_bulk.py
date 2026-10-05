@@ -1863,3 +1863,61 @@ def test_setup_tools_refuse_a_malformed_agent_name_before_any_path_is_built():
         with pytest.raises(argparse.ArgumentTypeError):
             pb.principal_name(bad)
     assert pb.principal_name("primary-helper") == "primary-helper"
+
+
+def _bulk_files(tmp_path, n):
+    root = tmp_path / "root"
+    root.mkdir()
+    for i in range(n):
+        (root / f"f{i}.md").write_text(f"# F{i}\nContent {i}.\n")
+    return root
+
+
+def test_invalid_json_batch_falls_back_to_builtin_and_rerun_keeps_finished_batches(tmp_path, monkeypatch, capsys):
+    root = _bulk_files(tmp_path, 4)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "SUPPORTED", "confidence": 0.9})
+    calls = []
+
+    def stub(items, model, feedback=None, command=None):
+        paths = [x["path"] for x in items]
+        calls.append(paths)
+        if any(p.endswith("f2.md") for p in paths):
+            raise pb.InvalidJSONError("writer returned invalid JSON after 2 attempts")
+        return {x["path"]: {"path": x["path"], "description": "Describes " + Path(x["path"]).stem + ".",
+                            "question": "Q?"} for x in items}
+
+    monkeypatch.setattr(pb, "writer", stub)
+    argv = base_argv(root, extra=["--no-connect", "--batch", "2"])
+    monkeypatch.setattr(sys, "argv", argv)
+    assert pb.main() == 0
+    out = capsys.readouterr().out
+    assert "builtin writer for 1 files in this batch only" in out
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    assert len(cache) == 4
+    assert cache[str(root / "f0.md")]["description"] == "Describes f0."
+    assert cache[str(root / "f2.md")]["description"].startswith("This file is titled")
+    assert cache[str(root / "f3.md")]["description"] == "Describes f3."
+
+    # Dead writer (non-JSON failure) mid-run: finished batches are saved, a retry skips them.
+    for f in root.glob("*.md"):
+        f.write_text(f.read_text() + "changed\n")
+    calls.clear()
+
+    def dying(items, model, feedback=None, command=None):
+        paths = [x["path"] for x in items]
+        calls.append(paths)
+        if any(p.endswith("f2.md") for p in paths):
+            raise pb.WriterError("writer exited with status 7")
+        return {x["path"]: {"path": x["path"], "description": "New " + Path(x["path"]).stem + ".", "question": "Q?"}
+                for x in items}
+
+    monkeypatch.setattr(pb, "writer", dying)
+    assert pb.main() == 1
+    assert (pb.CACHE_DIR / "my-records-drafts.json").is_file()
+    calls.clear()
+    monkeypatch.setattr(pb, "writer", stub)
+    assert pb.main() == 0
+    assert all(not p.endswith(("f0.md", "f1.md")) for c in calls for p in c)
+    assert not (pb.CACHE_DIR / "my-records-drafts.json").exists()
+    assert "resume: 2 drafts kept" in capsys.readouterr().out
