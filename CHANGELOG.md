@@ -1,14 +1,14 @@
 # Changelog
 
 
-## Unreleased
-
-- Heal state now survives a release. The auto-heal state (cooldowns, hourly limit, the per-principal scan lock, the per-set refresh locks and the log) lives in `<state root>/autoheal-state`, and the per-set prepare lock in `<state root>/locks`, where the state root is `SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`. They were inside the versioned release folder, so after every release the cooldowns started empty (a rescan storm) and the old release's still-running scan ran beside the new release's for the same principal. The prepare cache itself does not move. On the first run the old folder's cooldown files are copied over once (never a lock).
-
 ## 1.0.128 — 2026-10-05
 
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
 - Two refreshes of the same set no longer run at once: `prepare_bulk` takes a per-pointer lock in the prepare-cache and a second run for that pointer prints "refresh already running for <pointer>; skipping" and exits 0, so principals sharing a set cannot pile up refreshes; the skipping principal cools down as if it had refreshed. With `--json` the skip is one object, `{"skipped": true, "pointer": ..., "reason": "refresh-running"}`. The new-file scan also walks each report owner once per scan, not once per split part.
+
+## Unreleased
+
+- Heal state now survives a release. The auto-heal state (cooldowns, hourly limit, the per-principal scan lock, the per-set refresh locks and the log) lives in `<state root>/autoheal-state`, and the per-set prepare lock in `<state root>/locks`, where the state root is `SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`. They were inside the versioned release folder, so after every release the cooldowns started empty (a rescan storm) and the old release's still-running scan ran beside the new release's for the same principal. The prepare cache itself does not move. On the first run the old folder's cooldown files are copied over once (never a lock).
 
 ## 1.0.127 — 2026-10-05
 
