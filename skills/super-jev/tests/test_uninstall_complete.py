@@ -116,6 +116,27 @@ def test_autoheal_state_written_by_its_own_writers_is_removed(env, monkeypatch):
     assert not heal.exists() and not state.exists()
 
 
+def test_state_root_heal_folders_are_removed_and_a_user_file_there_stays(env):
+    state = made_state(env)
+    touch(state / "autoheal-state" / "autoheal.log")
+    touch(state / "autoheal-state" / "me.json")
+    touch(state / "autoheal-state" / ".me.scan-lock")
+    touch(state / "locks" / ".notes.prepare-lock")
+    touch(state / "locks" / "mine.txt")
+    assert setup.main(["--uninstall"]) == 0
+    assert not (state / "autoheal-state").exists()
+    assert not (state / "locks" / ".notes.prepare-lock").exists()
+    assert (state / "locks" / "mine.txt").exists()
+
+
+def test_state_root_heal_folders_alone_do_not_keep_the_state_root(env):
+    state = made_state(env)
+    touch(state / "locks" / ".notes.prepare-lock")
+    touch(state / "autoheal-state" / "autoheal.log")
+    assert setup.main(["--uninstall"]) == 0
+    assert not state.exists()
+
+
 # (o) the ledger folder: every name the call and catch ledgers write
 LEDGER_NAMES = ["calls.jsonl", "catches.jsonl", "catches.jsonl.lock", "catches.jsonl.tmp", "catch-cases.json",
                 "catch-cases.json.tmp", "signals.jsonl", "payloads/abc.json", "state/receipts-s1.jsonl",

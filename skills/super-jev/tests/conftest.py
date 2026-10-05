@@ -22,6 +22,40 @@ def _scrub_callers_settings():
 
 _scrub_callers_settings()
 
+# Heal state and prepare locks resolve to <state root> at import, and the scrub above leaves that the
+# real ~/.local/state/super-jev. A test must never write there: the fixture below points every loaded
+# copy at tmp, and the session-end check fails the run if the real folders appeared anyway.
+_REAL_HEAL_DIRS = [Path.home() / ".local/state/super-jev" / n for n in ("locks", "autoheal-state")]
+_HEAL_DIRS_BEFORE = [d.exists() for d in _REAL_HEAL_DIRS]
+_SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+@pytest.fixture(autouse=True)
+def _heal_state_in_tmp(monkeypatch, tmp_path):
+    import gc
+    import sys
+    import types
+    # importlib copies (spec_from_file_location) are not in sys.modules; find them by type, once.
+    if "mods" not in _heal_state_in_tmp.__dict__:
+        _heal_state_in_tmp.mods = [o for o in gc.get_objects() if isinstance(o, types.ModuleType)]
+    for mod in list(sys.modules.values()) + _heal_state_in_tmp.mods:
+        f = getattr(mod, "__file__", None)
+        if not f or not f.startswith(_SKILL_ROOT) or "/tests/" in f:
+            continue
+        if hasattr(mod, "LOCK_DIR"):
+            monkeypatch.setattr(mod, "LOCK_DIR", tmp_path / "heal-locks")
+        if hasattr(mod, "_OLD_STATE_DIR"):
+            heal = tmp_path / "heal-state"
+            monkeypatch.setattr(mod, "STATE_DIR", heal)
+            monkeypatch.setattr(mod, "LOG_PATH", heal / "autoheal.log")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    made = [str(d) for d, was in zip(_REAL_HEAL_DIRS, _HEAL_DIRS_BEFORE) if d.exists() and not was]
+    if made:
+        print(f"\nTEST ISOLATION BREACH: the run created {made} in the real state folder")
+        session.exitstatus = 1
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_toc: keeps the real TOC search (no replay of faked navigate candidates)")
     config.addinivalue_line("markers", "real_code_ask: uses the real fleet jev lib; skips when the lib file is absent")

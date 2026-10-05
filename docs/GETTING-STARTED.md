@@ -150,7 +150,7 @@ for `--writer builtin`). Pick the description writer:
 - **Where state lives:** per-principal logs and the memory config under `$SUPERJEV_STATE_DIR` or
   `~/.local/state/super-jev/<principal>/`. Preparation records land in the checkout:
   `skills/super-jev/prepare-cache/` (descriptions, reports and the recipe a refresh replays),
-  `skills/super-jev/ledger/` and `skills/super-jev/autoheal-state/` (see step 9).
+  and `skills/super-jev/ledger/`. Auto-heal state (cooldowns, locks, logs) and the refresh locks live under the state folder (`autoheal-state/` and `locks/`), so they survive a release (see step 9).
 
 ## 5. Ask your first question
 
@@ -253,7 +253,7 @@ caps how many refreshes it starts per hour. If a background refresh fails, the
 ask says `auto-heal: last refresh FAILED: <reason>`; run the refresh command
 printed on that line to see the error and refresh by hand. Auto-heal writes its locks,
 cooldowns and logs, which name your sets and files, to
-`skills/super-jev/autoheal-state/`. `SUPERJEV_NEW_FILE_SCAN=0` turns off the
+`autoheal-state/` and `locks/` under the state folder (`$SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`), not the release folder. `SUPERJEV_NEW_FILE_SCAN=0` turns off the
 scan that looks for new notes in connected folders; refreshing a changed set has
 no off switch.
 
@@ -264,7 +264,7 @@ python3 skills/super-jev/setup.py --uninstall
 ```
 
 Removes everything Super Jev wrote: the state folder (memory config, logs, pointers),
-`skills/super-jev/prepare-cache/`, `ledger/` and `autoheal-state/`, an older app's
+`skills/super-jev/prepare-cache/` and `ledger/`, an older app's
 config and the launcher if you installed it, and any `~/.claude/skills` links into this
 checkout. A file of yours that sits in one of those folders stays, and the output lists it.
 It keeps your key file (`$TYPESAFE_API_KEY_FILE`, else `~/.typesafe-api-key`; hooks, agents and the terminal app read it too); delete it

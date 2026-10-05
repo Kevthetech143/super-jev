@@ -55,6 +55,7 @@ OWNED = {
                "catch-cases.json.tmp", "signals.jsonl", "payloads", "state", "last", "calibration"),
     "autoheal-state": ("autoheal.log", "*.json", ".*.json.*", ".*.state-lock", ".*.lock-control", ".*.scan-lock", "*.lock",
                        ".*.lock.tmp.*", "*-last-refresh.log"),
+    "locks": (".*.prepare-lock",),
 }
 # install.sh writes the chat launcher with this marker line and an exec of its checkout
 LAUNCHER_MARKER = "# super-jev-installer"
@@ -299,7 +300,8 @@ def uninstall() -> int:
                 shutil.rmtree(child)
                 removed.append(str(child))
             elif child.is_dir() and not child.is_symlink():
-                _clear(child, "principal", removed, kept)
+                # <state>/autoheal-state/ and <state>/locks/ are shared by every release, not a principal's
+                _clear(child, child.name if child.name in ("autoheal-state", "locks") else "principal", removed, kept)
             else:
                 kept.append(str(child))
         if not kept:

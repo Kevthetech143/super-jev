@@ -10,10 +10,11 @@ run by hand. It also calls maybe_scan on every
 lookup: at most once per SCAN_SECS per principal, a detached scan finds files written into a
 connected folder since its connect (which never make a pointer stale) and heals those pointers.
 
-Bounds (state kept in autoheal-state/):
+Bounds (state kept in <state root>/autoheal-state/, not the release folder; the state root is
+$SUPERJEV_STATE_DIR or ~/.local/state/super-jev):
   - one refresh in flight at a time per principal+pointer (a lock file per principal+pointer, so a
     long refresh of one set never blocks the principal's other sets; every launch takes it first).
-    Across principals, prepare_bulk takes its own per-pointer lock (prepare-cache/.<pointer>.prepare-lock)
+    Across principals, prepare_bulk takes its own per-pointer lock (<state root>/locks/.<pointer>.prepare-lock)
     and a second run for the same pointer exits 0 without working (the skipping
     principal then cools down as if it had refreshed)
   - a pointer over the cap (or yielding to a waiting one) is queued; a refresh that finishes
