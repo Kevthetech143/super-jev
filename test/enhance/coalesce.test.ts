@@ -185,3 +185,20 @@ test('content checks for different questions are not packed together', async () 
     navigate(file('two', ['beta']), 'beta', { transport: batched, mode: 'source-evidence' })]);
   assert.equal(inner.sent.length, 2);
 });
+
+test('a big request does not close a half-full batch: a later small one still joins it', async () => {
+  const words = (n: number) => `alpha ${'filler '.repeat(n)}`;
+  const files = [file('mid', [words(300)]), file('big', [words(600)]), file('small', [words(10)])];
+  const solo = reader();
+  await navigate(files[0]!, 'alpha', { transport: solo, mode: 'source-evidence' });
+  const q = estimateTokens(solo.sent[0]!.questions.branch_0) + 20;
+  const shared = estimateTokens({ question: 'alpha', purpose: (solo.sent[0]!.state as { purpose: string }).purpose });
+  const size = (f: ReturnType<typeof file>) => q + estimateTokens({ branch_0: f.nodes[1]!.description });
+  // mid + small fit; mid + big and big + small do not.
+  const budget = shared + size(files[0]!) + size(files[2]!) + 5;
+  assert.ok(shared + size(files[1]!) + size(files[2]!) > budget);
+  const inner = reader();
+  const batched = new BatchingEvaluator(inner, budget);
+  await Promise.all(files.map(f => navigate(f, 'alpha', { transport: batched, mode: 'source-evidence' })));
+  assert.equal(inner.sent.length, 2);
+});
