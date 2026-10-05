@@ -241,3 +241,18 @@ def test_person_folders_from_the_index_equal_the_cache_scan(tmp_path, monkeypatc
     flag(monkeypatch, True)
     _rc, out = ask_it("what did my mom's clinic visit say", sdir, capsys)  # a person-scoped ask on the FTS path
     assert trace_stage(sdir)["fts"]["used"] is True and "/sam/" not in out
+
+
+def test_a_file_shared_by_two_sets_keeps_both_complete(tmp_path):
+    f = tmp_path / "shared.md"
+    f.write_text("# shared\nplain text\n")
+    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+    entries = {str(f): {"sha256": sha, "pass": True, "description": "d", "question": ""}}
+    idx = FileIndex(PRINCIPAL, tmp_path / "index.sqlite")
+    for ptr in ("set-a", "set-b"):  # the file is listed by both sets; the row is held by the last one updated
+        idx.update(ptr, entries=entries)
+    idx.set_panel([{"pointer": p, "snapshotStatus": "ready", "generation": 1} for p in ("set-a", "set-b")])
+    idx.set_complete({"set-a": [str(f)], "set-b": [str(f)]})
+    cov = idx.coverage()
+    assert sorted(c["complete"] for c in cov.values()) == [1, 2]  # one holds the row, the other counts it as held
+    assert ask.pointer_fallbacks(idx, {"set-a", "set-b"}, None) == {}
