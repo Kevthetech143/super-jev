@@ -60,3 +60,21 @@ def test_changed_files_ignores_a_held_entry_with_no_sha(tmp_path):
     f.write_text("x\n")
     assert rc.changed_files({"approved": []}, {str(f): {"pass": False}}) == []
     assert rc.changed_files({"approved": []}, {str(f): {"pass": False, "sha256": "0" * 64}}) == [str(f)]
+
+
+def test_held_edited_opens_no_cache_for_a_set_with_nothing_held_or_when_given_the_cache(tmp_path, monkeypatch):
+    f = tmp_path / "held.md"
+    f.write_text("edited\n")
+    cache = {str(f): {"pass": False, "sha256": "0" * 64}}
+    monkeypatch.setattr(ah.rc, "CACHE_DIR", tmp_path)
+    reads = []
+    real = ah.json.loads
+    (tmp_path / "a-report.json").write_text(json.dumps({"pointer": "a", "approved": []}))
+    (tmp_path / "b-report.json").write_text(json.dumps({"pointer": "b", "approved": [], "held": [[str(f), "low"]]}))
+    (tmp_path / "a.json").write_text(json.dumps(cache))
+    monkeypatch.setattr(ah.json, "loads", lambda t, *a, **k: reads.append(t) or real(t, *a, **k))
+    assert ah.held_edited("a") is False  # nothing held: only its small report was parsed
+    assert len(reads) == 1 and "0" * 64 not in reads[0]
+    reads.clear()
+    assert ah.held_edited("b", cache=cache) is True  # given the cache: no second parse of it
+    assert len(reads) == 1 and "0" * 64 not in reads[0]
