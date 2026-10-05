@@ -275,7 +275,7 @@ TABLE_NONVALUE_RE = re.compile(_PAT["table_nonvalue"], re.I | re.A)
 ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
 URL_RE = re.compile(_PAT["url"], re.A)
 # A uuid's digit groups can read as a Luhn-valid card (about 1 random uuid4 in 8,000), so an RFC uuid
-# (version 1-5, variant 8-b) is scrubbed before the card check too. The version and variant are required:
+# (version 1-8, so v7 time-ordered ids too; variant 8-b) is scrubbed before the card check too. The version and variant are required:
 # a card written in uuid shape without them ("40000566-5566-5556-0000-000000000000") is still held.
 UUID_RE = re.compile(_PAT["uuid"], re.A)
 # A spaced USPS tracking number (22 or 26 digits in groups of 4) starts with a card-shaped

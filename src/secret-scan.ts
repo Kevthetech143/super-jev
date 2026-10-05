@@ -13,7 +13,7 @@ const TOKEN = new RegExp(PAT.token.replace('{PH}', PAT.placeholder), 'i');
 const GENERIC = new RegExp(PAT.generic, 'gi');
 const ISO_DATE = new RegExp(PAT.iso_date, 'g');
 const URL_RE = new RegExp(PAT.url, 'g');
-// Twin of Python UUID_RE: an RFC uuid (version 1-5, variant 8-b) is never a card.
+// Twin of Python UUID_RE: an RFC uuid (version 1-8, variant 8-b) is never a card.
 const UUID = new RegExp(PAT.uuid, 'g');
 const TRACKING = new RegExp(PAT.tracking, 'g');
 

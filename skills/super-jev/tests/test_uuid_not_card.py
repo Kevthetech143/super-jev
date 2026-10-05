@@ -1,6 +1,6 @@
 """A uuid is never a card number. About 1 random uuid4 in 8,000 has digit groups that form a Luhn-valid
 16-digit run (mostly its first 8-4-4 window), so a uuid in a question, a uuid-named path or a log of uuids was
-held at random. An RFC uuid (version 1-5, variant 8-b) is now scrubbed before the card check, in Python and
+held at random. An RFC uuid (version 1-8, variant 8-b) is now scrubbed before the card check, in Python and
 Node alike; real cards, including one written in uuid shape without the version/variant, are still held.
 All data is made up. Needs node on PATH for the parity test.
 
@@ -23,16 +23,29 @@ from prepare_bulk import card_hit, has_secret  # noqa: E402
 
 _rng = random.Random(4)
 UUIDS = [str(uuid.UUID(int=_rng.getrandbits(128), version=4)) for _ in range(300_000)]
+
+
+def _v7(ms: int, rng: random.Random) -> str:
+    """A v7 (time-ordered) uuid: 48-bit ms timestamp, version 7, 12 random bits, variant 10, 62 random bits."""
+    return str(uuid.UUID(int=ms << 80 | 7 << 76 | rng.getrandbits(12) << 64 | 2 << 62 | rng.getrandbits(62)))
+
+
+_ms = 1_759_600_000_000  # a fixed 2025 timestamp, stepped forward like a log
+V7 = [_v7(_ms + i * 37 + _rng.randrange(37), _rng) for i in range(100_000)]
 # Known hits before the fix: last-window (9183-059972976233) and first-window (8-4-4 digits, Luhn-valid).
 FIXED = ["d4b9227c-4460-444a-9183-059972976233", "81978559-1669-4329-9c4e-1b7f0a2d5e3c",
          "80515908-3116-4877-a6c6-aa5f447edff1", "80515908-3116-4877-A6C6-AA5F447EDFF1"]
 BLOB = json.dumps([{"id": u, "status": "ok"} for u in FIXED + UUIDS[:496]], indent=1)
+BLOB_V7 = json.dumps([{"id": u, "status": "ok"} for u in V7[:500]], indent=1)
 NOT_HELD = [
     f"what happened to job {FIXED[1]} yesterday?",
     f"/var/log/runs/{FIXED[1]}/out.json",
     f"runs/run-{FIXED[0]}.log",
     f"attempt_{FIXED[2]}_retry",
+    f"what happened to job {V7[0]} yesterday?",
+    f"/var/log/runs/{V7[1]}/out.json",
     BLOB,
+    BLOB_V7,
 ]
 CARDS = [
     "4000056655665556",                                  # plain
@@ -49,7 +62,7 @@ CARDS = [
 
 
 def test_random_and_known_uuids_never_held():
-    assert [u for u in FIXED + UUIDS if has_secret(u)] == []
+    assert [u for u in FIXED + UUIDS + V7 if has_secret(u)] == []
 
 
 def test_uuid_in_prose_path_and_json_blob_not_held():
@@ -72,6 +85,6 @@ def _node(inputs):
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not on PATH")
 def test_python_and_node_agree():
-    inputs = FIXED + UUIDS[:20_000] + NOT_HELD + CARDS
+    inputs = FIXED + UUIDS[:20_000] + V7[:20_000] + NOT_HELD + CARDS
     py, js = [has_secret(s) for s in inputs], _node(inputs)
     assert [s for s, a, b in zip(inputs, py, js) if a != b] == []
