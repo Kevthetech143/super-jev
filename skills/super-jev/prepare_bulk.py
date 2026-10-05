@@ -113,7 +113,7 @@ Pipeline per run:
   Every connection is private (share_pointers.py refuses it) unless --shareable marks it for fleet-wide sharing;
   a refresh without the flag keeps the mark it had.
 Every run ends with one line, `CONNECTED n, HELD m, FAILED k`, and exits 0 only when m and k are 0
-(1 if anything failed, 3 if anything was held), so a run that left files out never reads as a complete connect.
+(1 if anything failed, 3 if anything was held; a file the judge scored under the line counts as held, a failed judge call as failed), so a run that left files out never reads as a complete connect.
 Exit 1 also means nothing was left to connect (every file failed or was held), and exit 2 means it refused.
 --json prints exactly one JSON object instead of the text (the same run, the same exit code): v 1 and
 {connected, held [{path, why}], failed [{path, why}], skipped [{kind, what, count, way_in}], refused {kind, why}}.
@@ -161,7 +161,7 @@ def given_path(value) -> Path:
 
 
 sys.path.insert(0, str(HERE))
-from connect_checked import PaymentRequired, gate, gate_many, memory, watched_refusals  # noqa: E402
+from connect_checked import KNOWN_VERDICTS, PaymentRequired, gate, gate_many, memory, watched_refusals  # noqa: E402
 import watched  # noqa: E402
 from watched import read_report_file, report_principals  # noqa: E402
 from judge_profile import PROFILE as JUDGE_PROFILE  # noqa: E402
@@ -2226,9 +2226,13 @@ def run(a) -> int:
             print(f"gate packs: {len(packed)} files checked in shared calls")
 
     exceptions, passing = [], []
+    low = []  # exceptions that are a real judge verdict (a low score), not a failed call: reported as held
 
-    def reject(p, why: str, plain: str) -> None:
+    def reject(p, why: str, plain: str, verdict: dict = None) -> None:
         exceptions.append((str(p), why))
+        if verdict and verdict.get("state") in KNOWN_VERDICTS:
+            low.append((str(p), plain))
+            return
         fail(p, plain)
 
     for p in todo:
@@ -2282,7 +2286,7 @@ def run(a) -> int:
                              "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
             print(f"  {v['state']:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
             reject(p, f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip(),
-                   f"the description check did not pass ({v['state']})")
+                   f"the description check did not pass ({v['state']})", v)
             continue
 
         # Stage 2 (only reached on a stage-1 pass): gate the label sentence alone. A miss here
@@ -2314,13 +2318,15 @@ def run(a) -> int:
     _record_written(cache_path)
     drafts_path.unlink(missing_ok=True)  # the cache now holds the result; the resume file is spent
 
-    print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
+    lowp = {p for p, _ in low}
+    print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions) - len(low)}  held: {len(held) + len(low)}")
     rerun = "python3 " + shlex.join(sys.argv)
+    hint = ("" if use_builtin else
+            " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)")
     for p, why in exceptions:
-        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})\n"
-              f"      to include it: check the file says what it should, then run: {rerun}"
-              + ("" if use_builtin else
-                 " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)"))
+        label = "HELD     " if p in lowp else "EXCEPTION"
+        print(f"  {label}  {relstr(p, roots)}  ({why})\n"
+              f"      to include it: check the file says what it should, then run: {rerun}" + hint)
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
         if "binary" not in why and "backup or credential-style" not in why:
@@ -2415,7 +2421,9 @@ def run(a) -> int:
     write_report(a.pointer, report)
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
     kick_index_updater(a.principals)
-    return connect_outcome(connected_n, held_n, len(exceptions) + failed_n)
+    # A low judge score is a verdict the run reached, like a held file: exit 3, listed in held. A failed call stays a failure.
+    _RESULT["held"] = list(_RESULT.get("held") or []) + low
+    return connect_outcome(connected_n, held_n + len(low), len(exceptions) - len(low) + failed_n)
 
 
 if __name__ == "__main__":

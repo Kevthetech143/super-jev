@@ -34,11 +34,18 @@ def sha(path: Path) -> str:
 
 
 def changed_files(report: dict, cache: dict) -> list[str]:
-    """Approved files that are missing or whose bytes differ from the cached prepare."""
+    """Approved files that are missing or whose bytes differ from the cached prepare, and files the judge
+    held (cache entry pass False) that were edited since: an unchanged one is not retried (no paid loop)."""
     out = []
     for f in report.get("approved", []):
         p, entry = Path(f), cache.get(f) or {}
         if not p.is_file() or sha(p) != entry.get("sha256"):
+            out.append(f)
+    for f, entry in cache.items():
+        if f in out or not isinstance(entry, dict) or entry.get("pass") is not False or f in report.get("approved", []):
+            continue
+        p = Path(f)
+        if p.is_file() and sha(p) != entry.get("sha256"):
             out.append(f)
     return out
 

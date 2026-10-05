@@ -375,7 +375,7 @@ def test_failing_draft_gets_one_retry_then_lands_in_exceptions_not_connected(tmp
     assert len(writer_calls) == 2  # initial batch draft + exactly one rewrite retry
     assert memory_calls == []      # connect_set stayed empty; memory is never invoked
     out = capsys.readouterr().out
-    assert "EXCEPTION" in out
+    assert "HELD" in out and "to include it" in out  # a low judge verdict reads as held, with the rerun hint
 
     cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
     assert cache[str(f)]["pass"] is False
