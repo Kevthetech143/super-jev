@@ -11,9 +11,10 @@ lookup: at most once per SCAN_SECS per principal, a detached scan finds files wr
 connected folder since its connect (which never make a pointer stale) and heals those pointers.
 
 Bounds (state kept in autoheal-state/):
-  - one refresh in flight at a time per pointer (a lock file per principal+pointer, so a long
-    refresh of one set never blocks the principal's other sets; every launch, refresh or
-    reconnect, takes it first, so a pointer is never run twice at once)
+  - one refresh in flight at a time per principal+pointer (a lock file per principal+pointer, so a
+    long refresh of one set never blocks the principal's other sets; every launch takes it first).
+    Across principals, prepare_bulk takes its own per-pointer lock (prepare-cache/.<pointer>.prepare-lock)
+    and a second run for the same pointer exits 0 without working
   - a pointer over the cap (or yielding to a waiting one) is queued; a refresh that finishes
     heals the queue one pointer at a time, oldest first, before it releases its lock (drain)
   - a cooldown per pointer (default 10 min) after a refresh that worked. An attempt that did
@@ -718,6 +719,7 @@ def scan(principal: str, pointers: list, cache_dir: Path = None) -> dict:
             continue
     known = set().union(*(rc.known_files(r) for r in reports if isinstance(r, dict)))
     out = {}
+    walked = set()
     for ptr in pointers:
         report, owner = _report_for(ptr, cache_dir)
         if not isinstance(report, dict):
@@ -729,8 +731,9 @@ def scan(principal: str, pointers: list, cache_dir: Path = None) -> dict:
                 print(line)
                 _log(principal=principal, pointer=ptr, action="scan-held", reason="report-unreadable", note=line)
             continue
-        if owner in out:
+        if owner in out or owner in walked:
             continue
+        walked.add(owner)
         notes = []
         try:
             added = rc.new_files(report, known, reports, notes=notes)

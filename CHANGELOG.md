@@ -9,6 +9,7 @@
 ## Unreleased
 
 - An ask never reconnects a stale set inline, so its time no longer grows with the number of stale sets (12 stale sets cost 139 s). A stale set is searched from its last prepared file list, or reported as refreshing; the heal starts in the background (`auto_heal.heal_in_background`, gated read-only before any spawn: no recipe, held and cooldown start nothing, the concurrency cap queues). Only a real start says "refreshing in the background; ask again in a minute"; a set with no recipe never claims a refresh.
+- Two refreshes of the same set no longer run at once: `prepare_bulk` takes a per-pointer lock in the prepare-cache and a second run for that pointer prints "refresh already running for <pointer>; skipping" and exits 0, so principals sharing a set cannot pile up refreshes. The new-file scan also walks each report owner once per scan, not once per split part.
 
 ## 1.0.126 — 2026-10-05
 
