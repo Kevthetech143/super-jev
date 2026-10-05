@@ -154,6 +154,7 @@ def connect(root: Path, state: Path, tmp: Path, env: dict) -> float:
     sys.path.insert(0, str(REPO / "experiments" / "verified-pointer-memory"))
     import prepare_bulk as pb
     pb.CACHE_DIR = tmp / "prepare-cache"
+    pb.LOCK_DIR = state / "locks"
     saved, argv = dict(os.environ), sys.argv
     os.environ.update(env)
     started = time.time()

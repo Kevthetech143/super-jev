@@ -10,10 +10,11 @@ run by hand. It also calls maybe_scan on every
 lookup: at most once per SCAN_SECS per principal, a detached scan finds files written into a
 connected folder since its connect (which never make a pointer stale) and heals those pointers.
 
-Bounds (state kept in autoheal-state/):
+Bounds (state kept in <state root>/autoheal-state/, not the release folder; the state root is
+$SUPERJEV_STATE_DIR or ~/.local/state/super-jev):
   - one refresh in flight at a time per principal+pointer (a lock file per principal+pointer, so a
     long refresh of one set never blocks the principal's other sets; every launch takes it first).
-    Across principals, prepare_bulk takes its own per-pointer lock (prepare-cache/.<pointer>.prepare-lock)
+    Across principals, prepare_bulk takes its own per-pointer lock (<state root>/locks/.<pointer>.prepare-lock)
     and a second run for the same pointer exits 0 without working (the skipping
     principal then cools down as if it had refreshed)
   - a pointer over the cap (or yielding to a waiting one) is queued; a refresh that finishes
@@ -42,6 +43,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -54,8 +56,26 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import refresh_changed as rc  # noqa: E402
 
-STATE_DIR = HERE / "autoheal-state"
+from dispatch import state_root  # noqa: E402
+
+# Heal state lives under the persistent state root, not the versioned release dir, so a release does not
+# reset cooldowns or let the old release's scan and locks run beside the new one's.
+STATE_DIR = state_root() / "autoheal-state"
+_OLD_STATE_DIR = HERE / "autoheal-state"
 LOG_PATH = STATE_DIR / "autoheal.log"
+
+
+def _migrate_old_state() -> None:
+    """First run after this change: carry the release dir's cooldowns over once (never a lock: its
+    refresh belongs to the old release). Skipped when the new folder exists; best effort."""
+    try:
+        if not STATE_DIR.exists() and _OLD_STATE_DIR.is_dir():
+            shutil.copytree(_OLD_STATE_DIR, STATE_DIR, ignore=shutil.ignore_patterns("*.lock", ".*.lock-control", ".*.scan-lock", ".*.state-lock"))
+    except OSError:
+        pass
+
+
+_migrate_old_state()
 
 COOLDOWN_SECS = 600       # 10 minutes per pointer, after a refresh that worked
 RETRY_SECS = 120          # wait after a failed/timed-out attempt (doubles per repeat, up to MAX_RETRY_SECS)

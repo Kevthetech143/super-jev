@@ -23,14 +23,15 @@ def test_a_second_refresh_for_a_locked_pointer_skips(tmp_path):
     report.write_text("{}")
     os.utime(report, (1_000_000, 1_000_000))
     env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp_path)}
-    with open(cache / ".xset.prepare-lock", "a") as fh:
+    (tmp_path / "locks").mkdir()
+    with open(tmp_path / "locks" / ".xset.prepare-lock", "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         r = subprocess.run([sys.executable, str(SKILL / "prepare_bulk.py"), "--refresh", "--pointer", "xset"],
                            env=env, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "refresh already running for xset; skipping" in r.stdout
     assert report.stat().st_mtime == 1_000_000
-    assert sorted(p.name for p in cache.iterdir()) == [".xset.prepare-lock", "xset-report.json"]
+    assert sorted(p.name for p in cache.iterdir()) == ["xset-report.json"]
 
 
 def test_b_scan_walks_each_owner_once(tmp_path, monkeypatch):
@@ -51,7 +52,8 @@ def test_b_scan_walks_each_owner_once(tmp_path, monkeypatch):
 def _locked_run(tmp_path, *args):
     cache = tmp_path / "prepare-cache"; cache.mkdir()
     env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp_path)}
-    with open(cache / ".xset.prepare-lock", "a") as fh:
+    (tmp_path / "locks").mkdir()
+    with open(tmp_path / "locks" / ".xset.prepare-lock", "a") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return subprocess.run([sys.executable, str(SKILL / "prepare_bulk.py"), "--pointer", "xset", *args],
                               env=env, capture_output=True, text=True, timeout=60)
