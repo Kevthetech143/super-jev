@@ -10,6 +10,10 @@
 - A saved answer or an assisted ask no longer fails at random with "memory request contains a secret; not sent". The engine's `ticket` and `attemptId` (uuid4) were scanned as user text, and about 1 uuid in 7,700 (387 of 3,000,000 measured) has digit groups that form a Luhn-valid 16-digit number; both keys now count as tool-built fields (`MACHINE_KEYS`, Python and Node). This was the occasional CI failure of the R6 test. Tests: `skills/super-jev/tests/test_hash_false_hold.py`, `test/secret-scan.test.ts`.
 - Fewer judge calls per ask: the table-of-contents file pick and part pick size their batches by the judge's per-call budget (`call_tokens` from `judge_profiles.json`) and the pick pool (capped by `max_questions_per_call`), so a whole pick pool fits one call. Test: `tests/test_toc_search.py`.
 
+## Unreleased
+
+- A crashed table-of-contents (TOC) stage is retried once, and no longer ends as a clean not-found. A payment refusal (HTTP 402) or a size refusal is not retried. If the retry also fails and nothing is found, the outcome is `error` (the same exit 3 a failed content check already gets) with "not found, but the contents check failed (<error>), so this may be a miss; ask again"; if files are confirmed the answer is unchanged and the trace's `toc` entry carries the error, `retried` and a note. Test: `skills/super-jev/tests/test_toc_retry.py`.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
