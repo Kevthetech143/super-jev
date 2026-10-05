@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.125 — 2026-10-05
+
+- File index (`SUPERJEV_INDEX`, still off by default): a file shared by two sets keeps both sets complete (#326).
+- File index: a fallback file reuses the index's stored word items and table-of-contents pages when its sha matches, so it is not read and split again (#329).
+- File index: the updater walks each root once per round instead of once per pointer (#330).
+
 ## 1.0.124 — 2026-10-04
 
 - A file is hashed once per version: a stat-keyed memo shares one hash between the held-file check, the table-of-contents build and the engine snapshot, so repeated asks on a large set stop re-reading every file.
