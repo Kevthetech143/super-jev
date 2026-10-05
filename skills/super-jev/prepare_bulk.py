@@ -219,6 +219,8 @@ def gate_pack(items: list) -> dict:
 from dispatch import state_root  # noqa: E402
 # An isolated run (SUPERJEV_STATE_DIR set) keeps its cache under that state root; default location unchanged.
 CACHE_DIR = state_root() / "prepare-cache" if os.environ.get("SUPERJEV_STATE_DIR") else HERE / "prepare-cache"
+# The per-pointer prepare lock is kept out of the release dir (the cache may live there), so an old and a new release exclude each other.
+LOCK_DIR = state_root() / "locks"
 # What one run found, for both printers: the text lines and --json read the same rows
 # (skipped, held, failed, refused, connected). main() clears it at the start of a run.
 _RESULT = {}
@@ -1898,8 +1900,8 @@ def main() -> int:
     lock = None
     if a.pointer and not (a.list or a.watch or a.unwatch):
         # one run per pointer at a time, whoever launched it; the kernel frees the lock if this process dies
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        lock = open(CACHE_DIR / f".{a.pointer}.prepare-lock", "a")
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        lock = open(LOCK_DIR / f".{a.pointer}.prepare-lock", "a")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
