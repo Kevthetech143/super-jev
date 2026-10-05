@@ -67,8 +67,8 @@ Pipeline per run:
      card/password-like patterns or over the size ceiling (250,000 bytes; a bigger note is held "too big, split it", never connected in sections) are HELD and never sent to the writer; a
      per-file reason (and, for the secret-pattern case, the matching line's pattern type and line number with
      all digits masked) is written to prepare-cache/<pointer>-held.txt for human review without opening files.
-     The card-number check ignores ISO dates and URLs first (a long numeric id in a URL, or a run of dates on
-     one line, must not trigger it); the password/api-key keyword check is never affected. A held file has
+     The card-number check ignores ISO dates, URLs and uuids first (a long numeric id in a URL, a uuid, or a run of
+     dates on one line, must not trigger it); the password/api-key keyword check is never affected. A held file has
      no override: remove or move the value, or split the note. A first connect
      (no cache yet) refuses above --max-files (default 250) total files, as a size guard. A --refresh of an
      already-cached pointer instead guards on files that actually need a writer call this run (unchanged
@@ -274,6 +274,10 @@ TABLE_NONVALUE_RE = re.compile(_PAT["table_nonvalue"], re.I | re.A)
 # always runs against the original, unscrubbed text.
 ISO_DATE_RE = re.compile(_PAT["iso_date"], re.A)
 URL_RE = re.compile(_PAT["url"], re.A)
+# A uuid's digit groups can read as a Luhn-valid card (about 1 random uuid4 in 8,000), so an RFC uuid
+# (version 1-8, so v7 time-ordered ids too; variant 8-b) is scrubbed before the card check too. The version and variant are required:
+# a card written in uuid shape without them ("40000566-5566-5556-0000-000000000000") is still held.
+UUID_RE = re.compile(_PAT["uuid"], re.A)
 # A spaced USPS tracking number (22 or 26 digits in groups of 4) starts with a card-shaped
 # 16-digit run, and about one in ten such numbers passes Luhn there by chance.
 # A whole run in USPS layout (TRACKING_RE: starts 91-95, groups of 4 then a final 2, one separator)
@@ -426,10 +430,10 @@ def _excluded(rel_posix: str, excludes: list) -> bool:
     return any(rel_posix == ex or rel_posix.startswith(ex + "/") for ex in excludes)
 
 
-def _scrub_dates_and_urls(text: str) -> str:
-    """Remove ISO-date and URL substrings before testing the card-number pattern, so a
-    long numeric id in a URL or a run of dates on one line cannot trigger a false hold."""
-    return ISO_DATE_RE.sub(" ", URL_RE.sub(" ", text))
+def _scrub_non_cards(text: str) -> str:
+    """Remove URL, uuid and ISO-date substrings before testing the card-number pattern, so a
+    long numeric id in a URL, a uuid or a run of dates on one line cannot trigger a false hold."""
+    return ISO_DATE_RE.sub(" ", UUID_RE.sub(" ", URL_RE.sub(" ", text)))
 
 
 def _entropy(s: str) -> float:
@@ -510,12 +514,12 @@ def _overlapping(rx, text: str):
 
 
 def card_hit(text: str, luhn: bool = True) -> bool:
-    """A standalone 16-digit run or 15-digit Amex number (dates/URLs and whole USPS tracking numbers scrubbed)
+    """A standalone 16-digit run or 15-digit Amex number (dates/URLs/uuids and whole USPS tracking numbers scrubbed)
     that passes the Luhn check, or a 16-digit window after other digit groups ("1234 4111 1111 1111 1111"; see
     _near_ok) that passes Luhn and starts with a card-network prefix; the later window is read with every
     check-digit-valid USPS run removed. luhn=False when the raw text had non-ASCII digits: normalizing folds them
     to 0, so their true value is lost, any card-shaped run is held and no run is exempted as a tracking number."""
-    text = CARD_SEP_RE.sub(" ", _scrub_dates_and_urls(text))
+    text = CARD_SEP_RE.sub(" ", _scrub_non_cards(text))
     if not luhn:
         return bool(CARD_RE.search(text) or AMEX_RE.search(text))
     plain = TRACKING_RE.sub(lambda m: " " if _usps_check_ok(m.group()) else m.group(), text)
@@ -574,7 +578,7 @@ def shape_hit(text: str) -> bool:
 
 def has_secret(text: str) -> bool:
     """Scans normalize_for_scan(text). Card-number check runs on the scrubbed text
-    (dates/URLs removed); the keyword and token checks run on the unscrubbed text."""
+    (dates/URLs/uuids removed); the keyword and token checks run on the unscrubbed text."""
     luhn = not NON_ASCII_DIGIT_RE.search(text)
     bare = normalize_for_scan(ZERO_WIDTH_RE.sub("", text)) if not text.isascii() else None
     text = normalize_for_scan(text)
