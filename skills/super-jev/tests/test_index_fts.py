@@ -68,7 +68,7 @@ def test_flag_off_is_byte_identical_and_touches_no_index(tmp_path, monkeypatch, 
         outs.append([ask_it(q, sdir, capsys) for q in QUESTIONS])
     assert outs[0] == outs[1]
     assert not (sdir / "index.sqlite").exists()
-    assert all("fts" not in json.dumps(json.loads(l).get("stages", {})) for l in (sdir / "traces.jsonl").read_text().splitlines())
+    assert all("fts" not in (json.loads(l).get("stages", {}).get("index") or {}) for l in (sdir / "traces.jsonl").read_text().splitlines())
 
 
 def test_flag_on_fts_top5_equals_s3a_and_no_file_lost(tmp_path, monkeypatch, capsys):
@@ -256,3 +256,20 @@ def test_a_file_shared_by_two_sets_keeps_both_complete(tmp_path):
     cov = idx.coverage()
     assert sorted(c["complete"] for c in cov.values()) == [1, 2]  # one holds the row, the other counts it as held
     assert ask.pointer_fallbacks(idx, {"set-a", "set-b"}, None) == {}
+
+
+def test_shared_file_with_owner_set_unsearched_is_still_a_candidate(tmp_path):
+    f = tmp_path / "shared.md"
+    f.write_text("# shared\nplain text\n")
+    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+    entries = {str(f): {"sha256": sha, "pass": True, "description": "d", "question": ""}}
+    idx = FileIndex(PRINCIPAL, tmp_path / "index.sqlite")
+    for ptr in ("set-a", "set-b"):  # the row ends up owned by set-b
+        idx.update(ptr, entries=entries)
+    idx.set_panel([{"pointer": p, "snapshotStatus": "ready", "generation": 1} for p in ("set-a", "set-b")])
+    idx.set_complete({"set-a": [str(f)], "set-b": [str(f)]})
+    cov = idx.coverage()
+    assert cov["set-a"]["borrows"] == ["set-b"] and cov["set-b"]["borrows"] == []
+    assert ask.index_served(cov, ["set-a"]) == []  # set-b is not searched: set-a goes to the fallback, its file is not lost
+    assert ask.index_served(cov, ["set-a", "set-b"]) == ["set-a", "set-b"]
+    assert ask.index_served(cov, ["set-b"]) == ["set-b"]

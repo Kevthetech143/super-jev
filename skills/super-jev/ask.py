@@ -2151,6 +2151,16 @@ def index_failed(idx, error):
     _STAGE["index"].update({"used": False, "fallback": f"index read failed ({type(error).__name__}: {str(error)[:60]})"})
     return None
 
+def index_served(cov, ptrs) -> list:
+    """The pointers the index may answer for in this ask: completeness borrowed from a set that is not searched
+    here (or is itself a fallback) is not completeness, so a pointer leaning on one goes to today's path."""
+    ptrs = list(ptrs)
+    while True:
+        keep = [p for p in ptrs if all(o in ptrs for o in cov.get(p, {}).get("borrows", []))]
+        if keep == ptrs:
+            return keep
+        ptrs = keep
+
 def fallback_candidates(idx, ptrs, ix_ptrs, exclude=()):
     """candidate_files() for the pointers the index does not hold (today's path, from their prepare-cache), minus the files
     the index already serves under a pointer it does hold. Returns [(pointer, path, entry)]."""
@@ -3276,7 +3286,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
             # are found by the updater, or at read below for the files actually served.
             ix_ptrs = [p for p in search_pointers if p not in index_fb]
-            fb_ptrs = [p for p in search_pointers if p in index_fb]
+            ix_ptrs = index_served(idx_read.coverage(), ix_ptrs)
+            fb_ptrs = [p for p in search_pointers if p not in ix_ptrs]
             picked, fwhy = fts_pick(idx_read, question, ix_ptrs, who, other_person) if ix_ptrs else (None, "the index holds none of the searched pointers")
             if picked:
                 icands, fitems, ftocs, fts_nums, ftrace = picked
