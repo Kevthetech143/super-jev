@@ -49,6 +49,13 @@
       before any verdict prints the OUTCOME line an ordinary ask prints, first.
       Only exit 0 passes.
 
+  ask.py --principal AGENT --quote "question"
+      Off by default. After the same search, one more line, made with no model call:
+      Answer: "the line, quoted word for word"  -- FILE line N, picked from the files
+      found, or "I found related files but no line that answers this. Top file: FILE".
+      With --json (--json --quote "question") the object carries the same as `quote`:
+      {text, path, line} or {why, top?}. The files are still the evidence: read them.
+
   ask.py --principal AGENT --json REQUEST
       For a program (the terminal app) instead of a person. REQUEST is a question, one
       --claim "statement", --status, --approve or --miss; any other mode (--add,
@@ -206,6 +213,7 @@ import judges  # noqa: E402
 import toc_search  # noqa: E402
 import judge_profile  # noqa: E402
 import refresh_changed  # noqa: E402
+import quote_answer  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -701,6 +709,19 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
         if text := line_text(path, n):
             row["text"] = text
     return row
+
+
+def quote_for(question: str, files: list, leans_none: bool = False) -> dict:
+    """--quote: one line from the ask's files that answers, word for word, or why none does
+    (quote_answer.pick; no model call). The listwise check leaning to none of the files means none."""
+    if leans_none and files:
+        return {"found": False, "why": quote_answer.NOT_FOUND, "top": files[0]["path"]}
+    def read(path):  # the quote and the lines around it get the secret scan, not the whole file (fast)
+        try:
+            return Path(path).read_text(errors="replace")
+        except OSError:
+            return None
+    return quote_answer.pick(question, files, query_terms(question), read, has_secret)
 
 
 def show_file(f: dict) -> None:
@@ -4870,11 +4891,29 @@ def json_refusal(a: list) -> str:
         return "--json checks one statement at a time: use --claim STATEMENT once"
     return ""
 
+QUOTE_REFUSED = "--quote goes with a question only (not with another --flag)"
+
+def quote_request(a: list):
+    """(question, rest of the request) when it starts with --quote, else (None, a). The question is the
+    words after it, read as text mode reads them; another --flag after it is refused (question "")."""
+    if a[:1] != ["--quote"]:
+        return None, a
+    rest = a[1:]
+    if rest[:1] == ["--"]:
+        return " ".join(rest[1:]), rest
+    if not rest or rest[0].startswith("--"):
+        return "", rest
+    return " ".join(rest), rest
+
 def run_json(principal: str, a: list) -> int:
     """--json: do the request exactly as text mode does, with its output held back, then print one
     JSON object from the same result (contract C1, v: 1) and return the same exit code."""
     _RESULT.clear()
     buf, crash = io.StringIO(), None
+    quote, a = quote_request(a)
+    if quote == "":
+        print(json.dumps({"v": 1, "outcome": "not-supported", "why": QUOTE_REFUSED, "next": "rephrase"}))
+        return 2
     try:
         with contextlib.redirect_stdout(buf):
             rc = _dispatch(principal, a, as_json=True)
@@ -4894,6 +4933,9 @@ def run_json(principal: str, a: list) -> int:
             _done("error" if crash or rc != 2 else "not-supported", lines[0] if lines else "no result", "",
                   "rephrase" if rc == 2 and not crash else "none")
         out = {k: v for k, v in _RESULT.items() if v and k != "cmd"}
+        if quote and not crash and "files" in _RESULT:
+            q = quote_for(quote, _RESULT.get("files") or [], bool(_RESULT.get("leans_none")))
+            out["quote"] = {k: q[k] for k in ("text", "path", "line", "why", "top") if q.get(k)}
         if out.get("files"):
             out["files"] = [{k: v for k, v in f.items() if k not in _FILE_PRIVATE} for f in out["files"]]
     print(json.dumps({"v": 1, **out}))
@@ -4903,7 +4945,14 @@ def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
     if a[:1] == ["--json"]:  # only a leading flag: after `--`, or inside a question, it is just words
         return run_json(principal, a[1:])
-    return _dispatch(principal, a)
+    quote, a = quote_request(a)
+    if quote == "":
+        print(QUOTE_REFUSED)
+        return 2
+    rc = _dispatch(principal, a)
+    if quote and "files" in _RESULT:
+        print(quote_answer.render(quote_for(quote, _RESULT.get("files") or [], bool(_RESULT.get("leans_none")))))
+    return rc
 
 def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
     if not sys.argv[1:] or sys.argv[1:] == ["--help"]:  # asking for the usage, not missing anything
