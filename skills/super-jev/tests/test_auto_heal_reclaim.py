@@ -91,3 +91,29 @@ def test_a_drain_that_cannot_start_waits_its_retry_timer(tmp_path, monkeypatch):
     assert ah._wait_secs(ah._load_state("agent"), "stuck", time.time()) > 0
     ah.heal_in_background("asked", "agent")  # not picked again while its retry timer runs
     assert [e["result"] for e in _reclaims()] == ["failed"]
+
+
+def _kill_drain():
+    """The started drain died: its lock names a gone pid (and is too old to be a live holder)."""
+    ah._lock_path("agent", "stuck").write_text(
+        json.dumps({"pid": 999999, "ts": time.time() - ah.LOCK_STALE_SECS - 1, "token": "gone", "drain": True}))
+
+
+def test_a_drain_that_dies_is_not_respawned_within_retry_secs(tmp_path, monkeypatch):
+    calls = _orphan(tmp_path, monkeypatch)
+    ah.heal_in_background("asked", "agent")
+    assert len(_drains(calls)) == 1
+    _kill_drain()
+    ah.heal_in_background("asked", "agent")
+    assert len(_drains(calls)) == 1 and len(_reclaims()) == 1
+
+
+def test_a_dead_drain_is_reclaimed_again_after_retry_secs(tmp_path, monkeypatch):
+    calls = _orphan(tmp_path, monkeypatch)
+    ah.heal_in_background("asked", "agent")
+    _kill_drain()
+    with ah._state_txn("agent") as state:
+        state["reclaimed"] = time.time() - ah.RETRY_SECS - 1
+    ah.heal_in_background("asked", "agent")
+    assert [c[2:5] for c in _drains(calls)] == [["--drain", "agent", "stuck"]] * 2
+    assert "gone" not in ah._lock_path("agent", "stuck").read_text()  # the dead holder's lock was taken over

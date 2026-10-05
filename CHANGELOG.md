@@ -8,7 +8,7 @@
 
 ## Unreleased
 
-- A queued heal is no longer orphaned. A drain that stops on a queued set's cooldown or the hourly cap leaves it pending, and an ask whose own set only cools down started no drain, so nothing healed it. Such an ask now starts one drain for the principal's queue when no lock holder is left to drain it, for sets that are due and within the hourly cap only; a drain that cannot start puts the set on its retry timer. Each reclaim writes one `action: "reclaim"` line to `autoheal.log`. Test: `tests/test_auto_heal_reclaim.py`.
+- A queued heal is no longer orphaned. A drain that stops on a queued set's cooldown or the hourly cap leaves it pending, and an ask whose own set only cools down started no drain, so nothing healed it. Such an ask now starts one drain for the principal's queue when no lock holder is left to drain it, for sets that are due and within the hourly cap only; a drain that cannot start puts the set on its retry timer, and a principal is reclaimed at most once per retry interval, so a drain that dies is not respawned by every ask. Each reclaim writes one `action: "reclaim"` line to `autoheal.log`. Test: `tests/test_auto_heal_reclaim.py`.
 
 ## 1.0.128 — 2026-10-05
 

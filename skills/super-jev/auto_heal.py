@@ -686,20 +686,25 @@ def _reclaim(principal: str) -> None:
     """Start a drain for this principal's queue when nothing holds a lock to drain it: a drain
     that stopped on a queued set's cooldown or the hourly cap left it pending, and an ask whose
     own set only cools down starts none. Only sets that could run now (due, and a counted kind
-    within the cap); one drain at most, since it takes the first such set's lock. A drain that
-    cannot start puts that set on its retry timer, so the next ask does not pick it again."""
+    within the cap); one drain at most, since it takes the first such set's lock, and one reclaim
+    per principal per RETRY_SECS, so a drain that dies (or leaves its set queued) is not
+    respawned by every ask. A drain that cannot start puts that set on its retry timer."""
     now, token, head = time.time(), "", ""
     with _state_txn(principal) as state:
+        if now - state.get("reclaimed", 0) < RETRY_SECS:
+            return
         slots = MAX_PER_HOUR - len([t for t in state["attempts"] if now - t < 3600])
         ready = sorted((v.get("ts", 0), p) for p, v in state["pending"].items()
                        if _wait_secs(state, p, now) <= 0 and (v.get("kind") not in ("refresh", "new") or slots > 0))
         if ready and not any(_lock_holder_alive(lock) for lock in STATE_DIR.glob(f"{principal}.*.lock")):
             head = ready[0][1]
             token = _acquire_lock(principal, head)
+            if token:
+                state["reclaimed"] = now
     if not token:
         return
     try:
-        _spawn_detached(_drain_cmd(principal, head, token))
+        _name_child(principal, head, token, _spawn_detached(_drain_cmd(principal, head, token)))
         result = "started"
     except OSError:
         _release_lock(principal, head, token)
