@@ -68,7 +68,7 @@ def test_flag_off_is_byte_identical_and_touches_no_index(tmp_path, monkeypatch, 
         outs.append([ask_it(q, sdir, capsys) for q in QUESTIONS])
     assert outs[0] == outs[1]
     assert not (sdir / "index.sqlite").exists()
-    assert all("fts" not in json.dumps(json.loads(l).get("stages", {})) for l in (sdir / "traces.jsonl").read_text().splitlines())
+    assert all("fts" not in (json.loads(l).get("stages", {}).get("index") or {}) for l in (sdir / "traces.jsonl").read_text().splitlines())
 
 
 def test_flag_on_fts_top5_equals_s3a_and_no_file_lost(tmp_path, monkeypatch, capsys):
@@ -241,3 +241,67 @@ def test_person_folders_from_the_index_equal_the_cache_scan(tmp_path, monkeypatc
     flag(monkeypatch, True)
     _rc, out = ask_it("what did my mom's clinic visit say", sdir, capsys)  # a person-scoped ask on the FTS path
     assert trace_stage(sdir)["fts"]["used"] is True and "/sam/" not in out
+
+
+def test_a_file_shared_by_two_sets_keeps_both_complete(tmp_path):
+    f = tmp_path / "shared.md"
+    f.write_text("# shared\nplain text\n")
+    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+    entries = {str(f): {"sha256": sha, "pass": True, "description": "d", "question": ""}}
+    idx = FileIndex(PRINCIPAL, tmp_path / "index.sqlite")
+    for ptr in ("set-a", "set-b"):  # the file is listed by both sets; the row is held by the last one updated
+        idx.update(ptr, entries=entries)
+    idx.set_panel([{"pointer": p, "snapshotStatus": "ready", "generation": 1} for p in ("set-a", "set-b")])
+    idx.set_complete({"set-a": [str(f)], "set-b": [str(f)]})
+    cov = idx.coverage()
+    assert sorted(c["complete"] for c in cov.values()) == [1, 2]  # one holds the row, the other counts it as held
+    assert ask.pointer_fallbacks(idx, {"set-a", "set-b"}, None) == {}
+
+
+def test_shared_file_with_owner_set_unsearched_is_still_a_candidate(tmp_path):
+    f = tmp_path / "shared.md"
+    f.write_text("# shared\nplain text\n")
+    sha = hashlib.sha256(f.read_bytes()).hexdigest()
+    entries = {str(f): {"sha256": sha, "pass": True, "description": "d", "question": ""}}
+    idx = FileIndex(PRINCIPAL, tmp_path / "index.sqlite")
+    for ptr in ("set-a", "set-b"):  # the row ends up owned by set-b
+        idx.update(ptr, entries=entries)
+    idx.set_panel([{"pointer": p, "snapshotStatus": "ready", "generation": 1} for p in ("set-a", "set-b")])
+    idx.set_complete({"set-a": [str(f)], "set-b": [str(f)]})
+    cov = idx.coverage()
+    assert cov["set-a"]["borrows"] == ["set-b"] and cov["set-b"]["borrows"] == []
+    assert ask.index_served(cov, ["set-a"]) == []  # set-b is not searched: set-a goes to the fallback, its file is not lost
+    assert ask.index_served(cov, ["set-a", "set-b"]) == ["set-a", "set-b"]
+    assert ask.index_served(cov, ["set-b"]) == ["set-b"]
+
+
+def test_person_folders_of_a_pointer_borrowing_from_an_unsearched_set_come_from_its_cache(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 30)
+    cdir = ask.prepare_bulk.CACHE_DIR
+    cache, shared = json.loads((cdir / "p0.json").read_text()), {}
+    for who, rel in (("nora", "Relation: mother"), ("sam", "Relation: brother")):
+        d = notes / "p0" / "agents" / "global" / "documents" / who
+        d.mkdir(parents=True)
+        for fname, text in (("profile.md", f"# profile\n{rel}\n"), ("visits.md", f"# visits\n{who} saw a clinic\n")):
+            (d / fname).write_text(text)
+            shared[str(d / fname)] = cache[str(d / fname)] = {"sha256": hashlib.sha256((d / fname).read_bytes()).hexdigest(), "pass": True, "description": fname, "question": ""}
+    (cdir / "p0.json").write_text(json.dumps(cache))
+    (cdir / "p2.json").write_text(json.dumps(shared))  # p2 lists only the people files p0 owns
+    Rig(monkeypatch, notes, list(reversed(names)))  # p2 is synced before p0: p0 holds the rows
+    sync(sdir)
+    idx = FileIndex(PRINCIPAL, sdir / "index.sqlite")
+    cov = idx.coverage()
+    assert cov["p2"]["complete"] == 2 and cov["p2"]["borrows"] == ["p0"]
+    want = {"nora": {"mother"}, "sam": {"brother"}}
+    assert ask.people(["p2"]) == want
+    served = ask.index_served(cov, ["p2"])  # p0 is not searched: p2 is not served by the index
+    assert served == []
+    assert idx.person_paths(served) == []  # so the index cannot supply p2's person folders
+    assert ask.people(["p2"], idx.person_paths(["p2"])) != want  # the profile rows are held by p0: the index alone misses the relations
+    Rig(monkeypatch, notes, ["p2"])  # only p2 is searched in this ask
+    flag(monkeypatch, True)
+    seen, real = [], ask.people
+    monkeypatch.setattr(ask, "people", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
+    _rc, out = ask_it("what did my mom's clinic visit say", sdir, capsys)
+    assert seen and seen[-1] == want  # the ask itself resolved the people from p2's cache, not the index alone
+    assert "/sam/" not in out

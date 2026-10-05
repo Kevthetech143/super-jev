@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, s
     sha256 TEXT, pass INTEGER, reviewed_sha TEXT);
 CREATE TABLE IF NOT EXISTS toc(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFAULT 0, roots TEXT, checked_at REAL,
-    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0, entries INTEGER, complete INTEGER);
+    status TEXT, generation TEXT, views TEXT, listed INTEGER DEFAULT 0, entries INTEGER, complete INTEGER, borrows TEXT);
 -- stat memo for files seen but never ingested (held, edited, new, unreviewed): so they are not re-hashed
 CREATE TABLE IF NOT EXISTS seen(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
     sha256 TEXT, reason TEXT, reviewed_sha TEXT);
@@ -139,7 +139,7 @@ class FileIndex:
         except sqlite3.Error as e:  # no FTS5 / no contentless delete in this sqlite: the ask runs the S3a path
             self.fts_error = f"{type(e).__name__}: {str(e)[:80]}"
         have = {r[1] for r in self.db.execute("PRAGMA table_info(pointers)")}
-        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0"), ("entries", "INTEGER"), ("complete", "INTEGER")):
+        for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0"), ("entries", "INTEGER"), ("complete", "INTEGER"), ("borrows", "TEXT")):
             if col not in have:  # an index made by the first version: add the read-path columns
                 self.db.execute(f"ALTER TABLE pointers ADD COLUMN {col} {typ}")
 
@@ -279,21 +279,29 @@ class FileIndex:
 
     def set_complete(self, expected: dict) -> None:
         """Updater: per pointer, 1 when every reviewed file of its prepare-cache that still exists is held by the index
-        under THIS pointer (a `files` row, or `seen` as edited / held), else 0. `expected`: {pointer: [paths]}."""
+        (a `files` row, or `seen` as edited / held) under ANY pointer: a path has one row, so a file two sets list is
+        held by one of them and counts as held for both. `expected`: {pointer: [paths]}."""
+        have = {r[0] for r in self.db.execute("SELECT path FROM files")}
+        have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE reason IN ('edited','held')")}
+        own = {r[0]: r[1] for r in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer")}
+        owner = {r[0]: r[1] for r in self.db.execute("SELECT path,pointer FROM seen WHERE reason IN ('edited','held')")}
+        owner.update({r[0]: r[1] for r in self.db.execute("SELECT path,pointer FROM files")})
         for ptr, paths in expected.items():
-            have = {r[0] for r in self.db.execute("SELECT path FROM files WHERE pointer=?", (ptr,))}
-            have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE pointer=? AND reason IN ('edited','held')", (ptr,))}
-            self.db.execute("UPDATE pointers SET complete=? WHERE pointer=?", (1 if all(p in have for p in paths) else 0, ptr))
+            # 2: complete, but every file is held under another set (this set owns no rows)
+            done = 0 if not all(p in have for p in paths) else (1 if own.get(ptr) or not paths else 2)
+            # the other pointers whose rows this pointer's completeness leans on: they must be searched in the same ask
+            borrows = sorted({owner[p] for p in paths if owner.get(p) not in (None, ptr)})
+            self.db.execute("UPDATE pointers SET complete=?, borrows=? WHERE pointer=?", (done, json.dumps(borrows), ptr))
         self.db.commit()
 
     def coverage(self) -> dict:
         """{pointer: {"stale", "status", "generation", "entries", "files", "complete"}} for every listed pointer:
         what the ask needs to decide, pointer by pointer, whether the index holds it completely and currently."""
         out = {}
-        for name, stale, status, gen, entries, complete in self.db.execute(
-                "SELECT pointer,stale,status,generation,entries,complete FROM pointers WHERE listed=1"):
+        for name, stale, status, gen, entries, complete, borrows in self.db.execute(
+                "SELECT pointer,stale,status,generation,entries,complete,borrows FROM pointers WHERE listed=1"):
             out[name] = {"stale": bool(stale), "status": status or "", "generation": json.loads(gen) if gen else None,
-                         "entries": entries, "complete": complete}
+                         "entries": entries, "complete": complete, "borrows": json.loads(borrows) if borrows else []}
         for name, n in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer"):
             if name in out:
                 out[name]["files"] = n

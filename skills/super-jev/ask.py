@@ -2094,9 +2094,9 @@ def pointer_fallbacks(idx, allowed, gens) -> dict:
             out[name] = "stale (files changed since its last refresh)"
         elif gens is not None and name in gens and c["generation"] != gens[name]:
             out[name] = "generation mismatch (index holds an older refresh)"
-        elif c["entries"] and not c["files"]:
+        elif c["entries"] and not c["files"] and c["complete"] != 2:
             out[name] = f"0 files indexed ({c['entries']} in its catalog)"
-        elif c["entries"] and c["complete"] != 1:
+        elif c["entries"] and c["complete"] not in (1, 2):
             out[name] = "files missing from the index"
     return out
 
@@ -2150,6 +2150,16 @@ def index_failed(idx, error):
         pass
     _STAGE["index"].update({"used": False, "fallback": f"index read failed ({type(error).__name__}: {str(error)[:60]})"})
     return None
+
+def index_served(cov, ptrs) -> list:
+    """The pointers the index may answer for in this ask: completeness borrowed from a set that is not searched
+    here (or is itself a fallback) is not completeness, so a pointer leaning on one goes to today's path."""
+    ptrs = list(ptrs)
+    while True:
+        keep = [p for p in ptrs if all(o in ptrs for o in cov.get(p, {}).get("borrows", []))]
+        if keep == ptrs:
+            return keep
+        ptrs = keep
 
 def fallback_candidates(idx, ptrs, ix_ptrs, exclude=()):
     """candidate_files() for the pointers the index does not hold (today's path, from their prepare-cache), minus the files
@@ -2340,7 +2350,7 @@ def index_sync(principal: str, sdir: Path) -> int:
         roots = (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("roots")
         hashed += idx.update(ptr, entries=entries, roots=roots)["hashed"]
     idx.set_panel(rows)
-    idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by the last one
+    idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by one and counts for both
     wpath = sdir / WORD_INDEX_FILE
     widx, dirty = _load_word_index(wpath), False
     cands = list(idx.candidates([r["pointer"] for r in rows]))
@@ -3010,8 +3020,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # another person's records, and a pointer holding only theirs is not asked.
     try:
         fts_ready = bool(idx_read and idx_read.fts_usable(WORD_INDEX_VERSION)[0])
-        folks = people(pointers, idx_read.person_paths([p for p in pointers if p not in index_fb])
-                       + [p for ptr in pointers if ptr in index_fb for p in load_cache_files(ptr)]) if fts_ready else people(pointers)
+        if fts_ready:
+            served = index_served(idx_read.coverage(), [p for p in pointers if p not in index_fb])
+            folks = people(pointers, idx_read.person_paths(served)
+                           + [p for ptr in pointers if ptr not in served for p in load_cache_files(ptr)])
+        else:
+            folks = people(pointers)
     except sqlite3.Error as e:
         idx_read, index_fb, fts_ready = index_failed(idx_read, e), {}, False
         folks = people(pointers)
@@ -3276,7 +3290,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
             # are found by the updater, or at read below for the files actually served.
             ix_ptrs = [p for p in search_pointers if p not in index_fb]
-            fb_ptrs = [p for p in search_pointers if p in index_fb]
+            ix_ptrs = index_served(idx_read.coverage(), ix_ptrs)
+            fb_ptrs = [p for p in search_pointers if p not in ix_ptrs]
             picked, fwhy = fts_pick(idx_read, question, ix_ptrs, who, other_person) if ix_ptrs else (None, "the index holds none of the searched pointers")
             if picked:
                 icands, fitems, ftocs, fts_nums, ftrace = picked
