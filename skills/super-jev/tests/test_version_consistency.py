@@ -20,7 +20,7 @@ def test_lock_matches_package_json():
 
 
 def test_top_changelog_entry_is_the_version():
-    top = re.search(r"^## (?!Unreleased)(\S+)", (ROOT / "CHANGELOG.md").read_text(), re.M)  # an Unreleased entry may sit above
+    top = re.search(r"^## (\S+)", (ROOT / "CHANGELOG.md").read_text(), re.M)
     assert top and top.group(1) == _version()
 
 

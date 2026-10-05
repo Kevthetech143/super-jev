@@ -2368,8 +2368,8 @@ def _index_sync(principal: str, sdir: Path) -> int:
     idx = FileIndex(principal, sdir / INDEX_FILE)
     try:
         hashed, expected = 0, {}
-        reports = {r["pointer"]: (auto_heal._report_for(r["pointer"], prepare_bulk.CACHE_DIR)[0] or {}).get("roots") for r in rows}
-        idx.begin_round([x for v in reports.values() for x in v or []])  # sets sharing a root walk it once; a root inside another is cut from its walk
+        reports = {r["pointer"]: auto_heal._report_for(r["pointer"], prepare_bulk.CACHE_DIR)[0] or {} for r in rows}
+        idx.begin_round([x for v in reports.values() for x in v.get("roots") or []])  # sets sharing a root walk it once; a root inside another is cut from its walk
         views = {r["pointer"] for r in rows if r.get("viewOriginals")}
         _STAGE["view_pointers"] = sorted(views)
         load_local_rows(sdir, principal, [r["pointer"] for r in rows], {r["pointer"]: r.get("generation") for r in rows}, views)
@@ -2382,8 +2382,8 @@ def _index_sync(principal: str, sdir: Path) -> int:
             fresh = not str(r.get("snapshotStatus") or r.get("status") or "").startswith(("preparation-required", "refresh-required"))
             if fresh and r.get("generation") is not None and idx.generation_of(ptr) not in (None, r.get("generation")):
                 idx.purge(ptr)  # the pointer was refreshed since: re-seed it from its new prepare-cache
-            roots = reports[ptr]
-            hashed += idx.update(ptr, entries=entries, roots=roots)["hashed"]
+            roots = reports[ptr].get("roots")
+            hashed += idx.update(ptr, entries=entries, roots=roots, excludes=reports[ptr].get("excludes"))["hashed"]
         idx.set_panel(rows)
         idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by one and counts for both
         wpath = sdir / WORD_INDEX_FILE

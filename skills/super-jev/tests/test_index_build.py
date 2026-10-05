@@ -299,3 +299,38 @@ def test_vbigram_word_index_exists(tmp_path):
     assert "vbigram_word" in names
     plan = " ".join(str(r) for r in idx.db.execute("EXPLAIN QUERY PLAN DELETE FROM vbigram WHERE word='x'"))
     assert "vbigram_word" in plan
+
+
+# (d) the updater's walk applies the excludes connect recorded
+
+def test_updater_never_walks_or_stats_an_excluded_folder(tmp_path, monkeypatch):
+    notes, names, sdir = rp.build(tmp_path, monkeypatch, 12)
+    rp.Rig(monkeypatch, notes, names)
+    sub = notes / "p0" / "sub"
+    for i in range(3):
+        touch(sub / f"inner{i}.md", f"made up inner {i}\n")
+    touch(sub / "deep" / "more.md")
+    touch(notes / "p0" / "kept" / "k.md")
+    cdir = ask.prepare_bulk.CACHE_DIR
+    rep = json.loads((cdir / "p0-report.json").read_text())
+    rep["excludes"] = ["sub/"]  # connect --exclude sub/, as the report stores it
+    (cdir / "p0-report.json").write_text(json.dumps(rep))
+    touched = []
+    real_stat, real_scandir = os.stat, os.scandir
+    monkeypatch.setattr(os, "stat", lambda p, *a, **k: (touched.append(str(p)), real_stat(p, *a, **k))[1])
+    monkeypatch.setattr(os, "scandir", lambda p=".", *a, **k: (touched.append(str(p)), real_scandir(p, *a, **k))[1])
+    rp.sync(sdir)
+    assert any("kept" in t for t in touched)  # the walk did run
+    assert not [t for t in touched if str(sub) in t], [t for t in touched if str(sub) in t]
+    c = sqlite3.connect(str(sdir / "index.sqlite"))
+    assert not c.execute("SELECT path FROM seen WHERE path LIKE ?", (f"{sub}/%",)).fetchall()
+    assert c.execute("SELECT COUNT(*) FROM seen WHERE path LIKE ?", (f"%/kept/k.md",)).fetchone()[0] == 1
+    c.close()
+
+
+def test_walk_excludes_match_connects_rule(tangle):
+    fi = FileIndex("t", tangle.parent / "i.sqlite")
+    ex = ["b/d", "a.md", "lnk_out/sub"]
+    got = set(fi._walk([str(tangle)], ex))
+    want = {p for p in fi._walk([str(tangle)]) if not pb._excluded(Path(p).relative_to(tangle).as_posix(), ex)}
+    assert got == want and str(tangle / "b" / "c.md") in got and str(tangle / "b" / "d" / "e.md") not in got

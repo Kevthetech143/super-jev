@@ -156,18 +156,19 @@ class FileIndex:
     def close(self):
         self.db.close()
 
-    def _walk(self, roots):
+    def _walk(self, roots, excludes=()):
         """New-file discovery by stat only, with the same guards connect's inventory() applies (credential
         suffix, logins / -secret / .bak names, vault and hidden folders, hidden files, links leaving the root,
         extension, size ceiling). No file body is opened."""
         import prepare_bulk as pb
+        ex = tuple(e.strip("/") for e in excludes or [] if e.strip("/"))  # as connect reads them
         for root in roots or []:
             if self._walked is None:  # no round open: walk fresh every time
-                yield from self._walk_one(Path(root), pb)
+                yield from self._walk_one(Path(root), pb, ex)
                 continue
-            key = str(root)
+            key = (str(root), ex)
             if key not in self._walked:
-                self._walked[key] = list(self._walk_one(Path(root), pb))
+                self._walked[key] = list(self._walk_one(Path(root), pb, ex))
             yield from self._walked[key]
 
     def begin_round(self, roots=()):
@@ -177,18 +178,18 @@ class FileIndex:
         self._raw = {}
         self._round_roots = sorted({str(Path(r)) for r in roots}, key=len)
 
-    def _raw_walk(self, root, pb):
+    def _raw_walk(self, root, pb, excludes=()):
         """(files, links, link_dirs) of pb.walk_md(root). In a round, a root inside an outer root of the round is cut out of
         that root's walk: the same files and links, unless a folder inside it was skipped there as already walked
         (a link loop or a second path to one folder), when it is walked on its own."""
-        key = str(root)
+        key = str(root) + "\0".join(excludes)
         if self._raw is None:
             tr = {}
-            files, linked = pb.walk_md(root, trace=tr)
+            files, linked = pb.walk_md(root, trace=tr, excludes=list(excludes))
             return files, linked, tr.get("link_dirs", [])
         if key in self._raw:
             return self._raw[key]
-        for outer in self._round_roots:
+        for outer in () if excludes else self._round_roots:  # (a root with excludes is walked on its own)
             if outer == key:
                 break
             if key.startswith(outer.rstrip(os.sep) + os.sep):
@@ -202,13 +203,13 @@ class FileIndex:
                     self._raw_dups[key] = []
                     return got
         tr = {}
-        files, linked = pb.walk_md(root, trace=tr)
+        files, linked = pb.walk_md(root, trace=tr, excludes=list(excludes))
         self._raw_dups[key] = tr.get("dups", [])
         self._raw[key] = (files, linked, tr.get("link_dirs", []))
         return self._raw[key]
 
-    def _walk_one(self, root, pb):
-        files, linked, _dirs = self._raw_walk(root, pb)
+    def _walk_one(self, root, pb, excludes=()):
+        files, linked, _dirs = self._raw_walk(root, pb, excludes)
         base = os.path.realpath(root)
         # every folder a file may sit under: the root's real path, then each link target outside the skipped folders. The
         # first of them (in this order) that holds a file is its base; one parents walk per FOLDER finds it, not one test per link.
@@ -230,6 +231,8 @@ class FileIndex:
         for p in files:
             name = p.name
             pdir = str(p.parent)
+            if excludes and pb._excluded(p.relative_to(root).as_posix(), excludes):  # connect's --exclude, by its own matcher
+                continue
             if os.path.islink(p):
                 rp = os.path.realpath(p)
             else:  # a plain file sits in the real folder of its own folder
@@ -267,10 +270,10 @@ class FileIndex:
         for t in ("files", "toc", "seen"):
             self.db.execute(f"DELETE FROM {t} WHERE path=?", (path,))
 
-    def update(self, pointer: str, entries: dict = None, roots=None) -> dict:
+    def update(self, pointer: str, entries: dict = None, roots=None, excludes=None) -> dict:
         """Stat-diff a pointer's files; read and sha ONLY files whose stat changed (or never seen).
         `entries` is the reviewed prepare-cache of the pointer (path -> record); default: load it from the
-        prepare-cache. `roots` are the connected folders, walked by stat only to find new files.
+        prepare-cache. `roots` are the connected folders, walked by stat only to find new files (never into `excludes`, the pointer's recorded --exclude list).
         Returns {"hashed": n, "changed": [...], "new": [...], "gone": [...], "stale": bool}."""
         if entries is None:
             from prepare_bulk import load_cache_files
@@ -282,7 +285,7 @@ class FileIndex:
         if roots is None and row and row[0]:
             roots = json.loads(row[0])
         paths = set(entries) | set(known)
-        paths |= {p for p in self._walk(roots)}
+        paths |= {p for p in self._walk(roots, excludes)}
         for p in sorted(paths):
             ent = entries.get(p)
             try:
