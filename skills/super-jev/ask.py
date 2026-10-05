@@ -2094,9 +2094,9 @@ def pointer_fallbacks(idx, allowed, gens) -> dict:
             out[name] = "stale (files changed since its last refresh)"
         elif gens is not None and name in gens and c["generation"] != gens[name]:
             out[name] = "generation mismatch (index holds an older refresh)"
-        elif c["entries"] and not c["files"]:
+        elif c["entries"] and not c["files"] and c["complete"] != 2:
             out[name] = f"0 files indexed ({c['entries']} in its catalog)"
-        elif c["entries"] and c["complete"] != 1:
+        elif c["entries"] and c["complete"] not in (1, 2):
             out[name] = "files missing from the index"
     return out
 
@@ -2340,7 +2340,7 @@ def index_sync(principal: str, sdir: Path) -> int:
         roots = (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("roots")
         hashed += idx.update(ptr, entries=entries, roots=roots)["hashed"]
     idx.set_panel(rows)
-    idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by the last one
+    idx.set_complete(expected)  # after every pointer is updated: a path shared by two pointers is held by one and counts for both
     wpath = sdir / WORD_INDEX_FILE
     widx, dirty = _load_word_index(wpath), False
     cands = list(idx.candidates([r["pointer"] for r in rows]))

@@ -279,11 +279,15 @@ class FileIndex:
 
     def set_complete(self, expected: dict) -> None:
         """Updater: per pointer, 1 when every reviewed file of its prepare-cache that still exists is held by the index
-        under THIS pointer (a `files` row, or `seen` as edited / held), else 0. `expected`: {pointer: [paths]}."""
+        (a `files` row, or `seen` as edited / held) under ANY pointer: a path has one row, so a file two sets list is
+        held by one of them and counts as held for both. `expected`: {pointer: [paths]}."""
+        have = {r[0] for r in self.db.execute("SELECT path FROM files")}
+        have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE reason IN ('edited','held')")}
+        own = {r[0]: r[1] for r in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer")}
         for ptr, paths in expected.items():
-            have = {r[0] for r in self.db.execute("SELECT path FROM files WHERE pointer=?", (ptr,))}
-            have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE pointer=? AND reason IN ('edited','held')", (ptr,))}
-            self.db.execute("UPDATE pointers SET complete=? WHERE pointer=?", (1 if all(p in have for p in paths) else 0, ptr))
+            # 2: complete, but every file is held under another set (this set owns no rows)
+            done = 0 if not all(p in have for p in paths) else (1 if own.get(ptr) or not paths else 2)
+            self.db.execute("UPDATE pointers SET complete=? WHERE pointer=?", (done, ptr))
         self.db.commit()
 
     def coverage(self) -> dict:
