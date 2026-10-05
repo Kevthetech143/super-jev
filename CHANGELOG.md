@@ -6,6 +6,11 @@
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
 - Heal state now survives a release. The auto-heal state (cooldowns, hourly limit, the per-principal scan lock, the per-set refresh locks and the log) lives in `<state root>/autoheal-state`, and the per-set prepare lock in `<state root>/locks`, where the state root is `SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`. They were inside the versioned release folder, so after every release the cooldowns started empty (a rescan storm) and the old release's still-running scan ran beside the new release's for the same principal. The prepare cache itself does not move. On the first run the old folder's cooldown files are copied over once (never a lock).
 
+## Unreleased
+
+- Fewer judge calls per ask. The content check of several files now shares calls: requests that differ only in their passages (same question and purpose) are packed into one judge call, each file's passage keys prefixed and its `Classify passages.<key>` reference rewritten to match, under the same token budget; batches are filled first-fit. Each passage is still its own question. Test: `test/enhance/coalesce.test.ts`.
+- The table-of-contents file pick and part pick size their batches by the judge's per-call budget (`call_tokens` from `judge_profiles.json`) and the pick pool (capped by `max_questions_per_call`), so a whole pick pool fits one call. Test: `tests/test_toc_search.py`.
+
 ## 1.0.128 — 2026-10-05
 
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
