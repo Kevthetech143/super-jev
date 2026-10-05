@@ -273,3 +273,35 @@ def test_shared_file_with_owner_set_unsearched_is_still_a_candidate(tmp_path):
     assert ask.index_served(cov, ["set-a"]) == []  # set-b is not searched: set-a goes to the fallback, its file is not lost
     assert ask.index_served(cov, ["set-a", "set-b"]) == ["set-a", "set-b"]
     assert ask.index_served(cov, ["set-b"]) == ["set-b"]
+
+
+def test_person_folders_of_a_pointer_borrowing_from_an_unsearched_set_come_from_its_cache(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 30)
+    cdir = ask.prepare_bulk.CACHE_DIR
+    cache, shared = json.loads((cdir / "p0.json").read_text()), {}
+    for who, rel in (("nora", "Relation: mother"), ("sam", "Relation: brother")):
+        d = notes / "p0" / "agents" / "global" / "documents" / who
+        d.mkdir(parents=True)
+        for fname, text in (("profile.md", f"# profile\n{rel}\n"), ("visits.md", f"# visits\n{who} saw a clinic\n")):
+            (d / fname).write_text(text)
+            shared[str(d / fname)] = cache[str(d / fname)] = {"sha256": hashlib.sha256((d / fname).read_bytes()).hexdigest(), "pass": True, "description": fname, "question": ""}
+    (cdir / "p0.json").write_text(json.dumps(cache))
+    (cdir / "p2.json").write_text(json.dumps(shared))  # p2 lists only the people files p0 owns
+    Rig(monkeypatch, notes, list(reversed(names)))  # p2 is synced before p0: p0 holds the rows
+    sync(sdir)
+    idx = FileIndex(PRINCIPAL, sdir / "index.sqlite")
+    cov = idx.coverage()
+    assert cov["p2"]["complete"] == 2 and cov["p2"]["borrows"] == ["p0"]
+    want = {"nora": {"mother"}, "sam": {"brother"}}
+    assert ask.people(["p2"]) == want
+    served = ask.index_served(cov, ["p2"])  # p0 is not searched: p2 is not served by the index
+    assert served == []
+    assert idx.person_paths(served) == []  # so the index cannot supply p2's person folders
+    assert ask.people(["p2"], idx.person_paths(["p2"])) != want  # the profile rows are held by p0: the index alone misses the relations
+    Rig(monkeypatch, notes, ["p2"])  # only p2 is searched in this ask
+    flag(monkeypatch, True)
+    seen, real = [], ask.people
+    monkeypatch.setattr(ask, "people", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
+    _rc, out = ask_it("what did my mom's clinic visit say", sdir, capsys)
+    assert seen and seen[-1] == want  # the ask itself resolved the people from p2's cache, not the index alone
+    assert "/sam/" not in out
