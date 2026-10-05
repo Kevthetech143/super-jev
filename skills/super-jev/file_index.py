@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS pointers(pointer TEXT PRIMARY KEY, stale INTEGER DEFA
 CREATE TABLE IF NOT EXISTS seen(path TEXT PRIMARY KEY, pointer TEXT NOT NULL, size INTEGER, mtime_ns INTEGER,
     sha256 TEXT, reason TEXT, reviewed_sha TEXT);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
+-- pointers whose FTS rows an updater is rewriting (or died halfway through): the ask serves just these by today's path
+CREATE TABLE IF NOT EXISTS fts_pending(pointer TEXT PRIMARY KEY);
 CREATE INDEX IF NOT EXISTS files_pointer ON files(pointer);
 CREATE INDEX IF NOT EXISTS seen_pointer ON seen(pointer);
 """
@@ -39,11 +41,15 @@ CREATE TABLE IF NOT EXISTS fts_map(rid INTEGER PRIMARY KEY, path TEXT UNIQUE, po
 -- the vocabulary (reference-counted by file) and its bigrams: the ask finds close spellings without scanning every word
 CREATE TABLE IF NOT EXISTS fvocab(word TEXT PRIMARY KEY, n INTEGER) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS vbigram(bg TEXT, word TEXT, PRIMARY KEY(bg, word)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS vbigram_word ON vbigram(word);
 CREATE INDEX IF NOT EXISTS fts_map_pointer ON fts_map(pointer, person);
 CREATE TABLE IF NOT EXISTS fts_stats(pointer TEXT, person TEXT, n INTEGER, passages INTEGER, psize REAL, PRIMARY KEY(pointer, person));
 CREATE TABLE IF NOT EXISTS witems(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 CREATE TABLE IF NOT EXISTS tocpage(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 """
+
+
+BUSY_MS = 2000  # a reader waits this long for a lock before it reports the index busy
 
 
 class StatSha:
@@ -130,9 +136,12 @@ class FileIndex:
     def __init__(self, principal: str, db_path=None):
         self.principal = principal
         self._walked = None  # set by begin_round(): root -> files found, so sets sharing a root walk it once per round
+        self._raw, self._round_roots, self._raw_dups = None, [], {}
         self.path = Path(db_path) if db_path else _state_dir(principal) / "index.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(self.path))
+        self.db = sqlite3.connect(str(self.path), timeout=BUSY_MS / 1000)
+        self.db.execute(f"PRAGMA busy_timeout={BUSY_MS}")
+        self.db.execute("PRAGMA journal_mode=WAL")  # a reader never waits for the updater's write, and never fails on it
         self.db.executescript(SCHEMA)
         try:
             self.db.executescript(FTS_SCHEMA)
@@ -147,46 +156,110 @@ class FileIndex:
     def close(self):
         self.db.close()
 
-    def _walk(self, roots):
+    def _walk(self, roots, excludes=()):
         """New-file discovery by stat only, with the same guards connect's inventory() applies (credential
         suffix, logins / -secret / .bak names, vault and hidden folders, hidden files, links leaving the root,
         extension, size ceiling). No file body is opened."""
         import prepare_bulk as pb
+        ex = tuple(e.strip("/") for e in excludes or [] if e.strip("/"))  # as connect reads them
         for root in roots or []:
             if self._walked is None:  # no round open: walk fresh every time
-                yield from self._walk_one(Path(root), pb)
+                yield from self._walk_one(Path(root), pb, ex)
                 continue
-            key = str(root)
+            key = (str(root), ex)
             if key not in self._walked:
-                self._walked[key] = list(self._walk_one(Path(root), pb))
+                self._walked[key] = list(self._walk_one(Path(root), pb, ex))
             yield from self._walked[key]
 
-    def begin_round(self):
-        """Open an update round: each root is walked once until set_complete() closes it."""
+    def begin_round(self, roots=()):
+        """Open an update round: each root is walked once until set_complete() closes it. `roots` (every root the round
+        will walk) lets a root inside another be derived from the outer root's one walk instead of walked again."""
         self._walked = {}
+        self._raw = {}
+        self._round_roots = sorted({str(Path(r)) for r in roots}, key=len)
 
-    def _walk_one(self, root, pb):
-        base = root.resolve()
-        files, linked = pb.walk_md(root)
-        bases = [base] + [t for t in linked if not pb.SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
+    def _raw_walk(self, root, pb, excludes=()):
+        """(files, links, link_dirs) of pb.walk_md(root). In a round, a root inside an outer root of the round is cut out of
+        that root's walk: the same files and links, unless a folder inside it was skipped there as already walked
+        (a link loop or a second path to one folder), when it is walked on its own."""
+        key = (str(root), tuple(excludes))
+        rk = key[0]
+        if self._raw is None:
+            tr = {}
+            files, linked = pb.walk_md(root, trace=tr, excludes=list(excludes))
+            return files, linked, tr.get("link_dirs", [])
+        if key in self._raw:
+            return self._raw[key]
+        for outer in () if excludes else self._round_roots:  # (a root with excludes is walked on its own)
+            if outer == rk:
+                break
+            if rk.startswith(outer.rstrip(os.sep) + os.sep):
+                of, ol, od = self._raw_walk(Path(outer), pb)
+                if not any(d == rk or d.startswith(rk + os.sep) for d in self._raw_dups[(outer, ())]):
+                    pre = rk + os.sep
+                    got = ([f for f in of if str(f).startswith(pre)],
+                           [t for t, d in zip(ol, od) if d == rk or d.startswith(pre)],
+                           [d for d in od if d == rk or d.startswith(pre)])
+                    self._raw[key] = got
+                    self._raw_dups[key] = []
+                    return got
+        tr = {}
+        files, linked = pb.walk_md(root, trace=tr, excludes=list(excludes))
+        self._raw_dups[key] = tr.get("dups", [])
+        self._raw[key] = (files, linked, tr.get("link_dirs", []))
+        return self._raw[key]
+
+    def _walk_one(self, root, pb, excludes=()):
+        files, linked, _dirs = self._raw_walk(root, pb, excludes)
+        base = os.path.realpath(root)
+        # every folder a file may sit under: the root's real path, then each link target outside the skipped folders. The
+        # first of them (in this order) that holds a file is its base; one parents walk per FOLDER finds it, not one test per link.
+        bases = {base: 0}
+        for i, t in enumerate(linked, 1):
+            if not pb.SKIP_PARTS.intersection(x.casefold() for x in t.parts):
+                bases.setdefault(str(t), i)
+        base_of, real_of, skip_of = {}, {}, {}
+
+        def base_for(d):  # (index, path) of the first base holding folder `d`, or None
+            if d not in base_of:
+                up = os.path.dirname(d)
+                best = base_for(up) if up != d else None
+                if d in bases and (best is None or bases[d] < best[0]):
+                    best = (bases[d], d)
+                base_of[d] = best
+            return base_of[d]
+
         for p in files:
-            rp = p.resolve()
-            if pb.credential_suffix(p.name) or pb.credential_suffix(rp.name):
+            name = p.name
+            pdir = str(p.parent)
+            if excludes and pb._excluded(p.relative_to(root).as_posix(), excludes):  # connect's --exclude, by its own matcher
                 continue
-            if not any(rp.is_relative_to(b) for b in bases):
+            if os.path.islink(p):
+                rp = os.path.realpath(p)
+            else:  # a plain file sits in the real folder of its own folder
+                if pdir not in real_of:
+                    real_of[pdir] = os.path.realpath(pdir)
+                rp = os.path.join(real_of[pdir], name)
+            rdir, rname = os.path.dirname(rp), os.path.basename(rp)
+            if pb.credential_suffix(name) or pb.credential_suffix(rname):
+                continue
+            b = base_for(rdir)
+            if b is None:
                 continue
             if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret")
-                   for n in (p.name.casefold(), rp.name.casefold())):
+                   for n in (name.casefold(), rname.casefold())):
                 continue
-            b = next(b for b in bases if rp.is_relative_to(b))
-            if pb.skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(b).parts[:-1]):
+            k = (pdir, rdir, b[0])
+            if k not in skip_of:
+                skip_of[k] = bool(pb.skipped_folder(Path(pdir).relative_to(root).parts + Path(rdir).relative_to(b[1]).parts))
+            if skip_of[k]:
                 continue
-            if p.name.startswith(".") or rp.name.startswith("."):
+            if name.startswith(".") or rname.startswith("."):
                 continue
-            if pb.path_has_secret(p.name) or pb.path_has_secret(rp.name):
+            if pb.path_has_secret(name) or pb.path_has_secret(rname):
                 continue
             try:
-                if rp.stat().st_size > pb.CEILING_BYTES:
+                if os.stat(rp).st_size > pb.CEILING_BYTES:
                     continue
             except OSError:
                 continue
@@ -194,15 +267,14 @@ class FileIndex:
 
     def _drop(self, path):
         if not self.fts_error and self.db.execute("SELECT 1 FROM fts_map WHERE path=?", (path,)).fetchone():
-            self.fts_drop(path)  # its passages go with it; the updater's FTS pass re-adds a file that still qualifies
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','0')")
+            self.fts_drop(path)  # its passages go with it (its pointer is marked pending); the updater's FTS pass re-adds a file that still qualifies
         for t in ("files", "toc", "seen"):
             self.db.execute(f"DELETE FROM {t} WHERE path=?", (path,))
 
-    def update(self, pointer: str, entries: dict = None, roots=None) -> dict:
+    def update(self, pointer: str, entries: dict = None, roots=None, excludes=None) -> dict:
         """Stat-diff a pointer's files; read and sha ONLY files whose stat changed (or never seen).
         `entries` is the reviewed prepare-cache of the pointer (path -> record); default: load it from the
-        prepare-cache. `roots` are the connected folders, walked by stat only to find new files.
+        prepare-cache. `roots` are the connected folders, walked by stat only to find new files (never into `excludes`, the pointer's recorded --exclude list).
         Returns {"hashed": n, "changed": [...], "new": [...], "gone": [...], "stale": bool}."""
         if entries is None:
             from prepare_bulk import load_cache_files
@@ -213,8 +285,15 @@ class FileIndex:
         row = self.db.execute("SELECT roots FROM pointers WHERE pointer=?", (pointer,)).fetchone()
         if roots is None and row and row[0]:
             roots = json.loads(row[0])
+        ex = [e.strip("/") for e in excludes or [] if e.strip("/")]
+        if ex and roots:  # rows a walk made before the folder was excluded go, so they are never stat'd again
+            import prepare_bulk as pb
+            for p in [p for p in known if p not in entries and any(
+                    p.startswith(str(r).rstrip("/") + "/") and pb._excluded(p[len(str(r).rstrip("/")) + 1:], ex) for r in roots)]:
+                self._drop(p)
+                del known[p]
         paths = set(entries) | set(known)
-        paths |= {p for p in self._walk(roots)}
+        paths |= {p for p in self._walk(roots, excludes)}
         for p in sorted(paths):
             ent = entries.get(p)
             try:
@@ -250,6 +329,8 @@ class FileIndex:
             # newly appeared review (promotion) re-evaluates, so a seen file can become indexed.
             if p in known and known[p] == (st.st_size, st.st_mtime_ns, reviewed):
                 continue
+            if p not in known and self._held_unchanged(p, pointer, st, reviewed):
+                continue  # another pointer holds this very file as it stands: pointers sharing files do not re-read each other's
             with open(p, "rb") as f:
                 raw = f.read()
             out["hashed"] += 1
@@ -281,6 +362,14 @@ class FileIndex:
         self.db.commit()
         return out
 
+    def _held_unchanged(self, path, pointer, st, reviewed) -> bool:
+        """Does another pointer's row for this path already carry this stat and this review?"""
+        for t in ("files", "seen"):
+            r = self.db.execute(f"SELECT pointer,size,mtime_ns,reviewed_sha FROM {t} WHERE path=?", (path,)).fetchone()
+            if r and r[0] != pointer and r[1:] == (st.st_size, st.st_mtime_ns, reviewed):
+                return True
+        return False
+
     def owner_of(self, path: str, any_row: bool = False):
         """The pointer whose row holds this path (`files`, or `seen` as an edited file; any_row: any `seen` row), or None.
         A path has one row, so a file two pointers list belongs to the one that was updated last."""
@@ -294,7 +383,7 @@ class FileIndex:
         """Updater: per pointer, 1 when every reviewed file of its prepare-cache that still exists is held by the index
         (a `files` row, or `seen` as edited / held) under ANY pointer: a path has one row, so a file two sets list is
         held by one of them and counts as held for both. `expected`: {pointer: [paths]}."""
-        self._walked = None  # the update round is over
+        self._walked, self._raw = None, None  # the update round is over
         have = {r[0] for r in self.db.execute("SELECT path FROM files")}
         have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE reason IN ('edited','held')")}
         own = {r[0]: r[1] for r in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer")}
@@ -319,8 +408,10 @@ class FileIndex:
         for name, n in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer"):
             if name in out:
                 out[name]["files"] = n
-        for v in out.values():
+        pending = {r[0] for r in self.db.execute("SELECT pointer FROM fts_pending")}
+        for name, v in out.items():
             v.setdefault("files", 0)
+            v["fts_pending"] = name in pending
         return out
 
     def is_stale(self, pointer: str) -> bool:
@@ -399,10 +490,10 @@ class FileIndex:
         """{path: (sha, pointer, labels)} of what the FTS table holds now."""
         return {p: (sha, ptr, lab) for p, ptr, sha, lab in self.db.execute("SELECT path,pointer,sha,lab FROM fts_map")}
 
-    def fts_begin(self) -> None:
-        """An unfinished pass (crash) leaves the table marked not-ok, so the ask runs the S3a path."""
-        self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','0')")
-        self.db.commit()
+    def _fts_pending(self, pointer: str) -> None:
+        """This pointer's FTS rows are being rewritten: until the pass finishes (a crash leaves it so) the ask serves it
+        by today's path. Every other pointer keeps using the table."""
+        self.db.execute("INSERT OR IGNORE INTO fts_pending VALUES(?)", (pointer,))
 
     def _vocab_add(self, words, d: int) -> None:
         for w in words:
@@ -416,8 +507,9 @@ class FileIndex:
                     self.db.execute("DELETE FROM vbigram WHERE word=?", (w,))
 
     def fts_drop(self, path: str) -> None:
-        r = self.db.execute("SELECT rid,words FROM fts_map WHERE path=?", (path,)).fetchone()
+        r = self.db.execute("SELECT rid,words,pointer FROM fts_map WHERE path=?", (path,)).fetchone()
         if r:
+            self._fts_pending(r[2])
             self._vocab_add((r[1] or "").split(), -1)
             self.db.execute("DELETE FROM fts WHERE rowid=?", (r[0],))
             self.db.execute("DELETE FROM fts_map WHERE rid=?", (r[0],))
@@ -427,6 +519,7 @@ class FileIndex:
     def fts_put(self, path, pointer, person, sha, lab, body, toc, npass, psize, item_json, toc_json) -> None:
         """Replace one file's rows (and only that file's)."""
         self.fts_drop(path)
+        self._fts_pending(pointer)
         cur = self.db.execute("INSERT INTO fts_map(path,pointer,person,sha,lab,npass,psize,words) VALUES(?,?,?,?,?,?,?,?)",
                               (path, pointer, person or "", sha, lab, npass, psize, " ".join(sorted(set(body.split())))))
         self._vocab_add(set(body.split()), 1)
@@ -435,7 +528,10 @@ class FileIndex:
         if toc_json is not None:
             self.db.execute("INSERT INTO tocpage VALUES(?,?,?)", (path, sha, toc_json))
 
-    def fts_finish(self, version: str) -> None:
+    def fts_finish(self, version: str, unfinished=()) -> None:
+        """The pass is over: every pointer but `unfinished` (a file whose bytes changed under the updater) is ready again."""
+        self.db.execute("DELETE FROM fts_pending" + (f" WHERE pointer NOT IN ({','.join('?' * len(unfinished))})" if unfinished else ""),
+                        list(unfinished))
         self.db.execute("DELETE FROM fts_stats")
         self.db.execute("INSERT INTO fts_stats SELECT pointer,person,COUNT(*),SUM(npass),SUM(psize) FROM fts_map GROUP BY pointer,person")
         self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_version',?)", (version,))
@@ -443,7 +539,8 @@ class FileIndex:
         self.db.commit()
 
     def fts_usable(self, version: str):
-        """(True, "") or (False, why): the table exists, was fully built, and by this tokenizer version."""
+        """(True, "") or (False, why): the table exists, was built, and by this tokenizer version. A pointer being
+        rewritten is not judged here: coverage() reports it and the ask serves it by today's path."""
         if self.fts_error:
             return False, f"fts unavailable ({self.fts_error})"
         m = dict(self.db.execute("SELECT k,v FROM meta WHERE k IN ('fts_ok','fts_version')"))
@@ -465,8 +562,9 @@ class FileIndex:
             near = set()
             if len(t) > 3:
                 grams = list({t[i:i + 2] for i in range(len(t) - 1)})
-                pool = [r[0] for r in self.db.execute(
-                    f"SELECT DISTINCT word FROM vbigram WHERE bg IN ({','.join('?' * len(grams))})", grams)]
+                # (no DISTINCT: it lets the planner scan the word index in place of the (bg, word) key)
+                pool = sorted({r[0] for r in self.db.execute(
+                    f"SELECT word FROM vbigram WHERE bg IN ({','.join('?' * len(grams))})", grams)})
                 near = set(difflib.get_close_matches(t, pool, n=3, cutoff=0.8))
             stem = t[:5] if len(t) > 5 else t
             lim = 99 if len(t) > 5 else 2
@@ -564,7 +662,6 @@ class FileIndex:
         if not self.fts_error:
             for (p,) in self.db.execute("SELECT path FROM fts_map WHERE pointer=?", (pointer,)).fetchall():
                 self.fts_drop(p)
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('fts_ok','0')")
         self.db.execute("DELETE FROM toc WHERE path IN (SELECT path FROM files WHERE pointer=?)", (pointer,))
         for t in ("files", "seen", "pointers"):
             self.db.execute(f"DELETE FROM {t} WHERE pointer=?", (pointer,))

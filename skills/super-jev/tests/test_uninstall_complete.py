@@ -76,7 +76,7 @@ def test_uninstall_after_an_ask_with_nothing_connected_leaves_no_state(env, caps
 
 # (l) every name a principal folder gets is removed
 PRINCIPAL_NAMES = ["lookups.jsonl", "traces.jsonl", "traces.jsonl.1", "approvals.jsonl", "claim-verdicts.json",
-                   "pointer_health.json", "pointer-words.json", "pointer-words.4242.tmp", "index-sync.stamp", "word-index.json", "set-rows.json",
+                   "pointer_health.json", "pointer-words.json", "pointer-words.4242.tmp", "index-sync.stamp", "index-update.lock", "index.sqlite-wal", "index.sqlite-shm", "word-index.json", "set-rows.json",
                    "scorecard-cases.jsonl", "scorecard-cases.tmp", "manual/a-note.md", "github/acme-widgets/README.md"]
 
 

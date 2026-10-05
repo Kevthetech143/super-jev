@@ -840,7 +840,7 @@ def is_worktree_copy(path: Path, root: Path) -> bool:
     return False
 
 
-def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS):
+def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS, trace: dict = None, excludes: list = None):
     """Markdown files under `root`, sorted, plus resolved folder symlink targets. When `others` is a list,
     it also receives what connect reports about files of other types, ready to tally as
     (key, path under root, reason, label, count): one entry per file outside the skipped folders, and one
@@ -849,7 +849,9 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
     costs no path work per file. The caller reports them; none connect.
     Path.rglob does not descend into a symlinked folder (Python 3.12), which silently dropped every
     symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
-    loop is walked once."""
+    loop is walked once. `trace` (a dict) receives "link_dirs" (the folder each returned link sat in, parallel to
+    the links) and "dups" (the folders skipped as already walked), so a caller can reuse this walk for a root inside it.
+    `excludes` (connect's --exclude, trailing slashes already stripped) keeps the walk out of a folder they name."""
     def note_others(real_dir, rel_parts, real_parts, names):
         # A folder is hidden or skipped by its path under the root or by its real path (a link into
         # documents/ is still documents/), the same two views the .md rule in inventory() uses.
@@ -877,10 +879,19 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
         real = os.path.realpath(dirpath)
         if real in walked:
             dirnames[:] = []
+            if trace is not None:
+                trace.setdefault("dups", []).append(dirpath)
             continue
         walked.add(real)
-        linked += [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
-                   if os.path.islink(os.path.join(dirpath, d))]
+        if excludes:
+            rel_dir = os.path.relpath(dirpath, root)
+            dirnames[:] = [d for d in dirnames
+                           if not _excluded(d if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{d}", excludes)]
+        new = [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
+               if os.path.islink(os.path.join(dirpath, d))]
+        linked += new
+        if trace is not None:
+            trace.setdefault("link_dirs", []).extend([dirpath] * len(new))
         out += [Path(dirpath) / n for n in filenames if n.lower().endswith(tuple(extensions))]
         rel, real_rel = os.path.relpath(dirpath, root), os.path.relpath(real, real_root)
         note_others(real, () if rel == "." else tuple(rel.split(os.sep)),
