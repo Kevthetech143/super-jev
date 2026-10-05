@@ -187,7 +187,7 @@ automatic arbitrary-file ingestion, or background scheduler is provided.
 
 ```sh
 python3 experiments/verified-pointer-memory/stress.py
-python3 -m unittest discover -s experiments/verified-pointer-memory -p 'test_*.py'
+python3 -m pytest experiments/verified-pointer-memory -q
 ```
 
 Synthetic tests verify storage/failure mechanics; they do not measure Jev accuracy.

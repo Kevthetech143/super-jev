@@ -37,7 +37,7 @@ jobs:
       - run: python -m compileall -q skills
       - run: npm run test:skill
       - run: python3 -m pytest skills/super-jev-build-cycle/tests -q
-      - run: python3 -m unittest discover -s experiments/verified-pointer-memory -p "test_*.py"
+      - run: python3 -m pytest experiments/verified-pointer-memory -q
       - run: python3 experiments/verified-pointer-memory/stress.py
 
   # A stock Mac ships Python 3.9. setup.py is the one door that tells it how to get 3.10 or newer,
