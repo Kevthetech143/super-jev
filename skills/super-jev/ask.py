@@ -1714,7 +1714,7 @@ def source_rows(principal: str, pointer: str):
             path, sha = (src.get("originalPath") or src.get("path"), src.get("contentSHA")) if isinstance(src, dict) else (None, None)
             if isinstance(path, str) and path and isinstance(sha, str) and sha:
                 rows[path] = {"pass": True, "sha256": sha, "description": str(src.get("description") or ""), "local": True,
-                              "upstream": str(src.get("upstreamPath") or "")}  # a view copy's original, for raw_over_view
+                              **({"upstream": str(src["upstreamPath"])} if src.get("upstreamPath") else {})}  # a view copy's original, for raw_over_view
         nxt = out.get("nextOffset")
         if not isinstance(nxt, int) or nxt <= offset:
             return rows
