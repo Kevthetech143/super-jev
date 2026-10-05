@@ -2230,7 +2230,7 @@ def index_after_ask(principal: str, sdir: Path) -> None:
     """After an ask run with the flag on: start the updater if a served file mismatched, the index was unusable,
     or the last start is older than INDEX_SPAWN_EVERY_SECS. One stamp file throttles it (a mismatch skips the wait)."""
     st = _STAGE.get("index")
-    if not st:
+    if not st or os.environ.get("SUPERJEV_REPLAY") == "1":  # a replay's state is a throwaway copy: no background writer into it
         return
     stamp = sdir / INDEX_STAMP
     try:

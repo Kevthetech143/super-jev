@@ -229,6 +229,17 @@ def test_updater_is_detached_not_inline(tmp_path, monkeypatch, capsys):
     assert spawned == [PRINCIPAL]
 
 
+def test_replay_does_not_start_the_updater(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 30)
+    Rig(monkeypatch, notes, names)
+    spawned = []
+    monkeypatch.setattr(ask, "spawn_index_updater", lambda p: spawned.append(p))
+    monkeypatch.setenv("SUPERJEV_REPLAY", "1")
+    flag(monkeypatch, True)
+    ask_it(PLANTED[3][0], sdir, capsys)
+    assert spawned == [] and not (sdir / "index-sync.stamp").exists()
+
+
 def test_edited_file_after_sync_is_still_served_and_few_files_opened(tmp_path, monkeypatch, capsys):
     notes, names, sdir = build(tmp_path, monkeypatch, 40)
     rig = Rig(monkeypatch, notes, names)
