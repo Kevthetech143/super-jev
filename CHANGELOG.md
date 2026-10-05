@@ -10,6 +10,10 @@
 - A saved answer or an assisted ask no longer fails at random with "memory request contains a secret; not sent". The engine's `ticket` and `attemptId` (uuid4) were scanned as user text, and about 1 uuid in 7,700 (387 of 3,000,000 measured) has digit groups that form a Luhn-valid 16-digit number; both keys now count as tool-built fields (`MACHINE_KEYS`, Python and Node). This was the occasional CI failure of the R6 test. Tests: `skills/super-jev/tests/test_hash_false_hold.py`, `test/secret-scan.test.ts`.
 - Fewer judge calls per ask: the table-of-contents file pick and part pick size their batches by the judge's per-call budget (`call_tokens` from `judge_profiles.json`) and the pick pool (capped by `max_questions_per_call`), so a whole pick pool fits one call. Test: `tests/test_toc_search.py`.
 
+## Unreleased
+
+- A refresh where some files are held or scored under the line no longer marks the whole set failed. A file the judge scored low (a real verdict such as SUPPORTED 0.35 under the pass line) is now reported as held, so a run whose every other file is connected or held exits 3 (partial success), which auto-heal already settles as ok; before, each such file counted as a failure, the run exited 1, the set got retry backoff and stayed stale for its connected files. A judge call that fails (network, 5xx, unparseable output) still counts as a failure (exit 1), and a payment refusal (HTTP 402) still stops the run with nothing written. Test: `tests/test_partial_ok.py`.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.

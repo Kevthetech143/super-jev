@@ -136,15 +136,15 @@ def test_a_part_with_no_reason_still_gets_a_plain_one(tmp_path, monkeypatch, fak
     assert code == 1 and obj["failed"][0]["why"].strip()
 
 
-def test_a_note_the_check_rejects_fails_alone_with_no_score_and_none_of_the_judges_words(tmp_path, monkeypatch, fake, go):
+def test_a_note_the_check_rejects_is_held_alone_with_no_score_and_none_of_the_judges_words(tmp_path, monkeypatch, fake, go):
     bad = {"state": "NOT_SUPPORTED", "confidence": 0.31, "secs": 0, "reason": "quoted XYZZY from the note"}
     monkeypatch.setattr(pb, "gate", lambda desc, path: bad if path.endswith("returns.md") else OK)
     monkeypatch.setattr(pb, "gate_many", lambda claims, path: [pb.gate(c, path) for c in claims])  # one call, same verdicts
     monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
     code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}))
     obj = one_object(out)
-    assert code == 1 and obj["connected"] == 1
-    [row] = obj["failed"]
+    assert code == 3 and obj["connected"] == 1 and "failed" not in obj  # a real low verdict is held, not failed
+    [row] = obj["held"]
     assert row["path"].endswith("returns.md") and row["why"]
     assert "XYZZY" not in out and "0.31" not in out and "confidence" not in out and "score" not in out
 
@@ -265,7 +265,7 @@ def test_text_and_json_agree_on_exit_code_and_on_every_count(scenario, tmp_path,
     obj = one_object(json_out)
     assert json_code == text_code
     assert text_code == {"scenario_clean": 0, "scenario_mixed": 3, "scenario_part_fails": 1,
-                         "scenario_check_rejects_one": 1, "scenario_refused": 2}[scenario.__name__]
+                         "scenario_check_rejects_one": 3, "scenario_refused": 2}[scenario.__name__]
     assert not any(line.startswith('{"v"') for line in text_out.splitlines())  # text mode prints no JSON
     m = COUNTS.search(text_out)
     if m:
