@@ -6,6 +6,10 @@
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
 - Heal state now survives a release. The auto-heal state (cooldowns, hourly limit, the per-principal scan lock, the per-set refresh locks and the log) lives in `<state root>/autoheal-state`, and the per-set prepare lock in `<state root>/locks`, where the state root is `SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`. They were inside the versioned release folder, so after every release the cooldowns started empty (a rescan storm) and the old release's still-running scan ran beside the new release's for the same principal. The prepare cache itself does not move. On the first run the old folder's cooldown files are copied over once (never a lock).
 
+## Unreleased
+
+- The test suite's session-end isolation check now compares the real `locks` and `autoheal-state` folders (names and mtimes) with a snapshot taken at session start, so a test that touches them fails the run even when the folders already exist; it only caught a newly created folder before.
+
 ## 1.0.128 — 2026-10-05
 
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
@@ -54,8 +58,6 @@
 - `skills/super-jev/scripts/scale_harness.py` builds a synthetic corpus of any size with a stub judge, to measure how an ask's local time grows with the number of files. It also runs on Python 3.10.
 
 ## Unreleased
-
-- The test suite's session-end isolation check now compares the real `locks` and `autoheal-state` folders (names and mtimes) with a snapshot taken at session start, so a test that touches them fails the run even when the folders already exist; it only caught a newly created folder before.
 
 - Index read path (`SUPERJEV_INDEX=1`) no longer loses an answer: it answers only for a pointer it holds completely and currently (same generation as the registry, files held, not stale); every other pointer is served by today's path in the same ask, named in the trace as `index.fallback.pointers`. A walk of a folder by one pointer no longer takes file rows away from another pointer that reviewed them, and an ask that meets the updater's lock on the index reads today's path instead of failing.
 
