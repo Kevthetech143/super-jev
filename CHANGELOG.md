@@ -12,6 +12,7 @@
 ## Unreleased
 
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
+- Two refreshes of the same set no longer run at once: `prepare_bulk` takes a per-pointer lock in the prepare-cache and a second run for that pointer prints "refresh already running for <pointer>; skipping" and exits 0, so principals sharing a set cannot pile up refreshes; the skipping principal cools down as if it had refreshed. With `--json` the skip is one object, `{"skipped": true, "pointer": ..., "reason": "refresh-running"}`. The new-file scan also walks each report owner once per scan, not once per split part.
 
 ## 1.0.126 — 2026-10-05
 

@@ -135,7 +135,7 @@ Nothing here edits original files. Cache and report land under prepare-cache/ ne
 A label is only as true as the file it was drafted and gated from; as_of shows staleness, not currency.
 Live truth for anything time-sensitive still needs a gated roll-up read fresh, not a cached label.
 """
-import argparse, contextlib, fnmatch, functools, hashlib, io, json, math, os, re, shlex, shutil, subprocess, sys, time, traceback, unicodedata
+import argparse, contextlib, fcntl, fnmatch, functools, hashlib, io, json, math, os, re, shlex, shutil, subprocess, sys, time, traceback, unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -1895,7 +1895,24 @@ def main() -> int:
     a.extensions = None
     a.no_findability = a.no_findability or not a.findability
     _RESULT.clear()
-    return run_json(a) if a.json else run(a)
+    lock = None
+    if a.pointer and not (a.list or a.watch or a.unwatch):
+        # one run per pointer at a time, whoever launched it; the kernel frees the lock if this process dies
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        lock = open(CACHE_DIR / f".{a.pointer}.prepare-lock", "a")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if a.json:
+                print(json.dumps({"skipped": True, "pointer": a.pointer, "reason": "refresh-running"}))
+            else:
+                print(f"refresh already running for {a.pointer}; skipping")
+            return 0
+    try:
+        return run_json(a) if a.json else run(a)
+    finally:
+        if lock:
+            lock.close()
 
 
 def run(a) -> int:
