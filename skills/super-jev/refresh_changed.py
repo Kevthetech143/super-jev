@@ -26,7 +26,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-CACHE_DIR = HERE / "prepare-cache"
+from prepare_bulk import CACHE_DIR  # noqa: E402  (honours SUPERJEV_STATE_DIR)
 
 
 def sha(path: Path) -> str:
