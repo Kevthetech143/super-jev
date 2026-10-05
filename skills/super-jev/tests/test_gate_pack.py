@@ -71,18 +71,78 @@ def test_small_files_share_one_call_and_skip_per_file_gate(tmp_path, monkeypatch
     assert all(cache[str(f)]["pass"] and cache[str(f)]["labels_ok"] for f in fs)
 
 
-def test_failed_pack_falls_back_to_per_file_gate(tmp_path, monkeypatch):
+OK = {"state": "SUPPORTED", "confidence": 0.95, "secs": 0.1}
+
+
+def test_failed_pack_splits_in_half_before_any_per_file_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "1")
+    fs = _files(tmp_path / "root", 4)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", _writer(fs))
+    monkeypatch.setattr(pb, "gate", lambda c, p: (_ for _ in ()).throw(AssertionError("per-file gate ran")))
+    sizes = []
+
+    def fake_many(claims, path):
+        sizes.append(len(claims))
+        return None if len(claims) == 8 else [OK for _ in claims]  # only the whole pack fails
+
+    monkeypatch.setattr(pb, "gate_many", fake_many)
+    monkeypatch.setattr(pb, "memory", fake_connect_memory([]))
+    monkeypatch.setattr(sys, "argv", base_argv(tmp_path / "root"))
+    assert pb.main() == 0
+    assert sizes == [8, 4, 4]  # the pack, then its two halves
+
+
+def test_per_file_fallback_is_one_call_with_both_claims(tmp_path, monkeypatch):
     monkeypatch.setenv("SUPERJEV_BATCH_JEV", "1")
     fs = _files(tmp_path / "root", 2)
     monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(pb, "writer", _writer(fs))
-    monkeypatch.setattr(pb, "gate_many", lambda claims, path: None)
+    monkeypatch.setattr(pb, "gate", lambda c, p: (_ for _ in ()).throw(AssertionError("single-claim gate ran")))
     calls = []
-    monkeypatch.setattr(pb, "gate", lambda c, p: calls.append(c) or {"state": "SUPPORTED", "confidence": 0.9})
+
+    def fake_many(claims, path):
+        calls.append((len(claims), path))
+        return None if "FILE F1" in Path(path).read_text() else [OK for _ in claims]  # packs fail, files pass
+
+    monkeypatch.setattr(pb, "gate_many", fake_many)
     monkeypatch.setattr(pb, "memory", fake_connect_memory([]))
     monkeypatch.setattr(sys, "argv", base_argv(tmp_path / "root"))
     assert pb.main() == 0
-    assert len(calls) == 4  # description + labels, per file
+    per_file = [c for c in calls if c[1] in {str(f) for f in fs}]
+    assert len(per_file) == 2 and all(n == 2 for n, _ in per_file)  # one call per file, desc + label claim
+    cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
+    assert all(cache[str(f)]["pass"] and cache[str(f)]["labels_ok"] for f in fs)
+
+
+def test_payment_required_stops_the_run_with_no_retries(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "1")
+    fs = _files(tmp_path / "root", 4)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(pb, "writer", _writer(fs))
+    monkeypatch.setattr(pb, "gate", lambda c, p: (_ for _ in ()).throw(AssertionError("per-file gate ran")))
+    n = []
+
+    def fake_many(claims, path):
+        n.append(1)
+        raise cc.PaymentRequired("HTTP 402")
+
+    monkeypatch.setattr(pb, "gate_many", fake_many)
+    monkeypatch.setattr(pb, "memory", fake_connect_memory([]))
+    monkeypatch.setattr(sys, "argv", base_argv(tmp_path / "root"))
+    assert pb.main() == 1
+    assert len(n) == 1  # one refused call, no split, no per-file retry
+    assert not (pb.CACHE_DIR / "my-records.json").exists()  # nothing written: the set stays stale
+
+
+def test_gate_many_and_gate_raise_on_http_402(monkeypatch):
+    class R:
+        stdout, stderr, returncode = "", "jev: Jev returned HTTP 402", 1
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate_many(["a", "b"], "/x")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
 
 
 def test_pack_failing_description_still_gets_one_rewrite_alone(tmp_path, monkeypatch):
