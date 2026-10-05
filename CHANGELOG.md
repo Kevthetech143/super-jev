@@ -6,6 +6,10 @@
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
 - Two refreshes of the same set no longer run at once: `prepare_bulk` takes a per-pointer lock in the prepare-cache and a second run for that pointer prints "refresh already running for <pointer>; skipping" and exits 0, so principals sharing a set cannot pile up refreshes; the skipping principal cools down as if it had refreshed. With `--json` the skip is one object, `{"skipped": true, "pointer": ..., "reason": "refresh-running"}`. The new-file scan also walks each report owner once per scan, not once per split part.
 
+## Unreleased
+
+- An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
+
 ## 1.0.127 — 2026-10-05
 
 - An ask never reconnects a stale set inline, so its time no longer grows with the number of stale sets (12 stale sets cost 139 s). A stale set is searched from its last prepared file list, or reported as refreshing; the heal starts in the background (`auto_heal.heal_in_background`, gated read-only before any spawn: no recipe, held and cooldown start nothing, the concurrency cap queues). Only a real start says "refreshing in the background; ask again in a minute"; a set with no recipe never claims a refresh.
@@ -49,8 +53,6 @@
 - `skills/super-jev/scripts/scale_harness.py` builds a synthetic corpus of any size with a stub judge, to measure how an ask's local time grows with the number of files. It also runs on Python 3.10.
 
 ## Unreleased
-
-- An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
 
 - Index read path (`SUPERJEV_INDEX=1`) no longer loses an answer: it answers only for a pointer it holds completely and currently (same generation as the registry, files held, not stale); every other pointer is served by today's path in the same ask, named in the trace as `index.fallback.pointers`. A walk of a folder by one pointer no longer takes file rows away from another pointer that reviewed them, and an ask that meets the updater's lock on the index reads today's path instead of failing.
 
