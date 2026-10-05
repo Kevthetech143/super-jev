@@ -58,15 +58,12 @@ def fts_off(monkeypatch):
     monkeypatch.setattr(ask, "fts_pick", lambda *a, **k: (None, "test: S3a path"))
 
 
-def test_flag_off_is_byte_identical_and_touches_no_index(tmp_path, monkeypatch, capsys):
+def test_flag_off_touches_no_index(tmp_path, monkeypatch, capsys):
     notes, names, sdir = build(tmp_path, monkeypatch, 40)
     Rig(monkeypatch, notes, names)
-    outs = []
-    for setting in (None, "0"):
-        (monkeypatch.delenv("SUPERJEV_INDEX", raising=False) if setting is None else monkeypatch.setenv("SUPERJEV_INDEX", setting))
-        monkeypatch.setattr(ask, "_engine_target", lambda: None)
-        outs.append([ask_it(q, sdir, capsys) for q in QUESTIONS])
-    assert outs[0] == outs[1]
+    monkeypatch.setenv("SUPERJEV_INDEX", "0")
+    monkeypatch.setattr(ask, "_engine_target", lambda: None)
+    [ask_it(q, sdir, capsys) for q in QUESTIONS]
     assert not (sdir / "index.sqlite").exists()
     assert all("fts" not in (json.loads(l).get("stages", {}).get("index") or {}) for l in (sdir / "traces.jsonl").read_text().splitlines())
 

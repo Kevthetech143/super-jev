@@ -2041,7 +2041,7 @@ def edited_held(pointers: list, exclude=(), reads=None) -> dict:
     return out
 
 
-# --- Index read path (flag-gated, default OFF): the ask reads its candidate list and pointer status from the
+# --- Index read path (default ON; SUPERJEV_INDEX=0 turns it off): the ask reads its candidate list and pointer status from the
 # per-principal file index (file_index.py) instead of hashing every file; only files it serves are sha-checked.
 INDEX_FILE = "index.sqlite"
 INDEX_STAMP = "index-sync.stamp"
@@ -2049,15 +2049,16 @@ INDEX_MAX_AGE_SECS = 24 * 3600   # an index not synced for a day is stale: today
 INDEX_SPAWN_EVERY_SECS = 600     # detached updater after an ask, at most this often (sooner on a served mismatch)
 
 def index_enabled() -> bool:
-    """SUPERJEV_INDEX=1/0 wins; else the engine config key "indexRead": true. Default off."""
+    """On unless switched off: SUPERJEV_INDEX=0/off/false/no wins (any other value is on); else the engine config
+    key "indexRead": false turns it off. Unset = on."""
     v = os.environ.get("SUPERJEV_INDEX", "").strip().lower()
     if v:
-        return v in ("1", "on", "true", "yes")
+        return v not in ("0", "off", "false", "no")
     try:
         target = _engine_target()
-        return bool(target and json.loads(target[1].read_text()).get("indexRead") is True)
+        return not (target and json.loads(target[1].read_text()).get("indexRead") is False)
     except Exception:
-        return False
+        return True
 
 def engine_visible(principal: str):
     """Names of the pointers the engine says this principal is authorized on right now (one SELECT, no snapshot,
@@ -2961,6 +2962,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                      if isinstance(row, dict) and row.get("viewOriginals")}
     _STAGE["view_pointers"] = sorted(view_pointers)
     if panel.get("reason") == "not-set-up":
+        _STAGE.pop("index", None)  # nothing to index yet: no updater is started, no state is left behind
         return _done("needs-setup", "Super Jev is not set up yet", f"python3 {skill_dir_for_display() / 'setup.py'}",
                      "setup")
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
@@ -2996,6 +2998,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     content_check={}, final_ranked=[], tier="none",
                     timings={"total_secs": round(time.time() - t0, 2)}, errors=["nothing-connected"],
                     stages={"cache": cache_stage})
+        _STAGE.pop("index", None)  # nothing to index: no updater is started
         return _done("needs-setup", f"nothing is connected yet for principal '{principal}'",
                      f"python3 {here / 'prepare_bulk.py'} --root /path/to/folder --pointer my-notes "
                      f"--principal {principal}", "connect")
