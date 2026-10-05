@@ -3020,8 +3020,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # another person's records, and a pointer holding only theirs is not asked.
     try:
         fts_ready = bool(idx_read and idx_read.fts_usable(WORD_INDEX_VERSION)[0])
-        folks = people(pointers, idx_read.person_paths([p for p in pointers if p not in index_fb])
-                       + [p for ptr in pointers if ptr in index_fb for p in load_cache_files(ptr)]) if fts_ready else people(pointers)
+        if fts_ready:
+            served = index_served(idx_read.coverage(), [p for p in pointers if p not in index_fb])
+            folks = people(pointers, idx_read.person_paths(served)
+                           + [p for ptr in pointers if ptr not in served for p in load_cache_files(ptr)])
+        else:
+            folks = people(pointers)
     except sqlite3.Error as e:
         idx_read, index_fb, fts_ready = index_failed(idx_read, e), {}, False
         folks = people(pointers)
