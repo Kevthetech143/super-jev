@@ -344,10 +344,14 @@ def score_items(question: str, items: dict, instruction: str, purpose: str) -> d
     Raises on any failed batch: a step that did not finish is never read as "none"."""
     # The judge refuses a call whose state plus longest question is over the budget, so the item
     # text gets only what the question, purpose and instruction leave (as superjev.py _judge_room).
-    room = BATCH_TOKENS - sum(map(judge_profile.judge_tokens, (question, purpose, instruction))) - 200
+    # Each text is counted as the judge client counts it: JSON-encoded, where a quote, backslash or
+    # newline is two bytes.
+    def sent(text):
+        return judge_profile.judge_tokens(json.dumps(text, ensure_ascii=False))
+    room = BATCH_TOKENS - sum(map(sent, (question, purpose, instruction))) - 200
     batches, cur, cost = [], [], 0
     for i in items:
-        t = judge_profile.judge_tokens(items[i]) + 40
+        t = sent(items[i]) + 40
         if cur and (cost + t > room or len(cur) >= BATCH_ITEMS):
             batches.append(cur)
             cur, cost = [], 0

@@ -211,6 +211,17 @@ def test_a_dense_pool_with_the_longest_question_never_goes_over_the_per_call_bud
     assert set(got) == set(pool) and len(sent) > 1
 
 
+
+def test_quote_and_newline_heavy_pages_are_counted_as_sent_and_never_go_over(monkeypatch):
+    """The client counts the JSON-encoded state, where a quote or newline is two bytes."""
+    sent = []
+    monkeypatch.setattr(toc_search.judges, "ask",
+                        _judge_that_refuses_oversize(toc_search.judge_profile.PROFILE.call_tokens, sent))
+    pool = {f"f{i}": f"notes/page_{i:03d}.md\n" + "".join(f'## "Step {k}" of "{i}"\n"a" "b" "c" "d" "e" "f"\n'
+                                                           for k in range(40))[:1400] for i in range(toc_search.POOL_CAP)}
+    got = toc_search.score_items("x" * 8000, pool, toc_search.L2, "choose the files that hold the answer")
+    assert set(got) == set(pool)
+
 def test_on_a_small_window_judge_batches_shrink_to_fit(monkeypatch):
     laya = toc_search.judge_profile.load("laya")
     monkeypatch.setattr(toc_search, "BATCH_TOKENS", laya.call_tokens)
