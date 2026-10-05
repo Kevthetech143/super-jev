@@ -1152,6 +1152,10 @@ class WriterError(RuntimeError):
     """The external description writer did not produce a usable response."""
 
 
+class InvalidJSONError(WriterError):
+    """The writer ran but its output was not a JSON array (a batch-local problem, not a dead writer)."""
+
+
 def writer(items: list, model: str, feedback: dict | None = None, command: list[str] | None = None) -> dict:
     """Run a writer that reads the prompt from stdin and returns a JSON array on stdout."""
     fb = ""
@@ -1196,7 +1200,7 @@ def writer(items: list, model: str, feedback: dict | None = None, command: list[
                 return {x["path"]: x for x in arr if isinstance(x, dict) and x.get("path")}
             except Exception:
                 pass
-    raise WriterError("writer returned invalid JSON after 2 attempts")
+    raise InvalidJSONError("writer returned invalid JSON after 2 attempts")
 
 
 BUILTIN_QUOTE_WORDS = 60
@@ -2094,16 +2098,51 @@ def run(a) -> int:
                           "raise --max-files to opt into the larger writer cost, or narrow --root/--exclude/--no-recurse first",
                           count=len(todo), max=a.max_files)
 
+    # Finished batches are saved as they go, so a retry after a failed run resumes from them.
+    drafts_path = CACHE_DIR / f"{a.pointer}-drafts.json"
+    try:
+        saved = json.loads(drafts_path.read_text())
+    except (OSError, ValueError):
+        saved = {}
     drafts = {}
-    for i in range(0, len(todo), a.batch):
-        batch = todo[i:i + a.batch]
+    for p in todo:
+        e = saved.get(str(p)) if isinstance(saved, dict) else None
+        if isinstance(e, dict) and e.get("sha256") == sha(p) and (e.get("draft") or {}).get("description"):
+            drafts[str(p)] = e["draft"]
+    if drafts:
+        print(f"resume: {len(drafts)} drafts kept from an earlier run, not redrafted")
+    todo_draft = [p for p in todo if str(p) not in drafts]
+
+    def write_chunk(chunk: list) -> dict:
+        items = [excerpt(p) for p in chunk]
+        if use_builtin:
+            return builtin_writer(items)
+        if writer_command:
+            return writer(items, a.writer_model, command=writer_command)
+        return writer(items, a.writer_model)
+
+    def draft_batch(batch: list) -> dict:
         try:
-            if use_builtin:
-                got = builtin_writer([excerpt(p) for p in batch])
-            elif writer_command:
-                got = writer([excerpt(p) for p in batch], a.writer_model, command=writer_command)
-            else:
-                got = writer([excerpt(p) for p in batch], a.writer_model)
+            return write_chunk(batch)
+        except InvalidJSONError as e:
+            print(f"writer: invalid JSON for a batch of {len(batch)} ({e}); retrying it in smaller pieces")
+        got = {}
+        size = max(1, len(batch) // 2)
+        for j in range(0, len(batch), size):
+            chunk = batch[j:j + size]
+            try:
+                if len(chunk) == len(batch):
+                    raise InvalidJSONError("a batch of one cannot be made smaller")
+                got.update(write_chunk(chunk))
+            except InvalidJSONError:
+                print(f"writer: falling back to the builtin writer for {len(chunk)} files in this batch only")
+                got.update(builtin_writer([excerpt(p) for p in chunk]))
+        return got
+
+    for i in range(0, len(todo_draft), a.batch):
+        batch = todo_draft[i:i + a.batch]
+        try:
+            got = draft_batch(batch)
         except WriterError as e:
             fail(roots[0], f"description writer failed: {e}")
             print(f"ERROR: description writer failed: {e}")
@@ -2112,6 +2151,11 @@ def run(a) -> int:
                       "--writer builtin (no model call).")
             return 1
         drafts.update(got)
+        for p in batch:
+            if (got.get(str(p)) or {}).get("description"):
+                saved[str(p)] = {"sha256": sha(p), "draft": got[str(p)]}
+        drafts_path.write_text(json.dumps(saved, indent=1))
+        _record_written(drafts_path)
         print(f"writer batch {i // a.batch + 1}: {len(got)}/{len(batch)} drafted")
 
     def fmt_conf(verdict: dict) -> str:
@@ -2216,6 +2260,7 @@ def run(a) -> int:
     connect_set = reused + passing
     cache_path.write_text(json.dumps(cache, indent=1))
     _record_written(cache_path)
+    drafts_path.unlink(missing_ok=True)  # the cache now holds the result; the resume file is spent
 
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
     rerun = "python3 " + shlex.join(sys.argv)
