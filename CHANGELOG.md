@@ -1,14 +1,14 @@
 # Changelog
 
-## 1.0.126 — 2026-10-05
-
-- File index and its word-search shortlist are now on by default. Set `SUPERJEV_INDEX=0` (or `off`/`false`, or `"indexRead": false` in the engine config) to turn them off.
-
-## Unreleased
+## 1.0.127 — 2026-10-05
 
 - File index build on a large connected folder: reads no longer fail while an update runs (the index uses WAL with a 2 s busy timeout, and a locked read says "index busy (update running)" and answers by the normal path; "index corrupt" is kept for a damaged file). Only one updater runs per principal (`index-update.lock`), the FTS pass commits every 200 files, and only the sets being rewritten fall back to the normal path during a build, not the whole principal.
 - File index walk: cost follows the files, not the links (one parents walk per folder instead of one test per link per file), a root inside another root of the same round is cut from the outer walk, a set that shares a file with another no longer re-reads it each round, and `vbigram(word)` is indexed.
 - File index walk: the updater applies the `--exclude` list connect recorded for a set, so an excluded folder is never walked or recorded.
+
+## 1.0.126 — 2026-10-05
+
+- File index and its word-search shortlist are now on by default. Set `SUPERJEV_INDEX=0` (or `off`/`false`, or `"indexRead": false` in the engine config) to turn them off.
 
 ## 1.0.125 — 2026-10-05
 
