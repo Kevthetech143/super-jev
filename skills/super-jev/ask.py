@@ -1745,8 +1745,7 @@ def load_local_rows(sdir: Path, principal: str, pointers: list, generations: dic
     for ptr in need:
         gen, hit = generations.get(ptr), saved.get(ptr)
         if gen and isinstance(hit, dict) and hit.get("generation") == gen:
-            if isinstance(hit.get("rows"), dict) and (ptr not in view_pointers or all(
-                    isinstance(r, dict) and "upstream" in r for r in hit["rows"].values())):  # older view rows lack the original
+            if isinstance(hit.get("rows"), dict) and (ptr not in view_pointers or hit.get("up")):  # older view rows lack the original
                 _LOCAL_ROWS[ptr] = hit["rows"]
                 continue
             if time.time() - (hit.get("failed_at") or 0) < SET_ROWS_RETRY_SECS:
@@ -1761,7 +1760,7 @@ def load_local_rows(sdir: Path, principal: str, pointers: list, generations: dic
             continue
         _LOCAL_ROWS[ptr] = got
         if gen:
-            saved[ptr], dirty = {"generation": gen, "rows": got}, True
+            saved[ptr], dirty = {"generation": gen, "rows": got, "up": 1}, True
     for ptr in [k for k in saved if k not in pointers]:
         saved.pop(ptr)
         dirty = True
