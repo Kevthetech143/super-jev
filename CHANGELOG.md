@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.126 — 2026-10-05
+
+- File index and its word-search shortlist are now on by default. Set `SUPERJEV_INDEX=0` (or `off`/`false`, or `"indexRead": false` in the engine config) to turn them off.
+
 ## 1.0.125 — 2026-10-05
 
 - File index (`SUPERJEV_INDEX`, still off by default): a file shared by two sets keeps both sets complete (#326).

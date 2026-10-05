@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The flag-gated index read path (SUPERJEV_INDEX=1): the ask reads its candidate list and pointer status from
+"""The index read path (on by default; SUPERJEV_INDEX=0 turns it off): the ask reads its candidate list and pointer status from
 the file index and sha-checks only the files it serves. Made-up files and a stub judge, no network, no spend.
 
     python3 -m pytest skills/super-jev/tests/test_index_read_path.py -q
@@ -128,15 +128,25 @@ def sync(sdir):
     assert ask.index_sync(PRINCIPAL, sdir) == 0
 
 
-def test_flag_off_unset_and_zero_are_byte_identical(tmp_path, monkeypatch, capsys):
+def test_unset_is_on_and_zero_off(monkeypatch):
+    monkeypatch.setattr(ask, "_engine_target", lambda: None)  # no live config is read
+    monkeypatch.delenv("SUPERJEV_INDEX", raising=False)
+    assert ask.index_enabled() is True
+    for v in ("0", "off", "false", "OFF"):
+        monkeypatch.setenv("SUPERJEV_INDEX", v)
+        assert ask.index_enabled() is False
+    for v in ("1", "on"):
+        monkeypatch.setenv("SUPERJEV_INDEX", v)
+        assert ask.index_enabled() is True
+
+
+def test_flag_off_never_creates_an_index(tmp_path, monkeypatch, capsys):
     notes, names, sdir = build(tmp_path, monkeypatch, 30)
     Rig(monkeypatch, notes, names)
-    outs = []
-    for setting in (None, "0"):
-        (monkeypatch.delenv("SUPERJEV_INDEX", raising=False) if setting is None else monkeypatch.setenv("SUPERJEV_INDEX", setting))
-        monkeypatch.setattr(ask, "_engine_target", lambda: None)  # no live config is read
-        outs.append(ask_it(PLANTED[0][0], sdir, capsys))
-    assert outs[0] == outs[1] and "zorblax.md" in outs[0][1]
+    monkeypatch.setenv("SUPERJEV_INDEX", "0")
+    monkeypatch.setattr(ask, "_engine_target", lambda: None)
+    out = ask_it(PLANTED[0][0], sdir, capsys)
+    assert "zorblax.md" in out[1]
     assert not (sdir / "index.sqlite").exists()  # flag off never creates or reads an index
 
 
