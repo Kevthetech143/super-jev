@@ -66,6 +66,7 @@ def test_size_held_plus_low_score_exception_exits_3_and_connected_files_are_serv
     out = capsys.readouterr().out
     assert rc == 3
     assert "CONNECTED 3, HELD 2, FAILED 0" in out
+    assert "approved: 3  exceptions: 0  held: 2" in out and "EXCEPTION" not in out
     cache = json.loads((pb.CACHE_DIR / "my-records.json").read_text())
     assert [Path(k).name for k, v in sorted(cache.items()) if v["pass"]] == ["orchard0.md", "orchard2.md", "orchard3.md"]
     registered = [s["path"] for c in calls if "reviewed" in c for s in c["sources"]]
@@ -98,3 +99,18 @@ def test_a_402_still_exits_1_and_stops(tmp_path, monkeypatch):
     assert rc == 1
     assert len(n) == 1
     assert not (pb.CACHE_DIR / "my-records.json").exists()
+
+
+def test_an_edited_low_held_file_is_retried_and_an_unchanged_one_is_not(tmp_path):
+    import hashlib
+    import refresh_changed as rc
+    f = tmp_path / "pear.md"
+    f.write_text("# Pear\nfirst\n")
+    ok = tmp_path / "plum.md"
+    ok.write_text("# Plum\n")
+    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    cache = {str(f): {"sha256": sha(f), "pass": False}, str(ok): {"sha256": sha(ok), "pass": True}}
+    report = {"approved": [str(ok)]}
+    assert rc.changed_files(report, cache) == []  # unchanged low-held: no paid retry loop
+    f.write_text("# Pear\nfixed so it says what it should\n")
+    assert rc.changed_files(report, cache) == [str(f)]  # edited: re-judged

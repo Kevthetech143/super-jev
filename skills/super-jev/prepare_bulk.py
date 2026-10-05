@@ -2318,13 +2318,15 @@ def run(a) -> int:
     _record_written(cache_path)
     drafts_path.unlink(missing_ok=True)  # the cache now holds the result; the resume file is spent
 
-    print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions)}  held: {len(held)}")
+    lowp = {p for p, _ in low}
+    print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions) - len(low)}  held: {len(held) + len(low)}")
     rerun = "python3 " + shlex.join(sys.argv)
+    hint = ("" if use_builtin else
+            " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)")
     for p, why in exceptions:
-        print(f"  EXCEPTION  {relstr(p, roots)}  ({why})\n"
-              f"      to include it: check the file says what it should, then run: {rerun}"
-              + ("" if use_builtin else
-                 " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)"))
+        label = "HELD     " if p in lowp else "EXCEPTION"
+        print(f"  {label}  {relstr(p, roots)}  ({why})\n"
+              f"      to include it: check the file says what it should, then run: {rerun}" + hint)
     for p, why in held:
         print(f"  HELD  {relstr(p, roots)}  ({why})")
         if "binary" not in why and "backup or credential-style" not in why:

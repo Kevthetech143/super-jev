@@ -12,7 +12,9 @@
 
 ## Unreleased
 
-- A refresh where some files are held or scored under the line no longer marks the whole set failed. A file the judge scored low (a real verdict such as SUPPORTED 0.35 under the pass line) is now reported as held, so a run whose every other file is connected or held exits 3 (partial success), which auto-heal already settles as ok; before, each such file counted as a failure, the run exited 1, the set got retry backoff and stayed stale for its connected files. A judge call that fails (network, 5xx, unparseable output) still counts as a failure (exit 1), and a payment refusal (HTTP 402) still stops the run with nothing written. Test: `tests/test_partial_ok.py`.
+- A refresh where some files are held or scored under the line no longer marks the whole set failed. A file the judge scored low (a real verdict such as SUPPORTED 0.35 under the pass line) is now reported as held, so a run whose every other file is connected or held exits 3 (partial success), which auto-heal already settles as ok; before, each such file counted as a failure, the run exited 1, the set got retry backoff and stayed stale for its connected files. A judge call that fails (network, 5xx, unparseable output) still counts as a failure (exit 1), and a payment refusal (HTTP 402) still stops the run with nothing written. The text summary lists such a file as HELD with its rerun hint, and a held file that is then edited is picked up by the next refresh (an unchanged one is not retried). Test: `tests/test_partial_ok.py`.
+
+- A crashed table-of-contents (TOC) stage is retried once, and no longer ends as a clean not-found. A payment refusal (HTTP 402) or a size refusal is not retried. If the retry also fails and nothing is found, the outcome is `error` (the same exit 3 a failed content check already gets) with "not found, but the contents check failed (<error>), so this may be a miss; ask again"; if files are confirmed the answer is unchanged and the trace's `toc` entry carries the error, `retried` and a note. Test: `skills/super-jev/tests/test_toc_retry.py`.
 
 ## 1.0.129 — 2026-10-05
 
