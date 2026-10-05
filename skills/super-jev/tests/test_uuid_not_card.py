@@ -35,6 +35,7 @@ V7 = [_v7(_ms + i * 37 + _rng.randrange(37), _rng) for i in range(100_000)]
 # Known hits before the fix: last-window (9183-059972976233) and first-window (8-4-4 digits, Luhn-valid).
 FIXED = ["d4b9227c-4460-444a-9183-059972976233", "81978559-1669-4329-9c4e-1b7f0a2d5e3c",
          "80515908-3116-4877-a6c6-aa5f447edff1", "80515908-3116-4877-A6C6-AA5F447EDFF1"]
+NIL = "00000000-0000-0000-0000-000000000000"
 BLOB = json.dumps([{"id": u, "status": "ok"} for u in FIXED + UUIDS[:496]], indent=1)
 BLOB_V7 = json.dumps([{"id": u, "status": "ok"} for u in V7[:500]], indent=1)
 NOT_HELD = [
@@ -46,6 +47,10 @@ NOT_HELD = [
     f"/var/log/runs/{V7[1]}/out.json",
     BLOB,
     BLOB_V7,
+    NIL,
+    f"the default id is {NIL} when unset",
+    f"/var/log/runs/{NIL}/out.json",
+    json.dumps([{"id": NIL, "parent": NIL, "status": "ok"}, {"id": FIXED[1], "owner": NIL.upper()}], indent=1),
 ]
 CARDS = [
     "4000056655665556",                                  # plain
@@ -56,6 +61,8 @@ CARDS = [
     "amex 3400-000000-00009",
     "40000566-5566-5556-0000-000000000000",              # uuid shape, variant 0: not a uuid, held
     "40000566-5566-0557-8000-000000000000",              # uuid shape, version 0: not a uuid, held
+    "40000566-5566-0000-0000-000000000000",              # almost nil, not all zeros: held
+    f"{NIL} 4000056655665556",                           # a card beside the nil uuid
     f"job {FIXED[1]} card 4000 0566 5566 5556",           # a card beside a uuid
     f"{FIXED[0]} 4000056655665556",
 ]
@@ -68,6 +75,10 @@ def test_random_and_known_uuids_never_held():
 def test_uuid_in_prose_path_and_json_blob_not_held():
     assert [t for t in NOT_HELD if has_secret(t)] == []
     assert not card_hit(f"/data/{FIXED[1]}.csv")  # the raw prepare-time line check
+
+
+def test_nil_uuid_not_held():
+    assert not has_secret(NIL) and not has_secret(NIL.upper()) and not card_hit(f"id={NIL}")
 
 
 def test_real_cards_still_held():

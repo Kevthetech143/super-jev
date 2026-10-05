@@ -117,3 +117,11 @@ test('a uuid is never a card; a card in uuid shape without the version/variant s
     '40000566-5566-5556-0000-000000000000', '40000566-5566-0557-8000-000000000000',
     `job ${fixed[1]} card 4000 0566 5566 5556`, `${fixed[0]} 4000056655665556`]) assert.equal(hasSecret(t), true, t);
 });
+
+test('the nil uuid is not a card; near-nil card shapes and a card beside it still are', () => {
+  const nil = '00000000-0000-0000-0000-000000000000';
+  const blob = JSON.stringify([{ id: nil, parent: nil, status: 'ok' }, { id: nil }], null, 1);
+  for (const t of [nil, `the default id is ${nil} when unset`, `/var/log/runs/${nil}/out.json`, blob]) assert.equal(hasSecret(t), false, t);
+  for (const t of ['40000566-5566-0000-0000-000000000000', '40000566-5566-0557-8000-000000000000',
+    `${nil} 4000056655665556`]) assert.equal(hasSecret(t), true, t);
+});
