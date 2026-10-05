@@ -682,12 +682,52 @@ def _recipe_gate(pointer: str, principal: str) -> str:
     return "cooldown" if _wait_secs(state, pointer, time.time()) > 0 else ""
 
 
+def _reclaim(principal: str) -> None:
+    """Start a drain for this principal's queue when nothing holds a lock to drain it: a drain
+    that stopped on a queued set's cooldown or the hourly cap left it pending, and an ask whose
+    own set only cools down starts none. Only sets that could run now (due, and a counted kind
+    within the cap); one drain at most, since it takes the first such set's lock, and one reclaim
+    per principal per RETRY_SECS, so a drain that dies (or leaves its set queued) is not
+    respawned by every ask. A drain that cannot start puts that set on its retry timer."""
+    now, token, head = time.time(), "", ""
+    with _state_txn(principal) as state:
+        if now - state.get("reclaimed", 0) < RETRY_SECS:
+            return
+        slots = MAX_PER_HOUR - len([t for t in state["attempts"] if now - t < 3600])
+        ready = sorted((v.get("ts", 0), p) for p, v in state["pending"].items()
+                       if _wait_secs(state, p, now) <= 0 and (v.get("kind") not in ("refresh", "new") or slots > 0))
+        if ready and not any(_lock_holder_alive(lock) for lock in STATE_DIR.glob(f"{principal}.*.lock")):
+            head = ready[0][1]
+            token = _acquire_lock(principal, head)
+            if token:
+                state["reclaimed"] = now
+    if not token:
+        return
+    try:
+        _name_child(principal, head, token, _spawn_detached(_drain_cmd(principal, head, token)))
+        result = "started"
+    except OSError:
+        _release_lock(principal, head, token)
+        with _state_txn(principal) as state:
+            state["retry"][head] = time.time() + RETRY_SECS
+        result = "failed"
+    _log(principal=principal, pointer=head, action="reclaim", result=result)
+
+
 def heal_in_background(pointer: str, principal: str, view: bool = False) -> str:
     """What an ask does for a stale set: start its heal and return at once, whatever the set count.
     A changed set gets maybe_heal's refresh; a set with nothing to redraft (no-change), or built
     without prepare_bulk (no-report, a recorded recipe), gets the reconnect, started detached
     (reconnect_now with no wait) or queued for a lock holder's drain. Same result words as
-    maybe_heal: "started", "in-progress", "cooldown", "rate-limited", "failed", or the skip reason."""
+    maybe_heal: "started", "in-progress", "cooldown", "rate-limited", "failed", or the skip reason.
+    A set that only cools down or hits the cap still reclaims an orphaned queue (_reclaim)."""
+    result = _heal_one(pointer, principal, view)
+    if result in ("cooldown", "rate-limited"):
+        _reclaim(principal)
+    return result
+
+
+def _heal_one(pointer: str, principal: str, view: bool) -> str:
     result = "no-report" if view else maybe_heal(pointer, principal)
     if result not in ("no-change", "no-report"):
         return result

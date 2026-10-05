@@ -8,6 +8,8 @@
 
 ## Unreleased
 
+- A queued heal is no longer orphaned. A drain that stops on a queued set's cooldown or the hourly cap leaves it pending, and an ask whose own set only cools down started no drain, so nothing healed it. Such an ask now starts one drain for the principal's queue when no lock holder is left to drain it, for sets that are due and within the hourly cap only; a drain that cannot start puts the set on its retry timer, and a principal is reclaimed at most once per retry interval, so a drain that dies is not respawned by every ask. Each reclaim writes one `action: "reclaim"` line to `autoheal.log`. Test: `tests/test_auto_heal_reclaim.py`.
+- The test suite's session-end isolation check now compares the real `locks` and `autoheal-state` folders (names and mtimes) with a snapshot taken at session start, so a test that touches them fails the run even when the folders already exist; it only caught a newly created folder before.
 - Fewer judge calls per ask: the table-of-contents file pick and part pick size their batches by the judge's per-call budget (`call_tokens` from `judge_profiles.json`) and the pick pool (capped by `max_questions_per_call`), so a whole pick pool fits one call. Test: `tests/test_toc_search.py`.
 
 ## 1.0.128 — 2026-10-05
