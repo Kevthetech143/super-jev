@@ -28,13 +28,14 @@ class CachedSkipSnapshotTests(unittest.TestCase):
         self.assertEqual(got, {'status': 'cache-miss', 'checked': ['docs']})
         self.assertEqual(snapped, [])
 
-    def test_pointer_with_row_for_different_question_is_still_snapshotted(self):
+    def test_pointer_with_row_only_for_different_question_is_not_snapshotted(self):
+        # #309: a row for another question cannot be a hit either, so the snapshot is skipped
         fixture, snapped = self.fixture()
         fixture.approve(fixture.ticket())
         snapped.clear()
         got = fixture.service.cached('alice', 'other question?')
-        self.assertEqual(got['status'], 'cache-miss')
-        self.assertEqual(snapped, ['docs'])
+        self.assertEqual(got, {'status': 'cache-miss', 'checked': ['docs']})
+        self.assertEqual(snapped, [])
 
     def test_edited_source_with_row_still_returns_stale(self):
         fixture, snapped = self.fixture()

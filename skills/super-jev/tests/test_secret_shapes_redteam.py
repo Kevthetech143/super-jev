@@ -59,6 +59,14 @@ BODIES = [
     "card 4000/0566/5566/5556",
     "card 4000-0566-5566-5556",
     "amex 3412.345678.90127",
+    # 3+ letter words joined by - or _ (regressed at #254; Fable Rev25 2026-10-05)
+    "password: this-is-a-private-password",
+    "password: correct-horse-battery-staple",
+    "Passphrase: blue_river_stone_fake",
+    "pass" + 'word: "correct-horse-battery-staple"',
+    "the password is correct-horse-battery-staple",
+    "**Password:** correct-horse-battery-staple.",
+    "pw: red-fox-jump-high",
 ]
 # Twenty ordinary sentences: the words are there, no value follows.
 CLEAN = [
@@ -98,6 +106,14 @@ CLEAN = [
     "Use pwd -- to print the working directory.",
     'cmd = "password=" + value',
     'q = "password=" +',
+    # prose with a hyphenated word near a credential label; two joined words are not held on purpose
+    # (auto-generated, read-only and per-user are far more common there than a two-word passphrase)
+    "Password-protected files are fine to share.",
+    "See the password-reset flow in the docs.",
+    "the password-reset-flow docs",
+    "password: password-reset",
+    "password: auto-generated",
+    "password reset-link-flow",
 ]
 
 
