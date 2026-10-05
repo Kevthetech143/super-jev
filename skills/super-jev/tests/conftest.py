@@ -24,9 +24,26 @@ _scrub_callers_settings()
 
 # Heal state and prepare locks resolve to <state root> at import, and the scrub above leaves that the
 # real ~/.local/state/super-jev. A test must never write there: the fixture below points every loaded
-# copy at tmp, and the session-end check fails the run if the real folders appeared anyway.
+# copy at tmp, and the session-end check fails the run if anything in the real folders changed (a
+# name appeared, vanished or got a new mtime), whether or not the folders existed before the run.
 _REAL_HEAL_DIRS = [Path.home() / ".local/state/super-jev" / n for n in ("locks", "autoheal-state")]
-_HEAL_DIRS_BEFORE = [d.exists() for d in _REAL_HEAL_DIRS]
+
+
+def _snapshot(d):
+    """{name: mtime_ns} of the folder and its entries, or None when the folder is absent."""
+    try:
+        snap = {".": d.stat().st_mtime_ns}
+        for e in d.iterdir():
+            try:
+                snap[e.name] = e.stat().st_mtime_ns
+            except OSError:
+                snap[e.name] = None
+        return snap
+    except OSError:
+        return None
+
+
+_HEAL_DIRS_BEFORE = [_snapshot(d) for d in _REAL_HEAL_DIRS]
 _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
@@ -51,9 +68,9 @@ def _heal_state_in_tmp(monkeypatch, tmp_path):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    made = [str(d) for d, was in zip(_REAL_HEAL_DIRS, _HEAL_DIRS_BEFORE) if d.exists() and not was]
-    if made:
-        print(f"\nTEST ISOLATION BREACH: the run created {made} in the real state folder")
+    changed = [str(d) for d, was in zip(_REAL_HEAL_DIRS, _HEAL_DIRS_BEFORE) if _snapshot(d) != was]
+    if changed:
+        print(f"\nTEST ISOLATION BREACH: the run changed {changed} in the real state folder")
         session.exitstatus = 1
 
 def pytest_configure(config):
