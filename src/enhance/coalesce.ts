@@ -16,31 +16,12 @@ const QUESTION_OVERHEAD = 20;
 export const estimateTokens = judgeTokens;
 
 type Pending = { request: Request; resolve: (e: Evaluation) => void; reject: (e: unknown) => void; tokens: number; done: boolean; onDone?: () => void };
-type Passages = Record<string, string>;
-
-/** The state's `passages` when they can be packed with other requests' (an object of strings), else undefined. */
-function passagesOf(state: unknown): Passages | undefined {
-  if (!state || typeof state !== 'object' || Array.isArray(state)) return undefined;
-  const passages = (state as { passages?: unknown }).passages;
-  if (!passages || typeof passages !== 'object' || Array.isArray(passages)) return undefined;
-  return Object.values(passages).every(text => typeof text === 'string') ? passages as Passages : undefined;
-}
-
-/** The state without its packable passages: requests with the same shared state can share a call. */
-function sharedState(state: unknown): unknown {
-  if (!passagesOf(state)) return state;
-  const { passages: _passages, ...rest } = state as { passages: Passages };
-  return rest;
-}
 
 /**
  * Coalesces evaluate() calls made in the same tick into as few provider calls as
  * fit the budget. Questions are answered independently against the same state,
- * so a batched answer means the same as the unbatched one. Requests with an
- * identical state are merged; so are requests whose states differ only in their
- * `passages` (one content check per file): each request's passage keys get its
- * batch prefix, and its `Classify passages.<key>` references are rewritten to
- * match. Each request keeps its own question keys and answers.
+ * so a batched answer means the same as the unbatched one. Only requests with an
+ * identical state are merged; each keeps its own question keys and answers.
  */
 export class BatchingEvaluator implements Evaluator {
   calls = 0;
@@ -52,9 +33,7 @@ export class BatchingEvaluator implements Evaluator {
 
   evaluate(request: Request, signal: AbortSignal): Promise<Evaluation> {
     return new Promise((resolve, reject) => {
-      // A request's own passages ride in the merged state, so they count against the budget with its questions.
-      const tokens = Object.values(request.questions).reduce((sum, q) => sum + estimateTokens(q) + QUESTION_OVERHEAD, 0)
-        + estimateTokens(passagesOf(request.state));
+      const tokens = Object.values(request.questions).reduce((sum, q) => sum + estimateTokens(q) + QUESTION_OVERHEAD, 0);
       const item: Pending = { request, resolve, reject, tokens, done: false };
       signal.addEventListener('abort', () => settle(item, () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))), { once: true });
       this.pending.push(item);
@@ -67,11 +46,11 @@ export class BatchingEvaluator implements Evaluator {
     const groups = new Map<string, Pending[]>();
     for (const item of this.pending.splice(0)) {
       if (item.done) continue;
-      const key = JSON.stringify([!!passagesOf(item.request.state), sharedState(item.request.state)]);
+      const key = JSON.stringify(item.request.state);
       groups.set(key, [...(groups.get(key) ?? []), item]);
     }
     for (const items of groups.values()) {
-      const stateTokens = estimateTokens(sharedState(items[0]!.request.state));
+      const stateTokens = estimateTokens(items[0]!.request.state);
       let batch: Pending[] = [];
       let used = stateTokens;
       for (const item of items) {
@@ -87,19 +66,7 @@ export class BatchingEvaluator implements Evaluator {
     const live = batch.filter(item => !item.done);
     if (!live.length) return;
     const questions: Request['questions'] = {};
-    let state = live[0]!.request.state;
-    if (live.length > 1 && passagesOf(state)) {
-      // Packed passages: prefix each request's passage keys like its question keys, and point its questions at them.
-      const passages: Passages = {};
-      live.forEach((item, i) => { for (const [key, text] of Object.entries(passagesOf(item.request.state)!)) passages[`b${i}_${key}`] = text; });
-      state = { ...(sharedState(state) as object), passages };
-      live.forEach((item, i) => {
-        const own = Object.keys(passagesOf(item.request.state)!);
-        for (const [key, q] of Object.entries(item.request.questions)) {
-          questions[`b${i}_${key}`] = { ...q, instructions: q.instructions.replace(/passages\.([A-Za-z0-9_]+)/g, (ref, name: string) => own.includes(name) ? `passages.b${i}_${name}` : ref) };
-        }
-      });
-    } else live.forEach((item, i) => { for (const [key, q] of Object.entries(item.request.questions)) questions[`b${i}_${key}`] = q; });
+    live.forEach((item, i) => { for (const [key, q] of Object.entries(item.request.questions)) questions[`b${i}_${key}`] = q; });
     const controller = new AbortController();
     // Once every caller has given up (each one's own timeout), nobody can use the
     // answer: stop the call so the process does not sit waiting for it.
@@ -107,7 +74,7 @@ export class BatchingEvaluator implements Evaluator {
     for (const item of live) item.onDone = giveUp;
     try {
       this.calls++;
-      const evaluation = await this.withRetry({ state, questions }, controller.signal);
+      const evaluation = await this.withRetry({ state: live[0]!.request.state, questions }, controller.signal);
       live.forEach((item, i) => {
         const answers = Object.fromEntries(Object.keys(item.request.questions).map(key => [key, evaluation.answers[`b${i}_${key}`]!]));
         settle(item, () => item.resolve({ ...evaluation, answers }));
