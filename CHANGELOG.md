@@ -34,7 +34,7 @@
 - An optional index read path, off by default (`SUPERJEV_INDEX=1`, or `indexRead: true` in the engine config). When on, the pointer list, status and word-search and table-of-contents corpus come from the file index, only the files served are checked against their hash, and an ask falls back to the normal path with the reason in the trace. A second optional step shortlists passages through an FTS5 index so the local part of an ask stays flat as the number of files grows. Leave both off until the fallback for pointers that are not fully indexed lands.
 - `skills/super-jev/scripts/scale_harness.py` builds a synthetic corpus of any size with a stub judge, to measure how an ask's local time grows with the number of files. It also runs on Python 3.10.
 
-## 1.0.126 — 2026-10-05
+## Unreleased
 
 - Index read path (`SUPERJEV_INDEX=1`) no longer loses an answer: it answers only for a pointer it holds completely and currently (same generation as the registry, files held, not stale); every other pointer is served by today's path in the same ask, named in the trace as `index.fallback.pointers`. A walk of a folder by one pointer no longer takes file rows away from another pointer that reviewed them, and an ask that meets the updater's lock on the index reads today's path instead of failing.
 
