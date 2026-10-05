@@ -182,7 +182,8 @@ class FileIndex:
         """(files, links, link_dirs) of pb.walk_md(root). In a round, a root inside an outer root of the round is cut out of
         that root's walk: the same files and links, unless a folder inside it was skipped there as already walked
         (a link loop or a second path to one folder), when it is walked on its own."""
-        key = str(root) + "\0".join(excludes)
+        key = (str(root), tuple(excludes))
+        rk = key[0]
         if self._raw is None:
             tr = {}
             files, linked = pb.walk_md(root, trace=tr, excludes=list(excludes))
@@ -190,15 +191,15 @@ class FileIndex:
         if key in self._raw:
             return self._raw[key]
         for outer in () if excludes else self._round_roots:  # (a root with excludes is walked on its own)
-            if outer == key:
+            if outer == rk:
                 break
-            if key.startswith(outer.rstrip(os.sep) + os.sep):
+            if rk.startswith(outer.rstrip(os.sep) + os.sep):
                 of, ol, od = self._raw_walk(Path(outer), pb)
-                if not any(d == key or d.startswith(key + os.sep) for d in self._raw_dups[outer]):
-                    pre = key + os.sep
+                if not any(d == rk or d.startswith(rk + os.sep) for d in self._raw_dups[(outer, ())]):
+                    pre = rk + os.sep
                     got = ([f for f in of if str(f).startswith(pre)],
-                           [t for t, d in zip(ol, od) if d == key or d.startswith(pre)],
-                           [d for d in od if d == key or d.startswith(pre)])
+                           [t for t, d in zip(ol, od) if d == rk or d.startswith(pre)],
+                           [d for d in od if d == rk or d.startswith(pre)])
                     self._raw[key] = got
                     self._raw_dups[key] = []
                     return got
@@ -284,6 +285,13 @@ class FileIndex:
         row = self.db.execute("SELECT roots FROM pointers WHERE pointer=?", (pointer,)).fetchone()
         if roots is None and row and row[0]:
             roots = json.loads(row[0])
+        ex = [e.strip("/") for e in excludes or [] if e.strip("/")]
+        if ex and roots:  # rows a walk made before the folder was excluded go, so they are never stat'd again
+            import prepare_bulk as pb
+            for p in [p for p in known if p not in entries and any(
+                    p.startswith(str(r).rstrip("/") + "/") and pb._excluded(p[len(str(r).rstrip("/")) + 1:], ex) for r in roots)]:
+                self._drop(p)
+                del known[p]
         paths = set(entries) | set(known)
         paths |= {p for p in self._walk(roots, excludes)}
         for p in sorted(paths):

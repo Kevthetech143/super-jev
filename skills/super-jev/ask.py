@@ -2365,7 +2365,12 @@ def _index_sync(principal: str, sdir: Path) -> int:
     if not rows:
         say(f"index update skipped: no pointer list ({panel.get('reason') or panel.get('status') or 'empty'})" if isinstance(panel, dict) else "index update skipped")
         return 1
-    idx = FileIndex(principal, sdir / INDEX_FILE)
+    try:
+        idx = FileIndex(principal, sdir / INDEX_FILE)
+    except sqlite3.OperationalError as e:
+        if index_unusable(e).startswith("index busy"):
+            return 0  # an old reader still holds the file (WAL conversion blocked): the next spawn retries
+        raise
     try:
         hashed, expected = 0, {}
         reports = {r["pointer"]: auto_heal._report_for(r["pointer"], prepare_bulk.CACHE_DIR)[0] or {} for r in rows}

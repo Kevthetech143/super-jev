@@ -334,3 +334,44 @@ def test_walk_excludes_match_connects_rule(tangle):
     got = set(fi._walk([str(tangle)], ex))
     want = {p for p in fi._walk([str(tangle)]) if not pb._excluded(Path(p).relative_to(tangle).as_posix(), ex)}
     assert got == want and str(tangle / "b" / "c.md") in got and str(tangle / "b" / "d" / "e.md") not in got
+
+
+def test_a_root_with_an_exclude_does_not_collide_with_a_sibling_root(tmp_path):
+    touch(tmp_path / "a" / "b" / "keep.md")
+    touch(tmp_path / "a" / "b" / "c" / "drop.md")
+    touch(tmp_path / "a" / "bc" / "other.md")  # "/a/b" + exclude "c" must not share a key with this root
+    fi = FileIndex("t", tmp_path / "i.sqlite")
+    fi.begin_round()
+    got_b = sorted(fi._walk([str(tmp_path / "a" / "b")], ["c"]))
+    got_bc = sorted(fi._walk([str(tmp_path / "a" / "bc")]))
+    assert got_b == [str(tmp_path / "a" / "b" / "keep.md")]
+    assert got_bc == [str(tmp_path / "a" / "bc" / "other.md")]
+    fi2 = FileIndex("t2", tmp_path / "i2.sqlite")
+    fi2.begin_round()
+    assert sorted(fi2._walk([str(tmp_path / "a" / "bc")])) == got_bc  # and in the other order
+    assert sorted(fi2._walk([str(tmp_path / "a" / "b")], ["c"])) == got_b
+
+
+def test_an_exclude_added_later_drops_the_old_rows_and_they_are_not_stat_again(tmp_path, monkeypatch):
+    root = tmp_path / "docs"
+    touch(root / "keep.md"); touch(root / "gen" / "g1.md"); touch(root / "gen" / "g2.md")
+    idx = FileIndex("t", tmp_path / "i.sqlite")
+    idx.update("p", entries={}, roots=[str(root)])
+    assert idx.db.execute("SELECT COUNT(*) FROM seen WHERE path LIKE '%/gen/%'").fetchone()[0] == 2
+    touched = []
+    real = os.stat
+    monkeypatch.setattr(os, "stat", lambda p, *a, **k: (touched.append(str(p)), real(p, *a, **k))[1])
+    idx.update("p", entries={}, roots=[str(root)], excludes=["gen/"])
+    assert not [t for t in touched if "/gen" in t], touched
+    assert idx.db.execute("SELECT COUNT(*) FROM seen WHERE path LIKE '%/gen/%'").fetchone()[0] == 0
+    assert idx.db.execute("SELECT COUNT(*) FROM seen WHERE path LIKE '%/keep.md'").fetchone()[0] == 1
+
+
+def test_updater_exits_quietly_when_the_index_cannot_be_opened(tmp_path, monkeypatch):
+    notes, names, sdir = rp.build(tmp_path, monkeypatch, 5)
+    rp.Rig(monkeypatch, notes, names)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(file_index, "FileIndex", locked)
+    assert ask.index_sync(rp.PRINCIPAL, sdir) == 0
