@@ -2309,7 +2309,7 @@ async function fakeJudge() {
       if (j.hold) { j.open++; res.on('close', () => j.open--); return; } // a held call ends only when the client goes away
       const body = JSON.parse(b), answers: Record<string, unknown> = {};
       for (const [id, q] of Object.entries<any>(body.questions)) {
-        const passage = body.state?.passages?.[id.replace(/^b\d+_/, '')]; // a passage check: yes or no on this text
+        const passage = body.state?.passages?.[/Classify passages\.(\w+)\./.exec(q.instructions ?? '')?.[1] ?? '']; // a passage check: yes or no on the text it names
         const keys = Object.keys(q.criteria ?? {});
         const pick = passage !== undefined ? (says(passage) ? 'o_0' : 'o_none') : keys.find((k) => k !== 'o_none' && says(q.criteria[k])) ?? 'o_none';
         if (q.type === 'choice') answers[id] = { type: 'choice', choice: pick, confidence: 0.95, probabilities: Object.fromEntries(keys.map((k) => [k, k === pick ? 0.95 : 0.05 / (keys.length - 1 || 1)])) };
