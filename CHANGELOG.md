@@ -2,6 +2,7 @@
 
 ## 1.0.127 — 2026-10-05
 
+- An ask never reconnects a stale set inline, so its time no longer grows with the number of stale sets (12 stale sets cost 139 s). A stale set is searched from its last prepared file list, or reported as refreshing; the heal starts in the background (`auto_heal.heal_in_background`, gated read-only before any spawn: no recipe, held and cooldown start nothing, the concurrency cap queues). Only a real start says "refreshing in the background; ask again in a minute"; a set with no recipe never claims a refresh.
 - File index build on a large connected folder: reads no longer fail while an update runs (the index uses WAL with a 2 s busy timeout, and a locked read says "index busy (update running)" and answers by the normal path; "index corrupt" is kept for a damaged file). Only one updater runs per principal (`index-update.lock`), the FTS pass commits every 200 files, and only the sets being rewritten fall back to the normal path during a build, not the whole principal.
 - File index walk: cost follows the files, not the links (one parents walk per folder instead of one test per link per file), a root inside another root of the same round is cut from the outer walk, a set that shares a file with another no longer re-reads it each round, and `vbigram(word)` is indexed.
 - File index walk: the updater applies the `--exclude` list connect recorded for a set, so an excluded folder is never walked or recorded.

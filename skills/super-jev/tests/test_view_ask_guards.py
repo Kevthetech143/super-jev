@@ -50,10 +50,10 @@ def test_lookup_never_reads_an_old_raw_bulk_cache(tmp_path, monkeypatch):
 def test_stale_view_only_attempts_its_recipe_not_old_bulk_report(tmp_path, monkeypatch):
     _, _ = setup(tmp_path, monkeypatch, stale=True)
     recipes = []
-    monkeypatch.setattr(ask.auto_heal, 'reconnect_recipe',
-                        lambda ptr, principal, memory=None: recipes.append(ptr) or 'failed')
+    monkeypatch.setattr(ask.auto_heal, 'heal_in_background',
+                        lambda ptr, principal, view=False: recipes.append((ptr, view)) or 'started')
     ask.lookup('Project public notes', 'owner', tmp_path / 'state/owner')
-    assert recipes == ['notes']
+    assert recipes == [('notes', True)]  # the recipe, started in the background; never the old bulk report
 
 
 def test_saved_raw_claim_is_withheld_after_view_conversion(tmp_path, monkeypatch, capsys):

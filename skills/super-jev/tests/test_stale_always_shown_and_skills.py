@@ -59,7 +59,7 @@ def test_a_stale_pointer_that_is_healing_still_shows_every_time(tmp_path, monkey
     monkeypatch.setattr(ah, "maybe_heal", lambda *a, **k: "started")
     for _ in range(2):
         ask.lookup("what is pending", "primary", tmp_path / "s")
-        assert "refresh started in background" in capsys.readouterr().out
+        assert "refreshing in the background; ask again in a minute" in capsys.readouterr().out
 
 
 def test_hint_never_prints_a_prepare_bulk_command_for_a_pointer_it_did_not_build(tmp_path, monkeypatch):

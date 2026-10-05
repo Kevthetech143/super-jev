@@ -3196,26 +3196,14 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         results[i] = nav(results[i][0])
     if again:
         _STAGE["network_retries"] = len(again)
-    # A stale pointer whose files are all already reviewed at their current bytes needs no
-    # redraft, only a reconnect: do it now and ask it again, so this lookup reads it.
-    # One RECONNECT_TIMEOUT_SECS budget covers every reconnect in this lookup. A replay
-    # never reconnects or heals: that changes connector state and starts paid work.
-    reconnected, deadline = {}, time.time() + auto_heal.RECONNECT_TIMEOUT_SECS
+    # An ask never reconnects a stale set itself: that made its time grow with the number of stale
+    # sets (one 6-14 s reconnect each, 139 s in all). A stale set is searched from its last prepared
+    # file list, or reported as refreshing; the heal below starts in the background and returns at once.
     for i, (ptr, kind, *_rest) in enumerate(results):
-        left = int(deadline - time.time())
-        if (auto_heal.is_stale_kind(kind) or ptr in stale_served) and left >= 1 and not replay:
-            reconnected[ptr] = ("no-report" if ptr in view_pointers else
-                                auto_heal.reconnect_now(ptr, principal, timeout=left))
-            if reconnected[ptr] == "no-report":
-                # Not built by prepare_bulk: replay the connect recipe recorded at connect time.
-                reconnected[ptr] = auto_heal.reconnect_recipe_or_queue(ptr, principal, memory=memory)
-            if reconnected[ptr] == "reconnected":
-                results[i] = nav(ptr)
-        elif kind == "pointer-changed":
+        if kind == "pointer-changed":
             # A refresh re-registered the set while Jev routed it (a stale set is routed now,
             # so a background refresh can land mid-call): ask it once more at its new generation.
             results[i] = nav(ptr)
-    _STAGE["reconnect"] = reconnected
     # A note written into a connected folder after its connect is not in the pointer's file list,
     # so nothing marks the pointer stale: look for such files now and then (background, bounded)
     # and refresh their pointers, so a later lookup finds them without a hand reconnect.
@@ -3275,12 +3263,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             stale = bool(served) or auto_heal.is_stale_kind(kind)
             result = None
             if stale and not replay:
-                result = (reconnected.get(ptr, "no-recipe") if ptr in view_pointers else
-                          auto_heal.maybe_heal(ptr, principal))
+                result = auto_heal.heal_in_background(ptr, principal, view=ptr in view_pointers)
                 if result in ("started", "in-progress"):
-                    healing.add(ptr)
+                    healing.add(ptr)  # "no-recipe", "held", "manual": nothing is refreshing, so never claimed
                 if result == "started":
-                    heal_note = " (auto-heal: refresh started in background)"
+                    heal_note = " (refreshing in the background; ask again in a minute)"
                 elif result == "in-progress":
                     heal_note = " (auto-heal: a refresh of this set is running, or the agent is at its limit of refreshes; queued, it runs when one finishes)"
                 elif result == "cooldown":
