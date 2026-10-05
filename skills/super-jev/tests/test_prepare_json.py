@@ -139,6 +139,7 @@ def test_a_part_with_no_reason_still_gets_a_plain_one(tmp_path, monkeypatch, fak
 def test_a_note_the_check_rejects_fails_alone_with_no_score_and_none_of_the_judges_words(tmp_path, monkeypatch, fake, go):
     bad = {"state": "NOT_SUPPORTED", "confidence": 0.31, "secs": 0, "reason": "quoted XYZZY from the note"}
     monkeypatch.setattr(pb, "gate", lambda desc, path: bad if path.endswith("returns.md") else OK)
+    monkeypatch.setattr(pb, "gate_many", lambda claims, path: [pb.gate(c, path) for c in claims])  # one call, same verdicts
     monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
     code, out = go(folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}))
     obj = one_object(out)
@@ -247,6 +248,7 @@ def scenario_part_fails(tmp_path, monkeypatch):
 def scenario_check_rejects_one(tmp_path, monkeypatch):
     monkeypatch.setattr(pb, "gate", lambda desc, path: {"state": "NOT_SUPPORTED", "confidence": 0.3, "secs": 0}
                         if path.endswith("returns.md") else OK)
+    monkeypatch.setattr(pb, "gate_many", lambda claims, path: [pb.gate(c, path) for c in claims])  # one call, same verdicts
     return folder(tmp_path, **{"warranty.md": "# Warranty\n\nCovered.\n", "returns.md": "# Returns\n\nBack.\n"}), []
 
 

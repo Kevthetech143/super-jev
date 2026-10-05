@@ -6,6 +6,10 @@
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
 - Heal state now survives a release. The auto-heal state (cooldowns, hourly limit, the per-principal scan lock, the per-set refresh locks and the log) lives in `<state root>/autoheal-state`, and the per-set prepare lock in `<state root>/locks`, where the state root is `SUPERJEV_STATE_DIR` or `~/.local/state/super-jev`. They were inside the versioned release folder, so after every release the cooldowns started empty (a rescan storm) and the old release's still-running scan ran beside the new release's for the same principal. The prepare cache itself does not move. On the first run the old folder's cooldown files are copied over once (never a lock).
 
+## Unreleased
+
+- A background refresh no longer sends each file to the paid judge twice. When a combined content check (gate pack) fails it is retried as its two halves before any per-file call, and the per-file fallback sends the description and label claims in one call (11 files after a failed pack: 6 calls, was 24). A payment refusal (HTTP 402, an empty judge balance) stops the refresh at once with "top up, then refresh again": no split, no per-file retries, nothing written, so the set stays stale. Cause of the 2026-10-05 20:04 UTC pile-up: every judge call failed that hour (ledger exit 1 from 19:53 to 20:06, success from 20:07) while the balance was empty, and the per-file fallback then doubled each file. Test: `tests/test_gate_pack.py`.
+
 ## 1.0.128 — 2026-10-05
 
 - A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
