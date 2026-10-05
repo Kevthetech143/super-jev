@@ -458,6 +458,20 @@ def _report_for(pointer: str, cache_dir: Path):
     return None, None
 
 
+def held_edited(pointer: str, cache_dir: Path = None) -> bool:
+    """True when a file the judge held for this pointer has been edited since (it is not a registered
+    source, so the pointer never reads stale). Reads only the held entries. Never raises."""
+    cache_dir = cache_dir or rc.CACHE_DIR
+    try:
+        report, owner = _report_for(pointer, cache_dir)
+        if not isinstance(report, dict):
+            return False
+        cache = json.loads((cache_dir / f"{owner}.json").read_text())
+        return isinstance(cache, dict) and bool(rc.held_changed(report, cache))
+    except (OSError, ValueError):
+        return False
+
+
 RECONNECT_TIMEOUT_SECS = 45  # how long reconnect_now waits for a reconnect (an ask passes 0: it never waits); the reconnect itself has no limit
 
 

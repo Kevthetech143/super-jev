@@ -41,11 +41,18 @@ def changed_files(report: dict, cache: dict) -> list[str]:
         p, entry = Path(f), cache.get(f) or {}
         if not p.is_file() or sha(p) != entry.get("sha256"):
             out.append(f)
+    return out + [f for f in held_changed(report, cache) if f not in out]
+
+
+def held_changed(report: dict, cache: dict) -> list[str]:
+    """Held files (cache entry pass False, not approved) whose bytes differ from the entry's sha. Only the
+    few held entries are read; an entry with no sha is never counted, so it cannot start a paid loop."""
+    out = []
     for f, entry in cache.items():
-        if f in out or not isinstance(entry, dict) or entry.get("pass") is not False or f in report.get("approved", []):
+        if not isinstance(entry, dict) or entry.get("pass") is not False or not entry.get("sha256") or f in report.get("approved", []):
             continue
         p = Path(f)
-        if p.is_file() and sha(p) != entry.get("sha256"):
+        if p.is_file() and sha(p) != entry["sha256"]:
             out.append(f)
     return out
 
