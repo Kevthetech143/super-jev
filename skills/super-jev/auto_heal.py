@@ -436,7 +436,7 @@ def _report_for(pointer: str, cache_dir: Path):
     return None, None
 
 
-RECONNECT_TIMEOUT_SECS = 45  # how long a lookup waits for a reconnect; the reconnect itself has no limit
+RECONNECT_TIMEOUT_SECS = 45  # how long reconnect_now waits for a reconnect (an ask passes 0: it never waits); the reconnect itself has no limit
 
 
 def reconnect_now(pointer: str, principal: str, cache_dir: Path = None,
@@ -640,6 +640,50 @@ def maybe_heal(pointer: str, principal: str, cache_dir: Path = None,
     _name_child(principal, pointer, token, proc)
     _log(principal=principal, pointer=pointer, action="started", cmd=cmd)
     return "started"
+
+
+def _recipe_gate(pointer: str, principal: str) -> str:
+    """Why a recipe replay must not be started now, read-only (the checks reconnect_recipe makes
+    before it admits one): "no-recipe", "held", "cooldown", else "" (go)."""
+    try:
+        got = _memory({"action": "recipe", "pointer": pointer, "principal": principal})
+    except Exception:
+        got = {}
+    recipe = got.get("recipe") if got.get("status") == "ok" else None
+    if not isinstance(recipe, dict):
+        return "no-recipe"
+    state = _load_state(principal)
+    paths = [str(s.get("path")) for s in recipe.get("sources") or [] if isinstance(s, dict)]
+    mark = state.get("held", {}).get(pointer) or {}
+    if mark.get("fp") == _fingerprint(paths, recipe) and time.time() - mark.get("ts", 0) < HELD_EXPIRE_SECS:
+        return "held"
+    return "cooldown" if _wait_secs(state, pointer, time.time()) > 0 else ""
+
+
+def heal_in_background(pointer: str, principal: str, view: bool = False) -> str:
+    """What an ask does for a stale set: start its heal and return at once, whatever the set count.
+    A changed set gets maybe_heal's refresh; a set with nothing to redraft (no-change), or built
+    without prepare_bulk (no-report, a recorded recipe), gets the reconnect, started detached
+    (reconnect_now with no wait) or queued for a lock holder's drain. Same result words as
+    maybe_heal: "started", "in-progress", "cooldown", "rate-limited", "failed", or the skip reason."""
+    result = "no-report" if view else maybe_heal(pointer, principal)
+    if result not in ("no-change", "no-report"):
+        return result
+    result = "no-report" if view else reconnect_now(pointer, principal, timeout=0)
+    if result == "no-report":
+        if "-manual-" in pointer:
+            return "manual"
+        why = _recipe_gate(pointer, principal)
+        if why:
+            return why
+        _queue(principal, pointer, "recipe")
+        if _live_locks(principal, pointer) >= MAX_CONCURRENT:
+            return "in-progress"  # queued: a running refresh's drain replays it when it ends
+        token = _acquire_lock(principal, pointer)
+        if token:
+            _hand_off(principal, pointer, token)  # starts the drain that replays the recipe
+        return "started"
+    return "started" if result == "timeout" else result
 
 
 SCAN_SECS = 600           # 10 minutes per principal between new-file scans

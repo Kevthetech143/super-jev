@@ -6,6 +6,10 @@
 - File index walk: cost follows the files, not the links (one parents walk per folder instead of one test per link per file), a root inside another root of the same round is cut from the outer walk, a set that shares a file with another no longer re-reads it each round, and `vbigram(word)` is indexed.
 - File index walk: the updater applies the `--exclude` list connect recorded for a set, so an excluded folder is never walked or recorded.
 
+## Unreleased
+
+- An ask never reconnects a stale set inline, so its time no longer grows with the number of stale sets (12 stale sets cost 139 s). A stale set is searched from its last prepared file list, or reported as refreshing; the heal starts in the background (`auto_heal.heal_in_background`, gated read-only before any spawn: no recipe, held and cooldown start nothing, the concurrency cap queues). Only a real start says "refreshing in the background; ask again in a minute"; a set with no recipe never claims a refresh.
+
 ## 1.0.126 — 2026-10-05
 
 - File index and its word-search shortlist are now on by default. Set `SUPERJEV_INDEX=0` (or `off`/`false`, or `"indexRead": false` in the engine config) to turn them off.
