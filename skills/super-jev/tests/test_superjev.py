@@ -12177,7 +12177,9 @@ def test_shipped_package_json_matches_its_shipped_pin():
     """Releases catch a package.json change that was not re-pinned: the repo's
     own package.json must hash to the pin committed beside it."""
     root = Path(__file__).resolve().parents[3]
-    assert sj._pinned_package_json_sha256(str(root)) == sj._sha256_of_file(
-        str(root / "package.json")), (
+    pinned = sj._pinned_package_json_sha256(str(root))
+    got = sj._sha256_of_file(str(root / "package.json"))
+    assert pinned is not None and got is not None
+    assert pinned == got, (
         "package.json changed without a re-pin; run: shasum -a 256 "
         "package.json | cut -d' ' -f1 > " + sj.TRUSTED_PACKAGE_JSON_PIN)
