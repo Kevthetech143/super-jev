@@ -191,33 +191,60 @@ def test_stored_variants_equal_the_full_vocabulary_scan(tmp_path, monkeypatch):
 
 
 def _median_ask(tmp_path, monkeypatch, n, tag, reps=6):
+    """Warm index with a stale set that shares files: its own files are served by the fallback path. Returns
+    (median ask seconds, files opened, TOC pages built, word entries built, secret scans) over the warm asks."""
     import contextlib
     import io
     notes, names, sdir = build(tmp_path, monkeypatch, n, tag=tag)
-    Rig(monkeypatch, notes, names)
+    cdir = ask.prepare_bulk.CACHE_DIR
+    shared = json.loads((cdir / "p0.json").read_text())
+    stale = {p: e for p, e in list(shared.items())[:20]}  # 20 files p0 also lists
+    for k in range(20):  # and 20 files only the stale set lists
+        f = notes / "p0" / f"stale-only-{k:02d}.md"
+        f.write_text(f"# stale only {k}\nriverlamp stoneledger {k} cedargarden\n")
+        stale[str(f)] = {"sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "pass": True, "description": f.name, "question": ""}
+    (cdir / "p9.json").write_text(json.dumps(stale))
+    (cdir / "p9-report.json").write_text(json.dumps({"pointer": "p9", "principals": [PRINCIPAL], "roots": [str(notes / "p0")]}))
+    names = ["p9"] + names  # p9 is synced first: p0 keeps the shared rows
+    rig = Rig(monkeypatch, notes, names)
     sync(sdir)
+    idx = FileIndex(PRINCIPAL, sdir / "index.sqlite")
+    idx.mark_stale("p9"); idx.db.commit(); idx.close()  # its files changed since its last refresh: it is a fallback set
     flag(monkeypatch, True)
+    counts = {"toc": 0, "word": 0, "secret": 0}
+    for key, mod, attr in (("toc", ask.toc_search, "build_toc"), ("word", ask, "_index_item"), ("secret", ask, "has_secret")):
+        real = getattr(mod, attr)
+        monkeypatch.setattr(mod, attr, lambda *a, _r=real, _k=key, **k: (counts.__setitem__(_k, counts[_k] + 1), _r(*a, **k))[1])
     ts = []
-    for _ in range(reps):
+    for rep in range(reps + 1):
         for q, *_ in PLANTED:
+            if rep == 1 and q == PLANTED[0][0]:
+                rig.opened.clear(); counts.update(toc=0, word=0, secret=0)  # the first pass was the cold ask
             t = time.time()
             with contextlib.redirect_stdout(io.StringIO()):
                 ask.lookup(q, PRINCIPAL, sdir)
-            ts.append(time.time() - t)
-    assert trace_stage(sdir)["fts"]["used"] is True
+            if rep:
+                ts.append(time.time() - t)
+    st = trace_stage(sdir)
+    assert st["fts"]["used"] is True and any(x.startswith("p9:") for x in st["fallback"]["pointers"]), st
+    assert not [f for f in rig.opened if "stale-only" in f], rig.opened  # no fallback-only file is opened on a warm ask
+    out = (statistics.median(ts), len(rig.opened), counts["toc"], counts["word"], counts["secret"])
     shutil.rmtree(tmp_path / tag, ignore_errors=True)  # disk is tight: the synthetic corpus goes now
-    return statistics.median(ts)
+    return out
 
 
 def test_ask_time_at_10x_within_10_percent_of_1x(tmp_path, monkeypatch, capsys):
-    """Local ask time, warm index, stub judge, no network. 1x holds more files than FTS_K so both runs score K files."""
+    """Local ask time, warm index, stub judge, no network. 1x holds more files than FTS_K so both runs score K files.
+    A stale set shares files with another: a warm ask opens only the served files (none of the fallback set's) and builds 0 TOC pages and 0 word entries."""
     for attempt in range(3):  # a loaded machine can spike one run; the claim must hold on at least one clean pair
-        t1 = _median_ask(tmp_path, monkeypatch, 400, f"x1_{attempt}")
-        t10 = _median_ask(tmp_path, monkeypatch, 4000, f"x10_{attempt}")
-        print(f"files=405 median ask {t1:.3f}s; files=4005 median ask {t10:.3f}s; ratio {t10 / t1:.3f}")
-        if t10 <= t1 * 1.10:
+        r1 = _median_ask(tmp_path, monkeypatch, 400, f"x1_{attempt}")
+        r10 = _median_ask(tmp_path, monkeypatch, 4000, f"x10_{attempt}")
+        print(f"files=405 {r1}; files=4005 {r10}; ratio {r10[0] / r1[0]:.3f}")
+        assert r1[1] == r10[1] <= 12 and r1[2:4] == r10[2:4] == (0, 0), (r1, r10)  # opened (only the served answers, same at both sizes), TOC pages, word entries
+        assert r1[4] == r10[4], (r1, r10)  # same secret-scan calls
+        if r10[0] <= r1[0] * 1.10:
             break
-    assert t10 <= t1 * 1.10, (t1, t10)
+    assert r10[0] <= r1[0] * 1.10, (r1, r10)
 
 
 def test_person_folders_from_the_index_equal_the_cache_scan(tmp_path, monkeypatch, capsys):
