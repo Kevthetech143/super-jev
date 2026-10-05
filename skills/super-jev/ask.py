@@ -206,6 +206,7 @@ import judges  # noqa: E402
 import toc_search  # noqa: E402
 import judge_profile  # noqa: E402
 import refresh_changed  # noqa: E402
+from connect_checked import PaymentRequired  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -3378,6 +3379,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         edited = edited_held(search_pointers, out_of_scope, reads)  # once per searched set, not per search path
     held_cover = {}  # a held file's word coverage of the question, from the same word-search pass
     toc_on = not _CLAIM["text"]
+    toc_error = ""  # set when the TOC stage crashed (after its retry): a not-found is then uncertain
     found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
                         reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
                         **({"candidates": icands, "read_paths": fb_paths - vouched} if idx_read else {}),
@@ -3394,21 +3396,32 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                             fb_paths if idx_read else None)
         flush_stat_memo()
         tt0 = time.time()
-        try:
-            tfiles, tparts, ttrace = toc_search.run(question, corpus, found, {
-                "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
-                    (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
-                "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits},
-                cache_path=None if fts_nums else sdir / "toc-cache.json", **({"rows": ftocs} if fts_nums else {}))
-            _STAGE["toc_parts"] = tparts
-            # the files Jev's navigate routed (sets with no prepare-cache) ride along after the TOC pick
-            tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
-            wpaths = {p: (corpus[p][0] if p in corpus else next(m[2] for m in merged if m[1] == p)) for p in tfiles}
-            to_check = list(tfiles)
-            for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties like routing's did
-                route.setdefault(tp_, ts_)
-        except Exception as e:  # noqa: BLE001 -- any failure reads the word search's list instead
-            ttrace = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+        for attempt in (1, 2):  # a crashed TOC stage is tried once more; the first crash may be a blip
+            try:
+                tfiles, tparts, ttrace = toc_search.run(question, corpus, found, {
+                    "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
+                        (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
+                    "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits},
+                    cache_path=None if fts_nums else sdir / "toc-cache.json", **({"rows": ftocs} if fts_nums else {}))
+                _STAGE["toc_parts"] = tparts
+                # the files Jev's navigate routed (sets with no prepare-cache) ride along after the TOC pick
+                tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
+                wpaths = {p: (corpus[p][0] if p in corpus else next(m[2] for m in merged if m[1] == p)) for p in tfiles}
+                to_check = list(tfiles)
+                for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties like routing's did
+                    route.setdefault(tp_, ts_)
+                if attempt == 2:
+                    ttrace["retried"] = True
+                break
+            except Exception as e:  # noqa: BLE001 -- any failure reads the word search's list instead
+                ttrace = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
+                # a payment or size refusal would be refused the same way again
+                if attempt == 1 and not (isinstance(e, (judges.TooBig, PaymentRequired)) or re.search(r"\bHTTP 402\b", str(e))):
+                    continue
+                toc_error = ttrace["error"]
+                ttrace["retried"] = attempt == 2
+                ttrace["note"] = "the contents check failed; the word search's list was read instead"
+                break
         ttrace["secs"] = round(time.time() - tt0, 1)
         _STAGE["toc"] = ttrace
     if idx_read:
@@ -3663,9 +3676,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     skipped = skipped_for_question(question, original_pointers, principal)
     _RESULT["left_out"] = left_out_rows(skipped + edited_out, held)
     ask_py = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal}"
-    if failed or check_error:
+    if failed or check_error or toc_error:
         why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
-               else "no match, and the content check failed")
+               else "no match, and the content check failed" if check_error
+               else f"not found, but the contents check failed ({toc_error}), so this may be a miss; ask again")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
     elif stale_ptrs or held_hit:
