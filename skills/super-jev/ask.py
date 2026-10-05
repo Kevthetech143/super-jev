@@ -2335,6 +2335,7 @@ def index_sync(principal: str, sdir: Path) -> int:
         return 1
     idx = FileIndex(principal, sdir / INDEX_FILE)
     hashed, expected = 0, {}
+    idx.begin_round()  # sets sharing a root walk it once
     views = {r["pointer"] for r in rows if r.get("viewOriginals")}
     _STAGE["view_pointers"] = sorted(views)
     load_local_rows(sdir, principal, [r["pointer"] for r in rows], {r["pointer"]: r.get("generation") for r in rows}, views)

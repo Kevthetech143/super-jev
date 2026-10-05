@@ -129,6 +129,7 @@ def _state_dir(principal: str) -> Path:
 class FileIndex:
     def __init__(self, principal: str, db_path=None):
         self.principal = principal
+        self._walked = None  # set by begin_round(): root -> files found, so sets sharing a root walk it once per round
         self.path = Path(db_path) if db_path else _state_dir(principal) / "index.sqlite"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.path))
@@ -152,32 +153,44 @@ class FileIndex:
         extension, size ceiling). No file body is opened."""
         import prepare_bulk as pb
         for root in roots or []:
-            root = Path(root)
-            base = root.resolve()
-            files, linked = pb.walk_md(root)
-            bases = [base] + [t for t in linked if not pb.SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
-            for p in files:
-                rp = p.resolve()
-                if pb.credential_suffix(p.name) or pb.credential_suffix(rp.name):
+            if self._walked is None:  # no round open: walk fresh every time
+                yield from self._walk_one(Path(root), pb)
+                continue
+            key = str(root)
+            if key not in self._walked:
+                self._walked[key] = list(self._walk_one(Path(root), pb))
+            yield from self._walked[key]
+
+    def begin_round(self):
+        """Open an update round: each root is walked once until set_complete() closes it."""
+        self._walked = {}
+
+    def _walk_one(self, root, pb):
+        base = root.resolve()
+        files, linked = pb.walk_md(root)
+        bases = [base] + [t for t in linked if not pb.SKIP_PARTS.intersection(x.casefold() for x in t.parts)]
+        for p in files:
+            rp = p.resolve()
+            if pb.credential_suffix(p.name) or pb.credential_suffix(rp.name):
+                continue
+            if not any(rp.is_relative_to(b) for b in bases):
+                continue
+            if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret")
+                   for n in (p.name.casefold(), rp.name.casefold())):
+                continue
+            b = next(b for b in bases if rp.is_relative_to(b))
+            if pb.skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(b).parts[:-1]):
+                continue
+            if p.name.startswith(".") or rp.name.startswith("."):
+                continue
+            if pb.path_has_secret(p.name) or pb.path_has_secret(rp.name):
+                continue
+            try:
+                if rp.stat().st_size > pb.CEILING_BYTES:
                     continue
-                if not any(rp.is_relative_to(b) for b in bases):
-                    continue
-                if any(".bak" in n or Path(n).stem == "logins" or Path(n).stem.endswith("-secret")
-                       for n in (p.name.casefold(), rp.name.casefold())):
-                    continue
-                b = next(b for b in bases if rp.is_relative_to(b))
-                if pb.skipped_folder(p.relative_to(root).parts[:-1] + rp.relative_to(b).parts[:-1]):
-                    continue
-                if p.name.startswith(".") or rp.name.startswith("."):
-                    continue
-                if pb.path_has_secret(p.name) or pb.path_has_secret(rp.name):
-                    continue
-                try:
-                    if rp.stat().st_size > pb.CEILING_BYTES:
-                        continue
-                except OSError:
-                    continue
-                yield str(p)
+            except OSError:
+                continue
+            yield str(p)
 
     def _drop(self, path):
         if not self.fts_error and self.db.execute("SELECT 1 FROM fts_map WHERE path=?", (path,)).fetchone():
@@ -281,6 +294,7 @@ class FileIndex:
         """Updater: per pointer, 1 when every reviewed file of its prepare-cache that still exists is held by the index
         (a `files` row, or `seen` as edited / held) under ANY pointer: a path has one row, so a file two sets list is
         held by one of them and counts as held for both. `expected`: {pointer: [paths]}."""
+        self._walked = None  # the update round is over
         have = {r[0] for r in self.db.execute("SELECT path FROM files")}
         have |= {r[0] for r in self.db.execute("SELECT path FROM seen WHERE reason IN ('edited','held')")}
         own = {r[0]: r[1] for r in self.db.execute("SELECT pointer,COUNT(*) FROM files GROUP BY pointer")}
