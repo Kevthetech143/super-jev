@@ -1896,14 +1896,17 @@ def main() -> int:
     a.no_findability = a.no_findability or not a.findability
     _RESULT.clear()
     lock = None
-    if a.pointer and not a.list:
+    if a.pointer and not (a.list or a.watch or a.unwatch):
         # one run per pointer at a time, whoever launched it; the kernel frees the lock if this process dies
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         lock = open(CACHE_DIR / f".{a.pointer}.prepare-lock", "a")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            print(f"refresh already running for {a.pointer}; skipping")
+            if a.json:
+                print(json.dumps({"skipped": True, "pointer": a.pointer, "reason": "refresh-running"}))
+            else:
+                print(f"refresh already running for {a.pointer}; skipping")
             return 0
     try:
         return run_json(a) if a.json else run(a)

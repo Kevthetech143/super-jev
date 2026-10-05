@@ -14,7 +14,8 @@ Bounds (state kept in autoheal-state/):
   - one refresh in flight at a time per principal+pointer (a lock file per principal+pointer, so a
     long refresh of one set never blocks the principal's other sets; every launch takes it first).
     Across principals, prepare_bulk takes its own per-pointer lock (prepare-cache/.<pointer>.prepare-lock)
-    and a second run for the same pointer exits 0 without working
+    and a second run for the same pointer exits 0 without working (the skipping
+    principal then cools down as if it had refreshed)
   - a pointer over the cap (or yielding to a waiting one) is queued; a refresh that finishes
     heals the queue one pointer at a time, oldest first, before it releases its lock (drain)
   - a cooldown per pointer (default 10 min) after a refresh that worked. An attempt that did

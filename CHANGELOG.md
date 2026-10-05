@@ -1,15 +1,18 @@
 # Changelog
 
+
 ## 1.0.127 — 2026-10-05
 
+- An ask never reconnects a stale set inline, so its time no longer grows with the number of stale sets (12 stale sets cost 139 s). A stale set is searched from its last prepared file list, or reported as refreshing; the heal starts in the background (`auto_heal.heal_in_background`, gated read-only before any spawn: no recipe, held and cooldown start nothing, the concurrency cap queues). Only a real start says "refreshing in the background; ask again in a minute"; a set with no recipe never claims a refresh.
+- Release note: the squash commit `4fceab0` (#338, the no-inline-heal change above) carries a wrong title, "Replay never starts the detached index updater"; its content is the no-inline-heal change.
 - File index build on a large connected folder: reads no longer fail while an update runs (the index uses WAL with a 2 s busy timeout, and a locked read says "index busy (update running)" and answers by the normal path; "index corrupt" is kept for a damaged file). Only one updater runs per principal (`index-update.lock`), the FTS pass commits every 200 files, and only the sets being rewritten fall back to the normal path during a build, not the whole principal.
 - File index walk: cost follows the files, not the links (one parents walk per folder instead of one test per link per file), a root inside another root of the same round is cut from the outer walk, a set that shares a file with another no longer re-reads it each round, and `vbigram(word)` is indexed.
 - File index walk: the updater applies the `--exclude` list connect recorded for a set, so an excluded folder is never walked or recorded.
 
 ## Unreleased
 
-- An ask never reconnects a stale set inline, so its time no longer grows with the number of stale sets (12 stale sets cost 139 s). A stale set is searched from its last prepared file list, or reported as refreshing; the heal starts in the background (`auto_heal.heal_in_background`, gated read-only before any spawn: no recipe, held and cooldown start nothing, the concurrency cap queues). Only a real start says "refreshing in the background; ask again in a minute"; a set with no recipe never claims a refresh.
-- Two refreshes of the same set no longer run at once: `prepare_bulk` takes a per-pointer lock in the prepare-cache and a second run for that pointer prints "refresh already running for <pointer>; skipping" and exits 0, so principals sharing a set cannot pile up refreshes. The new-file scan also walks each report owner once per scan, not once per split part.
+- A replay (`SUPERJEV_REPLAY=1`, the paid-replay and brains-check harness) no longer starts the detached index updater after an ask, so it cannot write into the replay's throwaway state while that folder is removed. Test: `tests/test_index_read_path.py`.
+- Two refreshes of the same set no longer run at once: `prepare_bulk` takes a per-pointer lock in the prepare-cache and a second run for that pointer prints "refresh already running for <pointer>; skipping" and exits 0, so principals sharing a set cannot pile up refreshes; the skipping principal cools down as if it had refreshed. With `--json` the skip is one object, `{"skipped": true, "pointer": ..., "reason": "refresh-running"}`. The new-file scan also walks each report owner once per scan, not once per split part.
 
 ## 1.0.126 — 2026-10-05
 

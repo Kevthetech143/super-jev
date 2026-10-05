@@ -46,3 +46,23 @@ def test_b_scan_walks_each_owner_once(tmp_path, monkeypatch):
     monkeypatch.setattr(ah.rc, "new_files", lambda *a, **k: calls.append(1) or [])
     assert ah.scan("tester", ["p", "p-2", "p-3"], cache_dir=cache) == {}
     assert len(calls) == 1
+
+
+def _locked_run(tmp_path, *args):
+    cache = tmp_path / "prepare-cache"; cache.mkdir()
+    env = {**os.environ, "SUPERJEV_STATE_DIR": str(tmp_path)}
+    with open(cache / ".xset.prepare-lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return subprocess.run([sys.executable, str(SKILL / "prepare_bulk.py"), "--pointer", "xset", *args],
+                              env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_json_skip_is_one_object(tmp_path):
+    r = _locked_run(tmp_path, "--refresh", "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout) == {"skipped": True, "pointer": "xset", "reason": "refresh-running"}
+
+
+def test_watch_is_not_skipped_by_the_lock(tmp_path):
+    r = _locked_run(tmp_path, "--watch")
+    assert "already running" not in r.stdout + r.stderr
