@@ -164,6 +164,22 @@ def test_a_failed_judge_batch_raises_never_reads_as_none(monkeypatch):
         toc_search.score_items("q", {"a": "x"}, "i", "p")
 
 
+
+def test_a_whole_pick_pool_fits_one_call_and_each_item_is_judged_on_its_own(monkeypatch):
+    """The batch size is the judge's per-call budget and the pick pool, read from the profile."""
+    assert toc_search.BATCH_TOKENS == toc_search.judge_profile.PROFILE.call_tokens
+    assert toc_search.BATCH_ITEMS == min(toc_search.POOL_CAP, toc_search.judge_profile.PROFILE.max_questions_per_call)
+    sent = []
+
+    def ask(state, qs, timeout=90):
+        sent.append(state)
+        return {"answers": {k: {"probabilities": {"LIKELY": 0.9 if "lantern" in state["items"][k] else 0.1}} for k in qs}}
+    monkeypatch.setattr(toc_search.judges, "ask", ask)
+    items = {f"f{i}": ("lantern page " if i % 3 == 0 else "kettle page ") + "row " * 40 for i in range(toc_search.POOL_CAP)}
+    got = toc_search.score_items("where is the lantern", items, "i", "p")
+    assert len(sent) == 1
+    assert got == {k: (0.9 if "lantern" in v else 0.1) for k, v in items.items()}
+
 def test_a_big_files_page_names_every_part_that_did_not_fit():
     big = "\n".join(f"def part_{i:03d}():\n    return {i}\n" for i in range(160))
     toc = toc_search.build_toc("big.py", big)

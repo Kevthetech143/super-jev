@@ -36,8 +36,8 @@ import judge_profile
 POOL_CAP = 150           # files shown to Jev at the pick step
 KEEP_FILES = 5           # files kept by Jev's pick
 KEEP_PARTS = 3           # parts per file kept by Jev
-BATCH_TOKENS = 20000     # one call's item text, under the judge window
-BATCH_ITEMS = 120
+BATCH_TOKENS = judge_profile.PROFILE.call_tokens  # one call's item text: the judge's per-call budget
+BATCH_ITEMS = min(POOL_CAP, judge_profile.PROFILE.max_questions_per_call)  # a whole pick pool in one call
 PART_CHARS = 3500        # most text of one part the content check reads
 PAGE_CHARS = 500         # most text of one TOC page's detailed rows
 BIG_PAGE_CHARS = 1400    # a big file's page also names the parts that did not fit
