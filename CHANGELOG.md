@@ -24,6 +24,10 @@
 
 - A refresh no longer pays again for a held file that has not changed. A file the judge held (a real low verdict) is kept with its earlier verdict and the same report rows when its bytes match the cache, so it makes no writer or judge call; before, every refresh re-judged each one. An edited held file is still judged again. `--rejudge` (added to the rerun hint printed for a refresh) judges unchanged held files again, for a manual retry; a non-refresh connect also judges them again. The cache entry now also keeps the judge's reason. Estimate from a copy of the primary agent's caches: 21 of its 32 held files are unchanged, so about 21 to 42 judge calls (a low verdict gets one rewrite and a second check) and about 21 rewrite calls are saved per full refresh of its sets. Test: `tests/test_held_reuse.py`.
 
+- The background index updater no longer re-walks every connected folder on every run. It walks the roots at most once per 10 minutes per principal (a stamp, `index-walk.stamp`) and otherwise only re-checks the files it already knows and the refreshed prepare-cache, which is where a refresh's changed files are listed; a set new to the index is always walked. One run on an unchanged large copy spent most of its time in that walk (8.8M stat calls). The updater that a connect or refresh starts now has the same 10-minute throttle as the one an ask starts, and is skipped in a replay. Tests: `tests/test_walk_throttle.py`.
+
+- The index file gives back freed pages. A refresh drops and re-adds a set's rows, which left about a third of the file as free pages. At the end of an updater run, when over a fifth of the file is free, a one-time rebuild turns on incremental auto-vacuum and later runs return only the freed pages. Test: `tests/test_walk_throttle.py`.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.

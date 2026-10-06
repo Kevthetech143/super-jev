@@ -1836,11 +1836,22 @@ def run_json(a) -> int:
 
 def kick_index_updater(principals) -> None:
     """After a connect or refresh: start the file-index updater detached, one per principal (ask.py does nothing
-    unless the index flag is on). Never on the caller's clock, never a failure. Not under pytest."""
-    if "PYTEST_CURRENT_TEST" in os.environ:
+    unless the index flag is on). Never on the caller's clock, never a failure. Not under pytest, not in a replay,
+    and at most once per INDEX_SPAWN_EVERY_SECS per principal (the stamp ask.py keeps): a refreshed file is already
+    in the prepare-cache the updater reads, and an ask that finds it out of date starts the updater itself."""
+    if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("SUPERJEV_REPLAY") == "1":
         return
     for principal in principals:
         try:
+            sdir = state_root() / principal
+            stamp = sdir / "index-sync.stamp"
+            try:
+                if time.time() - stamp.stat().st_mtime < 600:  # = ask.INDEX_SPAWN_EVERY_SECS
+                    continue
+            except OSError:
+                pass
+            sdir.mkdir(parents=True, exist_ok=True)
+            stamp.touch()
             subprocess.Popen([sys.executable, str(Path(__file__).resolve().parent / "ask.py"), "--principal", principal,
                               "--index-update-if-on"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
