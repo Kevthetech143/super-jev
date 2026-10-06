@@ -2415,7 +2415,10 @@ def _checked_pass(principal: str, sdir: Path) -> int:
             pass
         raise
     if rc == 0:
-        (sdir / INDEX_FAIL_STAMP).unlink(missing_ok=True)
+        try:
+            (sdir / INDEX_FAIL_STAMP).unlink(missing_ok=True)
+        except OSError:
+            pass  # a stamp that will not go must not fail a pass that succeeded
     return rc
 
 def _index_sync(principal: str, sdir: Path) -> int:
