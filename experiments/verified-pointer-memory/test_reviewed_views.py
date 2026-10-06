@@ -302,3 +302,16 @@ def test_unexpected_file_prevents_generation_deletion(setup, monkeypatch):
     assert result['status'] == 'registered'
     assert unexpected.read_text() == 'Keep this operator artifact'
     assert result['cleanupWarnings']
+
+
+def test_identical_view_reconnect_keeps_its_folder_and_generation(setup, monkeypatch):
+    src, config, req = setup
+    monkeypatch.setenv('SUPERJEV_STATE_DIR', str(src.parent / 'state'))
+    assert connect(confirm(req, config), config)['status'] == 'registered'
+    service = Service(config['db'], config['registry'], lambda *_: None)
+    before, (_, entry) = service.pointer('notes', 'owner')[0]['generation'], manifest(config)
+    result = connect(confirm({**req, 'replace': True}, config), config)
+    assert result['status'] == 'registered' and result['cleanupWarnings'] == []
+    assert manifest(config)[1] == entry and Path(entry['manifestPath']).is_file()
+    pointer, error = service.pointer('notes', 'owner')
+    assert error is None and pointer['generation'] == before

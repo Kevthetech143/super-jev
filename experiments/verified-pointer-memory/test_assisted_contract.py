@@ -101,6 +101,9 @@ class AssistedContractTests(unittest.TestCase):
 
     def test_reregister_invalidates_assistance_but_retains_audit(self):
         initial = self.search()
+        registry = json.loads(self.registry.read_text())
+        registry['datasets']['synthetic-reviewed']['checkedAt'] = 1  # a real change: an identical re-register keeps the generation
+        self.registry.write_text(json.dumps(registry))
         self.f.register(self.config)
         self.assertNotEqual(self.assist(initial)['status'], 'ready')
         with sqlite3.connect(self.f.root / 'state.sqlite') as c:

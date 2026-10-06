@@ -291,7 +291,7 @@ exact pointer names, no globs; `--dry-run` lists what would change) lets more pr
 It calls the memory `register` action with the pointer's current dataset and
 its principals plus the new ones: no reconnect, no writer, no Jev call, so it
 costs nothing. A connect with `replace:true` cannot do this; it refuses any
-change of principals as `scope-change`. `register` starts a new generation, so
+change of principals as `scope-change`. New principals start a new generation, so
 the pointer's cached and pending answers are dropped (the count is printed
 first); keep shared pointers to reference sets. Every connection is private
 until a person marks it shareable (`prepare_bulk.py --shareable` at connect, or
