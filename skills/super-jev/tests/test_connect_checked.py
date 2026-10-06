@@ -283,20 +283,29 @@ def test_gate_parses_ceiling_message_as_unchecked(tmp_path, monkeypatch):
     assert "32k-token ceiling" in verdict["reason"]
 
 
+def _fake_run(monkeypatch, stdout, stderr):
+    class R:
+        returncode = 1
+    R.stdout, R.stderr = stdout, stderr
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+
+
 def test_echoed_claim_mentioning_http_402_is_not_unpaid(monkeypatch):
-    out = "$ dispatch.py check --claim 'The vendor returned HTTP 402 last week' /x\nc1 SUPPORTED 0.95\n"
-
-    class R:
-        stdout, stderr, returncode = out, "", 0
-    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
-    assert cc.gate("The vendor returned HTTP 402 last week", "/x")["state"] == "SUPPORTED"
-    assert cc.gate_many(["HTTP 402 was returned"], "/x") is None or True  # no PaymentRequired raised
+    claim = "The vendor returned HTTP 402 last week"
+    _fake_run(monkeypatch, f"$ dispatch.py check --claim '{claim}' /x\nc1 SUPPORTED 0.95\n", "")
+    assert cc.gate(claim, "/x") == {"state": "SUPPORTED", "confidence": 0.95, "secs": cc.gate(claim, "/x")["secs"]}
+    assert [v["state"] for v in cc.gate_many([claim], "/x")] == ["SUPPORTED"]
 
 
-@pytest.mark.parametrize("err", ["RuntimeError: HTTP 402", "jev: Jev returned HTTP 402", "Jev returned HTTP 402"])
-def test_real_402_error_forms_still_raise(monkeypatch, err):
-    class R:
-        stdout, stderr, returncode = "$ dispatch.py check\n", err + "\n", 1
-    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+def test_door_error_line_jev_py_form_raises(monkeypatch):
+    # lib/jev.py: raise RuntimeError(f"HTTP {e.code}: {detail}")
+    _fake_run(monkeypatch, "$ dispatch.py check\n", "RuntimeError: HTTP 402: payment required\n")
     with pytest.raises(cc.PaymentRequired):
         cc.gate("a", "/x")
+
+
+def test_door_error_line_jev_client_form_raises(monkeypatch):
+    # lib/jev_client.py: raise BadReply(f"{VENDOR} returned HTTP {e.code}")
+    _fake_run(monkeypatch, "$ dispatch.py check\n", f"{cc.PROFILE.vendor or 'Jev'} returned HTTP 402\n")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate_many(["a"], "/x")
