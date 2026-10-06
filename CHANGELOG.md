@@ -15,6 +15,8 @@
 
 ## Unreleased
 
+- **Honest outcome: the outcome comes from the sets, not from files.** A set that failed to search is `error` (3); a set that needs setup or a refresh, or nothing connected, is `needs-setup` (4); otherwise no match is `not-found` (1). A file no searched set checked (label failed, held for a secret, too big, edited and not yet re-admitted, not UTF-8) never changes the outcome: it is always named in `left_out` and in a `partial: N files not checked` note in the reason, and a file another connected set admitted is not counted as unchecked. Removed the held-file word-coverage and routing-pick heuristic that turned some held files into `needs-setup`. Tests: `tests/test_honest_outcome.py` (two tests of the removed heuristic retired).
+
 - The checked connect no longer misses an unpaid judge call when the call's stdout ends without a newline: a stderr `HTTP 402` could glue onto the skipped `$ ` echo line and hide. Stdout and stderr are now joined with a newline. Test: `skills/super-jev/tests/test_connect_checked.py`.
 
 - `prepare_bulk.py --json` no longer reports a payment refusal as "internal error: PaymentRequired" with a traceback; it prints the same single payment message as text mode, exit code unchanged. Test: `skills/super-jev/tests/test_json_unpaid.py`.
