@@ -149,6 +149,7 @@ def test_kick_and_after_ask_start_the_one_updater_entry(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(pb.subprocess, "Popen", lambda cmd, **k: seen.append(cmd))
     monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path))  # the kick's stamp lives here, not in the real state
     pb.kick_index_updater(["me"])
     assert seen[0][1].endswith("ask.py") and seen[0][-1] == "--index-update-if-on"
     src = Path(ask.__file__).read_text()
