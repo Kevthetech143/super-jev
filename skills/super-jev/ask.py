@@ -2545,7 +2545,9 @@ def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
     for p in parts:
         whole.update(p[0])
     # secret: the text scans as holding one (worked out once per sha). Such a file is searched by neither path.
-    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts, "secret": has_secret(text)}
+    if has_secret(text):  # no words kept: a key-shaped token must not land in word-index.json
+        return {"sha": sha, "heading": "", "whole": {}, "passages": [[{}, 0, []]], "secret": True}
+    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts, "secret": False}
 
 def _valid_item(item, sha) -> bool:
     return (isinstance(item, dict) and item.get("sha") == sha and isinstance(item.get("heading"), str)

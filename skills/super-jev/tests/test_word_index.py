@@ -118,3 +118,16 @@ def test_version_covers_stopwords(monkeypatch):
     monkeypatch.undo()
     monkeypatch.setattr(ask, "WORD_RE", ask.re.compile(r"\w+"))
     assert ask._word_index_version() != base
+
+
+def test_secret_file_stores_no_words(tmp_path, monkeypatch):
+    a, b, idx = _setup(tmp_path, monkeypatch)
+    token = "AKIA" + "IOSFODNN7" + "EXAMPLE"  # fake key-shaped token, split so scanners pass over this file
+    a.write_text(f"# Orchard\nThe orchard harvest is in October.\nkey {token}\n")
+    cdir = ask.prepare_bulk.CACHE_DIR
+    (cdir / "p1.json").write_text(json.dumps({str(f): {"sha256": _sha(f), "pass": True} for f in (a, b)}))
+    assert ask.has_secret(a.read_text())
+    assert all(str(a) != r[1] for r in _search(idx))  # still never offered
+    raw = idx.read_text()
+    assert token not in raw and token.lower() not in raw
+    assert json.loads(raw)["files"][str(a)]["secret"] is True
