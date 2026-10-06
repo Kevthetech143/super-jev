@@ -373,20 +373,35 @@ def _connect(request, config):
         # Private unless someone marked it shareable on purpose; a refresh that does not say keeps the mark.
         kept = bool(old and (data['datasets'].get(dataset) or {}).get('shareable'))
         shareable = request.get('shareable', kept)
-        folder = Path(tempfile.mkdtemp(prefix='.prepared-', dir=registry.parent))
-        manifest = {'expectedPolicy': 'reviewed', 'descriptionsAffirmed': True,
-                    'catalog': catalog, 'sources': [], 'preparations': []}
-        for i, (s, passages) in enumerate(zip(sources, chunks)):
-            prepared_path = folder / f'{i}.txt'
-            _write(prepared_path, s['raw'])
-            manifest['sources'].append({'id': s['id'], 'path': str(prepared_path), 'originalPath': s['path'], 'contentSHA': s['viewSHA'], 'description': s['description'],
-                                        **({'viewTransform': s['viewTransform'], 'transformSHA': s['transformSHA'],
-                                            'originalSHA': s['sha256']} if s['viewTransform'] is not None else {})})
-            for p in passages:
-                manifest['preparations'].append({'sourceId': s['id'], 'contentSHA': s['viewSHA'], 'chunkIndex': p['chunkIndex'], 'startLine': p['startLine'], 'endLine': p['endLine'], 'reviewedText': p['text'], 'safeHeading': p['heading'] or s['description'], 'policy': 'reviewed', 'status': 'reviewed'})
+        def prepared(folder):
+            manifest = {'expectedPolicy': 'reviewed', 'descriptionsAffirmed': True,
+                        'catalog': catalog, 'sources': [], 'preparations': []}
+            for i, (s, passages) in enumerate(zip(sources, chunks)):
+                manifest['sources'].append({'id': s['id'], 'path': str(folder / f'{i}.txt'), 'originalPath': s['path'], 'contentSHA': s['viewSHA'], 'description': s['description'],
+                                            **({'viewTransform': s['viewTransform'], 'transformSHA': s['transformSHA'],
+                                                'originalSHA': s['sha256']} if s['viewTransform'] is not None else {})})
+                for p in passages:
+                    manifest['preparations'].append({'sourceId': s['id'], 'contentSHA': s['viewSHA'], 'chunkIndex': p['chunkIndex'], 'startLine': p['startLine'], 'endLine': p['endLine'], 'reviewedText': p['text'], 'safeHeading': p['heading'] or s['description'], 'policy': 'reviewed', 'status': 'reviewed'})
+            return json.dumps(manifest, ensure_ascii=False).encode()
+        # A refresh whose prepared bytes would be identical keeps the owned folder it already has: the snapshot,
+        # and so the generation, stay the same and nothing keyed on them is rebuilt.
+        folder = Path(previous.get('manifestPath', '')).parent
+        try:
+            reused = bool(old and previous.get('pathConnection') and folder.parent == registry.parent
+                          and folder.name.startswith('.prepared-') and not folder.is_symlink()
+                          and (folder / 'manifest.json').read_bytes() == prepared(folder)
+                          and all(not (folder / f'{i}.txt').is_symlink() and (folder / f'{i}.txt').read_bytes() == s['raw']
+                                  for i, s in enumerate(sources)))
+        except OSError:
+            reused = False
+        if not reused:
+            folder = Path(tempfile.mkdtemp(prefix='.prepared-', dir=registry.parent))
+            for i, s in enumerate(sources):
+                _write(folder / f'{i}.txt', s['raw'])
         manifest_path = folder / 'manifest.json'
-        manifest_raw = json.dumps(manifest, ensure_ascii=False).encode()
-        _write(manifest_path, manifest_raw)
+        manifest_raw = prepared(folder)
+        if not reused:
+            _write(manifest_path, manifest_raw)
         data['datasets'][dataset] = {'description': 'Reviewed local text connector: ' + dataset,
             'structure': structure,
             'pathConnection': {'pointer': pointer, 'principals': sorted(principals)},
@@ -415,16 +430,18 @@ def _connect(request, config):
             else:
                 data['datasets'].pop(dataset, None)
             _atomic(registry, data)
-            shutil.rmtree(folder, ignore_errors=True)  # it holds a copy of the refused file's text
+            if not reused:
+                shutil.rmtree(folder, ignore_errors=True)  # it holds a copy of the refused file's text
             return refusal.answer()
         _, error = service.pointer(pointer, principals[0])
         if error:
             return _problem('source-changed', 'A source changed during connection. Review it and reconnect with replace:true.')
-        cleanup_warnings = (_retire_view_artifacts(previous, data, registry, principals,
+        # A kept folder is the one still in use: only the stale claim proofs are retired, never the folder.
+        cleanup_warnings = (_retire_view_artifacts({} if reused else previous, data, registry, principals,
                             {os.path.realpath(path) for path in policies}) if policies else [])
     return {'status': 'registered', 'pointer': pointer, 'dataset': dataset,
             'structure': structure, 'navigationSHA': navigation_sha,
             'cleanupWarnings': cleanup_warnings,
             'sources': [{'id': s['id'], 'originalPath': s['path']} for s in sources],
-            'fileCount': len(sources), 'passageCount': len(manifest['preparations']),
+            'fileCount': len(sources), 'passageCount': sum(len(passages) for passages in chunks),
             'nextAction': 'search', 'hint': 'Ready for snapshot searches. Originals are unchanged; upstream synchronization and privacy approval are not automatic.'}

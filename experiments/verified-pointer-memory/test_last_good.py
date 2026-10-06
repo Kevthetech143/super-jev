@@ -104,7 +104,7 @@ class LastGoodTests(unittest.TestCase):
         def provider(q, catalog, limits):
             out = pick_all(q, catalog, limits)
             self.two.write_text('Release traps.\n')
-            self.service.register('notes', 'notes', ['owner'])  # a refresh finished meanwhile
+            self.service.register('notes', 'notes', ['owner', 'helper'])  # a re-registration finished meanwhile
             return out
         self.service.navigate_provider = provider
         self.assertEqual(self.service.navigate('notes', 'owner', 'tried', last_good=True)['status'],

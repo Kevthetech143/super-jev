@@ -87,7 +87,7 @@ class PathConnectTests(unittest.TestCase):
         self.assertNotIn('registeredPrincipals', connect({**request, 'replace': True, 'principals': ['other']}, self.config))
         self.assertEqual(connect({**request, 'replace': True}, self.config)['status'], 'registered')
         fresh, _ = service.pointer('records', 'owner')
-        self.assertNotEqual(pointer['generation'], fresh['generation'])
+        self.assertEqual(pointer['generation'], fresh['generation'])  # nothing changed: the generation stays
         with service.connect() as db:
             self.assertEqual(db.execute('SELECT COUNT(*) FROM cache').fetchone()[0], 0)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM pending').fetchone()[0], 0)
@@ -104,11 +104,16 @@ class PathConnectTests(unittest.TestCase):
         request = self.reviewed()
         self.assertEqual(connect(request, self.config)['status'], 'registered')
         with patch.object(Service, 'register', side_effect=ValueError('secret private text')):
-            result = connect({**request, 'replace': True}, self.config)
+            unchanged = connect({**request, 'replace': True}, self.config)
+        self.assertEqual(unchanged['reason'], 'connect-failed')
+        self.assertIsNone(self.service().pointer('records', 'owner')[1])  # nothing changed: it serves what it holds
+        changed = {**request, 'replace': True, 'sources': [{**request['sources'][0], 'description': 'A changed description'}]}
+        with patch.object(Service, 'register', side_effect=ValueError('secret private text')):
+            result = connect(changed, self.config)
         self.assertEqual(result['reason'], 'connect-failed')
         self.assertNotIn('secret', json.dumps(result))
         self.assertEqual(self.service().pointer('records', 'owner')[1]['status'], 'preparation-required')
-        self.assertEqual(connect({**request, 'replace': True}, self.config)['status'], 'registered')
+        self.assertEqual(connect(changed, self.config)['status'], 'registered')
 
     def test_first_registration_interruption_recoverable_with_same_scope(self):
         request = self.reviewed()

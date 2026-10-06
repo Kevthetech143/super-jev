@@ -92,7 +92,7 @@ for status in ['no-match','preparation-required','refused','error']:
   assert first['attemptId'] != second['attemptId']
   eq(f.s.attempt(first['attemptId'],'alice')['retrievalStatus'],st)
  check('preserve_'+status,run)
-for name,action in [('removed',lambda f:f.s.remove('docs')),('changed_source',lambda f:f.source.write_text('new')),('rebound',lambda f:f.s.register('docs','test',['alice']))]:
+for name,action in [('removed',lambda f:f.s.remove('docs')),('changed_source',lambda f:f.source.write_text('new')),('rebound',lambda f:f.s.register('docs','test',['alice','bob']))]:
  def run(a=action,n=name):
   f=Fixture()
   def retrieve(d,q):a(f);return {'status':'ready','passages':[f.passage]}

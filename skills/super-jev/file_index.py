@@ -298,6 +298,8 @@ class FileIndex:
             entries = load_cache_files(pointer)
         known = {r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns,reviewed_sha FROM files WHERE pointer=?", (pointer,))}
         indexed = set(known)
+        tocs = {r[0]: r[1:] for r in self.db.execute(
+            "SELECT f.path,f.sha256,t.json FROM files f LEFT JOIN toc t ON t.path=f.path WHERE f.pointer=?", (pointer,))}
         known.update({r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns,reviewed_sha FROM seen WHERE pointer=?", (pointer,))})
         # unreviewed files the walk found: neither search path serves one (it is in no prepare-cache), so its comings,
         # goings and edits never make the pointer stale
@@ -357,6 +359,11 @@ class FileIndex:
             # unchanged stat AND the same review as when it was last judged: nothing to do. A changed or
             # newly appeared review (promotion) re-evaluates, so a seen file can become indexed.
             if p in known and known[p] == (st.st_size, st.st_mtime_ns, reviewed):
+                # same bytes, same review: only its labels may have been re-gated (a refresh that changes no file
+                # keeps the generation, so no purge re-seeds them)
+                toc = json.dumps({k: ent.get(k) for k in ("description", "question", "kind", "status", "as_of", "subject")})
+                if p in tocs and tocs[p][1] != toc:
+                    self.db.execute("INSERT OR REPLACE INTO toc VALUES(?,?,?)", (p, tocs[p][0], toc))
                 continue
             if p not in known and self._held_unchanged(p, pointer, st, reviewed):
                 continue  # another pointer holds this very file as it stands: pointers sharing files do not re-read each other's

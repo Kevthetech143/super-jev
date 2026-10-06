@@ -104,7 +104,7 @@ def describe():
         'contextLimitation': 'Context scopes the exact cache only; it is not sent to the retrieval provider.',
         'principalScope': 'Principal labels are trusted-local scope labels, not authentication.',
         'pointerLifecycle': {
-            'register': 'Replaces the pointer generation and invalidates its answers and pending tickets.',
+            'register': 'Invalidates its answers and pending tickets; starts a new pointer generation unless nothing changed.',
             'remove': 'Removes the pointer, cache and pending tickets only; it never removes originals.',
         },
         'requiredConfig': ['db', 'registry'],
