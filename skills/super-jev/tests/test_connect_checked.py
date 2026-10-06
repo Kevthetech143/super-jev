@@ -281,3 +281,52 @@ def test_gate_parses_ceiling_message_as_unchecked(tmp_path, monkeypatch):
 
     assert verdict["state"] == "UNCHECKED"
     assert "32k-token ceiling" in verdict["reason"]
+
+
+def _fake_run(monkeypatch, stdout, stderr):
+    class R:
+        returncode = 1
+    R.stdout, R.stderr = stdout, stderr
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+
+
+def test_echoed_claim_mentioning_http_402_is_not_unpaid(monkeypatch):
+    claim = "The vendor returned HTTP 402 last week"
+    _fake_run(monkeypatch, f"$ dispatch.py check --claim '{claim}' /x\nc1 SUPPORTED 0.95\n", "")
+    assert cc.gate(claim, "/x") == {"state": "SUPPORTED", "confidence": 0.95, "secs": cc.gate(claim, "/x")["secs"]}
+    assert [v["state"] for v in cc.gate_many([claim], "/x")] == ["SUPPORTED"]
+
+
+def test_door_error_line_jev_py_form_raises(monkeypatch):
+    # lib/jev.py: raise RuntimeError(f"HTTP {e.code}: {detail}")
+    _fake_run(monkeypatch, "$ dispatch.py check\n", "RuntimeError: HTTP 402: payment required\n")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
+
+
+def test_door_error_line_jev_client_form_raises(monkeypatch):
+    # lib/jev_client.py: raise BadReply(f"{VENDOR} returned HTTP {e.code}")
+    _fake_run(monkeypatch, "$ dispatch.py check\n", f"{cc.PROFILE.vendor or 'Jev'} returned HTTP 402\n")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate_many(["a"], "/x")
+
+
+def test_traceback_badreply_form_raises(monkeypatch):
+    _fake_run(monkeypatch, "$ dispatch.py check\n",
+              "Traceback (most recent call last):\n  File \"x.py\", line 1, in f\n"
+              "judges.errors.BadReply: TypeSafe returned HTTP 402\n")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
+
+
+def test_gate_error_line_form_raises(monkeypatch):
+    _fake_run(monkeypatch, "gate: ERROR \u2014 Jev could not check this: TypeSafe returned HTTP 402. Treated as NOT clean.\n", "")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
+
+
+def test_verdict_row_echoing_claim_does_not_raise(monkeypatch):
+    class R:
+        stdout, stderr, returncode = "  c1 SUPPORTED 0.95  The vendor returned HTTP 402 last week\n", "", 0
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+    assert cc.gate("a", "/x")["state"] == "SUPPORTED"

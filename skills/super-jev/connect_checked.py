@@ -40,8 +40,14 @@ class PaymentRequired(RuntimeError):
     too, so callers stop the run rather than split, retry or fall back per file."""
 
 
+# Claim text rides only on the echoed "$ ..." command line and the verdict rows (superjev.py `_one_line` flattens
+# claims to one line, so a claim cannot spill onto other lines); everything else is the door's own output.
+_CLAIM_LINE = re.compile(r"^(?:\$ |\s*c\d+\s+\S+\s+[\d.]+)")
+
+
 def _raise_if_unpaid(txt: str) -> None:
-    if re.search(r"\bHTTP 402\b", txt):
+    own = "\n".join(l for l in txt.splitlines() if not _CLAIM_LINE.match(l))
+    if re.search(r"\bHTTP 402\b", own):
         raise PaymentRequired("the judge refused the call for payment (HTTP 402); top up, then refresh again")
 
 
