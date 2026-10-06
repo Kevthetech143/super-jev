@@ -161,7 +161,7 @@ keeps source IDs, hashes, reviewed quotes and line locations. Exact cache keys
 include question, principal and relevant context.
 
 Changed files invalidate reuse. Re-register only after review/refresh; doing so
-rotates the generation and removes prior associated cache/tickets. Removing a
+rotates the generation (kept when nothing changed) and removes prior associated cache/tickets. Removing a
 pointer also deletes its associated rows; this is logical deletion, not secure
 erasure of SQLite pages/backups. CLI-created files use a restrictive umask;
 protect the containing directory and use your normal disk protection/backups.

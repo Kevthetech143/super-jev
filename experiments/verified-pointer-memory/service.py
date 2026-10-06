@@ -362,7 +362,8 @@ class Service:
         return {'status': 'ok', 'recipe': recipe}
 
     def register(self, name: str, dataset: str, principals: list[str]) -> None:
-        """Register a pointer and clear data from its previous generation."""
+        """Register a pointer and clear its saved answers and pending tickets. A re-register that changes
+        nothing keeps its generation; any change to the snapshot, dataset or agents starts a new one."""
         require_text('pointer', name)
         require_text('dataset', dataset)
         if not isinstance(principals, list) or not all(valid_principal(p) for p in principals):
@@ -379,7 +380,13 @@ class Service:
             c.execute('BEGIN IMMEDIATE')
             rows = self._rows(c)
             self.require_allowed(name, principals, _originals(snapshot['entry']), rows)
-            kept = (rows.get(name) or {}).get('watched')
+            old = rows.get(name) or {}
+            # Nothing a reader can see changed (same dataset, agents and snapshot bytes): the generation stays,
+            # so the index and the per-generation rows and words are not rebuilt for a no-op refresh.
+            if (old.get('generation') and old.get('dataset') == dataset and old.get('principals') == row['principals']
+                    and old.get('fingerprint') == row['fingerprint']):
+                row['generation'] = old['generation']
+            kept = old.get('watched')
             if kept:  # a refresh keeps the mark
                 row['watched'] = kept
             c.execute('DELETE FROM cache WHERE pointer=?', (name, ))

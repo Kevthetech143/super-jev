@@ -19,7 +19,7 @@ These are onboarding requirements, not six new automatically enforced metadata f
 
 | Action/event | Runtime behavior | Operator responsibility |
 |---|---|---|
-| Register or replace a reviewed pointer | New generation; prior pointer answers and tickets removed | Verify scope, privacy, preparation and intended principal labels |
+| Register or replace a reviewed pointer | New generation unless dataset, principals and snapshot are unchanged; prior pointer answers and tickets removed | Verify scope, privacy, preparation and intended principal labels |
 | Source/manifest changes, disappears or fails validation | Preparation required; stale answer not reused | Diagnose corruption versus intended update, then rebuild/review |
 | Current request lacks a recent whole-scope check | Refresh required before retrieval/cache reuse | Fetch/check upstream data; do not renew timestamps blindly |
 | Source freshness expires during retrieval/review | Refuse current result/approval | Refresh, then submit a new request |
