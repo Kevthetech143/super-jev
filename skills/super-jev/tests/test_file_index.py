@@ -179,3 +179,14 @@ def test_unshare_purges(tmp_path, corpus):
         assert idx.db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] == 0
     assert idx.db.execute("SELECT COUNT(*) FROM pointers WHERE pointer='p'").fetchone()[0] == 0
     assert idx.count(pointer="p") == 0 and not idx.is_stale("p")
+
+
+def test_no_change_pass_rewrites_no_toc_rows(tmp_path, corpus):
+    d, files, entries = corpus
+    idx = _idx(tmp_path)
+    idx.update("p", entries, [str(d)])
+    rows = "SELECT rowid, path, json FROM toc ORDER BY path"  # a rewritten row gets a new rowid
+    before = idx.db.execute(rows).fetchall()
+    assert len(before) == 20
+    idx.update("p", entries, [str(d)])
+    assert idx.db.execute(rows).fetchall() == before
