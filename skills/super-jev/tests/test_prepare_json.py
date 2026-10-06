@@ -370,6 +370,7 @@ def test_real_engine_free_connect_json_with_the_builtin_writer_and_no_key(tmp_pa
 # reason's own words.
 SKIP_KINDS = {
     "link": "linked file(s) point outside",
+    "linkdir": "folder link(s) lead outside your home folder",
     "name": ".md file(s) with backup or credential-style names",
     "folder": ".md file(s) in folders skipped by default",
     "folder_other": "file(s) of other types in folders skipped by default",
@@ -385,7 +386,7 @@ REFUSAL_KINDS = {"too_many", "not_a_folder", "usage"}
 
 def every_reason_folder(tmp_path):
     """(root, extra args): a folder, plus a second root that is a prepared dataset copy, that together make
-    the connect leave something out for each of the ten default reasons."""
+    the connect leave something out for each of the eleven default reasons."""
     dataset = tmp_path / ".local" / "retrieval-datasets" / "Quillbrook Passages"
     dataset.mkdir(parents=True)
     (dataset / "passages.md").write_text("# Passages\n\nCopied text.\n")      # dataset
@@ -405,6 +406,8 @@ def every_reason_folder(tmp_path):
     (tmp_path / "elsewhere").mkdir()
     (tmp_path / "elsewhere" / "far.md").write_text("# Far\n\nOutside.\n")
     (root / "far-link.md").symlink_to(tmp_path / "elsewhere" / "far.md")       # link
+    (tmp_path / "scratch-out").mkdir()
+    (root / "out-link").symlink_to(tmp_path / "scratch-out")                   # linkdir
     return root, ["--root", str(dataset)]
 
 

@@ -182,6 +182,7 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
             files, held = inventory([Path(r) for r in report["roots"]], report.get("excludes"),
                                     report.get("noRecurse"), report.get("names"), report.get("allowTargets"), extensions)
         if notes is not None:
+            notes += [prepare_bulk.link_dir_line(name, link) for link in prepare_bulk._RESULT.get("linkdirs", [])]
             notes += [prepare_bulk.vault_line(name, folder, n)
                       for folder, n in sorted((prepare_bulk._RESULT.get("vault") or {}).items())]
         found, links = watched.split_out([str(p) for p in files + [h[0] for h in held]], report["roots"])
@@ -208,6 +209,8 @@ def new_files(report: dict, known: set, reports: list = None, snapshot: bool = T
     with contextlib.redirect_stdout(io.StringIO()):
         files, held = inventory(roots, report.get("excludes"), report.get("noRecurse"),
                                 report.get("names"), report.get("allowTargets"), extensions)
+    if notes is not None:
+        notes += [prepare_bulk.link_dir_line(report.get("pointer"), link) for link in prepare_bulk._RESULT.get("linkdirs", [])]
     found = [str(p) for p in files + [h[0] for h in held]]
     if folders is not None:
         others = _others(report, _reports(reports))

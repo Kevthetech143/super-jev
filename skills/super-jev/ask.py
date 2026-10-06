@@ -2407,7 +2407,8 @@ def _index_sync(principal: str, sdir: Path) -> int:
             roots = reports[ptr].get("roots")
             walk = walk_due or idx.generation_of(ptr) is None  # a pointer new to the index (or just purged) is always walked
             walked = walked or walk
-            hashed += idx.update(ptr, entries=entries, roots=roots, excludes=reports[ptr].get("excludes"), walk=walk)["hashed"]
+            hashed += idx.update(ptr, entries=entries, roots=roots, excludes=reports[ptr].get("excludes"), walk=walk,
+                               allow_targets=reports[ptr].get("allowTargets"))["hashed"]
         if walked:
             try:
                 wstamp.touch()
@@ -4701,23 +4702,23 @@ def _connected_files(principal: str, pointer: str) -> tuple:
     return files, exts, True
 
 
-def _folder_files(root: Path) -> dict:
+def _folder_files(root: Path, allow=()) -> dict:
     """{real path: presented names} for every file under root, walking into symlinked folders like
     prepare_bulk.walk_md (os.walk followlinks, each real folder once so a link loop ends); hidden and
     generated dirs skipped. The suffix is judged on the presented name (alias.md -> target.txt is a .md
     source, as inventory treats it); identity is the real path, so two routes to one file count once."""
     out, walked = {}, set()
-    real_root = Path(os.path.realpath(root))
+    inside = prepare_bulk._stat_bases([root, *allow, os.path.expanduser("~")])
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in walked:
             dirnames[:] = []
             continue
         walked.add(real)
-        # a folder link leaving the folder is not walked, as prepare_bulk.walk_md does
+        # a folder link leaving the folder and home is not walked, as prepare_bulk.walk_md does
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in PREFLIGHT_SKIP_DIRS
                        and (not os.path.islink(os.path.join(dirpath, d))
-                            or Path(os.path.realpath(os.path.join(dirpath, d))).is_relative_to(real_root))]
+                            or prepare_bulk._within(os.path.realpath(os.path.join(dirpath, d)), inside))]
         for n in filenames:
             f = os.path.join(dirpath, n)
             if not n.startswith(".") and os.path.isfile(f):
@@ -4729,7 +4730,12 @@ def _folder_coverage(folder: Path, principal: str, ready: list) -> dict:
     """How many of the folder's connectable files a ready pointer of this principal has registered.
     Connectable = the default suffixes plus any a pointer registered here opted into (name endswith,
     so compound suffixes like .schema.json match)."""
-    names = _folder_files(folder.expanduser())
+    allow = []   # the folders the ready pointers were connected with --allow-target, so coverage follows the links connect followed
+    for name in ready:
+        rep = auto_heal._report_for(name, prepare_bulk.CACHE_DIR)[0]
+        if isinstance(rep, dict):
+            allow += [t for t in rep.get("allowTargets") or [] if isinstance(t, str)]
+    names = _folder_files(folder.expanduser(), allow)
     on_disk = set(names)
     exts, connected, unread = set(getattr(prepare_bulk, "CONNECTABLE_EXTENSIONS", (".md",))), set(), []
     for name in ready:
