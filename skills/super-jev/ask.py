@@ -1848,9 +1848,11 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
         for src in rows:
             head = f"{src.get('originalPath', '')} {src.get('description', '')}".lower()
             try:
-                seen.update(words(head + " " + Path(src["path"]).read_text(errors="replace")))
+                text = Path(src["path"]).read_text(errors="replace")
             except (OSError, KeyError, TypeError):
                 return ptr, None  # a file we cannot read: never skip this pointer
+            if not has_secret(text):  # a held file's tokens are never stored
+                seen.update(words(head + " " + text))
         return ptr, " ".join(sorted(seen))
 
     try:
@@ -2506,7 +2508,7 @@ WORD_INDEX_FILE = "word-index.json"
 # The stamp covers everything that decides a stored token: tokenizer version and pattern, stopwords
 # (they shape the pair keys), passage size. Any change makes old entries invalid.
 def _word_index_version() -> str:
-    return "{}.2.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
+    return "{}.3.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
         json.dumps([WORD_RE.pattern, sorted(QUERY_STOPWORDS)]).encode()).hexdigest()[:12])
 
 WORD_INDEX_VERSION = _word_index_version()
@@ -2538,6 +2540,8 @@ def _save_word_index(path, files: dict) -> None:
         pass  # best effort: an unsaved index is just rebuilt
 
 def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
+    if has_secret(text):  # no words kept: a key-shaped token must not land in word-index.json
+        return {"sha": sha, "heading": "", "whole": {}, "passages": [[{}, 0, []]], "secret": True}
     heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     parts = []
@@ -2548,8 +2552,6 @@ def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
     for p in parts:
         whole.update(p[0])
     # secret: the text scans as holding one (worked out once per sha). Such a file is searched by neither path.
-    if has_secret(text):  # no words kept: a key-shaped token must not land in word-index.json
-        return {"sha": sha, "heading": "", "whole": {}, "passages": [[{}, 0, []]], "secret": True}
     return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts, "secret": False}
 
 def _valid_item(item, sha) -> bool:

@@ -131,3 +131,17 @@ def test_secret_file_stores_no_words(tmp_path, monkeypatch):
     raw = idx.read_text()
     assert token not in raw and token.lower() not in raw
     assert json.loads(raw)["files"][str(a)]["secret"] is True
+
+
+def test_secret_file_stores_no_pointer_words(tmp_path, monkeypatch):
+    token = "AKIA" + "IOSFODNN7" + "EXAMPLE"  # fake key-shaped token, split so scanners pass over this file
+    held, fine = tmp_path / "held.md", tmp_path / "fine.md"
+    held.write_text(f"# Orchard\nkey {token}\n")
+    fine.write_text("# Notes\nThe orchard harvest is in October.\n")
+    assert ask.has_secret(held.read_text())
+    rows = [{"path": str(f), "originalPath": str(f)} for f in (held, fine)]
+    monkeypatch.setattr(ask, "memory", lambda r: {"status": "ok", "sources": rows})
+    ask.save_pointer_words(tmp_path, "me", {"p": "g1"}, ["p"])
+    raw = (tmp_path / ask.POINTER_WORDS_FILE).read_text()
+    assert token.lower() not in raw.lower()
+    assert "harvest" in json.loads(raw)["p"]["words"].split()
