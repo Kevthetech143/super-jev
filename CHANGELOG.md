@@ -1,6 +1,18 @@
 # Changelog
 
 
+## 1.0.132 — 2026-10-06
+
+- A refresh no longer stops with a false "payment required" when a file's description mentions `HTTP 402`. The checked connect searched all of the judge call's output for `HTTP 402`, and that output echoes the full command including every claim, so a normal verdict looked like a payment refusal. It now ignores the echoed command line and the verdict rows, which are the only places claim text appears. Test: `skills/super-jev/tests/test_connect_checked.py`.
+
+- **Person folders work in any layout.** A person folder is any connected folder whose PROFILE file has a `Relation:` line (it was only one fixed path layout, so another layout had no people and "my dad" filtered nothing). The folder is the PROFILE's own one, or the one above it when the PROFILE's first heading names that one and not its own; only the PROFILE's first 80 lines are read. A PROFILE on disk beside connected files but not connected itself still counts (only its heading and Relation line are read, locally; only the folder name is stored, in index meta `person_profiles`). The index rewrites only the rows whose person moved (no version bump). Tests: `skills/super-jev/tests/test_kin_word.py`.
+
+- A file the secret scan holds no longer leaves its words in the local stores: the word index entry keeps `"secret": true` and no words, and the pointer word list skips the file, so a key-shaped token from such a file is never written to `word-index.json` or `pointer-words.json`. Files written earlier are cleaned on first load with no re-read and no re-index: `pointer-words.json` entries saved before `WORDS_VERSION` 4 are dropped and the file rewritten, and `word-index.json` items flagged secret have their words emptied and the file saved once. The word index version stamp is unchanged, so an upgrade does not re-index every file. Search ranking is unchanged (a held file was already skipped). Tests: `tests/test_word_index.py`.
+
+- A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
+
+- The index's table-of-contents label row is built by one helper for seeding and for the label compare, so editing one alone cannot make every pass rewrite every file's row. Test: `tests/test_file_index.py`. The folder-link walk test now sets its own home folder, so it no longer depends on where the temp folder lives.
+
 ## 1.0.131 — 2026-10-06
 
 - After a refresh bumps a pointer's generation, the index is re-seeded at once instead of waiting for the next throttled start (asks on that pointer took the slow path for roughly 17-25 minutes). An ask that finds a generation mismatch now starts the updater inside the 10-minute throttle, as a served-file sha mismatch already did; a `--refresh` that changed a pointer's generation (read from the registry before and after) starts it despite the stamp too (a plain re-connect still goes through the throttle), still skipped in a replay and under pytest. Both bypasses stand down for 2 minutes after an updater pass raised (`index-fail.stamp`; a successful pass removes it), so a failing pass is not respawned by every ask. The updater is still one per principal: a second one that finds the lock held touches `index-rerun.marker`, and the running one, when its pass ends, clears it and makes one more pass (at most one queued rerun, never a loop). The walk throttle is unchanged. Test: `tests/test_index_catchup.py`.
@@ -30,18 +42,6 @@
 - The index file gives back freed pages. A refresh drops and re-adds a set's rows, which left about a third of the file as free pages. At the end of an updater run, when over a fifth of the file is free, a one-time rebuild turns on incremental auto-vacuum and later runs return only the freed pages. Test: `tests/test_walk_throttle.py`.
 
 - The index and today's search path now agree on a held file: one that still matches its review but whose text the current secret scan flags. Today's path searched its raw text by words and then held it when picked; the index never served it; and a held file could leave its set stale for good (on the slow path) or never stale (served without it), switching on each refresh. Now neither path searches such a file, both name it as held ("contains a secret; not sent"), and it never makes a set stale. The word index records the secret flag once per file version (its version is bumped, so it is rebuilt once). Held files are still never written to the full-text index.
-
-## Unreleased
-
-- A refresh no longer stops with a false "payment required" when a file's description mentions `HTTP 402`. The checked connect searched all of the judge call's output for `HTTP 402`, and that output echoes the full command including every claim, so a normal verdict looked like a payment refusal. It now ignores the echoed command line and the verdict rows, which are the only places claim text appears. Test: `skills/super-jev/tests/test_connect_checked.py`.
-
-- **Person folders work in any layout.** A person folder is any connected folder whose PROFILE file has a `Relation:` line (it was only one fixed path layout, so another layout had no people and "my dad" filtered nothing). The folder is the PROFILE's own one, or the one above it when the PROFILE's first heading names that one and not its own; only the PROFILE's first 80 lines are read. A PROFILE on disk beside connected files but not connected itself still counts (only its heading and Relation line are read, locally; only the folder name is stored, in index meta `person_profiles`). The index rewrites only the rows whose person moved (no version bump). Tests: `skills/super-jev/tests/test_kin_word.py`.
-
-- A file the secret scan holds no longer leaves its words in the local stores: the word index entry keeps `"secret": true` and no words, and the pointer word list skips the file, so a key-shaped token from such a file is never written to `word-index.json` or `pointer-words.json`. Files written earlier are cleaned on first load with no re-read and no re-index: `pointer-words.json` entries saved before `WORDS_VERSION` 4 are dropped and the file rewritten, and `word-index.json` items flagged secret have their words emptied and the file saved once. The word index version stamp is unchanged, so an upgrade does not re-index every file. Search ranking is unchanged (a held file was already skipped). Tests: `tests/test_word_index.py`.
-
-- A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
-
-- The index's table-of-contents label row is built by one helper for seeding and for the label compare, so editing one alone cannot make every pass rewrite every file's row. Test: `tests/test_file_index.py`. The folder-link walk test now sets its own home folder, so it no longer depends on where the temp folder lives.
 
 ## 1.0.130 — 2026-10-05
 
