@@ -2467,7 +2467,7 @@ WORD_INDEX_FILE = "word-index.json"
 # The stamp covers everything that decides a stored token: tokenizer version and pattern, stopwords
 # (they shape the pair keys), passage size. Any change makes old entries invalid.
 def _word_index_version() -> str:
-    return "{}.1.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
+    return "{}.2.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
         json.dumps([WORD_RE.pattern, sorted(QUERY_STOPWORDS)]).encode()).hexdigest()[:12])
 
 WORD_INDEX_VERSION = _word_index_version()
@@ -2508,7 +2508,8 @@ def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
     whole = Counter()
     for p in parts:
         whole.update(p[0])
-    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts}
+    # secret: the text scans as holding one (worked out once per sha). Such a file is searched by neither path.
+    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts, "secret": has_secret(text)}
 
 def _valid_item(item, sha) -> bool:
     return (isinstance(item, dict) and item.get("sha") == sha and isinstance(item.get("heading"), str)
@@ -2528,7 +2529,7 @@ def term_variants(terms: list, vocab) -> dict:
     return out
 
 def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=(), held_cover=None,
-                reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=()) -> list:
+                reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=(), held=None) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
     scores its best passage; a file's path, description and stored question count triple
@@ -2540,7 +2541,9 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
     the same secret scan and size ceiling connect applies; it is listed in the trace.
     `extra` names edited files a refresh would hold. They never enter the ranking; in the same pass their word
     coverage of the question (the share of the question's weighted words they contain, the test every file
-    must pass to be offered) is recorded in `held_cover`, locally, nothing sent."""
+    must pass to be offered) is recorded in `held_cover`, locally, nothing sent.
+    A file that still matches its review but whose text scans as a secret (the word item's flag, or `extra` for the
+    index's held rows) is never ranked either: it is appended to `held` and its coverage recorded the same way."""
     terms = query_terms(question)
     if not terms:
         return []
@@ -2565,6 +2568,11 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
                 continue
             raw, sha = got
             text = None
+            if sha == entry.get("sha256") and path in extra:
+                aside[path] = raw.decode("utf-8", "replace")  # the index's held row: flagged by the updater, once per sha
+                if held is not None:
+                    held.append(path)
+                continue
             if sha != entry.get("sha256"):
                 text = raw.decode("utf-8", "replace")
                 # Edited since connect: the refresh (auto-heal) re-gates it soon. Until then
@@ -2584,6 +2592,11 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
                 if index_path:
                     index[path] = item
                     dirty = True
+            if item.get("secret") and sha == entry.get("sha256"):  # reviewed bytes the secret scan now holds
+                aside[path] = text if text is not None else raw.decode("utf-8", "replace")
+                if held is not None:
+                    held.append(path)
+                continue
         head = " ".join([path.replace("/", " ").replace("-", " ").replace("_", " "), item["heading"],
                          str(entry.get("description") or ""), str(entry.get("question") or "")])
         head_words = Counter(w for w in words(head) for _ in range(3))
@@ -3366,6 +3379,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     reads = {}  # one read+sha pass shared by edited_held and word_search
     use_stat_memo(principal)  # ...and a stat-keyed memo across asks: an unchanged file is not re-read
     icands, fitems, ftocs, fts_nums, fb_paths, vouched = None, None, None, None, set(), set()
+    held_ix = []  # the index's held rows (reviewed bytes the secret scan now holds) of the sets it serves
     if idx_read:
         try:
             # Index read path: candidates come from the index rows; no file is read or hashed here. Edited files
@@ -3384,6 +3398,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                 out_of_scope = {p for _ptr, p, _e in icands if other_person(p)}
                 icands = index_candidates(idx_read, ix_ptrs, out_of_scope)
             edited = {"secret": [], "stuck": [], "refresh": []}
+            held_ix = [c for c in idx_read.held_candidates(ix_ptrs) if not other_person(c[1])]
             if fb_ptrs:
                 # Pointers the index does not hold completely and currently: today's path, here, for each of them. Their
                 # files are read and sha-checked as today (word search and TOC corpus), not vouched for by the index.
@@ -3414,18 +3429,23 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         except sqlite3.Error as e:  # locked by the updater, damaged: today's path answers this ask
             idx_read, index_fb = index_failed(idx_read, e), {}
             icands = fitems = ftocs = fts_nums = None
-            fb_paths, vouched = set(), set()
+            fb_paths, vouched, held_ix = set(), set(), []
     if not idx_read:
         out_of_scope = {p for ptr in search_pointers for p in load_cache_files(ptr) if other_person(p)}
         edited = edited_held(search_pointers, out_of_scope, reads)  # once per searched set, not per search path
     held_cover = {}  # a held file's word coverage of the question, from the same word-search pass
+    held_found = []  # reviewed, unchanged files whose text scans as a secret: searched by neither path, named as held
+    held_paths = {c[1] for c in held_ix}
     toc_on = not _CLAIM["text"]
     toc_error = ""  # set when the TOC stage crashed (after its retry): a not-found is then uncertain
     found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
                         reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
-                        **({"candidates": icands, "read_paths": fb_paths - vouched} if idx_read else {}),
+                        **({"candidates": (icands or []) + held_ix, "read_paths": (fb_paths - vouched) | held_paths}
+                           if idx_read else {}),
                         **({"items": fitems, "fts": fts_nums} if fts_nums else {}),
-                        **({"extra": set(edited["secret"]), "held_cover": held_cover} if edited["secret"] else {}))
+                        extra=set(edited["secret"]) | held_paths, held_cover=held_cover, held=held_found)
+    edited["secret"] = list(dict.fromkeys(edited["secret"] + held_found))
+    held_paths |= set(held_found)
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     if toc_on:
@@ -3433,8 +3453,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         # Jev's pick of files from their TOC pages, then the parts of those files. The word search's
         # own hits ride along at every step. If it fails, the word search's list is read and the
         # failure is named in the trace.
-        corpus = toc_corpus(icands if idx_read else candidate_files(search_pointers, out_of_scope), reads,
-                            fb_paths if idx_read else None)
+        corpus = toc_corpus([c for c in (icands if idx_read else candidate_files(search_pointers, out_of_scope))
+                             if c[1] not in held_paths], reads, fb_paths if idx_read else None)
         flush_stat_memo()
         tt0 = time.time()
         for attempt in (1, 2):  # a crashed TOC stage is tried once more; the first crash may be a blip

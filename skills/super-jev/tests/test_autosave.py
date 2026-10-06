@@ -240,7 +240,8 @@ def test_a_file_holding_a_secret_is_never_saved(world):
     world["state"]["sha"] = world["sha"](world["note"])
     ask_once(world)
     out, _n = ask_once(world)
-    assert "not saved: secret-held" in out and "Saved for next time" not in out
+    # held at search: neither search path reads it, so there is no answer to save (the save guard is tested in test_auto_cache)
+    assert f"HELD  {world['note']}" in out and "Saved for next time" not in out
     assert not world["cache"]
 
 

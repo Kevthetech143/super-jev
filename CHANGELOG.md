@@ -32,6 +32,8 @@
 
 - The index file gives back freed pages. A refresh drops and re-adds a set's rows, which left about a third of the file as free pages. At the end of an updater run, when over a fifth of the file is free, a one-time rebuild turns on incremental auto-vacuum and later runs return only the freed pages. Test: `tests/test_walk_throttle.py`.
 
+- The index and today's search path now agree on a held file: one that still matches its review but whose text the current secret scan flags. Today's path searched its raw text by words and then held it when picked; the index never served it; and a held file could leave its set stale for good (on the slow path) or never stale (served without it), switching on each refresh. Now neither path searches such a file, both name it as held ("contains a secret; not sent"), and it never makes a set stale. The word index records the secret flag once per file version (its version is bumped, so it is rebuilt once). Held files are still never written to the full-text index.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
