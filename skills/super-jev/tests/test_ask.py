@@ -1095,3 +1095,13 @@ def test_add_under_an_uncalibrated_judge_saves_nothing(tmp_path, monkeypatch, ca
     ask.add_manual("alice", "which pointers hold the example agent brain", "The answer body.", str(src_file), tmp_path)
     assert approvals == [] and "uncalibrated" in capsys.readouterr().out
     assert not (tmp_path / "approvals.jsonl").exists()
+
+
+def test_folder_files_does_not_walk_a_folder_link_out_of_the_folder(tmp_path):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    root.mkdir(); outside.mkdir()
+    (root / "a.md").write_text("# a\n")
+    (outside / "stray.md").write_text("# stray\n")
+    (root / "escape_link").symlink_to(outside)
+
+    assert {n for names in ask._folder_files(root).values() for n in names} == {"a.md"}

@@ -225,7 +225,7 @@ def test_walk_filter_matches_the_old_one(tangle):
             assert sorted(fi._walk_one(r, pb)) == want, (solo, r)
             assert want, r  # every root of the fixture holds something
     got = sorted(fi._walk_one(tangle, pb))
-    assert str(tangle / "a.md") in got and str(tangle / "lnk_out" / "o1.md") in got  # a linked outside folder is walked
+    assert str(tangle / "a.md") in got and str(tangle / "lnk_out" / "o1.md") not in got  # a link out of the root is not walked
     assert str(tangle / "keep.bak.md") not in got and str(tangle / "b" / "documents" / "y.md") not in got
 
 
@@ -251,8 +251,8 @@ def test_a_root_holding_a_skipped_duplicate_folder_is_walked_on_its_own(tangle):
 
 
 def test_walk_filter_cost_follows_files_not_links(tmp_path):
-    root, out = tmp_path / "big", tmp_path / "targets"
-    for i in range(3000):  # 3k links, each to a folder of its own outside the root
+    root, out = tmp_path / "big", tmp_path / "big" / "targets"
+    for i in range(3000):  # 3k links, each to a folder of its own inside the root (a link out is not walked)
         touch(out / f"t{i}" / "n.md")
         (root).mkdir(exist_ok=True)
         (root / f"l{i}").symlink_to(out / f"t{i}")
@@ -265,20 +265,6 @@ def test_walk_filter_cost_follows_files_not_links(tmp_path):
     new = time.time() - t0
     assert n == 20000
     assert new < 30, new  # the old filter ran 20k x 3k link tests here (minutes)
-
-
-def test_old_filter_is_slower_with_many_links(tmp_path):
-    root, out = tmp_path / "r", tmp_path / "targets"
-    root.mkdir()
-    for i in range(250):
-        touch(out / f"t{i}" / "n.md")
-        (root / f"l{i}").symlink_to(out / f"t{i}")
-    for i in range(800):
-        touch(root / "plain" / f"n{i}.md")
-    fi = FileIndex("t", tmp_path / "i.sqlite")
-    t0 = time.time(); got = sorted(fi._walk_one(root, pb)); new = time.time() - t0
-    t0 = time.time(); want = sorted(old_walk_one(root, pb)); old = time.time() - t0
-    assert got == want and new * 3 < old, (new, old)
 
 
 def test_pointers_sharing_files_do_not_reread_each_other(tmp_path, monkeypatch):

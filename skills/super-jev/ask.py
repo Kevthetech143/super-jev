@@ -4707,13 +4707,17 @@ def _folder_files(root: Path) -> dict:
     generated dirs skipped. The suffix is judged on the presented name (alias.md -> target.txt is a .md
     source, as inventory treats it); identity is the real path, so two routes to one file count once."""
     out, walked = {}, set()
+    real_root = Path(os.path.realpath(root))
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in walked:
             dirnames[:] = []
             continue
         walked.add(real)
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in PREFLIGHT_SKIP_DIRS]
+        # a folder link leaving the folder is not walked, as prepare_bulk.walk_md does
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in PREFLIGHT_SKIP_DIRS
+                       and (not os.path.islink(os.path.join(dirpath, d))
+                            or Path(os.path.realpath(os.path.join(dirpath, d))).is_relative_to(real_root))]
         for n in filenames:
             f = os.path.join(dirpath, n)
             if not n.startswith(".") and os.path.isfile(f):

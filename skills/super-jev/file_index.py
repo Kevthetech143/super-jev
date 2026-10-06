@@ -210,7 +210,7 @@ class FileIndex:
         for outer in () if excludes else self._round_roots:  # (a root with excludes is walked on its own)
             if outer == rk:
                 break
-            if rk.startswith(outer.rstrip(os.sep) + os.sep):
+            if rk.startswith(outer.rstrip(os.sep) + os.sep) and os.path.realpath(rk).startswith(os.path.realpath(outer).rstrip(os.sep) + os.sep):
                 of, ol, od = self._raw_walk(Path(outer), pb)
                 if not any(d == rk or d.startswith(rk + os.sep) for d in self._raw_dups[(outer, ())]):
                     pre = rk + os.sep

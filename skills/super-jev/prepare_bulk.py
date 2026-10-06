@@ -850,7 +850,7 @@ def is_worktree_copy(path: Path, root: Path) -> bool:
     return False
 
 
-def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS, trace: dict = None, excludes: list = None):
+def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS, trace: dict = None, excludes: list = None, allow: list = None):
     """Markdown files under `root`, sorted, plus resolved folder symlink targets. When `others` is a list,
     it also receives what connect reports about files of other types, ready to tally as
     (key, path under root, reason, label, count): one entry per file outside the skipped folders, and one
@@ -861,7 +861,11 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
     symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
     loop is walked once. `trace` (a dict) receives "link_dirs" (the folder each returned link sat in, parallel to
     the links) and "dups" (the folders skipped as already walked), so a caller can reuse this walk for a root inside it.
-    `excludes` (connect's --exclude, trailing slashes already stripped) keeps the walk out of a folder they name."""
+    `excludes` (connect's --exclude, trailing slashes already stripped) keeps the walk out of a folder they name.
+    A folder symlink is followed only when its real path is under `root` or a folder in `allow` (the other
+    connected roots and --allow-target folders): a link out is not walked, so a connect never wanders outside
+    what the user named (a link to /tmp is not a /tmp inventory). A FILE symlink is unchanged: it is listed and
+    inventory() judges its target against the same folders (the "link" skip), so it admits nothing outside them."""
     def note_others(real_dir, rel_parts, real_parts, names):
         # A folder is hidden or skipped by its path under the root or by its real path (a link into
         # documents/ is still documents/), the same two views the .md rule in inventory() uses.
@@ -885,6 +889,7 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
         return [p for p in kids if p.name.lower().endswith(tuple(extensions))], []
     out, linked, walked = [], [], set()
     real_root = os.path.realpath(root)
+    inside = [real_root] + [os.path.realpath(a) for a in allow or []]
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in walked:
@@ -897,8 +902,14 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
             rel_dir = os.path.relpath(dirpath, root)
             dirnames[:] = [d for d in dirnames
                            if not _excluded(d if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{d}", excludes)]
-        new = [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
-               if os.path.islink(os.path.join(dirpath, d))]
+        new = []
+        for d in list(dirnames):
+            if os.path.islink(os.path.join(dirpath, d)):
+                target = Path(os.path.realpath(os.path.join(dirpath, d)))
+                if any(target.is_relative_to(b) for b in inside):
+                    new.append(target)
+                else:
+                    dirnames.remove(d)   # a link out of every connected folder is not walked
         linked += new
         if trace is not None:
             trace.setdefault("link_dirs", []).extend([dirpath] * len(new))
@@ -989,6 +1000,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
     folder (--allow-target) and pass the same name/folder/secret-name checks, so a link cannot reach profile/,
     logins.md or any other file the roots would never have admitted."""
     bases = [Path(r).resolve() for r in list(roots) + list(allow_targets or [])]
+    n_bases = len(bases)
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen = [], [], set()
     skips, counted = {}, set()
@@ -1003,7 +1015,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
 
     for root in roots:
         others = [] if not names else None  # other file types are reported only when nothing narrows by name
-        glob_iter, linked = walk_md(root, no_recurse, others, extensions)
+        glob_iter, linked = walk_md(root, no_recurse, others, extensions, allow=bases[:n_bases])
         for key, rel, reason, label, n in others or []:
             if not _excluded(rel, excludes):
                 skip(key, reason, label, n)

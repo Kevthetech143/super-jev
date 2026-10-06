@@ -161,10 +161,70 @@ def test_inventory_follows_a_symlinked_folder_but_not_into_a_vault(tmp_path):
     (root / "vault").symlink_to(tmp_path / "profile" / "x")
     (root / "plain" / "loop").symlink_to(root)
 
-    files, held = pb.inventory([root])
+    # A link leaving the root is followed only when its target is named (--allow-target).
+    files, held = pb.inventory([root], allow_targets=[elsewhere])
 
     assert sorted(p.relative_to(root).as_posix() for p in files) == ["linked/SKILL.md", "plain/SKILL.md"]
     assert held == []
+
+
+def _link_out_root(tmp_path):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    (root / "inner").mkdir(parents=True)
+    (root / "real").mkdir()
+    outside.mkdir()
+    (root / "inner" / "in.md").write_text("# in\nbody\n")
+    (root / "real" / "kept.md").write_text("# kept\nbody\n")
+    (outside / "stray.md").write_text("# stray\nbody\n")
+    (root / "escape_link").symlink_to(outside)
+    return root, outside
+
+
+def test_a_folder_link_out_of_the_root_is_not_walked(tmp_path):
+    root, _outside = _link_out_root(tmp_path)
+
+    files, held = pb.inventory([root])
+    walked, linked = pb.walk_md(root)
+
+    names = sorted(p.relative_to(root).as_posix() for p in files)
+    assert names == ["inner/in.md", "real/kept.md"] and held == []
+    assert all("stray.md" not in str(p) for p in walked) and linked == []
+
+
+def test_a_folder_link_inside_the_root_is_still_followed_and_a_loop_ends(tmp_path):
+    root, _outside = _link_out_root(tmp_path)
+    (root / "alias").symlink_to(root / "inner")
+    (root / "inner" / "loop").symlink_to(root)
+
+    files, _held = pb.inventory([root])
+
+    # the folder behind the in-root link is reached once (by whichever path is walked first), the loop ends
+    names = sorted(p.relative_to(root).as_posix() for p in files)
+    assert len(names) == 2 and names[1] == "real/kept.md" and names[0].endswith("/in.md")
+    _walked, linked = pb.walk_md(root)
+    assert root.resolve() / "inner" in linked
+
+
+def test_a_folder_link_to_another_connected_root_is_followed(tmp_path):
+    root, outside = _link_out_root(tmp_path)
+
+    files, _held = pb.inventory([root, outside])
+
+    assert "stray.md" in {p.name for p in files}
+
+
+def test_a_heal_scan_does_not_find_files_behind_a_link_out_as_new(tmp_path, monkeypatch):
+    import refresh_changed as rcm
+    root, _outside = _link_out_root(tmp_path)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(rcm, "CACHE_DIR", tmp_path / "cache")
+    report = {"pointer": "p", "roots": [str(root)], "watched": True}
+    notes = []
+
+    found = rcm.new_files(report, set(), notes=notes)
+
+    assert sorted(Path(f).name for f in found) == ["in.md", "kept.md"]
+    assert notes == []  # no "link out" line: nothing behind the link was even looked at
 
 
 def test_vault_and_secret_name_checks_ignore_capitals(tmp_path):
