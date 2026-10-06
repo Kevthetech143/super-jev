@@ -22,6 +22,8 @@
 
 - An ask no longer opens a set's prepare cache to see whether a held file was edited. The report now records the judged sha of each judge-held file (`heldSha`, written with the cache entry), and the ask checks those shas alone. A report written before this change falls back to the cache until its next refresh rewrites it. On a copy of the primary agent's 37 sets (27 with held rows, 32 judge-held files) the check took 36.7 ms per ask, now 10.3 ms (26 ms saved). Tests: `tests/test_held_edit_heal.py`, `tests/test_partial_ok.py`.
 
+- A refresh no longer pays again for a held file that has not changed. A file the judge held (a real low verdict) is kept with its earlier verdict and the same report rows when its bytes match the cache, so it makes no writer or judge call; before, every refresh re-judged each one. An edited held file is still judged again. `--rejudge` (added to the rerun hint printed for a refresh) judges unchanged held files again, for a manual retry; a non-refresh connect also judges them again. The cache entry now also keeps the judge's reason. Estimate from a copy of the primary agent's caches: 21 of its 32 held files are unchanged, so about 21 to 42 judge calls (a low verdict gets one rewrite and a second check) and about 21 rewrite calls are saved per full refresh of its sets. Test: `tests/test_held_reuse.py`.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
