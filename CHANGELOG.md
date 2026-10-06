@@ -20,6 +20,8 @@
 
 - A crashed table-of-contents (TOC) stage is retried once, and no longer ends as a clean not-found. A payment refusal (HTTP 402) or a size refusal is not retried. If the retry also fails and nothing is found, the outcome is `error` (the same exit 3 a failed content check already gets) with "not found, but the contents check failed (<error>), so this may be a miss; ask again"; if files are confirmed the answer is unchanged and the trace's `toc` entry carries the error, `retried` and a note. Test: `skills/super-jev/tests/test_toc_retry.py`.
 
+- An ask no longer opens a set's prepare cache to see whether a held file was edited. The report now records the judged sha of each judge-held file (`heldSha`, written with the cache entry), and the ask checks those shas alone. A report written before this change falls back to the cache until its next refresh rewrites it. On a copy of the primary agent's 37 sets (27 with held rows, 32 judge-held files) the check took 36.7 ms per ask, now 10.3 ms (26 ms saved). Tests: `tests/test_held_edit_heal.py`, `tests/test_partial_ok.py`.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.

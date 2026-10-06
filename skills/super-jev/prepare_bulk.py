@@ -2341,6 +2341,9 @@ def run(a) -> int:
 
               "approved": [str(p) for p in connect_set],
               "exceptions": exceptions, "held": held, "removed": removed, "findability": None,
+              # the sha each judge-held file had when judged: an ask tells an edited one without opening this cache
+              "heldSha": {f: e["sha256"] for f, e in cache.items() if isinstance(e, dict) and e.get("pass") is False
+                          and e.get("sha256") and f not in set(map(str, connect_set))},
               "connected": False, "parts": []}
     if getattr(a, "watched", False):
         report["watched"] = True

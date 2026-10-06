@@ -74,6 +74,9 @@ def test_size_held_plus_low_score_exception_exits_3_and_connected_files_are_serv
     # the report names the connected files as approved, so the set is not stale for them
     report = json.loads((pb.CACHE_DIR / "my-records-report.json").read_text())
     assert len(report["approved"]) == 3
+    # the judge-held file's judged sha is in the report, so an ask can tell an edit without opening the cache
+    low = next(k for k, v in cache.items() if not v["pass"])
+    assert report["heldSha"] == {low: cache[low]["sha256"]}
     # auto-heal settles the attempt as ok: no failure count, no retry backoff
     ah.STATE_DIR = tmp_path / "state"
     ah._settle("agent", "my-records", rc in (0, 3))
