@@ -40,6 +40,12 @@
 
 - The index and today's search path now agree on a held file: one that still matches its review but whose text the current secret scan flags. Today's path searched its raw text by words and then held it when picked; the index never served it; and a held file could leave its set stale for good (on the slow path) or never stale (served without it), switching on each refresh. Now neither path searches such a file, both name it as held ("contains a secret; not sent"), and it never makes a set stale. The word index records the secret flag once per file version (its version is bumped, so it is rebuilt once). Held files are still never written to the full-text index.
 
+- A file the secret scan holds no longer leaves its words in the local word index: the entry keeps `"secret": true` and no words, so a key-shaped token from such a file is never written to `word-index.json`. Search ranking is unchanged (a held file was already skipped). Test: `tests/test_word_index.py`.
+
+- A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
+
+- The index's table-of-contents label row is built by one helper for seeding and for the label compare, so editing one alone cannot make every pass rewrite every file's row. Test: `tests/test_file_index.py`. The folder-link walk test now sets its own home folder, so it no longer depends on where the temp folder lives.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.
