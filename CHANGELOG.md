@@ -28,6 +28,10 @@
 
 - An ask decides once per file whether an edited file may be read at its current text. The check (secret scan, size ceiling, scope) ran up to three times per edited file per ask (TOC pick, edited count, word search); it is now remembered per file, bytes, set and review within one ask, and never carried into the next ask.
 
+- The background index updater no longer re-walks every connected folder on every run. It walks the roots at most once per 10 minutes per principal (a stamp, `index-walk.stamp`) and otherwise only re-checks the files it already knows and the refreshed prepare-cache, which is where a refresh's changed files are listed; a set new to the index is always walked. One run on an unchanged large copy spent most of its time in that walk (8.8M stat calls). The updater that a connect or refresh starts now has the same 10-minute throttle as the one an ask starts, and is skipped in a replay. Tests: `tests/test_walk_throttle.py`.
+
+- The index file gives back freed pages. A refresh drops and re-adds a set's rows, which left about a third of the file as free pages. At the end of an updater run, when over a fifth of the file is free, a one-time rebuild turns on incremental auto-vacuum and later runs return only the freed pages. Test: `tests/test_walk_throttle.py`.
+
 ## 1.0.129 — 2026-10-05
 
 - An ask answers from a note's original, not from the redacted reviewed-view copy of it, when the asker can read that original through a raw (non-view) set: the view copy is dropped from the result and the original's own path is listed once. A view whose original is not connected for that asker still answers. Test: `tests/test_raw_over_view.py`.

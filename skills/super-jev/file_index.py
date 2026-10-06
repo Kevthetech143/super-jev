@@ -153,6 +153,23 @@ class FileIndex:
             if col not in have:  # an index made by the first version: add the read-path columns
                 self.db.execute(f"ALTER TABLE pointers ADD COLUMN {col} {typ}")
 
+    def compact(self) -> None:
+        """Give back the freelist (purge drops and re-adds rows on every refresh). An index made before auto_vacuum was on is
+        rebuilt once (VACUUM, about 2 s for a 220 MB index) and then only freed pages are returned (incremental, sub-second).
+        Only when the freelist is over a fifth of the file; a busy or failed run is skipped, never an error."""
+        try:
+            self.db.commit()
+            free, total = (self.db.execute(f"PRAGMA {k}").fetchone()[0] for k in ("freelist_count", "page_count"))
+            if not total or free * 5 < total:
+                return
+            if self.db.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+                self.db.execute("PRAGMA auto_vacuum=2")
+                self.db.execute("VACUUM")
+            else:
+                self.db.execute("PRAGMA incremental_vacuum").fetchall()
+        except sqlite3.Error:
+            pass
+
     def close(self):
         self.db.close()
 
@@ -271,10 +288,10 @@ class FileIndex:
         for t in ("files", "toc", "seen"):
             self.db.execute(f"DELETE FROM {t} WHERE path=?", (path,))
 
-    def update(self, pointer: str, entries: dict = None, roots=None, excludes=None) -> dict:
+    def update(self, pointer: str, entries: dict = None, roots=None, excludes=None, walk: bool = True) -> dict:
         """Stat-diff a pointer's files; read and sha ONLY files whose stat changed (or never seen).
         `entries` is the reviewed prepare-cache of the pointer (path -> record); default: load it from the
-        prepare-cache. `roots` are the connected folders, walked by stat only to find new files (never into `excludes`, the pointer's recorded --exclude list).
+        prepare-cache. `roots` are the connected folders, walked by stat only to find new files (never into `excludes`, the pointer's recorded --exclude list); `walk=False` skips that walk (the cache's own files and the known rows are still checked).
         Returns {"hashed": n, "changed": [...], "new": [...], "gone": [...], "stale": bool}."""
         if entries is None:
             from prepare_bulk import load_cache_files
@@ -297,7 +314,8 @@ class FileIndex:
                 self._drop(p)
                 del known[p]
         paths = set(entries) | set(known)
-        paths |= {p for p in self._walk(roots, excludes)}
+        if walk:
+            paths |= {p for p in self._walk(roots, excludes)}
         for p in sorted(paths):
             ent = entries.get(p)
             try:
