@@ -80,7 +80,7 @@ def test_new_file_found(tmp_path, corpus, opens):
     new.write_text("brand new\n")
     opens.clear()
     r = idx.update("p", entries)  # roots remembered
-    assert r["new"] == [str(new)] and idx.is_stale("p")
+    assert r["new"] == [str(new)] and not idx.is_stale("p")  # unreviewed: served by no path, so not stale
     assert r["hashed"] == 0 and _body_opens(opens, new) == []
     assert idx.count(path=str(new)) == 0  # unreviewed: found, not ingested
     assert idx.update("p", entries)["hashed"] == 0
