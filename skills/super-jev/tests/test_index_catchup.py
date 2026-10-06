@@ -88,7 +88,7 @@ def test_a_refresh_bypasses_only_when_a_generation_changed(tmp_path, monkeypatch
         gen["n"] += 1 if bump else 0
         return {"status": "registered", "pointer": req["pointer"], "sources": req["sources"]}
     got = []
-    sys.modules["share_pointers"] = type(sys)("share_pointers")
+    monkeypatch.setitem(sys.modules, "share_pointers", type(sys)("share_pointers"))
     sys.modules["share_pointers"].share_defaults = lambda principals, memory=None: None
     monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(pb, "writer", lambda items, *a, **k: {i["path"]: {"description": "A note.", "question": "q?"} for i in items})
