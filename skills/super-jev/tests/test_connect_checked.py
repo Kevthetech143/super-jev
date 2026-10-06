@@ -281,3 +281,22 @@ def test_gate_parses_ceiling_message_as_unchecked(tmp_path, monkeypatch):
 
     assert verdict["state"] == "UNCHECKED"
     assert "32k-token ceiling" in verdict["reason"]
+
+
+def test_echoed_claim_mentioning_http_402_is_not_unpaid(monkeypatch):
+    out = "$ dispatch.py check --claim 'The vendor returned HTTP 402 last week' /x\nc1 SUPPORTED 0.95\n"
+
+    class R:
+        stdout, stderr, returncode = out, "", 0
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+    assert cc.gate("The vendor returned HTTP 402 last week", "/x")["state"] == "SUPPORTED"
+    assert cc.gate_many(["HTTP 402 was returned"], "/x") is None or True  # no PaymentRequired raised
+
+
+@pytest.mark.parametrize("err", ["RuntimeError: HTTP 402", "jev: Jev returned HTTP 402", "Jev returned HTTP 402"])
+def test_real_402_error_forms_still_raise(monkeypatch, err):
+    class R:
+        stdout, stderr, returncode = "$ dispatch.py check\n", err + "\n", 1
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")

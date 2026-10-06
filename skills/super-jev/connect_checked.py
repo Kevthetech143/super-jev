@@ -40,8 +40,13 @@ class PaymentRequired(RuntimeError):
     too, so callers stop the run rather than split, retry or fall back per file."""
 
 
+# The door's own error lines only ("RuntimeError: HTTP 402", "<vendor> returned HTTP 402"), whole line, so the
+# echoed "$ ..." command and any claim text that mentions HTTP 402 never count as a payment refusal.
+_UNPAID_LINE = re.compile(r"^(?:\w+: )?(?:RuntimeError: HTTP 402|[\w .-]+ returned HTTP 402)\s*$", re.M)
+
+
 def _raise_if_unpaid(txt: str) -> None:
-    if re.search(r"\bHTTP 402\b", txt):
+    if _UNPAID_LINE.search(txt):
         raise PaymentRequired("the judge refused the call for payment (HTTP 402); top up, then refresh again")
 
 
