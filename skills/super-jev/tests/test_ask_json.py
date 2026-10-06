@@ -322,7 +322,7 @@ def test_left_out_files_name_where_they_are_and_the_way_in(tmp_path, monkeypatch
     world(tmp_path, monkeypatch, navigate=lambda p: {"status": "no-candidates"}, reports=rep)
     rc, text, _, obj = both(monkeypatch, capsys, "find the warranty card login")
     # the set was searched: files left out at setup are a note on a plain not-found, not a setup gap
-    assert rc == 1 and obj["outcome"] == "not-found" and obj["next"] == "connect"
+    assert rc == 1 and obj["outcome"] == "not-found" and obj["next"] == "include"
     assert obj["left_out"] == [{"what": "held back: it looks like it holds a password, key or card number",
                                 "count": 2, "where": str(docs),
                                 "way_in": "remove or move the flagged value, then re-run setup"}]

@@ -108,7 +108,7 @@ def test_held_file_is_named_in_ask_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["p1"]} if req["action"] == "panel" else
                         {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": str(f)}]})
     monkeypatch.setattr(ask, "confirm", lambda q, paths: ({}, set(), None, {str(f): ask.HELD_SECRET}))
-    assert ask.lookup("vet?", "me", tmp_path / "s") == 4  # needs-setup: a held file was not searched
+    assert ask.lookup("vet?", "me", tmp_path / "s") == 1  # not-found: every set was searched; the held file is only disclosed
     out = capsys.readouterr().out
     assert f"HELD  {f}  (contains a secret; not sent)" in out and "did not contain" not in out
 
