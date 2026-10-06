@@ -1,6 +1,14 @@
 # Changelog
 
 
+## 1.0.133 — 2026-10-06
+
+- **Honest outcome: the outcome comes from the sets, not from files.** A set that failed to search is `error` (3); a set that needs setup or a refresh, or nothing connected, is `needs-setup` (4); otherwise no match is `not-found` (1). A file no searched set checked (label failed, held for a secret, too big, edited and not yet re-admitted, not UTF-8) never changes the outcome: it is always named in `left_out` and in a `partial: N files not checked` note in the reason, and a file another connected set admitted is not counted as unchecked. Removed the held-file word-coverage and routing-pick heuristic that turned some held files into `needs-setup`. Tests: `tests/test_honest_outcome.py` (two tests of the removed heuristic retired).
+
+- The checked connect no longer misses an unpaid judge call when the call's stdout ends without a newline: a stderr `HTTP 402` could glue onto the skipped `$ ` echo line and hide. Stdout and stderr are now joined with a newline. Test: `skills/super-jev/tests/test_connect_checked.py`.
+
+- `prepare_bulk.py --json` no longer reports a payment refusal as "internal error: PaymentRequired" with a traceback; it prints the same single payment message as text mode, exit code unchanged. Test: `skills/super-jev/tests/test_json_unpaid.py`.
+
 ## 1.0.132 — 2026-10-06
 
 - A refresh no longer stops with a false "payment required" when a file's description mentions `HTTP 402`. The checked connect searched all of the judge call's output for `HTTP 402`, and that output echoes the full command including every claim, so a normal verdict looked like a payment refusal. It now ignores the echoed command line and the verdict rows, which are the only places claim text appears. Test: `skills/super-jev/tests/test_connect_checked.py`.
@@ -12,14 +20,6 @@
 - A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
 
 - The index's table-of-contents label row is built by one helper for seeding and for the label compare, so editing one alone cannot make every pass rewrite every file's row. Test: `tests/test_file_index.py`. The folder-link walk test now sets its own home folder, so it no longer depends on where the temp folder lives.
-
-## Unreleased
-
-- **Honest outcome: the outcome comes from the sets, not from files.** A set that failed to search is `error` (3); a set that needs setup or a refresh, or nothing connected, is `needs-setup` (4); otherwise no match is `not-found` (1). A file no searched set checked (label failed, held for a secret, too big, edited and not yet re-admitted, not UTF-8) never changes the outcome: it is always named in `left_out` and in a `partial: N files not checked` note in the reason, and a file another connected set admitted is not counted as unchecked. Removed the held-file word-coverage and routing-pick heuristic that turned some held files into `needs-setup`. Tests: `tests/test_honest_outcome.py` (two tests of the removed heuristic retired).
-
-- The checked connect no longer misses an unpaid judge call when the call's stdout ends without a newline: a stderr `HTTP 402` could glue onto the skipped `$ ` echo line and hide. Stdout and stderr are now joined with a newline. Test: `skills/super-jev/tests/test_connect_checked.py`.
-
-- `prepare_bulk.py --json` no longer reports a payment refusal as "internal error: PaymentRequired" with a traceback; it prints the same single payment message as text mode, exit code unchanged. Test: `skills/super-jev/tests/test_json_unpaid.py`.
 
 ## 1.0.131 — 2026-10-06
 
