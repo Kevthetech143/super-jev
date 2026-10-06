@@ -1919,9 +1919,14 @@ def kick_index_updater(principals, bypass_throttle: bool = False) -> None:
     for principal in principals:
         try:
             sdir = state_root() / principal
-            stamp = sdir / "index-sync.stamp"
+            stamp, bypass = sdir / "index-sync.stamp", bypass_throttle
             try:
-                if not bypass_throttle and time.time() - stamp.stat().st_mtime < 600:  # = ask.INDEX_SPAWN_EVERY_SECS
+                if bypass_throttle and time.time() - (sdir / "index-fail.stamp").stat().st_mtime < 120:  # = ask.INDEX_FAIL_COOLDOWN_SECS
+                    bypass = False  # the last pass raised a moment ago: only the normal throttle
+            except OSError:
+                pass
+            try:
+                if not bypass and time.time() - stamp.stat().st_mtime < 600:  # = ask.INDEX_SPAWN_EVERY_SECS
                     continue
             except OSError:
                 pass

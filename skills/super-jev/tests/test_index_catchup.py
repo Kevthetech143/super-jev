@@ -6,7 +6,9 @@ updater runs queues exactly one more pass. Made-up state, stubs, no network, no 
     python3 -m pytest skills/super-jev/tests/test_index_catchup.py -q
 """
 import fcntl
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -132,3 +134,49 @@ def test_no_marker_means_a_single_pass(tmp_path, monkeypatch):
     monkeypatch.setattr(ask, "_index_sync", lambda p, d: passes.append(1) or 0)
     assert ask.index_sync(PRINCIPAL, sdir) == 0
     assert len(passes) == 1
+
+
+def test_a_raising_pass_backs_off_the_mismatch_bypass_for_two_minutes_and_a_success_clears_it(tmp_path, monkeypatch, capsys):
+    notes, names, sdir = build(tmp_path, monkeypatch, 40)
+    Rig(monkeypatch, notes, names)
+    sync(sdir)
+    monkeypatch.setattr(ask, "engine_generations", lambda: {n: 2 for n in names})
+    spawned = []
+    monkeypatch.setattr(ask, "spawn_index_updater", lambda p: spawned.append(p))
+    flag(monkeypatch, True)
+
+    def boom(principal, d):
+        raise RuntimeError("update failed")
+    real = ask._index_sync
+    monkeypatch.setattr(ask, "_index_sync", boom)
+    with pytest.raises(RuntimeError):
+        ask.index_sync(PRINCIPAL, sdir)
+    fail = sdir / ask.INDEX_FAIL_STAMP
+    assert fail.exists()
+    (sdir / ask.INDEX_STAMP).touch()
+    ask_it(PLANTED[0][0], sdir, capsys)
+    assert spawned == []  # mismatch inside 120 s of a failure: the normal throttle only
+    old = time.time() - ask.INDEX_FAIL_COOLDOWN_SECS - 5
+    os.utime(fail, (old, old))
+    ask_it(PLANTED[0][0], sdir, capsys)
+    assert spawned == [PRINCIPAL]  # after 120 s the bypass is back
+    monkeypatch.setattr(ask, "_index_sync", real)
+    assert ask.index_sync(PRINCIPAL, sdir) == 0
+    assert not fail.exists()  # a successful pass clears it
+
+
+def test_kick_bypass_backs_off_while_the_fail_stamp_is_young(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    seen = []
+    monkeypatch.setattr(pb.subprocess, "Popen", lambda cmd, **k: seen.append(cmd))
+    sd = tmp_path / "state" / PRINCIPAL
+    sd.mkdir(parents=True)
+    (sd / ask.INDEX_STAMP).touch()
+    (sd / ask.INDEX_FAIL_STAMP).touch()
+    pb.kick_index_updater([PRINCIPAL], bypass_throttle=True)
+    assert seen == []
+    old = time.time() - ask.INDEX_FAIL_COOLDOWN_SECS - 5
+    os.utime(sd / ask.INDEX_FAIL_STAMP, (old, old))
+    pb.kick_index_updater([PRINCIPAL], bypass_throttle=True)
+    assert len(seen) == 1

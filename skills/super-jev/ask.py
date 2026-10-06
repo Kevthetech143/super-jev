@@ -2071,6 +2071,8 @@ INDEX_FILE = "index.sqlite"
 INDEX_STAMP = "index-sync.stamp"
 INDEX_LOCK = "index-update.lock"
 INDEX_RERUN = "index-rerun.marker"  # touched by an updater that found the lock held: the running one makes one more pass
+INDEX_FAIL_STAMP = "index-fail.stamp"  # touched when an updater pass raises; a success removes it
+INDEX_FAIL_COOLDOWN_SECS = 120  # while it is younger, a generation mismatch does not skip the spawn throttle (a failing pass would repeat)
 INDEX_WALK_STAMP = "index-walk.stamp"  # the last root walk; the updater walks the roots at most once per auto_heal.SCAN_SECS
 INDEX_MAX_AGE_SECS = 24 * 3600   # an index not synced for a day is stale: today's path runs
 INDEX_SPAWN_EVERY_SECS = 600     # detached updater after an ask, at most this often (sooner on a served mismatch)
@@ -2252,6 +2254,12 @@ def spawn_index_updater(principal: str) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+def index_failed_lately(sdir: Path) -> bool:
+    try:
+        return time.time() - (sdir / INDEX_FAIL_STAMP).stat().st_mtime < INDEX_FAIL_COOLDOWN_SECS
+    except OSError:
+        return False
+
 def index_after_ask(principal: str, sdir: Path) -> None:
     """After an ask run with the flag on: start the updater if a served file mismatched, the index was unusable,
     or the last start is older than INDEX_SPAWN_EVERY_SECS. One stamp file throttles it (a served-file mismatch or a
@@ -2264,7 +2272,8 @@ def index_after_ask(principal: str, sdir: Path) -> None:
         age = time.time() - stamp.stat().st_mtime
     except OSError:
         age = None
-    if age is not None and age < INDEX_SPAWN_EVERY_SECS and not st.get("mismatch") and not _STAGE.get("index_gen_mismatch"):
+    gen_bypass = _STAGE.get("index_gen_mismatch") and not index_failed_lately(sdir)
+    if age is not None and age < INDEX_SPAWN_EVERY_SECS and not st.get("mismatch") and not gen_bypass:
         return
     try:
         sdir.mkdir(parents=True, exist_ok=True)
@@ -2387,13 +2396,27 @@ def index_sync(principal: str, sdir: Path) -> int:
     try:
         marker = sdir / INDEX_RERUN
         marker.unlink(missing_ok=True)  # this pass reads the registry now, so it covers anything queued before it
-        rc = _index_sync(principal, sdir)
+        rc = _checked_pass(principal, sdir)
         if rc == 0 and marker.exists():  # queued while this pass ran: one more, never a loop
             marker.unlink(missing_ok=True)
-            rc = _index_sync(principal, sdir)
+            rc = _checked_pass(principal, sdir)
         return rc
     finally:
         lock.close()  # closing the file releases the lock
+
+def _checked_pass(principal: str, sdir: Path) -> int:
+    """One pass; a pass that raises leaves index-fail.stamp (the generation-mismatch bypass backs off), a success clears it."""
+    try:
+        rc = _index_sync(principal, sdir)
+    except Exception:
+        try:
+            (sdir / INDEX_FAIL_STAMP).touch()
+        except OSError:
+            pass
+        raise
+    if rc == 0:
+        (sdir / INDEX_FAIL_STAMP).unlink(missing_ok=True)
+    return rc
 
 def _index_sync(principal: str, sdir: Path) -> int:
     from file_index import FileIndex

@@ -49,7 +49,7 @@ IN_REPO_LEFTOVERS = (SKILL_DIR / "prepare-cache", SKILL_DIR / "ledger", SKILL_DI
 # name they build is missing here, so add a new writer's name below.
 OWNED = {
     "principal": ("lookups.jsonl", "traces.jsonl", "traces.jsonl.1", "approvals.jsonl", "claim-verdicts.json",
-                  "pointer_health.json", "pointer-words.json", "pointer-words.*.tmp", "toc-cache.json", "toc-cache.json.tmp*", "index.sqlite", "index.sqlite-journal", "index.sqlite-wal", "index.sqlite-shm", "index-sync.stamp", "index-walk.stamp", "index-update.lock", "index-rerun.marker", "word-index.json", "set-rows.json", "stat-sha.sqlite", "stat-sha.sqlite-journal",
+                  "pointer_health.json", "pointer-words.json", "pointer-words.*.tmp", "toc-cache.json", "toc-cache.json.tmp*", "index.sqlite", "index.sqlite-journal", "index.sqlite-wal", "index.sqlite-shm", "index-sync.stamp", "index-walk.stamp", "index-update.lock", "index-rerun.marker", "index-fail.stamp", "word-index.json", "set-rows.json", "stat-sha.sqlite", "stat-sha.sqlite-journal",
                   "scorecard-cases.jsonl", "scorecard-cases.tmp", "manual", "github"),
     "ledger": ("calls.jsonl", "catches.jsonl", "catches.jsonl.lock", "catches.jsonl.tmp", "catch-cases.json",
                "catch-cases.json.tmp", "signals.jsonl", "payloads", "state", "last", "calibration"),
