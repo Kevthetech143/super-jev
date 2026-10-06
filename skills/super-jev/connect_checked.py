@@ -58,7 +58,7 @@ def gate(description: str, path: str) -> dict:
                            capture_output=True, text=True)
     except ValueError as e:  # e.g. a null byte in the description; one bad file must not stop the rest
         return {"state": "ERROR", "reason": f"cannot check this file: {e}", "secs": round(time.time() - t, 1)}
-    txt = r.stdout + r.stderr
+    txt = r.stdout + "\n" + r.stderr
     _raise_if_unpaid(txt)
     secs = round(time.time() - t, 1)
     if CEILING_MSG in txt:
@@ -83,7 +83,7 @@ def gate_many(claims: list, path: str):
         r = subprocess.run([*args, path], capture_output=True, text=True)
     except ValueError:
         return None
-    txt = r.stdout + r.stderr
+    txt = r.stdout + "\n" + r.stderr
     _raise_if_unpaid(txt)
     secs = round(time.time() - t, 1)
     rows = {int(n): (v, float(c)) for n, v, c in re.findall(r"\bc(\d+)\s+(\S+)\s+([\d.]+)", txt)}
