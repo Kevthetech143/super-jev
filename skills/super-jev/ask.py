@@ -3300,6 +3300,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                    + hint + heal_note + " [STALE]")
                 continue
             error_lines.append(f"[{ptr}] {kind}" + hint + heal_note + (" [STALE]" if stale else ""))
+        elif not replay and auto_heal.held_edited(ptr):
+            # An edited held file is no registered source, so the set never reads stale: heal it anyway.
+            # Same bounded admission; the answer above is unchanged and never waits.
+            auto_heal.heal_in_background(ptr, principal, view=ptr in view_pointers)
     save_pointer_health(sdir, health)
     if learner:
         learner.join()
