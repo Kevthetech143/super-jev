@@ -1896,11 +1896,25 @@ def connector_names(ptr: str) -> list:
     return (auto_heal._report_for(ptr, prepare_bulk.CACHE_DIR)[0] or {}).get("names") or []
 
 
+_EDITED_MEMO = [None]  # {key: bool} while one lookup() runs, so each edited file is scanned once per ask; None outside an ask
+
+
 def edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
     """May a reviewed file edited since connect be read at its current text while its pointer
     waits on the refresh? Only as a refresh would admit it: reviewed at a known version and not
     failed by its last review, under the size ceiling, no secret-looking line, and still inside
     the pointer's recorded scope (a set built from reviewed sources, not a folder, is scoped by its listed files)."""
+    memo = _EDITED_MEMO[0]
+    if memo is None:
+        return _edited_readable(path, ptr, entry, raw, text)
+    e = entry if isinstance(entry, dict) else {}
+    key = (path, hashlib.sha256(raw).hexdigest(), ptr, e.get("pass"), e.get("sha256"), e.get("local"))
+    if key not in memo:
+        memo[key] = _edited_readable(path, ptr, entry, raw, text)
+    return memo[key]
+
+
+def _edited_readable(path: str, ptr: str, entry, raw: bytes, text: str) -> bool:
     return (isinstance(entry, dict) and bool(entry.get("pass")) and bool(entry.get("sha256"))
             and len(raw) <= prepare_bulk.CEILING_BYTES
             and clean_text(text, path) is not None
@@ -2892,6 +2906,14 @@ def _outcome_line(o: dict) -> str:
 
 
 def lookup(question: str, principal: str, sdir: Path) -> int:
+    _EDITED_MEMO[0] = {}  # this ask only: never carried into the next one
+    try:
+        return _lookup_once(question, principal, sdir)
+    finally:
+        _EDITED_MEMO[0] = None
+
+
+def _lookup_once(question: str, principal: str, sdir: Path) -> int:
     _RESULT.clear()
     buf = io.StringIO()
     if _CLAIM["text"]:
