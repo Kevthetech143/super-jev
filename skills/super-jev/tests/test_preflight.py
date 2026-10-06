@@ -273,7 +273,7 @@ def test_approved_but_unregistered_files_do_not_count(world, monkeypatch, capsys
 
 
 def test_symlinked_subfolder_is_walked_once(world, monkeypatch, capsys, tmp_path):
-    outside = tmp_path / "outside"
+    outside = world["proj"] / "shared"  # a link out of the folder is not walked, so the target sits inside
     outside.mkdir()
     (outside / "linked.md").write_text("# l\n")
     (outside / "loop").symlink_to(outside, target_is_directory=True)
