@@ -330,3 +330,12 @@ def test_verdict_row_echoing_claim_does_not_raise(monkeypatch):
         stdout, stderr, returncode = "  c1 SUPPORTED 0.95  The vendor returned HTTP 402 last week\n", "", 0
     monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
     assert cc.gate("a", "/x")["state"] == "SUPPORTED"
+
+
+def test_stdout_without_trailing_newline_does_not_hide_a_402(monkeypatch):
+    # stdout ends on the "$ " echo line with no newline; stderr's HTTP 402 must not glue onto it
+    _fake_run(monkeypatch, "$ dispatch.py check --claim 'a' /x", "RuntimeError: HTTP 402: payment required\n")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate_many(["a"], "/x")

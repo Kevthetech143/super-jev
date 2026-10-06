@@ -1885,6 +1885,8 @@ def run_json(a) -> int:
     try:
         with contextlib.redirect_stdout(io.StringIO()):
             rc = run(a)
+    except PaymentRequired:
+        raise  # main() prints the one clean payment message, no traceback
     except Exception as e:
         traceback.print_exc()
         text = f"{type(e).__name__}: {e}"

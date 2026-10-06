@@ -13,6 +13,12 @@
 
 - The index's table-of-contents label row is built by one helper for seeding and for the label compare, so editing one alone cannot make every pass rewrite every file's row. Test: `tests/test_file_index.py`. The folder-link walk test now sets its own home folder, so it no longer depends on where the temp folder lives.
 
+## Unreleased
+
+- The checked connect no longer misses an unpaid judge call when the call's stdout ends without a newline: a stderr `HTTP 402` could glue onto the skipped `$ ` echo line and hide. Stdout and stderr are now joined with a newline. Test: `skills/super-jev/tests/test_connect_checked.py`.
+
+- `prepare_bulk.py --json` no longer reports a payment refusal as "internal error: PaymentRequired" with a traceback; it prints the same single payment message as text mode, exit code unchanged. Test: `skills/super-jev/tests/test_json_unpaid.py`.
+
 ## 1.0.131 — 2026-10-06
 
 - After a refresh bumps a pointer's generation, the index is re-seeded at once instead of waiting for the next throttled start (asks on that pointer took the slow path for roughly 17-25 minutes). An ask that finds a generation mismatch now starts the updater inside the 10-minute throttle, as a served-file sha mismatch already did; a `--refresh` that changed a pointer's generation (read from the registry before and after) starts it despite the stamp too (a plain re-connect still goes through the throttle), still skipped in a replay and under pytest. Both bypasses stand down for 2 minutes after an updater pass raised (`index-fail.stamp`; a successful pass removes it), so a failing pass is not respawned by every ask. The updater is still one per principal: a second one that finds the lock held touches `index-rerun.marker`, and the running one, when its pass ends, clears it and makes one more pass (at most one queued rerun, never a loop). The walk throttle is unchanged. Test: `tests/test_index_catchup.py`.
