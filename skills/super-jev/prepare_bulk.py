@@ -122,7 +122,7 @@ and no note text, only paths and plain reasons. The skipped rows are the SKIP li
 --list with --json is refused (exit 2).
 Every skipped row and every refusal carries a stable `kind`, a short fixed word, so a program words it from the
 kind and never from the text; it shows `what` or `why` for a kind it does not know (a later version may add
-one; v stays 1). Skipped kinds, one per default reason: `link` (a link points outside every --root), `name`
+one; v stays 1). Skipped kinds, one per default reason: `link` (a link points outside every --root), `linkdir` (a folder link leads outside the roots and home; not walked), `name`
 (backup or credential-style name), `folder` (.md in a skipped folder), `folder_other` (other types in a skipped
 folder), `hidden`, `dataset` (a prepared dataset copy), `test` (test or scratch output), `worktree` (a git
 worktree copy), `empty`, `types` (files of other types). Refusal kinds: `too_many` (more files than one connect
@@ -850,7 +850,38 @@ def is_worktree_copy(path: Path, root: Path) -> bool:
     return False
 
 
-def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS, trace: dict = None, excludes: list = None):
+def _stat_bases(folders) -> list:
+    """[(real path, os.stat)] of the folders that exist, for _within."""
+    out = []
+    for f in folders:
+        real = os.path.realpath(f)
+        try:
+            out.append((real, os.stat(real)))
+        except OSError:
+            pass
+    return out
+
+
+def _within(path, bases: list) -> bool:
+    """Is `path` under one of `bases` (from _stat_bases)? The string test settles most; the fallback walks up
+    the path comparing file identity, so case spellings on a case-insensitive disk are not told apart."""
+    p = str(path)
+    if any(p == b or p.startswith(b.rstrip(os.sep) + os.sep) for b, _ in bases):
+        return True
+    while True:
+        try:
+            st = os.stat(p)
+        except OSError:
+            return False
+        if any(os.path.samestat(st, bst) for _, bst in bases):
+            return True
+        up = os.path.dirname(p)
+        if up == p:
+            return False
+        p = up
+
+
+def walk_md(root: Path, no_recurse: bool = False, others: list = None, extensions=CONNECTABLE_EXTENSIONS, trace: dict = None, excludes: list = None, allow: list = None):
     """Markdown files under `root`, sorted, plus resolved folder symlink targets. When `others` is a list,
     it also receives what connect reports about files of other types, ready to tally as
     (key, path under root, reason, label, count): one entry per file outside the skipped folders, and one
@@ -861,7 +892,15 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
     symlinked skill folder from a skills root; os.walk(followlinks=True) does, with a guard so a link
     loop is walked once. `trace` (a dict) receives "link_dirs" (the folder each returned link sat in, parallel to
     the links) and "dups" (the folders skipped as already walked), so a caller can reuse this walk for a root inside it.
-    `excludes` (connect's --exclude, trailing slashes already stripped) keeps the walk out of a folder they name."""
+    `excludes` (connect's --exclude, trailing slashes already stripped) keeps the walk out of a folder they name.
+    A folder symlink is followed when its real path is under `root`, a folder in `allow` (the other connected
+    roots and --allow-target folders) or the user's home folder (installed skills are links into a release
+    folder under home). A link that leaves all of them (a temp folder, /Applications, another volume) is not
+    walked, so a connect never wanders outside what the user named; each one is added to trace["skipped_links"]
+    for the caller to say. Containment is by file identity, so a link spelled in another case on a
+    case-insensitive disk still counts as inside. A FILE symlink is unchanged: it is listed and inventory()
+    judges its target against the roots and allow-targets (the "link" skip).
+    """
     def note_others(real_dir, rel_parts, real_parts, names):
         # A folder is hidden or skipped by its path under the root or by its real path (a link into
         # documents/ is still documents/), the same two views the .md rule in inventory() uses.
@@ -885,6 +924,7 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
         return [p for p in kids if p.name.lower().endswith(tuple(extensions))], []
     out, linked, walked = [], [], set()
     real_root = os.path.realpath(root)
+    inside = _stat_bases([real_root] + list(allow or []) + [os.path.expanduser("~")])
     for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
         real = os.path.realpath(dirpath)
         if real in walked:
@@ -897,8 +937,16 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
             rel_dir = os.path.relpath(dirpath, root)
             dirnames[:] = [d for d in dirnames
                            if not _excluded(d if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{d}", excludes)]
-        new = [Path(os.path.realpath(os.path.join(dirpath, d))) for d in dirnames
-               if os.path.islink(os.path.join(dirpath, d))]
+        new = []
+        for d in list(dirnames):
+            if os.path.islink(os.path.join(dirpath, d)):
+                target = Path(os.path.realpath(os.path.join(dirpath, d)))
+                if _within(target, inside):
+                    new.append(target)
+                else:
+                    dirnames.remove(d)   # a link out of every connected folder and home is not walked
+                    if trace is not None:
+                        trace.setdefault("skipped_links", []).append(os.path.join(dirpath, d))
         linked += new
         if trace is not None:
             trace.setdefault("link_dirs", []).extend([dirpath] * len(new))
@@ -918,6 +966,7 @@ def walk_md(root: Path, no_recurse: bool = False, others: list = None, extension
 # (--name, --exclude, --no-recurse) are never counted. Dict order is print order.
 SKIP_REASONS = {
     "link": ("linked file(s) point outside every --root", "add --allow-target FOLDER to admit them"),
+    "linkdir": ("folder link(s) lead outside your home folder and were not looked at", "connect the target as its own set, or add --allow-target FOLDER"),
     "name": (".md file(s) with backup or credential-style names (.bak, logins, *-secret); never connected", ""),
     "folder": (".md file(s) in folders skipped by default: {names}",
                "to connect one, connect that folder as its own set (--root FOLDER --pointer NEW-NAME)"),
@@ -952,6 +1001,11 @@ def extension_label(name: str) -> str:
     """The file's extension when it is on KNOWN_EXTENSIONS (".py"), else "other"."""
     ext = os.path.splitext(name)[1].lower()
     return ext if ext in KNOWN_EXTENSIONS else "other"
+
+
+def link_dir_line(pointer: str, link: str) -> str:
+    return (f"HELD  {pointer}: the folder link {link} leads outside your home folder and was not looked at "
+            "(connect its target as its own set, or add --allow-target FOLDER)")
 
 
 def skip_rows(skips: dict, extensions=CONNECTABLE_EXTENSIONS) -> list:
@@ -992,6 +1046,7 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
     excludes = [e.strip("/") for e in (excludes or []) if e.strip("/")]
     files, held, seen = [], [], set()
     skips, counted = {}, set()
+    _RESULT["linkdirs"] = []   # folder links not walked, for a caller that reports them (heal notes)
 
     def skip(key, reason, label="", n=1):
         """Tally what a default rule leaves out, once per physical file even when a link or a second
@@ -1003,7 +1058,12 @@ def inventory(roots: list, excludes: list = None, no_recurse: bool = False,
 
     for root in roots:
         others = [] if not names else None  # other file types are reported only when nothing narrows by name
-        glob_iter, linked = walk_md(root, no_recurse, others, extensions)
+        tr = {}
+        glob_iter, linked = walk_md(root, no_recurse, others, extensions, trace=tr, allow=bases)
+        for link in tr.get("skipped_links", []):
+            skip(Path(link), "linkdir")
+            if link not in _RESULT["linkdirs"]:
+                _RESULT["linkdirs"].append(link)
         for key, rel, reason, label, n in others or []:
             if not _excluded(rel, excludes):
                 skip(key, reason, label, n)

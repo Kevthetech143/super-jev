@@ -161,10 +161,138 @@ def test_inventory_follows_a_symlinked_folder_but_not_into_a_vault(tmp_path):
     (root / "vault").symlink_to(tmp_path / "profile" / "x")
     (root / "plain" / "loop").symlink_to(root)
 
-    files, held = pb.inventory([root])
+    # A link leaving the root is followed only when its target is named (--allow-target).
+    files, held = pb.inventory([root], allow_targets=[elsewhere])
 
     assert sorted(p.relative_to(root).as_posix() for p in files) == ["linked/SKILL.md", "plain/SKILL.md"]
     assert held == []
+
+
+def _link_out_root(tmp_path):
+    root, outside = tmp_path / "root", tmp_path / "outside"
+    (root / "inner").mkdir(parents=True)
+    (root / "real").mkdir()
+    outside.mkdir()
+    (root / "inner" / "in.md").write_text("# in\nbody\n")
+    (root / "real" / "kept.md").write_text("# kept\nbody\n")
+    (outside / "stray.md").write_text("# stray\nbody\n")
+    (root / "escape_link").symlink_to(outside)
+    return root, outside
+
+
+def test_a_folder_link_out_of_the_root_is_not_walked(tmp_path):
+    root, _outside = _link_out_root(tmp_path)
+
+    files, held = pb.inventory([root])
+    walked, linked = pb.walk_md(root)
+
+    names = sorted(p.relative_to(root).as_posix() for p in files)
+    assert names == ["inner/in.md", "real/kept.md"] and held == []
+    assert all("stray.md" not in str(p) for p in walked) and linked == []
+
+
+def test_a_folder_link_inside_the_root_is_still_followed_and_a_loop_ends(tmp_path):
+    root, _outside = _link_out_root(tmp_path)
+    (root / "alias").symlink_to(root / "inner")
+    (root / "inner" / "loop").symlink_to(root)
+
+    files, _held = pb.inventory([root])
+
+    # the folder behind the in-root link is reached once (by whichever path is walked first), the loop ends
+    names = sorted(p.relative_to(root).as_posix() for p in files)
+    assert len(names) == 2 and names[1] == "real/kept.md" and names[0].endswith("/in.md")
+    _walked, linked = pb.walk_md(root)
+    assert root.resolve() / "inner" in linked
+
+
+def test_a_folder_link_to_another_connected_root_is_followed(tmp_path):
+    root, outside = _link_out_root(tmp_path)
+
+    files, _held = pb.inventory([root, outside])
+
+    assert "stray.md" in {p.name for p in files}
+
+
+def test_a_folder_link_into_home_is_followed_and_one_to_a_temp_folder_is_skipped_with_a_note(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root, release, scratch = home / "skills", home / "releases" / "v1", tmp_path / "scratch"
+    for d in (root, release, scratch):
+        d.mkdir(parents=True)
+    (release / "SKILL.md").write_text("# installed\nbody\n")
+    (scratch / "stray.md").write_text("# stray\nbody\n")
+    (root / "installed").symlink_to(release)
+    (root / "escape_link").symlink_to(scratch)
+
+    files, _held = pb.inventory([root])
+
+    assert [p.relative_to(root).as_posix() for p in files] == ["installed/SKILL.md"]
+    out = capsys.readouterr().out
+    assert "SKIP  1 folder link(s) lead outside your home folder and were not looked at" in out
+    assert pb._RESULT["linkdirs"] == [str(root / "escape_link")]
+    line = pb.link_dir_line("p", str(root / "escape_link"))
+    assert "escape_link" in line and "outside your home folder" in line and line.startswith("HELD")
+
+
+def test_a_heal_scan_says_a_skipped_folder_link(tmp_path, monkeypatch):
+    import refresh_changed as rcm
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root, scratch = home / "root", tmp_path / "scratch"
+    root.mkdir(parents=True); scratch.mkdir()
+    (root / "a.md").write_text("# a\nbody\n")
+    (scratch / "stray.md").write_text("# stray\nbody\n")
+    (root / "escape_link").symlink_to(scratch)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(rcm, "CACHE_DIR", tmp_path / "cache")
+    notes = []
+
+    rcm.new_files({"pointer": "p", "roots": [str(root)], "watched": True}, set(), notes=notes)
+
+    assert len(notes) == 1 and "escape_link" in notes[0] and "outside your home folder" in notes[0]
+
+
+def test_a_folder_link_spelled_in_another_case_still_counts_as_inside(tmp_path, monkeypatch):
+    (tmp_path / "CaseProbe").mkdir()
+    if not (tmp_path / "caseprobe").exists():
+        pytest.skip("case-sensitive disk")
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    root = tmp_path / "Root"
+    (root / "inner").mkdir(parents=True)
+    (root / "inner" / "in.md").write_text("# in\nbody\n")
+    (root / "same").symlink_to(str(tmp_path / "ROOT" / "INNER"))
+    tr = {}
+
+    _walked, linked = pb.walk_md(root, trace=tr)
+
+    assert tr.get("skipped_links") is None and len(linked) == 1
+
+
+def test_the_index_and_coverage_walks_follow_an_allow_target_link(tmp_path, monkeypatch):
+    from file_index import FileIndex
+    import ask
+    monkeypatch.setenv("HOME", str(tmp_path / "elsewhere"))
+    root, outside = _link_out_root(tmp_path)
+
+    fi = FileIndex("t", tmp_path / "i.sqlite")
+    assert "stray.md" not in {Path(f).name for f in fi._walk_one(root, pb)}
+    assert "stray.md" in {Path(f).name for f in fi._walk_one(root, pb, (), (str(outside),))}
+    assert "stray.md" not in {n for ns in ask._folder_files(root).values() for n in ns}
+    assert "stray.md" in {n for ns in ask._folder_files(root, [outside]).values() for n in ns}
+
+
+def test_a_heal_scan_does_not_find_files_behind_a_link_out_as_new(tmp_path, monkeypatch):
+    import refresh_changed as rcm
+    root, _outside = _link_out_root(tmp_path)
+    monkeypatch.setattr(pb, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(rcm, "CACHE_DIR", tmp_path / "cache")
+    report = {"pointer": "p", "roots": [str(root)], "watched": True}
+    notes = []
+
+    found = rcm.new_files(report, set(), notes=notes)
+
+    assert sorted(Path(f).name for f in found) == ["in.md", "kept.md"]
+    assert len(notes) == 1 and "folder link" in notes[0] and "escape_link" in notes[0]  # said once; nothing behind it was looked at
 
 
 def test_vault_and_secret_name_checks_ignore_capitals(tmp_path):
