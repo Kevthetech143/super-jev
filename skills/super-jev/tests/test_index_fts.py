@@ -325,8 +325,8 @@ def test_person_folders_of_a_pointer_borrowing_from_an_unsearched_set_come_from_
     assert ask.people(["p2"], idx.person_paths(["p2"])) != want  # the profile rows are held by p0: the index alone misses the relations
     Rig(monkeypatch, notes, ["p2"])  # only p2 is searched in this ask
     flag(monkeypatch, True)
-    seen, real = [], ask.people
-    monkeypatch.setattr(ask, "people", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
+    seen, real = [], ask.person_homes
+    monkeypatch.setattr(ask, "person_homes", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
     _rc, out = ask_it("what did my mom's clinic visit say", sdir, capsys)
-    assert seen and seen[-1] == want  # the ask itself resolved the people from p2's cache, not the index alone
+    assert seen and ask.people_of(seen[-1]) == want  # the ask itself resolved the people from p2's cache, not the index alone
     assert "/sam/" not in out

@@ -535,8 +535,8 @@ class FileIndex:
     # ---- S3b: FTS5 passages (updater writes; the ask only reads) ----
 
     def fts_have(self) -> dict:
-        """{path: (sha, pointer, labels)} of what the FTS table holds now."""
-        return {p: (sha, ptr, lab) for p, ptr, sha, lab in self.db.execute("SELECT path,pointer,sha,lab FROM fts_map")}
+        """{path: (sha, pointer, labels, person)} of what the FTS table holds now."""
+        return {p: (sha, ptr, lab, who) for p, ptr, sha, lab, who in self.db.execute("SELECT path,pointer,sha,lab,person FROM fts_map")}
 
     def _fts_pending(self, pointer: str) -> None:
         """This pointer's FTS rows are being rewritten: until the pass finishes (a crash leaves it so) the ask serves it
@@ -576,8 +576,10 @@ class FileIndex:
         if toc_json is not None:
             self.db.execute("INSERT INTO tocpage VALUES(?,?,?)", (path, sha, toc_json))
 
-    def fts_finish(self, version: str, unfinished=()) -> None:
-        """The pass is over: every pointer but `unfinished` (a file whose bytes changed under the updater) is ready again."""
+    def fts_finish(self, version: str, unfinished=(), profiles=None) -> None:
+        """The pass is over: every pointer but `unfinished` (a file whose bytes changed under the updater) is ready again.
+        `profiles`: {pointer: PROFILE files on disk beside its files but not connected} (they make person folders)."""
+        self.db.execute("INSERT OR REPLACE INTO meta VALUES('person_profiles',?)", (json.dumps(profiles or {}),))
         self.db.execute("DELETE FROM fts_pending" + (f" WHERE pointer NOT IN ({','.join('?' * len(unfinished))})" if unfinished else ""),
                         list(unfinished))
         self.db.execute("DELETE FROM fts_stats")
@@ -667,15 +669,16 @@ class FileIndex:
         return bool(load_cache_files(pointer))
 
     def person_paths(self, pointers) -> list:
-        """One path per person folder per pointer plus the PROFILE files, from the stored per-person groups: no
-        prepare-cache is parsed and no scan of every file. Held / edited / unreviewed files count too (`seen`, small)."""
+        """The PROFILE files that make person folders, from the stored per-person groups: no prepare-cache is parsed
+        and no scan of every file. Held / edited / unreviewed files count too (`seen`, small)."""
         q = ",".join("?" * len(pointers))
         out = [r[0] for r in self.db.execute(
-            f"SELECT path FROM seen WHERE pointer IN ({q}) AND path LIKE '%/agents/global/documents/%'", list(pointers))]
+            f"SELECT path FROM seen WHERE pointer IN ({q}) AND path LIKE '%/profile.%'", list(pointers))]
         for ptr, who in self.db.execute(f"SELECT pointer,person FROM fts_stats WHERE pointer IN ({q}) AND person!=''", list(pointers)).fetchall():
-            out += [r[0] for r in self.db.execute("SELECT path FROM fts_map WHERE pointer=? AND person=? LIMIT 1", (ptr, who))]
             out += [r[0] for r in self.db.execute("SELECT path FROM fts_map WHERE pointer=? AND person=? AND path LIKE '%/profile.%'", (ptr, who))]
-        return out
+        r = self.db.execute("SELECT v FROM meta WHERE k='person_profiles'").fetchone()
+        unlisted = json.loads(r[0]) if r else {}
+        return out + [f for ptr in pointers for f in unlisted.get(ptr, [])]
 
     def fts_rows(self, paths) -> list:
         """[(pointer, path, entry, item, tocrow)] for these indexed paths: entry shaped like candidates()'s."""

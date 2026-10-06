@@ -162,6 +162,18 @@ def test_group_and_multi_person_questions():
     assert ask.question_people("what did my grandma say?", folks) == set()
 
 
-def test_person_filter_only_under_global_documents():
-    assert ask.person_of("/Users/x/agents/global/documents/nora/medical/a.md") == "nora"
-    assert ask.person_of("/Users/x/projects/documents/nora/a.md") is None
+def test_person_folder_is_the_profile_with_a_relation_line(tmp_path):
+    files, caches = _family(tmp_path)
+    for p, text in files.items():
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_text(text)
+    homes = ask.person_homes(None, list(files))
+    d = tmp_path / "agents/global/documents"
+    assert homes[str(d / "nora")] == ("nora", {"mother"})  # "# Nora" at nora/medical/PROFILE.md names nora/
+    assert ask.person_of(str(d / "nora/medical/a.md"), homes) == "nora"
+    assert ask.person_of(str(d / "nora/insurance/a.md"), homes) == "nora"
+    assert ask.person_of(str(tmp_path / "projects/documents/nora/a.md"), homes) is None
+    plain = tmp_path / "agents/global/documents/sam/PROFILE.md"  # a PROFILE without a Relation line makes no person
+    plain.parent.mkdir(parents=True)
+    plain.write_text("# Sam\nnotes\n")
+    assert str(plain.parent) not in ask.person_homes(None, [str(plain)])
