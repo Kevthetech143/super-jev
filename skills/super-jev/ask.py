@@ -1814,6 +1814,16 @@ def pointer_words(sdir: Path, generations: dict) -> tuple:
     generation, [pointers not known yet]). A pointer whose files could not be
     listed or read is saved with no words: known, but never skipped."""
     saved = _load_pointer_words(sdir / POINTER_WORDS_FILE)
+    stale = [p for p, e in saved.items() if not isinstance(e, dict) or e.get("version") != WORDS_VERSION]
+    if stale:  # words saved by an older tokenizer may hold a held file's tokens: drop them now, no re-read
+        for p in stale:
+            del saved[p]
+        try:
+            tmp = (sdir / POINTER_WORDS_FILE).with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(saved))
+            tmp.replace(sdir / POINTER_WORDS_FILE)
+        except OSError:
+            pass
     known, missing = {}, []
     for p, g in generations.items():
         entry = saved.get(p) or {}
@@ -2507,8 +2517,9 @@ def _index_sync(principal: str, sdir: Path) -> int:
 WORD_INDEX_FILE = "word-index.json"
 # The stamp covers everything that decides a stored token: tokenizer version and pattern, stopwords
 # (they shape the pair keys), passage size. Any change makes old entries invalid.
+WORD_INDEX_TOKENIZER = 3  # WORDS_VERSION as of this stamp; kept apart so a pointer-words bump does not re-index every file
 def _word_index_version() -> str:
-    return "{}.3.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
+    return "{}.2.{}.{}".format(WORD_INDEX_TOKENIZER, CONFIRM_CHUNK, hashlib.sha256(
         json.dumps([WORD_RE.pattern, sorted(QUERY_STOPWORDS)]).encode()).hexdigest()[:12])
 
 WORD_INDEX_VERSION = _word_index_version()
@@ -2527,7 +2538,15 @@ def _load_word_index(path) -> dict:
         return {}
     if not isinstance(saved, dict) or saved.get("version") != WORD_INDEX_VERSION or not isinstance(saved.get("files"), dict):
         return {}  # old tokenizer, or not ours: rebuild
-    return saved["files"]
+    files = saved["files"]
+    purged = False
+    for item in files.values():  # a held file's words, stored before held files kept none, go without a re-index
+        if isinstance(item, dict) and item.get("secret") and (item.get("whole") or item.get("heading") or item.get("passages") != [[{}, 0, []]]):
+            item.update(heading="", whole={}, passages=[[{}, 0, []]])
+            purged = True
+    if purged:
+        _save_word_index(path, files)
+    return files
 
 def _save_word_index(path, files: dict) -> None:
     try:

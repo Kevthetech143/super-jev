@@ -33,7 +33,7 @@
 
 ## Unreleased
 
-- A file the secret scan holds no longer leaves its words in the local stores: the word index entry keeps `"secret": true` and no words, and the pointer word list skips the file, so a key-shaped token from such a file is never written to `word-index.json` or `pointer-words.json`. The word list version (`WORDS_VERSION`) and the word index version are bumped, so every `pointer-words.json` and `word-index.json` written earlier is rebuilt once on first use and drops its old words (a refresh that changes nothing keeps the generation, so without the bump they could keep them for a long time). Search ranking is unchanged (a held file was already skipped). Tests: `tests/test_word_index.py`.
+- A file the secret scan holds no longer leaves its words in the local stores: the word index entry keeps `"secret": true` and no words, and the pointer word list skips the file, so a key-shaped token from such a file is never written to `word-index.json` or `pointer-words.json`. Files written earlier are cleaned on first load with no re-read and no re-index: `pointer-words.json` entries saved before `WORDS_VERSION` 4 are dropped and the file rewritten, and `word-index.json` items flagged secret have their words emptied and the file saved once. The word index version stamp is unchanged, so an upgrade does not re-index every file. Search ranking is unchanged (a held file was already skipped). Tests: `tests/test_word_index.py`.
 
 - A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
 

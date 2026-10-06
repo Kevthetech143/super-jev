@@ -147,15 +147,33 @@ def test_secret_file_stores_no_pointer_words(tmp_path, monkeypatch):
     assert "harvest" in json.loads(raw)["p"]["words"].split()
 
 
-def test_old_pointer_words_rebuild_once_without_the_secret_token(tmp_path, monkeypatch):
-    token = "AKIA" + "IOSFODNN7" + "EXAMPLE"
-    held = tmp_path / "held.md"
-    held.write_text(f"# Orchard\nkey {token}\n")
+def test_old_pointer_words_are_cleaned_on_first_load(tmp_path):
+    token = "AKIA" + "IOSFODNN7" + "EXAMPLE"  # fake key-shaped token, split so scanners pass over this file
     path = tmp_path / ask.POINTER_WORDS_FILE
-    path.write_text(json.dumps({"p": {"generation": "g1", "words": token.lower(), "version": ask.WORDS_VERSION - 1}}))
-    known, missing = ask.pointer_words(tmp_path, {"p": "g1"})
-    assert missing == ["p"] and known == {}  # an old-version file is rebuilt, not trusted
-    monkeypatch.setattr(ask, "memory", lambda r: {"status": "ok", "sources": [{"path": str(held), "originalPath": str(held)}]})
-    ask.save_pointer_words(tmp_path, "me", {"p": "g1"}, missing)
-    assert token.lower() not in path.read_text().lower()
-    assert ask.pointer_words(tmp_path, {"p": "g1"})[1] == []  # one rebuild, not one per ask
+    path.write_text(json.dumps({
+        "old": {"generation": "g1", "words": token.lower(), "version": ask.WORDS_VERSION - 1},
+        "new": {"generation": "g1", "words": "harvest", "version": ask.WORDS_VERSION}}))
+    known, missing = ask.pointer_words(tmp_path, {"old": "g1", "new": "g1"})
+    assert missing == ["old"] and known == {"new": "harvest"}
+    assert token.lower() not in path.read_text().lower()  # purged without re-reading any file
+    assert json.loads(path.read_text()) == {"new": {"generation": "g1", "words": "harvest", "version": ask.WORDS_VERSION}}
+    assert ask.pointer_words(tmp_path, {"old": "g1", "new": "g1"}) == ({"new": "harvest"}, ["old"])  # one purge
+
+
+def test_word_index_purges_held_words_on_load_without_reindexing(tmp_path, monkeypatch):
+    token = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    idx = tmp_path / "idx.json"
+    good = {"sha": "s2", "heading": "Fine", "whole": {"harvest": 1}, "passages": [[{"harvest": 1}, 1, ["harv est"]]], "secret": False}
+    old_held = {"sha": "s1", "heading": "Orchard", "whole": {token.lower(): 1}, "passages": [[{token.lower(): 1}, 1, []]], "secret": True}
+    idx.write_text(json.dumps({"version": ask.WORD_INDEX_VERSION, "files": {"/held": old_held, "/fine": good}}))
+    monkeypatch.setattr(ask, "_index_item", lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-indexed")))
+    files = ask._load_word_index(idx)
+    assert files["/fine"] == good  # untouched
+    assert files["/held"]["secret"] is True and files["/held"]["whole"] == {} and ask._valid_item(files["/held"], "s1")
+    assert token.lower() not in idx.read_text().lower()  # the cleaned file was saved
+    assert ask._load_word_index(idx) == files
+
+
+def test_word_index_version_is_not_bumped_by_this_release():
+    # same stamp as 1.0.131 (tokenizer 3, stamp ".2."), so upgrading does not re-index every file
+    assert ask.WORD_INDEX_VERSION.startswith("3.2.")
