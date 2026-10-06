@@ -124,7 +124,8 @@ def test_held_and_secret_text_never_in_fts(tmp_path, monkeypatch, capsys):
     idx.close()
     flag(monkeypatch, True)
     _rc, out = ask_it("what is the quillfeather zanzibar plan", sdir, capsys)
-    assert "held-note.md" not in out
+    assert f"HELD  {secret}" in out  # never served: only named as held, as today's path names it
+    assert not [ln for ln in out.splitlines() if "held-note.md" in ln and not ln.startswith(("HELD", "OUTCOME"))], out
 
 
 def test_edited_file_updates_only_its_rows(tmp_path, monkeypatch, capsys):
