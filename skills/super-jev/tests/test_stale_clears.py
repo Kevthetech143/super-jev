@@ -7,6 +7,7 @@ Made-up files and a stub judge, no network, no spend.
     python3 -m pytest skills/super-jev/tests/test_stale_clears.py -q
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -76,6 +77,45 @@ def test_a_read_side_mismatch_is_not_cleared_by_the_updater(seeded):
     assert idx.is_stale("p")
 
 
+def test_a_read_side_mismatch_survives_a_real_change_on_another_file(seeded):
+    _d, files, entries, idx = seeded
+    idx.mark_stale("p")
+    original = files[1].read_text()
+    files[1].write_text("edited bytes, never reviewed\n")  # a real change on a different reviewed file
+    assert idx.update("p", entries)["stale"]
+    files[1].write_text(original)
+    idx.update("p", entries)
+    idx.update("p", entries)  # a quiet pass
+    assert idx.db.execute("SELECT stale FROM pointers WHERE pointer='p'").fetchone()[0] == 2
+
+
+class _MarkMidPass:
+    """The index's connection, with an ask's mark_stale landing between the updater's read of `stale` and its write."""
+    def __init__(self, db):
+        self._db, self.marked = db, False
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def execute(self, sql, *a):
+        if sql.startswith("INSERT INTO pointers") and not self.marked:
+            self.marked = True
+            self._db.execute("UPDATE pointers SET stale=2 WHERE pointer='p'")
+        return self._db.execute(sql, *a)
+
+
+def test_the_updater_never_overwrites_a_mark_made_mid_pass(seeded):
+    _d, _files, entries, idx = seeded
+    db = idx.db
+    idx.db = _MarkMidPass(db)
+    try:
+        idx.update("p", entries)
+        assert idx.db.marked
+    finally:
+        idx.db = db
+    assert db.execute("SELECT stale FROM pointers WHERE pointer='p'").fetchone()[0] == 2
+
+
 def _stage(sdir):
     return json.loads(Path(sdir / "traces.jsonl").read_text().splitlines()[-1])["stages"]["index"]
 
@@ -84,9 +124,14 @@ def test_a_set_with_only_new_files_is_served_from_the_index(tmp_path, monkeypatc
     notes, names, sdir = build(tmp_path, monkeypatch, 40)
     Rig(monkeypatch, notes, names)
     sync(sdir)
-    (notes / "p0" / "unreviewed.md").write_text("# unreviewed\nthe zorblax quenth shipment was moved to a frobnitz depot.\n")
+    new = notes / "p0" / "unreviewed.md"
+    new.write_text("# unreviewed\nthe zorblax quenth shipment was moved to a frobnitz depot.\n")
+    os.utime(sdir / ask.INDEX_WALK_STAMP, (0, 0))  # the walk is due: this sync finds the new file
     sync(sdir)
-    assert not FileIndex(PRINCIPAL, sdir / "index.sqlite").is_stale("p0")
+    i = FileIndex(PRINCIPAL, sdir / "index.sqlite")
+    assert i.db.execute("SELECT reason FROM seen WHERE path=?", (str(new),)).fetchone() == ("new",)
+    assert not i.is_stale("p0")
+    i.close()
     q = PLANTED[0][0] + " frobnitz depot"
     flag(monkeypatch, False)
     off = ask_it(q, sdir, capsys)[1]

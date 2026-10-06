@@ -380,12 +380,14 @@ class FileIndex:
                     out["changed"].append(p); real.append(p)
         first = row is None  # the seeding pass is not a change
         out["stale"] = bool(real) and not first
-        stale = 1 if out["stale"] else (self.db.execute("SELECT stale FROM pointers WHERE pointer=?", (pointer,)).fetchone() or (0,))[0]
+        prev = (self.db.execute("SELECT stale FROM pointers WHERE pointer=?", (pointer,)).fetchone() or (0,))[0]
+        stale = 2 if prev == 2 else 1 if out["stale"] else prev  # 2 (a read-side mismatch) is cleared by a refresh only
         if stale == 1 and not out["stale"] and not self.db.execute(
                 "SELECT 1 FROM seen WHERE pointer=? AND reason IN ('edited','held') LIMIT 1", (pointer,)).fetchone():
             stale = 0  # a pass with no change and no edited or held file left: the index serves the pointer as it stands
         self.db.execute("INSERT INTO pointers(pointer,stale,roots,checked_at,entries) VALUES(?,?,?,strftime('%s','now'),?) "
-                        "ON CONFLICT(pointer) DO UPDATE SET stale=excluded.stale, roots=excluded.roots, checked_at=excluded.checked_at, "
+                        "ON CONFLICT(pointer) DO UPDATE SET stale=CASE WHEN pointers.stale=2 THEN 2 ELSE excluded.stale END, "
+                        "roots=excluded.roots, checked_at=excluded.checked_at, "
                         "entries=excluded.entries",
                         (pointer, stale, json.dumps(list(roots)) if roots else None, len(entries)))
         self.db.commit()
