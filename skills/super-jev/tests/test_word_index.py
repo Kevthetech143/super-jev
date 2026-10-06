@@ -145,3 +145,17 @@ def test_secret_file_stores_no_pointer_words(tmp_path, monkeypatch):
     raw = (tmp_path / ask.POINTER_WORDS_FILE).read_text()
     assert token.lower() not in raw.lower()
     assert "harvest" in json.loads(raw)["p"]["words"].split()
+
+
+def test_old_pointer_words_rebuild_once_without_the_secret_token(tmp_path, monkeypatch):
+    token = "AKIA" + "IOSFODNN7" + "EXAMPLE"
+    held = tmp_path / "held.md"
+    held.write_text(f"# Orchard\nkey {token}\n")
+    path = tmp_path / ask.POINTER_WORDS_FILE
+    path.write_text(json.dumps({"p": {"generation": "g1", "words": token.lower(), "version": ask.WORDS_VERSION - 1}}))
+    known, missing = ask.pointer_words(tmp_path, {"p": "g1"})
+    assert missing == ["p"] and known == {}  # an old-version file is rebuilt, not trusted
+    monkeypatch.setattr(ask, "memory", lambda r: {"status": "ok", "sources": [{"path": str(held), "originalPath": str(held)}]})
+    ask.save_pointer_words(tmp_path, "me", {"p": "g1"}, missing)
+    assert token.lower() not in path.read_text().lower()
+    assert ask.pointer_words(tmp_path, {"p": "g1"})[1] == []  # one rebuild, not one per ask

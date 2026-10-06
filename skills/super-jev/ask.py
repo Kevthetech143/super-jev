@@ -942,7 +942,7 @@ FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the 
 # cover gate, prefilter, term_hits) goes through words()/fold(). Bump WORDS_VERSION
 # when this changes: saved pointer words carry it and rebuild on a mismatch.
 WORD_RE = re.compile(r"[^\W_]+")
-WORDS_VERSION = 3  # 3: word lists read every sources page (were first 25 files only)
+WORDS_VERSION = 4  # 4: held files add no words (3: word lists read every sources page, were first 25 files only)
 
 _ASCII_WORD_RE = re.compile(r"[a-z0-9]+")  # same result on ASCII text, and faster
 
