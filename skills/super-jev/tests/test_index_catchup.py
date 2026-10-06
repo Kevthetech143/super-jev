@@ -97,7 +97,10 @@ def test_a_refresh_bypasses_only_when_a_generation_changed(tmp_path, monkeypatch
     monkeypatch.setattr(pb, "memory", memory)
     monkeypatch.setattr(pb, "kick_index_updater", lambda principals, bypass_throttle=False: got.append(bypass_throttle))
     monkeypatch.setattr(sys, "argv", base_argv(root, principal="agent"))
-    assert pb.main() == 0
+    assert pb.main() == 0  # the first connect makes the cache a refresh needs
+    got.clear()
+    monkeypatch.setattr(sys, "argv", base_argv(root, principal="agent", extra=["--refresh"]))
+    pb.main()
     assert got == [expect]
 
 
