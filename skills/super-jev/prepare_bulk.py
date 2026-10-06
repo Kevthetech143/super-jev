@@ -1858,6 +1858,9 @@ def main() -> int:
     ap.add_argument("--exclude", dest="excludes", action="append", default=[])
     ap.add_argument("--no-recurse", action="store_true")
     ap.add_argument("--ext", action="append", default=None, help="extra text suffixes, comma-separated (default: md only)")
+    ap.add_argument("--rejudge", action="store_true",
+                    help="on --refresh, judge a held file again even if it is unchanged (a refresh otherwise keeps its "
+                         "earlier verdict and makes no call for it)")
     ap.add_argument("--admit", action="append", default=[],
                     help="repeatable; on --refresh of a legacy pinned pointer, add this WAITING file (only those) "
                          "after checking it, through the usual holds, review and gate")
@@ -2126,14 +2129,19 @@ def run(a) -> int:
     if out_of_scope:
         print(f"cache: {len(out_of_scope)} entries outside the current scope dropped")
 
-    todo, reused = [], []
+    todo, reused, kept_held = [], [], []
     for p in files:
         c = cache.get(str(p))
         if c and c.get("sha256") == sha(p) and c.get("pass"):
             reused.append(p)
+        elif (a.refresh and not a.rejudge and c and c.get("pass") is False and c.get("sha256") == sha(p)
+              and c.get("verdict") in KNOWN_VERDICTS):
+            kept_held.append((p, c))  # an unchanged file the judge held: its verdict stands, no call is paid again
         else:
             todo.append(p)
     print(f"cache: {len(reused)} unchanged and already passing, {len(todo)} to draft")
+    if kept_held:
+        print(f"cache: {len(kept_held)} unchanged held file(s) keep their earlier verdict (--rejudge judges them again)")
 
     if a.refresh and cache and len(files) > a.max_files:
         print(f"refresh: {len(files)} files total (over --max-files {a.max_files}), "
@@ -2235,6 +2243,10 @@ def run(a) -> int:
             return
         fail(p, plain)
 
+    for p, c in kept_held:  # same rows as when the judge held it
+        exceptions.append((str(p), f"{c['verdict']} {c.get('confidence', '')} {c.get('reason') or ''}".strip()))
+        low.append((str(p), f"the description check did not pass ({c['verdict']})"))
+
     for p in todo:
         d = drafts.get(str(p))
         if not d or not d.get("description"):
@@ -2282,7 +2294,7 @@ def run(a) -> int:
             cache[str(p)] = {"sha256": sha(p), "description": d["description"], "question": d.get("question", ""),
                              "kind": "unknown", "status": "unknown", "as_of": "unknown", "subject": "unknown",
                              "verdict": v["state"], "confidence": v.get("confidence"), "pass": False,
-                             "labels_ok": False,
+                             "reason": v.get("reason"), "labels_ok": False,
                              "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
             print(f"  {v['state']:14}{v.get('confidence', ''):>5}  {relstr(p, roots)}")
             reject(p, f"{v['state']} {v.get('confidence', '')} {v.get('reason', '')}".strip(),
@@ -2321,6 +2333,8 @@ def run(a) -> int:
     lowp = {p for p, _ in low}
     print(f"\napproved: {len(connect_set)}  exceptions: {len(exceptions) - len(low)}  held: {len(held) + len(low)}")
     rerun = "python3 " + shlex.join(sys.argv)
+    if a.refresh and not a.rejudge:
+        rerun += " --rejudge"  # an unchanged held file is only judged again when asked
     hint = ("" if use_builtin else
             " --writer builtin\n      (later refreshes keep this writer; give your writer flag again to change it)")
     for p, why in exceptions:
