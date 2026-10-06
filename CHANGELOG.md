@@ -33,6 +33,8 @@
 
 ## Unreleased
 
+- **Person folders work in any layout.** A person folder is any connected folder whose PROFILE file has a `Relation:` line (it was only one fixed path layout, so another layout had no people and "my dad" filtered nothing). The folder is the PROFILE's own one, or the one above it when the PROFILE's first heading names that one and not its own; only the PROFILE's first 80 lines are read. A PROFILE on disk beside connected files but not connected itself still counts (only its heading and Relation line are read, locally; only the folder name is stored, in index meta `person_profiles`). The index rewrites only the rows whose person moved (no version bump). Tests: `skills/super-jev/tests/test_kin_word.py`.
+
 - A file the secret scan holds no longer leaves its words in the local stores: the word index entry keeps `"secret": true` and no words, and the pointer word list skips the file, so a key-shaped token from such a file is never written to `word-index.json` or `pointer-words.json`. Files written earlier are cleaned on first load with no re-read and no re-index: `pointer-words.json` entries saved before `WORDS_VERSION` 4 are dropped and the file rewritten, and `word-index.json` items flagged secret have their words emptied and the file saved once. The word index version stamp is unchanged, so an upgrade does not re-index every file. Search ranking is unchanged (a held file was already skipped). Tests: `tests/test_word_index.py`.
 
 - A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
