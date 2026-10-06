@@ -57,6 +57,15 @@ def held_changed(report: dict, cache: dict) -> list[str]:
     return out
 
 
+def held_sha_changed(report: dict) -> bool | None:
+    """Whether a judge-held file was edited, from the shas the report recorded (heldSha) with no cache read.
+    None for a report written before heldSha existed: the caller falls back to the cache until a refresh rewrites it."""
+    held = report.get("heldSha")
+    if not isinstance(held, dict):
+        return None
+    return any(Path(f).is_file() and sha(Path(f)) != h for f, h in held.items() if h and f not in report.get("approved", []))
+
+
 def known_files(report: dict) -> set[str]:
     """Every file a report already accounts for (connected, failed, held or removed)."""
     known = {str(e[0] if isinstance(e, list) else e)

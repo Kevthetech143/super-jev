@@ -460,12 +460,18 @@ def _report_for(pointer: str, cache_dir: Path):
 
 def held_edited(pointer: str, cache_dir: Path = None, cache: dict = None) -> bool:
     """True when a file the judge held for this pointer has been edited since (it is not a registered
-    source, so the pointer never reads stale). A set whose report lists no held or excepted file returns at
-    once without opening its prepare cache; a caller that already loaded the cache passes it. Never raises."""
+    source, so the pointer never reads stale). A report that records the held shas (heldSha) answers alone:
+    no cache is opened. An older report falls back to the prepare cache (none opened when it lists no held
+    file; a caller that already loaded it passes it) until its next refresh rewrites it. Never raises."""
     cache_dir = cache_dir or rc.CACHE_DIR
     try:
         report, owner = _report_for(pointer, cache_dir)
-        if not isinstance(report, dict) or not (report.get("held") or report.get("exceptions")):
+        if not isinstance(report, dict):
+            return False
+        known = rc.held_sha_changed(report)
+        if known is not None:  # the report holds the held shas: the cache is never opened
+            return known
+        if not (report.get("held") or report.get("exceptions")):  # an old report: fall back to the cache
             return False
         if cache is None:
             cache = json.loads((cache_dir / f"{owner}.json").read_text())
