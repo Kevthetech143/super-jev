@@ -1097,7 +1097,8 @@ def test_add_under_an_uncalibrated_judge_saves_nothing(tmp_path, monkeypatch, ca
     assert not (tmp_path / "approvals.jsonl").exists()
 
 
-def test_folder_files_does_not_walk_a_folder_link_out_of_the_folder(tmp_path):
+def test_folder_files_does_not_walk_a_folder_link_out_of_the_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # tmp_path must not count as inside the real home
     root, outside = tmp_path / "root", tmp_path / "outside"
     root.mkdir(); outside.mkdir()
     (root / "a.md").write_text("# a\n")

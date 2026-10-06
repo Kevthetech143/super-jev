@@ -942,7 +942,7 @@ FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the 
 # cover gate, prefilter, term_hits) goes through words()/fold(). Bump WORDS_VERSION
 # when this changes: saved pointer words carry it and rebuild on a mismatch.
 WORD_RE = re.compile(r"[^\W_]+")
-WORDS_VERSION = 3  # 3: word lists read every sources page (were first 25 files only)
+WORDS_VERSION = 4  # 4: held files add no words (3: word lists read every sources page, were first 25 files only)
 
 _ASCII_WORD_RE = re.compile(r"[a-z0-9]+")  # same result on ASCII text, and faster
 
@@ -1814,6 +1814,16 @@ def pointer_words(sdir: Path, generations: dict) -> tuple:
     generation, [pointers not known yet]). A pointer whose files could not be
     listed or read is saved with no words: known, but never skipped."""
     saved = _load_pointer_words(sdir / POINTER_WORDS_FILE)
+    stale = [p for p, e in saved.items() if not isinstance(e, dict) or e.get("version") != WORDS_VERSION]
+    if stale:  # words saved by an older tokenizer may hold a held file's tokens: drop them now, no re-read
+        for p in stale:
+            del saved[p]
+        try:
+            tmp = (sdir / POINTER_WORDS_FILE).with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(saved))
+            tmp.replace(sdir / POINTER_WORDS_FILE)
+        except OSError:
+            pass
     known, missing = {}, []
     for p, g in generations.items():
         entry = saved.get(p) or {}
@@ -1848,9 +1858,11 @@ def save_pointer_words(sdir: Path, principal: str, generations: dict, missing: l
         for src in rows:
             head = f"{src.get('originalPath', '')} {src.get('description', '')}".lower()
             try:
-                seen.update(words(head + " " + Path(src["path"]).read_text(errors="replace")))
+                text = Path(src["path"]).read_text(errors="replace")
             except (OSError, KeyError, TypeError):
                 return ptr, None  # a file we cannot read: never skip this pointer
+            if not has_secret(text):  # a held file's tokens are never stored
+                seen.update(words(head + " " + text))
         return ptr, " ".join(sorted(seen))
 
     try:
@@ -2415,7 +2427,10 @@ def _checked_pass(principal: str, sdir: Path) -> int:
             pass
         raise
     if rc == 0:
-        (sdir / INDEX_FAIL_STAMP).unlink(missing_ok=True)
+        try:
+            (sdir / INDEX_FAIL_STAMP).unlink(missing_ok=True)
+        except OSError:
+            pass  # a stamp that will not go must not fail a pass that succeeded
     return rc
 
 def _index_sync(principal: str, sdir: Path) -> int:
@@ -2502,8 +2517,9 @@ def _index_sync(principal: str, sdir: Path) -> int:
 WORD_INDEX_FILE = "word-index.json"
 # The stamp covers everything that decides a stored token: tokenizer version and pattern, stopwords
 # (they shape the pair keys), passage size. Any change makes old entries invalid.
+WORD_INDEX_TOKENIZER = 3  # WORDS_VERSION as of this stamp; kept apart so a pointer-words bump does not re-index every file
 def _word_index_version() -> str:
-    return "{}.2.{}.{}".format(WORDS_VERSION, CONFIRM_CHUNK, hashlib.sha256(
+    return "{}.2.{}.{}".format(WORD_INDEX_TOKENIZER, CONFIRM_CHUNK, hashlib.sha256(
         json.dumps([WORD_RE.pattern, sorted(QUERY_STOPWORDS)]).encode()).hexdigest()[:12])
 
 WORD_INDEX_VERSION = _word_index_version()
@@ -2522,7 +2538,15 @@ def _load_word_index(path) -> dict:
         return {}
     if not isinstance(saved, dict) or saved.get("version") != WORD_INDEX_VERSION or not isinstance(saved.get("files"), dict):
         return {}  # old tokenizer, or not ours: rebuild
-    return saved["files"]
+    files = saved["files"]
+    purged = False
+    for item in files.values():  # a held file's words, stored before held files kept none, go without a re-index
+        if isinstance(item, dict) and item.get("secret") and (item.get("whole") or item.get("heading") or item.get("passages") != [[{}, 0, []]]):
+            item.update(heading="", whole={}, passages=[[{}, 0, []]])
+            purged = True
+    if purged:
+        _save_word_index(path, files)
+    return files
 
 def _save_word_index(path, files: dict) -> None:
     try:
@@ -2535,6 +2559,8 @@ def _save_word_index(path, files: dict) -> None:
         pass  # best effort: an unsaved index is just rebuilt
 
 def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
+    if has_secret(text):  # no words kept: a key-shaped token must not land in word-index.json
+        return {"sha": sha, "heading": "", "whole": {}, "passages": [[{}, 0, []]], "secret": True}
     heading = next((ln.lstrip("# ") for ln in text.splitlines() if ln.startswith("#")), "")
     chunks = [text[i:i + CONFIRM_CHUNK] for i in range(0, len(text), CONFIRM_CHUNK)] or [""]
     parts = []
@@ -2545,7 +2571,7 @@ def _index_item(text: str, sha: str, pairs: bool = True) -> dict:
     for p in parts:
         whole.update(p[0])
     # secret: the text scans as holding one (worked out once per sha). Such a file is searched by neither path.
-    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts, "secret": has_secret(text)}
+    return {"sha": sha, "heading": heading, "whole": dict(whole), "passages": parts, "secret": False}
 
 def _valid_item(item, sha) -> bool:
     return (isinstance(item, dict) and item.get("sha") == sha and isinstance(item.get("heading"), str)

@@ -31,6 +31,14 @@
 
 - The index and today's search path now agree on a held file: one that still matches its review but whose text the current secret scan flags. Today's path searched its raw text by words and then held it when picked; the index never served it; and a held file could leave its set stale for good (on the slow path) or never stale (served without it), switching on each refresh. Now neither path searches such a file, both name it as held ("contains a secret; not sent"), and it never makes a set stale. The word index records the secret flag once per file version (its version is bumped, so it is rebuilt once). Held files are still never written to the full-text index.
 
+## Unreleased
+
+- A file the secret scan holds no longer leaves its words in the local stores: the word index entry keeps `"secret": true` and no words, and the pointer word list skips the file, so a key-shaped token from such a file is never written to `word-index.json` or `pointer-words.json`. Files written earlier are cleaned on first load with no re-read and no re-index: `pointer-words.json` entries saved before `WORDS_VERSION` 4 are dropped and the file rewritten, and `word-index.json` items flagged secret have their words emptied and the file saved once. The word index version stamp is unchanged, so an upgrade does not re-index every file. Search ranking is unchanged (a held file was already skipped). Tests: `tests/test_word_index.py`.
+
+- A failure to remove `index-fail.stamp` after a successful index pass no longer turns that pass into an exception.
+
+- The index's table-of-contents label row is built by one helper for seeding and for the label compare, so editing one alone cannot make every pass rewrite every file's row. Test: `tests/test_file_index.py`. The folder-link walk test now sets its own home folder, so it no longer depends on where the temp folder lives.
+
 ## 1.0.130 — 2026-10-05
 
 - A uuid is never read as a card number. About 1 random uuid4 in 5,000-8,000 has digit groups that form a Luhn-valid 16-digit number, so a uuid in a question, a uuid-named path or file content at prepare time was held at random (a log or JSON export with 500 uuids about 6-9% of the time). The card check now scrubs an RFC uuid (8-4-4-4-12 hex, version 1-8, variant 8-b; shared `uuid` pattern in `secret_patterns.json`, Python and Node) before testing, as it does dates and URLs: 0 of 300,000 random uuid4s held, was 56; 0 of 100,000 v7 (time-ordered) uuids. A card written in uuid shape without a uuid version or variant (`40000566-5566-5556-0000-000000000000`) is still held. Known limit: a card deliberately written in uuid shape with a valid version and variant (e.g. 8-4-4 digits followed by -8xxx-xxxxxxxxxxxx) is no longer held; cards written normally are. Tests: `skills/super-jev/tests/test_uuid_not_card.py`, `test/secret-scan.test.ts`.

@@ -122,6 +122,12 @@ class StatSha:
             pass  # the memo is an optimization only
 
 
+TOC_KEYS = ("description", "question", "kind", "status", "as_of", "subject")
+
+def _toc_json(ent: dict) -> str:
+    """The toc label row for a reviewed entry; seeding and the label compare must build it the same way."""
+    return json.dumps({k: ent.get(k) for k in TOC_KEYS})
+
 def _has_secret(text: str) -> bool:
     from prepare_bulk import has_secret
     return has_secret(text)
@@ -361,7 +367,7 @@ class FileIndex:
             if p in known and known[p] == (st.st_size, st.st_mtime_ns, reviewed):
                 # same bytes, same review: only its labels may have been re-gated (a refresh that changes no file
                 # keeps the generation, so no purge re-seeds them)
-                toc = json.dumps({k: ent.get(k) for k in ("description", "question", "kind", "status", "as_of", "subject")})
+                toc = _toc_json(ent)
                 if p in tocs and tocs[p][1] != toc:
                     self.db.execute("INSERT OR REPLACE INTO toc VALUES(?,?,?)", (p, tocs[p][0], toc))
                 continue
@@ -386,8 +392,7 @@ class FileIndex:
                     real.append(p)  # a held file is served by neither search path: only leaving `files` is a change
             else:
                 self.db.execute("INSERT INTO files VALUES(?,?,?,?,?,1,?)", (p, pointer, st.st_size, st.st_mtime_ns, sha, reviewed))
-                toc = {k: ent.get(k) for k in ("description", "question", "kind", "status", "as_of", "subject")}
-                self.db.execute("INSERT INTO toc VALUES(?,?,?)", (p, sha, json.dumps(toc)))
+                self.db.execute("INSERT INTO toc VALUES(?,?,?)", (p, sha, _toc_json(ent)))
                 if was_known:
                     out["changed"].append(p); real.append(p)
         first = row is None  # the seeding pass is not a change
