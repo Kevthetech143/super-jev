@@ -1894,11 +1894,26 @@ def run_json(a) -> int:
     return rc
 
 
-def kick_index_updater(principals) -> None:
+def pointer_generations(principals) -> dict:
+    """{pointer: generation} as the registry shows them to these principals now; {} when unreadable."""
+    out = {}
+    for principal in principals:
+        try:
+            for row in memory({"action": "panel", "principal": principal}).get("pointers", []):
+                if isinstance(row, dict) and row.get("pointer"):
+                    out[row["pointer"]] = row.get("generation")
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
+
+def kick_index_updater(principals, bypass_throttle: bool = False) -> None:
     """After a connect or refresh: start the file-index updater detached, one per principal (ask.py does nothing
     unless the index flag is on). Never on the caller's clock, never a failure. Not under pytest, not in a replay,
     and at most once per INDEX_SPAWN_EVERY_SECS per principal (the stamp ask.py keeps): a refreshed file is already
-    in the prepare-cache the updater reads, and an ask that finds it out of date starts the updater itself."""
+    in the prepare-cache the updater reads, and an ask that finds it out of date starts the updater itself.
+    A run that changed a pointer's generation (bypass_throttle) starts it now: until the index is re-seeded, every
+    ask on that pointer is served by the slow path."""
     if "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("SUPERJEV_REPLAY") == "1":
         return
     for principal in principals:
@@ -1906,7 +1921,7 @@ def kick_index_updater(principals) -> None:
             sdir = state_root() / principal
             stamp = sdir / "index-sync.stamp"
             try:
-                if time.time() - stamp.stat().st_mtime < 600:  # = ask.INDEX_SPAWN_EVERY_SECS
+                if not bypass_throttle and time.time() - stamp.stat().st_mtime < 600:  # = ask.INDEX_SPAWN_EVERY_SECS
                     continue
             except OSError:
                 pass
@@ -2455,6 +2470,7 @@ def run(a) -> int:
     all_connected = True
     connected_n = failed_n = 0
     hits, total, misses, search_failed = 0, 0, [], ""
+    gens_before = pointer_generations(a.principals)
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
         result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable)
@@ -2508,7 +2524,8 @@ def run(a) -> int:
     keep_unrecorded(report, a)
     write_report(a.pointer, report)
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
-    kick_index_updater(a.principals)
+    gens_after = pointer_generations(a.principals)
+    kick_index_updater(a.principals, bypass_throttle=any(g != gens_before.get(n) for n, g in gens_after.items()))
     # A low judge score is a verdict the run reached, like a held file: exit 3, listed in held. A failed call stays a failure.
     _RESULT["held"] = list(_RESULT.get("held") or []) + low
     return connect_outcome(connected_n, held_n + len(low), len(exceptions) - len(low) + failed_n)
