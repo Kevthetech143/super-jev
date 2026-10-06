@@ -298,7 +298,11 @@ class FileIndex:
             entries = load_cache_files(pointer)
         known = {r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns,reviewed_sha FROM files WHERE pointer=?", (pointer,))}
         known.update({r[0]: r[1:] for r in self.db.execute("SELECT path,size,mtime_ns,reviewed_sha FROM seen WHERE pointer=?", (pointer,))})
+        # unreviewed files the walk found: neither search path serves one (it is in no prepare-cache), so its comings,
+        # goings and edits never make the pointer stale
+        unreviewed = {r[0] for r in self.db.execute("SELECT path FROM seen WHERE pointer=? AND reason='new'", (pointer,))}
         out = {"hashed": 0, "changed": [], "new": [], "gone": [], "stale": False}
+        real = []  # changes to files the pointer reviewed: these are what a stale pointer waits on
         row = self.db.execute("SELECT roots FROM pointers WHERE pointer=?", (pointer,)).fetchone()
         if roots is None and row and row[0]:
             roots = json.loads(row[0])
@@ -319,6 +323,8 @@ class FileIndex:
             except OSError:
                 if p in known:
                     self._drop(p); out["gone"].append(p)
+                    if p not in unreviewed:
+                        real.append(p)
                 continue
             if not os.path.isfile(p):
                 continue
@@ -337,6 +343,8 @@ class FileIndex:
                     out["new"].append(p)
                 else:
                     out["changed"].append(p)
+                    if p not in unreviewed:
+                        real.append(p)
                 continue
             if not ent.get("pass"):
                 if p in known:
@@ -363,18 +371,23 @@ class FileIndex:
             if reason:
                 self.db.execute("INSERT INTO seen VALUES(?,?,?,?,?,?,?)",
                                 (p, pointer, st.st_size, st.st_mtime_ns, sha, reason, reviewed))
-                out["changed"].append(p)
+                out["changed"].append(p); real.append(p)
             else:
                 self.db.execute("INSERT INTO files VALUES(?,?,?,?,?,1,?)", (p, pointer, st.st_size, st.st_mtime_ns, sha, reviewed))
                 toc = {k: ent.get(k) for k in ("description", "question", "kind", "status", "as_of", "subject")}
                 self.db.execute("INSERT INTO toc VALUES(?,?,?)", (p, sha, json.dumps(toc)))
                 if was_known:
-                    out["changed"].append(p)
+                    out["changed"].append(p); real.append(p)
         first = row is None  # the seeding pass is not a change
-        out["stale"] = bool(out["changed"] or out["new"] or out["gone"]) and not first
-        stale = 1 if out["stale"] else (self.db.execute("SELECT stale FROM pointers WHERE pointer=?", (pointer,)).fetchone() or (0,))[0]
+        out["stale"] = bool(real) and not first
+        prev = (self.db.execute("SELECT stale FROM pointers WHERE pointer=?", (pointer,)).fetchone() or (0,))[0]
+        stale = 2 if prev == 2 else 1 if out["stale"] else prev  # 2 (a read-side mismatch) is cleared by a refresh only
+        if stale == 1 and not out["stale"] and not self.db.execute(
+                "SELECT 1 FROM seen WHERE pointer=? AND reason IN ('edited','held') LIMIT 1", (pointer,)).fetchone():
+            stale = 0  # a pass with no change and no edited or held file left: the index serves the pointer as it stands
         self.db.execute("INSERT INTO pointers(pointer,stale,roots,checked_at,entries) VALUES(?,?,?,strftime('%s','now'),?) "
-                        "ON CONFLICT(pointer) DO UPDATE SET stale=excluded.stale, roots=excluded.roots, checked_at=excluded.checked_at, "
+                        "ON CONFLICT(pointer) DO UPDATE SET stale=CASE WHEN pointers.stale=2 THEN 2 ELSE excluded.stale END, "
+                        "roots=excluded.roots, checked_at=excluded.checked_at, "
                         "entries=excluded.entries",
                         (pointer, stale, json.dumps(list(roots)) if roots else None, len(entries)))
         self.db.commit()
@@ -672,7 +685,8 @@ class FileIndex:
         return out
 
     def mark_stale(self, pointer: str) -> None:
-        self.db.execute("UPDATE pointers SET stale=1 WHERE pointer=?", (pointer,))
+        """A served file no longer matched (ask side): 2, which only a refresh (purge) clears, since the updater may see no stat change."""
+        self.db.execute("UPDATE pointers SET stale=2 WHERE pointer=?", (pointer,))
         self.db.commit()
 
     def purge(self, pointer: str) -> None:
