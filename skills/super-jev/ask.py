@@ -3849,8 +3849,9 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         gone = (f"; partial: {len(unchecked)} file{'s' if len(unchecked) != 1 else ''} not checked ({gone}; "
                 f"see {ask_py} --status)") if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
-                   f"no matching file (it may still exist){gone}", f"{ask_py} --trace-show last",
-                   "none" if _CLAIM["text"] else "connect")
+                   f"no matching file (it may still exist){gone}",
+                   f"{ask_py} --status" if unchecked else f"{ask_py} --trace-show last",
+                   "none" if _CLAIM["text"] else "include" if unchecked else "connect")
         _RESULT["searched"] = {"sets": len(original_pointers),
                                "notes": sum(len(load_cache_files(ptr)) for ptr in original_pointers)}
     if listed:  # an unsettled claim that listed files: the verdict lines above are its answer; this is its exit

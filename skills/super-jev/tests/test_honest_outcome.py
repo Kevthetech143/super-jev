@@ -325,6 +325,7 @@ def test_a_held_edited_file_the_question_matches_is_still_a_partial_not_found(tm
     lines = capsys.readouterr().out.splitlines()
     assert rc == 1 and lines[0].startswith("OUTCOME: not-found")
     assert "partial: 1 file not checked" in lines[0]
+    assert ask._RESULT["next"] == "include" and lines[0].endswith("--status")
     assert ask._RESULT["left_out"] == [{"what": ask.SECRET_WHAT, "count": 1, "where": str(tmp_path), "way_in": ask.SECRET_FIX}]
 
 
@@ -444,3 +445,9 @@ def test_a_claim_with_only_held_files_is_not_marked_incomplete_by_them(tmp_path,
     monkeypatch.setattr(ask, "claim_verdict", lambda *a, **k: seen.append(k.get("incomplete")) or real(*a, **k))
     rc = ask.lookup("The quarterly tax filing is due in April.", "primary", tmp_path / "s")
     assert rc == 1 and seen == [False]
+
+
+def test_a_clean_not_found_still_points_at_connect(tmp_path, monkeypatch, capsys):
+    _setup(tmp_path, monkeypatch, ["a"], lambda p, n: {"status": "no-candidates"})
+    rc, lines = _ask(tmp_path, capsys)
+    assert rc == 1 and ask._RESULT["next"] == "connect" and lines[0].endswith("--trace-show last")
