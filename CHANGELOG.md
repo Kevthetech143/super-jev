@@ -33,7 +33,7 @@
 
 ## Unreleased
 
-- A refresh no longer stops with a false "payment required" when a file's description mentions `HTTP 402`. The checked connect searched all of the judge call's output for `HTTP 402`, and that output echoes the full command including every claim, so a normal verdict looked like a payment refusal. It now matches only the door's own error lines (`RuntimeError: HTTP 402: <detail>`, `<vendor> returned HTTP 402`). Test: `skills/super-jev/tests/test_connect_checked.py`.
+- A refresh no longer stops with a false "payment required" when a file's description mentions `HTTP 402`. The checked connect searched all of the judge call's output for `HTTP 402`, and that output echoes the full command including every claim, so a normal verdict looked like a payment refusal. It now ignores the echoed command line and the verdict rows, which are the only places claim text appears. Test: `skills/super-jev/tests/test_connect_checked.py`.
 
 - **Person folders work in any layout.** A person folder is any connected folder whose PROFILE file has a `Relation:` line (it was only one fixed path layout, so another layout had no people and "my dad" filtered nothing). The folder is the PROFILE's own one, or the one above it when the PROFILE's first heading names that one and not its own; only the PROFILE's first 80 lines are read. A PROFILE on disk beside connected files but not connected itself still counts (only its heading and Relation line are read, locally; only the folder name is stored, in index meta `person_profiles`). The index rewrites only the rows whose person moved (no version bump). Tests: `skills/super-jev/tests/test_kin_word.py`.
 

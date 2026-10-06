@@ -309,3 +309,24 @@ def test_door_error_line_jev_client_form_raises(monkeypatch):
     _fake_run(monkeypatch, "$ dispatch.py check\n", f"{cc.PROFILE.vendor or 'Jev'} returned HTTP 402\n")
     with pytest.raises(cc.PaymentRequired):
         cc.gate_many(["a"], "/x")
+
+
+def test_traceback_badreply_form_raises(monkeypatch):
+    _fake_run(monkeypatch, "$ dispatch.py check\n",
+              "Traceback (most recent call last):\n  File \"x.py\", line 1, in f\n"
+              "judges.errors.BadReply: TypeSafe returned HTTP 402\n")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
+
+
+def test_gate_error_line_form_raises(monkeypatch):
+    _fake_run(monkeypatch, "gate: ERROR \u2014 Jev could not check this: TypeSafe returned HTTP 402. Treated as NOT clean.\n", "")
+    with pytest.raises(cc.PaymentRequired):
+        cc.gate("a", "/x")
+
+
+def test_verdict_row_echoing_claim_does_not_raise(monkeypatch):
+    class R:
+        stdout, stderr, returncode = "  c1 SUPPORTED 0.95  The vendor returned HTTP 402 last week\n", "", 0
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: R)
+    assert cc.gate("a", "/x")["state"] == "SUPPORTED"
