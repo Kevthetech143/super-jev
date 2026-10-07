@@ -1,6 +1,10 @@
 # Changelog
 
 
+## 1.0.134 — 2026-10-07
+
+- A newly connected set is indexed at once instead of staying "not indexed" for 10 minutes or more (every ask on it re-read and re-scanned all its files meanwhile). A connect now counts a pointer the registry did not hold before the run as changed, so it starts the index updater despite the 10-minute stamp (before, only a refresh that changed a generation did); and an ask that finds a searched set "not indexed" starts it too, as a generation mismatch already did. A burst of connects folds into one extra pass through the existing lock and rerun marker. Both stand down for 2 minutes after a failed pass and stay off in a replay and under pytest; a plain re-connect of an unchanged pointer still goes through the throttle. Test: `tests/test_index_newpointer.py`.
+
 ## 1.0.133 — 2026-10-06
 
 - **Honest outcome: the outcome comes from the sets, not from files.** A set that failed to search is `error` (3); a set that needs setup or a refresh, or nothing connected, is `needs-setup` (4); otherwise no match is `not-found` (1). A file no searched set checked (label failed, held for a secret, too big, edited and not yet re-admitted, not UTF-8) never changes the outcome: it is always named in `left_out` and in a `partial: N files not checked` note in the reason, and a file another connected set admitted is not counted as unchecked. Removed the held-file word-coverage and routing-pick heuristic that turned some held files into `needs-setup`. Tests: `tests/test_honest_outcome.py` (two tests of the removed heuristic retired).
@@ -8,10 +12,6 @@
 - The checked connect no longer misses an unpaid judge call when the call's stdout ends without a newline: a stderr `HTTP 402` could glue onto the skipped `$ ` echo line and hide. Stdout and stderr are now joined with a newline. Test: `skills/super-jev/tests/test_connect_checked.py`.
 
 - `prepare_bulk.py --json` no longer reports a payment refusal as "internal error: PaymentRequired" with a traceback; it prints the same single payment message as text mode, exit code unchanged. Test: `skills/super-jev/tests/test_json_unpaid.py`.
-
-## Unreleased
-
-- A newly connected set is indexed at once instead of staying "not indexed" for 10 minutes or more (every ask on it re-read and re-scanned all its files meanwhile). A connect now counts a pointer the registry did not hold before the run as changed, so it starts the index updater despite the 10-minute stamp (before, only a refresh that changed a generation did); and an ask that finds a searched set "not indexed" starts it too, as a generation mismatch already did. A burst of connects folds into one extra pass through the existing lock and rerun marker. Both stand down for 2 minutes after a failed pass and stay off in a replay and under pytest; a plain re-connect of an unchanged pointer still goes through the throttle. Test: `tests/test_index_newpointer.py`.
 
 ## 1.0.132 — 2026-10-06
 
