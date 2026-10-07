@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- The PR-merge check no longer blocks a true "Super Clef PR N merged" because a same-numbered PR is open in the sibling repo. The evidence text carries no repo, so when it reports a mismatch the gate now asks `gh pr view N --repo <repo>` for the repo the draft names ("Clef" or "Jev" next to the number; neither or both means both repos) and drops the block only if one says MERGED. A gh error or timeout (6 s) keeps the block. Tests: `skills/super-jev/tests/test_superjev.py`.
+- The PR-merge check no longer blocks a true "PR N merged" because a same-numbered PR is open in a sibling repo. The evidence text carries no repo, so when it reports a mismatch the gate asks `gh pr view N --repo <repo>` and drops the block only if one says MERGED. The repos come from `SUPERJEV_GATE_PR_REPOS` (`keyword=owner/repo,keyword=owner/repo`); a keyword next to the number in the draft picks that repo, otherwise every listed repo is checked. Unset means no gh check and the old behaviour. A gh error or timeout (6 s) keeps the block. Tests: `skills/super-jev/tests/test_superjev.py`.
 
 ## 1.0.134 — 2026-10-07
 

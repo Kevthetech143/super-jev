@@ -1355,27 +1355,40 @@ def _arms_registry():
         return None
 
 
-_PR_REPOS = {"clef": "Kevthetech143/super-clef", "jev": "Kevthetech143/super-jev"}
+PR_REPOS_ENV = "SUPERJEV_GATE_PR_REPOS"
+
+
+def _pr_repo_map():
+    """{keyword: owner/repo} from SUPERJEV_GATE_PR_REPOS, written as
+    "keyword=owner/repo,keyword=owner/repo". Unset or empty: {}."""
+    out = {}
+    for pair in os.environ.get(PR_REPOS_ENV, "").split(","):
+        key, _, repo = pair.partition("=")
+        if key.strip() and "/" in repo:
+            out[key.strip().lower()] = repo.strip()
+    return out
 
 
 def _pr_claim_repos(draft_text):
     """(pr_num, [owner/repo, ...]) for the draft's first "PR N merged" claim.
-    The repo comes from "Clef"/"Jev" wording just before the number (else
-    just after); no such wording, or both, means both candidates."""
+    The repo comes from a configured keyword just before the number (else
+    just after); no keyword, or several, means every configured repo."""
     m = _PR_MERGED_CLAIM_RE.search(draft_text or "")
-    if not m:
+    repos = _pr_repo_map()
+    if not m or not repos:
         return None, []
     for ctx in (draft_text[max(0, m.start() - 40):m.start()],
                 draft_text[m.start():m.end() + 40]):
-        found = [r for k, r in _PR_REPOS.items() if k in ctx.lower()]
+        found = [r for k, r in repos.items() if k in ctx.lower()]
         if found:
             return m.group(1), found
-    return m.group(1), list(_PR_REPOS.values())
+    return m.group(1), list(repos.values())
 
 
 def _pr_merged_in_any_repo(draft_text):
     """True when `gh pr view` says the claimed PR is MERGED in any candidate
-    repo. Any gh failure counts as not confirmed, so the original block stands."""
+    repo. No configured repos, or any gh failure, counts as not confirmed, so
+    the original block stands."""
     pr_num, repos = _pr_claim_repos(draft_text)
     for repo in repos:
         try:

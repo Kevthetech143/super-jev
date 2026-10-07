@@ -4427,6 +4427,11 @@ def test_deterministic_pr_mismatch_blocks_on_a_named_pr(monkeypatch):
     assert any("PR #11" in r and "open" in r for r in reasons)
 
 
+@pytest.fixture(autouse=False)
+def _pr_repos(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_GATE_PR_REPOS", "notes-a=acme/notes-a,notes-b=acme/notes-b")
+
+
 def _fake_gh(states, calls):
     def fake_run(cmd, **kw):
         repo = cmd[cmd.index("--repo") + 1]
@@ -4441,35 +4446,43 @@ def _fake_gh(states, calls):
 _OPEN_42 = '{"number": 42, "state": "OPEN"}\n'
 
 
-def test_pr_mismatch_uses_the_repo_named_in_the_draft(monkeypatch):
+def test_pr_mismatch_uses_the_repo_named_in_the_draft(monkeypatch, _pr_repos):
     calls = []
     monkeypatch.setattr(sj.subprocess, "run", _fake_gh(
-        {"Kevthetech143/super-clef": "MERGED", "Kevthetech143/super-jev": "OPEN"}, calls))
-    assert sj.deterministic_block_reasons("Super Clef PR #42 merged.", _OPEN_42) == []
-    assert calls == ["Kevthetech143/super-clef"]
+        {"acme/notes-a": "MERGED", "acme/notes-b": "OPEN"}, calls))
+    assert sj.deterministic_block_reasons("Notes-A PR #42 merged.", _OPEN_42) == []
+    assert calls == ["acme/notes-a"]
     calls.clear()
-    assert sj.deterministic_block_reasons("Super Jev PR #42 merged.", _OPEN_42)
-    assert calls == ["Kevthetech143/super-jev"]
+    assert sj.deterministic_block_reasons("Notes-B PR #42 merged.", _OPEN_42)
+    assert calls == ["acme/notes-b"]
 
 
-def test_pr_mismatch_checks_both_repos_when_the_draft_names_neither(monkeypatch):
+def test_pr_mismatch_checks_both_repos_when_the_draft_names_neither(monkeypatch, _pr_repos):
     calls = []
     monkeypatch.setattr(sj.subprocess, "run", _fake_gh(
-        {"Kevthetech143/super-clef": "MERGED", "Kevthetech143/super-jev": "OPEN"}, calls))
+        {"acme/notes-a": "MERGED", "acme/notes-b": "OPEN"}, calls))
     assert sj.deterministic_block_reasons("PR #42 is merged.", _OPEN_42) == []
-    assert calls == ["Kevthetech143/super-clef"]
+    assert calls == ["acme/notes-a"]
     monkeypatch.setattr(sj.subprocess, "run", _fake_gh(
-        {"Kevthetech143/super-clef": "OPEN", "Kevthetech143/super-jev": "OPEN"}, calls))
+        {"acme/notes-a": "OPEN", "acme/notes-b": "OPEN"}, calls))
     calls.clear()
     assert sj.deterministic_block_reasons("PR #42 is merged.", _OPEN_42)
-    assert sorted(calls) == ["Kevthetech143/super-clef", "Kevthetech143/super-jev"]
+    assert sorted(calls) == ["acme/notes-a", "acme/notes-b"]
 
 
-def test_pr_mismatch_block_stands_when_gh_fails(monkeypatch):
+def test_pr_mismatch_skips_gh_when_no_repos_are_configured(monkeypatch):
+    monkeypatch.delenv("SUPERJEV_GATE_PR_REPOS", raising=False)
+    def boom(cmd, **kw):
+        raise AssertionError("gh must not run")
+    monkeypatch.setattr(sj.subprocess, "run", boom)
+    assert sj.deterministic_block_reasons("PR #42 is merged.", _OPEN_42)
+
+
+def test_pr_mismatch_block_stands_when_gh_fails(monkeypatch, _pr_repos):
     def boom(cmd, **kw):
         raise OSError("no gh")
     monkeypatch.setattr(sj.subprocess, "run", boom)
-    assert sj.deterministic_block_reasons("Super Clef PR #42 merged.", _OPEN_42)
+    assert sj.deterministic_block_reasons("Notes-A PR #42 merged.", _OPEN_42)
 
 
 def test_deterministic_pr_no_mismatch_when_evidence_agrees():
