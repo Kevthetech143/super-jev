@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -4419,11 +4420,74 @@ def test_deterministic_count_tokenizer_still_keeps_a_short_sha_as_one_token():
     assert labelled == {"tests": {61}}
 
 
-def test_deterministic_pr_mismatch_blocks_on_a_named_pr():
+def test_deterministic_pr_mismatch_blocks_on_a_named_pr(monkeypatch):
+    monkeypatch.setattr(sj, "_pr_merged_in_named_repo", lambda draft, budget=None: False)
     draft = "PR #11 is merged into main, Sir."
     evidence = '{"number": 11, "state": "OPEN"}\n'
     reasons = sj.deterministic_block_reasons(draft, evidence)
     assert any("PR #11" in r and "open" in r for r in reasons)
+
+
+@pytest.fixture(autouse=False)
+def _pr_repos(monkeypatch):
+    monkeypatch.setenv("SUPERJEV_GATE_PR_REPOS", "notes-a=acme/notes-a,notes-b=acme/notes-b")
+
+
+def _fake_gh(states, calls):
+    def fake_run(cmd, **kw):
+        repo = cmd[cmd.index("--repo") + 1]
+        calls.append(repo)
+        state = states.get(repo)
+        if state is None:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not found")
+        return subprocess.CompletedProcess(cmd, 0, stdout=state + "\n", stderr="")
+    return fake_run
+
+
+_OPEN_42 = '{"number": 42, "state": "OPEN"}\n'
+
+
+def test_pr_mismatch_uses_the_repo_named_in_the_draft(monkeypatch, _pr_repos):
+    calls = []
+    monkeypatch.setattr(sj.subprocess, "run", _fake_gh(
+        {"acme/notes-a": "MERGED", "acme/notes-b": "OPEN"}, calls))
+    assert sj.deterministic_block_reasons("Notes-A PR #42 merged.", _OPEN_42) == []
+    assert calls == ["acme/notes-a"]
+    calls.clear()
+    assert sj.deterministic_block_reasons("Notes-B PR #42 merged.", _OPEN_42)
+    assert calls == ["acme/notes-b"]
+
+
+def test_pr_mismatch_block_stands_without_exactly_one_repo_keyword(monkeypatch, _pr_repos):
+    def boom(cmd, **kw):
+        raise AssertionError("gh must not run")
+    monkeypatch.setattr(sj.subprocess, "run", boom)
+    for draft in ("PR #42 is merged.", "Notes-A and Notes-B PR #42 merged."):
+        assert sj.deterministic_block_reasons(draft, _OPEN_42)
+
+
+def test_pr_mismatch_skips_gh_when_the_stop_budget_is_spent(monkeypatch, _pr_repos):
+    def boom(cmd, **kw):
+        raise AssertionError("gh must not run")
+    monkeypatch.setattr(sj.subprocess, "run", boom)
+    spent = sj.StopBudget(budget_s=0.001, max_calls=1)
+    time.sleep(0.01)
+    assert sj._pr_state_reason("Notes-A PR #42 merged.", _OPEN_42, budget=spent)
+
+
+def test_pr_mismatch_skips_gh_when_no_repos_are_configured(monkeypatch):
+    monkeypatch.delenv("SUPERJEV_GATE_PR_REPOS", raising=False)
+    def boom(cmd, **kw):
+        raise AssertionError("gh must not run")
+    monkeypatch.setattr(sj.subprocess, "run", boom)
+    assert sj.deterministic_block_reasons("PR #42 is merged.", _OPEN_42)
+
+
+def test_pr_mismatch_block_stands_when_gh_fails(monkeypatch, _pr_repos):
+    def boom(cmd, **kw):
+        raise OSError("no gh")
+    monkeypatch.setattr(sj.subprocess, "run", boom)
+    assert sj.deterministic_block_reasons("Notes-A PR #42 merged.", _OPEN_42)
 
 
 def test_deterministic_pr_no_mismatch_when_evidence_agrees():
