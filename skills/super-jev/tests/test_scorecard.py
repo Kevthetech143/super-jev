@@ -120,7 +120,6 @@ def test_a_file_that_is_not_an_ask_module_is_refused_by_name(tmp_path, monkeypat
 def test_gold_rank_indexes_each_file_once_per_principal_and_ranks_the_same(tmp_path, monkeypatch):
     import hashlib
     import importlib.util
-    import tempfile
     spec = importlib.util.spec_from_file_location("ask_reuse", Path(sc.__file__).parent / "ask.py")
     ask = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ask)
@@ -141,10 +140,6 @@ def test_gold_rank_indexes_each_file_once_per_principal_and_ranks_the_same(tmp_p
     real = ask._index_item
     monkeypatch.setattr(ask, "_index_item", lambda *a, **k: built.append(1) or real(*a, **k))
     memos = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        fast = []
-        for pr, c in cases:
-            memo = memos.setdefault(pr, {"dir": tempfile.mkdtemp(dir=tmp)})
-            fast.append(sc.gold_rank(ask, c, [pr], memo))
+    fast = [sc.gold_rank(ask, c, [pr], memos.setdefault(pr, {})) for pr, c in cases]
     assert fast == plain and None not in plain
     assert len(built) == sum(len(fs) for fs in files.values())  # the corpus once, not cases x corpus
