@@ -2157,8 +2157,8 @@ def index_unusable(e) -> str:
 
 def index_panel(principal: str, sdir: Path):
     """(FileIndex, panel dict, None, fallbacks), or (None, None, why it cannot be used: missing / corrupt / empty / stale, {}).
-    fallbacks {pointer: reason}: pointers served by today's path inside an ask that uses the index; the panel is then
-    None, so the caller reads the registry's rows (today's statuses) for every pointer."""
+    fallbacks {pointer: reason}: pointers served by today's path inside an ask that uses the index; the panel then
+    holds only the indexed pointers, and the caller reads the registry's rows (today's statuses) for the fallbacks alone."""
     path = sdir / INDEX_FILE
     if not path.is_file():
         return None, None, "index missing", {}
@@ -2188,7 +2188,7 @@ def index_panel(principal: str, sdir: Path):
     except Exception as e:  # noqa: BLE001 -- an index that cannot say what it holds is not used
         idx.close()
         return None, None, index_unusable(e), {}
-    return idx, (None if fb else {"pointers": rows}), None, fb
+    return idx, {"pointers": [r for r in rows if r.get("pointer") not in fb]}, None, fb
 
 def index_candidates(idx, pointers, exclude=()):
     """candidate_files() from the index rows: same filters, no prepare-cache parse, no file opened."""
@@ -3151,6 +3151,13 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             _STAGE["index"]["fallback"] = {"pointers": [f"{n}: {r}" for n, r in list(index_fb.items())[:STAGE_LIST_CAP]]}
             _STAGE["index_gen_mismatch"] = any(r.startswith(("generation mismatch", "not indexed")) for r in index_fb.values())
         panel = ipanel
+        if index_fb:  # only the fallback pointers are snapshotted by the engine; indexed ones keep their index rows
+            fb_panel = memory({"action": "panel", "principal": principal, "names": sorted(index_fb)})
+            if fb_panel.get("pointers") is not None and not fb_panel.get("reason"):
+                panel = {"pointers": sorted(ipanel["pointers"] + [r for r in fb_panel["pointers"] if r.get("pointer") in index_fb],
+                                            key=lambda r: r["pointer"])}
+            else:
+                panel = fb_panel
     panel = panel if panel is not None else memory({"action": "panel", "principal": principal})
     view_pointers = {row["pointer"] for row in panel.get("pointers", [])
                      if isinstance(row, dict) and row.get("viewOriginals")}

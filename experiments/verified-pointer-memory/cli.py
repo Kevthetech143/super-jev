@@ -294,7 +294,10 @@ def run(request, config):
         with service.connect() as connection:
             rows = connection.execute('SELECT name, body FROM pointers ORDER BY name').fetchall()
         pointers = []
+        only = request.get('names')  # optional subset: only these pointers are snapshotted
         for name, body in rows:
+            if only is not None and name not in only:
+                continue
             binding = json.loads(body)
             _, error = service.pointer(name, request['principal'])
             if error and error['status'] == 'access-denied':
