@@ -1355,7 +1355,42 @@ def _arms_registry():
         return None
 
 
-def _pr_state_reason(draft_text, evidence_text, run_sink=None):
+_PR_REPOS = {"clef": "Kevthetech143/super-clef", "jev": "Kevthetech143/super-jev"}
+
+
+def _pr_claim_repos(draft_text):
+    """(pr_num, [owner/repo, ...]) for the draft's first "PR N merged" claim.
+    The repo comes from "Clef"/"Jev" wording just before the number (else
+    just after); no such wording, or both, means both candidates."""
+    m = _PR_MERGED_CLAIM_RE.search(draft_text or "")
+    if not m:
+        return None, []
+    for ctx in (draft_text[max(0, m.start() - 40):m.start()],
+                draft_text[m.start():m.end() + 40]):
+        found = [r for k, r in _PR_REPOS.items() if k in ctx.lower()]
+        if found:
+            return m.group(1), found
+    return m.group(1), list(_PR_REPOS.values())
+
+
+def _pr_merged_in_any_repo(draft_text):
+    """True when `gh pr view` says the claimed PR is MERGED in any candidate
+    repo. Any gh failure counts as not confirmed, so the original block stands."""
+    pr_num, repos = _pr_claim_repos(draft_text)
+    for repo in repos:
+        try:
+            proc = subprocess.run(["gh", "pr", "view", pr_num, "--repo", repo,
+                                   "--json", "state", "-q", ".state"],
+                                  capture_output=True, text=True, timeout=6,
+                                  env=safe_git_env())
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0 and proc.stdout.strip().upper() == "MERGED":
+            return True
+    return False
+
+
+def _pr_state_reason_raw(draft_text, evidence_text, run_sink=None):
     """The PR-state arm's reason line, or None.
 
     With `SUPERJEV_ARMS` off (the default) this is `_pr_mismatch_reason`
@@ -1397,6 +1432,16 @@ def _pr_state_reason(draft_text, evidence_text, run_sink=None):
                                     errors=list(run.errors)))
     reasons = [v.reason for v in verdicts if v.is_block()]
     return reasons[0] if reasons else None
+
+
+def _pr_state_reason(draft_text, evidence_text, run_sink=None):
+    """`_pr_state_reason_raw`, except a mismatch is dropped when the PR is
+    really merged in the repo the draft names (evidence text carries no repo,
+    so a same-numbered PR in the sibling repo could trip it)."""
+    reason = _pr_state_reason_raw(draft_text, evidence_text, run_sink=run_sink)
+    if reason and reason.startswith("PR mismatch") and _pr_merged_in_any_repo(draft_text):
+        return None
+    return reason
 
 
 def deterministic_block_reasons(draft_text, evidence_text, run_sink=None):
