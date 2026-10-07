@@ -9,6 +9,10 @@
 
 - `prepare_bulk.py --json` no longer reports a payment refusal as "internal error: PaymentRequired" with a traceback; it prints the same single payment message as text mode, exit code unchanged. Test: `skills/super-jev/tests/test_json_unpaid.py`.
 
+## Unreleased
+
+- A newly connected set is indexed at once instead of staying "not indexed" for 10 minutes or more (every ask on it re-read and re-scanned all its files meanwhile). A connect now counts a pointer the registry did not hold before the run as changed, so it starts the index updater despite the 10-minute stamp (before, only a refresh that changed a generation did); and an ask that finds a searched set "not indexed" starts it too, as a generation mismatch already did. A burst of connects folds into one extra pass through the existing lock and rerun marker. Both stand down for 2 minutes after a failed pass and stay off in a replay and under pytest; a plain re-connect of an unchanged pointer still goes through the throttle. Test: `tests/test_index_newpointer.py`.
+
 ## 1.0.132 — 2026-10-06
 
 - A refresh no longer stops with a false "payment required" when a file's description mentions `HTTP 402`. The checked connect searched all of the judge call's output for `HTTP 402`, and that output echoes the full command including every claim, so a normal verdict looked like a payment refusal. It now ignores the echoed command line and the verdict rows, which are the only places claim text appears. Test: `skills/super-jev/tests/test_connect_checked.py`.

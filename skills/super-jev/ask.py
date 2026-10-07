@@ -2276,7 +2276,7 @@ def index_failed_lately(sdir: Path) -> bool:
 def index_after_ask(principal: str, sdir: Path) -> None:
     """After an ask run with the flag on: start the updater if a served file mismatched, the index was unusable,
     or the last start is older than INDEX_SPAWN_EVERY_SECS. One stamp file throttles it (a served-file mismatch or a
-    pointer the index holds at an older generation skips the wait: a refresh just made it, and every ask is slow until re-seeded)."""
+    pointer the index holds at an older generation, or not at all, skips the wait: a refresh just made it, and every ask is slow until re-seeded)."""
     st = _STAGE.get("index")
     if not st or os.environ.get("SUPERJEV_REPLAY") == "1":  # a replay's state is a throwaway copy: no background writer into it
         return
@@ -3149,7 +3149,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         _STAGE["index"] = {"on": True, "used": idx_read is not None, **({"fallback": why} if why else {})}
         if index_fb:  # some pointers are served by today's path, in this same ask
             _STAGE["index"]["fallback"] = {"pointers": [f"{n}: {r}" for n, r in list(index_fb.items())[:STAGE_LIST_CAP]]}
-            _STAGE["index_gen_mismatch"] = any(r.startswith("generation mismatch") for r in index_fb.values())
+            _STAGE["index_gen_mismatch"] = any(r.startswith(("generation mismatch", "not indexed")) for r in index_fb.values())
         panel = ipanel
     panel = panel if panel is not None else memory({"action": "panel", "principal": principal})
     view_pointers = {row["pointer"] for row in panel.get("pointers", [])

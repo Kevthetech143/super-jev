@@ -64,7 +64,9 @@ def fake_connect_memory(calls):
     between the preview and confirm calls)."""
 
     def fake(req):
-        calls.append(copy.deepcopy(req))
+        # the run reads the panel at its start and again at its end (the generation compare); only the first is recorded
+        if not (req.get("action") == "panel" and calls):
+            calls.append(copy.deepcopy(req))
         if req.get("action") == "panel":
             return {"pointers": []}
         if "reviewed" not in req:
