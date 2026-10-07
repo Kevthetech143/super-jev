@@ -28,9 +28,11 @@ ranks and file paths, never file contents. A --cases line is
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -214,10 +216,26 @@ def frozen_cases(path, checksum):
     return rows
 
 
-def gold_rank(ask, case: dict, pointers: list):
-    """1-based rank of the first gold file in the full word-search ranking, or None."""
+def reuses_items(ask) -> bool:
+    try:
+        return {"items", "index_path"} <= set(inspect.signature(ask.word_search).parameters) and hasattr(ask, "_load_word_index")
+    except (TypeError, ValueError):
+        return False
+
+
+def gold_rank(ask, case: dict, pointers: list, memo: dict = None):
+    """1-based rank of the first gold file in the full word-search ranking, or None. `memo` (one dict per build and
+    principal) keeps the per-file word items from the first case, so later cases do not re-tokenize the corpus."""
     ask._STAGE.clear()
-    ask.word_search(case["question"], pointers, limit=10 ** 6)
+    if memo is None or not reuses_items(ask):  # an older build without the index arguments: as before
+        ask.word_search(case["question"], pointers, limit=10 ** 6)
+    elif memo.get("items") is not None:
+        ask.word_search(case["question"], pointers, limit=10 ** 6, items=memo["items"])
+    else:  # first case: a throwaway index file collects the items, then they stay in memory
+        path = Path(memo["dir"]) / "word-index.json"
+        ask.word_search(case["question"], pointers, limit=10 ** 6, index_path=path)
+        if path.exists():
+            memo["items"] = ask._load_word_index(path)
     ranked = [p for _, p, _ in (ask._STAGE.get("word") or {}).get("ranked", [])]
     gold = {os.path.realpath(g) for g in case.get("gold") or []}
     return next((i + 1 for i, p in enumerate(ranked) if os.path.realpath(p) in gold), None)
@@ -291,7 +309,16 @@ def main(argv=None) -> int:
     pointers = {pr: base.my_pointers(pr) for pr in a.principal}
 
     slots = base.FALLBACK_FILES
-    ranks = [[gold_rank(m, c, pointers[c["principal"]]) for c in cases] for m in mods]
+    with tempfile.TemporaryDirectory(prefix="sj-scorecard-") as tmp:
+        memos = {}
+
+        def rank(i, m, c):
+            key = (i, c["principal"])
+            if key not in memos:
+                memos[key] = {"dir": tempfile.mkdtemp(dir=tmp)}
+            return gold_rank(m, c, pointers[c["principal"]], memos[key])
+
+        ranks = [[rank(i, m, c) for c in cases] for i, m in enumerate(mods)]
     read = lambda r: r is not None and r <= slots  # noqa: E731
     report = {"cases": len(cases), "excluded_no_gold": excluded_no_gold, "slots": slots, "builds": [str(b) for b in builds],
               "read": [sum(read(r) for r in rs) for rs in ranks], "rows": []}
