@@ -28,6 +28,7 @@ ranks and file paths, never file contents. A --cases line is
 import argparse
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import sys
@@ -214,10 +215,34 @@ def frozen_cases(path, checksum):
     return rows
 
 
-def gold_rank(ask, case: dict, pointers: list):
-    """1-based rank of the first gold file in the full word-search ranking, or None."""
+def reuses_items(ask) -> bool:
+    try:
+        return {"items", "index_path"} <= set(inspect.signature(ask.word_search).parameters) and hasattr(ask, "_index_item")
+    except (TypeError, ValueError):
+        return False
+
+
+def word_items(ask, pointers: list) -> dict:
+    """{path: word item} for every candidate file whose bytes still match their review: the items word_search would
+    build for itself on every call. An edited file is left out, so word_search treats it exactly as before."""
+    items = {}
+    for _, path, entry in ask.candidate_files(pointers):
+        got = ask.read_sha(path, None)
+        if got and got[1] == entry.get("sha256") and path not in items:
+            items[path] = ask._index_item(got[0].decode("utf-8", "replace"), got[1], True)
+    return items
+
+
+def gold_rank(ask, case: dict, pointers: list, memo: dict = None):
+    """1-based rank of the first gold file in the full word-search ranking, or None. `memo` (one dict per build and
+    principal) keeps the per-file word items, so cases after the first do not re-tokenize the corpus."""
     ask._STAGE.clear()
-    ask.word_search(case["question"], pointers, limit=10 ** 6)
+    if memo is None or not reuses_items(ask):  # an older build without the index arguments: as before
+        ask.word_search(case["question"], pointers, limit=10 ** 6)
+    else:
+        if "items" not in memo:
+            memo["items"] = word_items(ask, pointers)
+        ask.word_search(case["question"], pointers, limit=10 ** 6, items=memo["items"])
     ranked = [p for _, p, _ in (ask._STAGE.get("word") or {}).get("ranked", [])]
     gold = {os.path.realpath(g) for g in case.get("gold") or []}
     return next((i + 1 for i, p in enumerate(ranked) if os.path.realpath(p) in gold), None)
@@ -291,7 +316,9 @@ def main(argv=None) -> int:
     pointers = {pr: base.my_pointers(pr) for pr in a.principal}
 
     slots = base.FALLBACK_FILES
-    ranks = [[gold_rank(m, c, pointers[c["principal"]]) for c in cases] for m in mods]
+    memos = {}
+    ranks = [[gold_rank(m, c, pointers[c["principal"]], memos.setdefault((i, c["principal"]), {})) for c in cases]
+             for i, m in enumerate(mods)]
     read = lambda r: r is not None and r <= slots  # noqa: E731
     report = {"cases": len(cases), "excluded_no_gold": excluded_no_gold, "slots": slots, "builds": [str(b) for b in builds],
               "read": [sum(read(r) for r in rs) for rs in ranks], "rows": []}

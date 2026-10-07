@@ -115,3 +115,31 @@ def test_a_file_that_is_not_an_ask_module_is_refused_by_name(tmp_path, monkeypat
     with pytest.raises(SystemExit) as e:
         sc.main(["--principal", "me", "--no-harvest", "--ask", str(other)])
     assert e.value.code == 2 and "no word_search" in capsys.readouterr().err
+
+
+def test_gold_rank_indexes_each_file_once_per_principal_and_ranks_the_same(tmp_path, monkeypatch):
+    import hashlib
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ask_reuse", Path(sc.__file__).parent / "ask.py")
+    ask = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ask)
+    topics = ["tea", "coffee", "bread", "rice", "salt", "milk"]
+    files = {}
+    for pr in ("ann", "bob"):
+        for i, t in enumerate(topics):
+            f = tmp_path / f"{pr}-{t}.md"
+            f.write_text(f"# {t}\nNotes on {t} and {pr}: the {t} jar sits left of the stove, {topics[i - 1]} beside it.\n")
+            files.setdefault(pr, []).append(f)
+    cache = {pr: {str(f): {"sha256": hashlib.sha256(f.read_bytes()).hexdigest(), "pass": True} for f in fs}
+             for pr, fs in files.items()}
+    monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache[ptr])
+    cases = [(pr, {"question": f"where is the {t} jar beside the stove", "gold": [str(files[pr][i])]})
+             for pr in files for i, t in enumerate(topics[:3])]
+    plain = [sc.gold_rank(ask, c, [pr]) for pr, c in cases]
+    built = []
+    real = ask._index_item
+    monkeypatch.setattr(ask, "_index_item", lambda *a, **k: built.append(1) or real(*a, **k))
+    memos = {}
+    fast = [sc.gold_rank(ask, c, [pr], memos.setdefault(pr, {})) for pr, c in cases]
+    assert fast == plain and None not in plain
+    assert len(built) == sum(len(fs) for fs in files.values())  # the corpus once, not cases x corpus

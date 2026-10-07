@@ -9,6 +9,8 @@
 
 ## Unreleased
 
+- `scorecard.py` is much faster and ranks nothing differently. Before, every case re-read, hashed and tokenized every connected file, for each build, so `scorecard-all` took about 2.5 hours of CPU after a release. Now each build indexes a principal's files once and every case of that principal reuses them (a build whose `word_search` lacks `items`/`index_path` is graded as before). Tests: `skills/super-jev/tests/test_scorecard.py`.
+
 ## 1.0.134 — 2026-10-07
 
 - A newly connected set is indexed at once instead of staying "not indexed" for 10 minutes or more (every ask on it re-read and re-scanned all its files meanwhile). A connect now counts a pointer the registry did not hold before the run as changed, so it starts the index updater despite the 10-minute stamp (before, only a refresh that changed a generation did); and an ask that finds a searched set "not indexed" starts it too, as a generation mismatch already did. A burst of connects folds into one extra pass through the existing lock and rerun marker. Both stand down for 2 minutes after a failed pass and stay off in a replay and under pytest; a plain re-connect of an unchanged pointer still goes through the throttle. Test: `tests/test_index_newpointer.py`.
