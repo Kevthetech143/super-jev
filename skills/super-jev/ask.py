@@ -208,6 +208,7 @@ from prepare_bulk import (KIND_VALUES, STATUS_VALUES, DATE_RE, validate_labels, 
 import auto_heal  # noqa: E402
 import judges  # noqa: E402
 import toc_search  # noqa: E402
+import zoom  # noqa: E402
 import judge_profile  # noqa: E402
 import refresh_changed  # noqa: E402
 from connect_checked import PaymentRequired  # noqa: E402
@@ -700,6 +701,8 @@ def file_row(score, path: str, pointer: str, tier: str) -> dict:
     loc = ((_STAGE.get("checks") or {}).get(path) or {}).get("location")
     if loc:
         row["location"] = loc
+    elif why := ((_STAGE.get("checks") or {}).get(path) or {}).get("no_span"):
+        row["no_span"] = why
     n = ((_STAGE.get("checks") or {}).get(path) or {}).get("best_line")
     if isinstance(n, int) and n > 0:
         row["line"] = n
@@ -714,6 +717,8 @@ def show_file(f: dict) -> None:
     loc = f.get("location") or {}
     where = f"{f['path']}:{loc['start']}-{loc['end']}" if loc.get("unit") == "lines" else f['path']
     print(f"{score}  {where}  [{f['pointer']}]{note}")
+    if f.get("no_span"):
+        print(f"       {f['no_span']}")
 
 
 def unsearched_rows(ptrs, state_of: dict, healing: set) -> list:
@@ -1047,9 +1052,10 @@ def confirm_start(question: str, path: str):
     """(finished confirm_one result, None) when the file is never sent, else (None, what
     confirm_finish needs, including the navigation payload)."""
     try:
-        text = Path(path).read_text(errors="replace")
+        raw = Path(path).read_bytes()
     except OSError as e:
         return (None, False, f"cannot read {path}: {e.strerror or e}", None), None
+    text = raw.decode("utf-8", "replace")
     # The file may have changed since connect scanned it; never ship a secret to Jev. A secret-shaped
     # section is withheld (its lines blanked, line numbers kept); a file that cannot be made clean is held.
     text = clean_text(text, path)
@@ -1062,16 +1068,24 @@ def confirm_start(question: str, path: str):
     chunks = [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
     tlines = text.split("\n")
     extra = [toc_search.part_text(tlines, s_, e_) for _n, s_, e_ in tparts]
+    # A code file's outline (built by the zoom from the bytes it was connected at) is one more passage, only
+    # while the file still has those bytes; otherwise it is left out and the trace says why.
+    outl = (_STAGE.get("outlines") or {}).get(path)
+    if outl and hashlib.sha256(raw).hexdigest() != outl.get("sha256"):
+        _STAGE.setdefault("outline_ignored", {})[path] = OUTLINE_CHANGED
+        outl = None
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     base = len(chunks)
-    picked = pick_chunks(question, chunks) + list(range(base, base + len(extra)))
-    chunks = chunks + extra
+    picked = pick_chunks(question, chunks) + list(range(base, base + len(extra) + (1 if outl else 0)))
+    chunks = chunks + extra + ([outl["text"]] if outl else [])
+    outline_i = base + len(extra) if outl else None
     detail = _STAGE.setdefault("checks", {})[path] = {
         "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
         "wording": "claim-evidence" if _CLAIM["text"] else "source-evidence"}
     leaves = [{"id": f"c{i}", "label": label.format(n=i + 1),
-               "description": (f"{tparts[i - base][0]} (lines {tparts[i - base][1]}-{tparts[i - base][2]} of "
+               "description": (chunks[i] if i == outline_i else
+                               f"{tparts[i - base][0]} (lines {tparts[i - base][1]}-{tparts[i - base][2]} of "
                                f"{Path(path).name})\n{chunks[i]}" if i >= base else with_subject(chunks, i)),
                "sourceId": str(i)} for i in picked]
     payload = {"question": question, "limits": {"beamWidth": 5, "maxResults": 10},
@@ -1084,17 +1098,19 @@ def confirm_start(question: str, path: str):
     if payload_has_secret(payload):  # the question rides in the payload too
         return (None, partial, None, HELD_SECRET), None
     return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked,
-                  "detail": detail, "partial": partial, "tparts": tparts, "base": base}
+                  "detail": detail, "partial": partial, "tparts": tparts, "base": base, "outline_i": outline_i}
 
 TIE_MARGIN = 0.02  # candidate scores this close to the top are a tie
 
 
-def tightest_near_top(top_c, candidates, chunks: list, tparts: list, base: int):
+def tightest_near_top(top_c, candidates, chunks: list, tparts: list, base: int, outline_i=None):
     """The candidate to locate the answer: among those scoring within TIE_MARGIN of the top one, the one
     spanning the fewest lines (a named part, not the header passage that merely describes it). The judge
     scores a file's opening passage and the function it describes alike, and the first listed won the tie."""
     def span(c):
         i = int(c["sourceId"])
+        if i == outline_i:  # the outline locates nothing: it never wins a tie against a passage of the file
+            return 10 ** 9 + 1
         if base <= i < base + len(tparts):
             return tparts[i - base][2] - tparts[i - base][1] + 1
         return chunks[i].count("\n") + 1 if i < len(chunks) else 10 ** 9
@@ -1121,12 +1137,14 @@ def confirm_finish(question: str, ctx: dict, body, error):
     top_c = max((c for c in body.get("candidates") or [] if isinstance(c, dict)
                  and isinstance(c.get("score"), (int, float))), key=lambda c: c["score"], default=None)
     top_c = tightest_near_top(top_c, body.get("candidates"), ctx.get("chunks") or [], ctx.get("tparts") or [],
-                              ctx.get("base", len(chunks)))
+                              ctx.get("base", len(chunks)), ctx.get("outline_i"))
     if top_c and str(top_c.get("sourceId", "")).isdigit():
         detail["best_chunk"] = int(top_c["sourceId"])
         i_ = int(top_c["sourceId"])
         tp_, base_ = ctx.get("tparts") or [], ctx.get("base", len(chunks))
-        if base_ <= i_ < base_ + len(tp_):
+        if i_ == ctx.get("outline_i"):
+            detail["no_span"] = NO_SPAN_OUTLINE  # never widened to a part to make a hit
+        elif base_ <= i_ < base_ + len(tp_):
             name_, s_, e_ = tp_[i_ - base_]
             detail["location"] = {"unit": "lines", "start": s_, "end": e_, "part": name_}
             detail["best_line"] = s_ + best_line(question, [chunks[i_]], 0) - 1
@@ -1137,6 +1155,8 @@ def confirm_finish(question: str, ctx: dict, body, error):
             if home:
                 n_, s_, e_ = min(home, key=lambda x: x[2] - x[1])
                 detail["location"] = {"unit": "lines", "start": s_, "end": e_, "part": n_}
+            elif len(chunks) - len(tp_) - (ctx.get("outline_i") is not None) == 1:
+                detail["no_span"] = NO_SPAN_WHOLE
     if not _CLAIM["text"]:
         # Evidence mode scores each passage as requested property or required component.
         # The shared source floor admits leads, not proven answers; unlike the
@@ -2024,6 +2044,39 @@ def sha_of(path: str, reads):
             return known
     got = read_sha(path, reads)
     return got[1] if got else None
+
+
+ZOOM_FAILED = "zoom failed: {reason}; read list from word search only"
+NO_SPAN_OUTLINE = "no span: the outline passage scored best"
+NO_SPAN_WHOLE = "no span: the file was read whole and no named part scored best"
+OUTLINE_CHANGED = "outline ignored: file changed since outline"
+NAMED_IN_FILES = 20  # files the index lists for a file name, opened to find the line that names it
+
+
+def named_in(idx, path: str, pointers, who, allowed) -> list:
+    """[(path, line, text)]: searchable files (`allowed`) with a line naming this file, best bm25 first. The index's
+    word search lists them; each is opened to find the line. A line that scans as a secret is never returned."""
+    name = Path(path).name
+    toks = sorted(set(words(name)))
+    if idx is None or not pointers or not toks:
+        return []
+    try:
+        listed = idx.fts_top("body : (" + " AND ".join(f'"{t}"' for t in toks) + ")", pointers, NAMED_IN_FILES, sorted(who))
+    except sqlite3.Error:
+        return []
+    out = []
+    for c in listed:
+        if c == path or c not in allowed:
+            continue
+        try:
+            text = clean_text(Path(c).read_text(errors="replace"), c)
+        except OSError:
+            continue
+        for i, ln in enumerate((text or "").split("\n"), 1):
+            if name in ln and not has_secret(ln):
+                out.append((c, i, ln.strip()[:160]))
+                break
+    return out
 
 
 def toc_corpus(cands, reads, fb_paths=None) -> dict:
@@ -3552,27 +3605,35 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     wpaths = {p: ptr for _, p, ptr in found}
     to_check = routed[:CONFIRM_FILES] + list(wpaths)
     if toc_on:
-        # The TOC search picks the read list: a free shortlist from every file's table of contents,
-        # Jev's pick of files from their TOC pages, then the parts of those files. The word search's
-        # own hits ride along at every step. If it fails, the word search's list is read and the
-        # failure is named in the trace.
-        corpus = toc_corpus([c for c in (icands if idx_read else candidate_files(search_pointers, out_of_scope))
-                             if c[1] not in held_paths], reads, fb_paths if idx_read else None)
+        # The zoom picks the read list: folders, then files (from their table of contents), then parts, over
+        # every searchable file; Jev answers one yes/no per item and the word search's hits ride along at
+        # every level. If it fails, the word search's list is read and the reason is named in the outcome.
+        if idx_read:
+            everything = index_candidates(idx_read, ix_ptrs, out_of_scope) + [c for c in icands if c[1] in fb_paths]
+        else:
+            everything = candidate_files(search_pointers, out_of_scope)
+        corpus = toc_corpus([c for c in everything if c[1] not in held_paths], reads, fb_paths if idx_read else None)
         flush_stat_memo()
         tt0 = time.time()
-        for attempt in (1, 2):  # a crashed TOC stage is tried once more; the first crash may be a blip
+        zoom_hooks = {
+            "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
+                (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
+            "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits,
+            "mentions": lambda path: named_in(idx_read if fts_nums else None, path, ix_ptrs if idx_read else [],
+                                              who, corpus)}
+        for attempt in (1, 2):  # a crashed zoom is tried once more; the first crash may be a blip
             try:
-                tfiles, tparts, ttrace = toc_search.run(question, corpus, found, {
-                    "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
-                        (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
-                    "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits},
-                    cache_path=None if fts_nums else sdir / "toc-cache.json", **({"rows": ftocs} if fts_nums else {}))
+                tfiles, tparts, ttrace = zoom.run(
+                    question, corpus, found, zoom_hooks, cache_path=None if fts_nums else sdir / "toc-cache.json",
+                    **({"rows": lambda paths: {p: tr for _p, p, _e, _it, tr in idx_read.fts_rows(paths) if tr}}
+                       if fts_nums else {}))
                 _STAGE["toc_parts"] = tparts
-                # the files Jev's navigate routed (sets with no prepare-cache) ride along after the TOC pick
+                _STAGE["outlines"] = ttrace.pop("outlines", None) or {}
+                # the files Jev's navigate routed (sets with no local rows) ride along after the zoom's pick
                 tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
                 wpaths = {p: (corpus[p][0] if p in corpus else next(m[2] for m in merged if m[1] == p)) for p in tfiles}
                 to_check = list(tfiles)
-                for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties like routing's did
+                for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties
                     route.setdefault(tp_, ts_)
                 if attempt == 2:
                     ttrace["retried"] = True
@@ -3584,7 +3645,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                     continue
                 toc_error = ttrace["error"]
                 ttrace["retried"] = attempt == 2
-                ttrace["note"] = "the contents check failed; the word search's list was read instead"
+                ttrace["note"] = ZOOM_FAILED.format(reason=toc_error)
                 break
         ttrace["secs"] = round(time.time() - tt0, 1)
         _STAGE["toc"] = ttrace
@@ -3734,7 +3795,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                      "fate": fates.get(p) or ("already routed" if p in routed[:CONFIRM_FILES]
                                                               else "not read: past top %d" % FALLBACK_FILES)}
                                     for sc, p, _ptr in wsearch.get("ranked", [])]},
-            "toc": _STAGE.get("toc"),
+            "toc": {**(_STAGE.get("toc") or {}),
+                    **({"outline_ignored": _STAGE["outline_ignored"]} if _STAGE.get("outline_ignored") else {})},
             "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
             "cover_gate": _STAGE.get("cover_gate"),
             "timeout_rechecks": _STAGE.get("timeout_rechecks"),
@@ -3830,7 +3892,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         parts = ([f"{len(top)} file{'s' if len(top) != 1 else ''}{unconfirmed}"] if top else [])
         if skills:
             parts.append(f"{len(skills)} skill suggestion{'s' if len(skills) != 1 else ''}")
-        found = "; ".join(parts)
+        found = "; ".join(parts + ([ZOOM_FAILED.format(reason=toc_error)] if toc_error else []))
         _RESULT["saved_now"] = autosave(principal, question, sdir, win)
         return _done("found", found + (f"; partial: {sets} not searched" if n else ""))
     if dropped and not listed:
@@ -3841,7 +3903,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if failed or check_error or toc_error:
         why = (f"no match, and {len(failed)} set{'s' if len(failed) != 1 else ''} failed" if failed
                else "no match, and the content check failed" if check_error
-               else f"not found, but the contents check failed ({toc_error}), so this may be a miss; ask again")
+               else f"not found, but the {ZOOM_FAILED.format(reason=toc_error)}, so this may be a miss; ask again")
         key = bool(errors) and all(e["kind"] in KEY_KINDS for e in errors)
         rc = _done("error", why, f"{ask_py} --status", "key" if key else "none")
     elif stale_ptrs:

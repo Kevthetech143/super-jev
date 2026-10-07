@@ -121,13 +121,13 @@ def _toc_read_list_replays_old_routing(request, monkeypatch):
     search by listing those faked candidates (best first), so what they test (ranking, merging, filters
     and messages after the read list) is unchanged. test_toc_search.py and test_zoom_to_part.py
     exercise the real TOC search and are left alone."""
-    if request.module.__name__.split(".")[-1] in ("test_toc_search", "test_zoom_to_part") or request.node.get_closest_marker("real_toc"):
+    if request.module.__name__.split(".")[-1] in ("test_toc_search", "test_zoom_to_part", "test_zoom") or request.node.get_closest_marker("real_toc"):
         return
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    import toc_search
+    import zoom
 
-    def replay(question, corpus, hits, ask_hooks, cache_path=None):
+    def replay(question, corpus, hits, ask_hooks, cache_path=None, **_k):
         caller = sys._getframe(1)
         mem, principal = caller.f_globals["memory"], caller.f_locals.get("principal")
         rows = []
@@ -145,7 +145,7 @@ def _toc_read_list_replays_old_routing(request, monkeypatch):
         top = [(p, sc) for sc, p in sorted(rows, key=lambda r: -r[0])]
         return files, [], {"pick": {"top": top}}
 
-    monkeypatch.setattr(toc_search, "run", replay)
+    monkeypatch.setattr(zoom, "run", replay)
 
 # Tests that guard routing calls a question no longer makes. Skipped with the reason, never deleted.
 _DROPPED = "dropped on purpose: no routing calls on question path"

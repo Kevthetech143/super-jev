@@ -71,7 +71,7 @@ def _toc_read_list(monkeypatch, tmp_path, files, scores=None):
     # a set with a prepare-cache is searched through the TOC list; one without is routed by navigate
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {
         p: {"pass": True, "sha256": ask.sha256_file(Path(p))} for p, q in paths.items() if q == ptr})
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (list(paths), [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: (list(paths), [], {}))
     by_name = {str(tmp_path / "notes" / n): v for n, v in (scores or {}).items()}
     monkeypatch.setattr(ask, "confirm", lambda q, ps: (dict(by_name), set(), None, {}))
     return list(paths)
@@ -166,7 +166,7 @@ def test_lookup_logs_top_from_the_healthy_pointer_so_answer_can_still_auto_cache
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [("healthy", str(note), {"sha256": ask.sha256_file(note)})])
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True, "sha256": ask.sha256_file(note)}} if ptr == "healthy" else {"/x": {}})
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([str(note)], [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: ([str(note)], [], {}))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(note): 0.9}, set(), None, {}))
     sdir = tmp_path / "state"
     rc = ask.lookup("what color is the car?", "alice", sdir)
@@ -842,7 +842,7 @@ def test_lookup_asks_jev_nothing_at_routing_for_sets_with_a_prepare_cache(tmp_pa
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [])
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([], [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: ([], [], {}))
     for ptr in ("p1", "p2"):
         f = tmp_path / f"{ptr}.md"
         f.write_text("made up note\n")
@@ -1050,7 +1050,7 @@ def test_reviewed_dataset_copy_from_its_own_pointer_is_kept(tmp_path, monkeypatc
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
         ("skills", str(other), {"sha256": ask.sha256_file(other)}),
         ("brain-reviewed", str(copy), {"sha256": ask.sha256_file(copy)})])
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([str(other), str(copy)], [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: ([str(other), str(copy)], [], {}))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(copy): 0.99, str(other): 0.5}, set(), None, {}))
     rc = ask.lookup("when enqueue returns nothing was it sent?", "alice", tmp_path / "state")
 

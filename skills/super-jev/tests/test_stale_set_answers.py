@@ -71,7 +71,7 @@ def _setup(tmp_path, monkeypatch, changed=(), heal="cooldown"):
         return {"status": "error"}
     monkeypatch.setattr(ask, "memory", fake)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache if ptr == "notes" else {})
-    monkeypatch.setattr(ask.toc_search, "run", lambda q, corpus, hits, hooks, cache_path=None: (list(corpus), [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda q, corpus, hits, hooks, cache_path=None, **k: (list(corpus), [], {}))
     monkeypatch.setattr(ah, "reconnect_now", lambda ptr, principal, timeout=None: "changed")
     heals = []
     monkeypatch.setattr(ah, "maybe_heal", lambda *a, **k: heals.append(a) or heal)
@@ -181,7 +181,7 @@ def test_an_older_runtime_without_last_good_still_reports_the_stale_set(tmp_path
     tried, _, _, _, _ = _setup(tmp_path, monkeypatch, changed=[(lambda t, l: l, "# Log\nnew\n")])
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {})  # no prepare-cache: routed by navigate
     monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(0.9, str(tried), "notes")])  # the word search still reads its index
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no toc")))  # its list is read
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no toc")))  # its list is read
     real = ask.memory
     monkeypatch.setattr(ask, "memory", lambda req: real({k: v for k, v in req.items() if k != "lastGood"}))
     ask.lookup("have we already tried the cache warmer?", "primary", tmp_path / "s")
