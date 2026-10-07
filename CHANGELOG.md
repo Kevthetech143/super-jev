@@ -1,12 +1,13 @@
 # Changelog
 
-## Unreleased
-
-- The PR-merge check no longer blocks a true "PR N merged" because a same-numbered PR is open in a sibling repo. The evidence text carries no repo, so when it reports a mismatch the gate asks `gh pr view N --repo <repo>` and drops the block only if one says MERGED. The repos come from `SUPERJEV_GATE_PR_REPOS` (`keyword=owner/repo,keyword=owner/repo`); a keyword next to the number in the draft picks that repo, otherwise every listed repo is checked. Unset means no gh check and the old behaviour. A gh error or timeout (6 s) keeps the block. Tests: `skills/super-jev/tests/test_superjev.py`.
 
 ## 1.0.134 — 2026-10-07
 
 - A newly connected set is indexed at once instead of staying "not indexed" for 10 minutes or more (every ask on it re-read and re-scanned all its files meanwhile). A connect now counts a pointer the registry did not hold before the run as changed, so it starts the index updater despite the 10-minute stamp (before, only a refresh that changed a generation did); and an ask that finds a searched set "not indexed" starts it too, as a generation mismatch already did. A burst of connects folds into one extra pass through the existing lock and rerun marker. Both stand down for 2 minutes after a failed pass and stay off in a replay and under pytest; a plain re-connect of an unchanged pointer still goes through the throttle. Test: `tests/test_index_newpointer.py`.
+
+## Unreleased
+
+- The PR-merge check no longer blocks a true "PR N merged" because a same-numbered PR is open in a sibling repo. The evidence text carries no repo, so when it reports a mismatch the gate asks `gh pr view N --repo <repo>` and drops the block only if one says MERGED. The repos come from `SUPERJEV_GATE_PR_REPOS` (`keyword=owner/repo,keyword=owner/repo`); a keyword next to the number in the draft picks that repo, otherwise every listed repo is checked. Unset means no gh check and the old behaviour. A gh error or timeout (6 s) keeps the block. Tests: `skills/super-jev/tests/test_superjev.py`.
 
 ## 1.0.133 — 2026-10-06
 
