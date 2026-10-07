@@ -304,9 +304,16 @@ class Service:
 
     def _manifest(self, entry: dict[str, Any]) -> dict[str, Any]:
         """Hash and parse the same manifest bytes."""
-        raw = Path(entry['manifestPath']).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != entry['manifestSHA256']:
+        path, memo = entry['manifestPath'], _SHA_MEMO
+        key, known = memo.get(str(path)) if memo else (None, None)  # stat before the read
+        raw = Path(path).read_bytes()
+        if known and memo.key(str(path)) != key:
+            known, memo = None, None  # moved between stat and read: hash the bytes in hand
+        digest_ = known or hashlib.sha256(raw).hexdigest()
+        if digest_ != entry['manifestSHA256']:
             raise ValueError('stale manifest')
+        if memo and not known:
+            memo.put(str(path), key, digest_)
         return json.loads(raw)
 
     def snapshot(self, dataset: str) -> dict[str, Any]:

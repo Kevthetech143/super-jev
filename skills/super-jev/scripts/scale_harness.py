@@ -7,12 +7,13 @@ current code. The judge is a STUB: Node's fetch is replaced by an offline functi
 request instantly and appends one line to a counter file. No network, no key, no spend, and neither
 the live state dir nor the live install is touched (every path lives under the temp dir).
 
-Printed per ask: wall seconds, stub judge calls, and the files opened and hashed. "Opened" counts
+Printed per ask: wall seconds, stub judge calls, and the files opened and hashed, and the engine snapshots. "Opened" counts
 Python opens of files under the corpus; "hashed" counts hashlib sha256 digests (any bytes, every Python
 process the ask spawns, through a sitecustomize shim). Node-side reads are not counted.
 
     python3 skills/super-jev/scripts/scale_harness.py --scale 1
     python3 skills/super-jev/scripts/scale_harness.py --scale 10
+    python3 skills/super-jev/scripts/scale_harness.py --scale 10 --stale   # one stale pointer: hashed and snapshots stay flat
 """
 import argparse
 import json
@@ -61,7 +62,7 @@ import atexit, builtins, hashlib, io, json, os, socket
 ROOT = os.environ.get("SJ_COUNT_ROOT", "")
 OUT = os.environ.get("SJ_COUNT_OUT")
 if ROOT and OUT:
-    opened, hashed, net = [], [0], [0]
+    opened, hashed, net, snaps = [], [0], [0], [0]
     _open = io.open
     class counting_open:  # a class, not a function: Python 3.10 pathlib keeps io.open as a class attribute, and a function would bind as a method
         def __call__(self, file, mode="r", *a, **k):
@@ -74,6 +75,28 @@ if ROOT and OUT:
         hashed[0] += 1
         return _sha(*a, **k)
     hashlib.sha256 = counting_sha
+    import importlib.abc, sys
+    class SnapshotCount(importlib.abc.MetaPathFinder):  # counts the engine's Service.snapshot calls once `service` is imported
+        def find_spec(self, name, path, target=None):
+            if name != "service":
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(name)
+            sys.meta_path.insert(0, self)
+            if spec is None or spec.loader is None:
+                return None
+            load = spec.loader.exec_module
+            def exec_module(module):
+                load(module)
+                real = module.Service.snapshot
+                def snapshot(svc, *a, **k):
+                    snaps[0] += 1
+                    return real(svc, *a, **k)
+                module.Service.snapshot = snapshot
+            spec.loader.exec_module = exec_module
+            return spec
+    import importlib.util
+    sys.meta_path.insert(0, SnapshotCount())
     _connect = socket.socket.connect
     def no_net(self, address):
         if self.family != getattr(socket, "AF_UNIX", None) and not (isinstance(address, tuple) and address[0] == "127.0.0.1"):
@@ -83,7 +106,7 @@ if ROOT and OUT:
     socket.socket.connect = no_net
     def dump():
         with _open(OUT, "a") as f:
-            f.write(json.dumps({"opened": len(opened), "distinct": len(set(opened)), "hashed": hashed[0], "net": net[0]}) + "\\n")
+            f.write(json.dumps({"opened": len(opened), "distinct": len(set(opened)), "hashed": hashed[0], "snapshots": snaps[0], "net": net[0]}) + "\\n")
     atexit.register(dump)
 """
 
@@ -178,7 +201,7 @@ def connect(root: Path, state: Path, tmp: Path, env: dict) -> float:
     return time.time() - started
 
 
-def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=print) -> dict:
+def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=print, stale: bool = False) -> dict:
     tmp = Path(tempfile.mkdtemp(prefix="sj-scale-"))
     server = None
     try:
@@ -210,6 +233,13 @@ def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=pri
         ask_env = {**os.environ, **env, "SJ_COUNT_ROOT": str(corpus), "SJ_COUNT_OUT": str(count_out),
                    "PYTHONPATH": f"{shim}{os.pathsep}{os.environ.get('PYTHONPATH', '')}"}
         ask_env.pop("SUPERJEV_JUDGE", None)
+        if stale:  # index every pointer, then leave the first one stale: the ask serves it by the engine's path, the rest by the index
+            subprocess.run([sys.executable, str(SKILL / "ask.py"), "--principal", "scale", "--index-update"],
+                           capture_output=True, text=True, env=ask_env, cwd=str(tmp), timeout=3000, check=True)
+            from file_index import FileIndex
+            idx = FileIndex("scale", state / "scale" / "index.sqlite")
+            idx.mark_stale(sorted(p.name for p in corpus.iterdir())[0])
+            idx.close()
         rows = []
         for q, _word in QUESTIONS[:questions]:
             for p in (stub_count, count_out):
@@ -222,10 +252,11 @@ def run(files: int, questions: int = len(QUESTIONS), keep: bool = False, say=pri
             calls = len(stub_count.read_text().splitlines()) if stub_count.exists() else 0
             rows.append({"question": q, "seconds": round(secs, 2), "exit": out.returncode, "stub_calls": calls,
                          "opened": sum(p["opened"] for p in procs),
-                         "hashed": sum(p["hashed"] for p in procs), "network_attempts": sum(p["net"] for p in procs),
+                         "hashed": sum(p["hashed"] for p in procs),
+                         "snapshots": sum(p["snapshots"] for p in procs), "network_attempts": sum(p["net"] for p in procs),
                          "processes": len(procs)})
             say(f"ask {len(rows)}: {secs:.2f}s exit={out.returncode} stub_calls={calls} opened={rows[-1]['opened']} "
-                f"hashed={rows[-1]['hashed']} procs={len(procs)}")
+                f"hashed={rows[-1]['hashed']} snapshots={rows[-1]['snapshots']} procs={len(procs)}")
         return {"files": made, "connect_seconds": round(connect_s, 1), "asks": rows,
                 "median_ask_seconds": round(statistics.median(r["seconds"] for r in rows), 2) if rows else None,
                 "stub_calls": sum(r["stub_calls"] for r in rows),
@@ -244,12 +275,13 @@ def main() -> int:
     ap.add_argument("--scale", type=int, choices=(1, 10), default=1, help="1 = ~3,300 files, 10 = ~33,000")
     ap.add_argument("--files", type=int, default=None, help="override the file count (smoke runs)")
     ap.add_argument("--questions", type=int, default=len(QUESTIONS))
+    ap.add_argument("--stale", action="store_true", help="index everything, then leave one pointer stale (engine path for it alone)")
     ap.add_argument("--keep", action="store_true", help="leave the temp dir in place")
     a = ap.parse_args()
     if subprocess.run(["node", "--version"], capture_output=True).returncode:
         print("scale_harness: node is required for the stub judge", file=sys.stderr)
         return 2
-    result = run(a.files or BASE_FILES * a.scale, a.questions, a.keep)
+    result = run(a.files or BASE_FILES * a.scale, a.questions, a.keep, stale=a.stale)
     print(json.dumps(result, indent=1))
     return 0
 
