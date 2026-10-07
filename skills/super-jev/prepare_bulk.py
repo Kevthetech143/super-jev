@@ -2477,7 +2477,7 @@ def run(a) -> int:
     all_connected = True
     connected_n = failed_n = 0
     hits, total, misses, search_failed = 0, 0, [], ""
-    gens_before = pointer_generations(a.principals) if a.refresh else None  # one registry read each side of a refresh
+    gens_before = pointer_generations(a.principals)  # one registry read each side of a run
     for idx, part_files in enumerate(parts):
         pname = a.pointer if idx == 0 else f"{a.pointer}-{idx + 1}"
         result = connect_part(pname, a.principals, part_files, cache, shareable=a.shareable)
@@ -2531,7 +2531,7 @@ def run(a) -> int:
     keep_unrecorded(report, a)
     write_report(a.pointer, report)
     print(f"done in {time.time() - t0:.0f}s; report -> {CACHE_DIR / (a.pointer + '-report.json')}")
-    changed = gens_before is not None and any(g != gens_before.get(n) for n, g in pointer_generations(a.principals).items())
+    changed = any(n not in gens_before or g != gens_before[n] for n, g in pointer_generations(a.principals).items())  # a new pointer counts
     kick_index_updater(a.principals, bypass_throttle=changed)
     # A low judge score is a verdict the run reached, like a held file: exit 3, listed in held. A failed call stays a failure.
     _RESULT["held"] = list(_RESULT.get("held") or []) + low
