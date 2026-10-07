@@ -1369,38 +1369,41 @@ def _pr_repo_map():
     return out
 
 
-def _pr_claim_repos(draft_text):
-    """(pr_num, [owner/repo, ...]) for the draft's first "PR N merged" claim.
-    The repo comes from a configured keyword just before the number (else
-    just after); no keyword, or several, means every configured repo."""
+def _pr_claim_repo(draft_text):
+    """(pr_num, owner/repo) for the draft's first "PR N merged" claim, with
+    the repo set only when exactly one configured repo is named by a keyword
+    just before the number (else just after). No keyword, or keywords for
+    several repos, leaves it None: the claim is then too ambiguous to clear."""
     m = _PR_MERGED_CLAIM_RE.search(draft_text or "")
     repos = _pr_repo_map()
     if not m or not repos:
-        return None, []
+        return None, None
     for ctx in (draft_text[max(0, m.start() - 40):m.start()],
                 draft_text[m.start():m.end() + 40]):
-        found = [r for k, r in repos.items() if k in ctx.lower()]
+        found = {r for k, r in repos.items() if k in ctx.lower()}
         if found:
-            return m.group(1), found
-    return m.group(1), list(repos.values())
+            return m.group(1), (found.pop() if len(found) == 1 else None)
+    return m.group(1), None
 
 
-def _pr_merged_in_any_repo(draft_text):
-    """True when `gh pr view` says the claimed PR is MERGED in any candidate
-    repo. No configured repos, or any gh failure, counts as not confirmed, so
-    the original block stands."""
-    pr_num, repos = _pr_claim_repos(draft_text)
-    for repo in repos:
-        try:
-            proc = subprocess.run(["gh", "pr", "view", pr_num, "--repo", repo,
-                                   "--json", "state", "-q", ".state"],
-                                  capture_output=True, text=True, timeout=6,
-                                  env=safe_git_env())
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if proc.returncode == 0 and proc.stdout.strip().upper() == "MERGED":
-            return True
-    return False
+def _pr_merged_in_named_repo(draft_text, budget=None):
+    """True when `gh pr view` says the claimed PR is MERGED in the one repo
+    the draft names. No named repo, no time left in the Stop budget, or any
+    gh failure counts as not confirmed, so the original block stands."""
+    pr_num, repo = _pr_claim_repo(draft_text)
+    if not repo:
+        return False
+    timeout = 6 if budget is None else budget.timeout_for(6)
+    if timeout <= 0.5:
+        return False
+    try:
+        proc = subprocess.run(["gh", "pr", "view", pr_num, "--repo", repo,
+                               "--json", "state", "-q", ".state"],
+                              capture_output=True, text=True, timeout=timeout,
+                              env=safe_git_env())
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip().upper() == "MERGED"
 
 
 def _pr_state_reason_raw(draft_text, evidence_text, run_sink=None):
@@ -1447,12 +1450,12 @@ def _pr_state_reason_raw(draft_text, evidence_text, run_sink=None):
     return reasons[0] if reasons else None
 
 
-def _pr_state_reason(draft_text, evidence_text, run_sink=None):
+def _pr_state_reason(draft_text, evidence_text, run_sink=None, budget=None):
     """`_pr_state_reason_raw`, except a mismatch is dropped when the PR is
-    really merged in the repo the draft names (evidence text carries no repo,
-    so a same-numbered PR in the sibling repo could trip it)."""
+    really merged in the one repo the draft names (evidence text carries no
+    repo, so a same-numbered PR in a sibling repo could trip it)."""
     reason = _pr_state_reason_raw(draft_text, evidence_text, run_sink=run_sink)
-    if reason and reason.startswith("PR mismatch") and _pr_merged_in_any_repo(draft_text):
+    if reason and reason.startswith("PR mismatch") and _pr_merged_in_named_repo(draft_text, budget):
         return None
     return reason
 
@@ -11906,7 +11909,7 @@ def cmd_hook(a):
             det_block_reasons = [r for r in
                                  (det_reason,
                                   _pr_state_reason(text, _read_evidence_text(evidence),
-                                                   run_sink=_arm_runs))
+                                                   run_sink=_arm_runs, budget=budget))
                                  if r]
             # A derived fact the window already carries (any family —
             # written-file identity, removal, missing path, diffstat,
