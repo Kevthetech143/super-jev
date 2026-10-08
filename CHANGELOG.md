@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.138 — 2026-10-08
 
 - A part the zoom chose is no longer cut short. Before, a chosen part was cut near 3,500 characters (`PART_CHARS`), so an answer further down a long part (a long section of notes) never reached the judge. Now a part longer than one passage is split into passages the same way a long file is (`split_passages`); each passage keeps the part's name and its own line range, and the passages are picked within the same per-file read budget (`READ_CHARS`) as a long file's. Short parts are read exactly as before. `PART_CHARS` and `toc_search.part_text` are removed. Test: `skills/super-jev/tests/test_long_part.py`.
 
