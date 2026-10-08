@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+
+- A judge answer of HTTP 503 is now retried like 429 and 529. The judge sometimes answers 503 once and succeeds on the next call; before, 503 was a bad reply that was never retried, so an ask could mark a file `unchecked (content check failed)`. `overloaded_statuses` in `judge_profiles.json` is now `[429, 503, 529]` for both profiles; Node and Python read the same list and the existing bounded retry (`retry_attempts`, doubling delay) handles it. Tests: `test/judge-503.test.ts`, `skills/super-jev/tests/test_judge_door.py`.
 
 ## 1.0.136 — 2026-10-08
 

@@ -267,3 +267,17 @@ def test_http_400_is_toobig_only_when_the_body_says_so(body, kind, monkeypatch):
     with pytest.raises(kind) as e:
         judges.ask("def f(): pass", q)
     assert type(e.value) is kind
+
+
+def test_d_503_is_retried_like_429_and_529(monkeypatch):
+    jc = importlib.import_module("jev_client")
+    for name in ("typesafe-jev", "laya"):
+        assert judge_profile.load(name).overloaded_statuses == (429, 503, 529), name
+    prof = judge_profile.PROFILE
+    calls = []
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-not-a-key")
+    monkeypatch.setattr(jc.time, "sleep", lambda s: None)
+    monkeypatch.setattr(jc, "transport", lambda *a: calls.append(1) or (_ for _ in ()).throw(_Boom(503)))
+    with pytest.raises(errors.Overloaded):
+        judges.ask("s", {"c1": {"type": "choice", "instructions": "i", "criteria": {"A": "a"}}})
+    assert len(calls) == prof.retry_attempts
