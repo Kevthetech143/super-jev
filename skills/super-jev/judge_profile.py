@@ -52,7 +52,6 @@ class JudgeProfile:
     confirm_floor: float
     source_floor: float
     claim_content_floor: float
-    route_floor: float
     preflight_strong: float
     outcome_line: float
     # optional wire fields (defaults keep the Jev behaviour)
@@ -86,7 +85,7 @@ _INT = ("window_tokens", "max_questions_per_call", "max_parts", "file_ceiling_by
         "bytes_per_token", "input_cap_headroom", "call_headroom", "retry_attempts", "retry_first_delay_ms",
         "too_big_status")
 _FLOAT = ("input_usd_per_mtok", "confidence_line", "sure_line", "confirm_floor", "source_floor",
-          "claim_content_floor", "route_floor", "preflight_strong", "outcome_line")
+          "claim_content_floor", "preflight_strong", "outcome_line")
 _STR = ("kind", "key_env", "api_url", "model")
 
 

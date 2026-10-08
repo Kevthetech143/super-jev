@@ -3658,6 +3658,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                     "gone": vinfo["gone"][:STAGE_LIST_CAP]})
         finally:
             idx_read.close()
+    to_check = to_check[:READ_MAX]  # the ranked list, cut once and in order: what is checked is what confirm reads
     checked = set(to_check)
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
@@ -3771,11 +3772,11 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                    else "evidence-selected" if type(scores.get(p)) in (int, float)
                                    and SOURCE_FLOOR <= scores[p] <= 1
                                    else "dropped")}
-                     for p in checked}
+                     for p in to_check}
     tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed" if _CLAIM["text"] else "sources")
     try:  # trace detail is best-effort; it must never fail the ask
         wsearch = _STAGE.get("word") or {}
-        fates = {p: "read" for p in checked}
+        fates = {p: "read" for p in to_check}
         stages = {
             "cache": cache_stage,
             "routing_fallback": _STAGE.get("routing_fallback") or [],
@@ -3798,7 +3799,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                     for sc, p, _ptr in wsearch.get("ranked", [])]},
             "toc": {**(_STAGE.get("toc") or {}),
                     **({"outline_ignored": _STAGE["outline_ignored"]} if _STAGE.get("outline_ignored") else {})},
-            "read_list": to_check[:READ_MAX],
+            "read_list": to_check,
             "cover_gate": _STAGE.get("cover_gate"),
             "timeout_rechecks": _STAGE.get("timeout_rechecks"),
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}
