@@ -65,8 +65,9 @@ test('(c) a second profile with a different window, line, endpoint and key chang
   await assert.rejects(new Jev({ apiKey: 'k', fetch: fake, profile: second }).evaluate(request, signal()), Overloaded);
   assert.equal(url, 'https://judge.example/v1/ask');
   assert.equal(body.model, 'second-1');
-  // the same 503 is a plain bad reply for the default profile: only the profile decides
-  await assert.rejects(new Jev({ apiKey: 'k', fetch: fake }).evaluate(request, signal()), BadReply);
+  // a status outside the default list is a plain bad reply: only the profile decides
+  const fake500: typeof fetch = async () => new Response('{}', { status: 500 });
+  await assert.rejects(new Jev({ apiKey: 'k', fetch: fake500 }).evaluate(request, signal()), BadReply);
   // and the retry rule follows the profile's attempt count
   let calls = 0;
   await assert.rejects(retryOverloaded(async () => { calls++; throw new Overloaded('x'); }, signal(), { ...second, retryFirstDelayMs: 1 }), Overloaded);
@@ -166,7 +167,7 @@ test('a reply that says the judge cut the input is TooBig, no verdict', async ()
 test('error text names the active judge; Jev keeps its own wording', async () => {
   const q = { state: 's', questions: {} } as never;
   const fail = (status: number) => (async () => new Response('', { status })) as unknown as typeof fetch;
-  await assert.rejects(new Jev({ fetch: fail(503), profile: loadJudgeProfile('laya'), apiKey: '' }).evaluate(q, signal()), /Laya HTTP 503/);
+  await assert.rejects(new Jev({ fetch: fail(500), profile: loadJudgeProfile('laya'), apiKey: '' }).evaluate(q, signal()), /Laya HTTP 500/);
   await assert.rejects(new Jev({ apiKey: 'k', fetch: fail(500) }).evaluate(q, signal()), /Jev HTTP 500/);
   await assert.rejects(new Jev({ apiKey: 'k', fetch: fail(401) }).evaluate(q, signal()), /Jev HTTP 401/);
 });

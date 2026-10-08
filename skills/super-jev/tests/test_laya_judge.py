@@ -208,7 +208,7 @@ def test_error_text_names_the_active_judge(laya):
     import io
 
     def boom(*a):
-        raise urllib.error.HTTPError("http://x", 503, "err", {}, io.BytesIO(b""))
+        raise urllib.error.HTTPError("http://x", 500, "err", {}, io.BytesIO(b""))
     laya.transport = boom
     laya.time.sleep = lambda s: None
     with pytest.raises(errors.BadReply) as e:
