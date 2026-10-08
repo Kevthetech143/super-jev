@@ -1061,14 +1061,13 @@ def confirm_start(question: str, path: str):
     text = clean_text(text, path)
     if text is None:
         return (None, False, None, HELD_SECRET), None
-    tparts = (_STAGE.get("toc_parts") or {}).get(path) or []
     # One read rule: a file the zoom chose parts of is read as those parts, each with its line range, so the best
-    # one carries a location; the whole file is not sent beside them. A file with no named parts (or read from the
-    # word search's list when the zoom failed) is read as before: whole when short, else the passages the word
-    # overlap picks.
+    # one carries a location; the whole file is not sent beside them. A chosen part is never cut: one longer than a
+    # passage is split into passages the way a long file is, each with its own line range, and they are picked
+    # within READ_CHARS like a long file's. A file with no named parts (or read from the word search's list when the
+    # zoom failed) is read as before: whole when short, else the passages the word overlap picks.
+    tparts, extra = part_passages(text.split("\n"), (_STAGE.get("toc_parts") or {}).get(path) or [])
     chunks = [] if tparts else [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
-    tlines = text.split("\n")
-    extra = [toc_search.part_text(tlines, s_, e_) for _n, s_, e_ in tparts]
     # A code file's outline (built by the zoom from the bytes it was connected at) is one more passage, only
     # while the file still has those bytes; otherwise it is left out and the trace says why.
     outl = (_STAGE.get("outlines") or {}).get(path)
@@ -1078,7 +1077,8 @@ def confirm_start(question: str, path: str):
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     base = len(chunks)
-    picked = (pick_chunks(question, chunks) if chunks else []) + list(range(base, base + len(extra) + (1 if outl else 0)))
+    picked = ((pick_chunks(question, chunks) if chunks else []) + [base + i for i in (pick_chunks(question, extra) if extra else [])]
+              + ([base + len(extra)] if outl else []))
     chunks = chunks + extra + ([outl["text"]] if outl else [])
     outline_i = base + len(extra) if outl else None
     detail = _STAGE.setdefault("checks", {})[path] = {
@@ -1525,7 +1525,7 @@ def best_passage(path: str):
     d = (_STAGE.get("checks") or {}).get(path, {})
     loc = d.get("location") or {}
     if loc.get("unit") == "lines":  # the named part the content check scored best
-        return toc_search.part_text(text.split("\n"), loc["start"], loc["end"])
+        return "\n".join(text.split("\n")[loc["start"] - 1:loc["end"]])
     if len(text) <= WHOLE_FILE_CHARS:  # judged whole, so shown whole
         return text
     i = d.get("best_chunk") or 0
@@ -1651,6 +1651,19 @@ def split_passages(text: str) -> list:
         pos = min(ends, key=lambda i: abs(i - target)) if ends else target
         cuts.append(pos)
     return [text[a:b] for a, b in zip(cuts, cuts[1:] + [len(text)])]
+
+def part_passages(lines: list, parts: list):
+    """(parts, texts): each chosen part (name, start, end) whole, or, when longer than a passage, split by
+    split_passages into passages that keep the part's name and carry their own line ranges. Never cut short."""
+    out, texts = [], []
+    for name, s, e in parts:
+        at = s
+        for p in split_passages("\n".join(lines[s - 1:e])):
+            n = p.count("\n")
+            out.append((name, at, at + n - (1 if p.endswith("\n") else 0)))
+            texts.append(p)
+            at += n
+    return out, texts
 
 SUBJECT_CHARS, SUBJECT_SEP = 100, "\n...\n"
 
