@@ -55,7 +55,7 @@ search state, and its exit code matches:
 
 | Outcome | Meaning | Exit |
 |---|---|---|
-| `found` | at least one file or skill suggestion; the file count is ranked files only (skill suggestions have their own label, e.g. `5 files; 2 skill suggestions`); `partial: N sets not searched` if a set failed or is unprepared (a stale set served from its last refresh was searched: a separate `served from older catalog: N sets` line prints, not part of the OUTCOME line); `(unconfirmed: content check failed)` if the check failed and the files are routed but unread (still 0: read them) | 0 |
+| `found` | at least one file or skill suggestion; the file count is ranked files only (skill suggestions have their own label, e.g. `5 files; 2 skill suggestions`); `partial: N sets not searched` if a set failed or is unprepared (a stale set served from its last refresh was searched: a separate `served from older catalog: N sets` line prints, not part of the OUTCOME line); `(unconfirmed: content check failed)` if the check failed and some listed files are routed but unread (still 0: read them). Found needs one file the content check passed: unread files alone are listed as unchecked and the outcome is `not-found`, `partial: N files not checked` (or `error` when the content check itself failed) | 0 |
 | `not-found` | every set searched, no file. A file no searched set checked (label failed, held for a secret, too big, edited and not yet re-admitted, not UTF-8) never changes the outcome: it is named in `left_out` and in a `partial: N files not checked` note with `--status` | 1 |
 | `not-supported` | input outside the contract (empty or over-long question) | 2 |
 | `error` | no file, and execution failed | 3 |

@@ -197,12 +197,13 @@ def test_a_note_over_12000_chars_is_found_by_a_passage_past_char_12000(tmp_path,
 
 # --- review round 1 fixes ---------------------------------------------------------------------
 
-def test_found_with_a_failed_content_check_says_the_files_are_unconfirmed(tmp_path, monkeypatch):
+def test_a_failed_content_check_alone_is_an_error_never_found(tmp_path, monkeypatch):
+    # 2026-10-07: no file passed the check, so never "found"; the unread file is still listed to inspect
     _setup(tmp_path, monkeypatch, ["notes"], _cands)
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), "judge unreachable", {OK: ask.INCONCLUSIVE}))
     rc, lines = _ask(tmp_path)
-    assert rc == 0  # table: found is 0 (candidates exist); the line says they are unconfirmed
-    assert lines[0].startswith("OUTCOME: found") and "unconfirmed: content check failed" in lines[0]
+    assert rc == 3
+    assert lines[0].startswith("OUTCOME: error") and "content check failed" in lines[0]
     assert any(OK in ln and "inconclusive" in ln for ln in lines[1:])
     assert len(_outcomes(lines)) == 1
 

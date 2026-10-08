@@ -158,7 +158,7 @@ def test_budget_exhausted_is_inconclusive_and_keeps_the_file(tmp_path, monkeypat
     assert ask.confirm_one("q", str(f))[3] == ask.INCONCLUSIVE
     monkeypatch.setattr(ask, "memory", lambda req: {"pointers": ["p1"]} if req["action"] == "panel" else
                         {"status": "candidates", "candidates": [{"score": 0.8, "originalPath": str(f)}]})
-    assert ask.lookup("q", "me", tmp_path / "s") == 0
+    assert ask.lookup("q", "me", tmp_path / "s") == 1  # 2026-10-07: kept and listed, but never found alone
     out = capsys.readouterr().out
     assert str(f) in out and "inconclusive" in out and "no-candidates" not in out
 
