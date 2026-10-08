@@ -32,7 +32,6 @@ KEEP_FILES = 5           # files kept by Jev's pick
 KEEP_PARTS = 3           # parts per file kept by Jev
 BATCH_TOKENS = judge_profile.PROFILE.call_tokens  # one call's budget; the item text gets what the rest leaves
 BATCH_ITEMS = min(POOL_CAP, judge_profile.PROFILE.max_questions_per_call)  # a whole pick pool in one call
-PART_CHARS = 3500        # most text of one part the content check reads
 PAGE_CHARS = 500         # most text of one TOC page's detailed rows
 BIG_PAGE_CHARS = 1400    # a big file's page also names the parts that did not fit
 WINDOW = 15              # lines either side of the best-matching line
@@ -329,17 +328,6 @@ def page(path: str, entry: dict, toc: dict, callers: dict, rank=None) -> str:
 def toc_words(path: str, entry: dict, toc: dict) -> str:
     names = " ".join(f"{p['name']} {p.get('doc') or ''}" for p in (toc or {}).get("parts") or [])
     return f"{path} {entry.get('description') or ''} {entry.get('question') or ''} {(toc or {}).get('purpose') or ''} {names}"
-
-
-def part_text(lines: list, s: int, e: int) -> str:
-    """The part's text, cut at a line end near PART_CHARS."""
-    out, used = [], 0
-    for ln in lines[s - 1:e]:
-        if used + len(ln) + 1 > PART_CHARS and out:
-            break
-        out.append(ln)
-        used += len(ln) + 1
-    return "\n".join(out)
 
 
 # --- batched LIKELY / UNLIKELY scoring --------------------------------------------------------------

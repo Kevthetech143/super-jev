@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A part the zoom chose is no longer cut short. Before, a chosen part was cut near 3,500 characters (`PART_CHARS`), so an answer further down a long part (a long section of notes) never reached the judge. Now a part longer than one passage is split into passages the same way a long file is (`split_passages`); each passage keeps the part's name and its own line range, and the passages are picked within the same per-file read budget (`READ_CHARS`) as a long file's. Short parts are read exactly as before. `PART_CHARS` and `toc_search.part_text` are removed. Test: `skills/super-jev/tests/test_long_part.py`.
+
 ## 1.0.137 — 2026-10-08
 
 - A judge answer of HTTP 503 is now retried like 429 and 529. The judge sometimes answers 503 once and succeeds on the next call; before, 503 was a bad reply that was never retried, so an ask could mark a file `unchecked (content check failed)`. `overloaded_statuses` in `judge_profiles.json` is now `[429, 503, 529]` for both profiles; Node and Python read the same list and the existing bounded retry (`retry_attempts`, doubling delay) handles it. Tests: `test/judge-503.test.ts`, `skills/super-jev/tests/test_judge_door.py`.
