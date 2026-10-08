@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import toc_search  # noqa: E402
+import zoom  # noqa: E402
 
 PY = '''"""Lantern shop inventory helpers."""
 
@@ -133,7 +134,7 @@ def test_search_shortlists_picks_by_toc_and_reads_located_parts(monkeypatch):
                             for k, v in state["items"].items()}}
 
     monkeypatch.setattr(toc_search.judges, "ask", ask_judge)
-    files, chosen, trace = toc_search.run("when are wicks reordered", corpus, [], _fake_ask(texts))
+    files, chosen, trace = zoom.run("when are wicks reordered", zoom.MemoryStore(corpus, texts.get), [], _fake_ask(texts))
     assert files[0] == "/s/stock.py"
     assert "/s/stock.py" in chosen
     assert all(isinstance(s, int) and isinstance(e, int) for _n, s, e in chosen["/s/stock.py"])
@@ -147,7 +148,7 @@ def test_word_search_hits_ride_along_and_best_line_window_is_read(monkeypatch):
     corpus = {p: ("ptr", {"sha256": p, "description": ""}) for p in texts}
     monkeypatch.setattr(toc_search.judges, "ask", lambda state, qs, timeout=90: {
         "answers": {k: {"probabilities": {"LIKELY": 0.5}} for k in state["items"]}})
-    files, chosen, _ = toc_search.run("descaler code", corpus, [(0.5, "/s/log.md", "ptr")], _fake_ask(texts))
+    files, chosen, _ = zoom.run("descaler code", zoom.MemoryStore(corpus, texts.get), [(0.5, "/s/log.md", "ptr")], _fake_ask(texts))
     assert "/s/log.md" in files
     names = [n for n, _s, _e in chosen["/s/log.md"]]
     assert "<best-matching lines>" in names

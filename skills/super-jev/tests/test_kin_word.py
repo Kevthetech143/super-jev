@@ -85,7 +85,7 @@ def test_index_moves_the_person_without_a_version_bump(tmp_path, monkeypatch):
     sync(sdir)
     idx = FileIndex(PRINCIPAL, sdir / "index.sqlite")
     assert person()[str(root / NORA)] == "nora" and person()[str(root / DADS)] == "gustavo"
-    assert idx.fts_usable(ask.WORD_INDEX_VERSION)[0]
+    assert idx.fts_usable(ask.FTS_VERSION)[0]
 
 
 @pytest.mark.parametrize("fts", [False, True])

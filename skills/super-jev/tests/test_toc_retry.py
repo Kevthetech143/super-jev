@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_stale_set_answers as base  # noqa: E402
 
 ask = base.ask
-REAL_TOC_RUN = ask.toc_search.run
+REAL_TOC_RUN = ask.zoom.run
 pytestmark = pytest.mark.real_toc
 Q = "have we already tried the cache warmer?"
 
@@ -35,7 +35,7 @@ def _stub_judge(monkeypatch, failures, error=RuntimeError("judge hiccup")):
 
 def _lookup(tmp_path, monkeypatch, capsys, confirm_score, word_hit=False):
     tried = base._setup(tmp_path, monkeypatch)
-    monkeypatch.setattr(ask.toc_search, "run", REAL_TOC_RUN)
+    monkeypatch.setattr(ask.zoom, "run", REAL_TOC_RUN)
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({p: confirm_score for p in ps}, set(), None, {}))
     monkeypatch.setattr(ask, "word_search", lambda *a, **k: [(0.9, str(tried[0]), "notes")] if word_hit else [])
     rc = ask.lookup(Q, "primary", tmp_path / "s")
@@ -46,7 +46,7 @@ def test_a_toc_crash_is_retried_once_and_the_retry_answers_normally(tmp_path, mo
     calls = _stub_judge(monkeypatch, failures=1)
     rc, out = _lookup(tmp_path, monkeypatch, capsys, 0.95)
     assert len(calls) == 2 and rc == 0
-    assert out.startswith("OUTCOME: found") and "contents check failed" not in out
+    assert out.startswith("OUTCOME: found") and "zoom failed" not in out
     assert ask._STAGE["toc"].get("retried") is True and "error" not in ask._STAGE["toc"]
 
 
@@ -54,7 +54,7 @@ def test_a_toc_that_always_crashes_never_reads_as_a_clean_not_found(tmp_path, mo
     calls = _stub_judge(monkeypatch, failures=None)
     rc, out = _lookup(tmp_path, monkeypatch, capsys, 0.0)
     assert len(calls) == 2  # one try, one retry
-    assert "the contents check failed (RuntimeError: judge hiccup)" in out and "may be a miss" in out
+    assert "zoom failed: RuntimeError: judge hiccup; read list from word search only" in out and "may be a miss" in out
     assert not out.startswith("OUTCOME: not-found")
     assert rc == ask.OUTCOME_EXIT["error"]  # the same exit the content-check failure already uses
 
@@ -63,6 +63,7 @@ def test_a_failed_toc_with_confirmed_files_answers_as_usual_with_a_trace_note(tm
     _stub_judge(monkeypatch, failures=None)
     rc, out = _lookup(tmp_path, monkeypatch, capsys, 0.95, word_hit=True)
     assert rc == 0 and out.startswith("OUTCOME: found")
+    assert "zoom failed: RuntimeError: judge hiccup; read list from word search only" in out.splitlines()[0]
     assert ask._STAGE["toc"]["error"].startswith("RuntimeError") and ask._STAGE["toc"]["note"]
 
 

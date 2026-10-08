@@ -48,7 +48,9 @@ class World:
         self.nav, self.panel, self.sent = nav, {"pointers": [{"pointer": "notes"}]}, []
         monkeypatch.setattr(ask, "memory", self._memory)
         monkeypatch.setattr(ask, "word_search", lambda *a, **k: [])
-        monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache if ptr == "notes" else {})
+        # The zoom lists a set's files from its local rows, so routing (and its failure or stale answer) is asked
+        # only for a set that has none: the error and stale worlds give 'notes' no local rows.
+        monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache if ptr == "notes" and nav not in ("error", "stale") else {})
         monkeypatch.setattr(ask, "confirm", lambda q, ps: ({p: 0.95 for p in ps}, set(), None, {}))
         monkeypatch.setattr(ask, "claim_cache_put", lambda *a: None)
         monkeypatch.setattr(ask, "state_dir", lambda p: self.sdir)

@@ -32,7 +32,7 @@ def _run(tmp_path, monkeypatch, panel):
     monkeypatch.setattr(ask, "memory", fake_memory)
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [("p1", str(note), {"sha256": sha})])
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: {str(note): {"pass": True, "sha256": sha}})
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: ([str(note)], [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: ([str(note)], [], {}))
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({str(note): 0.9}, set(), None, {}))
     monkeypatch.setattr(ask, "run_gate", lambda claim, path, passage=None: ("CLEAN", 0.93))
     ask.lookup("q", "alice", tmp_path / "state")

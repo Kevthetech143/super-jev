@@ -52,7 +52,7 @@ FAKE = '''
 import os
 from pathlib import Path
 from types import SimpleNamespace
-FALLBACK_FILES = 1
+WORD_HITS = 1
 _STAGE = {}
 STAGE_LIST_CAP = 10
 prepare_bulk = SimpleNamespace(CACHE_DIR=Path("."))

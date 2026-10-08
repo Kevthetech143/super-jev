@@ -57,5 +57,5 @@ def test_note_holding_the_answer_is_read_when_routing_offers_only_unrelated_file
 def test_routed_files_are_still_read(tmp_path, monkeypatch, capsys):
     note, skills, read = _setup(tmp_path, monkeypatch)
     ask.lookup(QUESTION, "me", tmp_path / "state")
-    assert [str(p) for p in skills[:ask.CONFIRM_FILES]] == read[:ask.CONFIRM_FILES]
-    assert len(read) <= ask.CONFIRM_FILES + ask.FALLBACK_FILES
+    assert [str(p) for p in skills[:ask.zoom.KEEP_FILES]] == read[:ask.zoom.KEEP_FILES]
+    assert len(read) <= ask.READ_MAX

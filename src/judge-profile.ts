@@ -50,7 +50,6 @@ export type JudgeProfile = {
   confirmFloor: number;
   sourceFloor: number;
   claimContentFloor: number;
-  routeFloor: number;
   preflightStrong: number;
   outcomeLine: number;
   maxConfidenceAbovePeak: number;
@@ -66,7 +65,7 @@ type Raw = {
   file_ceiling_bytes: number; gate_window_tokens: number; bytes_per_token: number;
   input_cap_headroom: number; call_headroom: number; overloaded_statuses: number[]; retry_attempts: number;
   retry_first_delay_ms: number; too_big_status: number; confidence_line: number; sure_line: number;
-  confirm_floor: number; source_floor: number; claim_content_floor: number; route_floor: number;
+  confirm_floor: number; source_floor: number; claim_content_floor: number;
   preflight_strong: number; outcome_line: number; max_confidence_above_peak: number;
 };
 
@@ -90,7 +89,7 @@ export function loadJudgeProfile(name?: string, file: URL | string = PROFILES_UR
     inputCapHeadroom: p.input_cap_headroom, callHeadroom: p.call_headroom, overloadedStatuses: [...p.overloaded_statuses],
     retryAttempts: p.retry_attempts, retryFirstDelayMs: p.retry_first_delay_ms, tooBigStatus: p.too_big_status,
     confidenceLine: p.confidence_line, sureLine: p.sure_line, confirmFloor: p.confirm_floor, sourceFloor: p.source_floor,
-    claimContentFloor: p.claim_content_floor, routeFloor: p.route_floor, preflightStrong: p.preflight_strong,
+    claimContentFloor: p.claim_content_floor, preflightStrong: p.preflight_strong,
     outcomeLine: p.outcome_line, maxConfidenceAbovePeak: p.max_confidence_above_peak,
     inputCapTokens, callTokens: inputCapTokens - p.call_headroom
   };

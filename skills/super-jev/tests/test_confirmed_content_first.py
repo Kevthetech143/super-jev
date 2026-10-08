@@ -32,7 +32,7 @@ def _run(tmp_path, question, files, candidates, scores):
     listed = [c["originalPath"] for c in sorted(candidates, key=lambda c: -c["score"])]
     monkeypatch.setattr(ask, "candidate_files", lambda *a, **k: [
         ("p1", p_, {"sha256": ask.sha256_file(Path(p_))}) for p_ in files])
-    monkeypatch.setattr(ask.toc_search, "run", lambda *a, **k: (listed, [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda *a, **k: (listed, [], {}))
     monkeypatch.setattr(ask, "memory", lambda r: {"status": "miss"} if r["action"] == "cached" else
                         {"pointers": ["p1"]} if r["action"] == "panel" else
                         {"status": "candidates", "candidates": candidates})

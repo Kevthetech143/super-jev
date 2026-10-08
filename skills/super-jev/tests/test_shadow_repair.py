@@ -35,7 +35,7 @@ def bundle(tmp_path):
     code='''from pathlib import Path
 from types import SimpleNamespace
 prepare_bulk=SimpleNamespace(CACHE_DIR=Path('.'))
-FALLBACK_FILES=1
+WORD_HITS=1
 _STAGE={}
 def word_search(question,pointers,limit=5):
     text=Path(%r).read_bytes()
@@ -88,7 +88,7 @@ def test_source_scope_excludes_vaults_and_credentials():
 def test_read_slot_expansion_is_explicit_and_needs_paid_evidence(tmp_path):
     root,pin,note=bundle(tmp_path)
     candidate=tmp_path/'candidate';candidate.mkdir()
-    code=(root/'baseline'/'ask.py').read_text().replace('FALLBACK_FILES=1','FALLBACK_FILES=2')
+    code=(root/'baseline'/'ask.py').read_text().replace('WORD_HITS=1','WORD_HITS=2')
     (candidate/'ask.py').write_text(code)
     r=sr.compare(root,pin,candidate/'ask.py',tmp_path/'result')
     assert r['decision']=='REJECT'
