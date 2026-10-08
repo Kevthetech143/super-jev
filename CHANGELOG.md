@@ -1,17 +1,19 @@
 # Changelog
 
 
+## 1.0.136 — 2026-10-08
+
+- **One read rule: the zoom read path.** What an ask reads now comes from one rule for questions and claims: folders, then files, then parts of files. The index updater stores each indexed file's folder and one row per folder, set and person, so an ask reads only the folder rows of the sets it searches, a word-table shortlist per kept folder, and the table-of-contents rows of the files it shortlists. Each level asks the judge one yes/no per item, and word-search hits ride along at every level. A folder's cheap word score is fused with the judge's, in equal parts. Code files that are kept also get an outline passage (purpose, parts, call sites, connected files that name it, each with `path:line`), judged with the file while its bytes match. When the zoom cannot run, the ask falls back to the word-search list and names the reason on its output: `zoom failed`, `no span` or `outline ignored`. A judge batch that fails is asked once more (that batch only) instead of re-running the whole zoom. A question or claim that holds a secret is refused before any search and never sent anywhere (a claim exits 2). The cut to `READ_MAX` files is made in ranked order. The old read paths are retired (the routed ride-along, whole-file chunks for files read as parts, `route_floor`); `scorecard.py` and `shadow_repair.py` read the count through `scorecard.read_slots`. Tests: `skills/super-jev/tests/test_zoom.py`, `test_zoom_index.py`, `test_toc_retry.py`, `test_toc_search.py`.
+
+- An ask whose only files were never read (their content check failed or did not finish) no longer says `found`. Found needs at least one file the content check passed; the unread files are still listed as `unchecked` to inspect. An unfinished check gives `not-found` with `partial: N files not checked (N files not read (content check failed or unfinished))`; a failed check gives `error - no match, and the content check failed`, as it already did when no file was listed. Before, an absent question could report such a file as `found (unconfirmed: content check failed)`. `--claim` exit codes are unchanged. Test: `skills/super-jev/tests/test_absent_unchecked.py`.
+
+- `scorecard.py` is much faster and ranks nothing differently. Before, every case re-read, hashed and tokenized every connected file, for each build, so `scorecard-all` took about 2.5 hours of CPU after a release. Now each build indexes a principal's files once and every case of that principal reuses them (a build whose `word_search` lacks `items`/`index_path` is graded as before). Tests: `skills/super-jev/tests/test_scorecard.py`.
+
 ## 1.0.135 — 2026-10-07
 
 - The PR-merge check no longer blocks a true "PR N merged" because a same-numbered PR is open in a sibling repo. The evidence text carries no repo, so when it reports a mismatch the gate asks `gh pr view N --repo <repo>` and drops the block only if one says MERGED. The repos come from `SUPERJEV_GATE_PR_REPOS` (`keyword=owner/repo,keyword=owner/repo`); a keyword next to the number in the draft picks that repo; no keyword, or keywords for more than one repo, keeps the block (no gh call). Unset means no gh check and the old behaviour. A gh error or timeout (6 s or what is left of the Stop budget) keeps the block. Tests: `skills/super-jev/tests/test_superjev.py`.
 
 - An ask's local work no longer grows with the number of connected pointers when one of them is stale or not indexed. Before, one such pointer made the engine snapshot every pointer (each re-read and re-hashed its manifest and re-checked every source: about 1.4-1.9 s with 165 pointers). Now the index rows serve the indexed pointers and only the fallback pointers are snapshotted (the engine's `panel` action takes an optional `names` list), and the engine remembers a manifest's sha by the file's stat key, like the source files. Tests: `skills/super-jev/tests/test_panel_flat.py`; `scripts/scale_harness.py --stale` reports snapshots per ask.
-
-## Unreleased
-
-- An ask whose only files were never read (their content check failed or did not finish) no longer says `found`. Found needs at least one file the content check passed; the unread files are still listed as `unchecked` to inspect. An unfinished check gives `not-found` with `partial: N files not checked (N files not read (content check failed or unfinished))`; a failed check gives `error - no match, and the content check failed`, as it already did when no file was listed. Before, an absent question could report such a file as `found (unconfirmed: content check failed)`. `--claim` exit codes are unchanged. Test: `skills/super-jev/tests/test_absent_unchecked.py`.
-
-- `scorecard.py` is much faster and ranks nothing differently. Before, every case re-read, hashed and tokenized every connected file, for each build, so `scorecard-all` took about 2.5 hours of CPU after a release. Now each build indexes a principal's files once and every case of that principal reuses them (a build whose `word_search` lacks `items`/`index_path` is graded as before). Tests: `skills/super-jev/tests/test_scorecard.py`.
 
 ## 1.0.134 — 2026-10-07
 
