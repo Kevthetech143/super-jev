@@ -40,6 +40,10 @@ def _corpus(texts, ptr="shop"):
     return {p: (ptr, {"sha256": "sha-" + p, "description": ""}) for p in texts}
 
 
+def _store(texts, ptr="shop"):
+    return zoom.MemoryStore(_corpus(texts, ptr), texts.get)
+
+
 def _judge(rule):
     """A stub judge: LIKELY when rule(item text) is true. Records every item sent."""
     sent = []
@@ -53,7 +57,7 @@ def _judge(rule):
 def test_small_folders_list_under_their_parent_but_never_above_the_sets_top():
     corpus = _corpus({"/c/shop/a.md": "", "/c/shop/b.md": "", "/c/shop/x/one.md": "",
                       **{f"/c/shop/big/n{i}.md": "" for i in range(6)}})
-    unit = zoom.folder_units(corpus)
+    unit = zoom.folder_units({p: ptr for p, (ptr, _e) in corpus.items()})
     assert unit["/c/shop/x/one.md"] == "/c/shop"     # a folder of one file rolls up
     assert unit["/c/shop/big/n0.md"] == "/c/shop/big"  # a folder with enough files stays
     assert unit["/c/shop/a.md"] == "/c/shop"          # the set's top folder is the ceiling
@@ -65,7 +69,7 @@ def test_folders_are_asked_first_and_an_unpicked_folder_is_never_read(monkeypatc
     texts.update({f"/c/bells/n{i}.md": "# Bells\nbell notes\n" for i in range(4)})
     judge, sent = _judge(lambda item: "ring" in item)
     monkeypatch.setattr(toc_search.judges, "ask", judge)
-    files, _chosen, trace = zoom.run("where is the shop bell rung", _corpus(texts), [], _hooks(texts))
+    files, _chosen, trace = zoom.run("where is the shop bell rung", _store(texts), [], _hooks(texts))
     assert trace["folders"]["listed"] == 13 and trace["folders"]["calls"] >= 1
     assert trace["folders"]["top"][0][0] == "/c/bells"
     assert files[0] == "/c/bells/ring.py"
@@ -77,7 +81,7 @@ def test_a_word_search_hit_keeps_its_folder_and_its_file(monkeypatch):
     texts = {f"/c/f{k}/n{i}.md": f"# Note\ntext {k}\n" for k in range(12) for i in range(5)}
     judge, _ = _judge(lambda item: False)
     monkeypatch.setattr(toc_search.judges, "ask", judge)
-    files, _c, trace = zoom.run("anything", _corpus(texts), [(0.8, "/c/f7/n3.md", "shop")], _hooks(texts))
+    files, _c, trace = zoom.run("anything", _store(texts), [(0.8, "/c/f7/n3.md", "shop")], _hooks(texts))
     assert "/c/f7" in trace["folders"]["net_added"]
     assert "/c/f7/n3.md" in files
 
@@ -86,7 +90,7 @@ def test_few_folders_ask_jev_nothing_at_level_one(monkeypatch):
     texts = {"/c/shop/ring.py": BELL, "/c/shop/notes.md": "# Bell\nrung at noon\n"}
     judge, sent = _judge(lambda item: "ring" in item)
     monkeypatch.setattr(toc_search.judges, "ask", judge)
-    _f, _c, trace = zoom.run("when is the bell rung", _corpus(texts), [], _hooks(texts))
+    _f, _c, trace = zoom.run("when is the bell rung", _store(texts), [], _hooks(texts))
     assert trace["folders"] == {"listed": 1, "calls": 0}
     assert not any("/ (" in v for st in sent for v in st["items"].values())
 
@@ -97,7 +101,7 @@ def test_a_code_file_gets_an_outline_with_a_source_line_for_every_fact(monkeypat
     monkeypatch.setattr(toc_search.judges, "ask", judge)
     named = [("/c/shop/hours.md", 7, "the closing job runs bell.py at five"),
              ("/c/shop/keys.md", 3, "bell.py key SECRET-123")]
-    _f, _c, trace = zoom.run("what rings the bell", _corpus(texts), [], _hooks(texts, lambda p: named))
+    _f, _c, trace = zoom.run("what rings the bell", _store(texts), [], _hooks(texts, lambda p: named))
     out = trace["outlines"]["/c/shop/bell.py"]
     assert out["sha256"] == "sha-/c/shop/bell.py"
     text = out["text"]
@@ -162,6 +166,6 @@ def test_kept_folders_take_turns_so_a_big_folder_cannot_crowd_out_a_small_one(mo
     texts["/c/code/ring.py"] = BELL
     judge, sent = _judge(lambda item: "ring" in item)
     monkeypatch.setattr(toc_search.judges, "ask", judge)
-    files, _c, trace = zoom.run("which bell", _corpus(texts), [], _hooks(texts))
+    files, _c, trace = zoom.run("which bell", _store(texts), [], _hooks(texts))
     assert trace["pick"]["pool"] == zoom.POOL_CAP
     assert files[0] == "/c/code/ring.py"

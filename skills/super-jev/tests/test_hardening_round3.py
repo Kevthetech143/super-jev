@@ -132,7 +132,7 @@ def test_content_check_asks_for_the_answer_not_the_topic(tmp_path, monkeypatch):
 
 def test_files_past_the_checked_few_are_not_kept_unread(tmp_path, monkeypatch, capsys):
     paths = []
-    for i in range(ask.CONFIRM_FILES + 1):
+    for i in range(ask.READ_MAX + 1):
         paths.append(tmp_path / f"f{i}.md")
         paths[-1].write_text("x")
     cands = [{"score": 0.9 - i / 100, "originalPath": str(p)} for i, p in enumerate(paths)]
@@ -141,7 +141,7 @@ def test_files_past_the_checked_few_are_not_kept_unread(tmp_path, monkeypatch, c
     monkeypatch.setattr(ask, "confirm", lambda q, ps: ({}, set(), None, {}))
     ask.lookup("absent?", "me", tmp_path / "s")
     out = capsys.readouterr().out
-    assert "OUTCOME: not-found" in out and "f5.md" not in out
+    assert "OUTCOME: not-found" in out and f"f{ask.READ_MAX}.md" not in out
 
 
 def test_odd_candidate_does_not_crash(tmp_path, monkeypatch):

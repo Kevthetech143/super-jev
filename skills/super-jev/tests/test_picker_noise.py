@@ -65,7 +65,7 @@ def test_word_search_fills_every_slot_after_skipping_routed_files(tmp_path, monk
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: _cache(files))
     top = [p for _, p, _ in ask.word_search("knee brace size", ["p1"])]
     got = [p for _, p, _ in ask.word_search("knee brace size", ["p1"], skip={top[0]})]
-    assert len(got) == ask.FALLBACK_FILES and top[0] not in got
+    assert len(got) == ask.WORD_HITS and top[0] not in got
 
 
 # 3. secret scan: a keyword holds a file when a literal value follows: a digit or symbol in it, a quoted word, or a

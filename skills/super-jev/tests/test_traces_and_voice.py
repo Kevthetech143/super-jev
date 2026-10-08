@@ -465,13 +465,13 @@ def test_trace_records_stages_and_trace_show_prints_where_a_file_dropped(tmp_pat
     st = read_jsonl(tmp_path / "traces.jsonl")[-1]["stages"]
     assert st["cache"] == {"result": "cache-miss", "checked": 1}
     assert st["routing"]["p1"]["none"] == 0.2
-    assert [f["kept"] for f in st["routing"]["p1"]["files"]] == [True, True]
+    assert [f["score"] for f in st["routing"]["p1"]["files"]] == [0.7, 0.02]  # no routing floor: the zoom judges them
     fates = [f["fate"] for f in st["word_search"]["top"]]
-    # the read list is the TOC search's plus the files Jev's navigate routed for a set with no prepare-cache;
-    # word hits outside the set's file list are not read. /a.md is a word hit too, so it is simply read.
+    # the read list is the zoom's: the files Jev's navigate routed for a set with no prepare-cache join its pick (here
+    # the replay lists them), and the word search's hits are always kept. /a.md is both, so it is read once.
     assert fates and fates[0] == "read"
-    assert isinstance(st["toc"], dict) and "secs" in st["toc"]  # the TOC stage is traced
-    assert st["read_list"] == ["/a.md", "/b.md"]
+    assert isinstance(st["toc"], dict) and "secs" in st["toc"]  # the zoom stage is traced
+    assert st["read_list"] == ["/a.md", "/b.md", "/w.md", "/x.md"]
     assert st["content_check"]["/a.md"]["read"] == [0, 1, 2, 9]
     assert st["final"][0]["path"] == "/a.md" and st["final"][0]["rule"] == "evidence-selected"
 

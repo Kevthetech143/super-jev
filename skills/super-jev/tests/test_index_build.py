@@ -134,7 +134,7 @@ def test_fts_stays_usable_for_untouched_pointers_during_an_update(tmp_path, monk
     reader, panel, why, fb = ask.index_panel(rp.PRINCIPAL, sdir)
     try:
         assert why is None and list(fb) == ["p0"] and fb["p0"] == "index update running for it"
-        assert reader.fts_usable(ask.WORD_INDEX_VERSION)[0] is True
+        assert reader.fts_usable(ask.FTS_VERSION)[0] is True
     finally:
         reader.close()
     _rc, out = rp.ask_it(rp.PLANTED[1][0], sdir, capsys)  # plimbus lives in p1, untouched

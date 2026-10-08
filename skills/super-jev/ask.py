@@ -211,7 +211,6 @@ import toc_search  # noqa: E402
 import zoom  # noqa: E402
 import judge_profile  # noqa: E402
 import refresh_changed  # noqa: E402
-from connect_checked import PaymentRequired  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
 DEFAULT_KIND = "record"
@@ -494,17 +493,17 @@ def trace_show(sdir: Path, which: str) -> int:
         if not st:
             print("(no stage detail: this trace predates --trace-show)")
         return 0
-    print("2 routing (name + description only; floor %s):" % st.get("routing_floor", ROUTE_FLOOR))
+    print("2 routing (sets with no local rows only; name + description):")
     for ptr, r in st["routing"].items():
         none = f" none={r['none']}" if r.get("none") is not None else ""
-        files = ", ".join(f"{Path(f['path']).name} {f['score']}{'' if f.get('kept') else ' (under floor)'}"
+        files = ", ".join(f"{Path(f['path']).name} {f['score']}"
                           for f in r.get("files", []))
         print(f"  [{ptr}] {r.get('status')}{none} {r.get('secs', '')}s" + (f": {files}" if files else ""))
     for b in st.get("benched", []):
         print(f"  benched: {b}")
     w = st.get("word_search") or {}
     print(f"3 word search terms={w.get('terms')} files={w.get('files_searched')} "
-          f"covering>=50%={w.get('passed_coverage')} slots={FALLBACK_FILES}:")
+          f"covering>=50%={w.get('passed_coverage')} hits={WORD_HITS}:")
     edited = set(w.get("changed_since_connect") or [])
     for i, f in enumerate(w.get("top", []), 1):
         mark = " (edited since connect: current text)" if f["path"] in edited else ""
@@ -929,21 +928,22 @@ def pointer_benched(health: dict, ptr: str, principal: str = ""):
 # the answer. The same rule applies to every query; route confidence, filenames
 # and complete-answer comparisons do not override it. Unfinished checks remain
 # explicit. Claim mode retains its separate support/contradiction judgment.
-CONFIRM_FILES, CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 5, 3500, 4
+CONFIRM_CHUNK, CONFIRM_CHUNKS_PER_FILE = 3500, 4
 READ_CHARS = CONFIRM_CHUNK * CONFIRM_CHUNKS_PER_FILE  # most text one file's check sends
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
 # Judge calibration (measured per judge): read from the profile, judge_profiles.json.
-ROUTE_FLOOR, CONFIRM_FLOOR = judges.profile().route_floor, judges.profile().confirm_floor
+CONFIRM_FLOOR = judges.profile().confirm_floor
 SOURCE_FLOOR = judges.profile().source_floor
 CLAIM_CONTENT_FLOOR = judges.profile().claim_content_floor
 POSSIBLE_NOTE = "  (possible: on topic, answer not confirmed; read the file before answering)"
 # Word search: on every lookup the
 # principal's reviewed files (prepare-cache entries whose sha256 still matches) are
-# searched locally for the question's words (typo-tolerant), and the best
-# FALLBACK_FILES get the same source-evidence check as routed files.
-FALLBACK_FILES, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
+# searched locally for the question's words (typo-tolerant). Its best WORD_HITS files are
+# the zoom's safety net (kept at every level) and, when the zoom fails, the whole read list.
+WORD_HITS, FALLBACK_MIN_COVERAGE, FALLBACK_REL_FLOOR = 5, 0.5, 0.55
+READ_MAX = zoom.KEEP_FILES + WORD_HITS  # most files one ask's content check reads: the zoom's picks plus the hits
 FALLBACK_NOTE = "  (possible: word-search match, answer not confirmed; read the file before answering)"
 # Words are Unicode letters/digits, case- and accent-folded, so "¿Cuántas medicinas
 # toma mi papá?" gives cuantas/medicinas/toma/papa (an ASCII-only [a-z0-9] split
@@ -1062,10 +1062,11 @@ def confirm_start(question: str, path: str):
     if text is None:
         return (None, False, None, HELD_SECRET), None
     tparts = (_STAGE.get("toc_parts") or {}).get(path) or []
-    # A short file is read whole; a long one as the passages the word overlap picks. Either way the named
-    # parts the TOC search chose ride along, each with its line range, so the best one carries a location
-    # (a whole file alone could only point at its first lines).
-    chunks = [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
+    # One read rule: a file the zoom chose parts of is read as those parts, each with its line range, so the best
+    # one carries a location; the whole file is not sent beside them. A file with no named parts (or read from the
+    # word search's list when the zoom failed) is read as before: whole when short, else the passages the word
+    # overlap picks.
+    chunks = [] if tparts else [text] if len(text) <= WHOLE_FILE_CHARS else split_passages(text)
     tlines = text.split("\n")
     extra = [toc_search.part_text(tlines, s_, e_) for _n, s_, e_ in tparts]
     # A code file's outline (built by the zoom from the bytes it was connected at) is one more passage, only
@@ -1077,11 +1078,11 @@ def confirm_start(question: str, path: str):
     partial = False  # long files are judged on chosen passages, never passed through unread
     label = confirm_label(question)
     base = len(chunks)
-    picked = pick_chunks(question, chunks) + list(range(base, base + len(extra) + (1 if outl else 0)))
+    picked = (pick_chunks(question, chunks) if chunks else []) + list(range(base, base + len(extra) + (1 if outl else 0)))
     chunks = chunks + extra + ([outl["text"]] if outl else [])
     outline_i = base + len(extra) if outl else None
     detail = _STAGE.setdefault("checks", {})[path] = {
-        "chunks": len(chunks), "read": picked[:STAGE_LIST_CAP],
+        "chunks": len(chunks), "passages": base, "parts": len(extra), "read": picked[:STAGE_LIST_CAP],
         "wording": "claim-evidence" if _CLAIM["text"] else "source-evidence"}
     leaves = [{"id": f"c{i}", "label": label.format(n=i + 1),
                "description": (chunks[i] if i == outline_i else
@@ -1155,8 +1156,8 @@ def confirm_finish(question: str, ctx: dict, body, error):
             if home:
                 n_, s_, e_ = min(home, key=lambda x: x[2] - x[1])
                 detail["location"] = {"unit": "lines", "start": s_, "end": e_, "part": n_}
-            elif len(chunks) - len(tp_) - (ctx.get("outline_i") is not None) == 1:
-                detail["no_span"] = NO_SPAN_WHOLE
+            else:  # read by the old reader (no named parts chosen): never widened to a span to make a hit
+                detail["no_span"] = NO_SPAN_WHOLE if base_ == 1 else NO_SPAN_PASSAGES
     if not _CLAIM["text"]:
         # Evidence mode scores each passage as requested property or required component.
         # The shared source floor admits leads, not proven answers; unlike the
@@ -1521,11 +1522,15 @@ def best_passage(path: str):
     text = clean_text(text, path)
     if text is None:
         return None
+    d = (_STAGE.get("checks") or {}).get(path, {})
+    loc = d.get("location") or {}
+    if loc.get("unit") == "lines":  # the named part the content check scored best
+        return toc_search.part_text(text.split("\n"), loc["start"], loc["end"])
     if len(text) <= WHOLE_FILE_CHARS:  # judged whole, so shown whole
         return text
-    i = (_STAGE.get("checks") or {}).get(path, {}).get("best_chunk") or 0
+    i = d.get("best_chunk") or 0
     chunks = split_passages(text)
-    return with_subject(chunks, min(i, len(chunks) - 1))
+    return with_subject(chunks, min(i if i < d.get("passages", len(chunks)) else 0, len(chunks) - 1))
 
 def jev_choice(state: dict, questions: dict) -> dict:
     """One judge call through the doorway (judges.ask)."""
@@ -2048,13 +2053,14 @@ def sha_of(path: str, reads):
 
 ZOOM_FAILED = "zoom failed: {reason}; read list from word search only"
 NO_SPAN_OUTLINE = "no span: the outline passage scored best"
-NO_SPAN_WHOLE = "no span: the file was read whole and no named part scored best"
+NO_SPAN_WHOLE = "no span: the file has no named parts the zoom chose; it was read whole"
+NO_SPAN_PASSAGES = "no span: the file has no named parts the zoom chose; it was read as passages"
 OUTLINE_CHANGED = "outline ignored: file changed since outline"
 NAMED_IN_FILES = 20  # files the index lists for a file name, opened to find the line that names it
 
 
 def named_in(idx, path: str, pointers, who, allowed) -> list:
-    """[(path, line, text)]: searchable files (`allowed`) with a line naming this file, best bm25 first. The index's
+    """[(path, line, text)]: searchable files (`allowed(path)` true) with a line naming this file, best bm25 first. The index's
     word search lists them; each is opened to find the line. A line that scans as a secret is never returned."""
     name = Path(path).name
     toks = sorted(set(words(name)))
@@ -2066,7 +2072,7 @@ def named_in(idx, path: str, pointers, who, allowed) -> list:
         return []
     out = []
     for c in listed:
-        if c == path or c not in allowed:
+        if c == path or not allowed(c):
             continue
         try:
             text = clean_text(Path(c).read_text(errors="replace"), c)
@@ -2099,6 +2105,7 @@ def toc_corpus(cands, reads, fb_paths=None) -> dict:
         tgot = read_sha(tpath, reads)
         if tgot and edited_readable(tpath, tptr, tentry, tgot[0], tgot[0].decode("utf-8", "replace")):
             corpus[tpath] = (tptr, tentry)
+            _STAGE.setdefault("stale_changed", []).append(tpath)  # read at text no refresh passed: never saved from
     return corpus
 
 
@@ -2402,17 +2409,26 @@ def index_fts_pass(idx, pointers: list, widx: dict, toc) -> int:
     for path in set(have) - keep:
         idx.fts_drop(path)
         wrote += 1
-    idx.fts_finish(WORD_INDEX_VERSION, unfinished, unlisted)
+    # The zoom's level 1, once per update: every indexed file's folder and the folder rows (zoom.folder_rows), so an
+    # ask reads only the folder rows of the sets it searches.
+    unit, rows = zoom.folder_rows({p: (ptr, who) for p, ptr, who in idx.db.execute("SELECT path, pointer, person FROM fts_map")})
+    idx.set_folders(unit, rows)
+    idx.fts_finish(FTS_VERSION, unfinished, unlisted)
     return wrote
 
 def _fts_q(tokens) -> str:
     return " OR ".join(f'"{t}"' for t in sorted(tokens))
 
+def toc_match(terms) -> str:
+    """The FTS match on the TOC column for these question words, each by its first five letters ("" for none)."""
+    tq = sorted({t[:5] if len(t) > 5 else t for t in terms})
+    return "toc : (" + " OR ".join(f'"{q}"*' for q in tq) + ")" if tq else ""
+
 def fts_pick(idx, question: str, pointers: list, who, out_of_scope_fn):
     """The O(K) read path: (candidates [(ptr, path, entry)], items {path: word item}, toc rows, fts numbers for
     word_search, trace), or (None, why) to run the S3a path. Takes the top FTS_K files by bm25 on the question's
     words and the top FTS_K by bm25 on the TOC words, plus the few edited files; nothing else is touched."""
-    ok, why = idx.fts_usable(WORD_INDEX_VERSION)
+    ok, why = idx.fts_usable(FTS_VERSION)
     if not ok:
         return None, why
     terms = query_terms(question)
@@ -2424,8 +2440,7 @@ def fts_pick(idx, question: str, pointers: list, who, out_of_scope_fn):
         df = {t: idx.fts_df("body : (" + _fts_q(v) + ")", pointers, who) if v else 0 for t, v in variants.items()}
         allv = set().union(*variants.values())
         wtop = idx.fts_top("body : (" + _fts_q(allv) + ")", pointers, FTS_K, who) if allv else []
-        tq = {f"{t[:5] if len(t) > 5 else t}*" for t in terms}
-        ttop = idx.fts_top("toc : (" + " OR ".join(f'"{q[:-1]}"*' for q in sorted(tq)) + ")", pointers, FTS_K, who)
+        ttop = idx.fts_top(toc_match(terms), pointers, FTS_K, who)
         if len(ttop) < FTS_K:  # the TOC shortlist ties fall back to path order: pad with the first paths, as it does
             ttop += [p for p in idx.fts_first_paths(pointers, FTS_K, who) if p not in set(ttop)][:FTS_K - len(ttop)]
         stats = idx.fts_stats_for(pointers, who)
@@ -2587,6 +2602,8 @@ def _word_index_version() -> str:
         json.dumps([WORD_RE.pattern, sorted(QUERY_STOPWORDS)]).encode()).hexdigest()[:12])
 
 WORD_INDEX_VERSION = _word_index_version()
+# The FTS tables' stamp: the word items' version plus the zoom's folder rows' (a folder rule change rebuilds only them).
+FTS_VERSION = f"{WORD_INDEX_VERSION}+folders{zoom.FOLDERS_VERSION}"
 
 def _prune_word_index(widx: dict, keep) -> bool:
     """Drop entries for paths no longer in `keep` (left every pointer, or deleted). True when any went."""
@@ -2654,7 +2671,7 @@ def term_variants(terms: list, vocab) -> dict:
         out[t] |= {x for x in SYNONYMS.get(t, []) if x in vocab}
     return out
 
-def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip=(), extra=(),
+def word_search(question: str, pointers: list, limit: int = WORD_HITS, skip=(), extra=(),
                 reads=None, index_path=None, candidates=None, items=None, fts=None, read_paths=(), held=None) -> list:
     """Local, no provider calls: [(score, path, pointer)] of the principal's reviewed
     files best matching the question's words (BM25 per CONFIRM_CHUNK passage, a file
@@ -2775,7 +2792,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
         scored.append((round(bm25, 3), path, ptr))
     ranked = sorted(scored, key=lambda x: (-x[0], x[1]))
     _STAGE["word"] = {"terms": terms, "files_searched": len(docs), "passed_coverage": len(scored),
-                      "ranked": ranked[:STAGE_LIST_CAP],
+                      "ranked": ranked[:STAGE_LIST_CAP], "all": ranked,
                       "cover": {p: sum(idf[t] for t in terms if f[t]) / total for p, f in tf.items()}}
     # A file under 0.55x the best eligible file's score is a weak match: not worth a read slot.
     # Measured against the best file still eligible, i.e. after routed files are skipped.
@@ -2786,7 +2803,7 @@ def word_search(question: str, pointers: list, limit: int = FALLBACK_FILES, skip
 def confirm(question: str, paths: list):
     """Check each path on its own, in one batched run. Returns ({path: score} for kept files,
     set of paths too long to read whole, first error or None, {path: note})."""
-    paths = paths[:CONFIRM_FILES + FALLBACK_FILES]
+    paths = paths[:READ_MAX]
     if not batch_jev():
         results = list(ThreadPoolExecutor(max_workers=max(1, len(paths))).map(lambda p: confirm_one(question, p), paths))
         return confirm_results(paths, retry_network(question, paths, results))
@@ -3130,8 +3147,6 @@ def _lookup_once(question: str, principal: str, sdir: Path) -> int:
 
 
 def _lookup(question: str, principal: str, sdir: Path) -> int:
-    # Relative route mass ranks candidates; it is not ordinary evidence confidence.
-    route_floor = ROUTE_FLOOR if _CLAIM["text"] else 0
     status_cmd = f"python3 {skill_dir_for_display() / 'ask.py'} --principal {principal} --status"
     claim = bool(_CLAIM["text"])  # a claim is told what to fix in a claim's words, not a question's
     if not question.strip():
@@ -3144,6 +3159,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                      f"({len(question):,} chars, max {MAX_QUESTION:,})",
                      "check one shorter, focused statement" if claim else "ask one shorter, focused question",
                      "rephrase")
+    if payload_has_secret({"question": question}):  # never sent anywhere (a claim is refused cleanly: exit 2)
+        raise SecretHeld("the request contains a secret; not sent")
     t0 = time.time()
     lookup_id = new_lookup_id(principal, question, t0)
     _STAGE.clear()
@@ -3224,11 +3241,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                      "setup")
     pointers = [n for n in ((p.get("pointer") if isinstance(p, dict) else p)
                             for p in panel.get("pointers", [])) if n and n not in withheld]
-    if not _CLAIM["text"]:  # the claim path is unchanged: it keeps its own routing
-        gens_all = {row.get("pointer"): row.get("generation") for row in panel.get("pointers", []) if isinstance(row, dict)}
-        _STAGE["local_rows"] = load_local_rows(sdir, principal, pointers, gens_all, view_pointers)
-    else:
-        _LOCAL_ROWS.clear()
+    gens_all = {row.get("pointer"): row.get("generation") for row in panel.get("pointers", []) if isinstance(row, dict)}
+    _STAGE["local_rows"] = load_local_rows(sdir, principal, pointers, gens_all, view_pointers)
     # A saved note whose source file changed after it was recorded is not a current answer.
     stale_notes = {n: changed_source(sdir / "manual" / f"{n}.md") for n in pointers
                    if n.startswith(f"{principal}-manual-")}
@@ -3280,7 +3294,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # Person resolution: a question about one person never reads (or confirms)
     # another person's records, and a pointer holding only theirs is not asked.
     try:
-        fts_ready = bool(idx_read and idx_read.fts_usable(WORD_INDEX_VERSION)[0])
+        fts_ready = bool(idx_read and idx_read.fts_usable(FTS_VERSION)[0])
         if fts_ready:
             served = index_served(idx_read.coverage(), [p for p in pointers if p not in index_fb])
             homes = person_homes(pointers, idx_read.person_paths(served)
@@ -3349,9 +3363,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         kind = status or "error"
         return ptr, f"{kind}: {reason}" if reason else kind, [], elapsed, False
 
-    # Match the five-source result bound on every routing path. Claim checks
-    # retain their existing navigation defaults.
-    routing_limits = {} if _CLAIM["text"] else {"mode": "source-discovery", "limits": {"beamWidth": 5, "maxResults": 5}}
+    # Match the five-source result bound on every routing path: its files only join the zoom's pick.
+    routing_limits = {"mode": "source-discovery", "limits": {"beamWidth": 5, "maxResults": 5}}
 
     def nav(ptr):
         t_start = time.time()
@@ -3371,44 +3384,33 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             return None
         return {ptr: rows.get(ptr) if isinstance(rows.get(ptr), dict) else {"status": "error"} for ptr in ptrs}
 
-    # Routing asks Jev about every pointer at once: their questions ride in shared
-    # calls (split under the input ceiling) instead of one navigate call per pointer.
     t_start = time.time()
-    if not _CLAIM["text"]:
-        # The TOC search picks the read list, so routing asks Jev nothing: each set's status comes from
-        # the registry (no Jev call), which keeps stale sets searched, named and auto-healed.
-        outs = {ptr: {"status": "no-candidates"} for ptr in pointers}
-        # Reuse the panel fetched above: nothing writes the registry between the two reads.
-        panel = panel if pointers else {}
-        for row in (panel.get("pointers") or []) if isinstance(panel, dict) else []:
-            if isinstance(row, dict) and row.get("pointer") in outs and str(
-                    row.get("snapshotStatus") or row.get("status") or "").startswith(("preparation-required", "refresh-required")):
-                outs[row["pointer"]] = {"status": "no-candidates", "stale": {"from_registry": True}}
+    # The zoom picks the read list, so routing asks Jev nothing, for questions and claims alike: each set's status
+    # comes from the registry (no Jev call), which keeps stale sets searched, named and auto-healed.
+    outs = {ptr: {"status": "no-candidates"} for ptr in pointers}
+    # Reuse the panel fetched above: nothing writes the registry between the two reads.
+    panel = panel if pointers else {}
+    for row in (panel.get("pointers") or []) if isinstance(panel, dict) else []:
+        if isinstance(row, dict) and row.get("pointer") in outs and str(
+                row.get("snapshotStatus") or row.get("status") or "").startswith(("preparation-required", "refresh-required")):
+            outs[row["pointer"]] = {"status": "no-candidates", "stale": {"from_registry": True}}
+    # A set with no local rows at all (no cache, no covering parent, no reviewed sources) has no files for the zoom
+    # to list: Jev's navigate names its candidate files, which join the zoom's file pick (judged like any file, never
+    # read unpicked). One batched call, at most NAV_FALLBACK_MAX sets, named in the trace as routing_fallback.
+    def has_local(p):
+        own = (idx_read.has_entries(p) if fts_ready and p not in index_fb and p not in view_pointers else bool(load_cache_files(p)))
+        return own or bool(_LOCAL_ROWS.get(p)) or (p not in view_pointers and covered_by_parent(p, original_pointers))
+    nav_ptrs = [p for p in pointers if not has_local(p)]
+    _STAGE["routing_fallback"] = [f"{p}: no local rows" for p in nav_ptrs[:min(NAV_FALLBACK_MAX, STAGE_LIST_CAP)]]
+    if len(nav_ptrs) > NAV_FALLBACK_MAX:
+        _STAGE["routing_fallback"].append(f"{len(nav_ptrs) - NAV_FALLBACK_MAX} more sets: no local rows, over the cap, not asked")
+    nav_ptrs = nav_ptrs[:NAV_FALLBACK_MAX]
+    bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
+    if bm is not None:
+        navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
     else:
-        outs = nav_many(pointers) if pointers and batch_jev() else None
-    if not _CLAIM["text"]:
-        # A set with no prepare-cache (a reviewed view, a path-connected or recipe set) has no files for the TOC
-        # search to list, so it is still routed by Jev's navigate, as before: no quiet shrink of what a question reaches.
-        # S4: a set is routed by Jev only when it has no local rows at all (no cache, no covering parent, no reviewed
-        # sources); one batched call, at most NAV_FALLBACK_MAX sets, named in the trace as routing.fallback.
-        def has_local(p):
-            own = (idx_read.has_entries(p) if fts_ready and p not in index_fb and p not in view_pointers else bool(load_cache_files(p)))
-            return own or bool(_LOCAL_ROWS.get(p)) or (p not in view_pointers and covered_by_parent(p, original_pointers))
-        nav_ptrs = [p for p in pointers if not has_local(p)]
-        _STAGE["routing_fallback"] = [f"{p}: no local rows" for p in nav_ptrs[:min(NAV_FALLBACK_MAX, STAGE_LIST_CAP)]]
-        if len(nav_ptrs) > NAV_FALLBACK_MAX:
-            _STAGE["routing_fallback"].append(f"{len(nav_ptrs) - NAV_FALLBACK_MAX} more sets: no local rows, over the cap, not asked")
-        nav_ptrs = nav_ptrs[:NAV_FALLBACK_MAX]
-        bm = nav_many(nav_ptrs) if nav_ptrs and batch_jev() else None
-        if bm is not None:
-            navd = {ptr: classify(ptr, bm[ptr], time.time() - t_start) for ptr in nav_ptrs}
-        else:
-            navd = dict(zip(nav_ptrs, ThreadPoolExecutor(max_workers=min(len(nav_ptrs), NAV_CONCURRENCY)).map(nav, nav_ptrs))) if nav_ptrs else {}
-        results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
-    elif outs is None:  # one navigate call per pointer, as before batching
-        results = list(ThreadPoolExecutor(max_workers=min(len(pointers), NAV_CONCURRENCY)).map(nav, pointers)) if pointers else []
-    else:
-        results = [classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
+        navd = dict(zip(nav_ptrs, ThreadPoolExecutor(max_workers=min(len(nav_ptrs), NAV_CONCURRENCY)).map(nav, nav_ptrs))) if nav_ptrs else {}
+    results = [navd[ptr] if ptr in navd else classify(ptr, outs[ptr], time.time() - t_start) for ptr in pointers]
     # A set whose routing hit a TypeSafe network error is asked once more before it counts as not searched.
     again = [i for i, (ptr, kind, *_r) in enumerate(results) if not replay and is_network_error(kind, nav_kinds.get(ptr))]
     for i in again:
@@ -3520,8 +3522,7 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     # other pointer (prepare_bulk.is_bench_dataset), so a path that reaches here came from its
     # own registered pointer and must not be dropped by where it lives.
     names_of = {ptr: connector_names(ptr) for ptr in {m[2] for m in merged}}
-    merged = sorted((m for m in merged if m[0] >= route_floor
-                     and not prepare_bulk.is_test_material(
+    merged = sorted((m for m in merged if not prepare_bulk.is_test_material(
                          m[1], prepare_bulk.named_exactly(Path(m[1]).name, names_of[m[2]]))
                      and not other_person(m[1])), reverse=True)
     routed = list(dict.fromkeys(p for _, p, _ in merged))
@@ -3592,9 +3593,8 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
         edited = edited_held(search_pointers, out_of_scope, reads)  # once per searched set, not per search path
     held_found = []  # reviewed, unchanged files whose text scans as a secret: searched by neither path, named as held
     held_paths = {c[1] for c in held_ix}
-    toc_on = not _CLAIM["text"]
-    toc_error = ""  # set when the TOC stage crashed (after its retry): a not-found is then uncertain
-    found = word_search(question, search_pointers, skip=(out_of_scope if toc_on else set(routed[:CONFIRM_FILES]) | out_of_scope),
+    toc_error = ""  # set when the zoom crashed (after its retry): a not-found is then uncertain
+    found = word_search(question, search_pointers, skip=out_of_scope,
                         reads=reads, index_path=None if fts_nums else sdir / WORD_INDEX_FILE,
                         **({"candidates": (icands or []) + held_ix, "read_paths": (fb_paths - vouched) | held_paths}
                            if idx_read else {}),
@@ -3603,59 +3603,61 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     edited["secret"] = list(dict.fromkeys(edited["secret"] + held_found))
     held_paths |= set(held_found)
     wpaths = {p: ptr for _, p, ptr in found}
-    to_check = routed[:CONFIRM_FILES] + list(wpaths)
-    if toc_on:
-        # The zoom picks the read list: folders, then files (from their table of contents), then parts, over
-        # every searchable file; Jev answers one yes/no per item and the word search's hits ride along at
-        # every level. If it fails, the word search's list is read and the reason is named in the outcome.
-        if idx_read:
-            everything = index_candidates(idx_read, ix_ptrs, out_of_scope) + [c for c in icands if c[1] in fb_paths]
-        else:
-            everything = candidate_files(search_pointers, out_of_scope)
-        corpus = toc_corpus([c for c in everything if c[1] not in held_paths], reads, fb_paths if idx_read else None)
-        flush_stat_memo()
-        tt0 = time.time()
-        zoom_hooks = {
-            "read": lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(
-                (lambda q: q.read_bytes() if q.is_file() else None)(Path(path))),
-            "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits,
-            "mentions": lambda path: named_in(idx_read if fts_nums else None, path, ix_ptrs if idx_read else [],
-                                              who, corpus)}
-        for attempt in (1, 2):  # a crashed zoom is tried once more; the first crash may be a blip
-            try:
-                tfiles, tparts, ttrace = zoom.run(
-                    question, corpus, found, zoom_hooks, cache_path=None if fts_nums else sdir / "toc-cache.json",
-                    **({"rows": lambda paths: {p: tr for _p, p, _e, _it, tr in idx_read.fts_rows(paths) if tr}}
-                       if fts_nums else {}))
-                _STAGE["toc_parts"] = tparts
-                _STAGE["outlines"] = ttrace.pop("outlines", None) or {}
-                # the files Jev's navigate routed (sets with no local rows) ride along after the zoom's pick
-                tfiles = list(dict.fromkeys(list(tfiles) + routed[:CONFIRM_FILES]))
-                wpaths = {p: (corpus[p][0] if p in corpus else next(m[2] for m in merged if m[1] == p)) for p in tfiles}
-                to_check = list(tfiles)
-                for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties
-                    route.setdefault(tp_, ts_)
-                if attempt == 2:
-                    ttrace["retried"] = True
-                break
-            except Exception as e:  # noqa: BLE001 -- any failure reads the word search's list instead
-                ttrace = {"error": f"{type(e).__name__}: {str(e)[:160]}"}
-                # a payment or size refusal would be refused the same way again
-                if attempt == 1 and not (isinstance(e, (judges.TooBig, PaymentRequired)) or re.search(r"\bHTTP 402\b", str(e))):
-                    continue
-                toc_error = ttrace["error"]
-                ttrace["retried"] = attempt == 2
-                ttrace["note"] = ZOOM_FAILED.format(reason=toc_error)
-                break
-        ttrace["secs"] = round(time.time() - tt0, 1)
-        _STAGE["toc"] = ttrace
+    to_check = list(wpaths)  # the read list if the zoom fails: the word search's own list, and nothing else
+    # The zoom picks the read list: folders, then files (from their table of contents), then parts, over every
+    # searchable file; Jev answers one yes/no per item and the word search's hits are kept at every level. With the
+    # index's word table it reads only stored rows (folder rows, a shortlist per kept folder); the files the index
+    # does not serve (sets it does not hold, files edited since review) are listed in memory beside them, as is
+    # every file on the index-off path. If it fails, the word search's list is read and the reason is named.
+    read_text = lambda path: (lambda r: r if r is None else clean_text(r.decode("utf-8", "replace"), path))(  # noqa: E731
+        (lambda q: q.read_bytes() if q.is_file() else None)(Path(path)))
+    ix_store = None
+    if fts_nums:
+        ix_store = zoom.IndexStore(idx_read, ix_ptrs, who, toc_match(query_terms(question)), read_text)
+        side = [c for c in icands if c[1] in fts_nums["local"] and c[1] not in held_paths]
+        store = zoom.Stores(ix_store, zoom.MemoryStore(toc_corpus(side, reads), read_text, rows=ftocs))
+    else:
+        everything = icands if idx_read else candidate_files(search_pointers, out_of_scope)
+        store = zoom.MemoryStore(toc_corpus([c for c in everything if c[1] not in held_paths], reads,
+                                            fb_paths if idx_read else None), read_text, sdir / "toc-cache.json")
+    joins = {}  # files Jev's navigate routed for sets with no local rows: they join the file pick
+    for _s, p, ptr in merged:
+        if not store.has(p) and p not in held_paths:
+            got = read_sha(p, reads)  # (an unreadable one is listed too: its content check then says why)
+            joins.setdefault(p, (ptr, {"pass": True, "sha256": got[1] if got else None}))
+    store = zoom.Stores(store, zoom.MemoryStore(joins, read_text, listed=False)) if joins else store
+    flush_stat_memo()
+    tt0 = time.time()
+    zoom_hooks = {"read": read_text, "has_secret": has_secret, "query_terms": query_terms, "term_hits": term_hits,
+                  "mentions": lambda path: named_in(idx_read if fts_nums else None, path, ix_ptrs if fts_nums else [],
+                                                    who, store.has)}
+    word_scores = {p: sc for sc, p, _ptr in (_STAGE.get("word") or {}).get("all") or []}
+    r0 = toc_search.retried()  # a judge batch that fails is asked once more inside the zoom (toc_search.score_items)
+    try:
+        tfiles, tparts, ttrace = zoom.run(question, store, found, zoom_hooks, joins=list(joins), word=word_scores)
+        _STAGE["toc_parts"] = tparts
+        _STAGE["outlines"] = ttrace.pop("outlines", None) or {}
+        wpaths = {p: store.pointer_of(p) or wpaths.get(p) for p in tfiles}
+        to_check = list(tfiles)
+        for tp_, ts_ in (ttrace.get("pick") or {}).get("top") or []:  # the pick's scores break content ties
+            route.setdefault(tp_, ts_)
+    except Exception as e:  # noqa: BLE001 -- any failure reads the word search's list instead
+        toc_error = f"{type(e).__name__}: {str(e)[:160]}"
+        ttrace = {"error": toc_error, "note": ZOOM_FAILED.format(reason=toc_error), "read_list": "word search only"}
+    if toc_search.retried() > r0:
+        ttrace["retried"] = True
+    ttrace["secs"] = round(time.time() - tt0, 1)
+    _STAGE["toc"] = ttrace
     if idx_read:
         # Verify-at-read: only the files about to be served are hashed, whatever the corpus size.
-        by_path = {p: (ptr_, e) for ptr_, p, e in icands if p not in fb_paths}
-        to_check, vinfo = index_verify(idx_read, to_check, by_path, edited)
-        _STAGE["index"].update({"verified": vinfo["verified"], "mismatch": vinfo["mismatch"][:STAGE_LIST_CAP],
-                                "gone": vinfo["gone"][:STAGE_LIST_CAP]})
-        idx_read.close()
+        try:
+            by_path = ({p: (ptr_, e) for p, (ptr_, e, _t) in ix_store.rows(to_check).items()} if ix_store else
+                       {p: (ptr_, e) for ptr_, p, e in icands if p not in fb_paths})
+            to_check, vinfo = index_verify(idx_read, to_check, by_path, edited)
+            _STAGE["index"].update({"verified": vinfo["verified"], "mismatch": vinfo["mismatch"][:STAGE_LIST_CAP],
+                                    "gone": vinfo["gone"][:STAGE_LIST_CAP]})
+        finally:
+            idx_read.close()
     checked = set(to_check)
     if to_check:
         scores, partial, check_error, notes = confirm(question, to_check)
@@ -3773,17 +3775,16 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     tier = "none" if not top else ("possible" if top[0][1] in possible else "confirmed" if _CLAIM["text"] else "sources")
     try:  # trace detail is best-effort; it must never fail the ask
         wsearch = _STAGE.get("word") or {}
-        fates = {p: "read" for p in wpaths}
+        fates = {p: "read" for p in checked}
         stages = {
             "cache": cache_stage,
-            "routing_floor": route_floor,
             "routing_fallback": _STAGE.get("routing_fallback") or [],
             "local_rows": _STAGE.get("local_rows") or {},
             "routing": {ptr: {"status": kind + (" (stale: last refresh)" if ptr in stale_served else ""),
                               "none": nav_none.get(ptr, (None,))[0],
                               "secs": nav_none.get(ptr, (None, None))[1],
-                              "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0),
-                                         "kept": c.get("score", 0) >= route_floor} for c in rows][:STAGE_LIST_CAP]}
+                              "files": [{"path": c.get("originalPath", ""), "score": c.get("score", 0)}
+                                        for c in rows][:STAGE_LIST_CAP]}
                         for ptr, kind, rows, _elapsed, _ok in results},
             "benched": [ln for ln in error_lines if "] benched (" in ln][:STAGE_LIST_CAP],
             "stale_held": edited_paths[:STAGE_LIST_CAP],
@@ -3792,12 +3793,12 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
                                                             | set(_STAGE.get("stale_changed") or [])),
                             "passed_coverage": wsearch.get("passed_coverage"),
                             "top": [{"score": sc, "path": p,
-                                     "fate": fates.get(p) or ("already routed" if p in routed[:CONFIRM_FILES]
-                                                              else "not read: past top %d" % FALLBACK_FILES)}
+                                     "fate": fates.get(p) or ("not read: changed since its review" if p in wpaths
+                                                              else "not read: past top %d" % WORD_HITS)}
                                     for sc, p, _ptr in wsearch.get("ranked", [])]},
             "toc": {**(_STAGE.get("toc") or {}),
                     **({"outline_ignored": _STAGE["outline_ignored"]} if _STAGE.get("outline_ignored") else {})},
-            "read_list": to_check[:CONFIRM_FILES + FALLBACK_FILES],
+            "read_list": to_check[:READ_MAX],
             "cover_gate": _STAGE.get("cover_gate"),
             "timeout_rechecks": _STAGE.get("timeout_rechecks"),
             "content_check": {p: {**(_STAGE.get("checks") or {}).get(p, {}), "verdict": v["label"]}

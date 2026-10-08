@@ -116,22 +116,23 @@ def _no_live_chat_config_or_launcher(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def _toc_read_list_replays_old_routing(request, monkeypatch):
-    """The TOC search now picks the read list (routing asks Jev nothing). These suites were written when
-    the read list came from each pointer's navigate candidates, which they fake: stand in for the TOC
-    search by listing those faked candidates (best first), so what they test (ranking, merging, filters
-    and messages after the read list) is unchanged. test_toc_search.py and test_zoom_to_part.py
-    exercise the real TOC search and are left alone."""
+    """The zoom now picks the read list (routing asks Jev nothing), for questions and claims. These suites were
+    written when the read list came from each pointer's navigate candidates, which they fake: stand in for the
+    zoom by listing those faked candidates (best first) that the zoom's store holds, so what they test (ranking,
+    merging, filters and messages after the read list) is unchanged. test_toc_search.py, test_zoom_to_part.py and
+    test_zoom.py (and tests marked real_toc) exercise the real zoom and are left alone."""
     if request.module.__name__.split(".")[-1] in ("test_toc_search", "test_zoom_to_part", "test_zoom") or request.node.get_closest_marker("real_toc"):
         return
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     import zoom
 
-    def replay(question, corpus, hits, ask_hooks, cache_path=None, **_k):
+    def replay(question, store, hits, ask_hooks, joins=(), word=None):
         caller = sys._getframe(1)
         mem, principal = caller.f_globals["memory"], caller.f_locals.get("principal")
         rows = []
-        for ptr in {p_ for p_, _e in corpus.values()}:
+        routed_now = set(caller.f_locals.get("nav_ptrs") or [])  # sets the ask itself routed: their files are `joins`
+        for ptr in [p_ for p_ in caller.f_locals.get("search_pointers") or [] if p_ not in routed_now]:
             try:
                 out = mem({"action": "navigate", "pointer": ptr, "principal": principal, "question": question,
                            "lastGood": True})
@@ -139,9 +140,9 @@ def _toc_read_list_replays_old_routing(request, monkeypatch):
                 continue
             if isinstance(out, dict) and out.get("status") == "candidates":
                 rows += [(c["score"], c["originalPath"]) for c in out.get("candidates") or []
-                         if isinstance(c, dict) and c.get("originalPath") in corpus]
+                         if isinstance(c, dict) and store.has(c.get("originalPath"))]
         routed = [p for _s, p in sorted(rows, key=lambda r: -r[0])]
-        files = list(dict.fromkeys(routed + [p for _s, p, _ptr in hits if p in corpus]))
+        files = list(dict.fromkeys(routed + list(joins) + [p for _s, p, _ptr in hits]))
         top = [(p, sc) for sc, p in sorted(rows, key=lambda r: -r[0])]
         return files, [], {"pick": {"top": top}}
 

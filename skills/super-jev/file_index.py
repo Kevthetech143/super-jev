@@ -46,6 +46,8 @@ CREATE INDEX IF NOT EXISTS fts_map_pointer ON fts_map(pointer, person);
 CREATE TABLE IF NOT EXISTS fts_stats(pointer TEXT, person TEXT, n INTEGER, passages INTEGER, psize REAL, PRIMARY KEY(pointer, person));
 CREATE TABLE IF NOT EXISTS witems(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
 CREATE TABLE IF NOT EXISTS tocpage(path TEXT PRIMARY KEY, sha TEXT, json TEXT);
+-- the zoom's level 1, built by the updater (zoom.folder_rows): one row per folder, set and person, with its first file names
+CREATE TABLE IF NOT EXISTS folders(folder TEXT, pointer TEXT, person TEXT, n INTEGER, names TEXT, PRIMARY KEY(folder, pointer, person));
 """
 
 
@@ -154,6 +156,10 @@ class FileIndex:
             self.fts_error = None
         except sqlite3.Error as e:  # no FTS5 / no contentless delete in this sqlite: the ask runs the S3a path
             self.fts_error = f"{type(e).__name__}: {str(e)[:80]}"
+        if not self.fts_error and "folder" not in {r[1] for r in self.db.execute("PRAGMA table_info(fts_map)")}:
+            self.db.execute("ALTER TABLE fts_map ADD COLUMN folder TEXT")  # an index made before the zoom's folder rows
+        if not self.fts_error:
+            self.db.execute("CREATE INDEX IF NOT EXISTS fts_map_folder ON fts_map(folder, path)")
         have = {r[1] for r in self.db.execute("PRAGMA table_info(pointers)")}
         for col, typ in (("status", "TEXT"), ("generation", "TEXT"), ("views", "TEXT"), ("listed", "INTEGER DEFAULT 0"), ("entries", "INTEGER"), ("complete", "INTEGER"), ("borrows", "TEXT")):
             if col not in have:  # an index made by the first version: add the read-path columns
@@ -642,19 +648,65 @@ class FileIndex:
         s, a = self._scope(pointers, who)
         return self.db.execute("SELECT COUNT(*) FROM fts JOIN fts_map m ON m.rid=fts.rowid WHERE fts MATCH ?" + s, [match, *a]).fetchone()[0]
 
-    def fts_top(self, match: str, pointers, k: int, who=()) -> list:
-        """The k best paths by bm25 for an FTS match (column filters are in the match string)."""
+    def fts_top(self, match: str, pointers, k: int, who=(), folder=None) -> list:
+        """The k best paths by bm25 for an FTS match (column filters are in the match string); `folder`: only the files
+        the zoom lists under that folder."""
         s, a = self._scope(pointers, who)
+        if folder is not None:
+            s, a = s + " AND m.folder=?", a + [folder]
         return [r[0] for r in self.db.execute(
             "SELECT m.path FROM fts JOIN fts_map m ON m.rid=fts.rowid WHERE fts MATCH ?" + s + " ORDER BY bm25(fts), m.path LIMIT ?",
             [match, *a, k])]
 
-    def fts_first_paths(self, pointers, k: int, who=()) -> list:
-        """The k first indexed paths in path order: the TOC shortlist's tie-break, for a question that hits few files."""
+    def fts_first_paths(self, pointers, k: int, who=(), folder=None) -> list:
+        """The k first indexed paths in path order (of one zoom folder, if given): the TOC shortlist's tie-break, for a
+        question that hits few files."""
         s, a = self._scope(pointers, who)
         s = s.replace("m.pointer IN", "m.pointer||'' IN").replace("m.person=''", "m.person||''=''").replace("m.person IN", "m.person||'' IN")
-        # (the || keeps the planner on the path index: first k in path order, not a sort of every row)
+        if folder is not None:
+            s, a = " AND m.folder=?" + s, [folder] + a
+        # (the || keeps the planner on the path (or folder, path) index: first k in path order, not a sort of every row)
         return [r[0] for r in self.db.execute("SELECT m.path FROM fts_map m WHERE 1=1" + s + " ORDER BY m.path LIMIT ?", [*a, k])]
+
+    # ---- the zoom's folder rows (updater writes; the ask reads only the rows of the searched sets) ----
+
+    def set_folders(self, unit: dict, rows: dict) -> int:
+        """Store zoom.folder_rows' result: each file's folder (only changed ones are written) and the folder rows.
+        Returns the number of files whose folder changed."""
+        have = dict(self.db.execute("SELECT path, folder FROM fts_map"))
+        moved = [(f, p) for p, f in unit.items() if p in have and have[p] != f]
+        self.db.executemany("UPDATE fts_map SET folder=? WHERE path=?", moved)
+        self.db.execute("DELETE FROM folders")
+        self.db.executemany("INSERT INTO folders VALUES(?,?,?,?,?)",
+                            [(f, ptr, who, n, json.dumps(names)) for (f, ptr, who), (n, names) in rows.items()])
+        return len(moved)
+
+    def folder_rows(self, pointers, who=()) -> list:
+        """[(folder, n, names)] of the searched sets, the resolved person's folders and everyone's shared ones."""
+        s, a = self._scope(pointers, who)
+        return [(f, n, json.loads(names)) for f, n, names in self.db.execute(
+            "SELECT m.folder, m.n, m.names FROM folders m WHERE 1=1" + s, a)]
+
+    def fts_scoped(self, pointers, who, paths) -> dict:
+        """{path: pointer} for the given paths the FTS table holds inside this scope."""
+        s, a = self._scope(pointers, who)
+        out, paths = {}, list(paths)
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            out.update(self.db.execute(f"SELECT m.path, m.pointer FROM fts_map m WHERE m.path IN ({','.join('?' * len(chunk))})" + s,
+                                       [*chunk, *a]))
+        return out
+
+    def folder_of(self, paths, pointers, who=()) -> dict:
+        """{path: zoom folder} for the given paths inside this scope."""
+        s, a = self._scope(pointers, who)
+        out, paths = {}, list(paths)
+        for i in range(0, len(paths), 500):
+            chunk = paths[i:i + 500]
+            out.update((p, f) for p, f in self.db.execute(
+                f"SELECT m.path, m.folder FROM fts_map m WHERE m.path IN ({','.join('?' * len(chunk))})" + s, [*chunk, *a])
+                if f is not None)
+        return out
 
     def has_entries(self, pointer: str) -> bool:
         """Does the pointer have a prepare-cache with entries (as the updater last saw it)? An index made before this
@@ -724,6 +776,7 @@ class FileIndex:
         if not self.fts_error:
             for (p,) in self.db.execute("SELECT path FROM fts_map WHERE pointer=?", (pointer,)).fetchall():
                 self.fts_drop(p)
+            self.db.execute("DELETE FROM folders WHERE pointer=?", (pointer,))
         self.db.execute("DELETE FROM toc WHERE path IN (SELECT path FROM files WHERE pointer=?)", (pointer,))
         for t in ("files", "seen", "pointers"):
             self.db.execute(f"DELETE FROM {t} WHERE pointer=?", (pointer,))

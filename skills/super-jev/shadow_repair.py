@@ -283,7 +283,7 @@ def compare(root, pin, candidate, out):
     original_loader = scorecard.load_ask
     def loader(path, name):
         ask = original_loader(path, name)
-        slots[name] = ask.FALLBACK_FILES
+        slots[name] = scorecard.read_slots(ask)
         ask.my_pointers = lambda pr: data['pointers'][pr]
         ask.load_cache_files = lambda ptr: data['entries'][ptr]
         ask.connector_names = lambda ptr: data['names'][ptr]
@@ -294,7 +294,7 @@ def compare(root, pin, candidate, out):
         search = ask.word_search
         def word_search(question, pointers, limit=5, **kwargs):
             result = search(question, pointers, limit=limit, **kwargs)
-            selected[(name, tuple(pointers), question)] = [r[1] for r in result[:ask.FALLBACK_FILES]]
+            selected[(name, tuple(pointers), question)] = [r[1] for r in result[:scorecard.read_slots(ask)]]
             return result
         ask.word_search = word_search
         return ask

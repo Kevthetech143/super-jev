@@ -71,7 +71,7 @@ def _setup(tmp_path, monkeypatch, changed=(), heal="cooldown"):
         return {"status": "error"}
     monkeypatch.setattr(ask, "memory", fake)
     monkeypatch.setattr(ask, "load_cache_files", lambda ptr: cache if ptr == "notes" else {})
-    monkeypatch.setattr(ask.zoom, "run", lambda q, corpus, hits, hooks, cache_path=None, **k: (list(corpus), [], {}))
+    monkeypatch.setattr(ask.zoom, "run", lambda q, store, hits, hooks, **k: (list(store.corpus), [], {}))
     monkeypatch.setattr(ah, "reconnect_now", lambda ptr, principal, timeout=None: "changed")
     heals = []
     monkeypatch.setattr(ah, "maybe_heal", lambda *a, **k: heals.append(a) or heal)
