@@ -27,6 +27,9 @@
       that order (found 0, not-found 1, not-supported 2, error 3, needs-setup 4).
       found with a failed content check says "(unconfirmed: content check
       failed)" and exits 0: the files are unconfirmed candidates, read them.
+      Found needs one file the content check passed: unread files alone stay
+      listed as unchecked, and the outcome is not-found (files not checked),
+      or error when the content check itself failed.
 
   ask.py --principal AGENT --claim "statement" [--claim "statement2" ...] [--claims-file FILE]
       Is a statement true by our own files? One lookup per statement; the same
@@ -3814,7 +3817,10 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
     if why := SKILL_FAILED.pop(question, "") if skill_job else (
             "skill search is off (SUPERJEV_SKILLS=0)" if SKILL_Q_RE.search(question) else ""):
         _RESULT["skills_off"] = _redact(f"no skill catalog was searched: {why}")
-    listed = bool(top or skills)
+    # Found needs a file the content check passed: a file whose check failed or did not finish was not
+    # read, so it stays listed as unchecked (inspect it) and counts as a file not checked, never as found.
+    unread = [p for p, note in notes.items() if note == INCONCLUSIVE]
+    listed = bool([m for m in top if m[1] not in unread] or skills)
     # A claim that nothing settles takes its exit from how the search went, listed files or not: the judge's
     # confidence in the files it read must not decide whether a failed or stale set shows in the exit code.
     unsettled = bool(_CLAIM["text"]) and _CLAIM["word"] not in ("TRUE", "FALSE")
@@ -3844,15 +3850,18 @@ def _lookup(question: str, principal: str, sdir: Path) -> int:
             x for x in (f"{len(stale_ptrs)} set{'s' if len(stale_ptrs) != 1 else ''} stale or unprepared" if stale_ptrs else "",
                         f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
                         f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "",
-                        f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
+                        f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "",
+                        f"{len(unread)} file{'s' if len(unread) != 1 else ''} not read (content check failed or unfinished)"
+                        if unread else "") if x)
         rc = _done("needs-setup", why, first or f"{ask_py} --status", "refresh")
     else:
         # Files skipped at setup do not make a searched set a setup gap: the sets were searched.
         gone = "; ".join(x for x in (
             f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} skipped at setup" if skipped else "",
             f"{len(edited_out)} edited file{'s' if len(edited_out) != 1 else ''} not read" if edited_out else "",
-            f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "") if x)
-        unchecked = {p for p, *_ in skipped + edited_out} | set(held)
+            f"{len(held)} file{'s' if len(held) != 1 else ''} held (contains a secret; not sent)" if held else "",
+            f"{len(unread)} file{'s' if len(unread) != 1 else ''} not read (content check failed or unfinished)" if unread else "") if x)
+        unchecked = {p for p, *_ in skipped + edited_out} | set(held) | set(unread)
         gone = (f"; partial: {len(unchecked)} file{'s' if len(unchecked) != 1 else ''} not checked ({gone}; "
                 f"see {ask_py} --status)") if gone else ""
         rc = _done("not-found", f"searched {len(original_pointers)} set{'s' if len(original_pointers) != 1 else ''}, "
@@ -4001,7 +4010,7 @@ def miss_report(principal: str, total: int, routing: dict, content_check: dict,
     topic, which files were read (closest first), and the exact commands to
     connect a missing folder or save a known answer."""
     on_topic = sorted(ptr for ptr, r in routing.items() if r.get("status") == "candidates")
-    read = sorted((p for p in content_check if content_check[p].get("label") != "held-secret"),
+    read = sorted((p for p in content_check if content_check[p].get("label") not in ("held-secret", "inconclusive")),
                   key=lambda p: -(content_check[p].get("score") or 0))
     lines = ["What was searched:",
              f"  - {total} connected sets; {len(routing)} searched after the topic filter; descriptions matched in {len(on_topic)}"

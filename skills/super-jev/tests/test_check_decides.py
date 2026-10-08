@@ -80,12 +80,12 @@ def test_claim_passing_file_listed_first_and_rejected_one_left_out(tmp_path, mon
     assert paths["good.md"] in listed and paths["bad.md"] not in listed
 
 
-# (3) an unfinished check keeps today's behaviour: kept, and said to be unconfirmed
+# (3) an unfinished check: the file is kept and labelled, but alone it is not found (2026-10-07)
 
 def test_unfinished_check_is_kept_and_labelled_unconfirmed(tmp_path, monkeypatch, capsys):
     paths = _setup(tmp_path, monkeypatch, ["a.md"], {"a.md": 0.8}, {}, notes={"a.md": ask.INCONCLUSIVE})
     rc, out = _ask(tmp_path, capsys, "what is left to do")
-    assert rc == 0 and "OUTCOME: found" in out and paths["a.md"] in out and "inconclusive" in out
+    assert rc == 1 and "OUTCOME: not-found" in out and paths["a.md"] in out and "inconclusive" in out
 
 
 def test_claim_unjudged_file_is_not_dropped(tmp_path, monkeypatch, capsys):

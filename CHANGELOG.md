@@ -9,6 +9,8 @@
 
 ## Unreleased
 
+- An ask whose only files were never read (their content check failed or did not finish) no longer says `found`. Found needs at least one file the content check passed; the unread files are still listed as `unchecked` to inspect. An unfinished check gives `not-found` with `partial: N files not checked (N files not read (content check failed or unfinished))`; a failed check gives `error - no match, and the content check failed`, as it already did when no file was listed. Before, an absent question could report such a file as `found (unconfirmed: content check failed)`. `--claim` exit codes are unchanged. Test: `skills/super-jev/tests/test_absent_unchecked.py`.
+
 - `scorecard.py` is much faster and ranks nothing differently. Before, every case re-read, hashed and tokenized every connected file, for each build, so `scorecard-all` took about 2.5 hours of CPU after a release. Now each build indexes a principal's files once and every case of that principal reuses them (a build whose `word_search` lacks `items`/`index_path` is graded as before). Tests: `skills/super-jev/tests/test_scorecard.py`.
 
 ## 1.0.134 — 2026-10-07

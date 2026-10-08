@@ -148,7 +148,8 @@ def test_a_file_the_content_check_did_not_finish_is_unchecked(tmp_path, monkeypa
     w = notes / "warranty.md"
     world(tmp_path, monkeypatch, navigate=lambda p: cands(w), notes_by_path={str(w): ask.INCONCLUSIVE})
     rc, text, _, obj = both(monkeypatch, capsys, Q)
-    assert rc == 0 and obj["outcome"] == "found" and obj["files"][0]["tier"] == "unchecked"
+    # 2026-10-07: an unread file alone is never found; it stays listed to inspect
+    assert rc == 1 and obj["outcome"] == "not-found" and obj["files"][0]["tier"] == "unchecked"
     assert "inconclusive" in text
 
 
