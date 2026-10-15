@@ -5,6 +5,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadJudgeProfile } from '../src/judge-profile.ts';
+import { TABLE_HOOK, largeTable } from './large-table.ts';
 
 const cli = new URL('../src/navigation-cli.ts', import.meta.url).pathname;
 
@@ -87,7 +88,11 @@ test('source-evidence mode reaches the evaluator in single and batched CLI reque
 // ---- context: which preset (small, medium or large) a run reads at travels in the input as a `context` key; absent means small.
 // The preset gives the judge profile (so the long-context header rule), the batcher's call budget and the check's timeout.
 
-const at = (context: string) => loadJudgeProfile('typesafe-jev', undefined, {}, context);
+// The shipped table offers Small and Medium only (Large waits for its own test), so a run at a size this big reads a made-up table: the
+// shipped one plus a `large` row (test/large-table.ts). The CLI is a child process, so TABLE_HOOK, preloaded, hands it the table.
+const TABLE = largeTable();
+const TABLE_ENV = { NODE_OPTIONS: `--require=${TABLE_HOOK}`, SJ_TABLE: TABLE };
+const at = (context: string) => loadJudgeProfile('typesafe-jev', TABLE, {}, context);
 const [HEADER_NAME, HEADER_VALUE] = at('large').longContextHeader!;
 const FILLER = 'The cuff watch note says the wrist model is validated. ';
 /** A flat catalog of `n` passages of `chars` characters each, plain prose. */
@@ -125,7 +130,7 @@ function runOffline(input: unknown, env: Record<string, string> = {}) {
     const hook = join(dir, 'offline.cjs');
     const seenFile = join(dir, 'seen.json');
     writeFileSync(hook, OFFLINE_HOOK);
-    const result = runCli(JSON.stringify(input), { TYPESAFE_API_KEY: 'x', NODE_OPTIONS: `--require=${hook}`, SJ_SEEN: seenFile, SJ_HEADER_NAME: HEADER_NAME, SJ_HEADER_VALUE: HEADER_VALUE, ...env });
+    const result = runCli(JSON.stringify(input), { TYPESAFE_API_KEY: 'x', NODE_OPTIONS: `--require=${TABLE_HOOK} --require=${hook}`, SJ_TABLE: TABLE, SJ_SEEN: seenFile, SJ_HEADER_NAME: HEADER_NAME, SJ_HEADER_VALUE: HEADER_VALUE, ...env });
     const seen: Seen = existsSync(seenFile) ? JSON.parse(readFileSync(seenFile, 'utf8')) : { requests: [], timers: [] };
     return { ...result, seen };
   } finally { rmSync(dir, { recursive: true, force: true }); }
@@ -150,7 +155,7 @@ test('context large sets the default timeout to its preset (30000) unless SUPERJ
 test('an unknown context is a one-line error, before any judge is built', () => {
   const one = { question: 'q', catalog: CATALOG };
   for (const [input, name] of [[{ ...one, context: 'xl' }, 'xl'], [{ batch: [one], context: 'xl' }, 'xl'], [{ batch: [{ ...one, context: 'Large' }] }, 'Large']] as const) {
-    const r = runCli(JSON.stringify(input));                               // no key: the context is read first
+    const r = runCli(JSON.stringify(input), TABLE_ENV);                    // no key: the context is read first
     assert.equal(r.code, 2);
     assert.equal(r.stdout, '');
     assert.equal(r.stderr, `unknown context ${JSON.stringify(name)} (choose small, medium or large)\n`);

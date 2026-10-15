@@ -11,13 +11,16 @@ import { getJudge } from '../src/judge.ts';
 import { JUDGE_PROFILE, judgeTokens, loadJudgeProfile, type JudgeProfile } from '../src/judge-profile.ts';
 import { AuthRejected, JudgeError, Overloaded } from '../src/judge-errors.ts';
 import type { Request } from '../src/types.ts';
+import { largeTable } from './large-table.ts';
 
 const { Jev } = jevModule;
 /** Looked up when called, so a build without the counter fails the tests that read it, not this whole file at import. */
 const longCalls = (): number => jevModule.longCalls();
 
-/** The profile at a preset (the loader's fourth parameter). */
-const at = (context: string): JudgeProfile => loadJudgeProfile('typesafe-jev', undefined, {}, context);
+/** The profile at a preset (the loader's fourth parameter). The shipped table offers Small and Medium only (Large waits for its own
+ * test), so a request this size is sent through a made-up table: the shipped one plus a `large` row (test/large-table.ts). */
+const TABLE = largeTable();
+const at = (context: string): JudgeProfile => loadJudgeProfile('typesafe-jev', TABLE, {}, context);
 const [NAME, VALUE] = at('large').longContextHeader!;
 /** Small's call budget: the most a request can measure and still be carried without the header. */
 const BASE = at('large').baseCallTokens;

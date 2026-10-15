@@ -17,6 +17,10 @@ What these tests hold:
 No network, no key, no Jev call: ask.lookup is replaced by a stand-in that records what it was asked, or the engine and the
 navigation run are faked.
 
+The shipped table offers Small and Medium only (Large waits for its own test), so the tests of how a size is picked read a
+made-up table: the shipped one plus a `large` row (the large_row fixture in conftest.py). The two tests marked shipped_table
+read the shipped table and pin what it offers; test_large_not_offered.py says what asking for Large does.
+
     python3 -m pytest skills/super-jev/tests/test_context_setting.py -q
 """
 import dataclasses
@@ -40,6 +44,13 @@ judge_profile = ask.judge_profile
 
 USAGE = 'ask: unknown context "{}" (choose small, medium or large)'
 QUESTION = "when is the zeppelin quokka inspection scheduled"
+
+
+@pytest.fixture(autouse=True)
+def _made_up_large(request):
+    """A table with a `large` row for every test here, except the ones marked shipped_table."""
+    if request.node.get_closest_marker("shipped_table") is None:
+        request.getfixturevalue("large_row")
 
 
 @pytest.fixture(autouse=True)
@@ -322,12 +333,14 @@ def test_set_context_writes_settings_atomically_and_only_the_three_names(tmp_pat
     assert rc == 2 and json.loads(out)["outcome"] == "not-supported" and path.read_text() == before
 
 
-def test_the_three_names_are_the_ones_the_jev_profile_states():
+@pytest.mark.shipped_table
+def test_the_names_are_the_ones_the_shipped_jev_profile_states():
     table = json.loads((SKILL / "judge_profiles.json").read_text())["profiles"][judge_profile.PROFILE.name]
     assert ask.context_setting.NAMES == ("small", *table["contexts"])
-    assert ask.context_setting.NAMES == ("small", "medium", "large")  # what the docs and the terminal app offer
+    assert ask.context_setting.NAMES == ("small", "medium")  # what the docs and the terminal app offer: Large waits for its own test
 
 
+@pytest.mark.shipped_table
 def test_the_usage_text_states_the_sizes_the_profile_states():
     """ask.py --help names how much each size reads: the numbers are the profile's, so they cannot drift from it."""
     doc = " ".join(ask.__doc__.split())

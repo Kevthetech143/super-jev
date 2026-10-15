@@ -7,6 +7,9 @@ from the row's window by the rules the profile already has. The request header t
 the judge's normal limit is profile data too. No Jev call: only the loader and the table are read.
 The Node twin of these tests is test/context-presets.test.ts.
 
+The shipped table offers Small and Medium only (Large waits for its own test), so these tests read a made-up table: the
+shipped one plus a `large` row (the large_row fixture in conftest.py). test_large_not_offered.py pins what the shipped table offers.
+
     python3 -m pytest skills/super-jev/tests/test_context_presets.py -q
 """
 import dataclasses
@@ -24,8 +27,9 @@ REPO = SKILL.parent.parent
 sys.path.insert(0, str(SKILL))
 import judge_profile  # noqa: E402
 
-TABLE = SKILL / "judge_profiles.json"
+TABLE = SKILL / "judge_profiles.json"  # the shipped table; the loader reads judge_profile.PROFILES_PATH, which large_row points elsewhere
 NODE = shutil.which("node") or "node"
+pytestmark = pytest.mark.usefixtures("large_row")
 
 #: preset: (shown name, window, input cap, call budget, characters read per note, content-check timeout in ms)
 PRESETS = {
@@ -40,7 +44,7 @@ ROW_FIELDS = {"context", "context_label", "window_tokens", "read_chars", "nav_ti
 
 
 def _raw():
-    return json.loads(TABLE.read_text())["profiles"]
+    return json.loads(judge_profile.PROFILES_PATH.read_text())["profiles"]
 
 
 def _presets():
@@ -61,8 +65,8 @@ GOOD = {
 
 
 def _edited(tmp_path, edit):
-    """A copy of the real table, the Jev profile given the GOOD preset keys and then `edit`; returns its path."""
-    data = json.loads(TABLE.read_text())
+    """A copy of the table in use, the Jev profile given the GOOD preset keys and then `edit`; returns its path."""
+    data = json.loads(judge_profile.PROFILES_PATH.read_text())
     data["profiles"]["typesafe-jev"].update(json.loads(json.dumps(GOOD)))
     edit(data["profiles"]["typesafe-jev"])
     path = tmp_path / "profiles.json"
@@ -249,8 +253,9 @@ def _same_profile(want, got, where):
 
 
 def test_python_and_node_loaders_agree_on_every_preset():
-    cases = [(key, ctx, None) for key in _raw() for ctx in ["small", *_raw()[key].get("contexts", {})]]
-    assert ("typesafe-jev", "large", None) in cases, "the table has no presets to compare"
+    table = str(judge_profile.PROFILES_PATH)
+    cases = [(key, ctx, table) for key in _raw() for ctx in ["small", *_raw()[key].get("contexts", {})]]
+    assert ("typesafe-jev", "large", table) in cases, "the table has no presets to compare"
     for (key, ctx, _), got in zip(cases, _node_loads(cases)):
         assert "profile" in got, (key, ctx, got)
         _same_profile(judge_profile.load(key, context=ctx), got["profile"], (key, ctx))

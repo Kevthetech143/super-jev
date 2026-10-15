@@ -25,6 +25,9 @@ module's own state, _CONTEXT, which is what an ask sets once from the flag, the 
 item). The exception, test_ask_loads_beside_an_older_build_whose_profile_has_no_read_chars, guards a failure of the change
 itself (found by the scorecard) and so passes on the base.
 
+The shipped table offers Small and Medium only (Large waits for its own test). The tests that read at large, and the ones that
+walk every preset, read a made-up table: the shipped one plus a `large` row (the large_row fixture in conftest.py).
+
 No network, no key, no Jev call: a fake navigation stands in for the content check, and the one test that runs the real
 navigation-cli does it against an offline fetch hook.
 
@@ -44,6 +47,7 @@ import pytest
 SKILL = Path(__file__).resolve().parent.parent
 REPO = SKILL.parents[1]
 GOLDEN = Path(__file__).resolve().parent / "fixtures" / "context" / "small_payloads.json"
+TABLE_HOOK = REPO / "test" / "fixtures" / "judge-table-hook.cjs"  # hands a child process the made-up table (SJ_TABLE, set by large_row)
 sys.path.insert(0, str(SKILL))
 spec = importlib.util.spec_from_file_location("ask_read_budget", SKILL / "ask.py")
 ask = importlib.util.module_from_spec(spec)
@@ -353,6 +357,7 @@ def filled(chunks, picked, budget):
     return 0 <= budget - cost(chunks, picked) < max(map(len, chunks)) + TITLE
 
 
+@pytest.mark.usefixtures("large_row")
 def test_read_budget_is_14000_at_small_and_comes_from_the_profile(monkeypatch):
     prof = judge_profile.PROFILE
     assert prof.read_chars == ask.READ_CHARS == 14_000
@@ -414,6 +419,7 @@ def test_medium_fills_56000_with_the_best_passages_of_a_150kb_note(tmp_path, mon
     assert picked == sorted(picked) and len(picked) < len(chunks)
 
 
+@pytest.mark.usefixtures("large_row")
 def test_large_reads_a_100kb_note_whole_and_cuts_a_250kb_note_to_112000(tmp_path, monkeypatch):
     at(monkeypatch, "large")
     text = note(100_000, 0.5)  # 29 passages and a title on 28 of them: 102,940 characters or fewer, under 112,000
@@ -449,6 +455,7 @@ def test_ties_go_to_the_earlier_passage_and_a_zero_score_one_that_does_not_fit_e
     assert ask.pick_chunks(QUESTION, chunks, cost(chunks, range(5)) - 1) != [0, 1, 2, 3, 4]  # one character short: cut
 
 
+@pytest.mark.usefixtures("large_row")
 def test_claim_checks_read_at_small_whatever_the_preset(tmp_path, monkeypatch):
     text = note(150_000, 0.5)
     chunks = ask.split_passages(text)
@@ -466,6 +473,7 @@ def test_claim_checks_read_at_small_whatever_the_preset(tmp_path, monkeypatch):
         assert json.dumps(claimed["payload"]) == claimed_at_small, preset
 
 
+@pytest.mark.usefixtures("large_row")
 def test_a_file_re_sent_after_a_fallback_is_read_at_small(tmp_path, monkeypatch):
     case = {"name": "resent.md", "text": note(150_000, 0.5), "question": QUESTION}
     at(monkeypatch, "large")
@@ -477,6 +485,7 @@ def test_a_file_re_sent_after_a_fallback_is_read_at_small(tmp_path, monkeypatch)
     assert ask.read_budget(str(tmp_path / "resent.md")) == 14_000 and ask.read_budget(str(tmp_path / "other.md")) == 112_000
 
 
+@pytest.mark.usefixtures("large_row")
 def test_a_secret_past_character_14000_is_blanked_or_holds_the_file_at_every_preset(tmp_path, monkeypatch):
     text = with_secret(note(40_000, 0.9), 22_000)
     assert text.index(SECRET_LINE) > 14_000  # small never read this far; medium and large do
@@ -525,6 +534,7 @@ def ask_over(tmp_path, monkeypatch, connected):
     return opened, [sum(len(n["description"]) for n in pl["catalog"]["nodes"][1:]) for pl in payloads]
 
 
+@pytest.mark.usefixtures("large_row")
 def test_reads_are_bounded_by_read_max_not_by_connected_files(tmp_path, monkeypatch):
     at(monkeypatch, "large")
     opened, sizes = {}, {}
@@ -563,6 +573,7 @@ global.fetch = async (_url, opts) => {
 """
 
 
+@pytest.mark.usefixtures("large_row")
 def test_every_payload_fits_its_presets_call_room(tmp_path, monkeypatch):
     nav = (REPO / "src" / "enhance" / "navigation.ts").read_text()
     max_leaves = int(re.search(r"const MAX_LEAVES = (\d+);", nav).group(1))  # the most passages the navigation takes
@@ -592,7 +603,7 @@ def test_every_payload_fits_its_presets_call_room(tmp_path, monkeypatch):
             continue  # the rest runs the real navigation-cli
         seen = tmp_path / f"seen-{preset}.json"
         monkeypatch.setenv(ask.judges.key_env(), "offline")  # fetch is replaced below: the key only has to be set
-        monkeypatch.setenv("NODE_OPTIONS", f"--require={hook}")
+        monkeypatch.setenv("NODE_OPTIONS", f"--require={TABLE_HOOK} --require={hook}")
         monkeypatch.setenv("SJ_SEEN", str(seen))
         monkeypatch.setenv("SJ_BYTES_PER_TOKEN", str(prof.bytes_per_token))
         body, error = ask.run_navigation({"batch": list(payloads.values()), **({} if preset == "small" else {"context": preset})})

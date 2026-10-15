@@ -279,7 +279,7 @@ test('S15 help lists exactly the commands that exist, and ? is the same help', (
   assert.match(s, /\?/);
   assert.equal(cfg.readLine('?').kind, 'help');
   assert.equal(cfg.readLine('/help').kind, 'help');
-  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/right', '/right 2', '/context', '/context large']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
+  for (const c of ['/check x', '/status', '/help', '/exit', '/wrong', '/right', '/right 2', '/context', '/context medium']) assert.notEqual(cfg.readLine(c).kind, 'say', c);
 });
 
 test('S15b help rows line up: every description starts in the same column, and a row fits 60 columns', () => {

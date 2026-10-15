@@ -1,8 +1,10 @@
 // Frozen tests (context setting 4/7): the terminal app's `/context`, how much of each note a search reads.
 //
-// `/context large` sets the size for the rest of the window and calls no helper; every helper call after it carries
-// `--context large` (between --principal and --json), so it beats SUPERJEV_CONTEXT in the shell. `/context` alone asks the
+// `/context medium` sets the size for the rest of the window and calls no helper; every helper call after it carries
+// `--context medium` (between --principal and --json), so it beats SUPERJEV_CONTEXT in the shell. `/context` alone asks the
 // helper which size is in use and where that came from. `/context nope` says the usage. /status shows the size too.
+// Medium is the biggest size the app offers: Large waits for its own test (context setting 8/8), and a test below says what
+// `/context large` answers. The window has no way to read another table, so the tests that set a size use Medium.
 //
 // Same layers as test/jev-chat.test.ts, kept small and self-contained (no Jev, no network):
 //   pure        readLine, helperCall, render, HELP
@@ -119,18 +121,18 @@ const SKILL_DIR = '/skill';
 const session = { principal: 'me', skillDir: SKILL_DIR, connected: new Set<string>() };
 
 // ---------------------------------------------------------------- /context
-test('/context large sets the session and helperCall adds --context large before --json', async () => {
+test('/context medium sets the session and helperCall adds --context medium before --json', async () => {
   // the turn: a name, read as a person types it
-  assert.deepEqual(cfg.readLine('/context large'), { kind: 'context', name: 'large' });
+  assert.deepEqual(cfg.readLine('/context medium'), { kind: 'context', name: 'medium' });
   assert.deepEqual(cfg.readLine('/context   Medium '), { kind: 'context', name: 'medium' });
   assert.deepEqual(cfg.readLine('/CONTEXT small'), { kind: 'context', name: 'small' });
   // the helper's argv: --context goes between --principal and --json; with no choice made the argv is what it always was
   const ask = (s: object) => cfg.helperCall({ kind: 'ask', text: 'canary?' }, { ...session, ...s });
   assert.deepEqual(ask({}), [`${SKILL_DIR}/ask.py`, '--principal', 'me', '--json', '--', 'canary?']);
-  assert.deepEqual(ask({ context: 'large' }), [`${SKILL_DIR}/ask.py`, '--principal', 'me', '--context', 'large', '--json', '--', 'canary?']);
+  assert.deepEqual(ask({ context: 'medium' }), [`${SKILL_DIR}/ask.py`, '--principal', 'me', '--context', 'medium', '--json', '--', 'canary?']);
   assert.deepEqual(cfg.helperCall({ kind: 'status' }, { ...session, context: 'medium' }),
     [`${SKILL_DIR}/ask.py`, '--principal', 'me', '--context', 'medium', '--json', '--status']);
-  // the window: nothing is sent for /context large itself; every later helper call carries it, /context small included
+  // the window: nothing is sent for /context medium itself; every later helper call carries it, /context small included
   const r = rig([STATUS(), FOUND]);
   const w = win(r);
   await w.ready();
@@ -138,8 +140,8 @@ test('/context large sets the session and helperCall adds --context large before
   w.say('first?');
   await w.waitFor(() => found() === 1);
   const before = r.calls().length;
-  w.say('/context large');
-  await w.waitFor('Context: Large (this window)');
+  w.say('/context medium');
+  await w.waitFor('Context: Medium (this window)');
   assert.equal(r.calls().length, before, 'setting the size calls no helper');
   w.say('second?');
   await w.waitFor(() => found() === 2);
@@ -149,7 +151,7 @@ test('/context large sets the session and helperCall adds --context large before
   await w.waitFor(() => found() === 3);
   const [one, two, three] = asks(r).map((c) => c.args);
   assert.deepEqual(one, ['--principal', 'me', '--json', '--', 'first?']);
-  assert.deepEqual(two, ['--principal', 'me', '--context', 'large', '--json', '--', 'second?']);
+  assert.deepEqual(two, ['--principal', 'me', '--context', 'medium', '--json', '--', 'second?']);
   assert.deepEqual(three, ['--principal', 'me', '--context', 'small', '--json', '--', 'third?'], 'small is passed too: it beats a bigger size set in the shell');
   assert.equal(await w.quit(), 0);
 });
@@ -158,28 +160,28 @@ test('/context alone shows the current one', async () => {
   // the helper's own answer is what is shown: the size, and where it came from, in the app's words
   const showing = (source: string, preset = 'medium') => strip(cfg.render({ kind: 'context', data: { v: 1, ...STATUS().out as object, context: { preset, default: 'small', source } } }, OPTS));
   assert.match(showing('flag'), /^• Context: Medium \(this window\)$/m);
-  assert.match(showing('env', 'large'), /^• Context: Large \(SUPERJEV_CONTEXT\)$/m);
+  assert.match(showing('env'), /^• Context: Medium \(SUPERJEV_CONTEXT\)$/m);
   assert.match(showing('settings'), /^• Context: Medium \(saved default\)$/m);
   assert.match(showing('default', 'small'), /^• Context: Small \(the default\)$/m);
   // /status shows it too, under the folders; a helper that says nothing of it adds no row
   const status = (context?: object) => strip(cfg.render({ kind: 'status', data: { v: 1, ...STATUS().out as object, ...(context ? { context } : {}) } }, OPTS));
-  assert.match(status({ preset: 'large', default: 'small', source: 'env' }), /^ {2}Context: Large \(SUPERJEV_CONTEXT\)$/m);
+  assert.match(status({ preset: 'medium', default: 'small', source: 'env' }), /^ {2}Context: Medium \(SUPERJEV_CONTEXT\)$/m);
   assert.ok(!status().includes('Context:'));
   // the window asks the helper for it (a status call, free), with the choice made in the window if there is one
   const r = rig([
-    { when: '--context large --json --status', out: { v: 1, next: 'none', principal: 'me', sets: [SET], context: { preset: 'large', default: 'small', source: 'flag' } } },
+    { when: '--context medium --json --status', out: { v: 1, next: 'none', principal: 'me', sets: [SET], context: { preset: 'medium', default: 'small', source: 'flag' } } },
     STATUS({ preset: 'medium', default: 'small', source: 'env' })]);
   const w = win(r);
   await w.ready();
   w.say('/context');
   await w.waitFor('Context: Medium (SUPERJEV_CONTEXT)');
   assert.ok(!/Context: Medium \(SUPERJEV_CONTEXT\) ·/.test(w.text()), 'no timing on a setting');
-  w.say('/context large');
-  await w.waitFor('Context: Large (this window)');
+  w.say('/context medium');
+  await w.waitFor('Context: Medium (this window)');
   w.say('/context');
-  await w.waitFor(() => (w.text().match(/Context: Large \(this window\)/g) ?? []).length === 2);
+  await w.waitFor(() => (w.text().match(/Context: Medium \(this window\)/g) ?? []).length === 2);
   w.say('/status');
-  await w.waitFor(() => /^ {2}Context: Large \(this window\)$/m.test(w.text()));
+  await w.waitFor(() => /^ {2}Context: Medium \(this window\)$/m.test(w.text()));
   assert.ok(!w.text().includes('--principal') && !w.text().includes('python3'), 'the screen never shows the helper call');
   assert.equal(await w.quit(), 0);
   // the one-shot door has no window to set a size for, but it can say which one is in use
@@ -192,14 +194,14 @@ test('/context nope says the usage', async () => {
   for (const bad of ['/context nope', '/context large small', '/context 2', '/context --large']) {
     const t = cfg.readLine(bad) as { kind: string; text: string };
     assert.equal(t.kind, 'say', bad);
-    assert.equal(t.text, 'Usage: /context [small|medium|large]   how much of each note is read', bad);
+    assert.equal(t.text, 'Usage: /context [small|medium]   how much of each note is read', bad);
   }
   const r = rig([STATUS(), FOUND]);
   const w = win(r);
   await w.ready();
   const before = r.calls().length;
   w.say('/context nope');
-  await w.waitFor('Usage: /context [small|medium|large]');
+  await w.waitFor('Usage: /context [small|medium]');
   assert.equal(r.calls().length, before, 'the usage calls no helper');
   w.say('canary?');
   await w.waitFor('Found 1 note');
@@ -208,16 +210,39 @@ test('/context nope says the usage', async () => {
   // a judge profile that states only small refuses a bigger size in the window, so no ask is ever sent one it would refuse
   const laya = win(r, { SUPERJEV_JUDGE: 'laya' });
   await laya.ready();
-  laya.say('/context large');
-  await laya.waitFor('Unknown context "large" (choose small)');
+  laya.say('/context medium');
+  await laya.waitFor('Unknown context "medium" (choose small)');
   laya.say('canary again?');
   await laya.waitFor('Found 1 note');
   assert.ok(!asks(r)[1].args.includes('--context'));
   await laya.quit();
   // the door cannot keep a size between runs: it says so and points at the variable
-  const d = await door(r, ['/context', 'large']);
+  const d = await door(r, ['/context', 'medium']);
   assert.equal(d.code, 2);
   assert.match(d.err, /works in the window.*SUPERJEV_CONTEXT/);
+});
+
+test('/context large says it is not offered yet, and sets nothing', async () => {
+  // Large waits for its own test: the app names it, so a person who asks for it is told why it is refused and what to choose
+  const NOT_YET = 'Large is not offered yet. Usage: /context [small|medium]   how much of each note is read';
+  assert.deepEqual(cfg.readLine('/context large'), { kind: 'say', text: NOT_YET });
+  assert.deepEqual(cfg.readLine('/CONTEXT  Large '), { kind: 'say', text: NOT_YET });
+  assert.notEqual((cfg.readLine('/context nope') as { text: string }).text, NOT_YET, 'a name that is no size is unknown, not waiting');
+  const r = rig([STATUS(), FOUND]);
+  const w = win(r);
+  await w.ready();
+  const before = r.calls().length;
+  w.say('/context large');
+  await w.waitFor(NOT_YET);
+  assert.equal(r.calls().length, before, 'the refusal calls no helper');
+  w.say('canary?');
+  await w.waitFor('Found 1 note');
+  assert.ok(!asks(r)[0].args.includes('--context'), 'a size that is not offered sets nothing');
+  assert.equal(await w.quit(), 0);
+  // the one-shot door says the same, and exits 2
+  const d = await door(r, ['/context', 'large']);
+  assert.equal(d.code, 2);
+  assert.ok(d.err.includes(NOT_YET), d.err);
 });
 
 test('HELP lists /context', () => {

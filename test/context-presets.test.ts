@@ -1,7 +1,8 @@
 // The context presets (Small, Medium, Large) through the Node loader. Python twin: skills/super-jev/tests/test_context_presets.py,
 // which also runs this loader and checks it against the Python one on every preset. No judge call: only the loader and the table.
 // Small is the profile as written; Medium and Large are `contexts` rows that override only the label, the window, the characters
-// read per note and the content-check timeout. To run this file alone:
+// read per note and the content-check timeout. The shipped table offers Small and Medium only (Large waits for its own test), so the
+// loader is tested against a made-up table: the shipped one plus a `large` row (test/large-table.ts). To run this file alone:
 //   node --import ./test/clean-env.ts --test test/context-presets.test.ts
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,11 +10,12 @@ import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JUDGE_PROFILE, loadJudgeProfile } from '../src/judge-profile.ts';
+import { largeTable } from './large-table.ts';
 
-const TABLE = new URL('../skills/super-jev/judge_profiles.json', import.meta.url);
+const TABLE = largeTable();
 const raw = () => JSON.parse(readFileSync(TABLE, 'utf8')) as { profiles: Record<string, any> };
-/** The profile loaded at a preset (the loader's fourth parameter). */
-const at = (name: string, context?: string) => loadJudgeProfile(name, undefined, {}, context);
+/** The profile loaded at a preset (the loader's fourth parameter), from the made-up table. */
+const at = (name: string, context?: string) => loadJudgeProfile(name, TABLE, {}, context);
 
 // preset: [shown name, window, input cap, call budget, characters read per note, content-check timeout in ms]
 const PRESETS: Record<string, [string, number, number, number, number, number]> = {

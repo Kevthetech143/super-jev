@@ -19,6 +19,9 @@ error as it was and says nothing; and an ask at the preset small adds no retry.
 No network, no key, no Jev call: the navigation-cli process is replaced by a stand-in that records every input it is
 handed and answers each file by a rule the test states.
 
+The shipped table offers Small and Medium only (Large waits for its own test), so these tests read a made-up table: the shipped
+one plus a `large` row (the large_row fixture in conftest.py). The fallback is for any size above Small; Large is the biggest.
+
     python3 -m pytest skills/super-jev/tests/test_context_fallback.py -q
 """
 import hashlib
@@ -33,6 +36,8 @@ from pathlib import Path
 import pytest
 
 SKILL = Path(__file__).resolve().parent.parent
+REPO = SKILL.parents[1]
+TABLE_HOOK = REPO / "test" / "fixtures" / "judge-table-hook.cjs"  # hands a child process the made-up table (SJ_TABLE, set by large_row)
 sys.path.insert(0, str(SKILL))
 spec = importlib.util.spec_from_file_location("ask_context_fallback", SKILL / "ask.py")
 ask = importlib.util.module_from_spec(spec)
@@ -53,6 +58,11 @@ NETWORK = "Navigation provider failed: could not reach TypeSafe (network)"
 # The line, written out here in full: the words are fixed, so they are not built from the code's own pieces.
 SLOW_AT_LARGE = ("CONTEXT: Large did not work this time (the judge was slow to answer), so this ask used Small. "
                  "Small reads less of each note. Try again later, or pick Small yourself with --context small.")
+
+
+@pytest.fixture(autouse=True)
+def _made_up_large(large_row):
+    """A table with a `large` row for every test here."""
 
 
 @pytest.fixture(autouse=True)
@@ -266,7 +276,7 @@ def test_the_stand_in_prints_what_the_real_navigation_cli_prints(tmp_path, monke
     at(monkeypatch, "large")
     hook = tmp_path / "offline.cjs"
     hook.write_text(OFFLINE_JUDGE)
-    env = {**os.environ, "NODE_OPTIONS": f"--require={hook}", "TYPESAFE_API_KEY": "fake-not-real"}
+    env = {**os.environ, "NODE_OPTIONS": f"--require={TABLE_HOOK} --require={hook}", "TYPESAFE_API_KEY": "fake-not-real"}
     works, refused = write(tmp_path, "works.md", SHORT), write(tmp_path, "refused.md", "# Dock log\n" + ANSWER)
     one, other = (ask.confirm_start(QUESTION, path)[1]["payload"] for path in (works, refused))
     assert one["context"] == other["context"] == "large"  # the key the real process reads the size from

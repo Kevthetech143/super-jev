@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """The docs say what the context setting does (context setting 6/7).
 
-The setting is how much of each note one content check reads: Small, Medium or Large. A person picks it with
-`--context NAME` on one ask, `SUPERJEV_CONTEXT` in the shell, or `--set-context NAME` saved for a principal; Small is
-the default; and a read at a bigger size that fails is read again at Small, with a `CONTEXT:` line after the OUTCOME
-line. The pages a person or an agent reads first have to say so. They say it with the numbers the judge profile states
-(judge_profiles.json), so a change to the profile cannot leave a page behind, and they call the profile's own default
-"the default".
+The setting is how much of each note one content check reads: Small or Medium (Large waits for its own test, and
+test_large_not_offered.py pins what the docs say of that). A person picks it with `--context NAME` on one ask,
+`SUPERJEV_CONTEXT` in the shell, or `--set-context NAME` saved for a principal; Small is the default; and a read at a
+bigger size that fails is read again at Small, with a `CONTEXT:` line after the OUTCOME line. The pages a person or an
+agent reads first have to say so. They say it with the numbers the judge profile states (judge_profiles.json), so a change
+to the profile cannot leave a page behind, and they call the profile's own default "the default".
 
   - SKILL.md, the daily page: the flag, the variable, the saved choice, what each size reads, the default, the CONTEXT
     line. The page is capped at 60 lines, so a sentence was reworded and no line added.
-  - references/source-retrieval.md: the three read sizes, where the old page gave one fixed read for every note.
+  - references/source-retrieval.md: the read sizes, where the old page gave one fixed read for every note.
   - docs/jev-cli.md, the terminal app's page: the /context command. (Item 4 wrote it with the command; it is pinned here.)
   - CHANGELOG.md: the entry that introduced the setting, and one version in package.json, the lockfile and the changelog.
 
@@ -76,7 +76,7 @@ def test_skill_md_names_the_context_flag_and_stays_within_60_lines():
     _says_the_default(flat, "SKILL.md")
 
 
-def test_source_retrieval_names_the_three_read_sizes():
+def test_source_retrieval_names_the_read_sizes():
     flat = _flat(SOURCE_RETRIEVAL.read_text())
     assert not _missing_sizes(flat), f"source-retrieval.md does not say what these read: {_missing_sizes(flat)}"
     _says_the_default(flat, "source-retrieval.md")
@@ -109,7 +109,8 @@ def _entries():
 def test_changelog_top_entry_names_the_context_setting():
     """The top entry when it was written. It is found by what it says, not by where it stands, so the next release's
     entry does not break it: entries are added at the top, so the oldest one that names the setting's variable is the
-    entry that introduced it. Its numbers are the sizes as that release shipped them (history, not today's profile)."""
+    entry that introduced it. Its numbers are the sizes as that release shipped them (history, not today's profile); Large's
+    is there as the size that comes after its own test."""
     named = [(heading, body) for heading, body in _entries() if context_setting.ENV in body]
     assert named, f"no changelog entry names {context_setting.ENV}"
     heading, body = named[-1]
