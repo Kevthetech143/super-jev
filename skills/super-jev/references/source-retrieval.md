@@ -5,7 +5,26 @@ reviewed files under the intended principal. Use a meaningful title, one topic
 per note, and explicit names and dates. The bounded validation scope is UTF-8
 Markdown notes. Notes over 12,000 characters are supported, up to 250 KB (250,000 bytes)
 (contract v2, 2026-09-28): they are read in sections, and a passage past character
-12,000 can be found. In code: a note up to 12,000 characters is checked whole; notes of about 12,000-14,000 characters get every passage read; longer ones only the best-matching passages, up to about 14,000 characters. A note over 250 KB is outside the contract. Reading selected sections has additional recall limits.
+12,000 can be found. In code: a note up to 12,000 characters is checked whole. A longer
+note is cut into passages of about 3,500 characters, and one check reads as many of them
+as the context size allows: every passage when they all fit, otherwise the passages that
+match the question's words best, best first, until the size is spent. Small, the
+default, reads up to 14,000 characters of one note, Medium 56,000 and Large 112,000. A
+note over 250 KB is outside the contract. Reading selected sections has additional
+recall limits.
+
+The context size is picked with `--context NAME` on one ask, `SUPERJEV_CONTEXT` in the
+shell, or `--set-context NAME` saved for the principal, in that order, and `--status`
+names the one in use. It sets only how much of each note one content check reads: the
+number of notes read and the source floor are the same at every size, and routing, the
+near-twin check and `--claim` always run at Small. Medium and Large send bigger
+requests, which cost more input tokens and may take longer; a request Small's limits
+cannot carry is sent in TypeSafe's experimental long-input mode. If a Medium or Large
+read of a note fails (any error: too long for the judge, too slow, turned down, not
+reached) and Small would read less of that note, the note is read again at Small, once,
+and the line after `OUTCOME:` says so (`CONTEXT: Large did not work this time (the judge
+was slow to answer), so this ask used Small. ...`). If Small fails too, the ordinary
+content-check error stands and no `CONTEXT:` line is printed.
 
 The retrieval stage returns up to five source files. Each completed content check
 uses the same rule: the text must supply a fact requested about the specified
