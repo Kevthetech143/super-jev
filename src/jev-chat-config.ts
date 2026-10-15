@@ -7,7 +7,9 @@ import { styleText, stripVTControlCharacters } from 'node:util';
 
 export const COMMANDS = ['/check', '/right', '/wrong', '/status', '/context', '/help', '/exit'];
 /** The sizes /context takes: how much of each note a search reads (small is what it always read; judge_profiles.json says each one's size). */
-export const CONTEXTS = ['small', 'medium', 'large'];
+export const CONTEXTS = ['small', 'medium'];
+/** Every size there is a name for. A name here that CONTEXTS lacks is not offered yet: Large waits for its own test, and /context says so. */
+const KNOWN = ['small', 'medium', 'large'];
 /** How a user gets back to the window: the one wording every screen and message uses. */
 export const OPEN = 'open the window (npm run jev, or superjev with no words)';
 
@@ -93,8 +95,9 @@ export function readLine(line: string, home: string = process.env.HOME ?? ''): T
   if (cmd === '/status') return { kind: 'status' };
   if (cmd === '/context') {
     const name = rest.toLowerCase();
+    const usage = `Usage: /context [${CONTEXTS.join('|')}]   how much of each note is read`;
     return !rest ? { kind: 'context' } : CONTEXTS.includes(name) ? { kind: 'context', name }
-      : { kind: 'say', text: 'Usage: /context [small|medium|large]   how much of each note is read' };
+      : { kind: 'say', text: KNOWN.includes(name) ? `${name.charAt(0).toUpperCase()}${name.slice(1)} is not offered yet. ${usage}` : usage };
   }
   if (cmd === '/wrong') return { kind: 'wrong' };
   if (cmd === '/right') {

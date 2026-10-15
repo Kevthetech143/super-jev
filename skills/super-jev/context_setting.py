@@ -1,19 +1,21 @@
 """The context setting: how much of each note one content check reads, as a person picks it.
 
-A size is a name: small, medium or large. judge_profiles.json says what each one reads (its `contexts` table, and
-ask.read_budget); this module says only which size an ask uses, and where that choice is kept. The first of these that is
+A size is a name: small or medium. (Large is not offered yet: it comes after its own test. It has a name, so asking for it
+says so, but the judge profile states no size for it.) judge_profiles.json says what each one reads (its `contexts` table,
+and ask.read_budget); this module says only which size an ask uses, and where that choice is kept. The first of these that is
 set is the one used:
 
-    --context NAME     one ask: `ask.py --principal P --context large "question"`
+    --context NAME     one ask: `ask.py --principal P --context medium "question"`
     SUPERJEV_CONTEXT   the shell's choice, for every ask it runs. Only ask.py reads it: the size reaches the content check
                        as a `context` key in that check's own input, so routing and every other judge call stay small
     settings.json      the saved choice, `ask.py --principal P --set-context NAME`: the `context` key of the file in the
                        principal's state folder (written atomically, the file's other keys kept)
     default_context    the judge profile's own, small
 
-A name is read as a person types it (trimmed, any case). One that is not small, medium or large, or one the judge profile
-states no size for, is a ValueError whose message is the line ask.py prints before it exits 2. Only the source that is
-used is read, so a bad value in a source that something stronger overrides is never looked at.
+A name is read as a person types it (trimmed, any case). One the judge profile states no size for is a ValueError whose
+message is the line ask.py prints before it exits 2: `unknown context "xl" (choose small or medium)` for a name that is no
+size, `context "large" is not offered yet (choose small or medium)` for Large. Only the source that is used is read, so a bad
+value in a source that something stronger overrides is never looked at.
 """
 import json
 import os
@@ -21,8 +23,10 @@ from pathlib import Path
 
 import judge_profile
 
-#: The sizes a person can pick, smallest first. The judge profile says which of them it states a size for.
-NAMES = ("small", "medium", "large")
+#: Every size there is a name for, smallest first. NAMES are the ones this release offers, the ones the shipped Jev profile
+#: states a size for (a test keeps the two together); a name in KNOWN that is not in NAMES waits for its own test: Large.
+KNOWN = ("small", "medium", "large")
+NAMES = ("small", "medium")
 #: The environment variable and the file (in the principal's state folder) the choice can come from.
 ENV = "SUPERJEV_CONTEXT"
 FILE = "settings.json"
@@ -30,16 +34,37 @@ FILE = "settings.json"
 WHERE = {"flag": "from --context", "env": f"from {ENV}", "settings": f"from {FILE}", "default": "the default"}
 
 
+def _choose(names) -> str:
+    """The names as a choice: "small", "small or medium", "small, medium or large"."""
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} or {names[-1]}"
+
+
+def offered() -> list:
+    """The sizes of NAMES the judge profile states a size for, smallest first: what a person can pick with this judge (Jev:
+    small and medium; a judge that states no `contexts` table: small)."""
+    names = []
+    for name in NAMES:
+        try:
+            judge_profile.load(judge_profile.PROFILE.name, context=name)
+        except ValueError:
+            continue
+        names.append(name)
+    return names
+
+
 def pick(value, source: str = "flag") -> str:
-    """The size `value` names, lower-case. A ValueError, in one line, when it is not one of NAMES (naming where it came from
-    when that is not the flag just typed) or when the judge profile states no size for it (the profile's own error, which
-    names the sizes it does state)."""
+    """The size `value` names, lower-case. A ValueError, in one line, when the judge profile states no size for it: `unknown
+    context "xl" (choose small or medium)` for a name that is no size, `context "large" is not offered yet (choose small or
+    medium)` for a size with a name that this release does not offer (in KNOWN, not in NAMES). Each names where the name came
+    from when that is not the flag just typed, and the sizes the judge profile does state."""
     name = value.strip().lower() if isinstance(value, str) else None
-    if name not in NAMES:
-        where = {"env": f" in {ENV}", "settings": f" in {FILE}"}.get(source, "")
-        raise ValueError(f"unknown context {json.dumps(value, ensure_ascii=False)}{where} (choose {', '.join(NAMES[:-1])} or {NAMES[-1]})")
-    judge_profile.load(judge_profile.PROFILE.name, context=name)
-    return name
+    sizes = offered()
+    if name in sizes:
+        return name
+    where = {"env": f" in {ENV}", "settings": f" in {FILE}"}.get(source, "")
+    if name in KNOWN and name not in NAMES:
+        raise ValueError(f"context {json.dumps(name)}{where} is not offered yet (choose {_choose(sizes)})")
+    raise ValueError(f"unknown context {json.dumps(value, ensure_ascii=False)}{where} (choose {_choose(sizes)})")
 
 
 def saved(sdir):

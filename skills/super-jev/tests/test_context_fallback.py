@@ -574,6 +574,7 @@ def test_the_trace_counts_what_a_run_printed_and_nothing_for_a_run_that_printed_
 
 def test_the_usage_text_names_the_fallback_line_and_the_json_field():
     doc = " ".join(ask.__doc__.split())
-    for words in ("CONTEXT: Large did not work this time", "read again at small, once", "fallback {files, reason, message}",
+    # the help shows the line for a size that is offered (Medium): Large waits for its own test, so it never prints one here
+    for words in ("CONTEXT: Medium did not work this time", "read again at small, once", "fallback {files, reason, message}",
                   "the first error stays", "adds no retry"):
         assert words in doc, words

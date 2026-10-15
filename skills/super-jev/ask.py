@@ -53,22 +53,23 @@
       before any verdict prints the OUTCOME line an ordinary ask prints, first.
       Only exit 0 passes.
 
-  ask.py --principal AGENT --set-context small|medium|large
-  ask.py --principal AGENT --context small|medium|large "question"
+  ask.py --principal AGENT --set-context small|medium
+  ask.py --principal AGENT --context small|medium "question"
       How much of each note one content check reads. small reads the best 14,000 characters of
-      a note (what it always read, and the default), medium 56,000, large 112,000, so a long
-      note is read deeper; large uses TypeSafe's experimental long-input mode on the longest
-      reads. --set-context saves the choice for this principal (the `context` key of
+      a note (what it always read, and the default) and medium 56,000, so a long note is read
+      deeper; medium uses TypeSafe's experimental long-input mode on the longest reads. Large is
+      not offered yet: it comes after its own test, and asking for it is one line and exit 2.
+      --set-context saves the choice for this principal (the `context` key of
       settings.json in its state folder, written atomically). --context picks it for one ask:
-      it may stand anywhere before a "--" (`--context large --json -- "question"` works) and
+      it may stand anywhere before a "--" (`--context medium --json -- "question"` works) and
       after a "--" it is part of the question. The first of these that is set is used:
       --context, the SUPERJEV_CONTEXT environment variable (only ask.py reads it), the saved
-      choice, then the judge profile's default_context. A name that is not one of the three,
+      choice, then the judge profile's default_context. A name that is not an offered size,
       or that the judge profile has no size for, is one line and exit 2. --claim always reads
       at small. --status says the size in use, the default, and where the size came from.
-      When a note's check at medium or large fails (too long for the judge, too slow, turned down, not
+      When a note's check at medium fails (too long for the judge, too slow, turned down, not
       reached, retries used up) and small would have read less of that note, the note is read again at
-      small, once, and the ask says so on the line right after the OUTCOME line: "CONTEXT: Large did not
+      small, once, and the ask says so on the line right after the OUTCOME line: "CONTEXT: Medium did not
       work this time (the judge was slow to answer), so this ask used Small. Small reads less of each
       note. Try again later, or pick Small yourself with --context small." The answer, the OUTCOME and
       the exit code are those of the run that gave it; if small fails too the first error stays and
@@ -5397,7 +5398,7 @@ def _main() -> int:
 def set_context(principal: str, a: list) -> int:
     """`--set-context NAME`: save NAME as this principal's context (the key of settings.json in its state folder)."""
     if len(a) != 1:
-        print("usage: --principal AGENT --set-context small|medium|large")
+        print(f"usage: --principal AGENT --set-context {'|'.join(context_setting.offered())}")
         return 2
     try:
         name = context_setting.pick(a[0])

@@ -41,7 +41,7 @@ async function main(): Promise<void> {
   const batch = (input as { batch?: unknown }).batch;
   if (batch !== undefined && (Object.keys(input).some(key => key !== 'batch' && key !== 'context') || !Array.isArray(batch) || !batch.length || batch.length > MAX_BATCH)) throw new NavigationError('Navigation input is invalid');
   const single = batch === undefined ? checkedInput(input) : undefined;
-  // `context` names the preset (small, medium or large; judge_profiles.json) this whole run reads at: the judge's profile (so the
+  // `context` names the preset (small, or a larger one the profile states: medium; judge_profiles.json) this whole run reads at: the judge's profile (so the
   // long-context header rule), the batcher's call budget and the default timeout below. One preset per run: named at the top of the
   // input, or on its batch items, and all alike. Absent means small, the profile as written.
   const named = new Set([input, ...(Array.isArray(batch) ? batch : [])].map(part => (part as { context?: unknown } | null)?.context).filter(c => c !== undefined));

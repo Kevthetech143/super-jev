@@ -30,7 +30,7 @@ folder count, up to date or not. `TYPESAFE_API_KEY` wins over the saved key.
 | `/wrong` | the last answer was wrong. A saved answer is forgotten and the question is searched fresh at once; a live answer just won't be saved |
 | a folder or `.md` note (drag it in) | asks, then connects it or refreshes it |
 | `/status` | what is connected and whether it is current, and the size a search reads at (below) |
-| `/context [name]` | how much of each note a search reads: `small`, `medium` or `large`, for the rest of this window. With no name it shows the one in use and where it came from |
+| `/context [name]` | how much of each note a search reads: `small` or `medium`, for the rest of this window (`large` is not offered yet). With no name it shows the one in use and where it came from |
 | `/help` or `?` | this list |
 | `/exit`, `exit`, `quit` or Ctrl+D | leave |
 
@@ -58,8 +58,9 @@ much of one note a search reads. A note that fits in that is read whole.
 | Size | Reads of each note | |
 |---|---|---|
 | Small (the default) | the best 14,000 characters | what Super Jev has always read; the fastest and cheapest |
-| Medium | up to 56,000 characters | up to 4 times more of each long note |
-| Large | up to 112,000 characters | up to 8 times more of each long note, using TypeSafe's experimental long-input mode on the longest reads |
+| Medium | up to 56,000 characters | up to 4 times more of each long note, using TypeSafe's experimental long-input mode on the longest reads |
+
+Large comes after its own test and is not offered yet: asking for it says so.
 
 `/context medium` sets it for the rest of the window (`/context` alone says which
 one is in use). The first of these that is set wins:
@@ -72,8 +73,8 @@ one is in use). The first of these that is set wins:
    `context` key in `settings.json` in its state folder).
 4. Small.
 
-`/check` always reads at small. A size the judge does not state, or a name that
-is not one of the three, is refused with one line (exit 2).
+`/check` always reads at small. A size the judge does not state, a name that
+is not an offered size, or Large (not offered yet) is refused with one line (exit 2).
 
 ## One question from a shell
 
@@ -86,8 +87,8 @@ cannot use (no such path, unknown command, or a first word shaped like an option
 never a question) exits 2. No key: it says so, exit 4. Nothing connects
 without a keyboard.
 
-A question at another size: `SUPERJEV_CONTEXT=large superjev "question"`. At the
-door `/context` alone shows the size in use; `/context large` is for the window
+A question at another size: `SUPERJEV_CONTEXT=medium superjev "question"`. At the
+door `/context` alone shows the size in use; `/context medium` is for the window
 only, so it exits 2 and says so.
 
 Tests: `node --test test/jev-chat.test.ts` uses made-up notes and a stand-in
