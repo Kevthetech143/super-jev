@@ -24,6 +24,7 @@ handed and answers each file by a rule the test states.
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -87,7 +88,7 @@ def note(chars, title="Harbor log"):
     return "".join(lines)
 
 
-LONG, LONG_TOO, SHORT = note(40_000), note(40_000, "Dock log"), "# Short log\n" + ANSWER  # SHORT is whole at small
+LONG, LONG_TOO, SHORT = note(20_000), note(20_000, "Dock log"), "# Short log\n" + ANSWER  # SHORT is whole at small
 
 
 def write(tmp_path, name, text):
@@ -179,8 +180,10 @@ def long_reads_fail(fault):
 class Nav:
     """The navigation-cli process, replaced. It keeps every input it is handed (`runs`, one per process) and answers each
     file in it through rule(item) -- a row, or a raised Down or TimeoutExpired for the whole run -- unless down(run) names
-    a last line to print and fail the whole run with. Its calls and long-input calls are what the real one prints beside
-    the rows: a request per file, and a long one for a file that reads more than small at a bigger size."""
+    a last line to print and fail the whole run with. It prints what the real one prints (read off the real process, run against
+    a fake judge): `{results, calls, longCalls}` for a batch, where a file that fails is an error row, and for one file its row
+    with `calls` and `longCalls` -- except that one file that fails kills the process: exit 2, its message as the last line of
+    stderr, nothing on stdout. A request is made per file, and a long one for a file that reads more than small at a bigger size."""
     def __init__(self, rule, down=None):
         self.rule, self.down, self.runs = rule, down, []
 
@@ -200,8 +203,14 @@ class Nav:
             rows = [self.rule(item) for item in batch]
         except Down as e:
             return subprocess.CompletedProcess(cmd, 2, "", e.stderr)
-        counts = {"calls": len(batch), "longCalls": sum(1 for item in batch if "context" in item and sent(item) > SMALL_READ)}
-        return subprocess.CompletedProcess(cmd, 0, json.dumps({**({"results": rows} if "batch" in body else rows[0]), **counts}), "")
+        long_calls = sum(1 for item in batch if "context" in item and sent(item) > SMALL_READ)
+        if "batch" in body:
+            printed = {"results": rows, "calls": len(batch), "longCalls": long_calls}
+        elif rows[0]["status"] == "error":
+            return subprocess.CompletedProcess(cmd, 2, "", rows[0]["reason"] + "\n")
+        else:
+            printed = {**rows[0], "calls": 1, "longCalls": long_calls}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(printed), "")
 
 
 def at(monkeypatch, preset, source="flag"):
@@ -218,6 +227,55 @@ def ask_main(monkeypatch, capsys, *argv):
 
 def context_lines(out):
     return [ln for ln in out.splitlines() if ln.startswith("CONTEXT:")]
+
+
+# ---------------------------------------------------------------- the stand-in, against the real process
+# The real navigation-cli with `fetch` replaced by an offline stub, the way test_ask_to_node_end_to_end.py does it: the judge answers
+# every passage "states the answer", except a request about the Dock log, which it refuses as too large (HTTP 400).
+OFFLINE_JUDGE = """
+globalThis.fetch = async (_url, opts) => {
+  const payload = JSON.parse(opts.body);
+  if (JSON.stringify(payload.state).includes('Dock log')) return new Response('request too large for the context window', {status: 400});
+  const answers = Object.fromEntries(Object.entries(payload.questions).map(([id, q]) => {
+    const keys = Object.keys(q.criteria);
+    const choice = keys.find(k => k.endsWith('o_0')) || keys[0];
+    return [id, {type: 'choice', choice, confidence: 0.95,
+      probabilities: Object.fromEntries(keys.map(k => [k, k === choice ? 0.95 : 0.05 / (keys.length - 1 || 1)]))}];
+  }));
+  return new Response(JSON.stringify({model: 'offline', answers}), {status: 200});
+};
+"""
+
+
+def printed(proc):
+    """What one navigation-cli process did, as the code above reads it: its exit code, the last line of stderr, the counters it
+    printed and each row's status and reason."""
+    out = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    rows = out["results"] if "results" in out else [out] if out else []
+    return (proc.returncode, (proc.stderr.strip().splitlines() or [""])[-1], {k: out[k] for k in ("calls", "longCalls") if k in out},
+            [{k: row[k] for k in ("status", "reason") if k in row} for row in rows])
+
+
+def test_the_stand_in_prints_what_the_real_navigation_cli_prints(tmp_path, monkeypatch):
+    """The stand-in above copies the real process's output, and every test here leans on the copy; this pins it. The real
+    navigation-cli (no network, no key of ours, no Jev) and the stand-in are handed the same inputs -- a note that works, a note on
+    its own that the judge refuses, and a batch holding both -- and must agree on the exit code, the last line of stderr, the counters
+    and every row's status and reason. A note on its own that fails is a dead process; inside a batch it is an error row."""
+    if subprocess.run(["node", "--version"], capture_output=True).returncode:
+        pytest.skip("node is not installed")
+    at(monkeypatch, "large")
+    hook = tmp_path / "offline.cjs"
+    hook.write_text(OFFLINE_JUDGE)
+    env = {**os.environ, "NODE_OPTIONS": f"--require={hook}", "TYPESAFE_API_KEY": "fake-not-real"}
+    works, refused = write(tmp_path, "works.md", SHORT), write(tmp_path, "refused.md", "# Dock log\n" + ANSWER)
+    one, other = (ask.confirm_start(QUESTION, path)[1]["payload"] for path in (works, refused))
+    assert one["context"] == other["context"] == "large"  # the key the real process reads the size from
+    stand_in = Nav(lambda item: failed(BAD_REQUEST) if title(item) == "# Dock log" else answers(item))
+    for payload, code in ((one, 0), (other, 2), ({"batch": [one, other]}, 0)):
+        real = REAL_RUN(ask.navigation_command(), input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=120)
+        copy = stand_in(ask.navigation_command(), input=json.dumps(payload))
+        assert real.returncode == code, real.stderr
+        assert printed(copy) == printed(real), (real.stdout, real.stderr)
 
 
 # ---------------------------------------------------------------- the fallback, one file
@@ -455,6 +513,7 @@ def test_the_trace_says_the_size_what_was_sent_and_the_fallback(tmp_path, monkey
     assert stages_of(sdir)["context"] == {"preset": "large", "source": "flag", "budget_chars": 112_000, "requests": 1,
                                           "chars_sent": first, "long_calls": 1}
     # at medium, the read fails and is sent again at small: both runs count, and the fallback is named
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "1")
     nav = Nav(only_the_bigger_size_fails(lambda: failed(TIMEOUT)))
     monkeypatch.setattr(ask.subprocess, "run", nav)
     ask_main(monkeypatch, capsys, "--context", "medium", "--", QUESTION)
@@ -467,6 +526,40 @@ def test_the_trace_says_the_size_what_was_sent_and_the_fallback(tmp_path, monkey
     monkeypatch.setattr(ask.subprocess, "run", Nav(answers))
     ask_main(monkeypatch, capsys, "--", QUESTION)
     assert "context" not in stages_of(sdir)
+
+
+def test_the_trace_counts_what_a_run_printed_and_nothing_for_a_run_that_printed_nothing(tmp_path, monkeypatch, capsys):
+    connect(tmp_path, monkeypatch, {"long.md": LONG, "dock.md": LONG_TOO})
+    sdir = tmp_path / "state" / "me"
+
+    def context(nav):
+        """The last ask's `stages.context`, with the one number every case below shares checked against what the stand-in saw."""
+        stage = stages_of(sdir)["context"]
+        assert stage["chars_sent"] == sum(map(sent, nav.items())) and stage["budget_chars"] == 112_000
+        return {k: stage[k] for k in ("requests", "long_calls", "fallback") if k in stage}
+
+    def ask_at_large(nav):
+        monkeypatch.setattr(ask.subprocess, "run", nav)
+        ask_main(monkeypatch, capsys, "--context", "large", "--", QUESTION)
+        return context(nav)
+
+    # one batched run prints the requests it made (a request per note) and the long ones, both notes being long reads
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "1")
+    assert ask_at_large(Nav(answers)) == {"requests": 2, "long_calls": 2}
+    # a note whose row is an error inside a batched run still counts, since the run prints its requests; read again at small it is
+    # one more request, and not a long one
+    nav = Nav(lambda item: failed(TIMEOUT) if "context" in item and title(item) == "# Harbor log" else answers(item))
+    assert ask_at_large(nav) == {"requests": 3, "long_calls": 2, "fallback": {"files": 1, "reason": "slow"}}
+    # a batched run that fails as a whole prints nothing: no request and no long one for it, and each note is then read once at
+    # small (a run of one note prints its own `calls`)
+    nav = Nav(answers, down=lambda run: "Navigation input is too large" if "batch" in run else None)
+    assert ask_at_large(nav) == {"requests": 2, "long_calls": 0, "fallback": {"files": 2, "reason": "too-long"}}
+    assert "batch" in nav.runs[0] and len(nav.runs) == 3
+    # one note on its own that fails kills its process: nothing printed, so no request and no long one for it (its characters,
+    # handed over, still count: the check in `context`); each is then read again at small
+    monkeypatch.setenv("SUPERJEV_BATCH_JEV", "0")
+    nav = Nav(only_the_bigger_size_fails(lambda: failed(TIMEOUT)))
+    assert ask_at_large(nav) == {"requests": 2, "long_calls": 0, "fallback": {"files": 2, "reason": "slow"}}
 
 
 def test_the_usage_text_names_the_fallback_line_and_the_json_field():
