@@ -5,7 +5,8 @@
       Print the release (read from package.json, the one version source).
 
   ask.py --principal AGENT --status
-      Show this principal's connected snapshots and next steps, without a lookup.
+      Show this principal's connected snapshots and next steps, without a lookup, and the
+      context size in use (below).
 
   ask.py --principal AGENT --preflight [--project-dir DIR ...] [--about "the work"]
          [--skill "what a new skill would do"] [--json]
@@ -52,6 +53,20 @@
       before any verdict prints the OUTCOME line an ordinary ask prints, first.
       Only exit 0 passes.
 
+  ask.py --principal AGENT --set-context small|medium|large
+  ask.py --principal AGENT --context small|medium|large "question"
+      How much of each note one content check reads. small reads the best 14,000 characters of
+      a note (what it always read, and the default), medium 56,000, large 112,000, so a long
+      note is read deeper; large uses TypeSafe's experimental long-input mode on the longest
+      reads. --set-context saves the choice for this principal (the `context` key of
+      settings.json in its state folder, written atomically). --context picks it for one ask:
+      it may stand anywhere before a "--" (`--context large --json -- "question"` works) and
+      after a "--" it is part of the question. The first of these that is set is used:
+      --context, the SUPERJEV_CONTEXT environment variable (only ask.py reads it), the saved
+      choice, then the judge profile's default_context. A name that is not one of the three,
+      or that the judge profile has no size for, is one line and exit 2. --claim always reads
+      at small. --status says the size in use, the default, and where the size came from.
+
   ask.py --principal AGENT --json REQUEST
       For a program (the terminal app) instead of a person. REQUEST is a question, one
       --claim "statement", --status, --approve or --miss; any other mode (--add,
@@ -60,8 +75,9 @@
       out; no scores) and exits with text mode's code; a crash exits 3. An ask or claim:
       outcome, why, next (setup|key|connect|refresh|include|rephrase|none), files
       [{path, tier, line?, text?}], skills, skills_off, saved, saved_now, unsearched,
-      left_out, errors, claim. --status: {next, principal, sets}, or {outcome: error,
-      why} when it could not be read. --approve / --miss: {done, why, removed?}.
+      left_out, errors, claim, context ({preset, source}: only when the ask read at more than
+      small). --status: {next, principal, sets, context: {preset, default, source}}, or
+      {outcome: error, why} when it could not be read. --approve / --miss: {done, why, removed?}.
       --json is read only as the first word of the request, so after "--" or inside a
       question it is just text.
 
@@ -210,6 +226,7 @@ import judges  # noqa: E402
 import toc_search  # noqa: E402
 import zoom  # noqa: E402
 import judge_profile  # noqa: E402
+import context_setting  # noqa: E402
 import refresh_changed  # noqa: E402
 
 SKILL = Path(__file__).resolve().parent / "dispatch.py"
@@ -936,18 +953,22 @@ READ_CHARS = judge_profile.PROFILE.read_chars
 # A file this small is judged whole in one passage: split into pieces, a table or a list
 # spreads Jev's confidence across them and none reaches the bar. Same text sent either way.
 WHOLE_FILE_CHARS = 12000
-# The context preset this ask reads at (small, medium or large) and the files re-sent at small after a read at a larger
-# one failed. Set once per ask; small, the profile as written, until something sets it.
-_CONTEXT = {"name": judge_profile.SMALL, "small_paths": set()}
+# The context preset this ask reads at (small, medium or large), where that choice came from (flag, env, settings or
+# default: context_setting.py), and the files re-sent at small after a read at a larger one failed. _main sets it once per
+# ask; small, the profile as written, until something sets it.
+_CONTEXT = {"name": judge_profile.SMALL, "source": "default", "small_paths": set()}
+
+def read_context(path=None) -> str:
+    """The preset one note's content check reads at: the ask's own, except small for a claim check (its shape was tuned
+    for a few passages) and for a file in _CONTEXT["small_paths"]. The one place that decides it: read_budget spends it,
+    and the check's input says it (a `context` key, only above small)."""
+    return judge_profile.SMALL if _CLAIM["text"] or path in _CONTEXT["small_paths"] else _CONTEXT["name"]
 
 def read_budget(path=None) -> int:
-    """The most characters of one note a content check reads: the preset's read_chars (judge_profiles.json), except
-    small's READ_CHARS for a claim check (its shape was tuned for a few passages) and for a file in
-    _CONTEXT["small_paths"]. pick_chunks spends it."""
-    name = _CONTEXT["name"]
-    if name == judge_profile.SMALL or _CLAIM["text"] or path in _CONTEXT["small_paths"]:
-        return READ_CHARS
-    return judge_profile.load(judge_profile.PROFILE.name, context=name).read_chars
+    """The most characters of one note a content check reads: the preset's read_chars (judge_profiles.json), small's
+    READ_CHARS at small. pick_chunks spends it."""
+    name = read_context(path)
+    return READ_CHARS if name == judge_profile.SMALL else judge_profile.load(judge_profile.PROFILE.name, context=name).read_chars
 
 # Judge calibration (measured per judge): read from the profile, judge_profiles.json.
 CONFIRM_FLOOR = judges.profile().confirm_floor
@@ -1114,6 +1135,8 @@ def confirm_start(question: str, path: str):
                                       "children": [leaf["id"] for leaf in leaves]}, *leaves]}}
     if not _CLAIM["text"]:
         payload["mode"] = "source-evidence"
+    if (read_at := read_context(path)) != judge_profile.SMALL:  # navigation-cli reads the size from the check's own input
+        payload["context"] = read_at
     if payload_has_secret(payload):  # the question rides in the payload too
         return (None, partial, None, HELD_SECRET), None
     return None, {"payload": payload, "text": text, "chunks": chunks, "picked": picked,
@@ -4877,6 +4900,7 @@ def connection_status(principal: str, as_json: bool = False) -> int:
     pointers = panel["pointers"]
     if not pointers:
         print(f"Nothing connected for {principal}.")
+        print(context_setting.status_line(_CONTEXT["name"], _CONTEXT.get("source", "default")))
         print(f"Next: follow {skill.parent / 'super-jev-connect' / 'SKILL.md'} to connect a folder.")
         _RESULT.update(next="connect", principal=principal, sets=[])
         return 0
@@ -4899,6 +4923,7 @@ def connection_status(principal: str, as_json: bool = False) -> int:
             print(f"  {name}: stale ({status})" + hint)
         else:
             print(f"  {name}: {status}")
+    print(context_setting.status_line(_CONTEXT["name"], _CONTEXT.get("source", "default")))
     print("Next: refresh stale sets with their listed instructions; inspect unknown/error sets before use. "
           "Ready sets can be searched with ask.py --principal " + principal + ' "question".')
     _RESULT.update(next="refresh" if any(r["state"] == "stale" for r in sets.values()) else "none",
@@ -5167,14 +5192,26 @@ def json_refusal(a: list) -> str:
         return "--json checks one statement at a time: use --claim STATEMENT once"
     return ""
 
-def run_json(principal: str, a: list) -> int:
+def context_status() -> dict:
+    """The size in use for --status: {preset, default, source}. default is the judge profile's own; source says where the
+    preset came from (flag, env, settings or default)."""
+    return {"preset": _CONTEXT["name"], "default": judge_profile.PROFILE.default_context, "source": _CONTEXT.get("source", "default")}
+
+def context_json():
+    """The `context` field of an ask's --json object, {preset, source}, or None: it is there only when the ask read at more
+    than small, so what a small ask prints is what it always printed."""
+    if _CONTEXT["name"] == judge_profile.SMALL:
+        return None
+    return {"preset": _CONTEXT["name"], "source": _CONTEXT.get("source", "default")}
+
+def run_json(principal: str, a: list, context_flag=None) -> int:
     """--json: do the request exactly as text mode does, with its output held back, then print one
     JSON object from the same result (contract C1, v: 1) and return the same exit code."""
     _RESULT.clear()
     buf, crash = io.StringIO(), None
     try:
         with contextlib.redirect_stdout(buf):
-            rc = _dispatch(principal, a, as_json=True)
+            rc = _dispatch(principal, a, as_json=True, context_flag=context_flag)
     except SecretHeld as e:  # exits 1, as main() does in text mode
         rc, crash = 1, str(e)
     except Exception as e:  # any other crash is an error, exit 3 (text mode lets it fall out)
@@ -5182,7 +5219,7 @@ def run_json(principal: str, a: list) -> int:
         rc, crash = OUTCOME_EXIT["error"], _redact(f"{type(e).__name__}: {e}")
     lines = [crash] if crash else [ln.strip() for ln in buf.getvalue().splitlines() if ln.strip()]
     if a[:1] == ["--status"] and "sets" in _RESULT and not crash:
-        out = dict(_RESULT)
+        out = {**_RESULT, "context": context_status()}
     elif a[:1] in (["--approve"], ["--miss"]):  # done is the exit code; why is the reason recorded where it was decided
         out = {"done": rc == 0, "why": crash or _RESULT.get("why", ""), **({"removed": _RESULT["removed"]} if _RESULT.get("removed") else {})}
     else:
@@ -5193,16 +5230,50 @@ def run_json(principal: str, a: list) -> int:
         out = {k: v for k, v in _RESULT.items() if v and k != "cmd"}
         if out.get("files"):
             out["files"] = [{k: v for k, v in f.items() if k not in _FILE_PRIVATE} for f in out["files"]]
+        if a[:1] != ["--claim"] and (size := context_json()):  # a claim reads at small whatever was picked
+            out["context"] = size
     print(json.dumps({"v": 1, **out}))
     return rc
 
 def _main() -> int:
     principal, a = resolve_principal(sys.argv[1:])
+    _CONTEXT.update(name=judge_profile.SMALL, source="default", small_paths=set())  # one ask's size is its own
+    a, context_flag = context_setting.split_flag(a)  # before the --json check: `--context large --json -- q` is a JSON ask
     if a[:1] == ["--json"]:  # only a leading flag: after `--`, or inside a question, it is just words
-        return run_json(principal, a[1:])
-    return _dispatch(principal, a)
+        return run_json(principal, a[1:], context_flag)
+    return _dispatch(principal, a, context_flag=context_flag)
 
-def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
+def set_context(principal: str, a: list) -> int:
+    """`--set-context NAME`: save NAME as this principal's context (the key of settings.json in its state folder)."""
+    if len(a) != 1:
+        print("usage: --principal AGENT --set-context small|medium|large")
+        return 2
+    try:
+        name = context_setting.pick(a[0])
+    except ValueError as e:
+        print(f"ask: {e}")
+        return 2
+    try:
+        path = context_setting.save(state_dir(principal), name)
+    except OSError as e:
+        print(f"ask: could not save the context: {e.strerror or e}")
+        return OUTCOME_EXIT["error"]
+    print(f"Context for {principal} is now {judge_profile.load(judge_profile.PROFILE.name, context=name).context_label} "
+          f"(saved in {path}). --context or {context_setting.ENV} still wins for one ask.")
+    return 0
+
+def use_context(principal: str, flag) -> int:
+    """Set the size this ask reads at (flag, SUPERJEV_CONTEXT, the saved choice or the profile's default). 0, or 2 and one
+    line when the choice in use is not a size that can be picked."""
+    try:
+        name, source = context_setting.resolve(flag, state_dir(principal))
+    except ValueError as e:
+        print(f"ask: {e}")
+        return 2
+    _CONTEXT.update(name=name, source=source)
+    return 0
+
+def _dispatch(principal: str, a: list, as_json: bool = False, context_flag=None) -> int:
     if not sys.argv[1:] or sys.argv[1:] == ["--help"]:  # asking for the usage, not missing anything
         print(__doc__)
         return 2
@@ -5219,6 +5290,10 @@ def _dispatch(principal: str, a: list, as_json: bool = False) -> int:
         return 2
     if as_json and (why := json_refusal(a)):
         print(why)
+        return 2
+    if a[0] == "--set-context":  # the one request that does not read the setting: it is how a bad one is mended
+        return set_context(principal, a[1:])
+    if use_context(principal, context_flag):
         return 2
     if a[0] == "--":  # the rest is the question, read literally (never a --flag)
         if len(a) == 1:

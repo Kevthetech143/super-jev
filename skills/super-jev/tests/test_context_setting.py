@@ -122,6 +122,7 @@ def test_flag_beats_env_beats_settings_beats_default(tmp_path, monkeypatch, caps
     monkeypatch.setenv("SUPERJEV_CONTEXT", "  ")
     assert read_at() == ("medium", "settings")
     assert read_at("--context", " Small") == ("small", "flag")
+    assert read_at("--context", "large", "--context", "small") == ("small", "flag")  # said twice: the last word
     # a settings file that cannot be read, or holds no choice, is no choice
     monkeypatch.delenv("SUPERJEV_CONTEXT")
     for text in ("{not json", "[]", '"large"', '{"context": null}', '{"other": "large"}'):
@@ -158,7 +159,7 @@ def test_bad_name_exits_2_with_the_usage_line(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(judge_profile, "PROFILE", judge_profile.load("laya"))
     assert run(monkeypatch, capsys, "--context", "medium", "--", QUESTION) == (2, 'ask: unknown context "medium" (choose small)\n')
     assert run(monkeypatch, capsys, "--context", "small", "--", QUESTION)[0] == 0
-    assert not seen[1:] or all(s[1] == "small" for s in seen)  # only a valid name ever reached a search
+    assert [s[1:] for s in seen] == [("medium", "flag"), ("small", "flag")]  # only the two valid runs searched
 
 
 def test_flag_is_removed_before_the_json_check(tmp_path, monkeypatch, capsys):
@@ -191,7 +192,7 @@ def test_flag_after_double_dash_is_part_of_the_question(tmp_path, monkeypatch, c
 # ---------------------------------------------------------------- what --status and --json say
 def status_world(tmp_path, monkeypatch):
     cache = tmp_path / "cache"
-    cache.mkdir()
+    cache.mkdir(exist_ok=True)
     monkeypatch.setattr(ask.prepare_bulk, "CACHE_DIR", cache)
     monkeypatch.setattr(ask, "memory", lambda req: {"pointers": [{"pointer": "notes", "snapshotStatus": "available"}]}
                         if req["action"] == "panel" else {"status": "miss"})
@@ -302,24 +303,21 @@ def test_set_context_writes_settings_atomically_and_only_the_three_names(tmp_pat
     assert ask.main() == 2 and not (tmp_path / "state" / "newcomer").exists()
     capsys.readouterr()
     # a judge profile with no such size cannot save it either
-    monkeypatch.setattr(judge_profile, "PROFILE", judge_profile.load("laya"))
-    assert run(monkeypatch, capsys, "--set-context", "large") == (2, 'ask: unknown context "large" (choose small)\n')
+    with monkeypatch.context() as m:
+        m.setattr(judge_profile, "PROFILE", judge_profile.load("laya"))
+        assert run(m, capsys, "--set-context", "large") == (2, 'ask: unknown context "large" (choose small)\n')
     assert path.read_text() == before
-    monkeypatch.undo()  # back to the real profile for the rest
     # atomic: a write that breaks before the swap leaves the old file whole and no temporary file behind
-    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(ask, "lookup", lambda *a, **k: 0)
 
     def boom(*a, **k):
         raise OSError(errno.EIO, "disk gone")
-    monkeypatch.setattr(os, "replace", boom)
-    monkeypatch.setattr(Path, "replace", boom)
-    rc, out = run(monkeypatch, capsys, "--set-context", "small")
+    with monkeypatch.context() as m:
+        m.setattr(os, "replace", boom)
+        m.setattr(Path, "replace", boom)
+        rc, out = run(m, capsys, "--set-context", "small")
     assert rc == 3 and out.count("\n") == 1 and out.startswith("ask: could not save the context") and "disk gone" in out
     assert path.read_text() == before and sorted(p.name for p in path.parent.iterdir()) == ["settings.json"]
-    monkeypatch.undo()
     # a program's --json does not cover it
-    monkeypatch.setenv("SUPERJEV_STATE_DIR", str(tmp_path / "state"))
     rc, out = run(monkeypatch, capsys, "--json", "--set-context", "small")
     assert rc == 2 and json.loads(out)["outcome"] == "not-supported" and path.read_text() == before
 
@@ -328,6 +326,16 @@ def test_the_three_names_are_the_ones_the_jev_profile_states():
     table = json.loads((SKILL / "judge_profiles.json").read_text())["profiles"][judge_profile.PROFILE.name]
     assert ask.context_setting.NAMES == ("small", *table["contexts"])
     assert ask.context_setting.NAMES == ("small", "medium", "large")  # what the docs and the terminal app offer
+
+
+def test_the_usage_text_states_the_sizes_the_profile_states():
+    """ask.py --help names how much each size reads: the numbers are the profile's, so they cannot drift from it."""
+    doc = " ".join(ask.__doc__.split())
+    for name in ask.context_setting.NAMES:
+        assert f"{judge_profile.load(context=name).read_chars:,}" in doc, name
+    for words in ("--set-context", "--context", "SUPERJEV_CONTEXT", "settings.json", "default_context", "context ({preset, source}",
+                  "context: {preset, default, source}"):
+        assert words in doc, words
 
 
 # ---------------------------------------------------------------- what goes to the judge
@@ -430,9 +438,11 @@ def test_routing_and_near_twin_spawns_never_carry_a_context(tmp_path, monkeypatc
     routing = [r for r in requests if r["action"] in ("navigate", "navigate-many")]
     assert routing and all("context" not in r for r in routing)  # routing stays at small
     assert checks and [c.get("context") for c in checks] == ["large"] * len(checks)  # the content check reads at the size
-    # nothing but ask.py reads the variable, so no other program can pick a size for itself
-    readers = {str(p.relative_to(REPO)) for root in ("skills", "src", "experiments") for p in (REPO / root).rglob("*")
-               if p.is_file() and p.suffix in (".py", ".ts", ".sh", ".mjs", ".js") and "tests" not in p.parts
-               and "SUPERJEV_CONTEXT" in p.read_text(errors="replace")}
-    assert readers == {"skills/super-jev/ask.py", "skills/super-jev/context_setting.py"}, readers
-    assert re.search(r"CONTEXT\s*=", "") is None
+    # nothing but ask.py reads the variable, so no other program can pick a size for itself: it is named in ask.py and its
+    # module, and the terminal app names it in what it says (it hands its environment to the helper untouched and reads none)
+    named = {str(p.relative_to(REPO)): p.read_text(errors="replace") for root in ("skills", "src", "experiments")
+             for p in (REPO / root).rglob("*")
+             if p.is_file() and p.suffix in (".py", ".ts", ".sh", ".mjs", ".js") and "tests" not in p.parts}
+    assert {name for name, text in named.items() if "SUPERJEV_CONTEXT" in text} == {
+        "skills/super-jev/ask.py", "skills/super-jev/context_setting.py", "src/jev-chat-cli.ts", "src/jev-chat-config.ts"}
+    assert not [name for name, text in named.items() if name.startswith("src/") and re.search(r"env[\w.]*[\[.(]\s*['\"]?SUPERJEV_CONTEXT", text)]
